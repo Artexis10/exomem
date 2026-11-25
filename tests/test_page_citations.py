@@ -196,21 +196,26 @@ TAGGED = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 SECOND_SCOPE = "01ARZ3NDEKTSV4RRFFQ69G5FC2"
 
 
-def _tagged_rows(world):
-    """Five rows that scopes tell apart by tag and by ref; their labels, by row id.
+def _tagged_rows(world, layout):
+    """Six rows that scopes tell apart by tag and by ref; their labels, by row id.
 
     The first scope selects the tag ``secret`` and row 2 by ref, and excludes row 4 by ref, so it holds
-    rows 1, 2 and 3. The second scope names rows 0 and 3 by ref, so row 3 lies in both.
+    rows 1, 2, 3 and 5. The second scope names rows 0 and 3 by ref, so row 3 lies in both. ``layout``
+    is ``summary``, whose rows share one policy path, or ``items``, which keeps a view file a row.
     """
     def key(number):
         return f"00000000-0000-4000-8000-{number:012d}"
 
-    world.create_collection(path("Tagged"), collection_text(TAGGED, "Tagged", "label", (
+    text = collection_text(TAGGED, "Tagged", "label", (
         "    label: {type: string, required: true}\n"
         "    page: {type: link}\n"
-        "    tags: {type: array, items: {type: string}}\n")), why="declare", scaffold=False)
+        "    tags: {type: array, items: {type: string}}\n"))
+    if layout == "items":
+        text = (text.replace("view_mode: summary", "view_mode: items")
+                .replace("strategy: sqlite", "strategy: markdown-items"))
+    world.create_collection(path("Tagged"), text, why="declare", scaffold=False)
     with request_scope(owner_principal()):
-        for number, tags in enumerate(([], ["secret"], [], ["secret"], ["secret"])):
+        for number, tags in enumerate(([], ["secret"], [], ["secret"], ["secret"], ["secret"])):
             world.append_record(TAGGED, item={"label": f"r{number}", "page": ALPHA_REF, "tags": tags},
                                 item_key=key(number), why="record")
     _ready(world)
@@ -233,22 +238,37 @@ def _first_scope(world, extra):
                      + f'exclude:\n  refs: ["{collections.record_ref(TAGGED, key(4))}"]\n' + extra)
 
 
-@pytest.mark.parametrize("purpose", [None, "audit"])
-@pytest.mark.parametrize(("scope_extra", "rule", "withheld"), [
-    pytest.param("", {"ceiling": 0}, {"r1", "r2", "r3"}, id="ceiling-0 for the reader"),
-    pytest.param("", {"ceiling": 0, "audience": "partner"}, set(), id="a rule for another audience"),
-    pytest.param("default_deny: true\n", None, {"r1", "r2", "r3"}, id="a default-deny scope"),
-    pytest.param("", {"ceiling": 4, "extra": "kind: org_cap\n"}, {"r1", "r2", "r3"}, id="an org cap"),
-    pytest.param("", {"ceiling": 0, "extra": "purpose: audit\npurpose_condition: outside\n"},
-                 {"r1", "r2", "r3"}, id="an outside purpose condition"),
-    pytest.param("", {"ceiling": 5}, {"r1", "r2", "r3"}, id="ceiling-5 for the reader"),
+POLICIES = [
+    ("ceiling-0 for the reader", "", {"ceiling": 0}, {"r1", "r2", "r3", "r5"}),
+    ("a rule for another audience", "", {"ceiling": 0, "audience": "partner"}, set()),
+    ("a default-deny scope", "default_deny: true\n", None, {"r1", "r2", "r3", "r5"}),
+    ("an org cap", "", {"ceiling": 4, "extra": "kind: org_cap\n"}, {"r1", "r2", "r3", "r5"}),
+    ("an outside purpose condition", "", {"ceiling": 0, "extra": "purpose: audit\npurpose_condition: outside\n"},
+     {"r1", "r2", "r3", "r5"}),
+    ("ceiling-5 for the reader", "", {"ceiling": 5}, {"r1", "r2", "r3", "r5"}),
     # Each scope alone releases the reader, but only the first carries a constraint: their meet differs
     # in that option, which lowers the row that lies in both.
-    pytest.param("constraint: Reviewed before release.\n", None, {"r3"}, id="two scopes that combine"),
+    ("two scopes that combine", "constraint: Reviewed before release.\n", None, {"r3"}),
+]
+
+
+@pytest.mark.parametrize("purpose", [None, "audit"])
+@pytest.mark.parametrize(("layout", "scope_extra", "rule", "withheld"), [
+    *(pytest.param(layout, extra, rule, withheld, id=f"{layout}: {name}")
+      for layout in ("summary", "items") for name, extra, rule, withheld in POLICIES),
+    # The glob matches row 1's view file alone, so rows 1 and 5 differ only in their view files.
+    pytest.param("items", '  paths: ["{row_1_file}"]\n', {"ceiling": 0}, {"r2", "r3", "r5"},
+                 id="items: a path glob excludes one view file"),
 ])
 def test_rows_decided_together_release_exactly_the_rows_that_one_by_one_decisions_release(
-        world, scope_extra, rule, withheld, purpose):
-    labels = _tagged_rows(world)
+        world, layout, scope_extra, rule, withheld, purpose):
+    labels = _tagged_rows(world, layout)
+    if "{row_1_file}" in scope_extra:
+        [row_1] = [row_id for row_id, label in labels.items() if label == "r1"]
+        (file,) = world.handle.connection.execute("SELECT view_path FROM items WHERE row_id=?", (row_1,)).fetchone()
+        # A class for the name's last character keeps the glob a pattern, not one literal path.
+        stem = file.removeprefix("Knowledge Base/").removesuffix(".md")
+        scope_extra = scope_extra.format(row_1_file=f"{stem[:-1]}[{stem[-1]}].md")
     _first_scope(world, scope_extra)
     if rule is not None:
         write_rule(world.root, **rule)
@@ -265,7 +285,8 @@ def test_rows_decided_together_release_exactly_the_rows_that_one_by_one_decision
         session._authorization.released_rows(TAGGED, keys), lookup.uniform))
     assert together == grouped == one_by_one
     assert {labels[row_id] for row_id in keys.keys() - one_by_one} == withheld
-    assert uniform == (not withheld)
+    # Only a summary has a proof that one decision releases every row whole.
+    assert uniform == (layout == "summary" and not withheld)
     with request_scope(_external(purpose)):
         reply = page_citations.inbound_citations(ALPHA_REF, world.root, limit=10)
     assert sorted(item["label"] for item in reply["items"]) == sorted(labels[row_id] for row_id in one_by_one)
@@ -407,6 +428,39 @@ def test_thousands_of_withheld_citing_rows_answer_as_a_page_that_has_none(world)
     assert [item["label"] for item in alpha.pop("items")] == ["a0", "a1", "a2"]
     assert [item["label"] for item in beta.pop("items")] == ["b0", "b1", "b2"]
     assert alpha == beta == {"state": "ready", "count": 3, "count_complete": True, "more": None}
+
+
+@pytest.mark.query_deadline
+def test_thousands_of_view_files_that_a_tag_withholds_answer_as_a_page_that_has_none(world):
+    """Under the shipped deadline, 5,000 tag-withheld items-mode citing rows leave Alpha's reply equal to Beta's.
+
+    Each row keeps its own view file. Deciding each withheld row by its file would run past the
+    deadline, so Alpha alone would read as unavailable.
+    """
+    text = collection_text(TAGGED, "Tagged", "label", (
+        "    label: {type: string, required: true}\n"
+        "    page: {type: link}\n"
+        "    tags: {type: array, items: {type: string}}\n"))
+    world.create_collection(path("Tagged"), text.replace("view_mode: summary", "view_mode: items")
+                            .replace("strategy: sqlite", "strategy: markdown-items"), why="declare", scaffold=False)
+    rows = ([{"label": f"b{number}", "page": BETA_REF, "tags": []} for number in range(3)]
+            + [{"label": f"a{number}", "page": ALPHA_REF, "tags": []} for number in range(3)]
+            + [{"label": f"w{number:04d}", "page": ALPHA_REF, "tags": ["secret"]} for number in range(5_000)])
+    _evidence(world.root)
+    for start in range(0, len(rows), 500):
+        guards = world.inspect_collection(TAGGED)["lifecycle_guards"]
+        with request_scope(owner_principal()):
+            world.bulk_upsert_records(TAGGED, rows=[{"item": item} for item in rows[start:start + 500]], why="seed",
+                                      source=EVIDENCE, expected_container_hash=guards["expected_container_hash"])
+    _ready(world)
+    _ready(world, TAGGED)
+    write_tag_scope(world.root)
+    write_rule(world.root, ceiling=0)
+    external_read(world, AWAY)  # the policy's first read compiles it, whichever page it asks about
+    alpha, beta = external_read(world, ALPHA_REF), external_read(world, BETA_REF)
+    shown = [[item["label"] for item in reply.pop("items", [])] for reply in (alpha, beta)]
+    assert alpha == beta == {"state": "ready", "count": 3, "count_complete": True, "more": None}
+    assert shown == [["a0", "a1", "a2"], ["b0", "b1", "b2"]]
 
 
 def test_with_no_published_corpus_to_borrow_a_read_is_unavailable_never_a_walk_or_an_empty_list(world, monkeypatch):

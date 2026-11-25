@@ -15,6 +15,7 @@ from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import closing
 from dataclasses import dataclass, replace
+from functools import partial
 from itertools import islice
 from pathlib import Path
 from typing import Any
@@ -548,8 +549,30 @@ def _row_subject(cid: str, contract, row) -> CanonicalSubject:
 
 def _row_policy_path(contract, view_path: str) -> str:
     """The path that places a row in policy: its manifest's for a summary, its log's, or its own view's."""
-    path, source_path, layout, view_mode = contract[:4]
-    return path if view_mode == "summary" else source_path if layout == "markdown-log" else view_path
+    path, source_path, _layout, view_mode = contract[:4]
+    if _items_folder(contract) is not None:
+        return view_path
+    return path if view_mode == "summary" else source_path
+
+
+def _items_folder(contract) -> str | None:
+    """The folder that holds an items-mode collection's view files, one a row, ending with ``/``;
+    None for a summary or a log, whose rows share one policy path."""
+    _path, source_path, layout, view_mode = contract[:4]
+    return None if view_mode == "summary" or layout == "markdown-log" else source_path.rstrip("/") + "/"
+
+
+def _below(folder: str, path: str | None) -> bool:
+    """Whether ``path`` is a Markdown file below ``folder``, as `membership.path_selector_below` and its peers read it.
+
+    A name that ends with ``.md`` keeps the folder as its prefix under every path normalization.
+    `_BELOW_SQL` is the same test, for a statement.
+    """
+    return path is not None and path.startswith(folder) and path.endswith(".md")
+
+
+#: `_below` over a row's ``view_path``, given the folder's length and then the folder.
+_BELOW_SQL = "coalesce(substr(view_path,1,?)=? AND substr(view_path,-3)='.md',0)"
 
 
 def subject_factory(conn: sqlite3.Connection, cid: str, logical_vault_id: str):
@@ -1099,6 +1122,7 @@ class OperationAuthorization:
         self.manifest_subjects = {}
         self.summary_memo = {}
         self._scope_ref_lists: tuple[frozenset[str], ...] | None = None
+        self._folder_tests: dict[str, tuple[Callable[[str], bool], ...]] = {}
         # The release inputs of this snapshot that a kept projection decision is keyed on, read once.
         self._kept_inputs = None
         # How many decisions an unreadable connector input withheld; the release cache keeps none of them.
@@ -1521,9 +1545,11 @@ class OperationAuthorization:
 
         A decision reads a row through its subject: its policy path, its projects, tags and classes, and
         its ref. A scope reads the ref only as a member of its ``refs`` or ``exclude_refs``, and a tombstone
-        only as an exact value. Rows equal in those inputs are decided alike, so the first of them decides
-        the rest; a row whose subject cannot be built is withheld, and so is each row equal to it. A
-        session grant binds a row's own version, so a row that one names is decided alone.
+        only as an exact value. A read reads an items-mode row's own view file only through the tests that
+        `_path_tests` keeps, so view files equal in those are one input. Rows equal in those inputs are
+        decided alike, so the first of them decides the rest; a row whose subject cannot be built is
+        withheld, and so is each row equal to it. A session grant binds a row's own version, so a row that
+        one names is decided alone.
         """
         self._load_grants()
         contract = subject_factory(self.conn, cid, self.logical_vault_id)
@@ -1531,13 +1557,18 @@ class OperationAuthorization:
         lists = self._ref_lists()
         # Only a tombstone that holds the collection's id can name one of its rows.
         marked = any(cid in tombstone for tombstone in self.tombstones)
+        # A write also reads the path's write floor and capture folder, so it keeps each file apart.
+        folder = None if self.mutation else _items_folder(contract)
+        tests = () if folder is None else self._path_tests(folder)
         alike: dict[tuple, list[tuple]] = {}
         with closing(self.conn.execute(
                 f"SELECT {_ROW_COLUMNS} FROM items WHERE collection_id=? AND row_id IN (SELECT value FROM json_each(?))",
                 (cid, json.dumps(sorted(set(row_ids)))))) as cursor:
             for row in cursor:
                 ref = prefix + row[1]
-                inputs = (_row_policy_path(contract, row[4]), row[5],
+                path = _row_policy_path(contract, row[4])
+                place = tuple(test(path) for test in tests) if folder is not None and _below(folder, path) else path
+                inputs = (place, row[5],
                           tuple(index for index, refs in enumerate(lists) if ref in refs),
                           marked and lifecycle.is_tombstoned_in(self.tombstones, ref),
                           row[0] if ref in self.grants else None)
@@ -1553,20 +1584,23 @@ class OperationAuthorization:
         return released
 
     def row_filter(self, cid: str) -> RowFilter | None:
-        """The rows of a summary or log collection that this read releases, decided once per kind of row, or None.
+        """The rows of a collection that this read releases, decided once per kind of row, or None.
 
-        Such rows share their policy path, so a row's decision reads only its ``governance_json`` and its
-        ref (`released_rows`). A row that no scope list names is decided as every such row with equal
-        metadata is, and the rows that a list names are decided in their own groups. A collection whose
-        rows a grant or a tombstone names, or whose rows carry more than MAX_FILTER_METADATA metadata
-        values, answers None, and so does a write.
+        A summary's or a log's rows share their policy path, and so do an items-mode collection's view
+        files when no test of `_path_tests` can tell them apart, so a row's decision reads only its
+        ``governance_json`` and its ref (`released_rows`). A row that no scope list names is decided as
+        every such row with equal metadata is, and the rows that a list names are decided in their own
+        groups. A collection whose rows a grant or a tombstone names, whose view files a test tells apart
+        or lie outside its folder, or whose rows carry more than MAX_FILTER_METADATA metadata values,
+        answers None, and so does a write.
         """
         if self.mutation:
             return None
         self._load_grants()
         contract = subject_factory(self.conn, cid, self.logical_vault_id)
-        if contract[3] != "summary" and contract[2] != "markdown-log":
-            return None  # each row's own view path places it in policy
+        folder = _items_folder(contract)
+        if folder is not None and self._path_tests(folder):
+            return None  # a selector tells the view files apart, so `released_rows` groups each row by them
         prefix = f"exomem://{contract[5].item_type}/{cid}/"
         if (any(identity.startswith(prefix) for identity in self.grants)
                 or any(cid in tombstone for tombstone in self.tombstones)):
@@ -1575,15 +1609,42 @@ class OperationAuthorization:
         named = [row_id for (row_id,) in self.conn.execute(
             "SELECT row_id FROM items WHERE collection_id=? AND item_key IN (SELECT value FROM json_each(?))",
             (cid, json.dumps(keys)))]
+        # The representative of a metadata value decides every row with it only when each one's view
+        # file lies below the folder, which the same scan proves.
+        outside, below = ("0", ()) if folder is None else (f"max(NOT {_BELOW_SQL})", (len(folder), folder))
         kinds = self.conn.execute(
-            "SELECT governance_json, min(row_id) FROM items WHERE collection_id=? "
+            f"SELECT governance_json, min(row_id), {outside} FROM items WHERE collection_id=? "
             "AND row_id NOT IN (SELECT value FROM json_each(?)) GROUP BY governance_json LIMIT ?",
-            (cid, json.dumps(named), MAX_FILTER_METADATA + 1)).fetchall()
-        if len(kinds) > MAX_FILTER_METADATA:
+            (*below, cid, json.dumps(named), MAX_FILTER_METADATA + 1)).fetchall()
+        if len(kinds) > MAX_FILTER_METADATA or any(stray for *_, stray in kinds):
             return None
-        released = self.released_rows(cid, [*named, *(row_id for _, row_id in kinds)])
+        released = self.released_rows(cid, [*named, *(row_id for _, row_id, _ in kinds)])
         return RowFilter(frozenset(released.intersection(named)), frozenset(named),
-                         frozenset(raw for raw, row_id in kinds if row_id in released), len(named) + len(kinds))
+                         frozenset(raw for raw, row_id, _ in kinds if row_id in released), len(named) + len(kinds))
+
+    def _path_tests(self, folder: str) -> tuple[Callable[[str], bool], ...]:
+        """The tests of a path that a read of a file below ``folder`` reads and that two such files may answer apart.
+
+        A read reads a file's path through its content floor (a tombstone or an access exclusion) and
+        through each scope's path selectors and path-form refs. One that holds for every file below the
+        folder, or for none, answers each alike, so only the rest need a test. With no test, every file
+        below the folder is placed in policy alike (`_below`).
+        """
+        if folder not in self._folder_tests:
+            tests: list[Callable[[str], bool]] = []
+            if (lifecycle.tombstoned_below(self.tombstones, folder) is None
+                    or access.matches_below(self.access["excluded"], folder) is None):
+                tests.append(lambda path: content_available(path, None, self.access, self.access_blocked,
+                                                            self.tombstones))
+            for scope in self.policy.scopes.values():
+                for patterns in (scope.paths, scope.exclude_paths):
+                    if patterns and membership.path_selector_below(patterns, folder) is None:
+                        tests.append(partial(membership.path_selector_matches, patterns))
+                for values in (scope.refs, scope.exclude_refs):
+                    if values and membership.ref_selector_below(values, folder) is None:
+                        tests.append(partial(membership.ref_selector_matches, values))
+            self._folder_tests[folder] = tuple(tests)
+        return self._folder_tests[folder]
 
     def _ref_lists(self) -> tuple[frozenset[str], ...]:
         """Every non-empty ``refs`` and ``exclude_refs`` list of the policy's scopes, in one fixed order."""
