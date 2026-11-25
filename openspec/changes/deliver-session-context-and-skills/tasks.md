@@ -13,7 +13,11 @@
 - [x] 2.4 Project admitted skill pages as `kind: "skill"` method items with the full description; verify against a real turn that names no skill.
 - [x] 2.5 Keep a skill's other files one `read_page` away by the paths its body names, with no directory listing: a listing that is both bounded and blind to hidden pages needs an indexed folder read the catalogue does not have.
 - [x] 2.6 Render the catalogue and skill methods in the start-of-turn hook and pass the client's native skill names; verify the hook output for a Claude Code and a Codex home.
-- [ ] 2.7 Prove recall latency before and after on the recall latency instrument.
+- [x] 2.7 Prove recall latency before and after on the recall latency instrument.
+  - Instrument: `activate_context` duration on the installed personal service, served and abstained outcomes, latency boundary `activation-leaf-v1`, over one UTC day each.
+  - Before the catalogue change (#3098), 2026-11-22 13:16 to 2026-11-23 13:16, n=533: p50 5873 ms, p95 67914 ms, p99 127692 ms, max 345566 ms.
+  - After, on the release that carries it, 2026-11-24 11:44 to 2026-11-25 11:05, n=630: p50 2009 ms, p95 30652 ms, p99 60039 ms, max 74089 ms.
+  - The two days carried different traffic, so the drop is not attributed to #3098 alone; the claim is that adding the catalogue did not slow recall.
 
 ## 3. Deliver context on every turn
 
