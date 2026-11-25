@@ -139,7 +139,7 @@ def scan(vault_root: Path, pages: Iterable[Any]) -> Scan:
     was refused for, and which has not changed since, counts as refused (`record_refused`); the
     scan reads that memory and prepares nothing.
     """
-    from . import find, relocate, request_budget, vault
+    from . import find, foreground_priority, relocate, request_budget, vault
 
     root = Path(vault_root)
     basis = note_types.Basis(root)
@@ -150,7 +150,7 @@ def scan(vault_root: Path, pages: Iterable[Any]) -> Scan:
     drifted: list[Page] = []
     untitled: list[Page] = []
     refused: list[Page] = []
-    for page in ordered:
+    for page in foreground_priority.yielding_in_bulk(ordered):
         request_budget.checkpoint()
         verdict = judge(
             root,
