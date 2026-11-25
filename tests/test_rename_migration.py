@@ -195,7 +195,7 @@ def test_migrate_renames_a_codex_url_server_and_prints_the_sign_in_step(tmp_path
     code, out = install.migrate()
 
     assert code == 0
-    assert "If `evermatter` shows as not connected, codex mcp login evermatter." in out
+    assert "If `evermatter` shows as not connected, run codex mcp login evermatter." in out
     assert "run /mcp" not in out  # the Claude entry here is stdio: no sign-in to renew
     config = tomllib.loads((install.codex_home / "config.toml").read_text(encoding="utf-8"))
     assert config["mcp_servers"] == {"evermatter": {"url": "https://memory.example/mcp"}}
