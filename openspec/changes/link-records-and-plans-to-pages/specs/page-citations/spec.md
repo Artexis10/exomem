@@ -47,12 +47,7 @@ A citing row that a row-level policy releases on its own SHALL be counted up to 
 
 ### Requirement: Citations are visible only when both ends are visible
 
-A citation SHALL be returned and counted only when the caller may read the citing row's collection and field and also the cited page. A withheld page SHALL produce the same answer as a missing one. A withheld row SHALL be absent from the items and from the count, and the number of withheld rows that cite a page SHALL NOT change the reply's state.
-
-#### Scenario: Thousands of withheld citing rows leave the reply ready
-
-- **WHEN** under the shipped query deadline, a page is cited by three visible rows and 5,000 rows withheld from the caller, and its twin by three visible rows only
-- **THEN** both replies are `ready` with the count 3 and `count_complete: true`
+A citation SHALL be returned and counted only when the caller may read the citing row's collection and field and also the cited page. A withheld page SHALL produce the same answer as a missing one. A withheld row SHALL be absent from the items and from the count.
 
 #### Scenario: A withheld collection stays invisible
 
@@ -63,6 +58,21 @@ A citation SHALL be returned and counted only when the caller may read the citin
 
 - **WHEN** a caller asks for the citations of a page that it may not read, and its twin asks for a page id that does not exist
 - **THEN** both replies are identical, while the index warms as well as once it is built
+
+### Requirement: Withheld citing rows do not change the reply's state, within one bound
+
+The number of withheld rows that cite a page SHALL NOT change the reply's state. One bound applies: withheld rows that a read examines one at a time. These are rows that a scope names one by one by ref, and the rows of a collection that no row filter describes. Past about 25,000 such withheld rows in one collection, a read of a page that they cite MAY run past the query deadline and read `unavailable`.
+
+#### Scenario: Thousands of withheld citing rows leave the reply ready
+
+- **WHEN** under the shipped query deadline, a page is cited by three visible rows and 5,000 rows withheld from the caller, and its twin by three visible rows only
+- **AND** the collection keeps its rows in one summary, or keeps one view file a row that no path selector tells apart
+- **THEN** both replies are `ready` with the count 3 and `count_complete: true`
+
+#### Scenario: Past the bound, only the cited page reads as unavailable
+
+- **WHEN** under the shipped query deadline, a scope names 100,000 rows of one collection by ref, and each of them cites a page
+- **THEN** the read of that page MAY be `unavailable`, while a page that no such row cites reads `ready`
 
 ### Requirement: Each citation names its row, field and declared relation
 
