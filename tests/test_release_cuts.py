@@ -1285,3 +1285,126 @@ def test_pick_source_prefers_the_newest_fully_tested_commit_since_the_last_relea
     else:
         # Evidence from before the last release cannot serve; the tip runs its own Full.
         assert picked == {"source": shas["tip"], "main": shas["tip"], "evidence_run": None}
+
+
+def quiet_controller(monkeypatch, open_cut=None, cut_full=None):
+    """No unfinished controller run, and optionally an open cut pull request or its Full run."""
+
+    def api(path, pages=False):
+        if path.startswith("actions/workflows/release-evidence-automation.yml/runs"):
+            return {"workflow_runs": [{"id": 1, "status": "completed"}]}
+        if path.startswith("actions/workflows/ci.yml/runs"):
+            return {"workflow_runs": [cut_full] if cut_full else []}
+        assert pages and path.startswith("pulls?")
+        return [[open_cut] if open_cut else []]
+
+    monkeypatch.setattr(cuts.evidence, "api", api)
+
+
+@pytest.mark.parametrize(
+    ("landed_during_last_cut", "after_reconciliation", "cuts_now"),
+    [
+        ("fix: keep a save a restart interrupted", "ci: cache the wheel build", True),
+        ("ci: pin the runner image", "ci: cache the wheel build", False),
+        ("ci: pin the runner image", "feat: show where a page is cited", True),
+    ],
+)
+def test_a_scheduled_run_counts_changes_from_the_last_release_source(
+    tmp_path, monkeypatch, landed_during_last_cut, after_reconciliation, cuts_now
+):
+    """A fix that lands while a release is cut, before its reconciliation, belongs to the next one."""
+    repository(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    shas = {}
+    for name, subject in (
+        ("previous-source", "feat: the last released change"),
+        ("during-cut", landed_during_last_cut),
+        ("reconciliation", "chore: reconcile published metadata for v1.2.3"),
+        ("tested", after_reconciliation),
+    ):
+        (tmp_path / f"{name}.txt").write_text(name)
+        shas[name] = commit(tmp_path, subject)
+    quiet_controller(monkeypatch)
+    monkeypatch.setattr(
+        cuts,
+        "pick_source",
+        lambda: {"source": shas["tested"], "main": shas["tested"], "evidence_run": "11"},
+    )
+    monkeypatch.setattr(
+        cuts,
+        "predecessor",
+        lambda source, main: (
+            {"source": shas["previous-source"], "reconciliation_commit": shas["reconciliation"]},
+            None,
+        ),
+    )
+    released = {"fix", "feat"}
+
+    def changes(start, end):
+        log = git(tmp_path, "log", "--format=%s", f"{start}..{end}").splitlines()
+        return [{"subject": subject} for subject in log if subject.split(":")[0] in released]
+
+    monkeypatch.setattr(cuts, "changelog_changes", changes)
+
+    decision = cuts.schedule()
+
+    assert decision["cut"] is cuts_now, decision
+    if cuts_now:
+        assert decision["source"] == shas["tested"]
+
+
+def test_a_scheduled_run_resumes_an_open_cut_that_no_run_is_working_on(monkeypatch):
+    """An open cut with no controller run would otherwise stay stuck through every slot."""
+    source = "a" * 40
+    quiet_controller(
+        monkeypatch, open_cut={"number": 41, "base": {"ref": f"release-cuts/{source}"}}
+    )
+    monkeypatch.setattr(
+        cuts,
+        "pick_source",
+        lambda: pytest.fail("an open cut is resumed, not replaced by a new one"),
+    )
+
+    decision = cuts.schedule()
+
+    assert (decision["cut"], decision["resume"], decision["source"]) == (True, True, source)
+
+
+def test_a_scheduled_run_waits_while_an_open_cut_runs_its_own_full(monkeypatch):
+    """Resuming a cut during its Full run would start a second Full of about 90 jobs."""
+    quiet_controller(
+        monkeypatch,
+        open_cut={"number": 41, "base": {"ref": "release-cuts/" + "a" * 40}},
+        cut_full={"id": 9, "status": "in_progress", "head_branch": "release-cuts/" + "a" * 40},
+    )
+
+    decision = cuts.schedule()
+
+    assert decision == {"cut": False, "reason": "the open cut's Full run 9 is in_progress"}
+
+
+@pytest.mark.skipif(
+    not os.environ.get("RELEASE_PLEASE_NODE_MODULES"), reason="pinned Release Please parser"
+)
+def test_changelog_changes_follow_release_pleases_own_parser(tmp_path, monkeypatch):
+    """A breaking footer or a second header in a body is a release, as release-please counts it."""
+    repository(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("NODE_PATH", os.environ["RELEASE_PLEASE_NODE_MODULES"])
+    (tmp_path / "start.txt").write_text("start")
+    start = commit(tmp_path, "chore: start")
+    messages = (
+        "ci: cache the wheel build",
+        "chore: drop the retired key\n\nBREAKING CHANGE: the key is gone",
+        "chore: bump a pin\n\nfix(store): keep a save a restart interrupted",
+    )
+    for index, message in enumerate(messages):
+        (tmp_path / f"{index}.txt").write_text(message)
+        commit(tmp_path, message)
+
+    changes = cuts.changelog_changes(start, "HEAD")
+
+    assert sorted((change["type"], change["breaking"]) for change in changes) == [
+        ("chore", True),
+        ("fix", False),
+    ]

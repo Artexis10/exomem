@@ -193,6 +193,99 @@ def pick_source() -> dict:
     return {"source": main, "main": main, "evidence_run": None}
 
 
+RELEASE_PLEASE_CONFIG = Path(__file__).resolve().parents[1] / "release-please-config.json"
+CHANGES_SCRIPT = Path(__file__).resolve().parent / "release_changes.cjs"
+
+
+def changelog_changes(start: str, end: str) -> list[dict]:
+    """The commits after `start` up to `end` that release-please would show in a changelog.
+
+    release-please's own parser decides (scripts/release_changes.cjs), so a breaking footer or
+    a second Conventional Commits header in a body counts as it does for the release.
+    """
+    log = git("log", "--format=%H%x00%B%x1e", f"{start}..{end}")
+    commits = [
+        {"sha": sha, "message": message.strip()}
+        for sha, _, message in (
+            record.strip("\n").partition("\0") for record in log.split("\x1e") if record.strip()
+        )
+    ]
+    output = subprocess.check_output(
+        ["node", str(CHANGES_SCRIPT), str(RELEASE_PLEASE_CONFIG)],
+        input=json.dumps(commits),
+        text=True,
+        timeout=60,
+    )
+    return json.loads(output)
+
+
+def schedule() -> dict:
+    """Whether a scheduled run should start a cut now, and from which source.
+
+    It never starts a cut while a controller run is unfinished, resumes an open cut that no run
+    is working on, and otherwise cuts only from a commit with reusable Full evidence when a
+    change since the last release would appear in its changelog.
+    """
+    # Any unfinished controller run, including an evidence callback, holds the slot; a
+    # callback ends within minutes, and the next slot cuts.
+    runs = evidence.api("actions/workflows/release-evidence-automation.yml/runs?per_page=20")
+    unfinished = [run for run in runs["workflow_runs"] if run["status"] != "completed"]
+    if unfinished:
+        return {
+            "cut": False,
+            "reason": f"release-evidence run {unfinished[0]['id']} is {unfinished[0]['status']}",
+        }
+    full = evidence.api("actions/workflows/ci.yml/runs?event=workflow_dispatch&per_page=50")
+    for run in full["workflow_runs"]:
+        if run["status"] != "completed" and (run.get("head_branch") or "").startswith(
+            evidence.CUT_PREFIX
+        ):
+            return {
+                "cut": False,
+                "reason": f"the open cut's Full run {run['id']} is {run['status']}",
+            }
+    for page in evidence.api("pulls?state=open&per_page=100", pages=True):
+        for pull in page:
+            if pull["base"]["ref"].startswith(evidence.CUT_PREFIX):
+                # No controller run is working on this open cut, so resume it: the controller's
+                # own resume path, rather than a silent skip on every slot.
+                return {
+                    "cut": True,
+                    "resume": True,
+                    "reason": f"cut pull request #{pull['number']} is open and no controller run is active",
+                    "source": pull["base"]["ref"].removeprefix(evidence.CUT_PREFIX),
+                }
+    picked = pick_source()
+    if picked["evidence_run"] is None:
+        return {
+            "cut": False,
+            "reason": "no commit since the last release has Full evidence yet",
+            **picked,
+        }
+    previous, _ = predecessor(picked["main"], picked["main"])
+    if picked["source"] == previous["reconciliation_commit"]:
+        return {
+            "cut": False,
+            "reason": "the newest commit with Full evidence is the last release; newer commits await Full",
+            **picked,
+        }
+    # release-please counts from the last release's source, so commits that landed while that
+    # release was cut, before its reconciliation, belong to this release.
+    changes = changelog_changes(previous["source"], picked["source"])
+    if not changes:
+        return {
+            "cut": False,
+            "reason": "no change since the last release would appear in its changelog",
+            **picked,
+        }
+    return {
+        "cut": True,
+        "reason": f"{len(changes)} changelog change(s) since the last release",
+        "changes": [change["subject"] for change in changes],
+        **picked,
+    }
+
+
 def prepare(source: str) -> dict:
     branch = evidence.cut_branch(source)
     main = trusted_main()
@@ -903,6 +996,7 @@ def main() -> None:
         "operation",
         choices=(
             "pick-source",
+            "schedule",
             "prepare",
             "check-head",
             "push-generated",
@@ -924,6 +1018,8 @@ def main() -> None:
     os.environ["GH_REPO"] = os.environ.get("GH_REPO") or os.environ["GITHUB_REPOSITORY"]
     if args.operation == "pick-source":
         print(json.dumps(pick_source()))
+    elif args.operation == "schedule":
+        print(json.dumps(schedule()))
     elif args.operation == "prepare":
         if not args.source:
             parser.error("prepare requires --source")
