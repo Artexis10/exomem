@@ -1294,6 +1294,16 @@ def test_a_ref_addressed_add_with_compact_metadata_is_refused_without_a_vault_wa
     assert str(with_projection.value) == expected
 
 
+def test_an_early_compact_refusal_still_lets_a_malformed_date_win(tmp_path: Path) -> None:
+    """Refusing compact metadata before the page read must not hide an argument error the call made first."""
+    _write_page(tmp_path)
+    with pytest.raises(ValueError) as refused:
+        commands.op_observe_memory(
+            tmp_path, path=PAGE, operation="add", category="rule", content="A dated rule", as_of="July",
+        )
+    assert str(refused.value).startswith("INVALID_SEMANTIC_AS_OF")
+
+
 def test_observe_accepts_legacy_vault_reference_inside_governed_kb(
     tmp_path: Path,
 ) -> None:

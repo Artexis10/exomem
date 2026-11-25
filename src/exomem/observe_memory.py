@@ -1444,6 +1444,17 @@ def argument_refusal(arguments: Mapping[str, Any]) -> ObserveMemoryError | None:
     reads no page. A unit reference without `kind` keeps the unit's own kind, which only the
     page knows, so that call is left to the replay.
     """
+    passed = _compact_names_passed(arguments)
+    if not passed:
+        return None
+    return _compact_metadata_refusal(passed=passed, kinds=_core_kinds_remediation())
+
+
+def _compact_names_passed(arguments: Mapping[str, Any]):
+    """The governed names a compact unit would carry, when the arguments alone select the compact form.
+
+    The one rule that both the busy intake and the direct path apply before reading a page.
+    """
     mode = _proposal_mode(
         str(arguments.get("operation") or "").strip().lower(),
         unit_ref=arguments.get("unit_ref"),
@@ -1456,14 +1467,12 @@ def argument_refusal(arguments: Mapping[str, Any]) -> ObserveMemoryError | None:
         compact_kind = semantic_language_registry.normalize_label(kind) == _COMPACT_KIND
     if not compact_kind:
         return None
-    passed = _governed_names(**{
+    # A blank value is no value, as `_resolve_governed_value` reads it on an add.
+    return _governed_names(**{
         key: arguments[key]
         for key in _GOVERNED_ARGUMENT_KEYS
         if str(arguments.get(key) or "").strip()
     })
-    if not passed:
-        return None
-    return _compact_metadata_refusal(passed=passed, kinds=_core_kinds_remediation())
 
 
 def refusal_before_page(
@@ -1487,8 +1496,9 @@ def refusal_before_page(
     `observe_memory` reaches this refusal only after it has found and read the page, and finding a
     page by memory ref can walk the whole vault. A new unit's kind and governed fields are all in
     the arguments, so the caller refuses before it looks the page up. Only an add qualifies: an
-    update keeps the unit's own kind and form, which only the page knows. A call that an argument
-    check of `observe_memory` refuses first is left to it, so that check still wins.
+    update keeps the unit's own kind and form, which only the page knows. A call whose category or
+    dates `observe_memory` would refuse is left to it, so that refusal still wins; one decided by the
+    page (a missing path, an unknown reference, a stale hash) comes after this one.
 
     `page` names the page when it can do so without walking the vault, else None. Only the
     remediation reads the page, to list the rich kinds it admits; a page that `page` cannot name,
@@ -1506,14 +1516,19 @@ def refusal_before_page(
         origin_bindings.extract_origin_metadata(str(content))
     except provenance.OriginError:
         return None
-    if kind is not None and semantic_language_registry.normalize_label(kind) != _COMPACT_KIND:
-        return None
-    supplied = dict(zip(_GOVERNED_ARGUMENT_KEYS, (verdict, check_by, as_of, until), strict=True))
-    # A blank value is no value on an add, as `_resolve_governed_value` reads it.
-    passed = _governed_names(**{
-        key: value for key, value in supplied.items() if value is not None and str(value).strip()
+    passed = _compact_names_passed({
+        "operation": op, "kind": kind,
+        **dict(zip(_GOVERNED_ARGUMENT_KEYS, (verdict, check_by, as_of, until), strict=True)),
     })
     if not passed:
+        return None
+    try:
+        # Argument checks that `observe_memory` makes before this refusal keep winning.
+        _canonical_category(str(category))
+        for key, value in (("as_of", as_of), ("until", until), ("check_by", check_by)):
+            if value is not None and str(value).strip():
+                _canonical_date(str(value), key)
+    except (ObserveMemoryError, ValueError):
         return None
     rel_path = page()
     kinds = None if rel_path is None else _page_kinds_remediation(vault_root, rel_path, category)

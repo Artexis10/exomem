@@ -3476,13 +3476,24 @@ def _occupied_destination_refusal(
     id_paths = semantic_contract.current_identity_paths(root, identity)
     if id_paths is None:
         return None
+    return _occupancy_refusal(id_paths, artifact=artifact, destination_exists=True, exact_destination=False)
+
+
+def _occupancy_refusal(
+    id_paths, *, artifact: RelationReviewRecord | None, destination_exists: bool, exact_destination: bool
+) -> RelationReviewError | None:
+    """Which draft refusal an occupied identity or destination gets; the one rule both checks apply."""
+    if exact_destination:
+        return None
     if id_paths:
         return RelationReviewError("DRAFT_ID_IN_USE", "draft identity is already in use")
-    if artifact is not None:
+    if artifact is not None and destination_exists:
         return RelationReviewError("DRAFT_ID_IN_USE", "draft identity is already reserved")
-    return RelationReviewError(
-        "DRAFT_DESTINATION_OCCUPIED", "draft destination is already occupied"
-    )
+    if destination_exists:
+        return RelationReviewError(
+            "DRAFT_DESTINATION_OCCUPIED", "draft destination is already occupied"
+        )
+    return None
 
 
 def _attempt(
@@ -3611,14 +3622,11 @@ def _attempt(
             and state.identity == identity
             and state.source_hash == vault.content_hash(normalized)
         )
-    if id_paths and not exact_destination:
-        raise RelationReviewError("DRAFT_ID_IN_USE", "draft identity is already in use")
-    if artifact is not None and destination_exists and not exact_destination:
-        raise RelationReviewError("DRAFT_ID_IN_USE", "draft identity is already reserved")
-    if destination_exists and not exact_destination:
-        raise RelationReviewError(
-            "DRAFT_DESTINATION_OCCUPIED", "draft destination is already occupied"
-        )
+    refusal = _occupancy_refusal(
+        id_paths, artifact=artifact, destination_exists=destination_exists, exact_destination=exact_destination
+    )
+    if refusal is not None:
+        raise refusal
     # `with_candidate` is a pure function of the two inputs a reuse carries, and of the two that the
     # structural evaluation judged: the same corpus object and an equal candidate.
     if reused is not None:
