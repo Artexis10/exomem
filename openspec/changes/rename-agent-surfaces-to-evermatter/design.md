@@ -47,15 +47,18 @@ The accepted server names live in `client_config` beside the emitted `SERVER_NAM
 The documented name of every setting becomes `EVERMATTER_X`. `EXOMEM_X` and the legacy `KB_MCP_X` stay working aliases through the compatibility window. Code keeps reading the internal name `EXOMEM_X` until the package rename in `rename-stored-identifiers-to-evermatter`, which moves the readers and every in-process writer together.
 
 A copy of one prefix over another after the fact is wrong. It beats values that our own code forces, that a `.env` file sets, that an isolation recipe exports, or that code writes after import, such as a test fixture, the demo or a command-line flag. Each source therefore renames the documented name into the internal one before its own rules apply, and removes the documented name from the process environment:
-- The process environment renames `EVERMATTER_X` to `EXOMEM_X`, and then `KB_MCP_X` to `EXOMEM_X`, only when `EXOMEM_X` is unset. A later in-process write of `EXOMEM_X` therefore wins, and a child process inherits one name, not two.
+- The process environment renames `EVERMATTER_X` to `EXOMEM_X`, and then `KB_MCP_X` to `EXOMEM_X`, only when `EXOMEM_X` is unset. A later in-process write of `EXOMEM_X` therefore wins, and a child process inherits one name, not two. When `EXOMEM_X` is set and `EVERMATTER_X` holds a different value for a setting that is not a placement setting, the process logs one warning that names both variables.
 - A `.env` load renames its keys before the conflict check and the override.
 - The standalone hooks rename the names in their own alias normaliser. One function defines the names for a setting. The hooks keep a copy, because they cannot import the package, and a test keeps that copy in step.
 
 When one source sets `EVERMATTER_X` and `EXOMEM_X` to different values, the service and every command that reads a placement setting (the vault path, the state root) or writes a credential refuse to start. The refusal names both variables, without their values. This control prevents a run on the wrong vault, state root or credential. When it fires wrongly, the operator pays one refused start and fixes it by deleting one line. The hooks never pick on a conflict: they skip that turn's nudge or checkpoint and log the conflict.
 
 The release order prevents version skew:
-1. Settings release S1 teaches every source to rename the documented names. No writer outside the process changes.
-2. Settings release S2, at least one release later, makes setup, the installers (shell and PowerShell), the service files, the container images, the Helm chart and the remote setup wizard emit only `EVERMATTER_*`. Scrubs and denylists cover every name.
+1. Settings release S1 teaches every source to rename the documented names. No writer outside the process changes. The readers outside the package learn both names in the same step, each in its own repository and release:
+   - the Cloud gateway's environment check, in the control-plane repository;
+   - cellctl's own settings, such as the export TTL;
+   - the chart's scheduler runtime, which reads the scheduler secret.
+2. Settings release S2, at least one release later, makes setup, the installers (shell and PowerShell), the service files, the container images, the Helm chart and the remote setup wizard emit only `EVERMATTER_*`. The chart switches a component's names only after that component's reader from step 1 runs in production. Scrubs and denylists cover every name.
 3. cellctl renders each cell's manifest with the names that the cell's target image reads. An image older than S1, including the previous image on a refused upgrade, gets `EXOMEM_*`. cellctl emits `EVERMATTER_*` only for an image at S1 or later.
 
 A local downgrade below S1 after S2 rewrote a `.env` or service file needs `evermatter setup` again. The release notes say so.

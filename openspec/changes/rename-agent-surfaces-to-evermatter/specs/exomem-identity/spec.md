@@ -43,9 +43,9 @@ The MCP server key, the serverInfo name, the plugin names, the skill names and t
 
 #### Scenario: A value written after import wins
 
-- **WHEN** a shell exports `EVERMATTER_STATE_ROOT` and a test fixture or command then sets `EXOMEM_STATE_ROOT` in the same process
+- **WHEN** a shell exports an alias of the state root setting and a test fixture or command then sets its internal name in the same process
 - **THEN** the process uses the value that the fixture or command set
-- **AND** a child process inherits only `EXOMEM_STATE_ROOT`
+- **AND** a child process inherits only the internal name
 
 #### Scenario: A cell on an older image keeps its settings
 
@@ -76,7 +76,7 @@ The Python import package SHALL be `exomem`, and the CLI SHALL be reachable as `
 
 ### Requirement: Legacy `KB_MCP_*` Environment Variables Keep Working
 
-At package import, the system SHALL rename each `EVERMATTER_*` variable, then each legacy `KB_MCP_*` variable, to its `EXOMEM_*` equivalent when that is unset. A set `EXOMEM_*` value, and a later in-process write of one, SHALL win. The promotion SHALL be re-runnable and SHALL log one advisory line when it renamed a legacy name.
+Code SHALL read each setting under one internal name, and its other names SHALL be aliases. At import, the system SHALL rename a set alias to the internal name when that is unset, and remove the alias. A set internal name, and a later in-process write of it, SHALL win.
 
 #### Scenario: Old .env keeps working unchanged
 

@@ -9,8 +9,8 @@
 
 ## 2. Settings prefix (D3)
 
-- [ ] 2.1 Settings release S1: rename `EVERMATTER_X`, then `KB_MCP_X`, into `EXOMEM_X` when it is unset, and remove the documented name from the process environment. Do this per source: the process environment, the `.env` loads before their conflict check, the standalone hooks' alias normalisers, setup's `.env` route lookup and the early resource preload. Refuse a conflict wherever a placement setting is read or a credential is written. Skip the hook's nudge or checkpoint on a conflict.
-- [ ] 2.2 Settings release S2, at least one release after S1: emit only `EVERMATTER_*` from setup, the installers (shell and PowerShell), the service files, the container images, the Helm chart and the remote setup wizard. Make cellctl choose the names per cell from its target image. Cover every name in each scrub and denylist.
+- [ ] 2.1 Settings release S1: rename `EVERMATTER_X`, then `KB_MCP_X`, into `EXOMEM_X` when it is unset, and remove the documented name from the process environment. Do this per source: the process environment, the `.env` loads before their conflict check, the standalone hooks' alias normalisers, setup's `.env` route lookup and the early resource preload. Refuse a conflict wherever a placement setting is read or a credential is written. Skip the hook's nudge or checkpoint on a conflict. Teach the readers outside the package both names: the Cloud gateway's environment check in the control-plane repository, cellctl's own settings and the chart's scheduler runtime.
+- [ ] 2.2 Settings release S2, at least one release after S1: emit only `EVERMATTER_*` from setup, the installers (shell and PowerShell), the service files, the container images, the Helm chart and the remote setup wizard. Make cellctl choose the names per cell from its target image. Switch a chart component's names only after its reader accepts both in production. Cover every name in each scrub and denylist.
 
 ## 3. Release B: emit the new names
 
