@@ -433,11 +433,17 @@ class _Decide:
 
 
 def _request(server, decisions, work):
-    """One request to the store thread. A request refused whole is held against the store for the command."""
+    """One read-only request to the store. A request refused whole is held against the store for the command.
+
+    The decisions read the store's last commit beside the store thread (``StoreServer.read_beside``),
+    so a write or view pass that holds the thread does not make them wait out the mutation timeout.
+    The snapshot writer refuses every write, and the work reads no import progress. Where this
+    process holds no admitted writer, the request queues on the store thread as before.
+    """
     from ..cli_ops import OpError
 
     try:
-        return server.call(work, read_only=True, wake_maintenance=False)
+        return server.read_beside(work, initial=None, progress=False)
     except (CollectionStoreError, OpError) as error:
         if decisions is not None:
             decisions.refusals.setdefault(server, error)

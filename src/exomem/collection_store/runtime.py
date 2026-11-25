@@ -1697,13 +1697,27 @@ class StoreServer:
         open it is refused as busy instead, so it never runs on the store thread or takes back a
         lease the store released.
         """
+        # The span carries the asking site and the counts `call` records, so a read moved beside the queue
+        # stays attributable; a fallback onto the store thread also records its own `store.call` span.
+        fields = {"pages": getattr(work, "pages", 1), "refused": 0, "wake": 0}  # a read beside never wakes maintenance
+        on_path = call_spans.MCP_CALL_TOKEN.get() is not None
+        name = (f"store.read_beside@{_call_site(sys._getframe(1))}"[:call_spans.NAME_MAX_CHARS] if on_path
+                else "store.read_beside")
+        with call_spans.span(name, fields):
+            try:
+                return self._read_beside(work, initial=initial, collection=collection, progress=progress, queue=queue)
+            except BaseException:
+                fields["refused"] = 1
+                raise
+
+    def _read_beside(self, work, *, initial, collection, progress, queue):
         from ..cli_ops import OpError
         from ..governance import policy
         from . import capability, derived_rows, ownership
         from .preview import preview_store
 
         manager, runtime = self.manager, self.runtime
-        with call_spans.span("store.read_beside"), ExitStack() as scope:
+        with ExitStack() as scope:
             handle = None
             # A service's runtime that is not yet reporting resolves its takeover in a checkout on the store thread.
             if runtime is not None and not (runtime._bootstrap and not runtime.reporting_ready(manager._fencing_token)):
