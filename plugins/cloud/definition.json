@@ -16,9 +16,14 @@
   "resource": "https://exomem.substratesystems.io/mcp",
   "profile": "product-cloud",
   "edition_identities": {
+    "claude-hooks": {
+      "display_name": "Evermatter Cloud",
+      "lead": "For an Evermatter Cloud account. Installs the Evermatter Cloud connection with lifecycle hooks and skills. If you already connect Evermatter another way, such as your own Evermatter server, install Evermatter hooks instead."
+    },
     "claude-connector-hooks": {
       "name": "evermatter-hooks",
-      "display_name": "Evermatter hooks"
+      "display_name": "Evermatter hooks",
+      "lead": "For an Evermatter connection you already have, such as your own Evermatter server added as a connector. Adds lifecycle hooks and skills and bundles no server."
     }
   },
   "author": {

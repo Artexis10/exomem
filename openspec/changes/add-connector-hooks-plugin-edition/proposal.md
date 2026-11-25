@@ -7,6 +7,7 @@ The hooked Claude edition bundles an MCP server bound to Evermatter Cloud. An ac
 - Add a third Claude edition, `generated/claude-connector-hooks`, built from the same definition. It carries the hooked edition's hooks and skills byte for byte and bundles no MCP server.
 - List it in the repository marketplace under its own plugin name, `evermatter-hooks`, with the display name "Evermatter hooks".
 - Its readme tells the user to connect Evermatter first and to install the full plugin instead when they have not.
+- The hooked edition shows as "Evermatter Cloud", and both marketplace editions open their descriptions with the account they serve.
 
 ## Capabilities
 

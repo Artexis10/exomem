@@ -4,6 +4,7 @@
 - [x] 1.2 List `evermatter-hooks` in `.claude-plugin/marketplace.json`
 - [x] 1.3 Cover the edition in `tests/test_cloud_plugins.py` and the public-artifact privacy check
 - [x] 1.4 Document the edition in `docs/cloud-plugin-distribution.md`
+- [x] 1.5 Give the hooked edition the display name "Evermatter Cloud" and lead both marketplace editions' descriptions with the account each serves
 
 ## 2. Acceptance
 

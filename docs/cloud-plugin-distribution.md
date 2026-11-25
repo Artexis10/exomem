@@ -50,6 +50,11 @@ account that already connects Evermatter, for example a self-hosted server
 added as a connector. Its hooks then activate that existing connection. The
 hooked edition would add a second server that points at Evermatter Cloud.
 
+The two marketplace editions name themselves in `plugins/cloud/definition.json`
+under `edition_identities`. The hooked edition shows as "Evermatter Cloud" and
+the connector edition as "Evermatter hooks". Each description opens with the
+account it serves, so a person can choose from the listing alone.
+
 Hook installation health does not prove that the client loaded or executed the
 registration. Native acceptance must observe a normally trusted fresh session,
 its compiler call, and governed capture/readback. Explicit MCP mode instructs

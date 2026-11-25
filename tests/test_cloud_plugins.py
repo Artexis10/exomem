@@ -168,9 +168,13 @@ def test_connector_edition_adds_hooks_to_an_existing_connection_without_a_server
     marketplace = json.loads((ROOT / ".claude-plugin/marketplace.json").read_text())
     listed = {entry["name"]: entry["source"] for entry in marketplace["plugins"]}
     assert listed[manifest["name"]] == "./plugins/cloud/generated/claude-connector-hooks"
-    assert manifest["name"] != json.loads(
+    hooked_manifest = json.loads(
         (ROOT / "plugins/cloud/generated/claude-hooks/.claude-plugin/plugin.json").read_text()
-    )["name"]
+    )
+    # Both editions sit in one marketplace; a person picks between them by these labels.
+    assert manifest["name"] != hooked_manifest["name"]
+    assert manifest["displayName"] != hooked_manifest["displayName"]
+    assert manifest["description"] != hooked_manifest["description"]
 
 
 def test_claude_directory_edition_ships_only_admitted_files(tmp_path: Path) -> None:

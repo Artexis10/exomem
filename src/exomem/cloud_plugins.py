@@ -218,9 +218,14 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
         shutil.copyfile(root / "plugins/cloud/assets/icon.png", assets / "icon.png")
         shutil.copyfile(package_skills.APACHE_LICENSE, target / "LICENSE")
         display_name = identity_override.get("display_name", definition["display_name"])
+        # An edition that sits beside another in one marketplace leads with who it is for,
+        # so a person choosing between them can tell them apart from the listing alone.
+        description = "\n\n".join(
+            part for part in (identity_override.get("lead"), definition["description"]) if part
+        )
         readme = (
             f"# {display_name}\n\n"
-            f"{definition['description']}\n\n"
+            f"{description}\n\n"
             "## Getting started\n\n"
             + (
                 "Install the plugin and connect your Evermatter account. Check the account "
@@ -301,15 +306,15 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                     "inside the versioned package. Hook logs contain metadata only, "
                     "not prompt or assistant snippets. Hooks do not execute in Claude Chat. "
                     "By default the capture check runs after a turn that lands work (a commit, "
-                    "push, merge, pull request or a file handed over). To check after every "
-                    "substantial reply instead, set `EXOMEM_PROMINENCE=maximal` in the "
-                    "session's environment.\n"
+                    "push, merge, pull request or a file handed over). To also check after a "
+                    "substantial reply, at most once every five minutes, set "
+                    "`EXOMEM_PROMINENCE=maximal` in the session's environment.\n"
                 )
         if provider == "claude":
             manifest = {
                 "name": identity_override.get("name", definition["name"]),
                 "displayName": display_name,
-                "description": definition["description"],
+                "description": description,
                 "version": identity["version"],
                 "author": definition["author"],
                 "homepage": definition["homepage"],
