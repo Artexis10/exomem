@@ -49,7 +49,7 @@
         },
         "verdict": {
           "type": "string",
-          "description": "A rich verdict in words, never a number; see inspect_memory schema.infer."
+          "description": "Verdict in words, never a number; needs a rich `kind`. See inspect_memory schema.infer."
         },
         "anchor": {
           "type": "string",
@@ -57,15 +57,15 @@
         },
         "as_of": {
           "type": "string",
-          "description": "ISO date this starts to hold."
+          "description": "ISO date this starts to hold; needs a rich `kind`."
         },
         "until": {
           "type": "string",
-          "description": "ISO date this stops holding."
+          "description": "ISO date this stops holding; needs a rich `kind`."
         },
         "check_by": {
           "type": "string",
-          "description": "ISO date to revisit."
+          "description": "ISO date to revisit; needs a rich `kind`."
         },
         "unlinked_reason": {
           "type": "string",

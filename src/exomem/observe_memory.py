@@ -644,13 +644,25 @@ def observe_memory(
                 "INVALID_SEMANTIC_DATE_ORDER", "until must be on or after as_of",
             )
         preserved_metadata = _preserved_metadata(base_unit)
-        if selected_kind == _COMPACT_KIND and (
-            normalized_verdict is not None
-            or normalized_check_by is not None
-            or normalized_as_of is not None
-            or normalized_until is not None
-            or preserved_metadata
-        ):
+        # Names the argument each governed value came from, in `_GOVERNED_ARGUMENT_KEYS` order.
+        governed_passed = tuple(
+            key
+            for key, value in zip(
+                _GOVERNED_ARGUMENT_KEYS,
+                (normalized_verdict, normalized_check_by, normalized_as_of, normalized_until),
+                strict=True,
+            )
+            if value is not None
+        )
+        if selected_kind == _COMPACT_KIND and (governed_passed or preserved_metadata):
+            if base_unit is None:
+                raise _compact_add_metadata_refusal(
+                    language,
+                    passed=governed_passed,
+                    category=normalized_category,
+                    projects=page_projects,
+                    page_type=page_type,
+                )
             # Every exit named here has to actually exist. `verdict=""` and
             # `check_by=""` really do clear those rows, but no argument clears
             # an unowned row, so converting a unit that carries one means
@@ -1395,6 +1407,32 @@ def _rich_kind_remediation(
         if category in kinds else ""
     )
     return f"{hint}Pass `kind` with one of the admitted kinds: {', '.join(kinds)}."
+
+
+def _compact_add_metadata_refusal(
+    language: semantic_language_registry.SemanticLanguageRegistry,
+    *,
+    passed: tuple[str, ...],
+    category: str,
+    projects: tuple[str, ...],
+    page_type: str | None,
+) -> ObserveMemoryError:
+    """Governed metadata passed to a compact add: name each field and both exits.
+
+    An add has no existing unit to convert and no row to clear, so the edit remediation
+    would send the caller nowhere. Both exits here are a retry of the same call.
+    """
+    fields = ", ".join(passed)
+    return ObserveMemoryError(
+        "COMPACT_METADATA_REQUIRES_RICH_KIND",
+        f"Governed unit metadata ({fields}) needs a rich kind, and a compact observation "
+        "carries no metadata",
+        f"Retry one of two ways: omit {fields} to add a compact observation, or keep "
+        f"{fields} by adding a rich unit. "
+        + _rich_kind_remediation(
+            language, category=category, projects=projects, page_type=page_type
+        ),
+    )
 
 
 def _page_projects(frontmatter: dict[Any, Any]) -> tuple[str, ...]:

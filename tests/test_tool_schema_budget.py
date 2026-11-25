@@ -68,11 +68,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # and `save_evidence` says to keep proof in the turn it arrives.
 # `search_memory.file_types`, which lets an agent restrict a search to pictures and tells it to search both ways
 # when unsure, added 203 B on 2026-11-24 (add-images-only-search).
-TOTAL_BUDGET = 31_400
+# `add_observation`'s `verdict`, `as_of`, `until` and `check_by` say they need a rich `kind`, which a compact add
+# refuses them without, added 77 B on 2026-11-25 (compact-add-metadata-refusal).
+TOTAL_BUDGET = 31_500
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
-    "add_observation": 1650,
+    "add_observation": 1700,
     "add_plan_item": 500,
     "add_record": 940,
     "cancel_uploads": 600,
