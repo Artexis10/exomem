@@ -5,7 +5,7 @@
 ## 2. Sidecar field and ingest
 
 - [x] 2.1 `capture_date_source` and `capture_date_matched_from` through `set_capture_fields` and `render_sidecar_extraction`; extraction stamps `camera-exif`; the file name dates a media sidecar with no stated time. Evidence: `capture_metadata.py`, `preserve.py`, `media_worker.py`, `tests/test_capture_metadata.py`.
-- [x] 2.2 The upload receipt warns about an image that carries no camera metadata. Evidence: `preserve.NO_CAMERA_METADATA_WARNING`, `tests/test_capture_metadata.py`.
+- [x] 2.2 The upload receipt warns about a JPEG or HEIC photo that carries no camera metadata, and about no other format. Evidence: `preserve.NO_CAMERA_METADATA_WARNING`, `capture_metadata.lacks_camera_metadata`, `tests/test_capture_metadata.py`.
 
 ## 3. Search
 
@@ -13,9 +13,9 @@
 
 ## 4. Recovery
 
-- [x] 4.1 Perceptual matching with the unique-match rule. Evidence: `capture_match.py`, `perceptual_hash.py`, `tests/test_capture_match.py`.
-- [x] 4.2 `recover` and `originals_root` on the capture-metadata maintenance job, refused on Cloud. Evidence: `capture_backfill.py`, `commands.op_maintain_memory`, `operation_entries.py`.
-- [x] 4.3 Integration test on a temp vault: camera original, stripped copy, screenshot name, ambiguous pair, unrelated image, and an `originals_root` match; source and date per item, nothing written under `originals_root`, the fallback labelled in a date search. Evidence: `tests/test_capture_recovery.py`.
+- [x] 4.1 Perceptual matching with the unique-match rule and a finer-scale confirmation of the nearest original. Evidence: `capture_match.py`, `perceptual_hash.py`, `tests/test_capture_match.py`, and the look-alike page in `tests/test_capture_recovery.py`.
+- [x] 4.2 `recover` and `originals_root` on the capture-metadata maintenance job, refused on Cloud; the preview lists each planned match with its date and origin. Evidence: `capture_backfill.py`, `commands.op_maintain_memory`, `operation_entries.py`.
+- [x] 4.3 Integration test on a temp vault: camera original, stripped copy, screenshot name, ambiguous pair, unrelated image, and an `originals_root` match; source and date per item, nothing written under `originals_root`, the fallback labelled in a date search, and a look-alike page that stays undated. Evidence: `tests/test_capture_recovery.py`.
 
 ## 5. Documentation
 
@@ -23,4 +23,4 @@
 
 ## 6. After release
 
-- [ ] 6.1 Run the recovery preview on the owner's vault and read the unmatched list; calibrate the distance and margin if the preview shows wrong refusals or wrong matches.
+- [ ] 6.1 Run the recovery preview on the owner's vault and read the unmatched list; calibrate the distance, margin and correlation bound if the preview shows wrong refusals or wrong matches.

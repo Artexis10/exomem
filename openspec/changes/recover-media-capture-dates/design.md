@@ -22,7 +22,9 @@ New phone and screenshot tools add naming shapes over time, so they are data: ea
 
 ### D4. A match is a date, not a file
 
-The recovery pool holds the vault's camera-dated images and, on a personal server, the images under `originals_root`. A copy is matched by a 16x16 average hash (256 bits, box resample, EXIF-transposed) and its aspect ratio. A match is accepted only when the nearest original is within 24 bits, the aspect ratios agree within 2%, and every original that states a different capture time is at least 24 bits farther. Two copies of one original state one time, so they never make a match ambiguous. A picture with fewer than 64 set or clear bits has no structure and is never matched. The thresholds are set from the design reasoning above and are not yet calibrated on a real archive; the preview lists every unmatched page with its reason so the owner sees what the bound refuses.
+The recovery pool holds the vault's camera-dated images and, on a personal server, the images under `originals_root`. A copy is matched by a 16x16 average hash (256 bits, box resample, EXIF-transposed) and its aspect ratio, both taken from the same reduced, upright image. The nearest original must be within 12 bits, the aspect ratios must agree within 2%, and every original that states a different capture time must be at least 24 bits farther. Two copies of one original state one time, so they never make a match ambiguous. A picture with fewer than 64 set or clear bits has no structure and is never matched.
+
+The hash alone is not enough: photos of one kind, such as printed pages, often sit within 24 bits of each other, and pages that pass a hash bound can differ in every detail. The nearest original is therefore confirmed at a finer scale. Both pictures are opened again, reduced to 64x64 grayscale, and their correlation must be at least 0.95. On synthetic printed pages, true resized or re-encoded copies correlated 0.97 or more and the look-alikes that passed the hash correlated 0.83 at most. A picture that cannot be opened again is not confirmed. The thresholds come from those fixtures and are not yet calibrated on a real archive. The preview lists every unmatched page with its reason, and every planned match with its date and origin, so the owner sees what the bound refuses and what it accepts before the write.
 
 ### D5. Recovery lives inside the existing capture-metadata job
 
@@ -34,10 +36,10 @@ The recovery pool holds the vault's camera-dated images and, on a personal serve
 
 ### D7. The notice lives on the receipt
 
-Upload of an image that carries no camera metadata and whose name states no time adds one warning to the receipt: the client sent a copy without it, and the original must come from disk. It names the routes that carry full bytes. The sidecar records nothing about it, because the sidecar's absence of a date already says so.
+Upload of a JPEG or HEIC photo that carries no camera metadata and whose name states no time adds one warning to the receipt: the client sent a copy without it, and the original must come from disk. It names the routes that carry full bytes. Other formats (a screenshot, a diagram) never had camera metadata, so they get no warning, and the file name is read before the image is decoded. The sidecar records nothing about it, because the sidecar's absence of a date already says so.
 
 ## Risks
 
-- A wrong match dates a photo wrongly. The unique-match rule and the margin refuse doubtful cases, the source label and `capture_date_matched_from` let the owner audit and filter, and the preview shows what would change before the write. Thresholds may need tuning on a real archive.
+- A wrong match dates a photo wrongly. The unique-match rule, the margin and the finer-scale confirmation refuse doubtful cases, the source label and `capture_date_matched_from` let the owner audit and filter, and the preview shows what would change before the write. Thresholds may need tuning on a real archive.
 - A date search now returns photos filed on that day by arrival, not by capture. The `source-date` label and the `page.capture_date_source` filter make that visible and removable.
 - Walking a large `originals_root` costs one decode per image. The job reports its phase (`indexing originals`, `matching`) through the maintenance checkpoint, and RAW files are left out of the walk.

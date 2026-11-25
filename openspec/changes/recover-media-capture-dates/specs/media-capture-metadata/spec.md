@@ -77,7 +77,7 @@ A `matched-original` date SHALL also record `capture_date_matched_from`, a page 
 
 ### Requirement: Recovery accepts only a unique match
 
-The owner operation SHALL accept `recover`, which dates an image that states no capture time from a camera-dated image in the vault. A match SHALL be accepted only when one capture time explains the picture: the nearest original is within the match distance, the aspect ratios agree within the tolerance, and every original with a different capture time is at least the margin farther. A refused match SHALL leave the sidecar unchanged and SHALL be counted under its reason.
+The owner operation SHALL accept `recover`, which dates an image that states no capture time from a camera-dated image in the vault. A match SHALL be accepted only when one capture time explains the picture: the nearest original is within the match distance, the aspect ratios agree, every original with a different capture time is at least the margin farther, and both pictures agree again at a finer scale. A refused match SHALL leave the sidecar unchanged and be counted under its reason.
 
 #### Scenario: A re-encoded copy without EXIF
 
@@ -94,6 +94,12 @@ The owner operation SHALL accept `recover`, which dates an image that states no 
 
 - **WHEN** two originals state one capture time and a copy matches both
 - **THEN** the match is accepted
+
+#### Scenario: A look-alike of a different picture
+
+- **WHEN** an original is a photo of one printed page and a copy without EXIF is a photo of a different page that passes the hash bound
+- **THEN** the copy is unmatched with the reason that the closest original differs at a finer scale
+- **AND** its sidecar is unchanged
 
 ### Requirement: The owner's folder of originals is read-only and personal-server only
 
@@ -112,22 +118,28 @@ The operation SHALL accept `originals_root`, an absolute folder outside the vaul
 
 ### Requirement: The recovery preview reports what it will date
 
-The preview SHALL report `dated_by_source`, the number of dates by source after the plan applies, `undated`, the photos left without an evidence date, and each unmatched reason with its count and a bounded list of pages (`unmatched`, `unmatched_listed`). The `plan_id` SHALL bind `recover` and `originals_root`, so a plan names exactly one recovery.
+The preview SHALL report `dated_by_source` (dates by source after the plan applies), `undated`, each unmatched reason with its count and a bounded page list (`unmatched`, `unmatched_listed`), and a bounded list of planned matches with time and origin (`matched_listed`). Each planned page's receipt row SHALL carry its source, time and origin. The `plan_id` SHALL bind `recover` and `originals_root`, so a plan names exactly one recovery.
 
 #### Scenario: A preview before the write
 
 - **WHEN** the owner previews a recovery on a vault with one matchable copy and one unrelated image
 - **THEN** `dated_by_source` counts the matched date and `unmatched` counts the unrelated image under its reason
+- **AND** `matched_listed` names the copy with the matched time and the original it came from
 - **AND** no sidecar changes until the write names the `plan_id`
 
 ### Requirement: Upload says when an image arrives without camera metadata
 
-The upload receipt of an image that carries no camera metadata and whose name states no capture time SHALL warn that the client sent a copy without it, and that the original file from disk keeps it. The warning SHALL name the routes that carry the full bytes. An image whose metadata cannot be judged SHALL NOT receive the warning.
+The upload receipt of a JPEG or HEIC photo that carries no camera metadata and whose name states no capture time SHALL warn that the client sent a copy without it, and that the original file from disk keeps it. The warning SHALL name the routes that carry the full bytes. An image whose metadata cannot be judged, and an image of another format, SHALL NOT receive the warning.
 
 #### Scenario: A chat attachment
 
 - **WHEN** a client uploads a re-encoded JPEG with no EXIF block and a name that states no time
 - **THEN** the receipt carries the warning
+
+#### Scenario: A screenshot
+
+- **WHEN** a client uploads a PNG diagram that never carried camera metadata
+- **THEN** the receipt carries no such warning
 
 ### Requirement: A photo or video with no evidence date answers a date search under a fallback day
 
