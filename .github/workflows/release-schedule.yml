@@ -1,8 +1,9 @@
 name: release schedule
 
-# Starts a release cut on a schedule, so no session waits on a release. It cuts from the
-# newest main commit with reusable Full evidence (pick-source), only when a change since the
-# last release would appear in its changelog, and never while another cut is open or running.
+# Starts a release cut on a schedule, so no session waits on a release. It never starts one
+# while a controller run is unfinished, resumes an open cut that no run is working on, and
+# otherwise cuts from the newest main commit with reusable Full evidence (pick-source) when a
+# change since the last release would appear in its changelog.
 # The cut controller does the rest: proposal, qualification, merge, tag and publication.
 # The repository variable RELEASE_SCHEDULE set to `off` stops scheduled cuts.
 
@@ -32,11 +33,15 @@ jobs:
           ref: main
           fetch-depth: 0
           persist-credentials: false
+      # The decision reads commits with release-please's own parser; the same pin as the cut controller.
+      - name: Install the pinned release-please parser
+        run: npm install --prefix "$RUNNER_TEMP/release-please" --ignore-scripts --no-audit --no-fund release-please@17.6.0
       - name: Decide whether to cut, and from which source
         id: decide
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          NODE_PATH: ${{ runner.temp }}/release-please/node_modules
         run: |
           set -euo pipefail
           decision=$(python3 scripts/release_cuts.py schedule)
@@ -44,7 +49,7 @@ jobs:
           {
             echo "### Release schedule"
             echo
-            echo "$decision" | jq -r '"- cut: \(.cut)\n- reason: \(.reason)\n- source: \(.source // "none")\n- evidence run: \(.evidence_run // "none")"'
+            echo "$decision" | jq -r '"- cut: \(.cut)\n- resume: \(.resume // false)\n- reason: \(.reason)\n- source: \(.source // "none")\n- evidence run: \(.evidence_run // "none")"'
           } >> "$GITHUB_STEP_SUMMARY"
           echo "cut=$(jq -r .cut <<<"$decision")" >> "$GITHUB_OUTPUT"
           echo "source=$(jq -r '.source // ""' <<<"$decision")" >> "$GITHUB_OUTPUT"

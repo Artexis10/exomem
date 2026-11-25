@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -194,35 +193,68 @@ def pick_source() -> dict:
     return {"source": main, "main": main, "evidence_run": None}
 
 
-# The Conventional Commits header: `type(scope)!: subject`. The spec fixes this shape.
-CONVENTIONAL_HEADER = re.compile(r"(?P<type>[a-z]+)(\([^)]*\))?(?P<breaking>!)?: ")
 RELEASE_PLEASE_CONFIG = Path(__file__).resolve().parents[1] / "release-please-config.json"
+CHANGES_SCRIPT = Path(__file__).resolve().parent / "release_changes.cjs"
 
 
-def released_types() -> set[str]:
-    """The commit types that release-please lists in a changelog: its sections not marked hidden."""
-    config = json.loads(RELEASE_PLEASE_CONFIG.read_text())
-    sections = config.get("packages", {}).get(".", {}).get("changelog-sections") or config.get(
-        "changelog-sections", []
+def changelog_changes(start: str, end: str) -> list[dict]:
+    """The commits after `start` up to `end` that release-please would show in a changelog.
+
+    release-please's own parser decides (scripts/release_changes.cjs), so a breaking footer or
+    a second Conventional Commits header in a body counts as it does for the release.
+    """
+    log = git("log", "--format=%H%x00%B%x1e", f"{start}..{end}")
+    commits = [
+        {"sha": sha, "message": message.strip()}
+        for sha, _, message in (
+            record.strip("\n").partition("\0") for record in log.split("\x1e") if record.strip()
+        )
+    ]
+    output = subprocess.check_output(
+        ["node", str(CHANGES_SCRIPT), str(RELEASE_PLEASE_CONFIG)],
+        input=json.dumps(commits),
+        text=True,
+        timeout=60,
     )
-    return {section["type"] for section in sections if not section.get("hidden")}
+    return json.loads(output)
 
 
 def schedule() -> dict:
     """Whether a scheduled run should start a cut now, and from which source.
 
-    It cuts only from a commit with reusable Full evidence, only when a change since the last
-    release would appear in its changelog, and never while another cut is open or running.
+    It never starts a cut while a controller run is unfinished, resumes an open cut that no run
+    is working on, and otherwise cuts only from a commit with reusable Full evidence when a
+    change since the last release would appear in its changelog.
     """
-    for state in ("in_progress", "queued"):
-        if evidence.api(
-            f"actions/workflows/release-evidence-automation.yml/runs?status={state}&per_page=1"
-        )["total_count"]:
-            return {"cut": False, "reason": f"a release-evidence run is {state.replace('_', ' ')}"}
+    # Any unfinished controller run, including an evidence callback, holds the slot; a
+    # callback ends within minutes, and the next slot cuts.
+    runs = evidence.api("actions/workflows/release-evidence-automation.yml/runs?per_page=20")
+    unfinished = [run for run in runs["workflow_runs"] if run["status"] != "completed"]
+    if unfinished:
+        return {
+            "cut": False,
+            "reason": f"release-evidence run {unfinished[0]['id']} is {unfinished[0]['status']}",
+        }
+    full = evidence.api("actions/workflows/ci.yml/runs?event=workflow_dispatch&per_page=50")
+    for run in full["workflow_runs"]:
+        if run["status"] != "completed" and (run.get("head_branch") or "").startswith(
+            evidence.CUT_PREFIX
+        ):
+            return {
+                "cut": False,
+                "reason": f"the open cut's Full run {run['id']} is {run['status']}",
+            }
     for page in evidence.api("pulls?state=open&per_page=100", pages=True):
         for pull in page:
             if pull["base"]["ref"].startswith(evidence.CUT_PREFIX):
-                return {"cut": False, "reason": f"cut pull request #{pull['number']} is open"}
+                # No controller run is working on this open cut, so resume it: the controller's
+                # own resume path, rather than a silent skip on every slot.
+                return {
+                    "cut": True,
+                    "resume": True,
+                    "reason": f"cut pull request #{pull['number']} is open and no controller run is active",
+                    "source": pull["base"]["ref"].removeprefix(evidence.CUT_PREFIX),
+                }
     picked = pick_source()
     if picked["evidence_run"] is None:
         return {
@@ -231,19 +263,15 @@ def schedule() -> dict:
             **picked,
         }
     previous, _ = predecessor(picked["main"], picked["main"])
-    boundary = previous["reconciliation_commit"]
-    if picked["source"] == boundary:
+    if picked["source"] == previous["reconciliation_commit"]:
         return {
             "cut": False,
             "reason": "the newest commit with Full evidence is the last release; newer commits await Full",
             **picked,
         }
-    types = released_types()
-    changes = []
-    for subject in git("log", "--format=%s", f"{boundary}..{picked['source']}").splitlines():
-        header = CONVENTIONAL_HEADER.match(subject)
-        if header and (header["type"] in types or header["breaking"]):
-            changes.append(subject)
+    # release-please counts from the last release's source, so commits that landed while that
+    # release was cut, before its reconciliation, belong to this release.
+    changes = changelog_changes(previous["source"], picked["source"])
     if not changes:
         return {
             "cut": False,
@@ -253,7 +281,7 @@ def schedule() -> dict:
     return {
         "cut": True,
         "reason": f"{len(changes)} changelog change(s) since the last release",
-        "changes": changes,
+        "changes": [change["subject"] for change in changes],
         **picked,
     }
 
