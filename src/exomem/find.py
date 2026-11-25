@@ -5419,46 +5419,6 @@ def _unit_view_of(hit: Any) -> dict[str, Any]:
     }
 
 
-def display_unit_of(
-    hit: Any,
-    dimensions: epistemic_dimensions.UnitDimensions,
-    *,
-    instance: str,
-    status_basis: lifecycle_statuses.Basis,
-    restricted: bool = False,
-) -> tuple[dimension_display.DisplayUnit, frozenset[str]]:
-    """What a dimension's display reads of one selected unit hit, and every dimension of
-    `dimensions` that the hit belongs to.
-
-    A search's groups and a context packet's units read a selected unit here, so both mark it
-    alike. `instance` is the vocabulary instance the request reads unit values in.
-    """
-    view = _unit_view_of(hit)
-    path = hit.parent_path
-    own_kind = not structured_filters.foreign_entry("unit.kind", view.get("kind"), view, instance)
-    frontmatter = hit.frontmatter if isinstance(hit, _UnitCandidate) else None
-    status = frontmatter.get("status") if frontmatter is not None else hit.parent_status
-    holder = getattr(hit, "asserted_by", None) or getattr(hit, "credence_holder", None)
-    if restricted and holder:
-        from .governance import egress
-
-        # Optional metadata never makes unit selection depend on a linked page's existence or release.
-        holder = egress.project_holder(holder, restricted=True)
-    unit = dimension_display.DisplayUnit(
-        ref=hit.unit_ref,
-        path=path,
-        node=epistemic_dimensions.node_key(path, view),
-        kind=str(view.get("kind")) if own_kind else None,
-        verdict=view.get("verdict"),
-        historical=dimension_display.page_is_history(
-            status_basis, status, path=path, frontmatter=frontmatter
-        ),
-        holder=holder,
-        occurred_at=getattr(hit, "occurred_at", None),
-    )
-    return unit, dimensions({"path": path}, view, own_kind=own_kind)
-
-
 def _group_request(
     hits: Sequence[Any],
     lookups: epistemic_dimensions.DimensionMembership,
@@ -5482,10 +5442,30 @@ def _group_request(
     wanted = frozenset(groups)
     units: dict[str, tuple[dimension_display.DisplayUnit, frozenset[str]]] = {}
     for hit in hits:
-        unit, belongs = display_unit_of(
-            hit, dimensions, instance=instance, status_basis=status_basis, restricted=restricted,
+        view = _unit_view_of(hit)
+        path = hit.parent_path
+        own_kind = not structured_filters.foreign_entry("unit.kind", view.get("kind"), view, instance)
+        frontmatter = hit.frontmatter if isinstance(hit, _UnitCandidate) else None
+        status = frontmatter.get("status") if frontmatter is not None else hit.parent_status
+        holder = getattr(hit, "asserted_by", None) or getattr(hit, "credence_holder", None)
+        if restricted and holder:
+            from .governance import egress
+
+            # Optional metadata never makes unit selection depend on a linked page's existence or release.
+            holder = egress.project_holder(holder, restricted=True)
+        unit = dimension_display.DisplayUnit(
+            ref=hit.unit_ref,
+            path=path,
+            node=epistemic_dimensions.node_key(path, view),
+            kind=str(view.get("kind")) if own_kind else None,
+            verdict=view.get("verdict"),
+            historical=dimension_display.page_is_history(
+                status_basis, status, path=path, frontmatter=frontmatter
+            ),
+            holder=holder,
+            occurred_at=getattr(hit, "occurred_at", None),
         )
-        units[hit.unit_ref] = (unit, belongs & wanted)
+        units[hit.unit_ref] = (unit, dimensions({"path": path}, view, own_kind=own_kind) & wanted)
     definitions = language.label_definitions(semantic_labels.DIMENSIONS)
 
     def label(key: str) -> str:
