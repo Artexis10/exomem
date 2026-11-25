@@ -102,6 +102,7 @@ def _check(entry: registry.Entry, entries: Mapping[str, registry.Entry]) -> None
 def _check_role_attributes(attributes: Mapping[str, Any]) -> None:
     """Each role takes its own attributes: a pointer has no `source`, and a provenance field has no pointer attribute."""
     if attributes["role"] == PROVENANCE_ROLE:
+        # nosemgrep: ep-word-search -- these are the pack schema's own pointer attribute names, a closed set this module defines
         pointer_only = [name for name in ("writer", "carries", "shape") if name in attributes]
         if pointer_only:
             raise registry.RegistryError(
