@@ -549,6 +549,8 @@ def test_summary_policy_varying_past_the_bound_refuses_with_its_typed_limit(stor
     write_scope(store.root, paths="Notes/**")
     scope = _gov_dir(store.root) / "scopes" / "patterns.yaml"
     scope.write_text(scope.read_text() + f"refs: [exomem://record/{CID}/{key}]\n")
+    # A rule for this reader's own audience makes the named row differ from the others for it.
+    write_rule(store.root, ceiling=3, audience="owner")
     with pytest.raises(collections.CollectionError, match="COLLECTION_RELEASE_LIMIT"):
         store.inspect_collection(CID)
     with pytest.raises(collections.CollectionError, match="COLLECTION_RELEASE_LIMIT"):

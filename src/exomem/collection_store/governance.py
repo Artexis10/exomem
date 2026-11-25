@@ -12,9 +12,10 @@ import sqlite3
 import sys
 import time
 from collections import Counter, OrderedDict
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import closing
 from dataclasses import dataclass, replace
+from functools import partial
 from itertools import islice
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,9 @@ from .summary import SUMMARY
 
 #: Row decisions one summary release may stream when policy varies by row; past it, a typed refusal.
 MAX_SUMMARY_ROW_DECISIONS = 100_000
+#: The distinct row metadata values that one `RowFilter` decides, a decision each; a collection whose
+#: rows carry more is decided row by row instead, so a filter's cost stays within one read's budget.
+MAX_FILTER_METADATA = 1_000
 RELEASE_LIMIT = "COLLECTION_RELEASE_LIMIT"
 #: The owner's refusal on a connection whose write the host's connector boundary limits. Its words
 #: depend only on the collection's manifest, so they show the connection no hidden row.
@@ -256,6 +260,20 @@ def subject_policy(basis, scope_ids, effective):
             scope_ids = (default,)
         effective = replace(effective, scopes=scopes)
     return scope_ids, effective
+
+
+@dataclass(frozen=True, slots=True)
+class RowFilter:
+    """Which rows of one collection a read releases, in a form that one statement tests for each row.
+
+    A row is released when ``released`` holds its id, or when ``named`` does not hold its id and
+    ``metadata`` holds its ``governance_json``. ``decisions`` counts the decisions that built it.
+    """
+
+    released: frozenset[int]
+    named: frozenset[int]
+    metadata: frozenset[str]
+    decisions: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -514,6 +532,49 @@ def subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, ident
     return tuple(iter_subjects(conn, cid, logical_vault_id, identity=identity, view_path=view_path))
 
 
+#: The ``items`` columns that a row's subject is built from (`_row_subject`), in its order.
+_ROW_COLUMNS = "row_id,item_key,row_version,payload_hash,view_path,governance_json"
+
+
+def _row_subject(cid: str, contract, row) -> CanonicalSubject:
+    """The subject of one row, from its collection's `subject_factory` ``contract`` and its `_ROW_COLUMNS`."""
+    manifest_meta, declared, make = contract[4:7]
+    row_id, key, row_version, payload, view_path, raw_metadata = row
+    # Projects are inherited from the exact current manifest contract.
+    if _metadata(raw_metadata)["projects"] != manifest_meta["projects"]:
+        raise ValueError("canonical row project differs from its manifest")
+    return make(f"exomem://{declared.item_type}/{cid}/{key}", row_id, _row_policy_path(contract, view_path),
+                declared.item_type, raw_metadata, row_version, payload, "row")
+
+
+def _row_policy_path(contract, view_path: str) -> str:
+    """The path that places a row in policy: its manifest's for a summary, its log's, or its own view's."""
+    path, source_path, _layout, view_mode = contract[:4]
+    if _items_folder(contract) is not None:
+        return view_path
+    return path if view_mode == "summary" else source_path
+
+
+def _items_folder(contract) -> str | None:
+    """The folder that holds an items-mode collection's view files, one a row, ending with ``/``;
+    None for a summary or a log, whose rows share one policy path."""
+    _path, source_path, layout, view_mode = contract[:4]
+    return None if view_mode == "summary" or layout == "markdown-log" else source_path.rstrip("/") + "/"
+
+
+def _below(folder: str, path: str | None) -> bool:
+    """Whether ``path`` is a Markdown file below ``folder``, as `membership.path_selector_below` and its peers read it.
+
+    A name that ends with ``.md`` keeps the folder as its prefix under every path normalization.
+    `_BELOW_SQL` is the same test, for a statement.
+    """
+    return path is not None and path.startswith(folder) and path.endswith(".md")
+
+
+#: `_below` over a row's ``view_path``, given the folder's length and then the folder.
+_BELOW_SQL = "coalesce(substr(view_path,1,?)=? AND substr(view_path,-3)='.md',0)"
+
+
 def subject_factory(conn: sqlite3.Connection, cid: str, logical_vault_id: str):
     """Load one canonical contract for streamed or selected subject construction."""
     row = conn.execute(
@@ -551,21 +612,23 @@ def subject_factory(conn: sqlite3.Connection, cid: str, logical_vault_id: str):
 
 
 def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, identity=None,
-                  view_path=None, row_key=None, include_held=True, batch_size=128,
+                  view_path=None, row_key=None, row_ids=None, include_held=True, batch_size=128,
                   query_order=False, retained=False) -> Iterator[CanonicalSubject]:
-    """Stream canonical metadata; a row key selects no manifest or held candidate.
+    """Stream canonical metadata; a row key or a set of row ids selects no manifest or held candidate.
 
+    ``row_ids`` selects the rows of a set from one statement, so a reader that decides many known rows
+    reads their subjects once instead of once a row.
     ``retained`` also yields a retracted row, which only a reader that judges that row's history or holds
     may ask for; every other caller sees the current rows of the ``items`` view.
     """
     if type(batch_size) is not int or not 1 <= batch_size <= 128:
         raise ValueError("canonical subject batches must contain 1 to 128 rows")
-    if sum(selector is not None for selector in (identity, view_path, row_key)) > 1:
+    if sum(selector is not None for selector in (identity, view_path, row_key, row_ids)) > 1:
         raise ValueError("canonical subject lookup must have one selector")
+    contract = subject_factory(conn, cid, logical_vault_id)
     (path, source_path, layout, view_mode, manifest_meta, declared, make,
-     metadata, version, content_hash) = subject_factory(conn, cid, logical_vault_id)
-    summary = view_mode == "summary"
-    if identity in (None, path) and row_key is None:
+     metadata, version, content_hash) = contract
+    if identity in (None, path) and row_key is None and row_ids is None:
         yield make(path, None, path, "collection", metadata, version, content_hash, "manifest")
     item_key = identity.rsplit("/", 1)[-1] if identity and identity.startswith(f"exomem://{declared.item_type}/{cid}/") else None
     held_key = identity.rsplit("/", 1)[-1] if identity and identity.startswith(f"exomem://collection-held/{cid}/") else None
@@ -578,24 +641,20 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
         item_args = held_args = (view_path,)
     elif row_key is not None:
         item_filter, item_args = " AND item_key=?", (row_key,)
+    elif row_ids is not None:
+        item_filter, item_args = " AND row_id IN (SELECT value FROM json_each(?))", (json.dumps(list(row_ids)),)
     # Admission needs no result ordering; item keys follow the existing index
     # without a sorter whose spill files escape the private TEMP-table quota.
     item_order = "item_key" if query_order else "row_id"
     with closing(conn.execute(
-        "SELECT row_id,item_key,row_version,payload_hash,view_path,governance_json "
+        f"SELECT {_ROW_COLUMNS} "
         "FROM " + ("item_rows" if retained else "items") + " WHERE collection_id=?" + item_filter + " ORDER BY " + item_order,
         (cid, *item_args),
     )) as cursor:
         while batch := cursor.fetchmany(batch_size):
-            for row_id, key, row_version, payload, view_path, raw_metadata in batch:
-                # Projects are inherited from the exact current manifest contract.
-                meta = _metadata(raw_metadata)
-                if meta["projects"] != manifest_meta["projects"]:
-                    raise ValueError("canonical row project differs from its manifest")
-                policy_path = path if summary else source_path if layout == "markdown-log" else view_path
-                yield make(f"exomem://{declared.item_type}/{cid}/{key}", row_id, policy_path,
-                           declared.item_type, raw_metadata, row_version, payload, "row")
-    if not include_held or row_key is not None:
+            for row in batch:
+                yield _row_subject(cid, contract, row)
+    if not include_held or row_key is not None or row_ids is not None:
         return
     # Legacy summary corrections have no persisted floor; canonical source ownership supplies the same held basis.
     with closing(conn.execute(
@@ -1059,11 +1118,15 @@ class OperationAuthorization:
         self.catalogs = {}
         self.file_decisions = {}
         self._presentation_wikilinks = None
+        # A relationship value's resolved target, by value (`views.presentation_identity`).
+        self._presentation_identities: dict[str, str] = {}
         # A verified base proof excludes unpublished file imports in a migration snapshot.
         self._ownership_proof = ownership_proof
         self.points = {}
         self.manifest_subjects = {}
         self.summary_memo = {}
+        self._scope_ref_lists: tuple[frozenset[str], ...] | None = None
+        self._folder_tests: dict[str, tuple[Callable[[str], bool], ...]] = {}
         # The release inputs of this snapshot that a kept projection decision is keyed on, read once.
         self._kept_inputs = None
         # How many decisions an unreadable connector input withheld; the release cache keeps none of them.
@@ -1249,39 +1312,47 @@ class OperationAuthorization:
         mutation = self.mutation if mutation is None else mutation
         if self.failed or self.policy.blocked or (not self.who.resolved and not self.policy.empty) or self.access_blocked:
             return Decision(0)
+        active = self.grants.get(basis.identity, ()) if session else ()
         try:
             inputs = path_inputs(self, subject, path, mutation=mutation)
             if not inputs.shown or (mutation and inputs.write_withheld):
                 return Decision(0)
-            scope_ids = inputs.scopes
-            ceiling = connector_boundary.decide_scopes(self.root, self.who, scope_ids, compiled=self.policy,
-                                                       mutation=mutation, capture=inputs.capture, strict=True)
-            if ceiling.level == 0:
-                return ceiling
+            granted = None
+            if active:
+                bound = _bound(subject, self.logical_vault_id).basis
+                member = authority.SessionMembership(bound.identity, bound.fingerprint, inputs.scopes)
+                granted = [policy.StandingGrant(grant.grant_id, "authorization-session", grant.scope_ids,
+                                                grant.audience, grant.ceiling)
+                           for grant in active if member in grant.membership]
+            return self._scopes_decision(basis, inputs.scopes, mutation=mutation, capture=inputs.capture,
+                                         key=lambda: self._decision_key(subject), granted=granted)
         except connector_boundary.UNDECIDED:
             # Withheld for this operation only: the input may read again on the next one.
             self.undecided += 1
             return Decision(0)
-        try:
-            key = self._decision_key(subject)
-        except connector_boundary.BoundaryUnavailable:
-            self.undecided += 1
-            return Decision(0)
-        active = self.grants.get(basis.identity, ()) if session else ()
-        if not active and key in self.cache.decisions:
-            return self.cache.decisions[key]
-        grants = list(self.policy.grants)
-        if active:
-            basis = _bound(subject, self.logical_vault_id).basis
-        for grant in active:
-            if authority.SessionMembership(basis.identity, basis.fingerprint, scope_ids) in grant.membership:
-                grants.append(policy.StandingGrant(grant.grant_id, "authorization-session", grant.scope_ids,
-                                                   grant.audience, grant.ceiling))
+
+    def _scopes_decision(self, basis, scope_ids, *, mutation=False, capture=None, key=None,
+                         granted=None) -> Decision:
+        """The decision for a subject with ``basis`` that lies in exactly ``scope_ids``, once its path inputs allow it.
+
+        Every subject and every proof about many subjects is decided here: the connector's ceiling over the
+        scopes, then the policy kernel under the subject's default audience with the standing grants.
+        ``granted`` lists the session grants that name the subject, or is None when no session grant names
+        it; only then is the decision kept under ``key()``, which is always read. Raises one of
+        ``connector_boundary.UNDECIDED``.
+        """
+        ceiling = connector_boundary.decide_scopes(self.root, self.who, scope_ids, compiled=self.policy,
+                                                   mutation=mutation, capture=capture, strict=True)
+        if ceiling.level == 0:
+            return ceiling
+        memo = key() if key is not None else None
+        if granted is None and memo is not None and memo in self.cache.decisions:
+            return self.cache.decisions[memo]
         scope_ids, effective = subject_policy(basis, scope_ids, self.policy)
-        decision = decide(scope_ids, audience=self.who.audience_id, purpose=self.purpose,
-                          policy=effective, active_grants=grants)
-        if not active:
-            self.cache._remember(self.cache.decisions, key, decision, 65536)
+        decision = decide(scope_ids, audience=self.who.audience_id, purpose=self.purpose, policy=effective,
+                          active_grants=[*self.policy.grants, *(granted or ())])
+        if granted is None and memo is not None:
+            self.cache._remember(self.cache.decisions, memo, decision, 65536)
         return decision
 
     def _release_dependency(self):
@@ -1315,6 +1386,18 @@ class OperationAuthorization:
             return None
         return self._materialize_summary_release(cid, self._summary_policy_release(cid, head), memo)
 
+    def summary_uniform(self, cid: str) -> bool:
+        """Whether one decision releases every row of a summary collection whole, proven without visiting its rows.
+
+        False for an items collection and wherever a policy can vary by row: the caller then decides
+        each row it reads, which costs what it reads instead of the collection's row count.
+        """
+        head = self.summary_manifest(cid)
+        if head is None:
+            return False
+        selection = self._summary_policy_release(cid, head)
+        return bool(selection.uniform_rows_complete) and all(decision.level >= 6 for _s, decision in selection.held)
+
     def _summary_policy_release(self, cid, head):
         """Share row variation, held decisions and representative admission with reporting."""
         manifest, decision = head
@@ -1334,9 +1417,10 @@ class OperationAuthorization:
                 held.append((subject, self.decision(subject)))
         container = tokens.container_hash(cid, generation, audit_head)
         prefix = f"exomem://{item_type}/{cid}/"
-        varies = (self._summary_rows_vary(cid, prefix)
-                  or any(identity.startswith(prefix) for identity in self.grants)
-                  or any(cid in tombstone.casefold() for tombstone in self.tombstones))
+        varying = self._summary_varying_scopes(cid, prefix)
+        named = (any(identity.startswith(prefix) for identity in self.grants)
+                 or any(cid in tombstone.casefold() for tombstone in self.tombstones))
+        varies = bool(varying) or named
         derived = self.conn.execute("SELECT derived FROM collections WHERE collection_id=?", (cid,)).fetchone()[0]
         derived_rows = None
         uniform_rows_complete = None
@@ -1362,6 +1446,8 @@ class OperationAuthorization:
             if first is not None:
                 sample = next(iter(subjects(self.conn, cid, self.logical_vault_id, identity=prefix + first[0])))
                 uniform_rows_complete = self.decision(sample).level >= 6
+        elif not named and self._released_in_any_scopes(cid, prefix, varying):
+            uniform_rows_complete = True
         return _SummaryPolicyRelease(manifest, decision, prefix, tuple(held), container,
                                      uniform_rows_complete, derived_rows)
 
@@ -1406,23 +1492,172 @@ class OperationAuthorization:
         return (selection.uniform_rows_complete
                 and all(decision.level >= 6 for _subject, decision in selection.held))
 
-    def _summary_rows_vary(self, cid: str, prefix: str) -> bool:
-        """Whether a configured scope can select some summary rows and not others.
+    def _summary_varying_scopes(self, cid: str, prefix: str) -> tuple[str, ...]:
+        """The configured scopes that can select some summary rows and not others.
 
         Rows share the manifest's path, projects and type. They differ only by
         their own ref, and by tags or classes taken from a declared ``tags`` or
         ``classes`` field (``row_metadata``), so a tag or class selector varies
         only where some manifest version of this collection declared one.
         """
-        scopes = self.policy.scopes.values()
-        if any(ref.startswith(prefix) for scope in scopes for ref in (*scope.refs, *scope.exclude_refs)):
-            return True
-        if not any(scope.tags or scope.classes or scope.exclude_tags or scope.exclude_classes for scope in scopes):
+        scopes = self.policy.scopes
+        varying = {scope_id for scope_id, scope in scopes.items()
+                   if any(ref.startswith(prefix) for ref in (*scope.refs, *scope.exclude_refs))}
+        selecting = {scope_id for scope_id, scope in scopes.items()
+                     if scope.tags or scope.classes or scope.exclude_tags or scope.exclude_classes}
+        if selecting - varying and self.conn.execute(
+                "SELECT 1 FROM collection_manifests WHERE collection_id=? AND (json_type(schema_json,'$.fields.tags') "
+                "IS NOT NULL OR json_type(schema_json,'$.fields.classes') IS NOT NULL) LIMIT 1", (cid,),
+        ).fetchone() is not None:
+            varying |= selecting
+        return tuple(sorted(varying))
+
+    def _released_in_any_scopes(self, cid: str, prefix: str, varying: tuple[str, ...]) -> bool:
+        """Whether this reader may read every summary row however the ``varying`` scopes place it.
+
+        A row's decision reads its scopes only through the meet of each scope's own decision and the
+        connector's denial of any of them; every other input is the same for every row. A meet of
+        released decisions is released unless their options differ, which lowers it, so a scope whose
+        own decision carries an option makes this proof fail. A row lies in the first row's scopes that
+        no row varies, in varying ones, or in the residual scope alone. So when the first row is
+        released, and each of those scopes alone and a row in no scope are released with no option,
+        every row is. A rule that names a row for another audience then costs this reader no row
+        decision. A write reads its capture membership as a whole, so only a read is decided this way.
+        """
+        if self.mutation:
             return False
-        return self.conn.execute(
-            "SELECT 1 FROM collection_manifests WHERE collection_id=? AND (json_type(schema_json,'$.fields.tags') "
-            "IS NOT NULL OR json_type(schema_json,'$.fields.classes') IS NOT NULL) LIMIT 1", (cid,),
-        ).fetchone() is not None
+        first = self.conn.execute("SELECT item_key FROM items WHERE collection_id=? ORDER BY row_id LIMIT 1",
+                                  (cid,)).fetchone()
+        if first is None:
+            return True
+        sample = next(iter(subjects(self.conn, cid, self.logical_vault_id, identity=prefix + first[0])))
+        if self.decision(sample).level < 6:
+            return False
+        residual = self.policy.residual_scope_id
+        alone = sorted({*self.cache.scopes(sample, self.policy), *varying, *((residual,) if residual else ())})
+        return all(self._scopes_released(sample.basis, scope_ids)
+                   for scope_ids in ((), *((scope_id,) for scope_id in alone)))
+
+    def _scopes_released(self, basis, scope_ids: tuple[str, ...]) -> bool:
+        """Whether a read of a subject with ``basis`` in exactly ``scope_ids`` is released with no option to meet."""
+        try:
+            decision = self._scopes_decision(basis, scope_ids)
+        except connector_boundary.UNDECIDED:
+            return False
+        return decision.level >= 6 and not decision.option_values and not decision.option_ambiguities
+
+    def released_rows(self, cid: str, row_ids: Iterable[int]) -> set[int]:
+        """The rows of ``row_ids`` that this operation releases, with one decision for each set of rows decided alike.
+
+        A decision reads a row through its subject: its policy path, its projects, tags and classes, and
+        its ref. A scope reads the ref only as a member of its ``refs`` or ``exclude_refs``, and a tombstone
+        only as an exact value. A read reads an items-mode row's own view file only through the tests that
+        `_path_tests` keeps, so view files equal in those are one input. Rows equal in those inputs are
+        decided alike, so the first of them decides the rest; a row whose subject cannot be built is
+        withheld, and so is each row equal to it. A session grant binds a row's own version, so a row that
+        one names is decided alone.
+        """
+        self._load_grants()
+        contract = subject_factory(self.conn, cid, self.logical_vault_id)
+        prefix = f"exomem://{contract[5].item_type}/{cid}/"
+        lists = self._ref_lists()
+        # Only a tombstone that holds the collection's id can name one of its rows.
+        marked = any(cid in tombstone for tombstone in self.tombstones)
+        # A write also reads the path's write floor and capture folder, so it keeps each file apart.
+        folder = None if self.mutation else _items_folder(contract)
+        tests = () if folder is None else self._path_tests(folder)
+        alike: dict[tuple, list[tuple]] = {}
+        with closing(self.conn.execute(
+                f"SELECT {_ROW_COLUMNS} FROM items WHERE collection_id=? AND row_id IN (SELECT value FROM json_each(?))",
+                (cid, json.dumps(sorted(set(row_ids)))))) as cursor:
+            for row in cursor:
+                ref = prefix + row[1]
+                path = _row_policy_path(contract, row[4])
+                place = tuple(test(path) for test in tests) if folder is not None and _below(folder, path) else path
+                inputs = (place, row[5],
+                          tuple(index for index, refs in enumerate(lists) if ref in refs),
+                          marked and lifecycle.is_tombstoned_in(self.tombstones, ref),
+                          row[0] if ref in self.grants else None)
+                alike.setdefault(inputs, []).append(row)
+        released: set[int] = set()
+        for rows in alike.values():
+            try:
+                admitted = self.decision(_row_subject(cid, contract, rows[0])).level >= 6
+            except (ValueError, TypeError):
+                admitted = False
+            if admitted:
+                released.update(row[0] for row in rows)
+        return released
+
+    def row_filter(self, cid: str) -> RowFilter | None:
+        """The rows of a collection that this read releases, decided once per kind of row, or None.
+
+        A summary's or a log's rows share their policy path, and so do an items-mode collection's view
+        files when no test of `_path_tests` can tell them apart, so a row's decision reads only its
+        ``governance_json`` and its ref (`released_rows`). A row that no scope list names is decided as
+        every such row with equal metadata is, and the rows that a list names are decided in their own
+        groups. A collection whose rows a grant or a tombstone names, whose view files a test tells apart
+        or lie outside its folder, or whose rows carry more than MAX_FILTER_METADATA metadata values,
+        answers None, and so does a write.
+        """
+        if self.mutation:
+            return None
+        self._load_grants()
+        contract = subject_factory(self.conn, cid, self.logical_vault_id)
+        folder = _items_folder(contract)
+        if folder is not None and self._path_tests(folder):
+            return None  # a selector tells the view files apart, so `released_rows` groups each row by them
+        prefix = f"exomem://{contract[5].item_type}/{cid}/"
+        if (any(identity.startswith(prefix) for identity in self.grants)
+                or any(cid in tombstone for tombstone in self.tombstones)):
+            return None
+        keys = sorted({ref[len(prefix):] for refs in self._ref_lists() for ref in refs if ref.startswith(prefix)})
+        named = [row_id for (row_id,) in self.conn.execute(
+            "SELECT row_id FROM items WHERE collection_id=? AND item_key IN (SELECT value FROM json_each(?))",
+            (cid, json.dumps(keys)))]
+        # The representative of a metadata value decides every row with it only when each one's view
+        # file lies below the folder, which the same scan proves.
+        outside, below = ("0", ()) if folder is None else (f"max(NOT {_BELOW_SQL})", (len(folder), folder))
+        kinds = self.conn.execute(
+            f"SELECT governance_json, min(row_id), {outside} FROM items WHERE collection_id=? "
+            "AND row_id NOT IN (SELECT value FROM json_each(?)) GROUP BY governance_json LIMIT ?",
+            (*below, cid, json.dumps(named), MAX_FILTER_METADATA + 1)).fetchall()
+        if len(kinds) > MAX_FILTER_METADATA or any(stray for *_, stray in kinds):
+            return None
+        released = self.released_rows(cid, [*named, *(row_id for _, row_id, _ in kinds)])
+        return RowFilter(frozenset(released.intersection(named)), frozenset(named),
+                         frozenset(raw for raw, row_id, _ in kinds if row_id in released), len(named) + len(kinds))
+
+    def _path_tests(self, folder: str) -> tuple[Callable[[str], bool], ...]:
+        """The tests of a path that a read of a file below ``folder`` reads and that two such files may answer apart.
+
+        A read reads a file's path through its content floor (a tombstone or an access exclusion) and
+        through each scope's path selectors and path-form refs. One that holds for every file below the
+        folder, or for none, answers each alike, so only the rest need a test. With no test, every file
+        below the folder is placed in policy alike (`_below`).
+        """
+        if folder not in self._folder_tests:
+            tests: list[Callable[[str], bool]] = []
+            if (lifecycle.tombstoned_below(self.tombstones, folder) is None
+                    or access.matches_below(self.access["excluded"], folder) is None):
+                tests.append(lambda path: content_available(path, None, self.access, self.access_blocked,
+                                                            self.tombstones))
+            for scope in self.policy.scopes.values():
+                for patterns in (scope.paths, scope.exclude_paths):
+                    if patterns and membership.path_selector_below(patterns, folder) is None:
+                        tests.append(partial(membership.path_selector_matches, patterns))
+                for values in (scope.refs, scope.exclude_refs):
+                    if values and membership.ref_selector_below(values, folder) is None:
+                        tests.append(partial(membership.ref_selector_matches, values))
+            self._folder_tests[folder] = tuple(tests)
+        return self._folder_tests[folder]
+
+    def _ref_lists(self) -> tuple[frozenset[str], ...]:
+        """Every non-empty ``refs`` and ``exclude_refs`` list of the policy's scopes, in one fixed order."""
+        if self._scope_ref_lists is None:
+            self._scope_ref_lists = tuple(frozenset(refs) for scope in self.policy.scopes.values()
+                                    for refs in (scope.refs, scope.exclude_refs) if refs)
+        return self._scope_ref_lists
 
     def manifest_subject(self, cid: str) -> CanonicalSubject:
         """The collection's manifest subject, from one point read per read operation.
@@ -2227,7 +2462,9 @@ class OperationAuthorization:
         ``content_sha256`` is a caller-proved digest of the file's current bytes
         (a guarded import source); session grants then bind to it without
         rereading a large file. A callable proves it only when an active session
-        grant names the path, so a file nothing else releases is refused unread.
+        grant names the path, or when a Markdown page is placed from its own
+        bytes, which the proof must then name; otherwise a file nothing else
+        releases is refused unread.
         """
         from ..governance import raw_protection
 
@@ -2270,9 +2507,24 @@ class OperationAuthorization:
                     or (not self.who.resolved and not self.policy.empty)
                     or not content_available(path, None, self.access, self.access_blocked, self.tombstones)):
                 return False
-            # A renderer supplies canonical metadata; editable bytes never supply this classification proof.
-            scope_ids = (membership.evaluate_metadata(metadata, self.policy) if metadata is not None else
-                         membership.evaluate_path_only(self.root, path, self.policy).require_classified())
+            # A renderer supplies canonical metadata; otherwise the path places the file when it can.
+            if metadata is not None:
+                scope_ids = membership.evaluate_metadata(metadata, self.policy)
+            else:
+                outcome = membership.evaluate_path_only(self.root, path, self.policy)
+                if outcome.state == "classified":
+                    scope_ids = outcome.require_classified()
+                else:
+                    # A scope that selects by page metadata places a Markdown page as a read of it does,
+                    # from its own bytes; anything else it cannot place stays withheld. A caller's proof
+                    # must name the bytes classified here, or the caller would use other bytes.
+                    found = egress.page_scopes(self.root, path, self.policy)
+                    if found is None:
+                        return False
+                    proved = content_sha256() if callable(content_sha256) else content_sha256
+                    if proved is not None and proved != found[1]:
+                        return False
+                    scope_ids, content_sha256 = found
             grants = list(self.policy.grants)
             if self.authority is not None and not self.policy.empty:
                 fingerprint = content_sha256

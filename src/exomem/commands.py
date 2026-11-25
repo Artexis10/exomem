@@ -496,6 +496,13 @@ _COMMAND_SURFACE_EXPORTS = (
 )
 
 
+
+def _page_citations():
+    """The citation read seam, imported on first use: it loads the collection store, which a plain CLI call never needs."""
+    from . import page_citations
+
+    return page_citations
+
 def _preserve_module():
     from . import preserve as preserve_module
 
@@ -7094,6 +7101,9 @@ def op_ask_memory(
         # Inside the measured call, so the whole-call timing covers the shaping too.
         if isinstance(result, (list, dict)):
             result = _agent_search_reply(result, internals=bool(include_timings or explain))
+            # The citations are decided under the purpose the search declared, as its hits were.
+            with principal_module.declared_purpose_scope(purpose):
+                _cite_search_hits(vault_root, result["hits"])
             read_next_action.attach(result, search=True)
     return recall_timing_module.completed(result, trace)
 
@@ -7149,6 +7159,53 @@ def _search_notice(envelope: Mapping[str, Any]) -> str | None:
     if envelope.get("dimension_check"):
         return _SEARCH_NOTICE_DIMENSION
     return None
+
+
+def _cite_packet_leads(vault_root: Path, packet: dict[str, Any]) -> None:
+    """Give each of the first ten page leads of a served packet its citations, charged to the packet's budget.
+
+    The leads are the turn slice's anchors, or the rollback packet's `anchors`; each is cited by the memory
+    ref it already carries, so no path lookup runs here. A lead keeps the citations that fit under
+    `limit_chars`, counted at their serialized length; one that does not fit keeps its count, and one whose
+    count does not fit is left as it was. Never raises: a citation never breaks an activation.
+    """
+    try:
+        if packet.get("abstained"):
+            return
+        slice_items = (packet.get("turn_slice") or {}).get("items") or []
+        leads = [lead for lead in (slice_items or packet.get("anchors") or [])[: _page_citations().RECALL_HITS]
+                 if isinstance(lead, dict)]
+        found = _page_citations().for_hits([lead.get("ref") for lead in leads], vault_root)
+        budget = packet.setdefault("budget", {})
+        for lead in leads:
+            added = found.get(lead.get("ref"))
+            if not added:
+                continue
+            # The full citations first, then the count alone, then nothing.
+            for candidate in (added, {key: value for key, value in added.items() if key != "cited_by"}):
+                size = len(json.dumps(candidate))
+                if int(budget.get("used_chars") or 0) + size <= int(budget.get("limit_chars") or 0):
+                    lead.update(candidate)
+                    budget["used_chars"] = int(budget.get("used_chars") or 0) + size
+                    break
+    except Exception:  # noqa: BLE001 - a citation never breaks an activation
+        log.debug("page citations: lead citations unavailable", exc_info=True)
+
+
+def _cite_search_hits(vault_root: Path, hits: list) -> None:
+    """Give each of the first ten page hits its `cited_by_count` and up to three `cited_by`, from one read.
+
+    Only a page hit carries them: a row or a plan item that cites a page is never a hit of its own.
+    """
+    top = [hit for hit in hits[: _page_citations().RECALL_HITS] if isinstance(hit, dict)]
+    try:
+        found = _page_citations().for_hits([hit.get("ref") for hit in top], vault_root)
+    except Exception:  # noqa: BLE001 - a citation never breaks a search; each page hit says its count is unknown
+        log.debug("page citations: search hit citations unavailable", exc_info=True)
+        found = {hit["ref"]: {"cited_by_state": "unavailable"} for hit in top
+                 if memory_refs_module.parse_memory_ref(hit.get("ref")) is not None}
+    for hit in top:
+        hit.update(found.get(hit.get("ref"), {}))
 
 
 def _agent_search_reply(result: list | dict, *, internals: bool) -> dict:
@@ -7423,6 +7480,9 @@ def op_activate_context(
                             upkeep_module.for_packet(vault_root, packet, session=session)
                         # Also outside the cache: each resolved anchor page's sensed status.
                         sensed_model.for_packet(vault_root, packet)
+                        # The citations are decided under the purpose the request declared, as its leads were.
+                        with principal_module.declared_purpose_scope(purpose):
+                            _cite_packet_leads(vault_root, packet)
                         from . import due_state as due_state_module
 
                         # Guarded material supplies relevance; the agent decides whether to raise it.
@@ -8583,7 +8643,7 @@ def read_memory_stored(
         purpose: Declared purpose; governs visibility.
         history_limit: Retained revisions per page, from 1 to 50.
         history_continuation: Position from the previous revision_history envelope.
-        continuation: Next-page token of a view.
+        continuation: Next-page token of a view, or of a page's `cited_by` (the reply then holds only the next citations).
         follow_corrections: False reads the historical Source; unit reads stay exact.
         offset: Start, in characters, of a window of a long Source's extracted text; follow `window.next_offset`.
         units: List the page's observation units with the id each edit takes; `unavailable` when the principal sees a released view.
@@ -8632,7 +8692,11 @@ def read_memory_stored(
                 offset=offset,
             )
     if continuation is not None:
-        raise context_views_module.invalid_continuation()
+        return _cited_by_continuation(
+            vault_root, path, continuation,
+            conflicting=unit_ref is not None or frontmatter_only or include_history or links or include_raw
+            or offset is not None or units,
+        )
     path = page_names_module.resolve_page(vault_root, path, serve_stale=True)
     if unit_ref is not None:
         if frontmatter_only or links or include_raw or offset is not None:
@@ -8749,6 +8813,10 @@ def read_memory_stored(
 @wraps(read_memory_stored)
 def op_read_memory(vault_root: Path, *args: Any, **kwargs: Any) -> dict:
     result = read_memory_stored(vault_root, *args, **kwargs)
+    options = inspect.signature(read_memory_stored).bind(vault_root, *args, **kwargs).arguments
+    # The citations are decided under the purpose the read declared, as the page itself was.
+    with principal_module.declared_purpose_scope(options.get("purpose")):
+        result = _with_cited_by(vault_root, result, frontmatter_only=bool(options.get("frontmatter_only")))
     frontmatter = result.get("frontmatter")
     if (
         isinstance(frontmatter, Mapping)
@@ -8764,6 +8832,55 @@ def op_read_memory(vault_root: Path, *args: Any, **kwargs: Any) -> dict:
 
 
 op_read_memory.__name__ = op_read_memory.__qualname__ = "op_read_memory"
+
+#: Citations a page read lists before it offers `more`; a page cited by many rows stays a small read.
+_CITED_BY_LIMIT = 10
+
+
+def _with_cited_by(vault_root: Path, result: dict, *, frontmatter_only: bool) -> dict:
+    """`result` with `cited_by` when it is a page read released in full: the rows and plan items citing it.
+
+    The reply is `page_citations.inbound_citations`: `items`, the visible `count`, `count_complete`, `more` and `state`.
+    A reply of another kind (a view, a brief, a unit), a frontmatter-only scan and a page below full release
+    carry none, as they carry no links. A vault with no collection store has no link field to cite from.
+    """
+    if (
+        frontmatter_only
+        or "body" not in result
+        or "content_hash" not in result
+        or result.get("release_level", egress_module.LEVEL_FULL) != egress_module.LEVEL_FULL
+        or memory_refs_module.parse_memory_ref(result.get("ref")) is None
+        or not _page_citations().applies(vault_root)
+    ):
+        return result
+    try:
+        cited_by = _page_citations().inbound_citations(result["ref"], vault_root, limit=_CITED_BY_LIMIT)
+    except Exception:  # noqa: BLE001 - a citation never breaks a page read; the read says its citations are unknown
+        log.debug("page citations: page read citations unavailable", exc_info=True)
+        cited_by = {"state": "unavailable"}
+    return {**result, "cited_by": cited_by}
+
+
+def _cited_by_continuation(vault_root: Path, page: str, token: str, *, conflicting: bool) -> dict:
+    """The next citations of a page, from the `more` of its `cited_by`, without reading the page body.
+
+    Only the citations come back: the reply names no path or hash. A page with no memory ref, a page the caller
+    cannot read and a page that does not exist all get the same empty answer, so a continuation never tells
+    them apart. A token that is no citation cursor, or a vault with no collection store to have issued one,
+    is the refusal every continuation shares.
+    """
+    if conflicting or not _page_citations().applies(vault_root):
+        raise context_views_module.invalid_continuation()
+    ref = page if memory_refs_module.parse_memory_ref(page) is not None else next(iter(
+        ref for ref in memory_refs_module.ReferenceIndex(vault_root).refs_for_paths(list(
+            get_page_module.spellings(page_names_module.resolve_page(vault_root, page, serve_stale=True)))).values()
+        if ref), None)
+    try:
+        answer = (_page_citations().without_page(vault_root, token) if ref is None
+                  else _page_citations().inbound_citations(ref, vault_root, limit=_CITED_BY_LIMIT, more=token))
+    except ValueError as error:
+        raise context_views_module.invalid_continuation() from error
+    return {"cited_by": answer}
 
 
 def _show_links_by_title(vault_root: Path, result: dict) -> dict:

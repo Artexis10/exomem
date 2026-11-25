@@ -1,5 +1,6 @@
 """Canonical collection authorization, exercised without projected files."""
 
+import hashlib
 import json
 from dataclasses import replace
 
@@ -7,7 +8,7 @@ import pytest
 from test_authorization_session_authority import NOW, _custody, _open, _seed
 from test_collection_store_writer import CID, KEY, OTHER, create, manifest_path, manifest_text
 from test_collection_store_writer import store as store
-from test_governance_egress import _external, write_rule, write_scope
+from test_governance_egress import SCOPE_ID, _external, write_rule, write_scope
 
 from exomem import structured_collections as collections
 from exomem.collection_store.preview import preview_store
@@ -308,6 +309,26 @@ def test_withheld_preserved_source_refuses_before_storing_provenance(store, tmp_
                                 sources=(source,), why="capture")
     assert tuple(store.connection.iterdump()) == before
 
+
+def test_a_guarded_proof_of_other_bytes_than_a_metadata_scope_classified_refuses_the_file(store):
+    """A tag scope places a Markdown source from the bytes it reads, so a guarded digest must name them.
+
+    Bytes that change between that read and the guarded one would release the second bytes on the
+    first bytes' classification.
+    """
+    source = "Knowledge Base/Sources/note.md"
+    page = store.root / source
+    page.parent.mkdir(parents=True)
+    page.write_text("---\ntype: source\n---\nEvidence\n")
+    scope = store.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+    scope.parent.mkdir(parents=True)
+    scope.write_text(f'governance_version: 1\nid: {SCOPE_ID}\nname: Patterns\ntags: ["secret"]\n')
+    current = hashlib.sha256(page.read_bytes()).hexdigest()
+    other = hashlib.sha256(b"other").hexdigest()
+    with (request_scope(owner_principal()), store.handle.transaction(),
+          store._authorization(mutation=False) as authorization):
+        assert authorization.allows_file(source, content_sha256=lambda: current)
+        assert not authorization.allows_file(source, content_sha256=lambda: other)
 
 def test_raw_source_cannot_enter_guest_provenance_without_policy(request):
     """Canonical collection admission must not inherit the file-mode owner shortcut."""

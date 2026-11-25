@@ -400,16 +400,19 @@ class ReadSession:
             row_ids.clear()
             self.check_temp()
 
-    def admit_lookup(self, collection_id: str) -> LookupAdmission:
+    def admit_lookup(self, collection_id: str, *, visit_rows: bool = True) -> LookupAdmission:
         """Admit a collection for lookups by key, under the decision `admit` makes and without counting its rows.
 
         A lookup pays for itself through `charge_visits`. A collection that does not exist and one the
-        caller may not read raise the same COLLECTION_NOT_FOUND.
+        caller may not read raise the same COLLECTION_NOT_FOUND. ``visit_rows=False`` proves a summary
+        collection uniform only where one decision covers every row, and never streams its rows to prove
+        it: a reader that decides each row it reads then pays for those rows, not for the collection.
+        A lookup admitted either way stays for the session, as a non-uniform one only costs row decisions.
         """
         self.check()
         found = self._lookups.get(collection_id)
         if found is None:
-            with self._manifest(collection_id) as (manifest, basis, _, uniform):
+            with self._manifest(collection_id, visit_rows=visit_rows) as (manifest, basis, _, uniform):
                 plan = self._field_plans[collection_id]
             source = self.row_source(collection_id)
             layout = source.layout or self.typed_layout(collection_id)
@@ -442,7 +445,7 @@ class ReadSession:
             raise QueryError("QUERY_UNAVAILABLE") from error
 
     @contextmanager
-    def _manifest(self, collection_id):
+    def _manifest(self, collection_id, *, visit_rows=True):
         operation = self._authorization
         try:
             with closing(governance.iter_subjects(self.connection, collection_id,
@@ -466,7 +469,8 @@ class ReadSession:
                 # An admitted manifest proves uniformity only without any
                 # row-varying policy, grant, exclusion or session context, or
                 # for a summary collection by its one representative decision.
-                uniform = operation.uniform_release() or _summary_released(operation, collection_id)
+                uniform = operation.uniform_release() or _summary_released(operation, collection_id,
+                                                                           visit_rows=visit_rows)
                 yield manifest, subject.basis, subjects, uniform
         except (ValueError, TypeError, StopIteration, collections.CollectionError) as error:
             raise QueryError("COLLECTION_NOT_FOUND") from error
@@ -483,13 +487,16 @@ class ReadSession:
         return reduce(self, query, as_of=as_of)
 
 
-def _summary_released(operation, collection_id: str) -> bool:
+def _summary_released(operation, collection_id: str, *, visit_rows: bool = True) -> bool:
     """Whether every row of a summary collection is released, decided without row subjects.
 
     Past the summary release bound the typed limit is the answer, not a longer
-    admission stream over the same row decisions.
+    admission stream over the same row decisions. ``visit_rows=False`` answers False
+    where only that stream could prove it.
     """
     try:
+        if not visit_rows:
+            return operation.summary_uniform(collection_id)
         release = operation.summary_release(collection_id)
     except collections.CollectionError as error:
         if error.code == governance.RELEASE_LIMIT:

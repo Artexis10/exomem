@@ -230,6 +230,9 @@ def manifest_authoring_contract(*, store: bool = False) -> dict[str, Any]:
             "items": {"$ref": "#/$defs/field"},
             "units": {"type": "array", "items": {"type": "string"}},
             "link_kind": {"type": "string"},
+            # A `link` field's relation names a registry relation whose origins include
+            # `collection_link`; create and revise list the admissible keys when it names another.
+            "relation": {"type": "string"},
             # The S1 specification fixes the location class; declarations never infer it from names.
             "classification": {"enum": [None, "location"]},
             "properties": {"type": "object", "maxProperties": _MAX_SCHEMA_FIELDS,
@@ -943,6 +946,9 @@ class FieldSpec:
     items: FieldSpec | None = None
     units: tuple[str, ...] = ()
     link_kind: str | None = None
+    #: A `link` field's declared relation: a registry key whose origins include `collection_link`.
+    #: Create and revise check it against the registry; parsing only fixes its shape.
+    relation: str | None = None
     #: A datetime field's per-record UTC offset field: the source-local day basis (§3).
     offset: str | None = None
     classification: str | None = None
@@ -982,6 +988,41 @@ class ReferenceDeclaration:
         else:
             found = head if isinstance(head, list) else [head]
         return tuple(dict.fromkeys(value for value in found if type(value) is str and value))
+
+
+#: What an ``item_references`` state row names as its target for a link field: a link names pages, not a collection.
+LINK_TARGET = ""
+
+
+@dataclass(frozen=True, slots=True)
+class LinkDeclaration:
+    """One ``link`` field: where a row holds its page links and the relation the manifest declares for them.
+
+    It shares the surface of `ReferenceDeclaration` that the derived reference index reads
+    (``dotted``, ``collection``, ``values``), so one index code path serves both.
+    """
+
+    path: tuple[str, ...]
+    relation: str | None = None
+    collection: str = LINK_TARGET
+
+    @property
+    def dotted(self) -> str:
+        return ".".join(self.path)
+
+    def values(self, row: Mapping[str, Any]) -> tuple[str, ...]:
+        """The distinct, non-empty text values one row's values hold in this link field, in order of appearance."""
+        found: list[str] = []
+
+        def walk(value: Any) -> None:
+            if isinstance(value, list | tuple):
+                for item in value:
+                    walk(item)
+            elif type(value) is str and value:
+                found.append(value)
+
+        walk(row.get(self.path[0]))
+        return tuple(dict.fromkeys(found))
 
 
 @dataclass(frozen=True, slots=True)
@@ -3320,6 +3361,20 @@ def _parse_field_spec(value: object, depth: int = 0, at: str = "item_schema.fiel
     link_kind = raw.get("link_kind")
     if link_kind is not None and type(link_kind) is not str:
         raise CollectionError("INVALID_ITEM_SCHEMA", "link_kind must be a string")
+    relation = raw.get("relation")
+    if relation is not None and (kind != "link" or type(relation) is not str or not relation.strip()):
+        from . import relation_registry
+        from .collection_store import link_declarations
+
+        # The parser has no vault, so its example names a shipped relation; create and revise check the overlay.
+        admissible = link_declarations.admissible_relations(relation_registry.core_registry())
+        raise CollectionError(
+            "INVALID_ITEM_SCHEMA",
+            "relation is a non-empty registry relation key, and only a link field declares it",
+            {"field": f"{at}.relation", "received": relation if kind == "link" else f"a {kind} field",
+             "expected": "a link field with relation: <registry relation key>",
+             "example": link_declarations.example(at.rsplit(".", 1)[-1], admissible)},
+        )
     offset = raw.get("offset")
     if offset is not None and (kind != "datetime" or depth or type(offset) is not str):
         raise CollectionError("INVALID_ITEM_SCHEMA", "offset names a top-level datetime field's offset field")
@@ -3335,7 +3390,7 @@ def _parse_field_spec(value: object, depth: int = 0, at: str = "item_schema.fiel
     dependencies = raw.get("depends_on", [])
     if not isinstance(dependencies, list) or len(dependencies) > _MAX_SCHEMA_FIELDS or any(not isinstance(name, str) or not name for name in dependencies):
         raise CollectionError("INVALID_ITEM_SCHEMA", "depends_on must name declared fields")
-    return FieldSpec(kind, required, enum, items, tuple(units_raw), link_kind, offset, classification,
+    return FieldSpec(kind, required, enum, items, tuple(units_raw), link_kind, relation, offset, classification,
                      MappingProxyType({name: _parse_field_spec(spec, depth + 1, f"{at}.properties.{name}")
                                        for name, spec in properties.items()}),
                      tuple(dependencies), references=_parse_field_reference(raw.get("references"), at))
@@ -3392,6 +3447,35 @@ def declared_references(schema: ItemSchema) -> tuple[ReferenceDeclaration, ...]:
         for path, carrier, many in _reference_slots(name, spec)
         if carrier.references is not None
     )
+
+
+def _link_spec(spec: FieldSpec) -> FieldSpec | None:
+    """The spec that makes this field a link: itself, or the items of an array of links, however nested."""
+    if spec.type == "link":
+        return spec
+    if spec.type == "array" and spec.items is not None:
+        return _link_spec(spec.items)
+    return None
+
+
+def declared_links(schema: ItemSchema) -> tuple[LinkDeclaration, ...]:
+    """Every top-level link field a schema declares (a link or an array of links), in field order."""
+    return tuple(
+        LinkDeclaration((name,), carrier.relation)
+        for name, spec in schema.fields.items()
+        if (carrier := _link_spec(spec)) is not None
+    )
+
+
+def indexed_fields(
+    schema: ItemSchema, *, derived: bool = False
+) -> tuple[ReferenceDeclaration | LinkDeclaration, ...]:
+    """The fields whose values the derived ``item_references`` index holds: references, then links.
+
+    A derived collection keeps its rows outside the store's maintained write path, so its links
+    are not indexed and its inspection says so.
+    """
+    return (*declared_references(schema), *(() if derived else declared_links(schema)))
 
 
 def _require_reference_positions(name: str, spec: FieldSpec) -> None:

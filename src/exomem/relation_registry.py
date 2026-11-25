@@ -36,7 +36,12 @@ _ORIGINS = {
     "semantic_unit",
     "frontmatter",
     "wikilink",
+    # A Records or Planning `link` field declares the relation its values carry
+    # (`structured-collections`).
+    "collection_link",
 }
+#: The origin that marks a relation a Records or Planning `link` field may declare.
+COLLECTION_LINK_ORIGIN = "collection_link"
 #: The origins that carry an edge a writer authored, as against one a reader derives from
 #: structure (`frontmatter`, `wikilink`, `semantic_block`, `semantic_unit`).
 AUTHORED_ORIGINS = frozenset({"semantic_relation", "markdown_relation"})

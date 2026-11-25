@@ -9954,6 +9954,11 @@ class UnresolvedWikilinkError(WikilinkError):
 class AmbiguousWikilinkError(WikilinkError):
     """A bare-name wikilink matches more than one file."""
 
+    def __init__(self, message: str, candidates: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
+        #: The paths it matched, as the resolver's `visible` filter let them through.
+        self.candidates = candidates
+
 
 def _discard_from_bucket(mapping: dict[str, tuple[str, ...]], key: str, value: str) -> None:
     """Remove `value` from `mapping[key]`; drop the key if it empties.
@@ -10697,7 +10702,8 @@ def _normalize_wikilink(
         paths = [candidate.path for candidate in matches]
         if strict:
             raise AmbiguousWikilinkError(
-                f"wikilink {target!r} matches {len(matches)} files by {kind}: {paths}"
+                f"wikilink {target!r} matches {len(matches)} files by {kind}: {paths}",
+                tuple(paths),
             )
         return cleaned + anchor, (
             f"wikilink {target!r} matches {len(matches)} files "

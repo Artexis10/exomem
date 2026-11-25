@@ -14,6 +14,7 @@ import re
 import stat
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -1384,12 +1385,19 @@ def presentation_relationship_resolver(
     observe_read: Callable[[vault.PathGuard], None] | None = None,
     wikilink_resolver: Callable[[], vault.WikilinkResolver] | None = None,
     targeted_namespace_contains: Callable[[str], bool] | None = None,
+    resolve_identifier: Callable[[str], str] | None = None,
 ) -> Callable[[str, str], tuple[str, str] | None] | None:
-    """Resolve selected canonical relationships without disclosing withheld targets."""
+    """Resolve selected canonical relationships without disclosing withheld targets.
+
+    ``resolve_identifier`` turns a relationship value into a vault path or link target, as
+    `memory_refs.resolve_identifier_read_only` does by default.
+    """
     recipe = manifest.item_presentation
     if recipe is None or not recipe.relationships:
         return None
     root = Path(vault_root)
+    if resolve_identifier is None:
+        resolve_identifier = partial(memory_refs.resolve_identifier_read_only, root)
     if lookup_path is None or wikilink_resolver is None:
         from .collection_store import preview
 
@@ -1443,13 +1451,13 @@ def presentation_relationship_resolver(
             readable_relative = current_item_paths.get(parsed[1])
         if relative is None:
             try:
-                target = memory_refs.resolve_identifier_read_only(root, raw)
+                link_target = resolve_identifier(raw)
                 # The reader's filter runs before candidates are counted, so a page it may not
                 # see never makes a name ambiguous or takes a path another page left. Counting
                 # releases nothing, so it records no receipt; the target's own check below does.
                 with egress.decide_without_receipt():
                     canonical, _warning = vault.normalize_wikilink(
-                        target,
+                        link_target,
                         root,
                         resolver_factory=get_wikilinks,
                         targeted_namespace_contains=targeted_namespace_contains,

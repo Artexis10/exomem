@@ -147,6 +147,43 @@ def ref_selector_matches(values: tuple[str, ...], rel_path: str) -> bool:
     return _matches_refs(values, rel_path)
 
 
+def _glob_below(pattern: str, folder: str) -> bool | None:
+    """Whether `fnmatchcase` matches `pattern` to every name longer than `folder` that starts with it (True),
+    to none (False), or maybe to some (None)."""
+    # fnmatch opens a wildcard at `*`, `?` or `[`; an unclosed `[` is literal there, which only shortens this prefix.
+    wild = min((index for index in map(pattern.find, "*?[") if index >= 0), default=len(pattern))
+    literal = pattern[:wild]
+    if not folder.startswith(literal):
+        return None if literal.startswith(folder) else False
+    if wild == len(pattern):
+        return False  # a literal no longer than the folder names no name below it
+    return True if not pattern[wild:].strip("*") else None
+
+
+def below_form(folder: str) -> str:
+    """The KB-relative form of `folder`: every path below `folder` has a KB-relative form below it."""
+    return _relative_to_kb(folder + "x")[:-1]
+
+
+def path_selector_below(patterns: tuple[str, ...], folder: str) -> bool | None:
+    """Whether `path_selector_matches(patterns, path)` holds for every path below `folder` (True), for none
+    (False), or maybe for some (None).
+
+    A path below `folder`, which ends with ``/``, starts with it and ends with a file name, so that no
+    normalization strips its end.
+    """
+    found = {_glob_below(pattern, form) for pattern in patterns for form in (folder, below_form(folder))}
+    return True if True in found else None if None in found else False
+
+
+def ref_selector_below(values: tuple[str, ...], folder: str) -> bool | None:
+    """False when no path form in `values` names a path below `folder` (as `path_selector_below` reads it),
+    else None: a ref names one path, so it may name some of them."""
+    forms = (folder, below_form(folder))
+    named = _normalized_refs(values, managed_root_rel())
+    return None if any(value.startswith(form) for value in named for form in forms) else False
+
+
 def _scope_matches(scope: Scope, subject: MetadataSubject) -> bool:
     def semantic(values, candidates):
         return any(value.lower() in candidates for value in values)

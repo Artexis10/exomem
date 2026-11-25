@@ -2133,6 +2133,19 @@ def is_tombstoned_in(tombstones: frozenset[str], value: str) -> bool:
     return FAIL_CLOSED_TOMBSTONE in tombstones or normalized in tombstones
 
 
+def tombstoned_below(tombstones: frozenset[str], folder: str) -> bool | None:
+    """Whether `is_tombstoned_in(tombstones, path)` holds for every path below `folder` (True), for none
+    (False), or maybe for some (None).
+
+    A path below `folder`, which ends with ``/``, starts with it and ends with a file name, so that no
+    normalization strips its end.
+    """
+    if FAIL_CLOSED_TOMBSTONE in tombstones:
+        return True
+    form = _normalize_rel(folder + "x")[:-1]
+    return None if any(tombstone.startswith(form) for tombstone in tombstones) else False
+
+
 def is_tombstoned(vault_root: Path, value: str) -> bool:
     if not _normalize_rel(value):
         return False

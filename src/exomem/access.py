@@ -274,6 +274,19 @@ def _matches(prefixes: list[str], kb_rel: str) -> bool:
     return any(_under(p, kb_rel) for p in prefixes)
 
 
+def matches_below(prefixes: list[str], folder: str) -> bool | None:
+    """Whether `_matches(prefixes, _kb_relative(path))` holds for every path below `folder` (True), for none
+    (False), or maybe for some (None).
+
+    A path below `folder`, which ends with ``/``, starts with it and ends with a file name.
+    """
+    form = _kb_relative(folder + "x")[:-1]
+    if form and _matches(prefixes, form.rstrip("/")):
+        return True
+    inside = (prefix.replace("\\", "/").strip("/") for prefix in prefixes)
+    return None if any(prefix and prefix.startswith(form) for prefix in inside) else False
+
+
 def access_tier(vault_root: Path, rel_path: str) -> str:
     """Return the tier governing `rel_path` (vault-relative, either prefix form).
 
