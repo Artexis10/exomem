@@ -479,6 +479,48 @@ def test_store_failure_keeps_offload_demand_retryable_through_the_worker(vault: 
         assert captured.execute("SELECT count(*) FROM media_protections").fetchone()[0] == 0
 
 
+def test_a_write_takes_the_boundary_while_the_offload_scan_walks_the_vault(
+    vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The scan held the boundary across its whole walk of every companion page.
+
+    On a large vault that kept every save queued for minutes once a store was configured.
+    """
+    import threading
+
+    from exomem import media_jobs, media_store, writer_lease
+
+    paths = [_preserved(vault, category="first"), _preserved(vault, category="second")]
+    walk = media_store._offload_candidates
+    entered = threading.Event()
+    probe: dict[str, float] = {}
+
+    def write_meanwhile() -> None:
+        started = time.monotonic()
+        with writer_lease.get_manager().consistency_guard(vault, operation="probe_write", holder_kind="foreground"):
+            probe["waited"] = time.monotonic() - started
+            entered.set()
+
+    def walk_with_a_write_waiting(root: Path):
+        candidates = walk(root)
+        first = next(candidates, None)
+        writer = threading.Thread(target=write_meanwhile)
+        writer.start()
+        entered.wait(5)
+        if first is not None:
+            yield first
+        yield from candidates
+        writer.join(30)
+
+    monkeypatch.setattr(media_store, "_offload_candidates", walk_with_a_write_waiting)
+
+    media_store.enqueue_offloads(vault)
+
+    assert entered.is_set() and probe["waited"] < 2, probe
+    ledger = media_jobs.MediaJobStore(vault)
+    assert all(ledger.get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE) for path in paths)
+
+
 @pytest.mark.parametrize("new_bound", [None, 100_000])
 def test_a_size_refusal_parks_until_the_configured_bound_allows_it(vault: Path, selected_store, new_bound):
     """An original above the object bound stays resident through discovery and offloads once the bound allows it."""

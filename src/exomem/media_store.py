@@ -1270,7 +1270,7 @@ def _enqueue_offload(vault: Path, path: Path, *, usage: media_allowance.Referenc
 
 
 def enqueue_offloads(vault: Path) -> int:
-    from . import media_bindings, original_pool
+    from . import foreground_priority, media_bindings, original_pool
     from .writer_lease import get_manager
 
     if originals.binding_for(vault) is None:
@@ -1283,7 +1283,14 @@ def enqueue_offloads(vault: Path) -> int:
             f"SELECT binary_rel FROM media_offload_refusals WHERE code IN ({placeholders}) LIMIT ?",
             media_allowance.ALLOWANCE_REFUSAL_CODES)
         usage = media_allowance.reference_usage(vault) if rows else None
-        return sum(_enqueue_offload(vault, path, usage=usage) for path in _offload_candidates(vault))
+    # The walk reads every companion page, so it holds no boundary: one hold around it kept every save
+    # waiting for minutes on a large vault. Each enqueue re-reads its original under a brief hold, and a
+    # census older than the walk only decides what is queued: offload admission takes its own census.
+    queued = 0
+    for path in foreground_priority.yielding(_offload_candidates(vault)):
+        with get_manager().consistency_guard(vault, operation="media_offload_scan", holder_kind="background"):
+            queued += _enqueue_offload(vault, path, usage=usage)
+    return queued
 
 
 def _offload_candidates(vault: Path) -> Iterator[Path]:
