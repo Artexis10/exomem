@@ -3157,12 +3157,13 @@ def test_a_cold_manifest_registry_offers_and_publishes_the_store_collections(ser
 
 
 def test_a_records_query_answers_from_its_rows_without_walking_the_vault_for_links(service, monkeypatch):
-    """A query borrows the published link index or goes without it; it never walks the vault for one.
+    """While a published link index is coming, a query goes without it; it never walks the vault for one.
 
     No link index is published here, as on a service whose corpus rebuild is still running. A walk
     on the query's thread took most of the Records budget on a large vault, for every page and
     aggregate, even one that returns no link field. A link field the query returns is named in
-    `unresolved_links`, so a reference left out is never mistaken for an empty field.
+    `unresolved_links`, so a reference left out is never mistaken for an empty field. A filter on
+    that field would match no row, so it is refused with a wait instead.
     """
     linked = "77777777-7777-4777-8777-777777777777"
     text = sqlite_text(manifest_text().replace(CID, linked).replace("title: Work", "title: Linked").replace(
@@ -3172,6 +3173,9 @@ def test_a_records_query_answers_from_its_rows_without_walking_the_vault_for_lin
     reference = memory_refs.memory_ref(memory_refs.new_id())
     assert call(service.root, "record_memory", action="append", collection=linked,
                 item={"title": "Lead", "status": "open", "related": [reference]}, why="row with a link")["outcome"] == "committed"
+    # The cache is on and holds no corpus yet; the background warm stays off, so none arrives.
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    semantic_contract.reset_corpus_context_cache()
     # The service runs a query on its store thread, beside a graph rebuild that walks on its own.
     querying, walks_inside_a_query = threading.local(), []
     real_query, real_walk = record_governance.query_collection, vault.walk_vault_md
@@ -3194,8 +3198,13 @@ def test_a_records_query_answers_from_its_rows_without_walking_the_vault_for_lin
     status = call(service.root, "record_memory", action="query", collection=linked, columns=["status"])
     default = call(service.root, "record_memory", action="query", collection=linked)
     distinct = call(service.root, "record_memory", action="query", collection=linked, aggregate="distinct:status")
+    with pytest.raises(OpError) as refused:
+        call(service.root, "record_memory", action="query", collection=linked,
+             filters=[{"column": "related", "op": "contains", "value": reference}])
 
     assert walks_inside_a_query == []
+    assert refused.value.code == "LINK_INDEX_WARMING"
+    assert refused.value.details["retry_after_ms"] > 0
     assert [row["status"] for row in status["rows"]] == ["open"]
     assert "unresolved_links" not in status
     assert distinct["aggregate"]["distinct"] == ["open"]

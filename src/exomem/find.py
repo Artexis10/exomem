@@ -8798,7 +8798,7 @@ def schedule_tombstone_proof_warm(vault_root: Path, *, stop: threading.Event) ->
 def schedule_link_index_warm(vault_root: Path) -> None:
     """Warm the corpus whose published generation a Records query borrows for its links.
 
-    The owner that restores the link index a query found absent (`semantic_contract.borrow_link_snapshot`).
+    The owner that restores the link index a query found absent (`semantic_contract.link_corpus_coming`).
     The query answers without the index and never waits for this build.
     """
     from . import semantic_contract

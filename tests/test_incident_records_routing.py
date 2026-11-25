@@ -999,11 +999,8 @@ def _edit_note(vault: Path, path: str, old: str, new: str) -> dict:
 
 
 def _sources_of(vault: Path, item_key: str) -> list[str]:
-    """The row's sources as a query reads them, over the published corpus that resolves memory references."""
-    from exomem import commands, freshness, semantic_contract
+    from exomem import commands
 
-    freshness.rebaseline(vault)
-    semantic_contract.build_corpus_context(vault)
     rows = commands.op_record_memory(
         vault, action="query", collection=INCIDENTS, limit=100
     )["rows"]
@@ -1012,7 +1009,7 @@ def _sources_of(vault: Path, item_key: str) -> list[str]:
 
 
 def test_a_failure_note_is_filed_through_the_returned_payload(
-    vault: Path, monkeypatch: pytest.MonkeyPatch, corpus_cache_on: None
+    vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from exomem import commands
 

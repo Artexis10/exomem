@@ -1981,6 +1981,10 @@ def evict_corpus_context(vault_root: Path) -> bool:
 # The decline reason for a proof whose checkpoint moved while it ran;
 # `find.writer_resolver_snapshot` retries on it, so it lives in one place.
 CHANGED_DURING_PROOF = "changed_during_proof"
+# The decline reasons after which a published corpus is still coming; `link_corpus_coming` reads them.
+CORPUS_ABSENT = "corpus_absent"
+CHECKPOINT_DIFFERS = "checkpoint_differs"
+LOCK_BUSY = "lock_busy"
 
 
 def current_reference_identity_snapshot(
@@ -2021,9 +2025,9 @@ def current_reference_identity_snapshot(
             entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
             caption = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
             if entry is None:
-                return decline("corpus_absent")
+                return decline(CORPUS_ABSENT)
             if caption != checkpoint:
-                return decline("checkpoint_differs")
+                return decline(CHECKPOINT_DIFFERS)
             identity = entry[1].identity_census
             snapshot = ReferenceIdentitySnapshot(
                 checkpoint,
@@ -2176,9 +2180,9 @@ def current_writer_resolver_entries(
             caption = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
             language_hash = _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key)
             if entry is None or language_hash is None:
-                return decline("corpus_absent")
+                return decline(CORPUS_ABSENT)
             if caption != checkpoint:
-                return decline("checkpoint_differs")
+                return decline(CHECKPOINT_DIFFERS)
             census, context = entry
             entries = context.resolver_entries
 
@@ -2541,7 +2545,7 @@ def publish_capture_inventory(root: Path, witness, *, census: bool = False, excl
 
 
 def borrow_link_snapshot(
-    vault_root: Path, *, declined: dict[str, int] | None = None, schedule_warm: bool = False
+    vault_root: Path, *, declined: dict[str, int] | None = None
 ) -> LinkSnapshot | None:
     """Lend the last published corpus generation to a link projector, or None.
 
@@ -2553,26 +2557,19 @@ def borrow_link_snapshot(
     visibility live.
 
     `declined` receives the first reason this borrow declined, as one closed
-    `declined_<reason>` counter. With `schedule_warm`, a borrow that finds no
-    corpus at all starts the one background warm that publishes it
-    (`find.schedule_link_index_warm`); a corpus that is only behind is left to
-    the watcher that advances it.
+    `declined_<reason>` counter; `link_corpus_coming` reads it.
     """
     if not _CORPUS_CONTEXT_UPDATE_LOCK.acquire(blocking=False):
         if declined is not None:
-            declined["declined_lock_busy"] = 1
+            declined[f"declined_{LOCK_BUSY}"] = 1
         return None
-    reasons: dict[str, int] = {} if declined is None else declined
     try:
         snapshot = current_reference_identity_snapshot(
-            Path(vault_root), declined=reasons, tolerate_external_pending=True
+            Path(vault_root), declined=declined, tolerate_external_pending=True
         )
     finally:
         _CORPUS_CONTEXT_UPDATE_LOCK.release()
     if snapshot is None:
-        # Without the cache a warm keeps nothing, so it would rebuild the whole corpus on every query.
-        if schedule_warm and "declined_corpus_absent" in reasons and corpus_context_cache_enabled():
-            find_module.schedule_link_index_warm(Path(vault_root))
         return None
     context = snapshot._cache_context_identity
     if not isinstance(context, SemanticCorpusContext):
@@ -2589,6 +2586,24 @@ def borrow_link_snapshot(
         ),
         snapshot.reference_owners,
     )
+
+
+def link_corpus_coming(vault_root: Path, declined: Mapping[str, int]) -> bool:
+    """Whether the corpus that a declined `borrow_link_snapshot` lacked is on its way.
+
+    A bounded-latency reader, such as a Records query, goes without the corpus while one is
+    coming, and walks the vault as before while none is. One is coming only while this process
+    keeps corpora in its cache and the watcher keeps the vault live, and only when the borrow found
+    the corpus absent, behind the watcher, or being published. For an absent corpus this call
+    starts the one background warm that publishes it (`find.schedule_link_index_warm`).
+    """
+    root = Path(vault_root)
+    if not corpus_context_cache_enabled() or not freshness.is_live(root, "vault"):
+        return False
+    if f"declined_{CORPUS_ABSENT}" in declined:
+        find_module.schedule_link_index_warm(root)
+        return True
+    return f"declined_{CHECKPOINT_DIFFERS}" in declined or f"declined_{LOCK_BUSY}" in declined
 
 
 def _corpus_cache_key(root: Path) -> tuple[str, str]:

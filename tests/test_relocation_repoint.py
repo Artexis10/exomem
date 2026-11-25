@@ -181,7 +181,7 @@ def test_a_move_rewrites_the_moved_path_in_a_records_row_and_a_planning_item(vau
     ]
 
 
-def test_a_preview_names_the_outcome_of_rows_the_collection_store_keeps(env, monkeypatch, corpus_cache_on):  # noqa: F811
+def test_a_preview_names_the_outcome_of_rows_the_collection_store_keeps(env, monkeypatch):  # noqa: F811
     """A preview that lists only pages where the collection store keeps rows without one, so the
     mover reads the listed referrers as all of them; or a stored row whose link to the old path
     no longer reaches the note once the note moves."""
@@ -214,7 +214,6 @@ def test_a_preview_names_the_outcome_of_rows_the_collection_store_keeps(env, mon
         call(root, "manage_memory_file", operation="move", old_path=old, new_path=new)
 
         assert preview["store_rows"] == sealed["store_rows"] == move_file.KEPT
-        # The query resolves the stored ref through the link index that the service publishes.
         rows = call(root, "record_memory", action="query", collection=WORK)["rows"]
         # The write stored the note's ref for the path it was given, so the link follows the note.
         related = next(row for row in rows if row["title"] == "One").get("related")

@@ -2,17 +2,19 @@
 
 ## 1. Implementation
 
-- [x] 1.1 Create the Records and Planning query link projector without the cold walk, and name each returned link field in `unresolved_links` when no index is borrowed.
+- [x] 1.1 Create the Records and Planning query link projector without the cold walk while a corpus generation is coming, decided by one function from the borrow's decline reason, and keep the bounded walk when none is coming.
 - [x] 1.2 Add `unresolved_links` to the Records reply egress and to the Planning reply keys, null when every returned link field was checked, with validation against the manifest's link fields.
 - [x] 1.3 Project only the requested columns' fields, use the staged projection for aggregates, and project the row of a `latest` answer.
 - [x] 1.4 Start one single-flight background corpus warm when a query's borrow finds no corpus generation, and include it in the warm quiesce seam.
+- [x] 1.5 While a generation is coming, name each returned link field in `unresolved_links`, and refuse a selection on a link field, inline or in a saved view, with the retryable `LINK_INDEX_WARMING`.
 
 ## 2. Proof
 
-- [x] 2.1 Test at the service entry point that no query walks the vault for links, and that a returned link field is named in `unresolved_links`.
+- [x] 2.1 Test at the service entry point that no query walks the vault for links while a generation is coming, that a returned link field is named in `unresolved_links`, and that a link filter is refused for a retry.
 - [x] 2.2 Test at the service entry point that a query without a corpus answers with `unresolved_links`, and that the next query after the warm resolves the link.
-- [x] 2.3 Move the tests that read memory references or bare titles through a query onto a published corpus, and rerun the Records, Planning and collection store query modules.
-- [x] 2.4 Measure query CPU before and after on a vault with 1,000 pages per folder, with and without a published corpus, and while the warm runs.
+- [x] 2.3 Test at the Records entry point that a link filter, a link distinct and a saved view with a link filter are refused for a retry while a generation is coming and answer once it is published, and that a process the watcher does not keep live walks as before.
+- [x] 2.4 Measure query CPU before and after on a vault with 1,000 pages per folder, with and without a published corpus, while the warm runs, and for a link filter while the warm runs.
+- [x] 2.5 Rerun the Records, Planning and collection store query modules.
 
 ## 3. Delivery
 

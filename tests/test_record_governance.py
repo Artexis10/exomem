@@ -34,6 +34,7 @@ from exomem import (
 )
 from exomem import note as note_module
 from exomem import structured_collections as collections
+from exomem.cli_ops import OpError
 from exomem.governance import egress, receipts
 from exomem.governance.principal import RequestPrincipal, library_scope, owner_principal, request_scope
 
@@ -1798,12 +1799,10 @@ def test_missing_and_withheld_link_targets_have_identical_public_query_state(tmp
     )
 
 
-def test_query_requesting_a_link_field_still_resolves_and_withholds_it(
-    tmp_path: Path, corpus_cache_on: None
-) -> None:
+def test_query_requesting_a_link_field_still_resolves_and_withholds_it(tmp_path: Path) -> None:
     """G1: an ordinary query (no `late_link_projection` opt-in -- nothing in
     the public surface can set it, see the guard test below) keeps full,
-    eager link governance over the published corpus: an authorized bare-title
+    eager link governance exactly as on base: an authorized bare-title
     target still resolves and an unauthorized (here, missing) one is still
     withheld from the row.
     """
@@ -1823,7 +1822,6 @@ def test_query_requesting_a_link_field_still_resolves_and_withholds_it(
         "---\n",
         encoding="utf-8",
     )
-    _publish_corpus(tmp_path)
 
     result = record_governance.query_collection(
         tmp_path,
@@ -1897,6 +1895,81 @@ def test_empty_columns_through_record_memory_still_withholds_link_fields(tmp_pat
     assert "asset" not in row or row["asset"] is None
     assert "receipt" not in row or row["receipt"] is None
     assert row["status"] == "completed"
+
+
+def test_a_query_that_selects_on_a_link_while_the_link_index_is_coming_is_refused_for_a_retry(
+    tmp_path: Path, corpus_cache_on: None
+) -> None:
+    """While the watcher's corpus is coming, a query goes without the link index and leaves bare
+    titles out. A filter on the link field would then match no row, and its distinct value would be
+    null. Both are refused with a wait instead, and the same queries answer once the corpus is published.
+    """
+    manifest = _empty_columns_fixture(tmp_path)
+    (tmp_path / "Knowledge Base" / "Vehicle.md").write_text("# Vehicle\n", encoding="utf-8")
+    freshness.rebaseline(tmp_path)  # the watcher keeps the vault live; no corpus is published yet
+    by_asset = {"collection": manifest.path, "filters": [{"column": "asset", "op": "eq", "value": "[[Vehicle]]"}]}
+    distinct = {"collection": manifest.path, "aggregate": "distinct:asset"}
+
+    refusals = []
+    for query in (by_asset, distinct):
+        with pytest.raises(OpError) as raised:
+            record_memory.record_memory(tmp_path, "query", **query)
+        refusals.append(raised.value)
+    _publish_corpus(tmp_path)  # what the background warm does
+    matched = record_memory.record_memory(tmp_path, "query", **by_asset)
+    values = record_memory.record_memory(tmp_path, "query", **distinct)
+
+    assert [error.code for error in refusals] == ["LINK_INDEX_WARMING", "LINK_INDEX_WARMING"]
+    assert all(error.details["retry_after_ms"] > 0 for error in refusals)
+    assert [row["asset"] for row in matched["rows"]] == ["[[Vehicle]]"]
+    assert "[[Vehicle]]" in values["aggregate"]["distinct"]
+
+
+def test_a_saved_view_that_filters_on_a_link_while_the_link_index_is_coming_is_refused_for_a_retry(
+    tmp_path: Path, corpus_cache_on: None
+) -> None:
+    """Without the link index a view's link filter value cannot be checked. The view is still
+    available, so it is refused with a wait, and it answers once the corpus is published."""
+    manifest = _empty_columns_fixture(tmp_path)
+    (tmp_path / "Knowledge Base" / "Vehicle.md").write_text("# Vehicle\n", encoding="utf-8")
+    manifest_file = tmp_path / "Knowledge Base" / "Records" / "vehicle-maintenance" / "_collection.md"
+    manifest_file.write_text(
+        manifest_file.read_text(encoding="utf-8").replace(
+            "---\n\nOne ordinary",
+            'views:\n  vehicle:\n    query:\n      filters:\n        - column: asset\n'
+            '          op: eq\n          value: "[[Vehicle]]"\n---\n\nOne ordinary',
+        ),
+        encoding="utf-8",
+    )
+    freshness.rebaseline(tmp_path)  # the watcher keeps the vault live; no corpus is published yet
+
+    with pytest.raises(OpError) as raised:
+        record_memory.record_memory(tmp_path, "query", collection=manifest.path, view="vehicle")
+    _publish_corpus(tmp_path)  # what the background warm does
+    answered = record_memory.record_memory(tmp_path, "query", collection=manifest.path, view="vehicle")
+
+    assert raised.value.code == "LINK_INDEX_WARMING"
+    assert raised.value.details["retry_after_ms"] > 0
+    assert [row["asset"] for row in answered["rows"]] == ["[[Vehicle]]"]
+
+
+def test_a_query_in_a_process_the_watcher_does_not_keep_live_walks_for_its_links(
+    tmp_path: Path, corpus_cache_on: None
+) -> None:
+    """A one-shot process has no corpus coming, so its query walks the vault for the link index
+    as before: a bare title resolves, matches its filter and is counted, and nothing is unresolved."""
+    manifest = _empty_columns_fixture(tmp_path)
+    (tmp_path / "Knowledge Base" / "Vehicle.md").write_text("# Vehicle\n", encoding="utf-8")
+
+    matched = record_memory.record_memory(
+        tmp_path, "query", collection=manifest.path,
+        filters=[{"column": "asset", "op": "eq", "value": "[[Vehicle]]"}],
+    )
+    values = record_memory.record_memory(tmp_path, "query", collection=manifest.path, aggregate="distinct:asset")
+
+    assert [row["asset"] for row in matched["rows"]] == ["[[Vehicle]]"]
+    assert "unresolved_links" not in matched
+    assert "[[Vehicle]]" in values["aggregate"]["distinct"]
 
 
 def _parts_collection(tmp_path: Path) -> collections.CollectionManifest:
@@ -3742,7 +3815,7 @@ def test_a_link_query_answers_while_pending_custody_is_unreadable(
         assert value in values
 
 
-def test_a_link_query_receipts_only_released_targets(tmp_path: Path, corpus_cache_on: None) -> None:
+def test_a_cold_link_query_receipts_only_released_targets(tmp_path: Path) -> None:
     """A receipt must not claim pages consulted only to resolve a title link."""
     fixture = copy_vehicle_maintenance_fixture(tmp_path)
     manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
@@ -3758,7 +3831,6 @@ def test_a_link_query_receipts_only_released_targets(tmp_path: Path, corpus_cach
     _write_md(tmp_path, "Knowledge Base/Notes/Target.md", target)
     _write_md(tmp_path, "Knowledge Base/Notes/Other.md", consulted)
     _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
-    _publish_corpus(tmp_path)
 
     with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
         result = record_governance.query_collection(tmp_path, manifest, limit=10)
