@@ -30,9 +30,9 @@
 
   Done on 2026-11-25 on main db7cb81e with Claude Code 2.1.332 and claude-sonnet-5-5, in scratch homes:
   - `setup --migrate` renamed the stdio and non-Cloud URL registrations in Claude Code and Codex, and printed each sign-in step. It kept the Cloud URL registrations and listed other projects' local registrations. A rerun changed nothing.
-  - A headless session with the evermatter plugin listed 28 `mcp__evermatter__*` tools. The retrieve and capture hooks fired, and `search_memory` found a seeded note.
+  - A headless session used the migrated stdio registration for its tools and the evermatter plugin for its hooks. It listed the `mcp__evermatter__*` tools, the retrieve and capture hooks fired, and `search_memory` found a seeded note.
   - After a marketplace update, `renames` moved `enabledPlugins` and `pluginConfigs`.
-  - A directory marketplace loads the renamed plugin in place. A Git-hosted marketplace drops the old install, and the plugin stays "not cached" until the person runs `/plugin install evermatter@exomem` once, as the Claude Code marketplace docs state. The release notes for C1 and C2 must say so.
+  - A directory marketplace loads the renamed plugin in place. A Git-hosted marketplace drops the old install. The plugin then stays "not cached" until the person runs `/plugin install evermatter@exomem` once, as the Claude Code marketplace docs state. The release notes for C1 and C2 must say so.
   - The plugin-shaped tool names (`mcp__plugin_evermatter_evermatter__*`) were seen only in `claude mcp list`, because a session against the real HTTP service needs its OAuth setup.
 - [x] 3.9 Run skill activation on real Claude models with "Exomem" and "Evermatter" prompts, old names against new. Done on 2026-11-25 with `claude plugin eval` (Claude Code 2.1.332, claude-sonnet-5-5, one draw, a deterministic Skill-call grader) on 10 prompts, half naming each product: 10 of 10 activated with the old skills and 10 of 10 with the new.
 
