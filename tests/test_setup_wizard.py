@@ -680,6 +680,23 @@ def test_incomplete_enabled_exomem_plugin_inventory_fails_closed(
     assert not [c for c in recorder.calls if c[1:3] == ["mcp", "add"] and "claude" in c[0]]
 
 
+def test_an_enabled_plugin_without_an_mcp_server_does_not_block_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The live host's canary would otherwise decide whether setup reaches registration.
+    monkeypatch.setattr(
+        setup_wizard.doctor_module, "doctor", lambda **kw: SimpleNamespace(success=True, checks=[])
+    )
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    self_hosted_only = [{"id": "evermatter-self-hosted@exomem", "enabled": True}]
+    recorder = Recorder(results={"plugin list --json": (0, json.dumps(self_hosted_only), "")})
+
+    _code, out = _setup(vault, home, recorder, mcp_url="https://kb.example.com/mcp")
+
+    assert "could not verify Claude plugin state" not in out
+    assert [c for c in recorder.calls if c[1:3] == ["mcp", "add"] and "claude" in c[0]]
+
+
 def test_failed_codex_replacement_restores_its_config(tmp_path: Path) -> None:
     vault, home = _messy_vault(tmp_path), tmp_path / "home"
     codex_home = tmp_path / "codex"

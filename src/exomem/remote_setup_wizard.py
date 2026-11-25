@@ -132,6 +132,13 @@ def connector_url(base_url: str) -> str:
     return f"{base_url}/mcp"
 
 
+def plugin_url(base_url: str) -> str:
+    """Where this server serves its one-upload Claude plugin."""
+    from .self_hosted_plugin import ROUTE
+
+    return f"{base_url}{ROUTE}"
+
+
 def callback_url(base_url: str) -> str:
     """The GitHub OAuth App's Authorization callback URL."""
     return f"{base_url}/auth/callback"
@@ -579,10 +586,14 @@ def run_remote_setup(
 
     # 8. Success — print the connector URL and tunnel-specific next steps.
     print_fn("")
-    print_fn("Ready. Add the connector on claude.ai:")
-    print_fn("  Settings → Connectors → Add custom connector →")
+    print_fn("Ready. Install Evermatter in Claude with one upload:")
+    print_fn(f"  1. Download {plugin_url(base_url)}")
+    print_fn("  2. Upload that file as a plugin in Claude.")
+    print_fn("  3. Open the plugin's Connectors tab, connect Evermatter and sign in")
+    print_fn(f"     with the GitHub account: {github_username}")
+    print_fn("  The plugin brings the connection, every skill and the hooks. To add only")
+    print_fn("  the connection instead: Settings → Connectors → Add custom connector →")
     print_fn(f"      {connector_url(base_url)}")
-    print_fn(f"  then sign in with the GitHub account: {github_username}")
     print_fn("")
     if tunnel == "ngrok":
         print_fn("ngrok notes:")
