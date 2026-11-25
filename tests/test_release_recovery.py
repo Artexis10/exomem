@@ -112,9 +112,12 @@ def test_python_qualification_uses_exact_producer_while_images_are_running(
         }
         for name in names
     ]
-    observations = iter([[], urls])
+    # A new PyPI project can stay invisible for over a minute after its first upload (one release
+    # on 2026-11-24 failed 55 s in): six empty observations outlast the old 50 s window.
+    observations = iter([[], [], [], [], [], [], urls])
     monkeypatch.setattr(recovery, "pypi_files", lambda *args: next(observations))
-    monkeypatch.setattr(recovery.time, "sleep", lambda seconds: None)
+    pauses = []
+    monkeypatch.setattr(recovery.time, "sleep", pauses.append)
     monkeypatch.setattr(
         recovery.urllib.request, "urlopen", lambda url, timeout: io.BytesIO(url.encode())
     )
@@ -134,6 +137,16 @@ def test_python_qualification_uses_exact_producer_while_images_are_running(
     assert receipt["python"]["state"] == "qualified"
     assert receipt["images"]["state"] == "unqualified"
     assert receipt["consumer_verification"]["state"] == "unverified"
+    assert sum(pauses) > 60
+
+    # Distributions that never appear fail within the bounded observation.
+    pauses.clear()
+    monkeypatch.setattr(recovery, "pypi_files", lambda *args: [])
+    with pytest.raises(ValueError, match="bounded observation"):
+        recovery.qualify_python(
+            "v1.2.3", source, "12", "1", tmp_path, verification_attempt=verification_attempt
+        )
+    assert sum(pauses) <= 300
 
     if verification_attempt == "2":
         with pytest.raises(ValueError, match="predates.*producer attempt"):
