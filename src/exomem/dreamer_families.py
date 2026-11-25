@@ -2616,6 +2616,9 @@ DUPLICATE_KIND = "fact.duplicate"
 
 #: The last store transaction whose rows the worker has queued pages for.
 _DUPLICATE_TXN_META = "duplicate_txn"
+#: A sidecar meta key per page whose rows the family could not read, `duplicate_owed:<path>`: the page is owed a
+#: comparison, and `_queue_owed_duplicates` queues it again once the link indexes are built.
+_DUPLICATE_OWED = "duplicate_owed:"
 
 #: Characters of the unit shown beside the two values.
 _DUPLICATE_UNIT_CHARS = 240
@@ -2694,8 +2697,17 @@ def _duplicate_refresh(ctx: Context, rel_path: str) -> None:
     """Recompute one page's candidates as the owner, write each, and resolve the ones that no longer hold."""
     from .governance import principal
 
-    with principal.owner_local_producer(ctx.vault_root, "duplicate_facts"):
-        views = _duplicate_views(ctx, rel_path)
+    try:
+        with principal.owner_local_producer(ctx.vault_root, "duplicate_facts"):
+            views = _duplicate_views(ctx, rel_path)
+    except Deferred as deferred:
+        if deferred.reason != "records_unavailable":
+            raise
+        # Only this family is behind. Raising would roll back the page's work in every other family and hold the
+        # page, so the page is owed a comparison instead, and the candidates already stored stay as they were.
+        ctx.store.set_meta(ctx.conn, _DUPLICATE_OWED + rel_path, True)
+        return
+    ctx.conn.execute("DELETE FROM meta WHERE key=?", (_DUPLICATE_OWED + rel_path,))
     stale = _open_for_subject(ctx, DUPLICATE_FAMILY, rel_path)
     for key, kwargs in views.items():
         stale.discard(dreamer_store.candidate_id(DUPLICATE_KIND, rel_path, key))
@@ -2706,6 +2718,7 @@ def _duplicate_refresh(ctx: Context, rel_path: str) -> None:
 
 
 def _duplicate_on_delete(ctx: Context, rel_path: str) -> None:
+    ctx.conn.execute("DELETE FROM meta WHERE key=?", (_DUPLICATE_OWED + rel_path,))
     _resolve_all(ctx, _open_for_subject(ctx, DUPLICATE_FAMILY, rel_path))
 
 
@@ -2785,10 +2798,31 @@ def _queue_changed_rows(ctx: Context) -> None:
                 return
             finally:
                 ctx.close()
+    if not queue and through == mark:
+        return  # a write bumps the sidecar's generation, which every reader's memo follows
     with ctx.store.write(ctx.conn):
         if queue:
             ctx.store.pending_add(ctx.conn, sorted(queue))
         ctx.store.set_meta(ctx.conn, _DUPLICATE_TXN_META, through)
+
+
+def _queue_owed_duplicates(ctx: Context) -> None:
+    """Queue the pages whose rows the family could not read, once every link index is built.
+
+    A page is owed when its citations were unreadable at its turn (an index was building, or the reader was
+    busy). Nothing is queued, and the debts stay, while an index builds, so a building index costs one reader
+    statement a tick and no page work.
+    """
+    from . import duplicate_facts
+
+    owed = ctx.conn.execute(
+        "SELECT key FROM meta WHERE substr(key, 1, ?) = ?", (len(_DUPLICATE_OWED), _DUPLICATE_OWED)).fetchall()
+    if not owed or not duplicate_facts.indexes_ready(ctx.vault_root):
+        return
+    with ctx.store.write(ctx.conn):
+        ctx.store.pending_add(ctx.conn, sorted(str(key).removeprefix(_DUPLICATE_OWED) for (key,) in owed))
+        ctx.conn.execute(
+            "DELETE FROM meta WHERE substr(key, 1, ?) = ?", (len(_DUPLICATE_OWED), _DUPLICATE_OWED))
 
 
 def _queue_profiles_daily(ctx: Context) -> None:
@@ -2819,11 +2853,13 @@ def tick_start(ctx: Context) -> None:
     pages are queued again when the hash moves. Profile pages are queued
     again once a day, because a date passing is no write. Pages that linked rows
     changed since the last tick are queued again, because a row write is no page
-    change. Writes only on those changes.
+    change, and so are the pages whose rows the duplicate family could not read
+    once the link indexes are built. Writes only on those changes.
     """
     store, conn = ctx.store, ctx.conn
     _queue_profiles_daily(ctx)
     _queue_changed_rows(ctx)
+    _queue_owed_duplicates(ctx)
     if store.get_meta(conn, CAPACITY_BEHIND_META) and not store.capacity_exceeded(conn):
         with store.write(conn):
             store.pending_add(conn, sorted(store.seen_map(conn)))

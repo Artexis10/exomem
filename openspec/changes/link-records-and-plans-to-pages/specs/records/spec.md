@@ -11,6 +11,15 @@ A Records write that creates rows SHALL return `related_pages` for each new row 
 - **WHEN** an agent appends a row whose natural key names a service, and three visible pages are about that service
 - **THEN** the reply lists those pages under `related_pages` for that row
 
+### Requirement: Related pages are in the default reply
+
+`related_pages` SHALL sit at the top level of the write reply at every `response_detail`, for an append and for a bulk upsert. The default `compact` reply SHALL NOT drop it.
+
+#### Scenario: The default reply carries them
+
+- **WHEN** an agent appends a row, or bulk-upserts rows, with the default `response_detail`
+- **THEN** the reply holds `related_pages` at its top level, as it does at `response_detail` `full`
+
 ### Requirement: Related pages are batched, visible-only and judgement-free
 
 A bulk upsert SHALL resolve all its new rows' related pages in one batched lookup, never one per row. A withheld page SHALL NOT appear, and its absence SHALL read exactly as no match. The server SHALL NOT decide whether a written value means "unknown". An import job's receipt reports the job, not each batch, so it SHALL NOT carry `related_pages`.

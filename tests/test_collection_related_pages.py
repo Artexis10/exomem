@@ -115,3 +115,28 @@ def test_an_index_that_was_never_built_is_reported_not_read_as_no_pages(world):
     created = append(world, "Widget Service", "00000000-0000-4000-8000-0000000000f5")
     assert "related_pages" not in created
     assert any(text.startswith("RELATED_PAGES_UNAVAILABLE") for text in created["warnings"])
+
+
+@pytest.mark.parametrize("detail", [None, "full"])
+@pytest.mark.parametrize("action", ["append", "bulk_upsert"])
+def test_the_public_tool_lists_related_pages_at_the_top_of_the_reply(world, action, detail):
+    """The agent reads the compact reply by default; a list that only a full reply carried never reached the
+    agent that wrote the unknown beside the page that held the answer. Append and bulk build separate leaves."""
+    from test_due_state_bulk_carriers import _command
+
+    from exomem import writer_lease
+    from exomem.collection_store.preview import preview_store
+
+    page(world.root, "Notes/Widget Service.md", "Widget Service", identity(1))
+    build_index(world.root)
+    _evidence(world.root)
+    sent = ({"item": {"name": "Widget Service"}} if action == "append" else
+            {"rows": [{"item": {"name": "Widget Service"}}], "source": EVIDENCE,
+             "expected_container_hash": guards(world)})
+    if detail is not None:
+        sent["response_detail"] = detail
+    with preview_store(world.root, world.handle):
+        reply = writer_lease.invoke_command(
+            _command("record_memory"), world.root, action=action, collection=SERVICES, why="record", **sent)
+    [row] = reply["related_pages"]
+    assert row["pages"] == [{"title": "Widget Service", "ref": f"exomem://memory/{identity(1)}"}]

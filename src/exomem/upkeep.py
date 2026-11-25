@@ -181,7 +181,8 @@ def _why(row: dict[str, Any], visible_origins: int) -> str:
         if "row_value" not in measures:
             return "a record's field repeats a statement of a page it links"
         why = (
-            f'"{measures.get("label") or ""}" holds "{measures["row_value"]}" in {measures.get("field") or ""}, '
+            f'the record {measures.get("row_ref") or ""} ("{measures.get("label") or ""}") holds '
+            f'"{measures["row_value"]}" in {measures.get("field") or ""}, '
             f'and a unit of this page ({measures.get("unit_ref") or ""}) says "{measures.get("unit_text") or ""}"; '
             f'the proposed relation between the record and that unit is `{measures.get("relation") or ""}`'
         )

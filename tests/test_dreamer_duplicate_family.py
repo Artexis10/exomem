@@ -20,9 +20,12 @@ from exomem import dreamer, dreamer_families, dreamer_store, duplicate_facts, fr
 from exomem.collection_store import connection
 from exomem.governance import egress, membership, policy
 from exomem.governance.principal import owner_principal, request_scope
+from exomem.query_engine import runtime
 
 SERVICES = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee1"
 SECRETS = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee2"
+GADGETS = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee3"
+OTHER_PAGE = "33333333-3333-4333-8333-333333333333"
 WIDGET = "11111111-1111-4111-8111-111111111111"
 VAULT_DOOR = "22222222-2222-4222-8222-222222222222"
 FIELDS = "    name: {type: string, required: true}\n    location: {type: string}\n    page: {type: link, relation: cites}\n"
@@ -72,6 +75,7 @@ def tick(vault):
     publish(vault)  # a citation read borrows the corpus generation that a running service keeps current
     results = fx.run_to_quiet(vault)
     assert all(result.stop_reason != "error" for result in results), results
+    return results
 
 
 def served(vault, who):
@@ -117,6 +121,8 @@ def test_a_restated_fact_opens_one_item_per_candidate_and_writes_nothing_else(wo
     assert (stored["measures"]["field"], stored["measures"]["relation"]) == ("location", "duplicates")
     assert stored["measures"]["unit_ref"].startswith(link) and stored["measures"]["unit_ref"] in first["why"]
     assert "location" in first["why"] and first["why"].count("home office") == 2
+    # The owner finds the row from the item: its ref and the label that names it.
+    assert stored["measures"]["row_ref"] in first["why"] and '("Widget Service")' in first["why"]
     assert "home office" not in json.dumps(stored), "the shared sidecar must hold no row value"
     assert (fx.tree_state(vault), store_state(store)) == (pages, rows)
 
@@ -186,3 +192,74 @@ def test_a_page_cited_by_more_rows_than_one_read_returns_is_walked_and_a_bound_i
     tick(vault)
     [item] = served(vault, owner_principal())
     assert "home office" in item["why"] and "only the first 4 records that cite this page were compared" in item["why"]
+
+
+def test_a_link_index_that_is_still_building_holds_back_only_this_family(world):
+    """A second collection's link index that warms made every page unreadable for this family, and the page's
+    whole transaction rolled back: the other seven families then did nothing for any page until it was built."""
+    store, vault = world
+    service_page(vault, "Notes/Widget Service.md", "Widget Service", WIDGET,
+                 "The Widget Service runs in the home office.", "The Gadget Service sits in the garage.")
+    link = f"exomem://memory/{WIDGET}"
+    row(store, SERVICES, 1, "Widget Service", "home office", link)
+    _ready(store, SERVICES)
+    tick(vault)
+    assert len(served(vault, owner_principal())) == 1
+    # No `_ready` for this collection: its link index is still building.
+    store.create_collection(path("Gadgets"), collection_text(GADGETS, "Gadgets", "name", FIELDS),
+                            why="declare", scaffold=False)
+    service_page(vault, "Notes/Other Page.md", "Other Page", OTHER_PAGE, "Nothing about services is stated here.")
+    results = tick(vault)
+    assert [(r.processed, r.stop_reason, r.waiting) for r in results] == [
+        (("Knowledge Base/Notes/Other Page.md",), "drained", None)]
+    row(store, SERVICES, 2, "Gadget Service", "garage", link)
+    service_page(vault, "Notes/Widget Service.md", "Widget Service", WIDGET,
+                 "The Widget Service runs in the home office.", "The Gadget Service sits in the garage.", "Edited.")
+    results = tick(vault)
+    assert [(r.processed, r.stop_reason, r.waiting) for r in results] == [
+        (("Knowledge Base/Notes/Widget Service.md",), "drained", None)]
+    # The page was owed, not lost: once the index is built the family compares it with no further page change.
+    _ready(store, GADGETS)
+    tick(vault)
+    assert len(served(vault, owner_principal())) == 2
+
+
+def test_a_row_written_while_its_collection_index_builds_is_compared_once_it_is_built(world):
+    """A new row has no link entry until the backfill reaches it, and nothing queues its page after that, so a
+    row that restated a page's unit in the first minutes of its collection was never compared."""
+    store, vault = world
+    service_page(vault, "Notes/Widget Service.md", "Widget Service", WIDGET,
+                 "The Widget Service runs in the home office.")
+    _ready(store, SERVICES)
+    tick(vault)
+    store.create_collection(path("Gadgets"), collection_text(GADGETS, "Gadgets", "name", FIELDS),
+                            why="declare", scaffold=False)
+    row(store, GADGETS, 1, "Widget Service", "home office", f"exomem://memory/{WIDGET}")
+    tick(vault)
+    assert served(vault, owner_principal()) == []
+    _ready(store, GADGETS)
+    tick(vault)
+    tick(vault)
+    assert len(served(vault, owner_principal())) == 1
+
+
+def test_a_page_no_row_cites_opens_no_query_session(world, monkeypatch):
+    """Every page a tick processes would open a query session to learn that no row links it."""
+    store, vault = world
+    service_page(vault, "Notes/Widget Service.md", "Widget Service", WIDGET,
+                 "The Widget Service runs in the home office.")
+    _ready(store, SERVICES)
+    opened = []
+    real = runtime.read_session
+
+    def counted(*args, **kwargs):
+        opened.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(runtime, "read_session", counted)
+    tick(vault)
+    assert opened == []
+    row(store, SERVICES, 1, "Widget Service", "home office", f"exomem://memory/{WIDGET}")
+    tick(vault)
+    assert opened, "a page that a row cites is read through the citation reader"
+    assert len(served(vault, owner_principal())) == 1

@@ -2572,6 +2572,20 @@ def _pointer_repointed(leaf: Any) -> list[Mapping[str, Any]]:
     ]
 
 
+def _related_pages_projection(leaf: Any) -> list[Any] | None:
+    """The pages that already name the subject of each row a Records write created, as the writer built them.
+
+    An append and a bulk upsert both carry it, and the agent reads those pages before it writes an unknown, so the
+    default reply keeps it. `related_pages.PER_REPLY` bounds the list; the `note` result's `related_pages` is a count.
+    """
+    found = leaf.get("related_pages") if isinstance(leaf, Mapping) else None
+    if isinstance(found, list) and found and all(
+        isinstance(row, Mapping) and isinstance(row.get("item_key"), str) for row in found
+    ):
+        return found
+    return None
+
+
 def _stated_outcome(leaf: Any) -> str | None:
     """The sentence an approval leaf states itself.
 
@@ -2891,6 +2905,9 @@ def project_terminal(
         compact["structure_suggestion"] = structure_suggestion
     if records_routing is not None:
         compact["records_routing"] = records_routing
+    related_pages = _related_pages_projection(leaf)
+    if related_pages is not None:
+        compact["related_pages"] = related_pages
     entity_candidate = _entity_candidate_projection(leaf)
     if entity_candidate is not None:
         compact["entity_candidate"] = entity_candidate

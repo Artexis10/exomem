@@ -7,7 +7,10 @@ things, so a person decides, and this module only finds the pairs worth that loo
 The walk follows resolved row-to-page links only: the rows that the inbound-citation reader returns for the
 page, paged with its `more` cursor up to `ROWS_PER_PAGE` of them. Its work for one page is bounded by those
 rows, never by the vault. A page with more citing rows than that is compared on the first ones and reported
-as incomplete (`Found.complete`), so a reader never takes the first rows for all of them.
+as incomplete (`Found.complete`), so a reader never takes the first rows for all of them. A page that no row
+cites is told apart first by one probe of the link index (`cited`), so it opens no query session. When the
+citations cannot be read (a link index still builds, no corpus is published, the reader is busy), `candidates`
+answers None, never an empty result: the caller owes the page a later comparison (`indexes_ready` says when).
 It reads as the current principal, and it takes the reader's word on which rows that principal may read: this
 module decides no row release itself. The caller binds the owner to build the shared proposals and a request's
 own principal to serve them, so a row, a field, a collection or a page that principal may not read is neither
@@ -33,10 +36,10 @@ from typing import Any
 
 from . import page_citations, relation_registry, semantic_index
 from . import structured_collections as collections
-from .collection_store import connection, derived_rows, typed_storage
+from .collection_store import connection, derived_rows, reference_index, typed_storage
 from .collection_store.related_pages import subject_fields, subject_names
 from .entity_candidates import identity_key
-from .query_engine import runtime
+from .query_engine import reference_resolution, runtime
 from .query_engine.errors import QueryError
 
 #: Citing rows compared for one page in one pass: three reads of the citation reader's largest page. A bound on
@@ -46,8 +49,6 @@ ROWS_PER_PAGE = 300
 MIN_VALUE_CHARS = 4
 #: Store transactions one `changed_rows` call reads, so a burst of writes is read over several ticks.
 MAX_SCAN_TXNS = 64
-#: Link matches that name a page, as `reference_index.link_match` spells them.
-_PAGE_MATCH = "memory:"
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,10 +102,15 @@ def candidates(root: Path, rel_path: str, ref: str) -> Found | None:
     root = Path(root)
     if not page_citations.applies(root):
         return Found([], 0, True)
-    cited = _citing_rows(root, ref)
-    if cited is None:
+    linked = cited(root, ref)
+    if linked is None:
         return None
-    keys, rows, complete = cited
+    if not linked:
+        return Found([], 0, True)
+    cited_rows = _citing_rows(root, ref)
+    if cited_rows is None:
+        return None
+    keys, rows, complete = cited_rows
     units = _units(root, rel_path)
     if not keys or not units:
         return Found([], rows, complete)
@@ -115,6 +121,42 @@ def candidates(root: Path, rel_path: str, ref: str) -> Found | None:
     except QueryError:
         return None
     return Found(items, rows, complete)
+
+
+def cited(root: Path, ref: str) -> bool | None:
+    """Whether any row links the page `ref`, from the link index alone: one reader, no query session.
+
+    None says it is not known now: a link field's index is still building, so a row it has not reached may cite
+    the page, or the store cannot be read. The worker reads as the owner, so no row or collection is withheld here.
+    """
+    key = reference_index.link_match(ref)
+    if key is None:
+        return False
+    probe = _probe(root, [key])
+    return None if probe is None or not probe[0] else probe[1]
+
+
+def indexes_ready(root: Path) -> bool:
+    """Whether every link field's index is built, so that any page's citations can be read."""
+    probe = _probe(root, [])
+    return probe is not None and probe[0]
+
+
+def _probe(root: Path, keys: Sequence[str]) -> tuple[bool, bool] | None:
+    """`(every link index is built, one of keys is held by a link entry)`, or None when the store cannot be read."""
+    store = connection.store_path(Path(root))
+    if not store.exists():
+        return None
+    try:
+        with closing(connection.open_reader(store)) as conn:
+            declared = reference_index.link_fields(conn)
+            if not declared:
+                return True, False
+            if reference_index.link_pending(conn, declared):
+                return False, False
+            return True, bool(keys) and bool(reference_index.cited_fields(conn, declared, keys))
+    except (connection.CollectionStoreError, connection.CollectionStoreUnavailable, sqlite3.Error):
+        return None
 
 
 def _citing_rows(root: Path, ref: str) -> tuple[dict[str, dict[str, None]], int, bool] | None:
@@ -164,15 +206,22 @@ def changed_rows(root: Path, after: int | None) -> tuple[int, dict[int, tuple[st
                 (after, MAX_SCAN_TXNS)).fetchone()[0]
             if through is None:
                 return after, {}
-            rows = [row[0] for row in conn.execute(
-                "SELECT DISTINCT row_id FROM audit_effects WHERE txn_id > ? AND txn_id <= ? AND row_id IS NOT NULL",
-                (after, through))]
+            effects = conn.execute(
+                "SELECT DISTINCT txn_id, row_id FROM audit_effects "
+                "WHERE txn_id > ? AND txn_id <= ? AND row_id IS NOT NULL ORDER BY txn_id", (after, through)).fetchall()
+            # A row past a warming field's `built_through` has no entry yet, so its links cannot be read. The scan
+            # stops before the first transaction that wrote one and reads it again once the backfill has passed.
+            unbuilt = reference_index.unbuilt_rows(conn, {row_id for _, row_id in effects})
+            held = next((txn_id for txn_id, row_id in effects if row_id in unbuilt), None)
+            if held is not None:
+                through = held - 1
+                effects = [effect for effect in effects if effect[0] <= through]
+                if through <= after:
+                    return after, {}
+            rows = sorted({row_id for _, row_id in effects})
             linked: dict[int, set[str]] = {row_id: set() for row_id in rows}
-            for row_id, match in conn.execute(
-                    "SELECT row_id, match FROM item_references WHERE row_id IN (SELECT value FROM json_each(?))",
-                    (json.dumps(rows),)):
-                if match.startswith(_PAGE_MATCH):
-                    linked[row_id].add(match.removeprefix(_PAGE_MATCH))
+            for row_id, matches in reference_index.link_entries(conn, rows).items():
+                linked[row_id].update(page for match in matches if (page := reference_index.link_page(match)))
             return through, {row_id: tuple(sorted(found)) for row_id, found in linked.items()}
     except (connection.CollectionStoreError, connection.CollectionStoreUnavailable, sqlite3.Error):
         return None
@@ -200,9 +249,10 @@ def _collection_candidates(session, collection_id: str, item_keys: Sequence[str]
     if plan.item_key_withheld or lookup.source is not derived_rows.STORE:
         return []
     schema = manifest.schema
-    # A natural key the principal may not read never names a row, as `row_label` also holds.
+    # A natural key the principal may not read never names a row; `label_fields` owns that rule for every label.
+    keys = reference_resolution.label_fields(lookup)
     named = [name for name in subject_fields(manifest) if name in plan.whole_fields
-             and not (plan.natural_key_withheld and name in schema.natural_key)]
+             and (name not in schema.natural_key or name in keys)]
     # A free-text field: not a key, an enum, a reference or a link, which hold identities and labels, not statements.
     texts = [
         name for name, spec in schema.fields.items()
@@ -222,13 +272,14 @@ def _collection_candidates(session, collection_id: str, item_keys: Sequence[str]
     rows = typed_storage.keyed_values(session.connection, collection_id, [key for key in item_keys if key in row_ids])
     found = []
     for item_key, values in rows:
-        released = {name: values.get(name) for name in (*named, *texts)}
-        found += _row_candidates(lookup, row_ids[item_key], item_key, released, named, texts, units)
+        released = {name: values.get(name) for name in (*named, *texts, *keys)}
+        label = reference_resolution.label_of(released, keys, item_key)
+        found += _row_candidates(lookup, row_ids[item_key], item_key, label, released, named, texts, units)
     return found
 
 
-def _row_candidates(lookup, row_id: int, item_key: str, values: Mapping[str, Any], named: Sequence[str],
-                    texts: Sequence[str], units: Sequence[tuple[str, str]]) -> list[Candidate]:
+def _row_candidates(lookup, row_id: int, item_key: str, label: str, values: Mapping[str, Any],
+                    named: Sequence[str], texts: Sequence[str], units: Sequence[tuple[str, str]]) -> list[Candidate]:
     names = subject_names(lookup.manifest, {name: values.get(name) for name in named})
     folded_names = sorted({identity_key(name) for name in names} - {""}, key=len, reverse=True)
     if not folded_names:
@@ -247,7 +298,7 @@ def _row_candidates(lookup, row_id: int, item_key: str, values: Mapping[str, Any
         for field in texts:
             value = values.get(field)
             if type(value) is str and len(identity_key(value)) >= MIN_VALUE_CHARS and _contains(rest, identity_key(value)):
-                found.append(Candidate(lookup.collection_id, row_id, row_ref, field, unit_ref, names[0], value, unit_text))
+                found.append(Candidate(lookup.collection_id, row_id, row_ref, field, unit_ref, label, value, unit_text))
     return found
 
 

@@ -269,7 +269,9 @@ def test_held_resume_discard_do_not_advance_generation_or_audit(store):
     assert chain.recorded_head(store.connection) == before
 
 
-def test_commit_survives_lost_transport_ledger_and_retry_after_reopen(store):
+def test_commit_survives_lost_transport_ledger_and_retry_after_reopen(store, monkeypatch):
+    # A replay does no page lookup, so the first reply would hold a lookup warning the replay never repeats.
+    monkeypatch.setattr("exomem.collection_store.related_pages.for_write", lambda *a, **kw: None)
     create(store)
     args = dict(item={"title": "One"}, item_key=KEY, why="observe", request_id="lost-ledger")
     receipt = store.append_record(CID, **args)
@@ -279,7 +281,7 @@ def test_commit_survives_lost_transport_ledger_and_retry_after_reopen(store):
     ).fetchone()[0]
     # Session-local advisories accompany the first response, not durable replay.
     canonical_receipt = {key: value for key, value in receipt.items()
-                         if key not in {"due_state", "capture_sweep", "related_pages", "warnings"}}
+                         if key not in {"due_state", "capture_sweep"}}
     assert json.loads(stored) == canonical_receipt
     store.handle.close()
     from exomem.collection_store.writer import CollectionWriter

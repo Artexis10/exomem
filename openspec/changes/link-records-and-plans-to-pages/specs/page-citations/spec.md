@@ -166,6 +166,33 @@ A maintenance job SHALL compare each free-text field value of a row (a string fi
 - **WHEN** a page has more citing rows than one pass compares
 - **THEN** the job compares the first rows that the citation reader returns and every item of that page says that only that many rows were compared
 
+### Requirement: A page whose citations cannot be read delays only the duplicate-fact detector
+
+When the citations of a page cannot be read, because a link index is still building, the corpus is not published or the reader is busy, the detector SHALL skip that page. It SHALL NOT read the page as uncited, and it SHALL NOT stop any other dreamer family from processing the page or any other page. It SHALL record that it owes the page a comparison and SHALL compare the page again, with no further change to it, once the link indexes are built.
+
+#### Scenario: A link index is building
+
+- **WHEN** a collection with a link field has an index that is still building, and a page that no row cites changes
+- **THEN** the dreamer processes the page for every other family, and the detector compares the page after the index is built
+
+### Requirement: A row written while its collection's index builds is compared once it is built
+
+The detector SHALL NOT pass a row that its collection's link index has not yet reached. It SHALL compare the row, with the page that the row links, after the index reaches it.
+
+#### Scenario: A row restates a unit of its linked page during the first build
+
+- **WHEN** an agent writes a row that restates a unit of a linked page while its collection's link index is still building, and the index then finishes
+- **THEN** the detector opens its review item with no further change to the row or the page
+
+### Requirement: A page that no row cites costs no citation read
+
+The detector SHALL decide that no row cites a page with one indexed probe before it opens a citation read, so a vault whose pages are mostly uncited pays no query session for each page.
+
+#### Scenario: An uncited page
+
+- **WHEN** the dreamer processes a page that no row links
+- **THEN** no citation read session opens for that page
+
 ### Requirement: A duplicate-fact item names only what its reader may read
 
 The detector SHALL build its shared proposals as the owner and SHALL store no row value. It SHALL serve each item by comparing again as its reader, so a row, field, collection or page that the reader may not read SHALL be neither compared nor named, and the item SHALL read like one that does not exist.
@@ -177,7 +204,7 @@ The detector SHALL build its shared proposals as the owner and SHALL store no ro
 
 ### Requirement: The duplicate-fact detector proposes, and the owner decides
 
-A unit that contains the normalised field value and mentions the row's label SHALL open one review item. The item SHALL propose the registry's `duplicates` relation between the row and the unit, naming the field, the unit and both values. The job SHALL NOT change any page or row. Only an accepted review decision SHALL change one.
+A unit that contains the normalised field value and mentions the row's label SHALL open one review item. The item SHALL propose the registry's `duplicates` relation between the row and the unit, naming the record (its ref and its label), the field, the unit and both values. The job SHALL NOT change any page or row. Only an accepted review decision SHALL change one.
 
 #### Scenario: The same location is written twice
 

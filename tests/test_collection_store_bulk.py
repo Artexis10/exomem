@@ -127,8 +127,10 @@ def test_generated_identity_receipt_replays_after_reopen_without_another_write(s
         assert tuple(handle.connection.iterdump()) == before
 
 
-def test_dispatcher_reconstructs_native_replay_without_an_outer_ledger(store):
+def test_dispatcher_reconstructs_native_replay_without_an_outer_ledger(store, monkeypatch):
     """A lost transport ledger must not turn a verified replay into a bare receipt."""
+    # A replay does no page lookup, so the first reply would hold a lookup warning the replay never repeats.
+    monkeypatch.setattr("exomem.collection_store.related_pages.for_write", lambda *a, **kw: None)
     from test_due_state_bulk_carriers import _command
 
     create(store)
@@ -144,9 +146,7 @@ def test_dispatcher_reconstructs_native_replay_without_an_outer_ledger(store):
     operational = retried["diagnostics"]["operational"]
     assert operational["status"] == "replayed"
     assert operational["terminal"] is True and operational["mutated"] is False
-    # A replay does no page lookup, so the first reply's `related_pages` and its lookup warning are reply-only.
-    reply_only = {"operational", "related_pages", "warnings"}
-    leaf = lambda reply: {k: v for k, v in reply["diagnostics"].items() if k not in reply_only}  # noqa: E731
+    leaf = lambda reply: {k: v for k, v in reply["diagnostics"].items() if k != "operational"}  # noqa: E731
     assert leaf(retried) == leaf(first)
     assert "due_state" not in retried and "capture_sweep" not in retried
     assert tuple(store.connection.iterdump()) == before

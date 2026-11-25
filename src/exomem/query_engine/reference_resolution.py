@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass
+from typing import Any
 
 from .. import state_paths
 from .. import structured_collections as collections
@@ -173,15 +174,24 @@ def resolve_row(session, ref: tuple[str, str, str]) -> ResolvedRow | None:
     return ResolvedRow(lookup, row[0], item_key)
 
 
+def label_fields(lookup) -> tuple[str, ...]:
+    """The natural-key fields that may name a row of this lookup to its caller; none when the key is withheld."""
+    plan = lookup.plan
+    return () if plan.natural_key_withheld else tuple(
+        name for name in lookup.manifest.schema.natural_key if name in plan.whole_fields)
+
+
+def label_of(values: Mapping[str, Any], fields: Sequence[str], item_key: str) -> str:
+    """The label of a row from the values of its `label_fields`: those values joined, else its item key."""
+    label = " / ".join(str(values[name]) for name in fields if values.get(name) not in (None, ""))
+    return label or item_key
+
+
 def row_label(session, row: ResolvedRow) -> str:
     """What names a resolved row to the caller: its natural-key values they may read, else its item key."""
-    plan = row.lookup.plan
-    # A natural key the caller may not read never labels a row; the item key stands in for it.
-    key_fields = () if plan.natural_key_withheld else tuple(
-        name for name in row.lookup.manifest.schema.natural_key if name in plan.whole_fields)
-    values = session.lookup_values(row.lookup.collection_id, row.row_id, key_fields) if key_fields else {}
-    label = " / ".join(str(values[name]) for name in key_fields if values.get(name) not in (None, ""))
-    return label or row.item_key
+    fields = label_fields(row.lookup)
+    values = session.lookup_values(row.lookup.collection_id, row.row_id, fields) if fields else {}
+    return label_of(values, fields, row.item_key)
 
 
 def row_labeller(session):
