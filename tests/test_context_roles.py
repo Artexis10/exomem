@@ -72,7 +72,7 @@ def test_shipped_registry_loads_with_the_declared_vocabulary() -> None:
 def test_scaffold_and_plugin_copies_are_byte_identical() -> None:
     repo = Path(__file__).resolve().parents[1]
     scaffold = repo / "src" / "exomem" / "_scaffold" / "_Schema" / "context-roles.yaml"
-    plugin = repo / "plugins" / "claude-code" / "skills" / "exomem" / "context-roles.yaml"
+    plugin = repo / "plugins" / "claude-code" / "skills" / "evermatter" / "context-roles.yaml"
 
     assert scaffold.is_file()
     assert plugin.is_file()

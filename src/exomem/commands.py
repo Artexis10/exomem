@@ -56,6 +56,7 @@ from . import capabilities as capabilities_module
 from . import capture_attempts as capture_attempts_module
 from . import capture_carrier as capture_carrier_module
 from . import capture_inventory as capture_inventory_module
+from . import client_config as client_config_module
 from . import cloud_cell as cloud_cell_module
 from . import compile_proposal as compile_proposal_module
 from . import context_pack as context_pack_module
@@ -1710,7 +1711,7 @@ def op_bootstrap(
         "contract_version": "2026-10-08.1",
         "profile": profile,
         "server": {
-            "name": "exomem",
+            "name": client_config_module.SERVER_NAME,
             "version": package_version,
             "kb_dir": managed_root_rel(),
             "pure_substrate": True,

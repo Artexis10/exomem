@@ -72,7 +72,7 @@ def main() -> None:
     for name, source in workflow_skills.contract_sources(schema):
         if name.startswith("workflow-skills/"):
             workflow_skills.validate_contract_projection(source.parent.name, source.parent)
-    workflow_skills.validate_contract_projection("exomem", schema, core=True)
+    workflow_skills.validate_contract_projection(workflow_skills.CORE_SKILL_NAME, schema, core=True)
     print(f"{'checked' if args.check else 'refreshed'} skill contract {digest}")
 
 

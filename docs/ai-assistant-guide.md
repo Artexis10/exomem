@@ -411,9 +411,9 @@ longer required there — it remains the fallback for clients that have neither
 skills nor hooks. To do the steps individually:
 
 ```bash
-exomem install-skill --client codex
-exomem install-hook --client codex
-codex mcp add exomem --env EXOMEM_VAULT_PATH="/path/to/vault" -- exomem --transport stdio
+evermatter install-skill --client codex
+evermatter install-hook --client codex
+codex mcp add evermatter --env EXOMEM_VAULT_PATH="/path/to/vault" -- evermatter --transport stdio
 ```
 
 `--transport stdio` is not optional: the server defaults to HTTP, so a config
@@ -483,8 +483,8 @@ Use the standard stdio config shape:
 ```json
 {
   "mcpServers": {
-    "exomem": {
-      "command": "exomem",
+    "evermatter": {
+      "command": "evermatter",
       "args": ["--transport", "stdio"],
       "env": {
         "EXOMEM_VAULT_PATH": "/path/to/vault"

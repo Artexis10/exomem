@@ -8,7 +8,7 @@ SCHEMA = Path(__file__).parents[1] / "src" / "exomem" / "_scaffold" / "_Schema"
 
 
 def test_capture_workflow_checks_existing_entity_before_create() -> None:
-    text = (SCHEMA / "workflow-skills" / "exomem-capture" / "SKILL.md").read_text(
+    text = (SCHEMA / "workflow-skills" / "evermatter-capture" / "SKILL.md").read_text(
         encoding="utf-8"
     )
 
@@ -52,7 +52,7 @@ def test_capture_guidance_adds_a_native_script_alias_for_a_name_written_in_anoth
     Japanese alias the agent wrote at capture or edit time: the shipped
     guidance has to ask for one."""
     writing = (SCHEMA / "references" / "writing.md").read_text(encoding="utf-8")
-    capture = (SCHEMA / "workflow-skills" / "exomem-capture" / "SKILL.md").read_text(
+    capture = (SCHEMA / "workflow-skills" / "evermatter-capture" / "SKILL.md").read_text(
         encoding="utf-8"
     )
     for text in (writing, capture):
@@ -65,7 +65,7 @@ def test_capture_guidance_adds_a_native_script_alias_for_a_name_written_in_anoth
 
 def test_capture_workflow_puts_contact_details_in_a_contact_section_of_the_entity() -> None:
     text = " ".join(
-        (SCHEMA / "workflow-skills" / "exomem-capture" / "SKILL.md")
+        (SCHEMA / "workflow-skills" / "evermatter-capture" / "SKILL.md")
         .read_text(encoding="utf-8")
         .split()
     )

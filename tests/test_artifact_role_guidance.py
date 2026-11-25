@@ -13,7 +13,7 @@ def test_bootstrap_teaches_role_state_authority_and_coverage(vault):
 
 
 def test_shipped_review_and_capture_teach_role_first_homes_and_local_authority():
-    for name in ("exomem-review", "exomem-capture"):
+    for name in ("evermatter-review", "evermatter-capture"):
         text = (workflow_skills.WORKFLOW_SKILLS_DIR / name / "SKILL.md").read_text()
         assert "artifact_role_promotion" in text
         assert "transient_state_review" in text

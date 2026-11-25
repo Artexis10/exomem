@@ -116,7 +116,7 @@ def test_the_deferred_names_still_resolve_where_there_is_a_home() -> None:
     assert install_hook.DEFAULT_CODEX_SETTINGS == home / ".codex" / "hooks.json"
     assert install_hook.DEFAULT_HOOK_DIR == home / ".claude" / "hooks"
     assert install_hook.DEFAULT_SETTINGS == home / ".claude" / "settings.json"
-    assert install_skill.DEFAULT_TARGET == home / ".claude" / "skills" / "exomem"
+    assert install_skill.DEFAULT_TARGET == home / ".claude" / "skills" / "evermatter"
     assert (
         install_skill._LEGACY_TARGET == home / ".claude" / "skills" / "knowledge-base"
     )

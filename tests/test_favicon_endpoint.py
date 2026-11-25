@@ -70,7 +70,7 @@ def test_health_endpoint_public_and_reports_version(vault, monkeypatch: pytest.M
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["status"] == "ok"
-    assert body["service"] == "exomem"
+    assert body["service"] == "evermatter"
     assert "version" in body
     # Public even with OAuth enabled.
     with _client(vault, monkeypatch, require_auth=True) as client:

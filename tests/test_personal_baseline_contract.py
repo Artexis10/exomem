@@ -608,7 +608,7 @@ def test_active_baseline_blocks_preserve_doctrine_and_delegation() -> None:
             "- Capture whether",
         ),
         "capture workflow": _markdown_block(
-            scaffold / "workflow-skills" / "exomem-capture" / "SKILL.md",
+            scaffold / "workflow-skills" / "evermatter-capture" / "SKILL.md",
             "## Durable personal baselines",
             "## Workflow",
         ),
@@ -674,12 +674,12 @@ def test_generated_active_copies_match_each_named_source_block() -> None:
     schema = ROOT / "src" / "exomem" / "_scaffold" / "_Schema"
     plugin = ROOT / "plugins" / "claude-code"
     pairs = (
-        (schema / "SKILL.md", plugin / "skills" / "exomem" / "SKILL.md"),
+        (schema / "SKILL.md", plugin / "skills" / "evermatter" / "SKILL.md"),
         (
-            schema / "workflow-skills" / "exomem-capture" / "SKILL.md",
-            plugin / "skills" / "exomem-capture" / "SKILL.md",
+            schema / "workflow-skills" / "evermatter-capture" / "SKILL.md",
+            plugin / "skills" / "evermatter-capture" / "SKILL.md",
         ),
-        (schema / "references" / "operations.md", plugin / "skills" / "exomem" / "references" / "operations.md"),
+        (schema / "references" / "operations.md", plugin / "skills" / "evermatter" / "references" / "operations.md"),
         (ROOT / "src" / "exomem" / "_hooks" / "exomem_capture_nudge.py", plugin / "hooks" / "exomem_capture_nudge.py"),
     )
     for source, generated in pairs:

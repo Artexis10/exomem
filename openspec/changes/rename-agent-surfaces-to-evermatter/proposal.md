@@ -11,13 +11,13 @@ These names are interfaces. Clients store them, and hooks and permission rules m
 - **Release A accepts both names and still emits the old ones.**
   - Setup and doctor recognise both server keys, both managed-block markers and both readiness service names.
 - **Release B emits the new names.**
-  - The plugins become `evermatter` and `evermatter-cloud` through the marketplace `renames` map.
-  - The server key and the serverInfo name become `evermatter`.
+  - The plugins become `evermatter` and `evermatter-cloud` through the marketplace `renames` map in a later release, after the operator rules on the sign-in cost (D6). Until then they keep `exomem` and `exomem-cloud`.
+  - The server key of a new registration and the serverInfo name become `evermatter`. An existing HTTP registration keeps its key until D6 is ruled, because a rename signs the user out.
   - The skills become `evermatter-*`.
-  - `evermatter setup --migrate` moves an existing client configuration to the new key, with a backup.
-  - The Cloud plugin moves to the `mcp.evermatter.ai` address in the same release.
+  - `evermatter setup --migrate` moves an existing stdio client registration to the new key, with a backup.
+  - The Cloud plugin moves to the `mcp.evermatter.ai` address in the same later release.
 - **Settings accept `EVERMATTER_*` in their own release.** Each source (the process environment, a `.env` file, the standalone hooks) maps the new prefix to the internal one before its own precedence and conflict rules apply. An explicit `EXOMEM_*` value is never overridden after the fact.
-- The marketplace id stays `exomem`, with the display name Evermatter. Claude Code documents no path for renaming a marketplace, so a rename would strand every install.
+- The marketplace id stays `exomem`, and its description names Evermatter (the marketplace schema has no display-name field). Claude Code documents no path for renaming a marketplace, so a rename would strand every install.
 - Stored identifiers keep the internal name:
   - the `exomem_id` frontmatter key;
   - state and config paths;
@@ -39,5 +39,5 @@ None.
 ## Impact
 
 - `src/exomem/client_config.py`, `install_hook.py`, `_hooks/*`, `doctor.py`, `setup` and `upgrade` commands, `env_compat.py`, `cloud_plugins.py`, `server.py`, the plugin trees under `plugins/`, `.claude-plugin/marketplace.json`, the skill generators, and the docs.
-- Users whose own permission rules or hooks name `mcp__exomem__*` keep working until they migrate. Doctor lists what still names the old prefix.
+- Users whose own permission rules or hooks name `mcp__exomem__*` keep working until they migrate. Doctor lists the rules and hooks that name the old prefix once no `exomem` server answers them.
 - The Cloud plugin's move may need one new sign-in per Claude Code install. The operator's choice on that is recorded in the design.

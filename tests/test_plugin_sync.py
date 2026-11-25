@@ -104,7 +104,7 @@ def test_plugin_http_placeholder_passes_claude_validation() -> None:
 def test_plugin_ships_every_skill() -> None:
     from exomem import workflow_skills
 
-    expected = {"exomem"} | {str(s["name"]) for s in workflow_skills.list_skills()}
+    expected = {"evermatter"} | {str(s["name"]) for s in workflow_skills.list_skills()}
     shipped = {p.name for p in (PLUGIN_ROOT / "skills").iterdir() if p.is_dir()}
 
     assert shipped == expected
@@ -114,7 +114,7 @@ def test_plugin_ships_every_skill() -> None:
 
 def test_core_skill_does_not_nest_the_workflow_skills() -> None:
     """They ship as siblings; nesting would expose each SKILL.md at two paths."""
-    assert not (PLUGIN_ROOT / "skills" / "exomem" / "workflow-skills").exists()
+    assert not (PLUGIN_ROOT / "skills" / "evermatter" / "workflow-skills").exists()
 
 
 def test_hooks_file_nests_events_under_a_top_level_hooks_key() -> None:
@@ -193,6 +193,20 @@ def test_marketplace_points_at_the_plugin_directory() -> None:
     # `source` is relative to the REPO ROOT, not to .claude-plugin/.
     source = (REPO_ROOT / entry["source"]).resolve()
     assert source == PLUGIN_ROOT.resolve()
+
+
+def test_plugin_keeps_its_name_so_no_http_sign_in_is_lost() -> None:
+    """Claude Code stores the plugin server's sign-in under the plugin and server names.
+
+    A rename signs every user out, so it waits for a release that says so. The skills inside the
+    plugin are renamed already, which signs nobody out.
+    """
+    manifest = json.loads((PLUGIN_ROOT / _MANIFEST).read_text(encoding="utf-8"))
+    marketplace = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
+
+    assert manifest["name"] == "exomem"
+    assert "renames" not in marketplace
+    assert (PLUGIN_ROOT / "skills" / "evermatter" / "SKILL.md").is_file()
 
 
 def test_manifest_carries_listing_metadata() -> None:

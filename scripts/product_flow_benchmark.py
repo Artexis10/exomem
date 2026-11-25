@@ -400,7 +400,7 @@ def flow_fresh_setup(ctx: HarnessContext, runner: FlowRunner, bm: dict) -> FlowR
     )
     kb = vault / "Knowledge Base"
     contract = vault / ".exomem" / "schema" / "SKILL.md"
-    skill = home / ".claude" / "skills" / "exomem" / "SKILL.md"
+    skill = home / ".claude" / "skills" / "evermatter" / "SKILL.md"
     checks = [
         Check("setup exits successfully", run.ok, f"exit={run.returncode}"),
         Check("vault scaffold exists", contract.is_file(), str(contract)),

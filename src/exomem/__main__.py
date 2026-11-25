@@ -3555,7 +3555,7 @@ def _install_skill_main(argv: list[str]) -> int:
     )
     parser.add_argument(
         "--target",
-        help="Install into one explicit folder instead (default: ~/.claude/skills/exomem). "
+        help="Install into one explicit folder instead (default: ~/.claude/skills/evermatter). "
         "Overrides --client.",
     )
     parser.add_argument(
@@ -3574,14 +3574,24 @@ def _install_skill_main(argv: list[str]) -> int:
     from . import install_skill as install_module
 
     target = Path(args.target) if args.target else None
+
+    def moved(record: dict) -> None:
+        # Printed as each move happens, so a later failure still leaves it on the record.
+        print(
+            f"Moved the previous `{record['skill']}` skill from {record['from']} "
+            f"to {record['backup']}. Your edits are in that backup."
+        )
+
     try:
         if target is not None:
             reports = {
-                "claude": install_module.install_skill(target, force=args.force, link=args.link)
+                "claude": install_module.install_skill(
+                    target, force=args.force, link=args.link, on_moved=moved
+                )
             }
         else:
             reports = install_module.install_skills(
-                client=args.client, force=args.force, link=args.link
+                client=args.client, force=args.force, link=args.link, on_moved=moved
             )["clients"]
     except (FileExistsError, FileNotFoundError, ValueError) as e:
         print(f"exomem install-skill: {e}", file=sys.stderr)
