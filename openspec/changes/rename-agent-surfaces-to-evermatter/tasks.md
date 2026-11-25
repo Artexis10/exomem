@@ -21,12 +21,19 @@
 - [x] 3.5 Add `evermatter setup --migrate` (D5) for stdio registrations, and skip each URL registration. Make doctor list user-written rules and hooks that name the old prefix in a client with no `exomem` server.
 - [x] 3.6 Write the new managed-block markers and the readiness service name `evermatter`.
 - [ ] 3.7 Document `EVERMATTER_*` as the settings prefix once 2.2 ships. Update the README, docs and skill descriptions, keeping "formerly Exomem" as a trigger. Write the release notes and the service notice for Cloud users.
-- [ ] 3.8 Prove the switch end to end:
+- [x] 3.8 Prove the switch end to end:
   - a fixture home with the old configuration migrates;
   - a real Claude Code session lists `mcp__evermatter__*`;
   - the capture hook fires;
   - recall answers;
   - an old plugin install moves through `renames`.
+
+  Done on 2026-11-25 on main db7cb81e with Claude Code 2.1.332 and claude-sonnet-5-5, in scratch homes:
+  - `setup --migrate` renamed the stdio and non-Cloud URL registrations in Claude Code and Codex, and printed each sign-in step. It kept the Cloud URL registrations and listed other projects' local registrations. A rerun changed nothing.
+  - A headless session used the migrated stdio registration for its tools and the evermatter plugin for its hooks. It listed the `mcp__evermatter__*` tools, the retrieve and capture hooks fired, and `search_memory` found a seeded note.
+  - After a marketplace update, `renames` moved `enabledPlugins` and `pluginConfigs`.
+  - A directory marketplace loads the renamed plugin in place. A Git-hosted marketplace drops the old install. The plugin then stays "not cached" until the person runs `/plugin install evermatter@exomem` once, as the Claude Code marketplace docs state. The release notes for C1 and C2 must say so.
+  - The plugin-shaped tool names (`mcp__plugin_evermatter_evermatter__*`) were seen only in `claude mcp list`, because a session against the real HTTP service needs its OAuth setup.
 - [x] 3.9 Run skill activation on real Claude models with "Exomem" and "Evermatter" prompts, old names against new. Done on 2026-11-25 with `claude plugin eval` (Claude Code 2.1.332, claude-sonnet-5-5, one draw, a deterministic Skill-call grader) on 10 prompts, half naming each product: 10 of 10 activated with the old skills and 10 of 10 with the new.
 
 ## 4. Listings
