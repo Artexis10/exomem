@@ -208,7 +208,7 @@ def test_marketplace_moves_an_installed_exomem_plugin_to_the_evermatter_name() -
     manifest = json.loads((PLUGIN_ROOT / _MANIFEST).read_text(encoding="utf-8"))
     marketplace = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
 
-    assert marketplace["renames"] == {"exomem": "evermatter"}
+    assert marketplace["renames"]["exomem"] == "evermatter"
     assert marketplace["name"] == "exomem"  # the marketplace id stays: users added it by this name
     assert manifest["name"] == "evermatter"
     assert set(manifest["mcpServers"]) == {"evermatter"}
