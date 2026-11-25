@@ -12,10 +12,12 @@ import pytest
 
 from exomem import (
     classify_page,
+    commands,
     page_fields,
     pointer_write,
     sensitivity_classes,
     set_frontmatter_field,
+    source_taxonomy,
 )
 from exomem.vocabulary import registry
 
@@ -158,3 +160,19 @@ def test_the_page_field_registry_declares_sensitivity_as_a_classify_owned_list()
     field or store one class as a string."""
     assert page_fields.writers(None)["sensitivity"] == page_fields.WRITER_CLASSIFY
     assert "sensitivity" in page_fields.list_fields(None)
+
+
+@pytest.mark.usefixtures("owner_scope")
+def test_a_source_kind_default_survives_a_schema_save_and_shipped_kinds_declare_none(
+    vault: Path,
+) -> None:
+    """A kind default that a registry save drops or rejects, or a shipped kind that classifies
+    every capture of its kind."""
+    commands.op_schema_memory(
+        vault, subject="source-kinds", operation="save", expected_hash="none", why="id scans",
+        proposal={"upsert": {"id-scan": {"label": "ID scan", "attributes": {"sensitivity": ["identity"]}}}},
+    )
+    taxonomy = source_taxonomy.load_taxonomy(vault)
+
+    assert taxonomy.resolve_kind("id-scan").sensitivity == ("identity",)
+    assert not any(definition.sensitivity for definition in source_taxonomy.builtin_kinds().values())

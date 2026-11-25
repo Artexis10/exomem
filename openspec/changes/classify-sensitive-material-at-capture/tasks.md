@@ -8,7 +8,7 @@
 
 - [x] 2.1 Add the `sensitivity-classes` registry: module, shipped pack, `default_disclosure` validation, `propose-save`, and listing in `registry_specs()`.
 - [x] 2.2 Declare `sensitivity` in the `page-fields` pack as a list pointer field, with the new closed writer value `classify`.
-- [ ] 2.3 Add the optional `sensitivity` attribute to `source-kinds` entries.
+- [x] 2.3 Add the optional `sensitivity` attribute to `source-kinds` entries.
 
 ## 3. Capture and classify
 
