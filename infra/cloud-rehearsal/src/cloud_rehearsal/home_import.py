@@ -9,15 +9,11 @@ check compares one cell answer with what the fixture says it must be: the Source
 eligible file, with its `collection_path`, `file_modified` and origin fields), the files it listed as left
 with their reasons, and the counts, which add up to the files of the tree.
 
-Two facts about this run are recorded in the report instead of being hidden:
-
-* The shipped CLI cannot ask the cell to file without also filing itself. The run therefore uploads with
-  `--no-file` (the CLI makes no `file` call and writes no `filing` key) and the harness then writes
-  `filing: cell` into the stage's series file in the pod, which is the line a Home upload writes itself. A
-  cell start, which the harness causes with one pod deletion, finds that line and registers the stage.
-* The restart that proves exactly-once filing is a second pod deletion, made as soon as the filing view shows
-  the stage is being filed. When the stage is already `done` by then, the restart proved nothing, and the
-  verdict is `incomplete`, never `pass`.
+The run sends the tree with `exomem cloud import --no-wait`: the CLI writes `filing: cell` and the origin into
+each window's series file, makes no `file` call and exits. A cell start, which the harness causes with one pod
+deletion, finds the series file and registers the stage. The restart that proves exactly-once filing is a
+second pod deletion, made as soon as the filing view shows the stage is being filed. When the stage is already
+`done` by then, the restart proved nothing, and the verdict is `incomplete`, never `pass`.
 
 The live run needs a Cloud rehearsal cluster, so the pure parts (the fixture, the manifest and every check)
 have their own tests, and the run body is exercised by the `home-import` mode of the `Cloud rehearsal` workflow.
@@ -64,17 +60,14 @@ FILING_TIMEOUT_S = 900.0
 REGISTER_TIMEOUT_S = 180.0
 POLL_SECONDS = 2.0
 
-# Written into the stage's series file in the pod, with the product's own names for the file and the key.
-PROMOTE_SCRIPT = """import json, sys
+# Read in the pod from the stage's series file, with the product's own names for the file and the keys. It writes nothing.
+READ_SERIES_SCRIPT = """import json, sys
 from pathlib import Path
 from exomem import import_stage
 path = Path('/data/vault') / import_stage.STAGE_DIR / sys.argv[1] / import_stage.SERIES_FILE
 document = json.loads(path.read_text())
-before = document.get('filing')
-document['filing'] = import_stage.FILING_CELL
-path.write_text(json.dumps(document))
-print(json.dumps({'filing_before': before, 'filing': document['filing'], 'origin': document.get('origin'),
-                  'series_file': import_stage.SERIES_FILE}))
+print(json.dumps({'filing': document.get('filing'), 'cell_value': import_stage.FILING_CELL,
+                  'origin': document.get('origin'), 'series_file': import_stage.SERIES_FILE}))
 """
 
 
@@ -252,6 +245,25 @@ def check_leftovers(manifest: Manifest, listed: Sequence[Mapping[str, Any]], sta
     return problems
 
 
+def check_left_out(manifest: Manifest, left_out: Any) -> list[str]:
+    """The filing view's own list of what it left out is the files that the fixture says stay, with their reasons."""
+    if not isinstance(left_out, Mapping):
+        return [f"the filing view of a done stage has no left_out, found {left_out!r}"]
+    problems: list[str] = []
+    wanted_reasons: dict[str, int] = {}
+    for member in manifest.left_by_cell:
+        wanted_reasons[str(member.reason)] = wanted_reasons.get(str(member.reason), 0) + 1
+    if left_out.get("by_reason") != wanted_reasons:
+        problems.append(f"the filing view counts the left-out files {left_out.get('by_reason')!r}, expected {wanted_reasons!r}")
+    listed = {str(item.get("path")): item.get("code") for item in left_out.get("items") or [] if isinstance(item, Mapping)}
+    wanted = {member.path: member.reason for member in manifest.left_by_cell}
+    if listed != wanted:
+        problems.append(f"the filing view lists the left-out files {listed!r}, expected {wanted!r}")
+    if left_out.get("truncated") is not False:
+        problems.append(f"the filing view says its left-out list is truncated: {left_out.get('truncated')!r}")
+    return problems
+
+
 def check_counts(manifest: Manifest, view: Mapping[str, Any], listing: Mapping[str, Any]) -> list[str]:
     """The filing view and the stage report agree with the manifest, and filed plus left add up to the tree."""
     problems: list[str] = []
@@ -260,10 +272,17 @@ def check_counts(manifest: Manifest, view: Mapping[str, Any], listing: Mapping[s
         problems.append(f"the filing view's state is {view.get('state')!r}, expected 'done'")
     if view.get("stop") is not None:
         problems.append(f"the filing view still names a stop: {view.get('stop')!r}")
-    wanted = {"filed": len(manifest.filed), "skipped_duplicates": 0, "failed": 0, "remaining": 0}
+    if view.get("needs") != []:
+        problems.append(f"the filing view of a done stage still names needs: {view.get('needs')!r}")
+    # The CLI leaves its hidden files at the source, so the stage holds the filed files and the files the cell left out.
+    wanted = {"total": len(manifest.filed) + len(manifest.left_by_cell), "filed": len(manifest.filed),
+              "skipped_duplicates": 0, "failed": 0, "left_out": len(manifest.left_by_cell), "remaining": 0}
     for key, value in wanted.items():
         if progress.get(key) != value:
             problems.append(f"the filing view's {key} is {progress.get(key)!r}, expected {value}")
+    rate = view.get("rate")
+    if rate is not None and not rate.get("files_per_minute", 0) > 0:
+        problems.append(f"the filing view reports a rate of {rate.get('files_per_minute')!r} for a stage that filed files")
     windows = (listing.get("import_windows") or {}).get("windows") or []
     unfiled = sum(int((window.get("unfiled") or {}).get("count") or 0) for window in windows)
     if unfiled != len(manifest.left_by_cell):
@@ -277,14 +296,17 @@ def check_counts(manifest: Manifest, view: Mapping[str, Any], listing: Mapping[s
     return problems
 
 
-def check_origin(series_origin: Any) -> list[str]:
-    """The series file the CLI wrote carries the origin that the run asked for."""
-    if not isinstance(series_origin, dict):
-        return [f"the series file has no origin, found {series_origin!r}"]
+def check_origin(series: Mapping[str, Any]) -> list[str]:
+    """The series file the CLI wrote asks the cell to file and carries the origin that the run asked for."""
     problems = []
+    if series.get("filing") != series.get("cell_value"):
+        problems.append(f"the series file's filing is {series.get('filing')!r}, expected {series.get('cell_value')!r}")
+    origin = series.get("origin")
+    if not isinstance(origin, dict):
+        return [*problems, f"the series file has no origin, found {origin!r}"]
     for key, value in (("label", ORIGIN_LABEL), ("browser_family", ORIGIN_BROWSER)):
-        if series_origin.get(key) != value:
-            problems.append(f"the series file's origin {key} is {series_origin.get(key)!r}, expected {value!r}")
+        if origin.get(key) != value:
+            problems.append(f"the series file's origin {key} is {origin.get(key)!r}, expected {value!r}")
     return problems
 
 
@@ -351,10 +373,10 @@ def left_behind_lines(log: str) -> list[str]:
 
 
 async def send_fixture(ctx: Context, plan: HomeImportPlan, folder: Path, out: dict[str, Any]) -> str:
-    """The CLI upload through the real import Job, as a person runs it, with no filing by the CLI."""
+    """The CLI upload through the real import Job, as a person runs it: it asks the cell to file and files nothing itself."""
     try:
         cli = await run_cli_import(ctx, plan.cli_image, folder, label="home", tenant=ctx.a, windowed=True,
-                                   cli_args=["--no-file", "--label", ORIGIN_LABEL])
+                                   cli_args=["--no-wait", "--label", ORIGIN_LABEL])
     finally:
         retain_cli_diagnostics(ctx, "home")
     run(["docker", "rm", "--force", cli.name], check=False, timeout=60)
@@ -383,11 +405,9 @@ async def run_home_import(ctx: Context, plan: HomeImportPlan) -> None:
 
     import_id = await send_fixture(ctx, plan, folder, out)
     out["import_id"] = import_id
-    promoted = await asyncio.to_thread(exec_json, ctx, PROMOTE_SCRIPT, import_id)
-    out["series_file"] = promoted
-    problems = check_origin(promoted.get("origin"))
-    if promoted.get("filing_before") is not None:
-        problems.append(f"the CLI wrote filing {promoted['filing_before']!r} even with --no-file")
+    series = await asyncio.to_thread(exec_json, ctx, READ_SERIES_SCRIPT, import_id)
+    out["series_file"] = series
+    problems = check_origin(series)
 
     # The agent below only reads status: it never calls `file`.
     from .scenarios import first_session
@@ -424,7 +444,7 @@ async def run_home_import(ctx: Context, plan: HomeImportPlan) -> None:
     listing = await read_listing(agent, import_id)
     out["listing"] = listing
     staged = await asyncio.to_thread(exec_json, ctx, STAGE_SCRIPT, import_id)
-    staged_paths = sorted(path for path in staged if path != promoted["series_file"])
+    staged_paths = sorted(path for path in staged if path != series["series_file"])
     out["staged_after_filing"] = staged_paths
     vault_copy = plan.root / "vault"
     if vault_copy.exists():
@@ -435,6 +455,7 @@ async def run_home_import(ctx: Context, plan: HomeImportPlan) -> None:
     cli_lines = out["cli"]["left_behind_lines"]
     problems += check_sources(manifest, fronts)
     problems += check_leftovers(manifest, members, staged_paths, cli_lines)
+    problems += check_left_out(manifest, view.get("left_out"))
     problems += check_counts(manifest, view, listing)
     stats = agent.stats()
     out["agent"] = stats

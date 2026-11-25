@@ -140,8 +140,9 @@ def test_the_cli_lines_under_left_behind_are_taken_from_its_log() -> None:
 
 
 def _view(manifest, **progress) -> dict:
-    return {"state": "done", "stop": None, "progress": {
-        "filed": len(manifest.filed), "skipped_duplicates": 0, "failed": 0, "remaining": 0, **progress}}
+    return {"state": "done", "stop": None, "needs": [], "progress": {
+        "total": len(manifest.filed) + len(manifest.left_by_cell), "filed": len(manifest.filed), "skipped_duplicates": 0,
+        "failed": 0, "left_out": len(manifest.left_by_cell), "remaining": 0, **progress}}
 
 
 def _listing(manifest, unfiled=None) -> dict:
@@ -162,6 +163,23 @@ def test_a_view_that_counts_one_file_too_few_does_not_add_up_to_the_tree(manifes
     assert any("do not add up" in p for p in problems)
 
 
+def test_a_view_with_a_wrong_total_or_a_zero_rate_for_filed_work_is_reported(manifest) -> None:
+    view = {**_view(manifest, total=len(manifest.members)), "rate": {"files_per_minute": 0.0, "over_calls": 2}}
+
+    problems = home_import.check_counts(manifest, view, _listing(manifest))
+
+    assert any(p.startswith("the filing view's total is") for p in problems)
+    assert any("reports a rate of 0.0" in p for p in problems)
+
+
+def test_the_left_out_list_of_the_filing_view_is_the_files_that_stay_staged_with_their_reasons(manifest) -> None:
+    faithful = {"by_reason": {"unselected": 1}, "items": [{"path": "empty.txt", "code": "unselected"}], "truncated": False}
+
+    assert home_import.check_left_out(manifest, faithful) == []
+    assert len(home_import.check_left_out(manifest, {**faithful, "items": [], "truncated": True})) == 2
+    assert home_import.check_left_out(manifest, None) == ["the filing view of a done stage has no left_out, found None"]
+
+
 def test_a_stage_still_parked_is_not_done(manifest) -> None:
     view = {**_view(manifest), "state": "parked", "stop": {"code": "IMPORT_FILING_REPLY_UNREADABLE"}}
 
@@ -173,10 +191,13 @@ def test_a_stage_still_parked_is_not_done(manifest) -> None:
 # --- the origin, the client and the verdict ------------------------------------------------------
 
 
-def test_a_series_file_origin_that_the_cli_did_not_write_is_reported() -> None:
-    assert home_import.check_origin({"label": home_import.ORIGIN_LABEL, "browser_family": "cli"}) == []
-    assert home_import.check_origin(None) == ["the series file has no origin, found None"]
-    assert len(home_import.check_origin({"label": "x", "browser_family": "safari"})) == 2
+def test_a_series_file_that_does_not_ask_the_cell_to_file_or_lacks_the_origin_is_reported() -> None:
+    asked = {"filing": "cell", "cell_value": "cell", "origin": {"label": home_import.ORIGIN_LABEL, "browser_family": "cli"}}
+
+    assert home_import.check_origin(asked) == []
+    assert home_import.check_origin({**asked, "filing": None}) == ["the series file's filing is None, expected 'cell'"]
+    assert home_import.check_origin({**asked, "origin": None}) == ["the series file has no origin, found None"]
+    assert len(home_import.check_origin({**asked, "origin": {"label": "x", "browser_family": "safari"}})) == 2
 
 
 def test_a_file_call_from_the_harness_client_is_reported_and_status_reads_are_not() -> None:
