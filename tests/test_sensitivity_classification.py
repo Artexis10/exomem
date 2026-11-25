@@ -6,11 +6,14 @@ document number below is synthetic.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
+from fastmcp import Client
 
 from exomem import (
+    call_ledger,
     classify_page,
     commands,
     page_fields,
@@ -18,7 +21,9 @@ from exomem import (
     sensitivity_classes,
     set_frontmatter_field,
     source_taxonomy,
+    writer_lease,
 )
+from exomem import server as server_module
 from exomem.vocabulary import registry
 
 SOURCE = "Knowledge Base/Sources/Articles/2026-05-04-best-egcg-supplements.md"
@@ -49,33 +54,54 @@ def test_an_overlay_class_is_one_a_capture_may_declare_and_a_class_without_its_a
     assert "identity, health, financial" in str(unknown.value)
 
 
+@pytest.fixture
+def connector(vault: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """A call to one public tool of a local server, as a connected agent makes it."""
+    monkeypatch.setattr(server_module, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-lease"))
+    monkeypatch.setenv("EXOMEM_CALL_LEDGER_DIR", str(tmp_path / "ledger"))
+    call_ledger.reset_chain_cache()
+    mcp = server_module.build_server(require_auth=False)
+
+    def call(tool: str, operation: str, arguments: dict) -> dict:
+        async def run():
+            async with Client(mcp) as client:
+                body = {"operation": operation, "arguments": arguments}
+                return (await client.call_tool(tool, body, raise_on_error=False)).structured_content
+
+        return asyncio.run(run())
+
+    yield call
+    writer_lease.reset_managers_for_tests()
+
+
 def test_classifying_a_source_changes_only_its_sensitivity_field_and_a_revert_restores_every_byte(
-    vault: Path,
+    vault: Path, connector
 ) -> None:
-    """A classification that moves the page, rewrites its body or other frontmatter, or whose
-    revert returns different bytes than the page held before."""
+    """A connected agent that cannot reach classify, or a classification that moves the page,
+    rewrites its body or other frontmatter, or whose revert returns different bytes than the
+    page held before."""
     path = vault / SOURCE
     before = path.read_bytes()
+    arguments = {"path": SOURCE, "sensitivity": ["identity"], "reason": "an identity card scan"}
 
-    preview = classify_page.classify(
-        vault, path=SOURCE, sensitivity=["identity"], reason="an identity card scan", validate_only=True
-    )
-    assert path.read_bytes() == before and preview["validate_only"]
+    preview = connector("inspect_memory", "files.classify", arguments)
+    assert path.read_bytes() == before and preview["validate_only"], preview
 
-    done = classify_page.classify(
-        vault, path=SOURCE, sensitivity=["identity"], reason="an identity card scan"
-    )
+    done = connector("manage_memory", "files.classify", arguments)
     after = path.read_text(encoding="utf-8")
 
-    assert done["sensitivity"]["classes"] == ["identity"] and done["sensitivity"]["basis"] == "declared"
+    assert done["sensitivity"]["classes"] == ["identity"], done
+    assert done["sensitivity"]["basis"] == "declared"
     assert after == before.decode("utf-8").replace(
         "ingested_into: []\n", "ingested_into: []\nsensitivity: [identity]\n"
     )
     assert (vault / done["path"]).exists()
 
-    reverted = classify_page.classify(
-        vault, path=SOURCE, reason="classified the wrong page", revert_record=done["pointer_write"]
-    )
+    reverted = connector("manage_memory", "files.classify", {
+        "path": SOURCE, "reason": "classified the wrong page", "revert_record": done["pointer_write"],
+    })
 
     assert path.read_bytes() == before
     assert reverted["sensitivity"]["classes"] == []

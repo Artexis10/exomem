@@ -14954,6 +14954,37 @@ def op_revert_reclassification(
     return result.as_dict()
 
 
+def op_classify_page(
+    vault_root: Path,
+    *,
+    path: str,
+    sensitivity: list[str] | None = None,
+    reason: str | None = None,
+    revert_record: str | None = None,
+    expected_hash: str | None = None,
+    validate_only: bool = False,
+) -> dict:
+    """Record which sensitivity classes a page holds, without changing any other byte.
+
+    The page keeps its body, its path and every other frontmatter line; only its `sensitivity`
+    field changes, through the governed pointer write. Pass `sensitivity` with registered class
+    keys, or `[]` to clear them, or `revert_record` with the `pointer_write` id of an earlier
+    classification to return the page to its earlier bytes. `reason` is required and recorded.
+    With `validate_only` nothing is written.
+    """
+    from . import classify_page
+
+    if not path:
+        raise ValueError("INVALID_PATH: classify requires `path` naming the page")
+    try:
+        return classify_page.classify(
+            vault_root, path=path, sensitivity=sensitivity, reason=reason,
+            revert_record=revert_record, expected_hash=expected_hash, validate_only=validate_only,
+        )
+    except classify_page.ClassifyError as error:
+        raise ValueError(f"{error.code}: {error.reason}") from error
+
+
 def op_manage_memory_file(
     vault_root: Path,
     operation: str = "list",
@@ -14992,21 +15023,29 @@ def op_manage_memory_file(
     preview_digest: str | None = None,
     preview_run_id: str | None = None,
     cursor: str | None = None,
+    sensitivity: list[str] | None = None,
+    revert_record: str | None = None,
+    expected_hash: str | None = None,
 ) -> dict:
     """Manage files when typed tools do not fit.
 
     Destructive operations need explicit flags.
 
     Args:
-        operation: list, trash-list and propose-reclassification read; create, append
-            and move read with validate_only; the others write.
+        operation: list, trash-list and propose-reclassification read; create, append,
+            move and classify read with validate_only; the others write.
         path: Target for list/create/append/delete; default trash path for recover.
         allow_curated: Permit operations in curated trees where canonical leaves allow it.
         kind: file or dir, for create.
         source_kind: What a captured artifact IS; reclassify sets it.
         domain: What it is ABOUT; like source_kind.
         artifact_path: reclassify only: the existing file the source's pointer must name.
-        reason: Required for reclassify and revert-reclassification.
+        reason: Required for reclassify, revert-reclassification and classify.
+        sensitivity: classify only: the sensitivity classes the page holds, as registered keys;
+            an empty list clears them. The page keeps every other byte and never moves.
+        revert_record: classify only, instead of `sensitivity`: the `pointer_write` id of an
+            earlier classification of this page, which returns the page to its earlier bytes.
+        expected_hash: classify only: the page's content hash, to refuse a stale write.
         confirm: Required for delete.
         expected_dead_inbound: Links expected to die in the same workflow.
         validate_only: Validate a Markdown create or append, or preview a move, without
@@ -15032,7 +15071,7 @@ def op_manage_memory_file(
         )
     )
     append_review_requested = semantic_transition_token is not None
-    shared_review_requested = (validate_only and operation != "move") or any(
+    shared_review_requested = (validate_only and operation not in {"move", "classify"}) or any(
         value is not None
         for value in (
             relation_disposition,
@@ -15133,6 +15172,11 @@ def op_manage_memory_file(
             reason=reason,
             preview_digest=preview_digest,
         )
+    if operation == "classify":
+        return op_classify_page(
+            vault_root, path=path, sensitivity=sensitivity, reason=reason,
+            revert_record=revert_record, expected_hash=expected_hash, validate_only=validate_only,
+        )
     if operation == "trash-list":
         return op_list_trash(vault_root, date=date)
     if operation == "recover":
@@ -15147,8 +15191,8 @@ def op_manage_memory_file(
         )
     raise ValueError(
         "INVALID_MODE: manage_memory_file operation must be list, create, append, "
-        "move, reclassify, propose-reclassification, revert-reclassification, delete, "
-        "trash-list, or recover"
+        "move, reclassify, propose-reclassification, revert-reclassification, classify, "
+        "delete, trash-list, or recover"
     )
 
 

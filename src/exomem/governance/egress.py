@@ -7352,6 +7352,8 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "reclassify": "mutation",
         "propose-reclassification": "structure",
         "revert-reclassification": "mutation",
+        # A classify with `validate_only` is its preview, which writes nothing.
+        "classify": "validation",
     },
     ("schema_memory", "operation"): {
         "infer": "save-conditional",

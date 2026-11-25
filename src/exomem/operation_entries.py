@@ -752,6 +752,8 @@ _REMAINING = {
         _row("recover", "change_files", ("trash_path", "path", "restore_path"), (), verb="restored"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("reclassify", "change_files", ("path", "old_path", "source_kind", "domain", "artifact_path", "reason", "preview_digest"), ("reason",), destructive=True, verb="moved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("revert-reclassification", "change_files", ("path", "reason"), ("path",), destructive=True, verb="moved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("classify", "change_files", ("path", "sensitivity", "reason", "revert_record", "expected_hash", "validate_only"), ("path", "reason"), constraints=(_literal("validate_only", False, True),), destructive=True, verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("classify", "browse_memory", ("path", "sensitivity", "reason", "revert_record", "expected_hash", "validate_only"), ("path", "reason"), kind="validate-classify", constraints=(_literal("validate_only", True, implied=True),)),
     ), True),
     "approve_procedure": ("action", (
         _row("approve", "approve_procedure", ("ref", "expected_version"), ("ref", "expected_version"), verb="saved", idempotent=True),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation.

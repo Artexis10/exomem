@@ -79,7 +79,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # (keep-speech-results-in-cloud).
 # The optional `sensitivity` list on `create_note`, `save_source`, `save_evidence`, `save_episode` and `add_record`, through which the
 # agent that reads the material names its classes, added 739 B on 2026-11-25 (classify-sensitive-material-at-capture).
-TOTAL_BUDGET = 32_489
+# The door operation `files.classify`, which changes a kept page's classes later without touching its bytes, added
+# 31 B to the tool surface the same day, 21 B of it in the two door enums (classify-sensitive-material-at-capture).
+TOTAL_BUDGET = 32_520
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
