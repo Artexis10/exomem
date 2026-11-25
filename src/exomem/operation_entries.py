@@ -376,7 +376,7 @@ HISTORY_SELECTORS = ("item_key", "item_id", "natural_key")
 _RECORD_QUERY_FIELDS = (
     "collection", "view", "filters", "columns", "sort_by", "descending", "limit",
     "aggregate", "date_from", "date_to", "date_column", "expand_children", "expand_child",
-    "continuation", "include_agent_history", "output_format", "query", "item_key",
+    "continuation", "include_agent_history", "output_format", "query", "item_key", "timeline",
 )
 _MANIFEST_REVISION_FIELDS = (
     "collection", "manifest_text", "expected_manifest_hash", "expected_container_hash", "why",

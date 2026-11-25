@@ -75,7 +75,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # `effective_at` on `add_record` and `edit_record`, when the written values took effect, and `corrects` in
 # `edit_record.options`, which names the earlier write that an edit corrects, added 327 B on 2026-11-25
 # (record-value-timeline).
-TOTAL_BUDGET = 31_950
+# `query_records.timeline`, one field's values over effective time, added 124 B the same day (record-value-timeline).
+TOTAL_BUDGET = 32_080
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
@@ -97,7 +98,8 @@ TOOL_CEILINGS: dict[str, int] = {
     "list_review_items": 750,
     "manage_memory": 2570,
     "query_plan_items": 1050,
-    "query_records": 1100,
+    # timeline joined query_records on 2026-11-25 (record-value-timeline).
+    "query_records": 1250,
     "read_instructions": 750,
     "read_page": 700,
     "recall_context": 2800,

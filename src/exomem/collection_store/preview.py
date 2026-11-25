@@ -803,7 +803,18 @@ def dispatch(
         collection = args.pop("collection")
         # A query that names one row answers that row and its body; Records names the key item_key, Planning plan_id.
         key = args.pop("item_key", args.pop("plan_id", None))
+        requested_timeline = args.pop("timeline", None)
         with writer.read_collection(collection, facade_profile=profile) as manifest:
+            if requested_timeline is not None:
+                from . import timeline, timeline_query
+
+                if manifest.derived:
+                    raise timeline.unavailable()
+                # The facade refused every other argument; these three can only hold their defaults here.
+                # nosemgrep: ep-word-set -- closed query_records argument names, fixed by the tool schema
+                for name in ("output_format", "include_agent_history", "expand_children"):
+                    args.pop(name, None)
+                return True, timeline_query.read(writer, manifest, timeline_query.parse(requested_timeline), **args)
             if key is not None:
                 column = collection_profiles.profile_for(manifest.semantic_profile).item_id_property
                 args["filters"] = [{"column": column, "op": "eq", "value": key}]

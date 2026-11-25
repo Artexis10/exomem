@@ -109,6 +109,7 @@ def record_memory(
     natural_key: dict[str, Any] | None = None,
     effective_at: str | None = None,
     corrects: str | None = None,
+    timeline: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Describe, validate, inspect, create, query, append, bulk_upsert, update, retract, revise, rebaseline, discard or import Records.
 
@@ -199,6 +200,11 @@ def record_memory(
         corrects: update only: the `transition_id` of the write whose point this update replaces, as the
             row's history lists it. Name the corrected values in `changes`, a corrected `effective_at`,
             or both.
+        timeline: query only, store-routed collections only: list one field's spans, each a value with the
+            effective times it held from and to, over the rows that `filters` select. Give
+            `{"field": ..., "value": {"op": ..., "value": ...}, "at": ...}` or `from` and `to`, and
+            `"changes": true` for the spans that started in the window. Only filters, columns, descending,
+            limit and continuation go with it.
 
     retract takes one row out of current state with a required why. Its history stays, and
     appending the same natural key later brings the row back. A store-routed collection
@@ -268,6 +274,7 @@ def record_memory(
         "natural_key": natural_key,
         "effective_at": effective_at,
         "corrects": corrects,
+        "timeline": timeline,
     }
     _validate_arguments(action, values)
     # A leaf takes only the arguments it declares, and these two are the facade's alone.
@@ -949,6 +956,8 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
         _invalid_arguments("validate requires exactly one of: collection, manifest_path")
     if action == "validate" and values["collection"] is not None and values["scaffold"] is not None:
         _invalid_arguments("scaffold is not accepted when collection is supplied")
+    if action == "query" and values["timeline"] is not None:
+        _validate_timeline(values)
     if action == "query" and values["query"] is not None and supplied - {"collection", "query", "view"}:
         from .query_engine.validation import Finding
 
@@ -968,6 +977,18 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
     if action == "query" and values["item_key"] is not None and supplied - {"collection", "item_key"}:
         _invalid_arguments("a query with item_key reads that one row and its body, so it takes only collection; "
                            "remove " + ", ".join(sorted(supplied - {"collection", "item_key"})))
+
+
+def _validate_timeline(values: Mapping[str, Any]) -> None:
+    """Refuse a timeline query's other arguments and its shape before any collection is read."""
+    from .collection_store import timeline_query
+
+    try:
+        timeline_query.conflicts(values)
+        timeline_query.parse(values["timeline"])
+    except CollectionError as error:
+        raise OpError(error.code, error.reason, collection_remediation(error),
+                      details=_json_safe_details(error.details)) from error
 
 
 def _require_one_history_selector(given: Mapping[str, Any]) -> None:

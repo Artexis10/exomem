@@ -858,6 +858,8 @@ class QueryRecords(Wire):
     descending: bool | None = None
     limit: int | None = None
     more: str | None = Field(default=None, description="Continuation token.")
+    timeline: dict[str, Any] | None = Field(
+        default=None, description="One field's values over effective time: {field, value?, at? or from?/to?, changes?}.")
     options: dict[str, Any] | None = Field(default=None, description="Rare knobs: aggregate, date_from, date_to, view, output_format.")
 
 
@@ -877,6 +879,7 @@ def _query_collection(command: str, tool: str, key: str | None):
             "action": "inspect" if collection is None else "query", "collection": collection,
             "filters": wire.get("filters"), "columns": columns, "sort_by": wire.get("sort_by"),
             "descending": wire.get("descending"), "limit": wire.get("limit"), "continuation": wire.get("more"),
+            "timeline": wire.get("timeline"),
         }
         call = _leaf_call(wire, "options", ctx, command, tool, leaf)
         # No collection lists them all; the other fields then have nothing to select.

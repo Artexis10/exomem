@@ -397,10 +397,11 @@ def vault_bytes(vault: Path):
 
 @pytest.mark.parametrize("make", [file_canonical, dataset])
 @pytest.mark.parametrize("arguments", [
-    {"action": "append", "item": {"asset_tag": "L-17"}, "effective_at": "2026-03-07"},
+    {"action": "append", "item": {"asset_tag": "L-17"}, "effective_at": "2026-03-07", "why": "try"},
     {"action": "update", "item_key": "44444444-4444-4444-8444-444444444444", "changes": {"asset_tag": "L-17"},
      "corrects": "00000000-0000-4000-8000-000000000000", "expected_container_hash": "0" * 64,
-     "expected_item_version": "0" * 64},
+     "expected_item_version": "0" * 64, "why": "try"},
+    {"action": "query", "timeline": {"field": "asset_tag"}},
 ])
 def test_a_file_collection_refuses_a_timeline_argument_and_writes_nothing(tmp_path, make, arguments):
     """A file keeps no past versions, so a stated time there would be dropped while the reply claimed it."""
@@ -410,7 +411,7 @@ def test_a_file_collection_refuses_a_timeline_argument_and_writes_nothing(tmp_pa
     before = vault_bytes(tmp_path)
 
     with pytest.raises(OpError) as refused:
-        record_memory(tmp_path, collection=collection, why="try", **arguments)
+        record_memory(tmp_path, collection=collection, **arguments)
 
     assert refused.value.code == "TIMELINE_UNAVAILABLE" and "effective_at" in refused.value.details["remediation"]
     assert vault_bytes(tmp_path) == before
@@ -426,6 +427,9 @@ def test_a_derived_collection_refuses_a_timeline_argument_and_writes_nothing(sto
 
     refused = refusal(store.append_record, derived, item={"asset_tag": "L-17"}, why="a hand edit",
                       effective_at="2026-03-07")
+    with request_scope(owner_principal(surface="mcp")), preview_store(store.root, store.handle), \
+            pytest.raises(OpError) as queried:
+        record_memory(store.root, "query", collection=derived, timeline={"field": "location"})
 
-    assert refused.code == "TIMELINE_UNAVAILABLE"
+    assert refused.code == queried.value.code == "TIMELINE_UNAVAILABLE"
     assert stored(store) == before

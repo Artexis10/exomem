@@ -1058,6 +1058,10 @@
           "type": "string",
           "description": "Continuation token."
         },
+        "timeline": {
+          "type": "object",
+          "description": "One field's values over effective time: {field, value?, at? or from?/to?, changes?}."
+        },
         "options": {
           "type": "object",
           "description": "Rare knobs: aggregate, date_from, date_to, view, output_format."

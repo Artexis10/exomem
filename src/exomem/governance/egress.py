@@ -949,6 +949,7 @@ _FULL_ONLY_PROJECTORS: frozenset[str] = frozenset(
         "record_template",
         "record_mutation",
         "record_history",
+        "record_timeline",
         "planning_query",
         "planning_inspection",
         "planning_mutation",

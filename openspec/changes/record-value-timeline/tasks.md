@@ -55,8 +55,9 @@
 
 ## 5. Timeline queries
 
-- [ ] 5.1 Add `timeline` to `query_records` in `public_tools`, `record_memory` and `operation_entries`, with `TIMELINE_ARGUMENT_INVALID` and `TIMELINE_FIELD_NOT_SCALAR`.
+- [x] 5.1 Add `timeline` to `query_records` in `public_tools`, `record_memory` and `operation_entries`, with `TIMELINE_ARGUMENT_INVALID` and `TIMELINE_FIELD_NOT_SCALAR`.
   - Check: the MCP tool schema fixture shows the one added argument; tests for each refused combination.
+  - Evidence: `tests/test_record_timeline_query.py::test_a_timeline_query_refuses_an_argument_it_does_not_honour_and_names_it`, `::test_a_malformed_timeline_is_refused_naming_its_part`, `::test_a_field_that_is_not_a_top_level_scalar_is_refused` and `::test_an_undeclared_field_is_refused_with_the_fields_it_can_name`, on a JSON and a typed collection. `scripts/dump-tool-schemas.py` added only `query_records.timeline` to `tests/fixtures/mcp_tool_schemas.json` (`tests/test_mcp_schema_fidelity.py`); it adds 124 B, which `tests/test_tool_schema_budget.py` records. The 4.6 refusal tests in `tests/test_record_timeline_writes.py` now also send `timeline`.
 - [ ] 5.2 Answer selections within the direct bound from the versions: one row's timeline, `at` an instant, `at` a date, a range, `changes` with `previous` and `first`, `descending`, `columns`, and continuations bound to the snapshot.
   - Check: tests for each case on a typed and a JSON collection, including a retracted row's absence and a continuation refused after a write.
 - [ ] 5.3 Apply governance: `QUERY_FIELD_UNKNOWN` for a withheld field, no trace of a withheld row, and no transition id, `why` or sources for a field reader.
