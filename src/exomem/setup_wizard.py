@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import adopt as adopt_module
-from . import client_config, install_info, prominence
+from . import client_config, install_info, prominence, workflow_skills
 from . import doctor as doctor_module
 from . import init as init_module
 from . import install_hook as hook_module
@@ -40,7 +40,7 @@ from .governance.principal import library_scope
 from .kbdir import managed_join, managed_root_rel
 from .vault_store import cli_fence
 
-_SKILL_NAME_MARKER = "name: exomem"
+_SKILL_NAME_MARKER = f"name: {workflow_skills.CORE_SKILL_NAME}"
 def _format_pack_suggestions(packs: list[dict], *, limit: int = 3) -> str:
     shown = []
     for pack in packs[:limit]:
@@ -376,7 +376,7 @@ def _register_claude(
     if existing_scopes and not replace:
         if yes or not _ask_yn(
             input_fn,
-            f"exomem is already registered in {scope_text}. Replace every explicit route?",
+            f"Evermatter is already registered in {scope_text}. Replace every explicit route?",
             False,
         ):
             report("register", f"[skipped: already registered in {scope_text}]")
@@ -490,7 +490,7 @@ def _register_codex(
     block = client_config.render_codex_block(route, name=name)
     replace = replace_client_registration and existing
     if existing and not replace:
-        if yes or not _ask_yn(input_fn, f"exomem is already in {path}. Replace it?", False):
+        if yes or not _ask_yn(input_fn, f"Evermatter is already in {path}. Replace it?", False):
             report("register-codex", "[skipped: already in config.toml]")
             return
         replace = True
@@ -567,7 +567,7 @@ def _register_codex(
             if yes:
                 report("register-codex", "[skipped: already in config.toml]")
                 return
-            if not _ask_yn(input_fn, f"exomem is already in {path}. Replace it?", False):
+            if not _ask_yn(input_fn, f"Evermatter is already in {path}. Replace it?", False):
                 report("register-codex", "[skipped: already in config.toml]")
                 return
             outcome = client_config.merge_codex_mcp(block, path=path, replace=True)
@@ -653,7 +653,7 @@ def _offer_learning_instruction(
         )
         print_fn(f"    {prominence.LEARNING_INSTRUCTION}")
         print_fn(
-            "  Setup keeps it between the `exomem learning instruction` markers. Delete that "
+            "  Setup keeps it between the `evermatter learning instruction` markers. Delete that "
             "block, or run `exomem install-hook --uninstall --client all`, to remove it."
         )
     for name, client, path, change in pending:
@@ -999,16 +999,19 @@ def run_setup(
         )
 
     # 7. skill — the brain; without it the tools sit unused
-    skill_target = (home / "skills" / "exomem") if home else None
+    skill_target = (home / "skills" / workflow_skills.CORE_SKILL_NAME) if home else None
     try:
         if skill_target is not None:
-            install_module.install_skill(skill_target)
+            retired = install_module.install_skill(skill_target)["retired"]
             report("skill", "[done] installed")
         else:
             # No explicit target: install into every client present on this
             # machine, so a Codex user gets the brain too rather than just tools.
-            installed = install_module.install_skills(client="auto")["installed"]
-            report("skill", f"[done] installed for {', '.join(installed)}")
+            installed = install_module.install_skills(client="auto")
+            retired = [path for each in installed["clients"].values() for path in each["retired"]]
+            report("skill", f"[done] installed for {', '.join(installed['installed'])}")
+        for path in retired:
+            report("migrate", f"[done] removed the previous copy at {path}")
     except FileExistsError:
         target = skill_target if skill_target is not None else install_module.DEFAULT_TARGET
         skill_md = target / "SKILL.md"
@@ -1100,9 +1103,17 @@ def run_setup(
     print_fn("Next steps:")
     if route.transport == "http":
         print_fn("  1. In Claude Code, use /mcp to authenticate the claude mcp connection.")
-        print_fn("     For Codex, run: codex mcp login exomem")
+        try:
+            codex_key = client_config.codex_mcp_name(
+                _resolve_codex_home(codex_home) / "config.toml"
+            )
+        except ValueError:
+            codex_key = None
+        print_fn(
+            f"     For Codex, run: codex mcp login {codex_key or client_config.SERVER_NAME}"
+        )
     else:
-        print_fn("  1. Restart Claude Code so it loads the exomem server and skill.")
+        print_fn("  1. Restart Claude Code so it loads the Evermatter server and skill.")
     print_fn('  2. Try: "what does this vault look like" or "find my notes on X".')
     print_fn("  3. Optional, for direct CLI use (`kb find ...`): set EXOMEM_VAULT_PATH.")
     print_fn(
@@ -1182,7 +1193,21 @@ def setup_main(argv: list[str]) -> int:
     )
     parser.add_argument("--scope", choices=("user", "local", "project"), default="user",
                         help="claude mcp add scope (default: user — available in every project).")
+    parser.add_argument(
+        "--migrate",
+        action="store_true",
+        help="Move an install made before the rename from the `exomem` server key to "
+        "`evermatter` in Claude Code and Codex, and the managed instruction block with it. "
+        "Backs up each file it changes, never edits a rule or hook you wrote, and lists "
+        "those. Takes no other option.",
+    )
     args = parser.parse_args(argv)
+    if args.migrate:
+        if len(argv) > 1:
+            parser.error("--migrate takes no other option")
+        from .rename_migration import migrate
+
+        return migrate()
     if args.yes and not args.vault:
         parser.error("--yes requires --vault")
     return run_setup(

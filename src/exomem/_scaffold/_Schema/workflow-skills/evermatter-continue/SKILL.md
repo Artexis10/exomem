@@ -1,19 +1,18 @@
 ---
-name: exomem-review
-description: Use Evermatter's Epistemic Inbox and audit queues to surface stale conclusions, contradictions, relation debt, and unprocessed sources safely.
+name: evermatter-continue
+description: Resume prior project or session context from Evermatter when the user wants to continue, pick something back up, or remember what was happening on a topic. Part of Evermatter, formerly Exomem.
 metadata:
-  skill_contract: 96ab0f8b9834703e4dafda31fa839d9f0f28712d4ce78b38544a5f2ac2b9cccf
-  version: "0.2.0"
+  skill_contract: 11af20af93a5fb2117016a32d1cebefb6c664aae1b7b8f4a18be746e58a1b17b
+  version: "0.1.0"
 ---
 
-# exomem-review
+# evermatter-continue
 
 ## Purpose
-Drain Evermatter review queues into safe next actions.
+Resume prior context without guessing from chat history alone.
 
 ## When to use
-Use when the user asks to review the KB, see what needs attention, drain backlog,
-or inspect stale, contradictory, disconnected, or unprocessed material.
+Use when the user asks to continue, resume, pick up a project, recover prior state, or asks what they were doing on a topic.
 
 ## Portable operating rules
 
@@ -74,66 +73,12 @@ An unchanged map does not certify method freshness. Refresh when the task, evide
 or uncertainty changes materially; ordinary memory reads alone do not trigger refresh.
 
 ## Workflow
-1. Start with `list_review_items(queue='due')` for the ranked review queue.
-2. Use `inspect_memory(operation="maintenance.audit")` when the user asks for broader health checks or specific categories.
-3. For unprocessed sources, use `create_note` before writing a compiled note with `create_note`, passing those source paths as `sources:` so the source leaves the unprocessed queue.
-4. For relation debt, inspect `inspect_memory(operation="connections.suggest_relations")` or
-   `suggest-links`; write accepted note edges under `## Relations`, never from
-   semantic proximity alone.
-5. For stale or contradictory compiled notes, read the relevant pages with `read_page` and decide keep, `edit_note`, `supersede_note`, `inspect_memory` and `manage_memory`, or leave alone.
-6. For recurring unregistered relation labels, propose promotion with `inspect_memory(operation="schema.propose_relation", arguments={"subject": "relations", "proposal": ...})` rather than rewriting the notes that use them.
-7. Use `decide_review_item` only after an explicit decision to dismiss, snooze, or
-   reopen an Inbox item, and lead its `why` with a review reason code —
-   `intentional:`, `false_positive:`, `handled:`, `deferred:`, or
-   `too_frequent:` — so the decision is still legible months later.
-8. When the user wants to stop hearing about a whole KIND of signal, quiet that
-   family rather than lowering prominence, which silences everything:
-   `manage_memory(operation="review.set_family", arguments={'ref': 'exomem://review/family/<family>', 'action': 'quiet', 'why': ...})` with a
-   reason code in `why`. `off` additionally hides it from explicit category
-   review; `normal` restores it. A quiet family is silent, not clean — it stays
-   listed by `inspect_memory(operation="review.dispositions")` and the audit still measures
-   it, so a queue without it is not proof it has nothing due.
-9. Propose risky actions before mutating.
-
-## Artifact role and current state
-Read the supporting units for `artifact_role_promotion` and
-`transient_state_review`; neither signal grants mutation authority. Choose a home
-by role even within one topic: a repeatable successful procedure belongs in a
-suitable reusable note, and an attributed multi-source synthesis in a research
-note. Search existing eligible homes first. Keep exact source-unit provenance:
-reference both the procedure and outcome units when extracting a method, or the
-synthesis unit and its distinct sources when compiling a research note. Retain
-the experiment history. A title match or parent backlink does not establish that
-the identified material has a home; exact represented content does, while a
-paraphrase remains a review candidate for the reader to assess.
-
-For example, a batch may contain two separately successful reusable methods and
-a synthesis across two sources. Give each method its own evidence and check the
-synthesis independently; extracting one does not settle the others. A protocol
-without reusable success or a list of citations alone needs no such promotion.
-For a single batch, “No taste results yet” alongside an observed taste result
-invites a current-wording correction; “Previously no taste results existed” is
-history, and taste results do not settle an awaited safety result or a new trial.
-Preserve that history through a governed edit or exact valid supersession.
-
-Extraction/restructuring uses confirmed `restructure_execution`; an
-already-authorized local correction acquires no additional confirmation step.
-Observed transaction state still follows the existing Records claims handoff,
-never an automatic append from a review signal. Item triage changes presentation,
-not evidence coverage. Explicit review exposes complete/capped/unknown coverage;
-compact omission is not proof of a clean page. Apply this role-first reasoning to
-visible conversation transitions before writing too. An MCP-only server cannot
-guarantee detection or capture of a tool-free turn.
-
-## Vocabulary
-
-Read [vocabulary](references/vocabulary.md) before changing a registry.
-If the vocabulary reference is missing, inspect the exposed `read_instructions` schema.
-Use `read_instructions(profile='compact', section='vocabulary')`, or
-`read_instructions(profile='full')` when `section` is unavailable. Follow the returned
-inspect routes and `save` contract. Reuse or alias before proposing justified
-new meaning; save with the current hash and `why`. Report saved versus queued
-and the returned restore route. Use only exposed operations.
+1. Search first with `search_memory(detail="compact", rerank=false)`, preferring active compiled notes and project-relevant terms from the prompt.
+2. Use `search_memory(deep=true)` when several hits matter or the state needs synthesis.
+3. Read only the top relevant pages with `read_page` when excerpts are not enough.
+4. Prefer recent active compiled notes, then linked sources/evidence when provenance is needed.
+5. Read the Planning inventory with `query_plan_items()` (no collection) when the topic has one, and read the due-state block any response already carried rather than re-deriving it. Both are read-only and create nothing.
+6. Summarize current state, decisions already made, blockers, and likely next actions.
 
 ## Relation governance
 Resolve typed meaning with `resolve-relation` before authoring, and name a specific
@@ -144,15 +89,16 @@ relation is refused (`GENERIC_RELATION_REFUSED` lists ranked specific relations 
 exact calls). Corrections use a new canonical key and deprecate the old one.
 
 ## Output contract
-Return a prioritized review list, recommended safe actions, and any completed saves or edits.
+Return a compact continuation brief with cited Evermatter pages and a short next-action list. Say when the search missed or was thin.
 
 ## Save rules
-Compile unprocessed sources only when they form a coherent note. Use supersession for changed conclusions.
+Save only if the resumed work produces a new durable decision, solved problem, failure, pattern, or research finding. Use `create_note`, `edit_note`, or `supersede_note` as appropriate.
+
+## Lifecycle
+Resuming reads Planning; it never moves it. Route explicit user intent to Planning and observed outcomes to Records. An outcome alone never transitions Planning: explicit user intent may request a guarded transition, and `propose-after-outcome` may only propose one. Elapsed time since the last session is not an outcome, and nothing in the runtime transitions an item on your behalf.
 
 ## Mistakes to avoid
-Do not auto-delete. Do not treat queue presence as proof something is wrong. Do
-not auto-accept suggested relations or batch risky mutations without user
-confirmation.
+Do not invent prior context from memory. Do not treat a scoped miss as absence. Do not dump long note bodies when a state brief is enough.
 
 <!-- exomem-semantic-authoring:v12 sha256:531316a2be37ad20214f80f7a0831929be57f46105228e019e292d6ac92aafd9 -->
 ## Semantic authoring contract

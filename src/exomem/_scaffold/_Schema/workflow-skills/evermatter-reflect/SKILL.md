@@ -1,18 +1,18 @@
 ---
-name: exomem-research
-description: "Run a focused research loop with Evermatter: gather sources, preserve evidence, compile attributed findings, and connect prior notes."
+name: evermatter-reflect
+description: Distill a session or project episode into decisions, failures, patterns, open questions, and next actions. Part of Evermatter, formerly Exomem.
 metadata:
-  skill_contract: 96ab0f8b9834703e4dafda31fa839d9f0f28712d4ce78b38544a5f2ac2b9cccf
+  skill_contract: 11af20af93a5fb2117016a32d1cebefb6c664aae1b7b8f4a18be746e58a1b17b
   version: "0.1.0"
 ---
 
-# exomem-research
+# evermatter-reflect
 
 ## Purpose
-Answer a focused question and save what should compound.
+Convert experience into reusable memory.
 
 ## When to use
-Use when the user asks to research a topic, compare options, investigate a claim, or save findings from a research pass.
+Use when the user asks what was learned, asks to reflect, closes a project episode, or wants patterns extracted from a session.
 
 ## Portable operating rules
 
@@ -73,13 +73,11 @@ An unchanged map does not certify method freshness. Refresh when the task, evide
 or uncertainty changes materially; ordinary memory reads alone do not trigger refresh.
 
 ## Workflow
-1. Search Evermatter first with `search_memory` for prior conclusions and related sources.
-2. Gather external sources only as needed; preserve important raw sources with `save_source`, passing `files` when the client can hand over an attachment. `save_evidence`, `save_evidence`, and the `upload_files` fallback are for proof-bearing artifacts, not for raw material.
-   Take a document's title, authors, year, venue and DOI from the document itself, never from a search hit, a repository match or memory. Compare what you saved with the reply's `identity` block, which shows the document's opening and the DOIs it carries. A document that cites the work is not the work. When they differ, correct the Source with `options.correction` and no `files`.
-   Set `document_form`. When the full text is unavailable, save the publisher's abstract or citation record and label it so; never present it as the full text.
-3. Attribute findings to sources and distinguish evidence from interpretation.
-4. Draft the result as a `research-note` unless another type clearly fits, listing every source preserved in step 2 in `sources:`.
-5. Reuse meaningful connections from the research context; use `inspect_memory(operation="connections.suggest_links")` when candidates are still missing and review related prior notes. Then write with `create_note`, including the sources and accepted connections in the first write.
+1. Search Evermatter with `search_memory` for the project/topic so reflection builds on existing memory.
+2. Extract durable decisions, solved problems, diagnosed failures, reusable patterns, held views and unsure reports (attributed, with their uncertainty, never as fact), open questions (including whether something happened), settled values (in full, not file pointers), and next actions.
+3. Draft each durable conclusion at the right type: `insight`, `failure`, `pattern`, or `research-note`. Cite the session capture or prior notes it draws on in `sources:`.
+4. Prefer one strong note over many weak notes unless the conclusions are genuinely different.
+5. Link the pages you already read in step 1 inline, using `inspect_memory(operation="connections.suggest_links")` to catch the ones you missed; draft the edges that carry direction under `## Relations`. Then save with `create_note`, carrying the sources and accepted links in the first write.
 
 ## Relation governance
 Resolve typed meaning with `resolve-relation` before authoring, and name a specific
@@ -90,13 +88,13 @@ relation is refused (`GENERIC_RELATION_REFUSED` lists ranked specific relations 
 exact calls). Corrections use a new canonical key and deprecate the old one.
 
 ## Output contract
-Return findings, cited sources, limits, saved path, and follow-up questions.
+Return what was saved, what was intentionally not saved, and remaining open questions.
 
 ## Save rules
-Save findings that answer the question, change a decision, or create reusable context. Keep source attribution explicit.
+Save conclusions, not a transcript. Keep enough context that the lesson is reusable later. Save each claim at its true strength: never more certain, more general or more settled than its source made it. No note mentions what stays unwritten.
 
 ## Mistakes to avoid
-Do not research from scratch before checking Evermatter. Do not save a source list without synthesis. Do not hide uncertainty or source gaps.
+Do not capture every turn. Do not flatten failures and patterns into generic summaries. Do not erase uncertainty or next actions.
 
 <!-- exomem-semantic-authoring:v12 sha256:531316a2be37ad20214f80f7a0831929be57f46105228e019e292d6ac92aafd9 -->
 ## Semantic authoring contract

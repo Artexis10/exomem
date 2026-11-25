@@ -750,7 +750,7 @@ def test_shipped_guidance_does_not_name_relocated_state_as_in_vault() -> None:
     root = Path(__file__).resolve().parents[1]
     shipped = (
         root / "src/exomem/_scaffold/_Schema/SKILL.md",
-        root / "plugins/claude-code/skills/exomem/SKILL.md",
+        root / "plugins/claude-code/skills/evermatter/SKILL.md",
         root / "src/exomem/product_invoke.py",
         root / "src/exomem/__main__.py",
         root / "src/exomem/vault.py",

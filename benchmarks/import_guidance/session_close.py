@@ -425,7 +425,7 @@ def stage_agent_files(arm: Arm, work: Path, env: dict[str, str], client_mode: st
     if client_mode == "deferred-skill":
         # A project skill, so the agent sees its description and loads the body through the Skill tool.
         schema = arm.root / "src" / "exomem" / "_scaffold" / "_Schema"
-        skill_dir = work / "cwd" / ".claude" / "skills" / "exomem"
+        skill_dir = work / "cwd" / ".claude" / "skills" / "evermatter"
         shutil.rmtree(skill_dir, ignore_errors=True)
         shutil.copytree(schema, skill_dir, ignore=shutil.ignore_patterns("project-keys.yaml"))
         files["project_skill"] = skill_dir / "SKILL.md"

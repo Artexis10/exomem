@@ -32,11 +32,11 @@ from . import package_skills, workflow_skills
 _SKILL_SRC = Path(__file__).parent / "_scaffold" / "_Schema"
 
 # Claude Code loads `~/.claude/skills/<name>/SKILL.md`; the folder name must match
-# the skill's `name:` frontmatter (`exomem`).
+# the skill's `name:` frontmatter (`workflow_skills.CORE_SKILL_NAME`).
 # Resolved on attribute access, not at import: see `_DEFAULT_PATHS` in
 # install_hook.py for why an import must not need a home directory.
 _DEFAULT_PATHS = {
-    "DEFAULT_TARGET": (".claude", "skills", "exomem"),
+    "DEFAULT_TARGET": (".claude", "skills", workflow_skills.CORE_SKILL_NAME),
     "_LEGACY_TARGET": (".claude", "skills", "knowledge-base"),
 }
 
@@ -72,8 +72,8 @@ def client_home(client: str) -> Path:
 
 
 def client_skill_target(client: str) -> Path:
-    """Where the core `exomem` skill lands for a client."""
-    return client_home(client) / "skills" / "exomem"
+    """Where the core skill lands for a client."""
+    return client_home(client) / "skills" / workflow_skills.CORE_SKILL_NAME
 
 
 def detect_clients() -> tuple[str, ...]:
@@ -122,6 +122,11 @@ def install_skills(
 # only when it is unmistakably ours (see that function).
 _LEGACY_MARKER = "name: knowledge-base"
 _LEGACY_FINGERPRINT = "Exomem"
+# Our own old skills (`exomem`, `exomem-<workflow>`) carry the product name in one of these
+# two spellings. A fingerprint of provenance, not a reading of meaning: it keeps a user's own
+# folder that merely shares the name from being retired.
+_RENAMED_FINGERPRINTS = ("Exomem", "Evermatter")
+_RENAMED_READ_LIMIT = 1_000_000
 
 
 def install_skill(
@@ -134,9 +139,11 @@ def install_skill(
 
     Copies (or, with ``link=True``, symlinks) the canonical `_Schema/` — SKILL.md,
     references/, project-keys.yaml, and the workflow-skill definitions — to
-    ``target`` (default ``~/.claude/skills/exomem``). The named workflow skills
-    are also installed as sibling Claude Code skills beside the core `exomem`
-    skill so clients can discover them directly.
+    ``target`` (default ``~/.claude/skills/evermatter``). The named workflow skills
+    are also installed as sibling Claude Code skills beside the core `evermatter`
+    skill so clients can discover them directly. A copy of one of our skills that the
+    rename left under its old `exomem` name is retired once the new ones are in place
+    (see ``retire_renamed_skill``).
 
     Args:
         target: Destination skill folder. Defaults to DEFAULT_TARGET.
@@ -148,7 +155,7 @@ def install_skill(
 
     Returns:
         {"target": str, "mode": "copy"|"symlink"|"mixed", "files": int,
-        "workflow_skills": [...]}.
+        "workflow_skills": [...], "retired": [str, ...]}.
 
     Raises:
         FileNotFoundError: the bundled skill is missing (broken install).
@@ -196,12 +203,18 @@ def install_skill(
             }
         )
 
+    retired = [
+        str(path)
+        for item in targets
+        if (path := retire_renamed_skill(item["target"].parent, item["name"])) is not None
+    ]
     modes = {r["mode"] for r in records}
     return {
         "target": str(target),
         "mode": records[0]["mode"] if len(modes) == 1 else "mixed",
         "files": sum(r["files"] for r in records),
         "workflow_skills": [r for r in records if r["kind"] == "workflow"],
+        "retired": retired,
     }
 
 
@@ -209,7 +222,7 @@ def _install_targets(target: Path) -> list[dict]:
     targets = [
         {
             "kind": "core",
-            "name": "exomem",
+            "name": workflow_skills.CORE_SKILL_NAME,
             "source": _SKILL_SRC,
             "target": target,
         }
@@ -266,6 +279,31 @@ def _count_files(root: Path) -> int:
     return sum(1 for p in root.rglob("*") if p.is_file())
 
 
+def _retire_skill_dir(
+    path: Path, *, marker: str, fingerprints: tuple[str, ...], limit: int
+) -> Path | None:
+    """Remove the skill folder ``path`` when its SKILL.md names ``marker`` and a fingerprint.
+
+    Only the first ``limit`` characters are read. A symlink is unlinked, never followed.
+    Returns the removed path, or ``None`` when there was nothing of ours to remove.
+    """
+    skill_md = path / "SKILL.md"
+    if not skill_md.is_file():
+        return None
+    try:
+        with skill_md.open(encoding="utf-8", errors="replace") as handle:
+            head = handle.read(limit)
+    except OSError:
+        return None
+    if marker not in head or not any(fingerprint in head for fingerprint in fingerprints):
+        return None
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    else:
+        shutil.rmtree(path)
+    return path
+
+
 def remove_legacy_skill(legacy: Path | None = None) -> Path | None:
     """Retire a pre-rename ``knowledge-base`` skill install, if present and ours.
 
@@ -282,17 +320,27 @@ def remove_legacy_skill(legacy: Path | None = None) -> Path | None:
     legacy = (
         Path(legacy) if legacy is not None else _default_path("_LEGACY_TARGET")
     ).expanduser()
-    skill_md = legacy / "SKILL.md"
-    if not skill_md.is_file():
-        return None
-    try:
-        head = skill_md.read_text(encoding="utf-8", errors="replace")[:4096]
-    except OSError:
-        return None
-    if _LEGACY_MARKER not in head or _LEGACY_FINGERPRINT not in head:
-        return None
-    if legacy.is_symlink() or legacy.is_file():
-        legacy.unlink()
-    else:
-        shutil.rmtree(legacy)
-    return legacy
+    return _retire_skill_dir(
+        legacy, marker=_LEGACY_MARKER, fingerprints=(_LEGACY_FINGERPRINT,), limit=4096
+    )
+
+
+def retire_renamed_skill(skills_dir: Path, name: str) -> Path | None:
+    """Retire the copy of our skill ``name`` that the rename left under its old name.
+
+    The core skill and the workflow skills moved from ``exomem`` and ``exomem-<x>`` to
+    ``evermatter`` and ``evermatter-<x>``; left in ``skills_dir`` after an upgrade the old copy
+    loads as a stale duplicate. It goes only when its SKILL.md carries the old
+    ``name:`` line *and* our product name, so a user's own folder that shares the name stays.
+    A ``--link`` symlink resolves to the renamed scaffold, so it no longer names the old skill and is
+    left for the user to clear.
+
+    Returns the removed path, or ``None`` if there was nothing of ours to remove.
+    """
+    old = workflow_skills.legacy_skill_name(name)
+    return _retire_skill_dir(
+        Path(skills_dir) / old,
+        marker=f"\nname: {old}\n",
+        fingerprints=_RENAMED_FINGERPRINTS,
+        limit=_RENAMED_READ_LIMIT,
+    )

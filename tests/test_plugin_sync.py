@@ -73,7 +73,7 @@ def test_manifest_matches_apart_from_the_version(regenerated: dict[str, bytes]) 
 def test_plugin_never_auto_starts_a_full_stdio_core() -> None:
     manifest = json.loads((PLUGIN_ROOT / _MANIFEST).read_text(encoding="utf-8"))
 
-    server = manifest["mcpServers"]["exomem"]
+    server = manifest["mcpServers"]["evermatter"]
     assert server == {"type": "http", "url": "${user_config.mcp_url}"}
     option = manifest["userConfig"]["mcp_url"]
     assert option["type"] == "string"
@@ -104,7 +104,7 @@ def test_plugin_http_placeholder_passes_claude_validation() -> None:
 def test_plugin_ships_every_skill() -> None:
     from exomem import workflow_skills
 
-    expected = {"exomem"} | {str(s["name"]) for s in workflow_skills.list_skills()}
+    expected = {"evermatter"} | {str(s["name"]) for s in workflow_skills.list_skills()}
     shipped = {p.name for p in (PLUGIN_ROOT / "skills").iterdir() if p.is_dir()}
 
     assert shipped == expected
@@ -114,7 +114,7 @@ def test_plugin_ships_every_skill() -> None:
 
 def test_core_skill_does_not_nest_the_workflow_skills() -> None:
     """They ship as siblings; nesting would expose each SKILL.md at two paths."""
-    assert not (PLUGIN_ROOT / "skills" / "exomem" / "workflow-skills").exists()
+    assert not (PLUGIN_ROOT / "skills" / "evermatter" / "workflow-skills").exists()
 
 
 def test_hooks_file_nests_events_under_a_top_level_hooks_key() -> None:
@@ -189,10 +189,22 @@ def test_plugin_checkpoint_survives_a_compaction(tmp_path: Path) -> None:
 def test_marketplace_points_at_the_plugin_directory() -> None:
     marketplace = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
 
-    entry = next(p for p in marketplace["plugins"] if p["name"] == "exomem")
+    entry = next(p for p in marketplace["plugins"] if p["name"] == "evermatter")
     # `source` is relative to the REPO ROOT, not to .claude-plugin/.
     source = (REPO_ROOT / entry["source"]).resolve()
     assert source == PLUGIN_ROOT.resolve()
+
+
+def test_marketplace_moves_an_install_of_the_old_plugin_name() -> None:
+    """Claude Code rewrites an enabled `exomem` plugin to `evermatter` through `renames`.
+
+    The marketplace id stays `exomem`, so `exomem@exomem` installs resolve to the new name.
+    """
+    marketplace = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
+
+    assert marketplace["name"] == "exomem"
+    assert marketplace["renames"] == {"exomem": "evermatter"}
+    assert "evermatter" in {plugin["name"] for plugin in marketplace["plugins"]}
 
 
 def test_manifest_carries_listing_metadata() -> None:

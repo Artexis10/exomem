@@ -1,18 +1,18 @@
 ---
-name: exomem-capture
-description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
+name: evermatter-media
+description: Search, inspect, cite, and preserve Evermatter media artifacts such as PDFs, images, audio, and video. Part of Evermatter, formerly Exomem.
 metadata:
-  skill_contract: 96ab0f8b9834703e4dafda31fa839d9f0f28712d4ce78b38544a5f2ac2b9cccf
+  skill_contract: 11af20af93a5fb2117016a32d1cebefb6c664aae1b7b8f4a18be746e58a1b17b
   version: "0.1.0"
 ---
 
-# exomem-capture
+# evermatter-media
 
 ## Purpose
-Save durable conclusions and recurring entities at the right epistemic layer.
+Use Evermatter's multimodal substrate without flattening every artifact into text.
 
 ## When to use
-Use when the user asks to save or the session lands on durable reusable knowledge, including stable context about a recurring entity.
+Use when the user asks to find media evidence, look inside a recording, inspect a PDF/image/audio/video, or recall where something appeared.
 
 ## Portable operating rules
 
@@ -72,131 +72,20 @@ Without method continuity, freshly read a method before reusing it.
 An unchanged map does not certify method freshness. Refresh when the task, evidence
 or uncertainty changes materially; ordinary memory reads alone do not trigger refresh.
 
-## Durable personal baselines
-A stable preference, recurring routine, historical baseline, or durable affiliation
-is eligible only when both stability or recurrence and reusable comparison,
-interpretation, or decision value are clear. Attach a facet or affiliation to a
-uniquely resolved Entity; otherwise write one concise compiled observation. A
-recurring named item or measurement goes to Records: reuse a matching collection by
-natural key, else create a minimal one under `proactive_capture`. Fleeting preferences, one-off activity, incidental associations, and trivial
-metrics get no note. A tentative or unresolved claim never becomes a baseline; when later
-work could use it, save it as tentative, attributed, with its uncertainty. Durable
-interpretations retain explicit attribution and uncertainty rather than becoming
-established facts. Eligibility never creates an Entity,
-collection, or schema. Concise observations and narrow additive facts follow
-`proactive_capture`; a new Entity or your own affiliation edge follows `proactive_capture`;
-accepting a queued relation uses `link_acceptance`; merge or substantial curation uses
-confirmed `restructure_execution`.
-
-## Recurring structured work and agreed decisions
-A **decision or standing rule agreed in conversation** is durable. Under `proactive_capture`,
-save it when it is agreed: `silent` saves it and reports one line, `advisory` offers the
-save, and `off` waits for an explicit request.
-
-**Recurring structured work** goes to Records: stable identities that recur, repeated
-observations or evaluations of the same items, comparisons, changing state, or a need to
-query exactly. Judge it from meaning. A passing mention gets no collection, and narrative
-stays in Notes. Follow `references/planning-records.md`: list the collections, reuse a
-compatible one and update rows by natural key, else `add_record` with `new_collection`
-creates a minimal collection and adds the first row, under the served disposition. A later
-fact that has no field is added with `new_fields`, never put into another field. Backfill
-what the conversation established with dates and attribution, and report the collection and
-the rows in the reply.
-
-When a write ends `MUTATION_ACKNOWLEDGEMENT_PENDING`, replay it with the same identity and
-the same payload, or read the collection and the row by natural key before submitting that write again.
-Never retry with a new identity. A `bulk_upsert` needs `source`, once for the batch or on
-each row.
-
 ## Workflow
-Before choosing a destination, partition the exchange into independently reusable
-objects by retrieval question, subject/domain, temporal episode, and epistemic
-role. Reuse current relevant recall and resolve each meaningful cluster against
-canonical homes. The open note has no priority; keep details within one coherent
-scope together. Save each claim at its true strength, never more certain, more general
-or more settled than its source made it. A held view, interpretation or working hypothesis
-the evidence does not settle is saved attributed to whoever holds it, with its uncertainty,
-never as fact; a remark made in passing is not a held view. A person's unsure report that
-later work could use is saved as unsure and attributed, never as an event, fact or baseline.
-Also save a question the work leaves open (as an open question, including whether something
-happened) and settled values (in full, not file pointers). No write mentions what stays unwritten.
-Perform one completeness/destination review for the whole write plan, not a new
-review after every write. During development, repository/specification artifacts
-carry transient progress; capture reusable decisions and verified milestones.
+1. Search with media-aware filters or artifact terms using `search_memory`.
+2. Use artifact-specific product tools: extracted text/OCR/transcripts, `inspect_memory` and `manage_memory` status/retry/reprocess, `inspect_memory`, `save_evidence` for file handles, fallback `upload_files`, upload metadata, or preserved evidence paths.
+3. Cite raw artifact paths and timestamps/pages/frames when available.
+4. Preserve new raw artifacts with `save_source`, `save_evidence`, `save_evidence` for file handles, or fallback `upload_files` before analyzing them.
+5. Draft textual conclusions only when there is a durable finding, naming the preserved artifact in `sources:`.
+6. Reuse known meaningful connections; use `inspect_memory(operation="connections.suggest_links")` when candidates are still missing and review them. Then write with `create_note`, carrying the sources and accepted connections in the first write.
+7. For a set of recordings and documents to compile into notes, follow the multi-source steps of the source compilation pass in `references/writing.md`: inventory, timeline, reading by time range and page, attribution, verification, coverage ledger and final audit.
 
-1. Decide whether the material is raw evidence or a compiled conclusion.
-2. Use `save_source` for raw captured text or source material. Classify it on
-   two open axes: `source_kind` (what it is, required) and `domain` (what it is
-   about), plus `projects` for the work it serves. Name the closest known kind
-   or a new one; there is no catch-all.
-3. Pick the lane before the transport. Raw material stays with `save_source`, which takes `files` for attachments as well as `content` for text. Proof-bearing material takes `save_evidence` for factual text, `save_evidence` when file handles are available, and `upload_files(lane="evidence", scope=..., category=...)` when they are not: its send saves on arrival. Keep a proof file the user shares in the turn it arrives, and put the returned `cite` wikilink in the text you write about it. Never keep a card number, code or password; ask for a covered copy.
-4. Draft distilled conclusions as: `research-note`, `insight`, `failure`, or `pattern`. Pass any path captured in steps 2-3 as `sources:` so the conclusion links to its provenance and the source leaves the unprocessed queue.
-5. Reuse known meaningful connections; use `inspect_memory(operation="connections.suggest_links")`
-   when candidates are still missing. Then write with
-   `create_note`, carrying the sources and accepted links in the first write; prefer
-   `edit_note` or `supersede_note` for near-duplicates.
-6. For an entity, consult the active entity registry and selected knowledge packs,
-   then call `inspect_memory(operation="connections.resolve_entity", arguments={'name': ...})` before writing.
-7. When one active entity matches, use `edit_note` for a small stable-fact
-   correction or the canonical relation workflow for a new connection.
-   A stable, uniquely attributable fact about a resolved person, including the
-   vault owner's own entity (role, affiliation, relationship), is an entity-level
-   fact: route it to that entity under `proactive_capture`, not just in the reply
-   that used it. Contact details (phone, address, email, identifiers) go on the
-   same entity page, in a dedicated `## Contact` section, each as its own
-   `- [contact] ...` unit. Never put them in the summary or in `fact` units:
-   activation serves `contact` units only when the turn asks to reach the person,
-   and a restricted audience that cannot see the entity cannot see the section.
-   Do not create a separate contact page or page type.
-8. Only when no entity matches and the identity is stable, and central or
-   recurring, and useful beyond this source, use `manage_memory(operation="connections.create_entity")`.
-   When the name you write is in another script than the user's own spelling
-   of it, add a native-script alias (`aliases=[...]` at create, or the
-   `aliases` field through `edit_note` on an existing page); see
-   `references/writing.md` § Names in another script.
+## Declaring the language
+When the languages of a recording are unknown at ingest, ask the user once: "One language or several?" Say that several is slower, because the engine detects the language in every window. Declare the answer on the first processing with `manage_memory(operation="media.process", arguments={'path': ..., 'language': <code>})`, or `'multilingual': true` for several. Do not ask per file when the languages are already known. If the file is already being processed, wait for the run to end, then use `reprocess` with the same field.
 
-## Lifecycle
-Two more classes land here. A **stated intent or commitment** routes to Planning after resolving workflow posture and inspecting for an existing item to update before creating one. An **observed outcome or event** routes only to one compatible Records collection with `add_record(...)`; when collections compete ask one focused question, and when none fits and the identity, type and scope are clear, create a minimal one under the served capture disposition. Records never transition Planning: only explicit user intent may request a guarded transition, while a `propose-after-outcome` posture may only propose one. A tentative claim is never written as an event, and elapsed time is never an outcome. When a write receipt or recall names a collection's capture method, read it and follow it.
-
-## Artifact role and current state
-Read the supporting units for `artifact_role_promotion` and
-`transient_state_review`; neither signal grants mutation authority. Choose a home
-by role even within one topic: a repeatable successful procedure belongs in a
-suitable reusable note, and an attributed multi-source synthesis in a research
-note. Search existing eligible homes first. Keep exact source-unit provenance:
-reference both the procedure and outcome units when extracting a method, or the
-synthesis unit and its distinct sources when compiling a research note. Retain
-the experiment history. A title match or parent backlink does not establish that
-the identified material has a home; exact represented content does, while a
-paraphrase remains a review candidate for the reader to assess.
-
-For example, a batch may contain two separately successful reusable methods and
-a synthesis across two sources. Give each method its own evidence and check the
-synthesis independently; extracting one does not settle the others. A protocol
-without reusable success or a list of citations alone needs no such promotion.
-For a single batch, “No taste results yet” alongside an observed taste result
-invites a current-wording correction; “Previously no taste results existed” is
-history, and taste results do not settle an awaited safety result or a new trial.
-Preserve that history through a governed edit or exact valid supersession.
-
-Extraction/restructuring uses confirmed `restructure_execution`; an
-already-authorized local correction acquires no additional confirmation step.
-Observed transaction state still follows the existing Records claims handoff,
-never an automatic append from a review signal. Item triage changes presentation,
-not evidence coverage. Explicit review exposes complete/capped/unknown coverage;
-compact omission is not proof of a clean page. Apply this role-first reasoning to
-visible conversation transitions before writing too. An MCP-only server cannot
-guarantee detection or capture of a tool-free turn.
-
-## Vocabulary
-
-Read [vocabulary](references/vocabulary.md) before changing a registry.
-If the vocabulary reference is missing, inspect the exposed `read_instructions` schema.
-Use `read_instructions(profile='compact', section='vocabulary')`, or
-`read_instructions(profile='full')` when `section` is unavailable. Follow the returned
-inspect routes and `save` contract. Reuse or alias before proposing justified
-new meaning; save with the current hash and `why`. Report saved versus queued
-and the returned restore route. Use only exposed operations.
+## Faulty transcripts
+Read the extraction fields in the sidecar before trusting a transcript: `asr_language`, `asr_language_probability`, `asr_language_source`, `asr_language_mode` and `asr_speech_seconds`. A transcript in the wrong language, or one that repeats a line, is a processing fault, not content. Fix it with `manage_memory(operation="media.reprocess", arguments={'path': ..., 'language': <code>})` on the user's request or on that evidence, or with `'multilingual': true` when the recording mixes languages. Without either, a reprocess reuses the language or mode already pinned on the sidecar, and detects one language when none is pinned. The old extraction stays on a linked prior page.
 
 ## Relation governance
 Resolve typed meaning with `resolve-relation` before authoring, and name a specific
@@ -207,17 +96,13 @@ relation is refused (`GENERIC_RELATION_REFUSED` lists ranked specific relations 
 exact calls). Corrections use a new canonical key and deprecate the old one.
 
 ## Output contract
-After writing, report the `user_summary` (`Saved -> <title> (<store>)`) plus one short phrase if needed. If nothing durable was saved, say why. Report a lifecycle consequence in the user's own vocabulary and cite the collection the way recall cites a page; the words Planning, Records, collection, schema and natural key never lead the report.
+Return matching artifacts, what was inspected, citations, and any compiled conclusion path.
 
 ## Save rules
-Keep raw source verbatim when it matters. Keep compiled notes concise, attributed, linked, and written as conclusions, not transcripts.
+Raw media belongs in `Sources/` or `Evidence/`; textual notes should summarize conclusions and link back to artifacts.
 
 ## Mistakes to avoid
-Do not save unresolved brainstorming as a conclusion. Do not bury raw evidence
-inside a compiled note. A single incidental mention, unresolved identity, or
-transient participant stays in source/note context. Do not create a parallel
-page when an existing active note or entity should be edited, linked, or
-superseded.
+Do not claim visual/audio evidence from filenames alone. Do not discard raw media after extracting text. Do not paste whole transcripts into notes when a cited artifact path with timestamps or pages is the durable evidence; read the extracted text in full before concluding anything from it.
 
 <!-- exomem-semantic-authoring:v12 sha256:531316a2be37ad20214f80f7a0831929be57f46105228e019e292d6ac92aafd9 -->
 ## Semantic authoring contract

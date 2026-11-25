@@ -1,18 +1,19 @@
 ---
-name: exomem-defrag
-description: Reconcile duplicate, stale, or conflicting Evermatter memory while preserving history through review, merge, or supersession.
+name: evermatter-review
+description: Use Evermatter's Epistemic Inbox and audit queues to surface stale conclusions, contradictions, relation debt, and unprocessed sources safely. Part of Evermatter, formerly Exomem.
 metadata:
-  skill_contract: 96ab0f8b9834703e4dafda31fa839d9f0f28712d4ce78b38544a5f2ac2b9cccf
-  version: "0.1.0"
+  skill_contract: 11af20af93a5fb2117016a32d1cebefb6c664aae1b7b8f4a18be746e58a1b17b
+  version: "0.2.0"
 ---
 
-# exomem-defrag
+# evermatter-review
 
 ## Purpose
-Reduce duplicate, stale, or conflicting memory without losing provenance.
+Drain Evermatter review queues into safe next actions.
 
 ## When to use
-Use when the user asks to defrag a topic, reconcile notes, resolve contradictions, merge duplicates, or inspect what is stale.
+Use when the user asks to review the KB, see what needs attention, drain backlog,
+or inspect stale, contradictory, disconnected, or unprocessed material.
 
 ## Portable operating rules
 
@@ -73,12 +74,66 @@ An unchanged map does not certify method freshness. Refresh when the task, evide
 or uncertainty changes materially; ordinary memory reads alone do not trigger refresh.
 
 ## Workflow
-1. Search the topic with `search_memory`, using `search_memory(deep=true)`, `inspect_memory` and `manage_memory`, or `list_review_items` and `decide_review_item` when graph, stale, audit, or evolution context matters.
-2. Group findings into keep, merge, supersede, or leave alone.
-3. Read candidate pages with `read_page`, including history when needed.
-4. Use `supersede_note` for changed conclusions and `edit_note` only for minor corrections.
-5. Preserve raw sources and evidence; keep superseded history visible.
-6. When you supersede or merge, carry the merged notes' `sources:` and outbound links onto the survivor — a merge that drops edges loses graph value the superseded page can no longer carry. Check `list_review_items(queue='unlinked')` on the survivor afterwards.
+1. Start with `list_review_items(queue='due')` for the ranked review queue.
+2. Use `inspect_memory(operation="maintenance.audit")` when the user asks for broader health checks or specific categories.
+3. For unprocessed sources, use `create_note` before writing a compiled note with `create_note`, passing those source paths as `sources:` so the source leaves the unprocessed queue.
+4. For relation debt, inspect `inspect_memory(operation="connections.suggest_relations")` or
+   `suggest-links`; write accepted note edges under `## Relations`, never from
+   semantic proximity alone.
+5. For stale or contradictory compiled notes, read the relevant pages with `read_page` and decide keep, `edit_note`, `supersede_note`, `inspect_memory` and `manage_memory`, or leave alone.
+6. For recurring unregistered relation labels, propose promotion with `inspect_memory(operation="schema.propose_relation", arguments={"subject": "relations", "proposal": ...})` rather than rewriting the notes that use them.
+7. Use `decide_review_item` only after an explicit decision to dismiss, snooze, or
+   reopen an Inbox item, and lead its `why` with a review reason code —
+   `intentional:`, `false_positive:`, `handled:`, `deferred:`, or
+   `too_frequent:` — so the decision is still legible months later.
+8. When the user wants to stop hearing about a whole KIND of signal, quiet that
+   family rather than lowering prominence, which silences everything:
+   `manage_memory(operation="review.set_family", arguments={'ref': 'exomem://review/family/<family>', 'action': 'quiet', 'why': ...})` with a
+   reason code in `why`. `off` additionally hides it from explicit category
+   review; `normal` restores it. A quiet family is silent, not clean — it stays
+   listed by `inspect_memory(operation="review.dispositions")` and the audit still measures
+   it, so a queue without it is not proof it has nothing due.
+9. Propose risky actions before mutating.
+
+## Artifact role and current state
+Read the supporting units for `artifact_role_promotion` and
+`transient_state_review`; neither signal grants mutation authority. Choose a home
+by role even within one topic: a repeatable successful procedure belongs in a
+suitable reusable note, and an attributed multi-source synthesis in a research
+note. Search existing eligible homes first. Keep exact source-unit provenance:
+reference both the procedure and outcome units when extracting a method, or the
+synthesis unit and its distinct sources when compiling a research note. Retain
+the experiment history. A title match or parent backlink does not establish that
+the identified material has a home; exact represented content does, while a
+paraphrase remains a review candidate for the reader to assess.
+
+For example, a batch may contain two separately successful reusable methods and
+a synthesis across two sources. Give each method its own evidence and check the
+synthesis independently; extracting one does not settle the others. A protocol
+without reusable success or a list of citations alone needs no such promotion.
+For a single batch, “No taste results yet” alongside an observed taste result
+invites a current-wording correction; “Previously no taste results existed” is
+history, and taste results do not settle an awaited safety result or a new trial.
+Preserve that history through a governed edit or exact valid supersession.
+
+Extraction/restructuring uses confirmed `restructure_execution`; an
+already-authorized local correction acquires no additional confirmation step.
+Observed transaction state still follows the existing Records claims handoff,
+never an automatic append from a review signal. Item triage changes presentation,
+not evidence coverage. Explicit review exposes complete/capped/unknown coverage;
+compact omission is not proof of a clean page. Apply this role-first reasoning to
+visible conversation transitions before writing too. An MCP-only server cannot
+guarantee detection or capture of a tool-free turn.
+
+## Vocabulary
+
+Read [vocabulary](references/vocabulary.md) before changing a registry.
+If the vocabulary reference is missing, inspect the exposed `read_instructions` schema.
+Use `read_instructions(profile='compact', section='vocabulary')`, or
+`read_instructions(profile='full')` when `section` is unavailable. Follow the returned
+inspect routes and `save` contract. Reuse or alias before proposing justified
+new meaning; save with the current hash and `why`. Report saved versus queued
+and the returned restore route. Use only exposed operations.
 
 ## Relation governance
 Resolve typed meaning with `resolve-relation` before authoring, and name a specific
@@ -89,13 +144,15 @@ relation is refused (`GENERIC_RELATION_REFUSED` lists ranked specific relations 
 exact calls). Corrections use a new canonical key and deprecate the old one.
 
 ## Output contract
-Return the reconciliation decision for each candidate and the paths changed or left alone.
+Return a prioritized review list, recommended safe actions, and any completed saves or edits.
 
 ## Save rules
-Only mutate when the correct action is clear. Use supersession for meaningful changes.
+Compile unprocessed sources only when they form a coherent note. Use supersession for changed conclusions.
 
 ## Mistakes to avoid
-Do not auto-delete memory. Do not treat semantic proximity as contradiction by itself. Do not merge notes that answer different questions.
+Do not auto-delete. Do not treat queue presence as proof something is wrong. Do
+not auto-accept suggested relations or batch risky mutations without user
+confirmation.
 
 <!-- exomem-semantic-authoring:v12 sha256:531316a2be37ad20214f80f7a0831929be57f46105228e019e292d6ac92aafd9 -->
 ## Semantic authoring contract

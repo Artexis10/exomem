@@ -23,7 +23,7 @@ def _active_capture_carriers(vault: Path) -> dict[str, str]:
         # The router delegates the engagement rules to this reference, so it is
         # the carrier that must teach adoption in each distribution.
         "scaffold": _text("src/exomem/_scaffold/_Schema/references/engagement.md"),
-        "plugin-skill": _text("plugins/claude-code/skills/exomem/references/engagement.md"),
+        "plugin-skill": _text("plugins/claude-code/skills/evermatter/references/engagement.md"),
     }
 
 
@@ -69,13 +69,13 @@ def test_off_and_light_remain_explicit_request_only() -> None:
 
 def test_scaffold_and_deployed_claude_code_copies_match() -> None:
     assert (ROOT / "src/exomem/_scaffold/_Schema/SKILL.md").read_bytes() == (
-        ROOT / "plugins/claude-code/skills/exomem/SKILL.md"
+        ROOT / "plugins/claude-code/skills/evermatter/SKILL.md"
     ).read_bytes()
     for reference in ("operations.md", "write-scope.md"):
         assert (
             ROOT / "src/exomem/_scaffold/_Schema/references" / reference
         ).read_bytes() == (
-            ROOT / "plugins/claude-code/skills/exomem/references" / reference
+            ROOT / "plugins/claude-code/skills/evermatter/references" / reference
         ).read_bytes()
     assert (ROOT / "src/exomem/_hooks/exomem_capture_nudge.py").read_bytes() == (
         ROOT / "plugins/claude-code/hooks/exomem_capture_nudge.py"

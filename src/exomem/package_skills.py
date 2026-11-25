@@ -23,7 +23,7 @@ import zipfile
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 
-from . import install_info, workflow_skills
+from . import client_config, install_info, workflow_skills
 from .install_hook import CLAUDE_CONTINUATION_CLIENT_ARG
 from .kbdir import managed_root
 
@@ -152,8 +152,10 @@ def ensure_personalized_output(path: Path, *, vault: Path) -> Path:
 
 
 def _core_payload(vault: Path | None) -> dict[str, str]:
-    """Files for the core `exomem` skill archive, keyed by archive-relative path."""
-    workflow_skills.validate_contract_projection("exomem", _SKILL_SRC, core=True)
+    """Files for the core skill archive, keyed by archive-relative path."""
+    workflow_skills.validate_contract_projection(
+        workflow_skills.CORE_SKILL_NAME, _SKILL_SRC, core=True
+    )
     payload: dict[str, str] = {
         "SKILL.md": render_shipped_markdown((_SKILL_SRC / "SKILL.md").read_text(encoding="utf-8"))
     }
@@ -201,7 +203,11 @@ def _workflow_payload(name: str) -> dict[str, str]:
 
 def skill_payload(name: str, *, vault: Path | None = None) -> dict[str, str]:
     """Return the complete canonical payload for a core or workflow skill."""
-    return _core_payload(vault) if name == "exomem" else _workflow_payload(name)
+    return (
+        _core_payload(vault)
+        if name == workflow_skills.CORE_SKILL_NAME
+        else _workflow_payload(name)
+    )
 
 
 def _write_zip(path: Path, payload: dict[str, str]) -> int:
@@ -222,6 +228,11 @@ def _write_zip(path: Path, payload: dict[str, str]) -> int:
 # Local-only users can opt into stdio explicitly with `exomem setup --stdio`.
 # The skills/ and hooks/ trees are GENERATED from the same package sources and
 # guarded by a sync test rather than hand-maintained.
+
+#: The plugin's name, which is also the entry name in `.claude-plugin/marketplace.json`. A client
+#: builds its tools as `mcp__plugin_<plugin>_<server>__<tool>`. The marketplace's `renames` map
+#: sends an install of the old name `exomem` here.
+PLUGIN_NAME = "evermatter"
 
 _PLUGIN_HOOK_EVENTS: tuple[tuple[str, str | None], ...] = (
     ("Stop", None),
@@ -261,12 +272,13 @@ def _package_version() -> str:
 
 def _plugin_manifest() -> dict:
     return {
-        "name": "exomem",
+        "name": PLUGIN_NAME,
         "description": (
-            "Governed long-term memory over a markdown vault: raw sources stay "
-            "immutable, conclusions are compiled with provenance, and nothing is "
-            "deleted - it is superseded. Requires EXOMEM_VAULT_PATH to point at "
-            "your vault; run `exomem setup` if you do not have one yet."
+            "Evermatter (formerly Exomem): governed long-term memory over a markdown "
+            "vault. Raw sources stay immutable, conclusions are compiled with "
+            "provenance, and nothing is deleted - it is superseded. Requires "
+            "EXOMEM_VAULT_PATH to point at your vault; run `evermatter setup` if "
+            "you do not have one yet."
         ),
         "version": _package_version(),
         # Listing metadata. A curated marketplace entry shows author, homepage,
@@ -297,7 +309,7 @@ def _plugin_manifest() -> dict:
             }
         },
         "mcpServers": {
-            "exomem": {
+            client_config.SERVER_NAME: {
                 "type": "http",
                 "url": "${user_config.mcp_url}",
             }
@@ -345,7 +357,9 @@ def sync_plugin(plugin_root: Path) -> dict:
     hooks_dir = plugin_root / "hooks"
     manifest_dir = plugin_root / ".claude-plugin"
 
-    workflow_skills.validate_contract_projection("exomem", _SKILL_SRC, core=True)
+    workflow_skills.validate_contract_projection(
+        workflow_skills.CORE_SKILL_NAME, _SKILL_SRC, core=True
+    )
     for skill in workflow_skills.list_skills():
         name = str(skill["name"])
         workflow_skills.validate_contract_projection(
@@ -360,18 +374,18 @@ def sync_plugin(plugin_root: Path) -> dict:
     # nested would expose every SKILL.md at two paths at once.
     shutil.copytree(
         _SKILL_SRC,
-        skills_dir / "exomem",
+        skills_dir / workflow_skills.CORE_SKILL_NAME,
         ignore=shutil.ignore_patterns("workflow-skills", "__pycache__", "relation-reviews"),
     )
     # The copytree ships the scaffold byte-for-byte except release placeholders,
     # which pin the release this plugin was synced from.
-    for document in (skills_dir / "exomem").rglob("*.md"):
+    for document in (skills_dir / workflow_skills.CORE_SKILL_NAME).rglob("*.md"):
         document.write_text(
             render_shipped_markdown(document.read_text(encoding="utf-8")),
             encoding="utf-8",
             newline="\n",
         )
-    names = ["exomem"]
+    names = [workflow_skills.CORE_SKILL_NAME]
     for skill in workflow_skills.list_skills():
         name = str(skill["name"])
         target = skills_dir / name
@@ -434,7 +448,8 @@ def package_skills(out_dir: Path | None = None, *, vault: Path | None = None) ->
     if vault is not None:
         out_dir = ensure_personalized_output(out_dir, vault=vault)
 
-    builds: list[tuple[str, dict[str, str]]] = [("exomem", skill_payload("exomem", vault=vault))]
+    core = workflow_skills.CORE_SKILL_NAME
+    builds: list[tuple[str, dict[str, str]]] = [(core, skill_payload(core, vault=vault))]
     for skill in workflow_skills.list_skills():
         name = str(skill["name"])
         builds.append((name, skill_payload(name)))

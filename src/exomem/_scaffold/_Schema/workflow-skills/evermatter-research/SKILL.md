@@ -1,18 +1,18 @@
 ---
-name: exomem-continue
-description: Resume prior project or session context from Evermatter when the user wants to continue, pick something back up, or remember what was happening on a topic.
+name: evermatter-research
+description: "Run a focused research loop with Evermatter: gather sources, preserve evidence, compile attributed findings, and connect prior notes. Part of Evermatter, formerly Exomem."
 metadata:
-  skill_contract: 96ab0f8b9834703e4dafda31fa839d9f0f28712d4ce78b38544a5f2ac2b9cccf
+  skill_contract: 11af20af93a5fb2117016a32d1cebefb6c664aae1b7b8f4a18be746e58a1b17b
   version: "0.1.0"
 ---
 
-# exomem-continue
+# evermatter-research
 
 ## Purpose
-Resume prior context without guessing from chat history alone.
+Answer a focused question and save what should compound.
 
 ## When to use
-Use when the user asks to continue, resume, pick up a project, recover prior state, or asks what they were doing on a topic.
+Use when the user asks to research a topic, compare options, investigate a claim, or save findings from a research pass.
 
 ## Portable operating rules
 
@@ -73,12 +73,13 @@ An unchanged map does not certify method freshness. Refresh when the task, evide
 or uncertainty changes materially; ordinary memory reads alone do not trigger refresh.
 
 ## Workflow
-1. Search first with `search_memory(detail="compact", rerank=false)`, preferring active compiled notes and project-relevant terms from the prompt.
-2. Use `search_memory(deep=true)` when several hits matter or the state needs synthesis.
-3. Read only the top relevant pages with `read_page` when excerpts are not enough.
-4. Prefer recent active compiled notes, then linked sources/evidence when provenance is needed.
-5. Read the Planning inventory with `query_plan_items()` (no collection) when the topic has one, and read the due-state block any response already carried rather than re-deriving it. Both are read-only and create nothing.
-6. Summarize current state, decisions already made, blockers, and likely next actions.
+1. Search Evermatter first with `search_memory` for prior conclusions and related sources.
+2. Gather external sources only as needed; preserve important raw sources with `save_source`, passing `files` when the client can hand over an attachment. `save_evidence`, `save_evidence`, and the `upload_files` fallback are for proof-bearing artifacts, not for raw material.
+   Take a document's title, authors, year, venue and DOI from the document itself, never from a search hit, a repository match or memory. Compare what you saved with the reply's `identity` block, which shows the document's opening and the DOIs it carries. A document that cites the work is not the work. When they differ, correct the Source with `options.correction` and no `files`.
+   Set `document_form`. When the full text is unavailable, save the publisher's abstract or citation record and label it so; never present it as the full text.
+3. Attribute findings to sources and distinguish evidence from interpretation.
+4. Draft the result as a `research-note` unless another type clearly fits, listing every source preserved in step 2 in `sources:`.
+5. Reuse meaningful connections from the research context; use `inspect_memory(operation="connections.suggest_links")` when candidates are still missing and review related prior notes. Then write with `create_note`, including the sources and accepted connections in the first write.
 
 ## Relation governance
 Resolve typed meaning with `resolve-relation` before authoring, and name a specific
@@ -89,16 +90,13 @@ relation is refused (`GENERIC_RELATION_REFUSED` lists ranked specific relations 
 exact calls). Corrections use a new canonical key and deprecate the old one.
 
 ## Output contract
-Return a compact continuation brief with cited Evermatter pages and a short next-action list. Say when the search missed or was thin.
+Return findings, cited sources, limits, saved path, and follow-up questions.
 
 ## Save rules
-Save only if the resumed work produces a new durable decision, solved problem, failure, pattern, or research finding. Use `create_note`, `edit_note`, or `supersede_note` as appropriate.
-
-## Lifecycle
-Resuming reads Planning; it never moves it. Route explicit user intent to Planning and observed outcomes to Records. An outcome alone never transitions Planning: explicit user intent may request a guarded transition, and `propose-after-outcome` may only propose one. Elapsed time since the last session is not an outcome, and nothing in the runtime transitions an item on your behalf.
+Save findings that answer the question, change a decision, or create reusable context. Keep source attribution explicit.
 
 ## Mistakes to avoid
-Do not invent prior context from memory. Do not treat a scoped miss as absence. Do not dump long note bodies when a state brief is enough.
+Do not research from scratch before checking Evermatter. Do not save a source list without synthesis. Do not hide uncertainty or source gaps.
 
 <!-- exomem-semantic-authoring:v12 sha256:531316a2be37ad20214f80f7a0831929be57f46105228e019e292d6ac92aafd9 -->
 ## Semantic authoring contract

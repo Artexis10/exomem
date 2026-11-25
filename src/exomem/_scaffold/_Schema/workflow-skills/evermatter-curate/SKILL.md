@@ -1,18 +1,18 @@
 ---
-name: exomem-reflect
-description: Distill a session or project episode into decisions, failures, patterns, open questions, and next actions.
+name: evermatter-curate
+description: Improve Evermatter note quality by adding links, clarifying compiled notes, and organizing safely without editing the content of raw Sources or Evidence. Part of Evermatter, formerly Exomem.
 metadata:
-  skill_contract: 96ab0f8b9834703e4dafda31fa839d9f0f28712d4ce78b38544a5f2ac2b9cccf
-  version: "0.1.0"
+  skill_contract: 11af20af93a5fb2117016a32d1cebefb6c664aae1b7b8f4a18be746e58a1b17b
+  version: "0.2.0"
 ---
 
-# exomem-reflect
+# evermatter-curate
 
 ## Purpose
-Convert experience into reusable memory.
+Improve the KB graph and compiled-note quality without damaging provenance.
 
 ## When to use
-Use when the user asks what was learned, asks to reflect, closes a project episode, or wants patterns extracted from a session.
+Use when the user asks to clean up, organize, link, tidy, or improve a set of Evermatter notes.
 
 ## Portable operating rules
 
@@ -73,11 +73,31 @@ An unchanged map does not certify method freshness. Refresh when the task, evide
 or uncertainty changes materially; ordinary memory reads alone do not trigger refresh.
 
 ## Workflow
-1. Search Evermatter with `search_memory` for the project/topic so reflection builds on existing memory.
-2. Extract durable decisions, solved problems, diagnosed failures, reusable patterns, held views and unsure reports (attributed, with their uncertainty, never as fact), open questions (including whether something happened), settled values (in full, not file pointers), and next actions.
-3. Draft each durable conclusion at the right type: `insight`, `failure`, `pattern`, or `research-note`. Cite the session capture or prior notes it draws on in `sources:`.
-4. Prefer one strong note over many weak notes unless the conclusions are genuinely different.
-5. Link the pages you already read in step 1 inline, using `inspect_memory(operation="connections.suggest_links")` to catch the ones you missed; draft the edges that carry direction under `## Relations`. Then save with `create_note`, carrying the sources and accepted links in the first write.
+0. To organize by topic, or when maps show few topics, do not edit pages one by one. Read the topic-carrier items from `list_review_items(queue='vocabulary')` and follow "Topic carriers" in [vocabulary](references/vocabulary.md): one carrier save files every page of a project key, folder or tag. When no existing domain names the pages' shared subject, register one with `manage_memory(operation="schema.save", arguments={'subject': 'domains'})` and declare it; within this step that needs no separate approval. Then show the person the review list.
+1. Search related notes with `search_memory`; use `inspect_memory(operation="connections.suggest_links")` for link candidates, `"suggest-relations"` when direction matters, and `"graph-context"` for graph shape or inbound links.
+2. Identify safe improvements — missing links, stale wording, weak titles, duplicate tags, or unlinked entities — starting from `list_review_items(queue='unlinked')` for pages with no outbound edges and `list_review_items(queue='relation_suggestions')` for already-reviewed candidates.
+3. For a bounded set of explicitly selected pages, call `inspect_memory(operation="curation.work_item", arguments={'curation_action': 'work-item', 'refs': [...], 'paths': [...]})`. This is `structural_suggestions`: it assembles recorded context and never chooses semantics or writes content.
+4. Author the typed plan yourself: `{'version': 1, 'title': <one line>, 'steps': [{'step_id': 's1', 'kind': <step kind>, 'args': {...}}]}`, with each step's args from the work item's `step_schemas`. `read_instructions(topic='curation.propose')` returns worked split, move and rehome plans. A refusal names what is missing or not allowed; correct the plan from it. Submit it with `manage_memory(operation="curation.propose", arguments={'curation_action': 'propose', 'plan': ...})`, or on the CLI `manage_memory` with `mode="curation"`, `curation_action="propose"`, and `plan`. Inspect it with `inspect_memory(operation="curation.preview", arguments={'run_id': ...})`; preview the immutable plan once and surface its exact actions, blockers, fingerprint, and compensation classes. To move many pages into one project or rename them to their titles, skip steps 3 and 4: `manage_memory(operation="curation.relocate", arguments={'pages': [...], 'to_project': <key>})` derives and seals the whole plan. Its grouped summary, refusals and fingerprint are the preview.
+5. Before any execution, treat the plan as `restructure_execution`: obtain one explicit confirmation for that exact plan fingerprint. Do not infer confirmation from the request to inspect or improve notes, and do not accept standing approval.
+6. On confirmation, call `manage_memory(operation="curation.apply")` (CLI `curation_action="apply"`), the returned `run_id`, `plan_id`, `expected_plan_fingerprint`, and `why`. Each request runs the steps its time allows and reports its `progress`. Follow the reply's `next_action`: while it is `resume`, resume automatically through `manage_memory(operation="curation.resume")` (CLI `curation_action="resume"`). A reply with `stopped` names the step and the refusal that ended the request; the steps before it stay committed. When the run is `partial` or `blocked` and `next_action` is not `resume`, stop and report the durable evidence instead of improvising.
+7. Compensation is a new reviewed plan, never rollback. `manage_memory(operation="curation.propose_compensation")` (CLI `curation_action="propose-compensation"`) is `structural_suggestions`: use it to derive the plan, then preview it and obtain a fresh exact-plan confirmation before `manage_memory(operation="curation.apply_compensation")` (CLI `curation_action="apply-compensation"`). Continue the already-approved compensation plan only through the same `resume` route; resume does not need a fresh confirmation for each step.
+8. Leave the content of raw `Sources/` and `Evidence/` untouched. A plan changes their links only through its `repoint-links` step, and a registered pointer field such as `project` through a `patch_frontmatter` edit step.
+9. Check `inspect_memory(operation="maintenance.audit", arguments={'categories': ['unregistered_relation']})` for relation labels that recur but are not registered; promote the ones that have earned it with `inspect_memory(operation="schema.propose_relation", arguments={"subject": "relations", "proposal": ...})`, which turns them into real typed edges instead of standing review debt.
+
+Remote and local clients run the same curation workflow. MCP and REST expose
+the reads through `inspect_memory` and the writes (propose, apply, resume and
+compensation) through `manage_memory`; the CLI exposes them through
+`manage_memory`.
+
+## Vocabulary
+
+Read [vocabulary](references/vocabulary.md) before changing a registry.
+If the vocabulary reference is missing, inspect the exposed `read_instructions` schema.
+Use `read_instructions(profile='compact', section='vocabulary')`, or
+`read_instructions(profile='full')` when `section` is unavailable. Follow the returned
+inspect routes and `save` contract. Reuse or alias before proposing justified
+new meaning; save with the current hash and `why`. Report saved versus queued
+and the returned restore route. Use only exposed operations.
 
 ## Relation governance
 Resolve typed meaning with `resolve-relation` before authoring, and name a specific
@@ -88,13 +108,13 @@ relation is refused (`GENERIC_RELATION_REFUSED` lists ranked specific relations 
 exact calls). Corrections use a new canonical key and deprecate the old one.
 
 ## Output contract
-Return what was saved, what was intentionally not saved, and remaining open questions.
+Summarize changes made or proposed, citing affected paths. Flag risky changes instead of applying them silently.
 
 ## Save rules
-Save conclusions, not a transcript. Keep enough context that the lesson is reusable later. Save each claim at its true strength: never more certain, more general or more settled than its source made it. No note mentions what stays unwritten.
+Preserve history. Prefer supersession when meaning changes. Keep links useful, not decorative.
 
 ## Mistakes to avoid
-Do not capture every turn. Do not flatten failures and patterns into generic summaries. Do not erase uncertainty or next actions.
+Do not rewrite the content of raw sources or evidence. Do not mass-edit without reading the relevant notes. Do not collapse distinct conclusions just because they share keywords. Do not reuse a forward approval for compensation, continue a run whose `next_action` is not `resume`, or turn one confirmation into standing approval.
 
 <!-- exomem-semantic-authoring:v12 sha256:531316a2be37ad20214f80f7a0831929be57f46105228e019e292d6ac92aafd9 -->
 ## Semantic authoring contract

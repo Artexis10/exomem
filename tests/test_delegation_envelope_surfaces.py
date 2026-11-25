@@ -108,7 +108,7 @@ def test_a_family_decision_moves_no_envelope_class(config, vault: Path) -> None:
 
 REPO = Path(__file__).resolve().parents[1]
 SCAFFOLD_SKILL = REPO / "src/exomem/_scaffold/_Schema/SKILL.md"
-PLUGIN_SKILL = REPO / "plugins/claude-code/skills/exomem/SKILL.md"
+PLUGIN_SKILL = REPO / "plugins/claude-code/skills/evermatter/SKILL.md"
 HOOKLESS_DOC = REPO / "docs/prominence.md"
 #: The heading each prose carrier files the teaching under. One name, so a
 #: carrier that renames its section fails the count rather than silently

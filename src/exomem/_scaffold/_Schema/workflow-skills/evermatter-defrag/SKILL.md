@@ -1,18 +1,18 @@
 ---
-name: exomem-media
-description: Search, inspect, cite, and preserve Evermatter media artifacts such as PDFs, images, audio, and video.
+name: evermatter-defrag
+description: Reconcile duplicate, stale, or conflicting Evermatter memory while preserving history through review, merge, or supersession. Part of Evermatter, formerly Exomem.
 metadata:
-  skill_contract: 96ab0f8b9834703e4dafda31fa839d9f0f28712d4ce78b38544a5f2ac2b9cccf
+  skill_contract: 11af20af93a5fb2117016a32d1cebefb6c664aae1b7b8f4a18be746e58a1b17b
   version: "0.1.0"
 ---
 
-# exomem-media
+# evermatter-defrag
 
 ## Purpose
-Use Evermatter's multimodal substrate without flattening every artifact into text.
+Reduce duplicate, stale, or conflicting memory without losing provenance.
 
 ## When to use
-Use when the user asks to find media evidence, look inside a recording, inspect a PDF/image/audio/video, or recall where something appeared.
+Use when the user asks to defrag a topic, reconcile notes, resolve contradictions, merge duplicates, or inspect what is stale.
 
 ## Portable operating rules
 
@@ -73,19 +73,12 @@ An unchanged map does not certify method freshness. Refresh when the task, evide
 or uncertainty changes materially; ordinary memory reads alone do not trigger refresh.
 
 ## Workflow
-1. Search with media-aware filters or artifact terms using `search_memory`.
-2. Use artifact-specific product tools: extracted text/OCR/transcripts, `inspect_memory` and `manage_memory` status/retry/reprocess, `inspect_memory`, `save_evidence` for file handles, fallback `upload_files`, upload metadata, or preserved evidence paths.
-3. Cite raw artifact paths and timestamps/pages/frames when available.
-4. Preserve new raw artifacts with `save_source`, `save_evidence`, `save_evidence` for file handles, or fallback `upload_files` before analyzing them.
-5. Draft textual conclusions only when there is a durable finding, naming the preserved artifact in `sources:`.
-6. Reuse known meaningful connections; use `inspect_memory(operation="connections.suggest_links")` when candidates are still missing and review them. Then write with `create_note`, carrying the sources and accepted connections in the first write.
-7. For a set of recordings and documents to compile into notes, follow the multi-source steps of the source compilation pass in `references/writing.md`: inventory, timeline, reading by time range and page, attribution, verification, coverage ledger and final audit.
-
-## Declaring the language
-When the languages of a recording are unknown at ingest, ask the user once: "One language or several?" Say that several is slower, because the engine detects the language in every window. Declare the answer on the first processing with `manage_memory(operation="media.process", arguments={'path': ..., 'language': <code>})`, or `'multilingual': true` for several. Do not ask per file when the languages are already known. If the file is already being processed, wait for the run to end, then use `reprocess` with the same field.
-
-## Faulty transcripts
-Read the extraction fields in the sidecar before trusting a transcript: `asr_language`, `asr_language_probability`, `asr_language_source`, `asr_language_mode` and `asr_speech_seconds`. A transcript in the wrong language, or one that repeats a line, is a processing fault, not content. Fix it with `manage_memory(operation="media.reprocess", arguments={'path': ..., 'language': <code>})` on the user's request or on that evidence, or with `'multilingual': true` when the recording mixes languages. Without either, a reprocess reuses the language or mode already pinned on the sidecar, and detects one language when none is pinned. The old extraction stays on a linked prior page.
+1. Search the topic with `search_memory`, using `search_memory(deep=true)`, `inspect_memory` and `manage_memory`, or `list_review_items` and `decide_review_item` when graph, stale, audit, or evolution context matters.
+2. Group findings into keep, merge, supersede, or leave alone.
+3. Read candidate pages with `read_page`, including history when needed.
+4. Use `supersede_note` for changed conclusions and `edit_note` only for minor corrections.
+5. Preserve raw sources and evidence; keep superseded history visible.
+6. When you supersede or merge, carry the merged notes' `sources:` and outbound links onto the survivor — a merge that drops edges loses graph value the superseded page can no longer carry. Check `list_review_items(queue='unlinked')` on the survivor afterwards.
 
 ## Relation governance
 Resolve typed meaning with `resolve-relation` before authoring, and name a specific
@@ -96,13 +89,13 @@ relation is refused (`GENERIC_RELATION_REFUSED` lists ranked specific relations 
 exact calls). Corrections use a new canonical key and deprecate the old one.
 
 ## Output contract
-Return matching artifacts, what was inspected, citations, and any compiled conclusion path.
+Return the reconciliation decision for each candidate and the paths changed or left alone.
 
 ## Save rules
-Raw media belongs in `Sources/` or `Evidence/`; textual notes should summarize conclusions and link back to artifacts.
+Only mutate when the correct action is clear. Use supersession for meaningful changes.
 
 ## Mistakes to avoid
-Do not claim visual/audio evidence from filenames alone. Do not discard raw media after extracting text. Do not paste whole transcripts into notes when a cited artifact path with timestamps or pages is the durable evidence; read the extracted text in full before concluding anything from it.
+Do not auto-delete memory. Do not treat semantic proximity as contradiction by itself. Do not merge notes that answer different questions.
 
 <!-- exomem-semantic-authoring:v12 sha256:531316a2be37ad20214f80f7a0831929be57f46105228e019e292d6ac92aafd9 -->
 ## Semantic authoring contract

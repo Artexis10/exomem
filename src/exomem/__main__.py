@@ -3555,7 +3555,7 @@ def _install_skill_main(argv: list[str]) -> int:
     )
     parser.add_argument(
         "--target",
-        help="Install into one explicit folder instead (default: ~/.claude/skills/exomem). "
+        help="Install into one explicit folder instead (default: ~/.claude/skills/evermatter). "
         "Overrides --client.",
     )
     parser.add_argument(
@@ -3595,6 +3595,8 @@ def _install_skill_main(argv: list[str]) -> int:
         if report.get("workflow_skills"):
             names = ", ".join(s["name"] for s in report["workflow_skills"])
             print(f"  Workflow skills: {names}")
+        for retired in report.get("retired", []):
+            print(f"  Removed the previous copy at {retired}.")
     # Installing to the default location supersedes any pre-rename `knowledge-base`
     # skill; retire it so Claude Code doesn't load both.
     if target is None:

@@ -25,10 +25,19 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
 
-SERVER_NAME = "exomem"
+SERVER_NAME = "evermatter"
+#: The server key an install made before the rename holds.
+LEGACY_SERVER_NAME = "exomem"
 # Every server key a reader accepts: a client stores the key it was given, so an old
-# install keeps `exomem` while a new one may hold `evermatter`. Writers emit SERVER_NAME only.
-SERVER_NAMES = ("exomem", "evermatter")
+# install keeps `exomem` while a new one holds `evermatter`. Writers emit SERVER_NAME only.
+SERVER_NAMES = (SERVER_NAME, LEGACY_SERVER_NAME)
+#: The tool-name prefix of each old server key, with the prefix its new key gives. A client
+#: builds a user-scope server's tools as `mcp__<server>__<tool>` and a plugin's as
+#: `mcp__plugin_<plugin>_<server>__<tool>`, and users' rules and hooks match those names.
+LEGACY_TOOL_PREFIXES = {
+    "mcp__exomem__": "mcp__evermatter__",
+    "mcp__plugin_exomem_exomem__": "mcp__plugin_evermatter_evermatter__",
+}
 
 
 def normalize_mcp_url(raw: str) -> str:
@@ -218,7 +227,7 @@ def _section_bounds(text: str, header: str) -> tuple[int, int] | None:
 
 
 def merge_codex_mcp(block: str, *, path: Path | None = None, replace: bool = False) -> dict:
-    """Merge the exomem MCP block into Codex's config.toml.
+    """Merge the Evermatter MCP block into Codex's config.toml.
 
     An existing registration under either accepted server key counts as the
     registration: ``replace=True`` swaps its section, sub-tables included, for
@@ -272,6 +281,53 @@ def merge_codex_mcp(block: str, *, path: Path | None = None, replace: bool = Fal
     return {"action": action, "path": str(path), "diff": diff, "backup": backup}
 
 
+def rename_codex_mcp_server(*, path: Path | None = None) -> dict:
+    """Rename Codex's legacy `exomem` server section, sub-tables included, to ``SERVER_NAME``.
+
+    Only the section headers change, so the server's settings and the tool approvals
+    under its sub-tables move with it. Returns {"action", "path", "diff", "backup"} where
+    ``action`` is "renamed", "current" (no legacy key, nothing written), "conflict" (both keys
+    hold a section, nothing written) or "manual" (the legacy key is not a plain section the
+    rename can move, such as an inline table, nothing written).
+
+    Raises:
+        ValueError: the config is not valid TOML, or the rename would make it invalid
+            (nothing is written).
+    """
+    path = Path(path) if path is not None else codex_config_path()
+    outcome = {"path": str(path), "diff": "", "backup": None}
+    if not path.is_file():
+        return {"action": "current", **outcome}
+    try:
+        original = path.read_text(encoding="utf-8")
+        servers = tomllib.loads(original).get("mcp_servers")
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError(f"cannot inspect Codex MCP registration in {path}: {exc}") from exc
+    if not isinstance(servers, dict) or LEGACY_SERVER_NAME not in servers:
+        return {"action": "current", **outcome}
+    if SERVER_NAME in servers:
+        return {"action": "conflict", **outcome}
+    legacy = _section_bounds(original, f"[mcp_servers.{LEGACY_SERVER_NAME}]")
+    if legacy is None:
+        return {"action": "manual", **outcome}
+    start, end = legacy
+    old, new = f"mcp_servers.{LEGACY_SERVER_NAME}", f"mcp_servers.{SERVER_NAME}"
+    lines = original.splitlines(keepends=True)
+    for index in range(start, end):
+        stripped = lines[index].strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            lines[index] = lines[index].replace(old, new, 1)
+    updated = "".join(lines)
+    try:
+        renamed = tomllib.loads(updated)["mcp_servers"]
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f"refusing to write invalid TOML to {path}: {e}") from e
+    if SERVER_NAME not in renamed or LEGACY_SERVER_NAME in renamed:
+        return {"action": "manual", **outcome}  # a header the line scan misread
+    diff, backup = _write_user_file(path, original, updated)
+    return {"action": "renamed", "path": str(path), "diff": diff, "backup": backup}
+
+
 def _write_user_file(path: Path, original: str, updated: str) -> tuple[str, str | None]:
     """Back up, diff and write one user-owned file. Returns (diff, backup path)."""
     diff = "".join(
@@ -295,17 +351,15 @@ def _write_user_file(path: Path, original: str, updated: str) -> tuple[str, str 
 
 # The learning instruction sits between these two lines, so a re-run replaces only
 # that span and uninstall removes only it. They are protocol tokens Evermatter owns.
-LEARNING_BEGIN = "<!-- BEGIN exomem learning instruction (managed by exomem setup) -->"
-LEARNING_END = "<!-- END exomem learning instruction -->"
-EVERMATTER_LEARNING_BEGIN = (
-    "<!-- BEGIN evermatter learning instruction (managed by evermatter setup) -->"
-)
-EVERMATTER_LEARNING_END = "<!-- END evermatter learning instruction -->"
+LEARNING_BEGIN = "<!-- BEGIN evermatter learning instruction (managed by evermatter setup) -->"
+LEARNING_END = "<!-- END evermatter learning instruction -->"
+LEGACY_LEARNING_BEGIN = "<!-- BEGIN exomem learning instruction (managed by exomem setup) -->"
+LEGACY_LEARNING_END = "<!-- END exomem learning instruction -->"
 # Every marker pair a reader accepts, for the same reason as SERVER_NAMES: a file keeps the
 # pair it was written with. Writers emit LEARNING_BEGIN and LEARNING_END only.
 LEARNING_PAIRS = (
     (LEARNING_BEGIN, LEARNING_END),
-    (EVERMATTER_LEARNING_BEGIN, EVERMATTER_LEARNING_END),
+    (LEGACY_LEARNING_BEGIN, LEGACY_LEARNING_END),
 )
 
 
@@ -348,7 +402,7 @@ def _learning_span(lines: list[str], path: Path) -> tuple[int, int] | None:
     raise ValueError(
         f"{path} does not hold exactly one Evermatter learning-instruction span. "
         f"Keep one {LEARNING_BEGIN!r} line above one {LEARNING_END!r} line "
-        f"(or the {EVERMATTER_LEARNING_BEGIN!r} and {EVERMATTER_LEARNING_END!r} pair), "
+        f"(or the {LEGACY_LEARNING_BEGIN!r} and {LEGACY_LEARNING_END!r} pair), "
         "or delete every marker line, then run the command again."
     )
 
@@ -376,6 +430,27 @@ def _plan_learning_instruction(path: Path, text: str) -> tuple[str, str, str]:
         updated = "".join(lines[:start]) + span + "".join(lines[end + 1 :])
         action = "updated"
     return ("current" if updated == original else action), original, updated
+
+
+def migrate_learning_instruction(path: Path, text: str) -> dict:
+    """Move a managed span written under the legacy marker pair to the current pair.
+
+    The span's text is replaced with ``text``, as a re-run of setup does. A file without
+    a span is left alone, and so is a span that already carries the current pair.
+    Returns {"action": "migrated"|"current"|"absent", "path", "diff", "backup"}.
+
+    Raises:
+        ValueError: the file is not UTF-8 or its markers are unmatched (nothing is written).
+    """
+    path = Path(path)
+    original = _read_user_text(path)
+    bounds = _learning_span(original.splitlines(keepends=True), path) if original else None
+    if bounds is None:
+        return {"action": "absent", "path": str(path), "diff": "", "backup": None}
+    if original.splitlines()[bounds[0]].strip() == LEARNING_BEGIN:
+        return {"action": "current", "path": str(path), "diff": "", "backup": None}
+    outcome = place_learning_instruction(path, text)
+    return {**outcome, "action": "migrated"}
 
 
 def learning_instruction_change(path: Path, text: str) -> str:
@@ -439,3 +514,64 @@ def remove_learning_instruction(path: Path) -> dict:
         return {"action": "removed", "path": str(path), "diff": "", "backup": None}
     diff, backup = _write_user_file(path, original, updated)
     return {"action": "removed", "path": str(path), "diff": diff, "backup": backup}
+
+
+@dataclass(frozen=True)
+class UserReference:
+    """A rule or hook the user wrote that still names an old tool-name prefix."""
+
+    path: Path
+    kind: Literal["permission rule", "hook", "setting"]
+    name: str
+
+
+def _strings(node: object, trail: tuple[str, ...] = ()):
+    """Every string value in a parsed settings document, with the keys above it."""
+    if isinstance(node, str):
+        yield trail, node
+    elif isinstance(node, dict):
+        for key, value in node.items():
+            yield from _strings(value, (*trail, str(key)))
+    elif isinstance(node, list):
+        for value in node:
+            yield from _strings(value, trail)
+
+
+def user_references(
+    *, claude_home: Path, codex_home: Path, project_dir: Path
+) -> list[UserReference]:
+    """List the user's permission rules and hooks that still name an old tool prefix.
+
+    Setup writes no rule or hook that names a tool, so every hit is the user's own. It
+    reads the settings files each client documents, and a file it cannot read or parse
+    is skipped: the client reports that file itself. Nothing is written.
+    """
+    files = (
+        claude_home / "settings.json",
+        claude_home / "settings.local.json",
+        project_dir / ".claude" / "settings.json",
+        project_dir / ".claude" / "settings.local.json",
+        codex_home / "config.toml",
+        codex_home / "hooks.json",
+    )
+    found: list[UserReference] = []
+    for path in files:
+        try:
+            raw = path.read_text(encoding="utf-8")
+            document = tomllib.loads(raw) if path.suffix == ".toml" else json.loads(raw)
+        except (OSError, UnicodeError, ValueError):  # tomllib and json errors are ValueErrors
+            continue
+        for trail, text in _strings(document):
+            # The tokens are the client-defined tool-name prefixes, a closed set (a
+            # protocol token, not a reading of what the rule meant).
+            if not any(
+                prefix in text or text.strip() == prefix.removesuffix("__")
+                for prefix in LEGACY_TOOL_PREFIXES
+            ):
+                continue
+            root = trail[0] if trail else ""
+            kind = (
+                "permission rule" if root == "permissions" else "hook" if root == "hooks" else "setting"
+            )
+            found.append(UserReference(path=path, kind=kind, name=text.strip()[:200]))
+    return found

@@ -1,18 +1,18 @@
 ---
-name: exomem-ingest
-description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Evermatter while preserving raw evidence before compiling conclusions.
+name: evermatter-capture
+description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory. Part of Evermatter, formerly Exomem.
 metadata:
-  skill_contract: 96ab0f8b9834703e4dafda31fa839d9f0f28712d4ce78b38544a5f2ac2b9cccf
+  skill_contract: 11af20af93a5fb2117016a32d1cebefb6c664aae1b7b8f4a18be746e58a1b17b
   version: "0.1.0"
 ---
 
-# exomem-ingest
+# evermatter-capture
 
 ## Purpose
-Turn external artifacts into preserved evidence plus useful compiled memory.
+Save durable conclusions and recurring entities at the right epistemic layer.
 
 ## When to use
-Use when the user asks to ingest, add, import, process, or preserve an external source or artifact.
+Use when the user asks to save or the session lands on durable reusable knowledge, including stable context about a recurring entity.
 
 ## Portable operating rules
 
@@ -72,51 +72,121 @@ Without method continuity, freshly read a method before reusing it.
 An unchanged map does not certify method freshness. Refresh when the task, evidence
 or uncertainty changes materially; ordinary memory reads alone do not trigger refresh.
 
+## Durable personal baselines
+A stable preference, recurring routine, historical baseline, or durable affiliation
+is eligible only when both stability or recurrence and reusable comparison,
+interpretation, or decision value are clear. Attach a facet or affiliation to a
+uniquely resolved Entity; otherwise write one concise compiled observation. A
+recurring named item or measurement goes to Records: reuse a matching collection by
+natural key, else create a minimal one under `proactive_capture`. Fleeting preferences, one-off activity, incidental associations, and trivial
+metrics get no note. A tentative or unresolved claim never becomes a baseline; when later
+work could use it, save it as tentative, attributed, with its uncertainty. Durable
+interpretations retain explicit attribution and uncertainty rather than becoming
+established facts. Eligibility never creates an Entity,
+collection, or schema. Concise observations and narrow additive facts follow
+`proactive_capture`; a new Entity or your own affiliation edge follows `proactive_capture`;
+accepting a queued relation uses `link_acceptance`; merge or substantial curation uses
+confirmed `restructure_execution`.
+
+## Recurring structured work and agreed decisions
+A **decision or standing rule agreed in conversation** is durable. Under `proactive_capture`,
+save it when it is agreed: `silent` saves it and reports one line, `advisory` offers the
+save, and `off` waits for an explicit request.
+
+**Recurring structured work** goes to Records: stable identities that recur, repeated
+observations or evaluations of the same items, comparisons, changing state, or a need to
+query exactly. Judge it from meaning. A passing mention gets no collection, and narrative
+stays in Notes. Follow `references/planning-records.md`: list the collections, reuse a
+compatible one and update rows by natural key, else `add_record` with `new_collection`
+creates a minimal collection and adds the first row, under the served disposition. A later
+fact that has no field is added with `new_fields`, never put into another field. Backfill
+what the conversation established with dates and attribution, and report the collection and
+the rows in the reply.
+
+When a write ends `MUTATION_ACKNOWLEDGEMENT_PENDING`, replay it with the same identity and
+the same payload, or read the collection and the row by natural key before submitting that write again.
+Never retry with a new identity. A `bulk_upsert` needs `source`, once for the batch or on
+each row.
+
 ## Workflow
-1. Identify the artifact type: text, article, PDF, dataset, image, audio, video, or mixed media.
-2. Preserve raw material with `save_source`: `content` for authored text, `files` for original attachments. Original bytes remain intact.
-   A Source's custody verifies none of its claims.
-   Never retype an original file. If its handle is unavailable, follow the Source upload route that the exposed tools serve.
-   Use `save_evidence` or `save_evidence` for proof-bearing material.
-   Pass `source_kind` and `domain` on a `save_source` call — both are open
-   vocabularies, so name the label that fits even if it is unfamiliar. A kind is
-   required, and there is no catch-all.
-   For a whole folder or collection of existing files, use `manage_memory` instead of
-   capturing one by one. A folder outside the vault is staged first: run
-   `exomem import <folder>` and start on the path it prints, because `start` refuses an
-   absolute path. A personal server's remote client can send the folder as one archive
-   instead. For either, and for Cloud, follow [importing](references/importing.md): on Cloud, get the CLI command from `observe_transfer` and check its prerequisites. Then call `manage_memory` with `operation` `imports.file`
-   and the staged `path`, with a `collection` name where the person gives one. Repeat the same
-   call with the returned `continuation` until `filing` is not `working`. Report the whole
-   import from `summary` and the `progress` counts, including the failed files, then the
-   residual in `filed.residual` and what the `person` list asks. `filed.last_finished_page`
-   describes one page only, never the import. A folder with own-note rules, or an older server that
-   refuses `imports.file`, uses the step path: `imports.start`, `imports.select` for folders (with a `source_kind` and
-   `domain` per folder rule where known), `plan`, `apply`, then `finish`, repeating each with
-   its `continuation`. For a large folder, a full disk or a staged copy to discard, follow
-   [importing](references/importing.md).
-   A folder of the person's own notes can also become notes. Ask which folders hold them;
-   never guess from file names. Give that folder the rule
-   `{path, adopt_as: "note", note_type, project?, domain?}`, with a `note_type` that
-   `inspect_memory(operation="schema.inspect", arguments={'subject': 'note-types'})` lists as compiled, and
-   `project` or `domain` where that type needs one. Each Markdown file in the folder keeps
-   its Source and also gets a draft note that cites it and keeps its original body. Other
-   files stay Sources. A draft is not live and does not clear its Source citation backlog. Promote it
-   after review with the usual writers; a live citation still does not prove semantic coverage.
-3. Inspect available original media or extracted content; record the scope actually read.
-   Media processing is automatic. Use `inspect_memory` and `manage_memory` for reconciliation, status, retry or reprocess,
-   and `inspect_memory` or the exposed source-read route for inspection. Pending extraction
-   does not prevent using an available original. Extraction completion says nothing
-   about semantic compilation. Respect source-version guards on dependent writes.
-4. When preparing compiled knowledge, request `compile_guidance=true` or use `create_note`; the optional scaffold is available.
-   A proposal prepares one note, not a source-wide semantic plan. Its opening excerpt
-   covers only the opening; use the returned read route for the full available source.
-   Adjacent pages and `suggested_connections` are unreviewed candidates, never accepted edges.
-5. For selected compilation, follow the [source compilation pass](references/writing.md#source-compilation-pass); one inventory check closes the work.
-   Raw capture may end after custody when compilation is outside the request and live policy.
-   Decide at capture: compile into an existing or new note when the Source's claims will be reused; otherwise report it as kept for custody only.
-   When you keep a handed file only for safekeeping and nothing in it warrants a note, pass `options.custody_only: true`; the reply says so, and a later note that cites it takes it off the custody list.
-   Correct a wrong Source's title, URL, kind or form with `save_source` and `options.correction` (its ref, page hash and a reason) and no `files`; the stored original is reused and the old Source stays readable.
+Before choosing a destination, partition the exchange into independently reusable
+objects by retrieval question, subject/domain, temporal episode, and epistemic
+role. Reuse current relevant recall and resolve each meaningful cluster against
+canonical homes. The open note has no priority; keep details within one coherent
+scope together. Save each claim at its true strength, never more certain, more general
+or more settled than its source made it. A held view, interpretation or working hypothesis
+the evidence does not settle is saved attributed to whoever holds it, with its uncertainty,
+never as fact; a remark made in passing is not a held view. A person's unsure report that
+later work could use is saved as unsure and attributed, never as an event, fact or baseline.
+Also save a question the work leaves open (as an open question, including whether something
+happened) and settled values (in full, not file pointers). No write mentions what stays unwritten.
+Perform one completeness/destination review for the whole write plan, not a new
+review after every write. During development, repository/specification artifacts
+carry transient progress; capture reusable decisions and verified milestones.
+
+1. Decide whether the material is raw evidence or a compiled conclusion.
+2. Use `save_source` for raw captured text or source material. Classify it on
+   two open axes: `source_kind` (what it is, required) and `domain` (what it is
+   about), plus `projects` for the work it serves. Name the closest known kind
+   or a new one; there is no catch-all.
+3. Pick the lane before the transport. Raw material stays with `save_source`, which takes `files` for attachments as well as `content` for text. Proof-bearing material takes `save_evidence` for factual text, `save_evidence` when file handles are available, and `upload_files(lane="evidence", scope=..., category=...)` when they are not: its send saves on arrival. Keep a proof file the user shares in the turn it arrives, and put the returned `cite` wikilink in the text you write about it. Never keep a card number, code or password; ask for a covered copy.
+4. Draft distilled conclusions as: `research-note`, `insight`, `failure`, or `pattern`. Pass any path captured in steps 2-3 as `sources:` so the conclusion links to its provenance and the source leaves the unprocessed queue.
+5. Reuse known meaningful connections; use `inspect_memory(operation="connections.suggest_links")`
+   when candidates are still missing. Then write with
+   `create_note`, carrying the sources and accepted links in the first write; prefer
+   `edit_note` or `supersede_note` for near-duplicates.
+6. For an entity, consult the active entity registry and selected knowledge packs,
+   then call `inspect_memory(operation="connections.resolve_entity", arguments={'name': ...})` before writing.
+7. When one active entity matches, use `edit_note` for a small stable-fact
+   correction or the canonical relation workflow for a new connection.
+   A stable, uniquely attributable fact about a resolved person, including the
+   vault owner's own entity (role, affiliation, relationship), is an entity-level
+   fact: route it to that entity under `proactive_capture`, not just in the reply
+   that used it. Contact details (phone, address, email, identifiers) go on the
+   same entity page, in a dedicated `## Contact` section, each as its own
+   `- [contact] ...` unit. Never put them in the summary or in `fact` units:
+   activation serves `contact` units only when the turn asks to reach the person,
+   and a restricted audience that cannot see the entity cannot see the section.
+   Do not create a separate contact page or page type.
+8. Only when no entity matches and the identity is stable, and central or
+   recurring, and useful beyond this source, use `manage_memory(operation="connections.create_entity")`.
+   When the name you write is in another script than the user's own spelling
+   of it, add a native-script alias (`aliases=[...]` at create, or the
+   `aliases` field through `edit_note` on an existing page); see
+   `references/writing.md` § Names in another script.
+
+## Lifecycle
+Two more classes land here. A **stated intent or commitment** routes to Planning after resolving workflow posture and inspecting for an existing item to update before creating one. An **observed outcome or event** routes only to one compatible Records collection with `add_record(...)`; when collections compete ask one focused question, and when none fits and the identity, type and scope are clear, create a minimal one under the served capture disposition. Records never transition Planning: only explicit user intent may request a guarded transition, while a `propose-after-outcome` posture may only propose one. A tentative claim is never written as an event, and elapsed time is never an outcome. When a write receipt or recall names a collection's capture method, read it and follow it.
+
+## Artifact role and current state
+Read the supporting units for `artifact_role_promotion` and
+`transient_state_review`; neither signal grants mutation authority. Choose a home
+by role even within one topic: a repeatable successful procedure belongs in a
+suitable reusable note, and an attributed multi-source synthesis in a research
+note. Search existing eligible homes first. Keep exact source-unit provenance:
+reference both the procedure and outcome units when extracting a method, or the
+synthesis unit and its distinct sources when compiling a research note. Retain
+the experiment history. A title match or parent backlink does not establish that
+the identified material has a home; exact represented content does, while a
+paraphrase remains a review candidate for the reader to assess.
+
+For example, a batch may contain two separately successful reusable methods and
+a synthesis across two sources. Give each method its own evidence and check the
+synthesis independently; extracting one does not settle the others. A protocol
+without reusable success or a list of citations alone needs no such promotion.
+For a single batch, “No taste results yet” alongside an observed taste result
+invites a current-wording correction; “Previously no taste results existed” is
+history, and taste results do not settle an awaited safety result or a new trial.
+Preserve that history through a governed edit or exact valid supersession.
+
+Extraction/restructuring uses confirmed `restructure_execution`; an
+already-authorized local correction acquires no additional confirmation step.
+Observed transaction state still follows the existing Records claims handoff,
+never an automatic append from a review signal. Item triage changes presentation,
+not evidence coverage. Explicit review exposes complete/capped/unknown coverage;
+compact omission is not proof of a clean page. Apply this role-first reasoning to
+visible conversation transitions before writing too. An MCP-only server cannot
+guarantee detection or capture of a tool-free turn.
 
 ## Vocabulary
 
@@ -137,15 +207,17 @@ relation is refused (`GENERIC_RELATION_REFUSED` lists ranked specific relations 
 exact calls). Corrections use a new canonical key and deprecate the old one.
 
 ## Output contract
-Report preserved originals, compiled outputs and the scope actually inspected.
-Distinguish custody, extraction, citation linkage and the agent's semantic coverage judgment.
-Name unread, unavailable or uncompiled material without claiming that counts prove completion.
+After writing, report the `user_summary` (`Saved -> <title> (<store>)`) plus one short phrase if needed. If nothing durable was saved, say why. Report a lifecycle consequence in the user's own vocabulary and cite the collection the way recall cites a page; the words Planning, Records, collection, schema and natural key never lead the report.
 
 ## Save rules
-Raw artifacts stay in `Sources/` or `Evidence/`. Distilled conclusions go in typed compiled notes with source links.
+Keep raw source verbatim when it matters. Keep compiled notes concise, attributed, linked, and written as conclusions, not transcripts.
 
 ## Mistakes to avoid
-Do not skip raw preservation. Do not paste large raw artifacts into compiled notes. Do not claim media content was inspected unless an extraction, frame, transcript, OCR, or artifact view was actually used.
+Do not save unresolved brainstorming as a conclusion. Do not bury raw evidence
+inside a compiled note. A single incidental mention, unresolved identity, or
+transient participant stays in source/note context. Do not create a parallel
+page when an existing active note or entity should be edited, linked, or
+superseded.
 
 <!-- exomem-semantic-authoring:v12 sha256:531316a2be37ad20214f80f7a0831929be57f46105228e019e292d6ac92aafd9 -->
 ## Semantic authoring contract

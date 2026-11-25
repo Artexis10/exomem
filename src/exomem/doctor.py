@@ -4049,6 +4049,43 @@ def _check_managed_hook_refresh() -> DoctorCheck:
     )
 
 
+def _check_legacy_tool_references() -> DoctorCheck:
+    """Warn about permission rules and hooks of the user's that name the old tool prefix.
+
+    They still match while the client holds the old `exomem` server key and stop matching
+    after `evermatter setup --migrate`, which never edits them. A warning, never a
+    failure: the install works either way. Read-only; the output names rules and files only.
+    """
+    from . import client_config
+    from .install_skill import client_home
+
+    references = client_config.user_references(
+        claude_home=client_home("claude"),
+        codex_home=client_home("codex"),
+        project_dir=Path.cwd(),
+    )
+    if not references:
+        return _check(
+            "migration.tool_prefix",
+            "pass",
+            "no permission rule or hook of yours names the old `mcp__exomem__` tool prefix",
+        )
+    listed = "; ".join(f"{ref.kind} {ref.name} in {ref.path}" for ref in references)
+    return _check(
+        "migration.tool_prefix",
+        "warn",
+        f"{len(references)} permission rule(s) or hook(s) of yours name the old `exomem` tool "
+        f"prefix: {listed}",
+        "Run `evermatter setup --migrate`, then change each listed rule or hook to the "
+        "`mcp__evermatter__` prefix. Setup never edits what you wrote.",
+        details={
+            "references": [
+                {"path": str(ref.path), "kind": ref.kind, "name": ref.name} for ref in references
+            ]
+        },
+    )
+
+
 def _check_edge_ingress(*, probe: bool) -> list[DoctorCheck]:
     """Doctor's `edge-ingress` section (design.md Decision 3): verifies the public
     apex is fronted by the HA edge worker rather than tunnel-direct. Skipped
@@ -4308,6 +4345,7 @@ def _doctor_report(vault_root, vault_check, *, profile, probe, replica_urls):
     checks.append(_check_recall_canary())
     checks.append(_check_idempotency_store())
     checks.append(_check_managed_hook_refresh())
+    checks.append(_check_legacy_tool_references())
 
     return DoctorReport(profile=profile, checks=checks)
 

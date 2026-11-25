@@ -77,19 +77,19 @@ def test_http_route_renders_native_client_forms_without_credentials() -> None:
         "http",
         "--scope",
         "user",
-        "exomem",
+        "evermatter",
         "https://kb.example.com/mcp",
     ]
     assert route.codex_add_argv("codex") == [
         "codex",
         "mcp",
         "add",
-        "exomem",
+        "evermatter",
         "--url",
         "https://kb.example.com/mcp",
     ]
     parsed = tomllib.loads(client_config.render_codex_block(route))
-    assert parsed["mcp_servers"]["exomem"] == {
+    assert parsed["mcp_servers"]["evermatter"] == {
         "url": "https://kb.example.com/mcp"
     }
 
@@ -106,7 +106,7 @@ def test_stdio_route_uses_json_so_claude_preserves_child_flags() -> None:
         "add-json",
         "--scope",
         "project",
-        "exomem",
+        "evermatter",
     ]
     assert json.loads(argv[6]) == {
         "type": "stdio",
@@ -120,7 +120,7 @@ def test_rendered_block_is_valid_toml_with_windows_paths() -> None:
     """Backslashes in a Windows vault path must be escaped, not emitted raw."""
     parsed = tomllib.loads(_stdio_block())
 
-    server = parsed["mcp_servers"]["exomem"]
+    server = parsed["mcp_servers"]["evermatter"]
     assert server["command"] == "exomem"
     assert server["args"] == ["--transport", "stdio"]
     assert server["env"]["EXOMEM_VAULT_PATH"] == WINDOWS_VAULT
@@ -138,7 +138,7 @@ def test_creates_the_file_when_codex_has_no_config_yet(tmp_path: Path) -> None:
 
     assert outcome["action"] == "created"
     assert outcome["backup"] is None
-    assert "exomem" in tomllib.loads(path.read_text(encoding="utf-8"))["mcp_servers"]
+    assert "evermatter" in tomllib.loads(path.read_text(encoding="utf-8"))["mcp_servers"]
 
 
 def test_preserves_every_other_server_and_setting(tmp_path: Path) -> None:
@@ -158,7 +158,7 @@ def test_preserves_every_other_server_and_setting(tmp_path: Path) -> None:
     assert parsed["model"] == "gpt-5"
     assert parsed["mcp_servers"]["other"]["command"] == "other-server"
     assert parsed["mcp_servers"]["other"]["args"] == ["--flag"]
-    assert parsed["mcp_servers"]["exomem"]["command"] == "exomem"
+    assert parsed["mcp_servers"]["evermatter"]["command"] == "exomem"
 
 
 def test_existing_registration_is_reported_not_silently_overwritten(tmp_path: Path) -> None:
@@ -191,7 +191,7 @@ def test_replace_swaps_only_our_section_and_backs_the_file_up(tmp_path: Path) ->
 
     assert outcome["action"] == "replaced"
     parsed = tomllib.loads(path.read_text(encoding="utf-8"))
-    assert parsed["mcp_servers"]["exomem"]["command"] == "exomem"
+    assert parsed["mcp_servers"]["evermatter"]["command"] == "exomem"
     assert parsed["mcp_servers"]["keeper"]["command"] == "keep-me"
     # The previous content survives on disk for recovery.
     assert "hand-tuned" in Path(outcome["backup"]).read_text(encoding="utf-8")
@@ -208,15 +208,15 @@ def test_a_registration_under_the_evermatter_key_counts_as_ours(tmp_path: Path) 
     assert "hand-tuned" in path.read_text(encoding="utf-8")
 
 
-def test_replace_swaps_an_evermatter_section_and_its_sub_tables_instead_of_adding_a_second(
+def test_replace_swaps_a_held_legacy_section_and_its_sub_tables_instead_of_adding_a_second(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "config.toml"
     path.write_text(
-        "[mcp_servers.evermatter]\n"
+        "[mcp_servers.exomem]\n"
         'command = "hand-tuned"\n'
         "\n"
-        "[mcp_servers.evermatter.env]\n"
+        "[mcp_servers.exomem.env]\n"
         'EXOMEM_VAULT_PATH = "/old/vault"\n'
         "\n"
         "[mcp_servers.keeper]\n"
@@ -228,8 +228,8 @@ def test_replace_swaps_an_evermatter_section_and_its_sub_tables_instead_of_addin
 
     assert outcome["action"] == "replaced"
     servers = tomllib.loads(path.read_text(encoding="utf-8"))["mcp_servers"]
-    assert set(servers) == {"exomem", "keeper"}
-    assert servers["exomem"]["env"]["EXOMEM_VAULT_PATH"] == WINDOWS_VAULT
+    assert set(servers) == {"evermatter", "keeper"}
+    assert servers["evermatter"]["env"]["EXOMEM_VAULT_PATH"] == WINDOWS_VAULT
     assert servers["keeper"]["command"] == "keep-me"
 
 
@@ -255,7 +255,7 @@ def test_diff_shows_the_user_what_changed(tmp_path: Path) -> None:
 
     outcome = client_config.merge_codex_mcp(_stdio_block(), path=path)
 
-    assert "+[mcp_servers.exomem]" in outcome["diff"]
+    assert "+[mcp_servers.evermatter]" in outcome["diff"]
 
 
 def test_refuses_to_write_when_the_result_would_not_parse(tmp_path: Path) -> None:
@@ -278,8 +278,8 @@ def test_codex_home_follows_the_env_override(tmp_path: Path, monkeypatch: pytest
 
 def _evermatter_block(text: str) -> str:
     return (
-        f"{client_config.EVERMATTER_LEARNING_BEGIN}\n{text}\n"
-        f"{client_config.EVERMATTER_LEARNING_END}\n"
+        f"{client_config.LEARNING_BEGIN}\n{text}\n"
+        f"{client_config.LEARNING_END}\n"
     )
 
 

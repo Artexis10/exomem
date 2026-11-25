@@ -85,7 +85,7 @@ def test_scaffold_never_hardcodes_a_release_pin() -> None:
 def test_packages_every_skill_not_just_the_core_one(tmp_path: Path) -> None:
     report = package_module.package_skills(tmp_path)
 
-    expected = {"exomem"} | {str(s["name"]) for s in workflow_skills.list_skills()}
+    expected = {"evermatter"} | {str(s["name"]) for s in workflow_skills.list_skills()}
     produced = {a["name"] for a in report["archives"]}
     assert produced == expected
     assert report["count"] == len(expected)
@@ -102,7 +102,7 @@ def test_skill_md_sits_at_the_archive_root(tmp_path: Path) -> None:
     """Web uploaders expect SKILL.md at the root, not nested under a folder."""
     package_module.package_skills(tmp_path)
 
-    for name in ("exomem", "exomem-capture"):
+    for name in ("evermatter", "evermatter-capture"):
         with zipfile.ZipFile(tmp_path / f"{name}.zip") as archive:
             assert "SKILL.md" in archive.namelist()
 
@@ -111,7 +111,7 @@ def test_core_archive_carries_its_references(tmp_path: Path) -> None:
     """The web clients cannot reach the repo, so references must travel with it."""
     package_module.package_skills(tmp_path)
 
-    with zipfile.ZipFile(tmp_path / "exomem.zip") as archive:
+    with zipfile.ZipFile(tmp_path / "evermatter.zip") as archive:
         names = archive.namelist()
     assert any(n.startswith("references/") for n in names)
     assert "project-keys.yaml" in names
@@ -120,7 +120,7 @@ def test_core_archive_carries_its_references(tmp_path: Path) -> None:
 def test_capture_archive_carries_its_linked_writing_reference(tmp_path: Path) -> None:
     package_module.package_skills(tmp_path)
 
-    with zipfile.ZipFile(tmp_path / "exomem-capture.zip") as archive:
+    with zipfile.ZipFile(tmp_path / "evermatter-capture.zip") as archive:
         assert "references/writing.md" in archive.namelist()
         assert archive.read("references/writing.md") == (
             Path(package_module.__file__).parent
@@ -131,7 +131,7 @@ def test_capture_archive_carries_its_linked_writing_reference(tmp_path: Path) ->
 def test_capture_archive_closes_writing_reference_dependencies(tmp_path: Path) -> None:
     package_module.package_skills(tmp_path)
 
-    with zipfile.ZipFile(tmp_path / "exomem-capture.zip") as archive:
+    with zipfile.ZipFile(tmp_path / "evermatter-capture.zip") as archive:
         writing = archive.read("references/writing.md").decode("utf-8")
         for name in ("frontmatter.md", "supersession.md", "write-scope.md", "page-types.md"):
             assert f"`{name}`" in writing
@@ -150,7 +150,7 @@ def test_generic_build_ships_the_scaffold_keys(tmp_path: Path) -> None:
     """Without a vault the archive must stay shareable - no personal registry."""
     package_module.package_skills(tmp_path)
 
-    with zipfile.ZipFile(tmp_path / "exomem.zip") as archive:
+    with zipfile.ZipFile(tmp_path / "evermatter.zip") as archive:
         packaged = archive.read("project-keys.yaml").decode("utf-8")
     scaffold = (
         Path(package_module.__file__).parent / "_scaffold" / "_Schema" / "project-keys.yaml"
@@ -167,7 +167,7 @@ def test_vault_overlay_replaces_only_the_project_key_registry(tmp_path: Path) ->
     output = vault / "private-skills"
     package_module.package_skills(output, vault=vault)
 
-    with zipfile.ZipFile(output / "exomem.zip") as archive:
+    with zipfile.ZipFile(output / "evermatter.zip") as archive:
         assert "real-one" in archive.read("project-keys.yaml").decode("utf-8")
         assert package_module.PRIVATE_OUTPUT_MARKER in archive.namelist()
         # SKILL.md still comes from the scaffold, never from the vault.
@@ -177,12 +177,12 @@ def test_vault_overlay_replaces_only_the_project_key_registry(tmp_path: Path) ->
 def test_rebuild_overwrites_a_previous_archive(tmp_path: Path) -> None:
     """Re-running must replace, not append into, an existing zip."""
     package_module.package_skills(tmp_path)
-    first = (tmp_path / "exomem.zip").stat().st_size
+    first = (tmp_path / "evermatter.zip").stat().st_size
 
     package_module.package_skills(tmp_path)
 
-    assert (tmp_path / "exomem.zip").stat().st_size == first
-    with zipfile.ZipFile(tmp_path / "exomem.zip") as archive:
+    assert (tmp_path / "evermatter.zip").stat().st_size == first
+    with zipfile.ZipFile(tmp_path / "evermatter.zip") as archive:
         assert archive.namelist().count("SKILL.md") == 1
 
 
@@ -247,7 +247,7 @@ def test_builds_and_unpacks_every_public_contract_distribution(
     # Generic uploadable archives.
     archive_dir = tmp_path / "skills"
     package_module.package_skills(archive_dir)
-    with zipfile.ZipFile(archive_dir / "exomem.zip") as archive:
+    with zipfile.ZipFile(archive_dir / "evermatter.zip") as archive:
         _assert_contract(
             archive.read("SKILL.md").decode("utf-8")
             + archive.read("references/semantic-authoring.md").decode("utf-8")
@@ -262,10 +262,10 @@ def test_builds_and_unpacks_every_public_contract_distribution(
     plugin = tmp_path / "plugin"
     package_module.sync_plugin(plugin)
     _assert_contract(
-        (plugin / "skills" / "exomem" / "SKILL.md").read_text("utf-8")
-        + (plugin / "skills" / "exomem" / "references" / "semantic-authoring.md").read_text("utf-8")
+        (plugin / "skills" / "evermatter" / "SKILL.md").read_text("utf-8")
+        + (plugin / "skills" / "evermatter" / "references" / "semantic-authoring.md").read_text("utf-8")
     )
-    assert (plugin / "skills" / "exomem" / "references" / "page-types.md").is_file()
+    assert (plugin / "skills" / "evermatter" / "references" / "page-types.md").is_file()
     for name in skills:
         _assert_contract((plugin / "skills" / name / "SKILL.md").read_text("utf-8"))
     plugin_files = [path for path in plugin.rglob("*") if path.is_file()]
