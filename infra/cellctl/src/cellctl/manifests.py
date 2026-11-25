@@ -1028,7 +1028,9 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
     )
     # Defence in depth: settings load already refused these (main.py).
     check_model_env(spec.model_env)
-    if PASSAGE_MATRIX_BYTES_ENV not in spec.model_env:
+    # A model_env entry that names the budget under an alias reaches the cell as this name, so it
+    # replaces the default as well; two entries would leave the value to the order of the list.
+    if not any(canonical_name(key) == PASSAGE_MATRIX_BYTES_ENV for key in spec.model_env):
         budget_mib = _memory_mib(spec.resources.passage_matrix_budget)
         env.append({"name": PASSAGE_MATRIX_BYTES_ENV, "value": str(budget_mib * 1024 * 1024)})
     for key, value in sorted(spec.model_env.items()):

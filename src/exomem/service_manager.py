@@ -1400,7 +1400,8 @@ class WorkerRuntime:
 
         self.environment_warnings = []
         values: dict[str, str] = {}
-        sources: list[dict[str, str]] = [dict(os.environ)]
+        # The supervisor's environment as inherited, before the rename removed its alias names.
+        sources: list[dict[str, str]] = [env_compat.inherited_environment()]
         for path in self.environment_files:
             try:
                 text = path.read_text(encoding="utf-8")
@@ -1418,8 +1419,8 @@ class WorkerRuntime:
                 )
             )
         # The supervisor keeps its own placement while the worker takes the file's, so the
-        # supervisor and its files are one source: a name that disagrees between them is a
-        # conflict, not an override.
+        # supervisor and its files are one source: a placement name that an alias spelling
+        # sets differently from the `EXOMEM_` spelling is a conflict, not an override.
         env_compat.refuse_placement_conflicts_across(
             sources, source="the supervisor environment and its service environment files"
         )

@@ -1769,6 +1769,32 @@ def test_a_service_environment_file_that_places_the_vault_elsewhere_than_its_sup
     assert "vault-of-the-supervisor" not in str(refused.value)
 
 
+@pytest.mark.parametrize("spelling", ["EVERMATTER_STATE_ROOT", "EXOMEM_STATE_ROOT"])
+def test_an_edit_of_the_state_root_in_a_service_file_takes_effect_under_either_spelling(
+    tmp_path, monkeypatch, spelling
+):
+    """The failure: the supervisor's own environment, renamed at start, holds only the `EXOMEM_` name, so a
+    file edit under the product-prefix spelling is refused as a conflict while the same edit under the
+    other spelling takes effect."""
+    from exomem import env_compat
+
+    module = _manager()
+    service_env = tmp_path / "service.env"
+    service_env.write_text(f"{spelling}=/root-edited\n")
+    # What the process inherited, and what it holds after the rename at import.
+    monkeypatch.setattr(env_compat, "_inherited", {spelling: "/root-at-start"})
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", "/root-at-start")
+    runtime = module.WorkerRuntime(
+        tmp_path / "worker.sock", host="127.0.0.1", port=1, environment_files=[service_env]
+    )
+
+    environment = runtime._child_environment()
+
+    assert environment is not None
+    assert environment["EXOMEM_STATE_ROOT"] == "/root-edited"
+    assert "EVERMATTER_STATE_ROOT" not in environment
+
+
 def test_two_service_environment_files_that_place_the_state_root_under_two_names_are_refused(
     tmp_path, monkeypatch
 ):

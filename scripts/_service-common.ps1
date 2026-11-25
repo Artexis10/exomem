@@ -86,6 +86,75 @@ function Get-ExomemServiceAppDirectory {
     return $directory
 }
 
+function Resolve-ExomemSetting {
+    <#
+    .SYNOPSIS
+      Read EXOMEM_X, else EVERMATTER_X, else KB_MCP_X from one source.
+    .DESCRIPTION
+      The package (env_compat) holds this rule, and scripts/_service-common.sh keeps
+      the same copy for the shell readers; tests/test_setting_names_in_step.py keeps them in
+      step. A placement setting (it picks the vault or a state root) that the source
+      names both EXOMEM_X and EVERMATTER_X with different values is refused, because a
+      guess runs on the wrong data. The message names both variables, never the values.
+      Any other conflict lets EXOMEM_X win. -Lookup takes one literal name and returns
+      its value, or $null when the source does not set it; an empty value counts as set.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][scriptblock]$Lookup
+    )
+
+    if (-not $Name.StartsWith("EXOMEM_")) { return (& $Lookup $Name) }
+    $suffix = $Name.Substring("EXOMEM_".Length)
+    $explicit = & $Lookup "EXOMEM_$suffix"
+    $evermatter = & $Lookup "EVERMATTER_$suffix"
+    $legacy = & $Lookup "KB_MCP_$suffix"
+    if ($null -ne $explicit) {
+        # The closed set of settings that choose where data lives, defined by the package itself.
+        if (($null -ne $evermatter) -and ($evermatter -cne $explicit) -and
+            (@("VAULT_PATH", "STATE_ROOT", "HOSTED_STATE_ROOT") -contains $suffix)) {
+            throw "EVERMATTER_$suffix and EXOMEM_$suffix are set to different values in $Source, so it is unclear which to use. Delete one name of each pair, then run it again."
+        }
+        return $explicit
+    }
+    if ($null -ne $evermatter) { return $evermatter }
+    return $legacy
+}
+
+function Get-ExomemDotenvLiteral {
+    <# One literal name out of an exact dotenv file: its first value, or $null when unset. #>
+    param([string]$EnvPath, [string]$Name)
+
+    if (-not (Test-Path -LiteralPath $EnvPath -PathType Leaf)) { return $null }
+    foreach ($line in Get-Content -LiteralPath $EnvPath) {
+        if ($line -match "^\s*$([Regex]::Escape($Name))\s*=\s*(.*)\s*$") {
+            $value = $Matches[1].Trim()
+            if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+            return $value
+        }
+    }
+    return $null
+}
+
+function Get-ExomemMapSetting {
+    <# Read EXOMEM_X under any of its names out of a parsed dotenv map, or $null. #>
+    param([System.Collections.IDictionary]$Map, [string]$Name, [string]$Source)
+
+    $lookup = { param($literal) if ($Map.Contains($literal)) { [string]$Map[$literal] } else { $null } }.GetNewClosure()
+    return Resolve-ExomemSetting -Name $Name -Source $Source -Lookup $lookup
+}
+
+function Get-ExomemProcessSetting {
+    <# Read EXOMEM_X under any of its names out of the process environment, or $null. #>
+    param([string]$Name)
+
+    $lookup = { param($literal) [Environment]::GetEnvironmentVariable($literal, "Process") }
+    return Resolve-ExomemSetting -Name $Name -Source "the process environment" -Lookup $lookup
+}
+
 function Get-ExomemDefaultManagedStateRoot {
     <# Pin the installer/operator user's platform default for LocalSystem too. #>
     $base = if ($env:LOCALAPPDATA) {
@@ -104,21 +173,27 @@ function Get-ExomemDotenvStateRootBinding {
     if (-not (Test-Path -LiteralPath $envPath -PathType Leaf)) {
         throw "The managed service dotenv is missing; cannot bind EXOMEM_STATE_ROOT."
     }
-    $observed = @()
-    foreach ($line in Get-Content -LiteralPath $envPath) {
-        if ($line -match '^\s*EXOMEM_STATE_ROOT\s*=\s*(.*)\s*$') {
-            $value = $Matches[1].Trim()
-            if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
-                $value = $value.Substring(1, $value.Length - 2)
+    # The binding may be named EXOMEM_, EVERMATTER_ or KB_MCP_STATE_ROOT; one name set twice
+    # to different values is its own conflict.
+    $lookup = {
+        param($literal)
+        $observed = @()
+        foreach ($line in Get-Content -LiteralPath $envPath) {
+            if ($line -match "^\s*$([Regex]::Escape($literal))\s*=\s*(.*)\s*$") {
+                $value = $Matches[1].Trim()
+                if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+                    $value = $value.Substring(1, $value.Length - 2)
+                }
+                $observed += $value
             }
-            $observed += $value
         }
-    }
-    if ($observed.Count -gt 1 -and @($observed | Select-Object -Unique).Count -ne 1) {
-        throw "The managed dotenv contains conflicting EXOMEM_STATE_ROOT bindings."
-    }
-    if (-not $observed.Count) { return "" }
-    $bound = [string]$observed[-1]
+        if ($observed.Count -gt 1 -and @($observed | Select-Object -Unique).Count -ne 1) {
+            throw "The managed dotenv contains conflicting $literal bindings."
+        }
+        if ($observed.Count) { [string]$observed[-1] } else { $null }
+    }.GetNewClosure()
+    $bound = Resolve-ExomemSetting -Name "EXOMEM_STATE_ROOT" -Source $envPath -Lookup $lookup
+    if (-not $bound) { return "" }
     if (-not [System.IO.Path]::IsPathFullyQualified($bound)) {
         throw "The managed EXOMEM_STATE_ROOT binding must be absolute."
     }
@@ -163,12 +238,21 @@ function Ensure-ExomemDotenvStateRootBinding {
     }
     if (-not $existing) {
         $raw = [System.IO.File]::ReadAllText($envPath)
-        $prefix = if ($raw.Length -eq 0 -or $raw.EndsWith("`n") -or $raw.EndsWith("`r")) { "" } else { "`r`n" }
-        [System.IO.File]::AppendAllText(
-            $envPath,
-            "${prefix}EXOMEM_STATE_ROOT=$bound`r`n",
-            [System.Text.UTF8Encoding]::new($false)
-        )
+        # An empty binding is filled under the name the dotenv already uses; EXOMEM_STATE_ROOT is
+        # appended only when the dotenv names the state root under no name, never beside an
+        # EVERMATTER_ line that would then differ from it.
+        $named = '(?m)^(\s*)(EXOMEM_STATE_ROOT|EVERMATTER_STATE_ROOT|KB_MCP_STATE_ROOT)\s*=[^\r\n]*'
+        if ($raw -match $named) {
+            $filled = [regex]::Replace($raw, $named, { param($m) "$($m.Groups[1].Value)$($m.Groups[2].Value)=$bound" })
+            [System.IO.File]::WriteAllText($envPath, $filled, [System.Text.UTF8Encoding]::new($false))
+        } else {
+            $prefix = if ($raw.Length -eq 0 -or $raw.EndsWith("`n") -or $raw.EndsWith("`r")) { "" } else { "`r`n" }
+            [System.IO.File]::AppendAllText(
+                $envPath,
+                "${prefix}EXOMEM_STATE_ROOT=$bound`r`n",
+                [System.Text.UTF8Encoding]::new($false)
+            )
+        }
     }
     return $bound
 }
@@ -216,7 +300,7 @@ function Get-ExomemInstalledVersion {
 function Get-ExomemDotenvValue {
     <#
     .SYNOPSIS
-      Read a single key out of <repo>\.env, or $null.
+      Read a single setting out of <repo>\.env under any of its names, or $null.
     #>
     param(
         [string]$RepoRoot,
@@ -224,17 +308,8 @@ function Get-ExomemDotenvValue {
     )
 
     $envPath = Join-Path $RepoRoot ".env"
-    if (-not (Test-Path $envPath)) { return $null }
-    foreach ($line in Get-Content $envPath) {
-        if ($line -match "^\s*$([Regex]::Escape($Name))\s*=\s*(.*)\s*$") {
-            $value = $Matches[1].Trim()
-            if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
-                $value = $value.Substring(1, $value.Length - 2)
-            }
-            return $value
-        }
-    }
-    return $null
+    $lookup = { param($literal) Get-ExomemDotenvLiteral -EnvPath $envPath -Name $literal }.GetNewClosure()
+    return Resolve-ExomemSetting -Name $Name -Source $envPath -Lookup $lookup
 }
 
 function Get-ExomemServiceEndpoint {

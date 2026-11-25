@@ -422,13 +422,29 @@ def _working_set_max_chars() -> int:
     return max(0, _env_int("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", _WORKING_SET_MAX_CHARS))
 
 
+# The settings that choose where data lives, which a hook never guesses between: the package's
+# placement settings (`exomem.env_compat.PLACEMENT_SETTINGS`) and the hook's own home.
+# nosemgrep: ep-word-set -- closed set that this code defines, not a customer's vocabulary
+_PLACEMENT_SETTINGS = frozenset({"VAULT_PATH", "STATE_ROOT", "HOSTED_STATE_ROOT", "HOOK_HOME"})
+
+
+def _is_placement(alias: str) -> bool:
+    """Whether the conflicting EVERMATTER_ name sets a placement setting, which skips the turn."""
+    return alias[len("EVERMATTER_") :] in _PLACEMENT_SETTINGS
+
+
+def _conflict_pairs(names: list[str]) -> str:
+    """The variables in conflict, each EVERMATTER_ name with its EXOMEM_ name; never their values."""
+    return "; ".join(f"{name} and EXOMEM_{name[len('EVERMATTER_'):]}" for name in names)
+
+
 def _rename_aliases(environ: MutableMapping[str, str]) -> list[str]:
     """Rename each alias name in `environ` into its EXOMEM_ name and remove the alias names.
 
     Copy of `exomem.env_compat.rename_settings` for a hook, which cannot import the
-    package; `tests/test_rename_compat.py` keeps the copy in step. EVERMATTER_X then
+    package; `tests/test_setting_names_in_step.py` keeps the copy in step. EVERMATTER_X then
     KB_MCP_X fills EXOMEM_X only when it is unset. Returns the EVERMATTER_ names whose
-    value differs from a set EXOMEM_ name: a hook never picks one, it skips the turn.
+    value differs from a set EXOMEM_ name: a placement setting skips the turn, any other lets EXOMEM_X win.
     """
     conflicts: list[str] = []
     for prefix in ("EVERMATTER_", "KB_MCP_"):  # the product's closed naming history
@@ -724,11 +740,12 @@ def _log(prompt: str, lane: str = "off", hits: int = 0, session: str = "") -> No
         pass
 
 
-def _log_conflict(names: list[str]) -> None:
-    """One row naming the variables (never their values) when a settings conflict skipped the turn."""
+def _log_conflict(names: list[str], *, skipped: bool) -> None:
+    """One row naming both variables of each conflict (never their values), and whether the turn was skipped."""
     try:
         logp = _hook_home() / "exomem-retrieve-nudge.log"
-        row = f"{time.strftime('%Y-%m-%d %H:%M:%S')} nudge skipped | settings conflict: {', '.join(names)}\n"
+        outcome = "nudge skipped" if skipped else "nudge ran with the EXOMEM_ names"
+        row = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {outcome} | settings conflict: {_conflict_pairs(names)}\n"
         _state_core().write_nudge_file(logp, row.encode("utf-8"), append=True)
     except Exception:  # noqa: BLE001 - hook must never break prompt submission
         pass
@@ -4107,9 +4124,11 @@ def main(argv: list[str] | None = None) -> int:
     ):
         if value is not None:
             os.environ[name] = value
-    if conflicts:  # never pick between two values: skip this turn's nudge
-        _log_conflict(conflicts)
-        return 0
+    if conflicts:
+        placement = any(_is_placement(name) for name in conflicts)
+        _log_conflict(conflicts, skipped=placement)
+        if placement:  # never guess where data lives: skip this turn's nudge
+            return 0
     try:
         # Native results can be large. Beyond this existing structural-state bound,
         # report uncovered accounting rather than parse or retain result prose.

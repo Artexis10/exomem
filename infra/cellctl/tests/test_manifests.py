@@ -501,6 +501,16 @@ def test_a_cells_model_env_replaces_the_passage_matrix_default_instead_of_duplic
     assert [e["value"] for e in env if e["name"] == "EXOMEM_PASSAGE_MATRIX_BYTES"] == ["0"]
 
 
+def test_a_cells_model_env_that_names_the_passage_matrix_budget_with_the_product_prefix_replaces_the_default() -> None:
+    # The cell reads EVERMATTER_PASSAGE_MATRIX_BYTES as the EXOMEM_ name, so a second default entry
+    # would sit beside it and leave the cell's value to the order of the list.
+    env = render_statefulset(_spec(model_env={"EVERMATTER_PASSAGE_MATRIX_BYTES": "0"}))["spec"]["template"][
+        "spec"
+    ]["containers"][0]["env"]
+    budgets = [e for e in env if e["name"].endswith("PASSAGE_MATRIX_BYTES")]
+    assert budgets == [{"name": "EVERMATTER_PASSAGE_MATRIX_BYTES", "value": "0"}]
+
+
 def test_model_env_may_not_move_media_extraction_into_the_serving_process() -> None:
     import pytest
 

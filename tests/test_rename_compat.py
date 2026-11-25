@@ -2,15 +2,10 @@
 
 from __future__ import annotations
 
-import importlib.util
-import logging
 import os
-import re
 import subprocess
 import sys
 import warnings
-from pathlib import Path
-from unittest import mock
 
 import pytest
 
@@ -248,88 +243,6 @@ def test_a_dotenv_that_disagrees_with_itself_about_a_placement_setting_is_refuse
     assert "alias-root" not in str(refused.value) and "explicit-root" not in str(refused.value)
 
 
-# One sample that every copy of the rename rule must settle like `env_compat`: aliases alone,
-# precedence between aliases, agreeing and differing pairs, a silent legacy loss and empty values.
-ALIAS_SAMPLE = {
-    "EVERMATTER_PRODUCT_ONLY": "product",
-    "EVERMATTER_BEATS_LEGACY": "product-wins",
-    "KB_MCP_BEATS_LEGACY": "legacy-loses",
-    "KB_MCP_LEGACY_ONLY": "legacy",
-    "EVERMATTER_SAME": "same",
-    "EXOMEM_SAME": "same",
-    "EVERMATTER_DIFFERS": "alias",
-    "EXOMEM_DIFFERS": "explicit",
-    "KB_MCP_QUIET": "legacy",
-    "EXOMEM_QUIET": "explicit",
-    "EVERMATTER_EMPTY": "",
-    "EVERMATTER_EMPTY_DIFFERS": "",
-    "EXOMEM_EMPTY_DIFFERS": "explicit",
-    "EXOMEM_UNRELATED": "kept",
-    "OTHER_SETTING": "ignored",
-}
-
-
-def test_each_standalone_hook_renames_like_env_compat() -> None:
-    """A hook cannot import env_compat, so it carries a copy of the rule; one sample keeps them alike."""
-    from exomem._hooks import (
-        exomem_capture_nudge,
-        exomem_continuation_checkpoint,
-        exomem_local_credentials,
-        exomem_retrieve_nudge,
-    )
-
-    renamed, conflicts = env_compat.rename_settings(ALIAS_SAMPLE)
-    assert renamed["EXOMEM_PRODUCT_ONLY"] == "product"
-    assert [c.alias for c in conflicts] == ["EVERMATTER_DIFFERS", "EVERMATTER_EMPTY_DIFFERS"]
-
-    for hook in (
-        exomem_capture_nudge,
-        exomem_retrieve_nudge,
-        exomem_continuation_checkpoint,
-        exomem_local_credentials,
-    ):
-        environ = dict(ALIAS_SAMPLE)
-        names = hook._rename_aliases(environ)
-        assert environ == renamed, hook.__name__
-        assert sorted(names) == sorted(c.alias for c in conflicts), hook.__name__
-
-
-def _load_by_path(name: str, relative: str):
-    """A module that ships apart from the package (cellctl's, the chart's), loaded without its siblings."""
-    path = Path(__file__).resolve().parents[1] / relative
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_the_cellctl_and_scheduler_readers_choose_like_env_compat(capsys, caplog) -> None:
-    """cellctl and the chart's scheduler cannot import env_compat, so each carries a copy of the rule."""
-    cellctl = _load_by_path("cellctl_setting_alias", "infra/cellctl/src/cellctl/setting_alias.py")
-    scheduler = _load_by_path(
-        "scheduler_runtime_alias_probe", "infra/helm/platform/files/scheduler_runtime.py"
-    )
-    renamed, conflicts = env_compat.rename_settings(ALIAS_SAMPLE)
-    internal_names = sorted(name for name in renamed if name.startswith("EXOMEM_"))
-    warned = {c.alias for c in conflicts}
-
-    def aliases_in(text: str) -> set[str]:
-        return set(re.findall(r"EVERMATTER_\w+", text))
-
-    for name in ALIAS_SAMPLE:
-        assert cellctl.canonical_name(name) == next(iter(env_compat.rename_settings({name: "v"})[0])), name
-
-    with mock.patch.dict(os.environ, ALIAS_SAMPLE, clear=True), caplog.at_level(logging.WARNING):
-        for name in internal_names:
-            assert cellctl.setting(name) == renamed[name], name
-        assert aliases_in(caplog.text) == warned
-        capsys.readouterr()
-        for name in internal_names:
-            assert scheduler._setting(name) == renamed[name], name
-        assert aliases_in(capsys.readouterr().err) == warned
-
-
 def _run_module(tmp_path, module_arguments: list[str], **conflict) -> subprocess.CompletedProcess[str]:
     env = _subprocess_env()
     env.update(conflict)
@@ -342,8 +255,9 @@ def _run_module(tmp_path, module_arguments: list[str], **conflict) -> subprocess
 @pytest.mark.parametrize(
     "module_arguments",
     [
+        # Port 0 asks the OS for a free port: a regression that starts the supervisor cannot take the default 8765.
         ["exomem.service_manager", "serve", "--runtime-dir", "managed", "--worker-python", sys.executable,
-         "--unit-name", "exomem-probe.service"],
+         "--unit-name", "exomem-probe.service", "--port", "0"],
         ["exomem.catalogue_prewarm"],
     ],
     ids=["the managed supervisor", "a module run as a job"],
@@ -362,6 +276,36 @@ def test_a_module_run_as_a_program_refuses_a_placement_conflict_in_its_environme
     assert "not run" in out.stderr  # a warning that names both variables and runs on is no refusal
     assert "EVERMATTER_STATE_ROOT" in out.stderr and "EXOMEM_STATE_ROOT" in out.stderr
     assert "explicit-root" not in out.stderr and "alias-root" not in out.stderr
+
+
+@pytest.mark.parametrize(
+    ("orig_argv", "refused"),
+    [
+        (["python", "-m", "exomem.catalogue_prewarm"], True),
+        (["python", "-mexomem.catalogue_prewarm"], True),
+        (["python", "-Im", "exomem.catalogue_prewarm"], True),
+        (["python", "-Imexomem.catalogue_prewarm"], True),
+        (["python", "-W", "ignore", "-m", "exomem.catalogue_prewarm"], True),
+        (["python", "-m", "exomem.catalogue_prewarm", "--help"], False),
+        (["python", "-m", "exomem"], False),
+        (["python", "-m", "pytest", "exomem.catalogue_prewarm"], False),
+        (["python", "-c", "import exomem", "-m", "exomem.catalogue_prewarm"], False),
+        (["python", "script.py", "-m", "exomem.catalogue_prewarm"], False),
+    ],
+)
+def test_the_program_entry_refusal_reads_every_way_the_interpreter_takes_a_module(
+    orig_argv, refused, monkeypatch
+) -> None:
+    """The failure: `python -Im exomem.<module>` runs a module past the refusal that `-m` meets."""
+    conflict = env_compat.Conflict("EVERMATTER_STATE_ROOT", "EXOMEM_STATE_ROOT")
+    monkeypatch.setattr(env_compat, "_process_conflicts", [conflict])
+
+    if refused:
+        with pytest.raises(SystemExit) as exit_:
+            env_compat.refuse_program_entry_conflicts(orig_argv)
+        assert exit_.value.code == 2
+    else:
+        env_compat.refuse_program_entry_conflicts(orig_argv)
 
 
 def test_help_runs_under_a_placement_conflict(tmp_path) -> None:

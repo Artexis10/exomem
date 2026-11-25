@@ -49,6 +49,9 @@ _advised = False
 # The process environment's conflicts, kept because promotion removes the alias
 # that held one side: the entry point refuses a placement conflict from here.
 _process_conflicts: list[Conflict] = []
+# The process environment as the process inherited it, kept because the first rename removes
+# its alias names. The supervisor reads its environment files over this copy, by literal name.
+_inherited: dict[str, str] | None = None
 # A conflict is warned about once per process: the same environment is mapped again
 # by every later loader, and one line per pair is enough for the operator.
 _reported: set[Conflict] = set()
@@ -163,6 +166,11 @@ def canonical_settings(
     return renamed
 
 
+def inherited_environment() -> dict[str, str]:
+    """A copy of the process environment as it was before the first rename removed its alias names."""
+    return dict(os.environ if _inherited is None else _inherited)
+
+
 def promote_legacy() -> list[str]:
     """Rename the alias names in the process environment into `EXOMEM_X`, and remove them.
 
@@ -174,8 +182,10 @@ def promote_legacy() -> list[str]:
     about once. Logs one advisory line, once per process, the first time a
     `KB_MCP_*` name is found.
     """
-    global _advised
+    global _advised, _inherited
     before = dict(os.environ)
+    if _inherited is None:
+        _inherited = dict(before)
     renamed, conflicts = rename_settings(before)
     removed = [name for name in before if name not in renamed]
     for name in removed:
@@ -206,6 +216,35 @@ def refuse_process_conflicts(*, every_setting: bool = False) -> None:
         raise SettingsConflict(refused, "the process environment")
 
 
+def program_module(argv: Sequence[str]) -> tuple[str, list[str]] | None:
+    """The module and its arguments when `argv` is `python [options] -m module [args]`, else None.
+
+    This is the interpreter's own option grammar: `-m` ends the options, and it may join other
+    flags (`-Im`) or its module (`-mexomem.x`). `-W` and `-X` take a value; `-c` runs code, not a module.
+    """
+    index = 1
+    while index < len(argv):
+        arg = argv[index]
+        if arg == "--check-hash-based-pycs":
+            index += 2
+            continue
+        if not arg.startswith("-") or arg in ("-", "--"):
+            return None  # a script, standard input or the end of the options
+        flags = "" if arg.startswith("--") else arg[1:]
+        for position, flag in enumerate(flags, start=1):
+            joined = arg[position + 1 :]
+            if flag == "m":
+                module = joined or (argv[index + 1] if index + 1 < len(argv) else "")
+                return (module, list(argv[index + (1 if joined else 2) :])) if module else None
+            if flag == "c":
+                return None
+            if flag in "WX":  # takes a value: the rest of this argument, or the next one
+                index += 0 if joined else 1
+                break
+        index += 1
+    return None
+
+
 def refuse_program_entry_conflicts(orig_argv: Sequence[str] | None = None) -> None:
     """Exit with code 2 when `python -m exomem.<module>` starts on a placement conflict.
 
@@ -215,11 +254,10 @@ def refuse_program_entry_conflicts(orig_argv: Sequence[str] | None = None) -> No
     interpreter was started with `-m exomem.<module>`. `-m exomem` refuses in its own `main`,
     and a version or help request runs.
     """
-    argv = list(sys.orig_argv if orig_argv is None else orig_argv)
-    if "-m" not in argv[:-1]:
+    program = program_module(sys.orig_argv if orig_argv is None else orig_argv)
+    if program is None:
         return
-    position = argv.index("-m")
-    module, arguments = argv[position + 1], argv[position + 2 :]
+    module, arguments = program
     if not module.startswith("exomem.") or module == "exomem.__main__":
         return
     if asks_only_to_identify(arguments):
@@ -234,11 +272,13 @@ def refuse_program_entry_conflicts(orig_argv: Sequence[str] | None = None) -> No
 def refuse_placement_conflicts_across(sources: Iterable[Mapping[str, str]], *, source: str) -> None:
     """Treat `sources` that one process reads together as one source for placement conflicts.
 
-    A later source's value for a name replaces an earlier one's, as an environment file
-    replaces what its supervisor inherited. An `EVERMATTER_X` then refuses when it disagrees with
-    the `EXOMEM_X` in force: a conflict between the supervisor and a file, or between two files,
-    would otherwise give two processes of one service two places. Each source's own conflicts
-    are settled by `canonical_settings`.
+    Each source holds its names as written, before any rename. A later source's value for a
+    name replaces an earlier one's by that literal spelling, as an environment file replaces
+    what its supervisor inherited, so an edit under either spelling takes effect alike. The
+    merged view then refuses an `EVERMATTER_X` that disagrees with the `EXOMEM_X` in force:
+    a conflict between the supervisor and a file, or between two files, would otherwise give
+    two processes of one service two places. Each source's own conflicts are settled by
+    `canonical_settings`.
     """
     merged: dict[str, str] = {}
     for settings in sources:

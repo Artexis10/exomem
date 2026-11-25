@@ -107,7 +107,7 @@ if (-not $serviceAppDirectory) {
     Fail "could not resolve the service AppDirectory; the shared dotenv state-root authority is unavailable."
 }
 $resolvedVault = if ($Vault) { $Vault } else { Get-ExomemDotenvValue -RepoRoot $serviceAppDirectory -Name "EXOMEM_VAULT_PATH" }
-if (-not $resolvedVault) { $resolvedVault = $env:EXOMEM_VAULT_PATH }
+if (-not $resolvedVault) { $resolvedVault = Get-ExomemProcessSetting -Name "EXOMEM_VAULT_PATH" }
 if (-not $resolvedVault) {
     Fail "no vault resolved (-Vault, .env, or EXOMEM_VAULT_PATH); offline state migration needs an explicit vault."
 }

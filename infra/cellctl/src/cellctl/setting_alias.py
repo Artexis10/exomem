@@ -1,7 +1,7 @@
 """The EVERMATTER_ and KB_MCP_ names of the EXOMEM_ settings that cellctl reads or screens.
 
 cellctl cannot import the substrate's `exomem.env_compat`, so it holds the rule here. The module
-imports only the standard library: `tests/test_rename_compat.py` loads it by path, without
+imports only the standard library: `tests/test_setting_names_in_step.py` loads it by path, without
 cellctl's dependencies, and fails when its answers differ from `env_compat`'s.
 """
 

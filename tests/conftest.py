@@ -489,6 +489,8 @@ def _fresh_settings_conflict_record(monkeypatch):
     """`env_compat` keeps the conflicts it saw at promotion for the whole process; a test's must not outlive it."""
     monkeypatch.setattr(env_compat_module, "_process_conflicts", [])
     monkeypatch.setattr(env_compat_module, "_reported", set())
+    # No snapshot: a test's own environment is the one the process "inherited".
+    monkeypatch.setattr(env_compat_module, "_inherited", None)
 
 
 @pytest.fixture(autouse=True)

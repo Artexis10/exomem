@@ -98,9 +98,10 @@ def _rename_aliases(environ: MutableMapping[str, str]) -> list[str]:
     """Rename each alias name in `environ` into its EXOMEM_ name and remove the alias names.
 
     Copy of `exomem.env_compat.rename_settings` for a hook, which cannot import the
-    package; `tests/test_rename_compat.py` keeps the copy in step. EVERMATTER_X then
+    package; `tests/test_setting_names_in_step.py` keeps the copy in step. EVERMATTER_X then
     KB_MCP_X fills EXOMEM_X only when it is unset. Returns the EVERMATTER_ names whose
-    value differs from a set EXOMEM_ name: a hook never picks one, it skips the turn.
+    value differs from a set EXOMEM_ name. This hook reads one credential, which the package
+    refuses on any conflict, so its caller treats every conflict as a refusal.
     """
     conflicts: list[str] = []
     for prefix in ("EVERMATTER_", "KB_MCP_"):  # the product's closed naming history

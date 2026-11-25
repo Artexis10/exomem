@@ -139,8 +139,9 @@ def test_platform_home_binding_never_falls_back_to_an_inherited_home(
     observed = []
     if module is continuation:
         monkeypatch.setattr(module.sys, "stdin", io.TextIOWrapper(io.BytesIO(b"{}")))
+        # The hook passes its command-line home as a flag, which applies after the environment rename.
         monkeypatch.setattr(
-            module, "dispatch_event", lambda client, data, *, environ: observed.append(environ)
+            module, "dispatch_event", lambda client, data, *, flags: observed.append(flags)
         )
     else:
         monkeypatch.setattr(module.sys, "stdin", io.StringIO(json.dumps(payload)))

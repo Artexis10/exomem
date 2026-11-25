@@ -126,8 +126,8 @@ def test_a_deferred_reminder_arrives_once_on_the_next_prompt(tmp_path, source):
     ]
 
 
-def test_a_settings_conflict_skips_the_turn_in_both_hooks(tmp_path):
-    """The failure: a hook picks one of two different values for the same setting and nudges on a guess."""
+def test_a_placement_conflict_skips_the_turn_in_both_hooks(tmp_path):
+    """The failure: a hook picks one of two different vaults and nudges on a guess."""
     (tmp_path / "agreed").mkdir()
     agreed = _env(tmp_path / "agreed", EXOMEM_CAPTURE_NUDGE_DELIVERY="next-turn")
     assert _stop(tmp_path / "agreed", agreed) == ""
@@ -137,13 +137,30 @@ def test_a_settings_conflict_skips_the_turn_in_both_hooks(tmp_path):
     conflicted = _env(
         tmp_path,
         EXOMEM_CAPTURE_NUDGE_DELIVERY="next-turn",
-        EVERMATTER_CAPTURE_NUDGE_DELIVERY="inline",
+        EXOMEM_VAULT_PATH=str(tmp_path / "vault-a"),
+        EVERMATTER_VAULT_PATH=str(tmp_path / "vault-b"),
     )
 
     assert _stop(tmp_path, conflicted) == ""
     assert not _pending(tmp_path)
     assert _prompt(conflicted, PROMPT) == ""
-    assert "EVERMATTER_CAPTURE_NUDGE_DELIVERY" in _log(tmp_path)
+    assert "EVERMATTER_VAULT_PATH and EXOMEM_VAULT_PATH" in _log(tmp_path)
+
+
+def test_a_conflict_in_a_setting_that_picks_no_data_lets_both_hooks_run(tmp_path):
+    """The failure: one stray setting that the hook never reads silences every nudge, every turn."""
+    conflicted = _env(
+        tmp_path,
+        EXOMEM_CAPTURE_NUDGE_DELIVERY="next-turn",
+        EVERMATTER_CAPTURE_NUDGE_DELIVERY="inline",
+    )
+
+    assert _stop(tmp_path, conflicted) == ""
+    assert _pending(tmp_path)  # EXOMEM_CAPTURE_NUDGE_DELIVERY won: the reminder waits for the next prompt
+    assert retrieve_hook.REMINDER in _prompt(conflicted, PROMPT)
+    log = _log(tmp_path)
+    assert "EVERMATTER_CAPTURE_NUDGE_DELIVERY and EXOMEM_CAPTURE_NUDGE_DELIVERY" in log
+    assert "inline" not in log and "next-turn" not in log  # the log names variables, never values
 
 
 def test_a_hook_flag_wins_over_an_inherited_product_prefix_name_in_both_hooks(tmp_path):
