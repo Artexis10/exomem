@@ -392,7 +392,10 @@ class AddObservation(Wire):
     text: str = Field(description="The observation, on one line.")
     tags: list[str] | None = None
     context: str | None = None
-    links: list[Link] | None = None
+    links: list[Link] | None = Field(
+        default=None,
+        description="A compact observation keeps only `derived_from` a saved Source or Evidence page, cited in the note's sources; other relations need a rich `kind`.",
+    )
     kind: str | None = Field(default=None, description="A rich kind, such as hypothesis; omit for a compact observation.")
     verdict: str | None = Field(default=None, description="Verdict in words, never a number; needs a rich `kind`. See inspect_memory schema.infer.")
     anchor: str | None = Field(default=None, description="Unique within the note; derived when omitted.")
