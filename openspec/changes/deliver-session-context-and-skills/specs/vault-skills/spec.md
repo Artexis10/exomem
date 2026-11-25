@@ -86,7 +86,7 @@ The listing, `omitted` and `generation` SHALL NOT depend on the turn.
 
 ### Requirement: An overflowing catalogue still names every item it could not list
 
-When not every item fits, `names` SHALL give the kind and name of each unlisted item, in listing order, within `skills_names_max_chars`.
+When not every item fits, `names` SHALL give each unlisted item's name under its kind, in listing order, within `skills_names_max_chars` (default 2400, range 0..8000; 0 turns it off).
 `omitted` SHALL count only the items neither listed nor named. `names` SHALL be part of `generation` and SHALL NOT depend on the turn.
 The block SHALL carry `names_advice`, which says how to open a named collection and find a named skill on the serving surface.
 
@@ -106,7 +106,7 @@ When not every item fits, `turn_items` SHALL name unlisted items that fit within
 #### Scenario: An overflowing catalogue names the touched domain's unlisted item
 
 - **WHEN** the items do not all fit and an unlisted item belongs to the one registered domain the turn touches
-- **THEN** the listing stays in fit order, `omitted` counts the items that did not fit, and `turn_items` names that item
+- **THEN** the listing stays in fit order, `omitted` counts the items neither listed nor named, and `turn_items` names that item
 
 #### Scenario: A held overflowing catalogue stays unchanged as the turn's domains change
 

@@ -2622,11 +2622,13 @@ _SKILLS_NAMES_GROUPS = (("skill", "skills"), ("collection", "collections"))
 
 
 def _skill_names_text(names: object) -> str:
-    """The named items grouped by kind, exactly as the service's `vault_skills.names_text` counts them."""
-    named = [item for item in names or () if isinstance(item, dict) and item.get("name")]
+    """The named items grouped by kind, exactly as the service's `vault_skills.names_text` writes and counts them."""
+    if not isinstance(names, dict):
+        return ""
     groups = []
     for kind, label in _SKILLS_NAMES_GROUPS:
-        members = [" ".join(str(item["name"]).split()) for item in named if (item.get("kind") or "skill") == kind]
+        listed = names.get(kind)
+        members = [" ".join(str(name).split()) for name in listed if str(name).strip()] if isinstance(listed, list) else []
         if members:
             groups.append(f"{label}: " + "; ".join(members) + ".")
     return " ".join(groups)

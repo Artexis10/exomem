@@ -58,6 +58,27 @@ def _names_advice() -> str:
     )
 
 
+def _fit_names(candidates: list[_Candidate], max_chars: int | None) -> tuple[dict[str, list[str]], list[_Candidate]]:
+    """The names of `candidates` that fit `max_chars` as `vault_skills.names_text` writes them, by kind, in order.
+
+    The length is kept running, so fitting is linear in the candidates: each kind's label, colon, space and closing
+    full stop are paid once when its group opens, a space joins the groups, and each name pays its length plus the
+    `; ` that joins it to the one before. A name that does not fit is skipped, and a shorter later one may still fit.
+    """
+    labels = dict(vault_skills.NAMES_GROUPS)
+    names: dict[str, list[str]] = {}
+    named: list[_Candidate] = []
+    used = 0
+    for candidate in candidates if max_chars else ():
+        kind, name = candidate.item["kind"], " ".join(str(candidate.item["name"]).split())
+        group = names.get(kind)
+        cost = len(name) + (2 if group else len(labels[kind]) + 3 + (1 if names else 0))
+        if used + cost > max_chars:
+            continue
+        names.setdefault(kind, []).append(name)
+        named.append(candidate)
+        used += cost
+    return {kind: names[kind] for kind, _ in vault_skills.NAMES_GROUPS if kind in names}, named
 
 
 def _unit(item: Mapping[str, Any], path: str) -> dict[str, Any]:
@@ -182,19 +203,11 @@ def compile_block(
         used += cost
     # Each item left without a line is still named while its name fits, so the agent sees every collection and
     # skill it may choose from and decides itself; `omitted` then counts only the items not even named.
-    names: list[dict[str, Any]] = []
-    for candidate in unlisted if names_chars else ():
-        named = {"kind": candidate.item["kind"], "name": candidate.item["name"]}
-        # The bound counts the names as the hook writes them, so a line within it is never cut there.
-        if len(vault_skills.names_text([*names, named])) > names_chars:
-            continue
-        names.append(named)
-        # Terminal egress decides the whole unit the name comes from, so a name never outlives its page's release.
-        served.append(_unit(candidate.item, candidate.path))
-    block["omitted"] -= len(names)
-    if names:
+    names, named = _fit_names(unlisted, names_chars)
+    block["omitted"] -= len(named)
+    if named:
         block["names"] = names
-    block["state"] = "ready" if block["items"] or names else "empty"
+    block["state"] = "ready" if block["items"] or named else "empty"
     block["generation"] = _digest({"items": block["items"], "names": names, "omitted": block["omitted"]})
     if block["state"] == "ready" and known_generation == block["generation"]:
         # The caller holds exactly these items: repeat none of them, and keep the count they were chosen with.
@@ -203,8 +216,10 @@ def compile_block(
         served = []
     elif block["state"] == "ready":
         block["advice"] = _advice()
-        if names:
+        if named:
             block["names_advice"] = _names_advice()
+        # Terminal egress decides the whole unit each name comes from, so a name never outlives its page's release.
+        served.extend(_unit(candidate.item, candidate.path) for candidate in named)
     turn_items, turn_used = [], 0
     for candidate in _of_the_turn(root, unlisted, domains, reached) if unlisted and turn_chars else ():
         cost = len(vault_skills.item_line(candidate.item)) + 1

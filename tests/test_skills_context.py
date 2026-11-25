@@ -259,7 +259,7 @@ def test_a_vault_sets_the_size_of_its_skills_block(skills_vault):
     block = _activate(skills_vault)["skills"]
 
     assert _names(block) == ["alpha"]
-    assert [item["name"] for item in block["names"]] == ["mid", "zeta"] and block["omitted"] == 0
+    assert block["names"] == {"skill": ["mid", "zeta"]} and block["omitted"] == 0
     assert block["generation"] != whole["generation"]
 
 
@@ -541,7 +541,7 @@ def test_an_overflowing_catalogue_is_held_once_while_the_turns_domains_change(do
 
 
 def _named(block: dict) -> list[tuple[str, str]]:
-    return [(item["kind"], item["name"]) for item in block.get("names") or ()]
+    return [(kind, name) for kind, names in (block.get("names") or {}).items() for name in names]
 
 
 def test_an_overflowing_catalogue_names_a_collection_that_shares_no_word_or_domain_with_the_turn(skills_vault):
@@ -561,7 +561,7 @@ def test_an_overflowing_catalogue_names_a_collection_that_shares_no_word_or_doma
 
 def test_names_past_their_bound_are_counted_as_omitted(skills_vault):
     whole = _activate(skills_vault, turn=NO_SKILL_NAMED)["skills"]
-    _one_item_bound(skills_vault, whole["items"], names_chars=len(vault_skills.names_text([{"kind": "skill", "name": "mid"}])))
+    _one_item_bound(skills_vault, whole["items"], names_chars=len(vault_skills.names_text({"skill": ["mid"]})))
 
     block = _activate(skills_vault, turn=NO_SKILL_NAMED)["skills"]
 
@@ -590,12 +590,17 @@ def test_a_collection_the_caller_cannot_see_is_never_named(skills_vault):
     assert "Depot stock" not in [name for _, name in _named(block)] + _names(block)
 
 
-def test_names_are_counted_as_the_hook_writes_them_with_each_kind_once(skills_vault):
+def test_names_fill_their_bound_exactly_across_both_kinds(skills_vault):
+    """The bound counts the grouped text the hook writes, so names that exactly fill it are all served."""
     _collection(skills_vault, "Pantry", "Pantry counts", "Counts of jars kept on each shelf.")
     _refresh(skills_vault)
     whole = _activate(skills_vault, turn=NO_SKILL_NAMED)["skills"]
-    _one_item_bound(skills_vault, whole["items"], names_chars=2000)
+    exact = len(vault_skills.names_text({"skill": ["mid", "zeta"], "collection": ["Pantry counts"]}))
 
-    block = _activate(skills_vault, turn=NO_SKILL_NAMED)["skills"]
+    _one_item_bound(skills_vault, whole["items"], names_chars=exact)
+    filled = _activate(skills_vault, turn=NO_SKILL_NAMED)["skills"]
+    _one_item_bound(skills_vault, whole["items"], names_chars=exact - 1)
+    short = _activate(skills_vault, turn=NO_SKILL_NAMED)["skills"]
 
-    assert vault_skills.names_text(block["names"]) == "skills: mid; zeta. collections: Pantry counts."
+    assert filled["names"] == {"skill": ["mid", "zeta"], "collection": ["Pantry counts"]} and filled["omitted"] == 0
+    assert short["names"] == {"skill": ["mid", "zeta"]} and short["omitted"] == 1

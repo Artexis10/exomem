@@ -286,7 +286,7 @@ def test_the_hook_writes_the_names_exactly_as_the_service_counted_them():
     """The service fits the names to its bound by this text; a hook line that differs could drop names for good."""
     from exomem import vault_skills
 
-    names = [{"kind": "skill", "name": "mid"}, {"kind": "collection", "name": "Depot stock"}, {"kind": "collection", "name": "Tide  log"}]
+    names = {"skill": ["mid"], "collection": ["Depot stock", "Tide  log"]}
 
     assert hook._skill_names_text(names) == vault_skills.names_text(names) == "skills: mid. collections: Depot stock; Tide log."
 
@@ -299,13 +299,13 @@ def test_names_at_the_largest_bound_a_vault_may_set_are_all_rendered():
     """The advice sits outside the cap, so a names text the service fitted to the largest bound still renders whole."""
     from exomem import vault_skills
 
-    names: list[dict] = []
+    names: dict[str, list[str]] = {"collection": []}
     for index in range(400):
-        candidate = [*names, {"kind": "collection", "name": f"Collection {index:03d}"}]
+        candidate = {"collection": [*names["collection"], f"Collection {index:03d}"]}
         if len(vault_skills.names_text(candidate)) > hook._SKILLS_NAMES_MAX_CHARS:
             break
         names = candidate
 
     text = hook._format_skills_block({"state": "ready", "items": [], "names": names, "names_advice": "Open one by name.", "omitted": 0})
 
-    assert vault_skills.names_text(names) in text and len(names) > 250
+    assert vault_skills.names_text(names) in text and len(names["collection"]) > 250

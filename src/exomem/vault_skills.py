@@ -90,18 +90,19 @@ def item_line(item: Mapping[str, Any]) -> str:
 
 
 #: How the names line labels each kind, once per group; a closed pair matching KIND_SKILL and KIND_COLLECTION.
-_NAMES_GROUPS = ((KIND_SKILL, "skills"), (KIND_COLLECTION, "collections"))
+NAMES_GROUPS = ((KIND_SKILL, "skills"), (KIND_COLLECTION, "collections"))
 
 
-def names_text(names: Sequence[Mapping[str, Any]]) -> str:
+def names_text(names: Mapping[str, Sequence[str]]) -> str:
     """The named items as the start-of-turn hook writes them, which is also how `skills_names_max_chars` counts them.
 
-    Each kind is written once before its names (`skills: a; b. collections: X; Y.`), so a long catalogue does not
-    pay for the kind on every name. A standalone hook cannot import this, so a parity test keeps the two in step.
+    `names` maps a kind to its names, as the block carries them. Each kind is written once before its names
+    (`skills: a; b. collections: X; Y.`), so a long catalogue does not pay for the kind on every name. A
+    standalone hook cannot import this, so a parity test keeps the two in step.
     """
     groups = []
-    for kind, label in _NAMES_GROUPS:
-        members = [" ".join(str(item["name"]).split()) for item in names if (item.get("kind") or KIND_SKILL) == kind]
+    for kind, label in NAMES_GROUPS:
+        members = [" ".join(str(name).split()) for name in names.get(kind) or () if str(name).strip()]
         if members:
             groups.append(f"{label}: " + "; ".join(members) + ".")
     return " ".join(groups)
