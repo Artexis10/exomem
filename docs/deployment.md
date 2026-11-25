@@ -480,6 +480,8 @@ service name, so it keeps working across the rename. Verify with
 
 ## 7. Add to claude.ai
 
+To install everything in one upload, open `https://kb.example.com/claude-plugin.zip`, upload the file as a plugin in Claude, then connect Evermatter from the plugin's **Connectors** tab. The plugin carries the connection, every skill and the hooks. To add only the connection:
+
 1. claude.ai → Settings → Connectors → **Add custom connector**
 2. **Name**: `Knowledge Base` (or whatever)
 3. **Server URL**: `https://kb.example.com/mcp` (this host's public hostname)
