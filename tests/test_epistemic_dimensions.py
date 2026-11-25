@@ -601,6 +601,10 @@ def test_a_served_row_dimension_fills_its_limit_before_each_lane_cap(
     index = embeddings.get_embedding_index(vault)
     vectors = [_vector(1.0, n / 100) for n in range(25)] + [_vector(0.1, 1.0)] * 3
     index.upsert_semantic_units(state, np.stack(vectors), 1.0)
+    for path in (RULES, OLD, NEW):
+        # A served cell embeds every page's units, so a vector lane proves its coverage from the index.
+        other = semantic_index.build_parent_index_state(vault, vault / path)
+        index.upsert_semantic_units(other, np.stack([_vector(0.0, 1.0)] * len(other.occurrences)), 1.0)
     warm_managed_cell(vault)
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setattr(embeddings, "embed_texts", lambda *_a, **_k: np.stack([_vector(1.0)]))

@@ -4041,9 +4041,23 @@ def _find_semantic_units(
     parent_reads: UnitParentReads | None = None,
     _defer_hydration: bool = False,
     _candidate_window: _UnitCandidateWindow | None = None,
+    _exact_dimensions: bool = False,
 ) -> list[SemanticUnitHit]:
     """Rank current, exactly eligible units through lexical and vector lanes."""
     from . import lexstore
+
+    def fill_exactly():
+        # The candidate windows underfilled the limit: exact eligibility reads every proposed unit.
+        return _find_semantic_units(
+            vault_root, query=query, limit=limit, scope=scope, plan=plan, snapshot=snapshot,
+            prefer_active=prefer_active, config=config, mode=mode, degraded_out=degraded_out,
+            failed_out=failed_out, retrieval_trace=retrieval_trace, timings=timings,
+            query_vector_provider=query_vector_provider, allowed_parent_paths=allowed_parent_paths,
+            prepared_queries=prepared_queries, recall_checkpoint=recall_checkpoint, repair=repair,
+            max_catalog_candidates=max_catalog_candidates, truncated_out=truncated_out,
+            status_basis=status_basis, parent_reads=parent_reads, _defer_hydration=_defer_hydration,
+            _candidate_window=_candidate_window, _exact_dimensions=True,
+        )
 
     def finish(hits):
         if _candidate_window is not None:
@@ -4094,7 +4108,14 @@ def _find_semantic_units(
     dnf_clauses = algebra.clauses if algebra.status == "complete" else None
     requested_limit = 20 if limit is None else max(1, limit)
     candidate_limit = max(20, min(200, requested_limit * 8))
-    if dnf_clauses is not None or indexed_dimensions:
+    # A dimension can propose most of the corpus, and exact eligibility hydrates every proposed
+    # unit. A ranked, limited query checks dimensions on its usual candidate windows first.
+    windowed_dimensions = (
+        indexed_dimensions and dnf_clauses is None and not _exact_dimensions
+        and limit is not None and mode in {"hybrid", "vector"}
+    )
+    exact_eligibility = dnf_clauses is not None or (indexed_dimensions and not windowed_dimensions)
+    if exact_eligibility:
         # Exact eligibility is normal-table metadata only. Hybrid/vector
         # content ranking consumes this finite candidate set independently,
         # so FTS absence cannot change the catalog outcome.
@@ -4235,7 +4256,7 @@ def _find_semantic_units(
             )
         else:
             records = _eligible_unit_records(vault_root, scope=scope, plan=plan, allowed_parent_paths=allowed_parent_paths)
-    elif dnf_clauses is None:
+    elif not exact_eligibility:
         if len(indexed) > candidate_limit:
             candidate_window_exhausted = True
             indexed = indexed[:candidate_limit]
@@ -4312,7 +4333,7 @@ def _find_semantic_units(
     }
     if mode in {"hybrid", "vector"}:
         vector_allowed_refs: set[str] | None = None
-        if dnf_clauses is not None or indexed_dimensions:
+        if exact_eligibility:
             # The allow-set is branch-correlated and bounded: it pushes the same
             # DNF clauses down so only rows satisfying a real `(category AND
             # kind)` branch are admitted — never the giant all-unit query under a
@@ -4384,6 +4405,8 @@ def _find_semantic_units(
         )
 
     if not records:
+        if candidate_window_exhausted and windowed_dimensions:
+            return fill_exactly()
         if candidate_window_exhausted and _candidate_window is None and failed_out is not None:
             failed_out.append("semantic_units_candidate_window")
             _record_degradation("semantic_units_candidate_window")
@@ -4512,6 +4535,8 @@ def _find_semantic_units(
 
     if limit is not None:
         final_ranking = final_ranking[:limit]
+    if candidate_window_exhausted and windowed_dimensions and len(final_ranking) < limit:
+        return fill_exactly()
     if (candidate_window_exhausted and _candidate_window is None
             and (limit is None or len(final_ranking) < limit)):
         if failed_out is not None:
