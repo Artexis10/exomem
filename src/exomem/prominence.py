@@ -168,7 +168,7 @@ LEARNING_INSTRUCTION = (
     "claims as unverified. A file that proves something, such as a label, receipt or "
     "warranty, goes in Evidence in the same turn, cited in what you write about it. "
     "Files you work on in my own repositories are not handed files. Files that hold "
-    "secrets, such as keys, tokens, a .env file, a card number or a code, are not kept; "
+    "secrets, such as keys, tokens, a .env file, a payment card number or a security code, are not kept; "
     "ask me for a copy with the secret covered."
 )
 

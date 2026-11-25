@@ -2276,7 +2276,7 @@ def op_bootstrap(
                 ),
                 "when": "the user shares a proof file (label, receipt, invoice, order, warranty): keep it that turn",
                 "custody": "original first; transcription beside, never instead; put the returned `cite` wikilink in your text",
-                "secrets": "never keep card numbers, codes or passwords; ask for a covered copy and say why",
+                "secrets": "keep identity, health and financial documents in full; never keep a payment card number, security code or password: ask for a covered copy and say why",
                 "fallback": {
                     "tool": "transfer_artifact",
                     "args": {"operation": "upload", "lane": "evidence", "scope": "<scope>", "category": "<category>"},
