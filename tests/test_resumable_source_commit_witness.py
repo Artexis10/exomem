@@ -349,4 +349,6 @@ def test_a_source_resumed_at_the_space_floor_keeps_its_receipt_or_unknown_outcom
         assert upload.part.read_bytes() == data
     credits = vault_state_dir(vault) / "upload-commit-credit.sqlite"
     with closing(sqlite3.connect(credits)) as conn:
-        assert conn.execute("SELECT peak FROM credits WHERE session = ?", (upload.id,)).fetchone() is None
+        # The resumed worker's log names any credit cleanup that failed and was deferred to expiry.
+        leftover = conn.execute("SELECT peak FROM credits WHERE session = ?", (upload.id,)).fetchone()
+        assert leftover is None, resumed.stderr
