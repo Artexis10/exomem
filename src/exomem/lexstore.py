@@ -3991,11 +3991,11 @@ def _journal_position(conn: sqlite3.Connection) -> _JournalPosition | None:
     later position under the same version shows that no trigger was dropped and no table replaced since.
     """
     objects = dict(conn.execute(
-        "SELECT name, type FROM sqlite_master "
-        "WHERE name LIKE 'catalogue\\_change%' ESCAPE '\\' OR (type = 'table' AND name = 'fts')"
+        "SELECT name, type FROM sqlite_master WHERE name LIKE 'catalogue\\_change%' ESCAPE '\\' "
+        "OR (type = 'table' AND name IN (SELECT value FROM json_each(?)))",
+        (json.dumps(list(_JOURNALED_PATHS)),),
     ).fetchall())
-    # The full-text table's own writes are journaled only where it exists.
-    tables = ("pages", "unit_revisions", *(("fts_content",) if "fts" in objects else ()))
+    tables = [table for table in _JOURNALED_PATHS if objects.get(table) == "table"]
     required = {CHANGE_JOURNAL, _CHANGE_JOURNAL_BOUND, *(_change_trigger(t, e) for t in tables for e in _CHANGE_EVENTS)}
     if not required <= objects.keys():
         return None
@@ -4015,6 +4015,7 @@ def _changed_paths(
     built or replaced beside this one, the journal's own bound, or a copy that diverged before `since`
     each leaves another row there or none, and an older snapshot holds no row past its own. A copy made
     after `since` holds the same rows up to its copy point, so the gap still names every path that moved.
+    The journal's bound caps the gap, so a patch reads at most `_CHANGE_JOURNAL_ROWS` paths by their key.
     """
     if since.schema != now.schema or since.seq > now.seq:
         return None
@@ -4023,11 +4024,8 @@ def _changed_paths(
     row = conn.execute(f"SELECT stamp FROM {CHANGE_JOURNAL} WHERE seq = ?", (since.seq,)).fetchone()
     if row is None or row[0] != since.stamp:
         return None
-    paths = [path for (path,) in conn.execute(
-        f"SELECT DISTINCT path FROM {CHANGE_JOURNAL} WHERE seq > ? LIMIT ?",
-        (since.seq, _CHANGE_PATCH_PATHS_MAX + 1),
-    )]
-    return paths if len(paths) <= _CHANGE_PATCH_PATHS_MAX else None
+    found = conn.execute(f"SELECT DISTINCT path FROM {CHANGE_JOURNAL} WHERE seq > ?", (since.seq,))
+    return [path for (path,) in found]
 
 
 class _PageRow(NamedTuple):
@@ -4071,15 +4069,17 @@ def _framed(path: str, value: bytes) -> bytes:
 def _read_catalogue_rows(
     conn: sqlite3.Connection, paths: list[str] | None, context: tuple, indexed: bool,
 ) -> tuple[dict[str, _PageRow], dict[str, tuple[str, bytes]]]:
-    """The page rows and unit revisions of `paths`, or of the whole catalogue when `paths` is None.
-
-    Paths are interned, so every state and every cache built from one shares one string per page.
-    """
+    """The page rows and unit revisions of `paths`, or of the whole catalogue when `paths` is None."""
     key, raw_clause, raw_params = context
     wanted = [] if paths is None else [json.dumps(paths, ensure_ascii=False)]
     # The wanted paths lead each join and are found by key; a whole read walks the table once.
     pages_from = "pages p" if paths is None else "json_each(?) AS wanted CROSS JOIN pages p ON p.path = wanted.value"
-    has_text = "EXISTS(SELECT 1 FROM fts WHERE fts.rowid = p.rowid)" if indexed else "0"
+    # A whole read lists the full-text rowids once; a patch probes the few rows it reads.
+    has_text = (
+        "0" if not indexed
+        else "p.rowid IN (SELECT rowid FROM fts)" if paths is None
+        else "EXISTS(SELECT 1 FROM fts WHERE fts.rowid = p.rowid)"
+    )
     found = conn.execute(
         "SELECT p.path, p.title, p.emitted_parent_path, p.in_vault, p.in_kb, "
         f"(1{raw_clause}), p.content_hash, {has_text} FROM {pages_from}",
@@ -4094,7 +4094,6 @@ def _read_catalogue_rows(
     )) if unparsed else {}
     pages: dict[str, _PageRow] = {}
     for path, title, parent, in_vault, in_kb, carried, content_hash, has_row in found:
-        path = sys.intern(str(path))
         identity = _page_identity(key, content_hash, texts.get(path)) if has_row else None
         pages[path] = _PageRow(
             title, parent, in_vault, in_kb, carried, identity,
@@ -4105,7 +4104,7 @@ def _read_catalogue_rows(
         else "json_each(?) AS wanted CROSS JOIN unit_revisions ON parent_path = wanted.value"
     )
     revisions = {
-        (path := sys.intern(str(parent_path))): (revision, _framed(path, revision.encode()))
+        parent_path: (revision, _framed(parent_path, revision.encode()))
         for parent_path, revision in conn.execute(
             f"SELECT parent_path, revision FROM {revisions_from}", wanted
         )
@@ -6108,10 +6107,17 @@ _CHANGE_JOURNAL_BOUND = "catalogue_changes_bound"
 #: it replaces, so this covers about 650 page writes of four units each between two reads. A reader whose
 #: position is older reads every row again.
 _CHANGE_JOURNAL_ROWS = 16_384
-#: A read patches at most this many changed paths. Past it, reading every row costs less than the lookups.
-_CHANGE_PATCH_PATHS_MAX = 2_048
 # nosemgrep: ep-word-set -- The SQLite trigger events, a closed set.
 _CHANGE_EVENTS = ("INSERT", "UPDATE", "DELETE")
+#: Each journaled table, and the SQL that names the page path of one of its rows (`row` is NEW or OLD). The
+#: catalogue DDL creates the triggers from this mapping, and `_journal_position` requires them for each of
+#: these tables that exists; the full-text content table exists only where SQLite has FTS5.
+# nosemgrep: ep-word-set -- The catalogue's own table names, a closed set its DDL fixes.
+_JOURNALED_PATHS: dict[str, Callable[[str], str]] = {
+    "pages": lambda row: f"{row}.path",
+    "unit_revisions": lambda row: f"{row}.parent_path",
+    "fts_content": lambda row: f"(SELECT path FROM pages WHERE rowid = {row}.id)",
+}
 
 
 def _change_trigger(table: str, event: str) -> str:
@@ -7693,17 +7699,18 @@ class LexicalStore:
             (("INSERT", "NEW"), ("UPDATE OF structure_json", "NEW"), ("DELETE", "OLD")),
             lambda row: f"{row}.path",
         )
-        LexicalStore._create_change_triggers(conn, "pages", lambda row: f"{row}.path")
-        LexicalStore._create_change_triggers(conn, "unit_revisions", lambda row: f"{row}.parent_path")
+        LexicalStore._create_change_triggers(conn, "pages")
+        LexicalStore._create_change_triggers(conn, "unit_revisions")
 
     @staticmethod
-    def _create_change_triggers(conn: sqlite3.Connection, table: str, path: Callable[[str], str]) -> None:
+    def _create_change_triggers(conn: sqlite3.Connection, table: str) -> None:
         """Journal the path of every row that a write to `table` adds, changes or removes.
 
-        `path` names the page path of a row in SQL (NULL when it has none). An update journals the old
-        path, and the new one too when it differs. Each journal row gets a random stamp, so a reader
+        `_JOURNALED_PATHS` names the page path of a row in SQL (NULL when it has none). An update journals
+        the old path, and the new one too when it differs. Each journal row gets a random stamp, so a reader
         can tell its own last row from another catalogue's row at the same position (`_changed_paths`).
         """
+        path = _JOURNALED_PATHS[table]
         insert = (
             f"INSERT INTO {CHANGE_JOURNAL}(path, stamp) "
             "SELECT changed, randomblob(8) FROM (SELECT {} AS changed) WHERE changed IS NOT NULL; "
@@ -7863,9 +7870,7 @@ class LexicalStore:
             )
             LexicalStore._create_frequency_revision_triggers(conn, "fts_content")
             # A page counts in the BM25 corpus only with its full-text row, so that row's writes are journaled too.
-            LexicalStore._create_change_triggers(
-                conn, "fts_content", lambda row: f"(SELECT path FROM pages WHERE rowid = {row}.id)"
-            )
+            LexicalStore._create_change_triggers(conn, "fts_content")
             conn.execute(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS tri USING fts5("
                 "title_lower, body_lower, tokenize='trigram case_sensitive 1')"
@@ -11834,41 +11839,46 @@ class LexicalStore:
     def _catalogue_rows(self, conn: sqlite3.Connection, generation: tuple) -> _CatalogueRows:
         """The page rows and unit revisions at `conn`'s pinned snapshot, which `generation` names.
 
-        A state kept for the same generation answers at once. Otherwise the change journal names the paths
+        A state kept at the same generation and journal position answers at once: a unit revision can move
+        without the generation, never without the position. Otherwise the change journal names the paths
         written since a kept state's position, and only their rows are read again. When it cannot vouch for
-        that gap, or the context moved, every row is read. Requests at one generation wait for the one that
-        fills it; a request at another generation never waits for that fill. The caller pins the snapshot.
+        that gap, or the context moved, every row is read. Requests at one key wait for the one that fills
+        it; a request at another key never waits for that fill. The caller pins the snapshot.
 
         Lock order: a recall-row fill lock, then a catalogue row fill lock, then `_term_frequency_cache_lock`.
         """
+        position = _journal_position(conn)
+        key = (generation, position)
         with self._term_frequency_cache_lock:
-            held = self._catalogue_row_states.get(generation)
+            held = self._catalogue_row_states.get(key)
             if held is not None:
                 return held
-            fill = self._catalogue_row_fills.setdefault(generation, threading.Lock())
+            fill = self._catalogue_row_fills.setdefault(key, threading.Lock())
         try:
             with fill:
                 with self._term_frequency_cache_lock:
-                    held = self._catalogue_row_states.get(generation)
+                    held = self._catalogue_row_states.get(key)
                     bases = list(reversed(self._catalogue_row_states.values()))
                 if held is not None:
                     return held
-                state = self._read_catalogue_state(conn, generation, bases)
+                state = self._read_catalogue_state(conn, generation, position, bases)
                 with self._term_frequency_cache_lock:
-                    self._catalogue_row_states[generation] = state
+                    self._catalogue_row_states[key] = state
                     while len(self._catalogue_row_states) > _CATALOGUE_ROW_STATES_MAX:
                         self._catalogue_row_states.popitem(last=False)
                 return state
         finally:
             with self._term_frequency_cache_lock:
-                if self._catalogue_row_fills.get(generation) is fill:
-                    del self._catalogue_row_fills[generation]
+                if self._catalogue_row_fills.get(key) is fill:
+                    del self._catalogue_row_fills[key]
 
     @staticmethod
     def _read_catalogue_state(
-        conn: sqlite3.Connection, generation: tuple, bases: list[_CatalogueRows]
+        conn: sqlite3.Connection, generation: tuple, position: _JournalPosition | None,
+        bases: list[_CatalogueRows],
     ) -> _CatalogueRows:
-        """The state at `generation`: patched from the newest of `bases` that the journal vouches for, or read whole."""
+        """The state at `generation` and `position`: patched from the newest of `bases` that the journal vouches
+        for, or read whole."""
         raw_clause, raw_params = _excluded_rows_clause(navigation=False, raw_material=True)
         # The catalogue identity and the KB folder name are the only inputs of a page's text beyond its
         # bytes and path (see `_page_identity`); they key every identity, so a change of either reads as
@@ -11883,7 +11893,6 @@ class LexicalStore:
         # `patched` is 1 when the journal vouched for the gap from a kept state; `paths_read` counts the paths
         # whose rows were read, every page on a whole read.
         with call_spans.span("lexical.catalogue_rows", {"patched": 0}) as measured:
-            position = _journal_position(conn)
             for base in bases if position is not None else ():
                 if base.context != context or base.position is None:
                     continue

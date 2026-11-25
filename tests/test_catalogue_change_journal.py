@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import lexstore
+from exomem import call_spans, lexstore
 
 
 def _catalogue(path: Path) -> sqlite3.Connection:
@@ -105,9 +105,7 @@ def test_a_position_that_the_journal_bound_dropped_cannot_vouch(
     assert lexstore._changed_paths(conn, since, lexstore._journal_position(conn)) is None
 
 
-def test_rows_patched_after_seeded_writes_equal_a_whole_read(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_rows_patched_after_seeded_writes_equal_a_whole_read(tmp_path: Path) -> None:
     """Edits, renames, deletions and moves in and out of the knowledge base and its raw material.
 
     After each write the long-lived store patches its rows from the journal. A store that kept nothing
@@ -128,25 +126,23 @@ def test_rows_patched_after_seeded_writes_equal_a_whole_read(
         path.write_text(f"# {chosen.choice(words).title()} {name}\n\n{' '.join(chosen.choices(words, k=12))}\n\n{units}\n")
         written[name] = path
 
-    reads: list[int | None] = []
-    real_read = lexstore._read_catalogue_rows
-
-    def counted_read(conn, paths, context, indexed):
-        reads.append(None if paths is None else len(paths))
-        return real_read(conn, paths, context, indexed)
-
-    monkeypatch.setattr(lexstore, "_read_catalogue_rows", counted_read)
+    patched: list[int] = []
 
     def compare() -> None:
         store = lexstore.get_store(tmp_path)
         conn = store._connect()
+        handle = call_spans.MCP_CALL_TOKEN.set("seeded-journal")
         try:
             conn.execute("BEGIN")
             generation = store._snapshot_generation(conn)
             kept = store._catalogue_rows(conn, generation)
+            spans = call_spans.pop_call_spans("seeded-journal")
             whole = lexstore.LexicalStore(tmp_path)._catalogue_rows(conn, generation)
         finally:
+            call_spans.MCP_CALL_TOKEN.reset(handle)
+            call_spans.pop_call_spans("seeded-journal")
             conn.close()
+        patched.extend(span["fields"]["patched"] for span in spans if span["name"] == "lexical.catalogue_rows")
         assert list(kept.pages.items()) == list(whole.pages.items())
         assert kept.revisions == whole.revisions
 
@@ -164,7 +160,5 @@ def test_rows_patched_after_seeded_writes_equal_a_whole_read(
             write(chosen.choice(sorted(written)))
         lexstore.ensure_fresh(tmp_path)
         compare()
-    # The kept store read the whole catalogue once; the store that kept nothing reads it at every step.
-    kept_reads = reads[0::2]
-    assert kept_reads[0] is None
-    assert all(paths is not None and paths > 0 for paths in kept_reads[1:]), kept_reads
+    # The long-lived store read the whole catalogue once, then patched at every step.
+    assert patched == [0] + [1] * 14, patched

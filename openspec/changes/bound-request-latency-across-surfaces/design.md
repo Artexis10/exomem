@@ -495,14 +495,13 @@ The catalogue now keeps a change journal, `catalogue_changes(seq, path, stamp)`:
 
 - Triggers on `pages`, `unit_revisions` and the full-text content table write one row for each row that a write adds, changes or removes. The row names the page path and carries a random stamp. The triggers run in the writer's transaction, so a snapshot holds exactly the journal rows of the writes that it sees.
 - A trigger keeps the newest 16,384 rows. Rewriting a page journals about 9 rows plus 4 for each unit row that it replaces.
-- `create_catalogue_schema` adds the table and its triggers in place, so no rebuild and no schema version change is needed. Store mode gets them through the same DDL. Its comparison with a fresh derivation leaves the journal out, as it leaves out `meta`.
+- `create_catalogue_schema` adds the table and its triggers in place, so a file-mode catalogue needs no rebuild and no schema version change. A store-mode vault migrated after this change gets them through the same DDL, and its comparison with a fresh derivation leaves the journal out, as it leaves out `meta`. An existing store gets them at its next owner pass, which an owner or lexical schema change starts. Until then it reads every row after a write, as before.
 
-A store keeps the page rows, page identities and unit revisions of its two latest snapshots (`_CatalogueRows`). For a new snapshot it patches a kept state when the journal vouches for the gap, and reads only the rows of the paths written since, each by its key. Otherwise it reads every row, as before. The journal vouches for a gap only when all of these hold:
+A store keeps the page rows, page identities and unit revisions of its two latest snapshots (`_CatalogueRows`). A kept state answers again only at the same generation and journal position: a revision-only write moves the position, not the generation. For a new snapshot the store patches a kept state when the journal vouches for the gap, and reads only the rows of the paths written since, each by its key. The journal's bound caps the gap, so a patch reads at most 16,384 paths. Otherwise it reads every row, as before. The journal vouches for a gap only when all of these hold:
 
-- Every journal trigger exists.
+- Every journal trigger exists, for each journaled table that the catalogue has. One mapping names the journaled tables for the DDL and for this check.
 - `PRAGMA schema_version` is unchanged. DDL can drop a trigger or replace a table without a journal row.
 - The journal still holds the kept state's newest row, under the same stamp. A catalogue built or replaced beside the live one, a copy that diverged before that row, or the bound leaves another row there or none. A copy taken after that row holds the same rows up to its copy point, so its gap still names every path that moved.
-- The gap names at most 2,048 paths. Past that, one whole read costs less than the lookups.
 
 The recall rows, the page identities and their fingerprint, and the unit revisions and their fingerprint are now derived from that state. They hold the same values in the same order as before, so every cache key and every result is unchanged. Each state fill records the span `lexical.catalogue_rows`, with `patched` and `paths_read`. SQLite's session extension records changesets, but Python's `sqlite3` module does not expose it. `sqlite3_update_hook` sees only the writes of its own connection.
 
@@ -513,7 +512,8 @@ Measured on the synthetic 15,600-page corpus of decision 11, two runs an arm, ei
 - A write added 550 and 664 ms of request-thread CPU (p50) to the next activation before the change, and 291 and 353 ms after it.
 - The page identities took 15,621 `_page_identity` calls (14 to 16 ms) before, and one call after. The recall rows took 35 to 71 ms before, and 21 ms after.
 - The page statistics' own work fell from 170 to 196 ms to 109 to 129 ms. A patched state fill took 2 ms.
-- One kept state holds 10 MiB, with a 14 MiB peak while it fills. The two kept states hold about 20 MiB.
+- One whole state held 10 MiB, with a 14 MiB peak while it filled. A patched state shares every row that did not change, so the second kept state adds only the rows that a write changed.
+- On a generated 15,600-page catalogue, a whole fill and the three readers on it took 60 to 68 ms (p50), against 54 to 57 ms for the three reads before the change. The difference is the framing that each row keeps, which makes every patched fingerprint a single hash. A whole fill happens after a start, a catalogue replaced or changed by DDL, or a gap that the journal cannot vouch for. An existing store-mode vault, which has no journal until its next owner pass, pays it after every write.
 - Rewriting a page with four units journals 25 rows. The write time per page showed no measurable change: −1.8 to +1.0 ms on 15.6 to 21.0 ms.
 
 The second run of each arm shared the host with other work, and in three of the four runs a write's rebuild sometimes reached the following activation. So the activation medians are noisy. The function times show where the saving lies.

@@ -1914,7 +1914,6 @@ def test_an_owner_only_page_without_units_that_leaves_its_project_still_ranks(
         assert set(search()) == both
 
 
-
 def test_a_limited_client_after_the_owners_patched_unit_build_answers_as_a_cold_store(
     configured_boundary, private_instances, vault, monkeypatch
 ):
@@ -1981,6 +1980,7 @@ def test_a_limited_client_after_the_owners_patched_unit_build_answers_as_a_cold_
     warm = ranked(limited)
     lexstore.clear_stores()
     assert warm == ranked(limited)
+
 
 def test_a_stopped_unit_build_keeps_the_public_parents_it_finished_and_never_a_private_one(
     configured_boundary, private_instances, vault, monkeypatch
