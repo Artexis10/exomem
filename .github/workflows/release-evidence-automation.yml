@@ -146,3 +146,16 @@ jobs:
           EVIDENCE_RUN: ${{ inputs.evidence_run }}
           EVIDENCE_ATTEMPT: ${{ inputs.evidence_attempt }}
         run: python3 scripts/release_evidence.py refresh --run-id "$EVIDENCE_RUN" --attempt "$EVIDENCE_ATTEMPT"
+      # refresh fails unless the Full attempt succeeded, so this runs only after a passing Full.
+      # GitHub drops most scheduled runs here, and a bot-started Full raises no workflow_run event.
+      - name: Start the release schedule after a passing Full run on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVIDENCE_RUN: ${{ inputs.evidence_run }}
+          EVIDENCE_ATTEMPT: ${{ inputs.evidence_attempt }}
+        run: |
+          set -euo pipefail
+          branch=$(gh api "repos/$GH_REPO/actions/runs/$EVIDENCE_RUN/attempts/$EVIDENCE_ATTEMPT" --jq .head_branch)
+          if [[ "$branch" == main ]]; then
+            gh workflow run release-schedule.yml --ref main -f caller_run="$GITHUB_RUN_ID"
+          fi
