@@ -2457,7 +2457,9 @@ class OperationAuthorization:
         ``content_sha256`` is a caller-proved digest of the file's current bytes
         (a guarded import source); session grants then bind to it without
         rereading a large file. A callable proves it only when an active session
-        grant names the path, so a file nothing else releases is refused unread.
+        grant names the path, or when a Markdown page is placed from its own
+        bytes, which the proof must then name; otherwise a file nothing else
+        releases is refused unread.
         """
         from ..governance import raw_protection
 
@@ -2500,7 +2502,7 @@ class OperationAuthorization:
                     or (not self.who.resolved and not self.policy.empty)
                     or not content_available(path, None, self.access, self.access_blocked, self.tombstones)):
                 return False
-            # A renderer supplies canonical metadata; editable bytes never supply this classification proof.
+            # A renderer supplies canonical metadata; otherwise the path places the file when it can.
             if metadata is not None:
                 scope_ids = membership.evaluate_metadata(metadata, self.policy)
             else:
@@ -2509,9 +2511,13 @@ class OperationAuthorization:
                     scope_ids = outcome.require_classified()
                 else:
                     # A scope that selects by page metadata places a Markdown page as a read of it does,
-                    # from its own bytes; anything else it cannot place stays withheld.
+                    # from its own bytes; anything else it cannot place stays withheld. A caller's proof
+                    # must name the bytes classified here, or the caller would use other bytes.
                     found = egress.page_scopes(self.root, path, self.policy)
-                    if found is None or (isinstance(content_sha256, str) and content_sha256 != found[1]):
+                    if found is None:
+                        return False
+                    proved = content_sha256() if callable(content_sha256) else content_sha256
+                    if proved is not None and proved != found[1]:
                         return False
                     scope_ids, content_sha256 = found
             grants = list(self.policy.grants)
