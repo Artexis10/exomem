@@ -1,0 +1,24 @@
+schema_version: 1
+registry: capture-date-sources
+# Where a sidecar's capture date came from. A source is fixed with the code that
+# produces it, so the vault overlay cannot add one; `producer` names that code and
+# `class` says how far to trust the date. An evidence date is a time that a file states.
+# A fallback date is derived from another fact and is never stored. Pack order is
+# precedence among the evidence entries: a later entry never replaces an earlier one.
+entries:
+  camera-exif:
+    label: Camera metadata
+    description: The photo's EXIF block or the video container states the time.
+    attributes: {class: evidence, producer: file-metadata}
+  matched-original:
+    label: Matched original
+    description: The date of a unique, camera-dated original that the image matches by content.
+    attributes: {class: evidence, producer: perceptual-match}
+  file-name:
+    label: File name
+    description: The file name states a date and time in a known tool format.
+    attributes: {class: evidence, producer: file-name}
+  source-date:
+    label: Source date
+    description: The day the source was captured into the vault, used only when no evidence date exists.
+    attributes: {class: fallback, producer: captured-field}

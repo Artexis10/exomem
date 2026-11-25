@@ -893,12 +893,14 @@ def _maintenance_rows():
             _row("collections-store", "check_memory", ("cursor",)),
             # The cutover previews here and takes no argument; the owner applies its plan_id with the CLI.
             _row("collections-cutover", "check_memory", ())]
-    for action, field, default, write_extra in (("fix", "dry_run", True, ("rebuild_embeddings",)),
-                                                ("backfill-ids", "dry_run", True, ()),
-                                                ("capture-metadata", "dry_run", True, ()),
-                                                ("convert-originals", "dry_run", True, ()),
-                                                ("reconcile", "dry_run", False, ("rebuild_graph",))):
-        fields = ("categories", "dry_run", "rebuild_embeddings", "rebuild_graph", "detail", "legacy_sample_limit")
+    # The last element is what only the preview of recovery also takes: it names the arguments the write applies.
+    for action, field, default, write_extra, read_extra in (
+            ("fix", "dry_run", True, ("rebuild_embeddings",), ()),
+            ("backfill-ids", "dry_run", True, (), ()),
+            ("capture-metadata", "dry_run", True, ("recover", "originals_root"), ("recover", "originals_root")),
+            ("convert-originals", "dry_run", True, (), ()),
+            ("reconcile", "dry_run", False, ("rebuild_graph",), ())):
+        fields = ("categories", "dry_run", "rebuild_embeddings", "rebuild_graph", "detail", "legacy_sample_limit", *read_extra)
         for value in (True, False, None):
             read = value is True if action == "reconcile" else value is not False
             # A write offers only the flags its mode uses, and names the preview it runs and why;

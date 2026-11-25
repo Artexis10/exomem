@@ -36,11 +36,12 @@ import stat
 import tempfile
 import unicodedata
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO
 
 from . import (
+    capture_dates,
     capture_metadata,
     document_identity,
     indexes,
@@ -129,6 +130,13 @@ def _parts_module():
 
 MAX_DECODED_BYTES = 5 * 1024 * 1024  # 5 MB — base64-via-model path (tokens cost real money)
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100 MB — HTTP /upload path (raw bytes, no token cost).
+#: The receipt's notice for a photo that states no camera metadata. It says what the file lacks and what often causes it,
+#: since the server cannot know that the client removed the metadata.
+NO_CAMERA_METADATA_WARNING = (
+    "This image has no camera metadata, so its capture time and position are unknown. "
+    "A chat client often sends a re-encoded copy without it. "
+    "To keep the original's metadata, send the original file from disk."
+)
 # Aligns with the Cloudflare free-plan ~100 MB edge cap, so the public path and this app cap
 # agree. A deployment that wants larger uploads over a non-Cloudflare route (LAN/Tailscale
 # direct to the origin) raises EXOMEM_UPLOAD_MAX_BYTES in its .env.
@@ -1119,6 +1127,8 @@ def preserve(
 
     from .media_store import enqueue_offload
 
+    if media_type == "image" and capture_metadata.lacks_camera_metadata(vault_root, artifact_path, artifact_path.name):
+        warnings.append(NO_CAMERA_METADATA_WARNING)
     if not media_pending and not media_previews.enqueue(vault_root, artifact_path, expected_sha256=artifact_hash):
         warnings.append("Preview admission deferred. Media reconciliation will retry the recorded intent.")
     enqueue_offload(vault_root, artifact_path)
@@ -2099,8 +2109,11 @@ def set_capture_fields(content: str, capture: CaptureFacts) -> str:
     """`content` with its capture fields replaced by exactly what `capture` states, in the frontmatter alone.
 
     A field that the file does not state is removed, so a sidecar never keeps a value that the original
-    no longer supports. The extracted text, the preserved notes and every other field stay as they are.
+    no longer supports. The one exception is a date matched to another file: no read of this file can
+    state it, so it stays unless `capture` states a date of higher precedence. The extracted text, the
+    preserved notes and every other field stay as they are.
     """
+    capture = _keeping_matched_date(content, capture)
     stated = capture.frontmatter()
     content = _remove_frontmatter_fields(
         content, lambda key: key in capture_metadata.FIELDS and key not in stated
@@ -2108,6 +2121,22 @@ def set_capture_fields(content: str, capture: CaptureFacts) -> str:
     for field, value in stated.items():
         content = _set_frontmatter_field(content, field, value)
     return content
+
+
+def _keeping_matched_date(content: str, capture: CaptureFacts) -> CaptureFacts:
+    """`capture`, carrying the page's recorded matched-original date when this read cannot replace it."""
+    try:
+        recorded = parse_frontmatter(content)[0]
+    except FrontmatterError:
+        return capture
+    kept = capture_metadata.recorded(recorded)
+    stated = capture.date_source if capture.time else None
+    if not kept.time or not capture_dates.survives_extraction(kept.date_source, stated):
+        return capture
+    return replace(
+        capture, time=kept.time, date=kept.date, date_basis=kept.date_basis,
+        date_source=kept.date_source, date_matched_from=kept.date_matched_from,
+    )
 
 
 def without_position_fields(content: str) -> str | None:

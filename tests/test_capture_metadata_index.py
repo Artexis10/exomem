@@ -51,6 +51,9 @@ NORTH_OF_THE_TROPICS = {"page.capture_lat": {"$gte": 23.5}}
 HAS_A_POSITION = {"page.frontmatter:/capture_lat": {"$exists": True}}
 HAS_NO_POSITION = {"page.frontmatter:/capture_lat": {"$exists": False}}
 WINDOW_WITHOUT_THE_BOX = {"$and": [WINDOW, {"$not": BOX}]}
+EVER = {"page.capture_date": {"$gte": "1900-01-01"}}
+STATED_DATE = {"$and": [EVER, {"page.capture_date_source": {"$in": ["camera-exif"]}}]}
+DAY_ENTERED_THE_VAULT = {"$and": [EVER, {"page.capture_date_source": {"$in": ["source-date"]}}]}
 
 
 def _write_photo(vault: Path, name: str) -> tuple[str, str]:
@@ -136,6 +139,9 @@ OWNER_ANSWERS = [
     pytest.param(BOX, {"helsinki"}, id="box"),
     pytest.param(ACROSS_THE_ANTIMERIDIAN, {"fiji", "tonga"}, id="box-across-the-antimeridian"),
     pytest.param(WINDOW_WITHOUT_THE_BOX, {"no-position"}, id="window-without-the-box"),
+    # A photo whose date the file states is `camera-exif`; the scan's day is only when it entered the vault.
+    pytest.param(STATED_DATE, set(PHOTOS) - {"scan"}, id="stated-date"),
+    pytest.param(DAY_ENTERED_THE_VAULT, {"scan"}, id="day-entered-the-vault"),
 ]
 
 
@@ -153,9 +159,23 @@ def test_live_cell_answers_capture_filters_from_the_catalogue(vault, photos, war
     assert (names, source) == (expected, "index")
 
 
-def test_a_photo_with_no_date_or_position_matches_no_window_and_no_box(vault, photos):
-    assert "scan" not in _names(vault, photos, {"page.capture_date": {"$gte": "1900-01-01"}})
+def test_a_photo_with_no_date_or_position_matches_no_box_and_no_stated_date(vault, photos):
     assert "scan" not in _names(vault, photos, {"page.capture_lat": {"$gte": -90}})
+    # The scan states no date, so only the day it entered the vault, labelled as such, places it in time.
+    assert "scan" in _names(vault, photos, EVER)
+    assert "scan" not in _names(vault, photos, STATED_DATE)
+
+
+def test_a_search_result_says_how_each_photos_capture_day_was_found(vault, photos):
+    by_sidecar = {sidecar: name for name, (_original, sidecar) in photos.items()}
+    hits = find_module.find(
+        vault, query="harbour", scope="kb-only", mode="keyword", graph=False, result_level="page",
+        filters=EVER, limit=20,
+    )
+
+    labels = {by_sidecar[hit.path]: hit.as_dict()["capture_date_source"] for hit in hits}
+
+    assert labels == {name: ("source-date" if name == "scan" else "camera-exif") for name in PHOTOS}
 
 
 def test_a_position_outside_the_globe_is_not_a_position(vault, photos):
@@ -411,7 +431,10 @@ def test_a_store_catalogue_built_before_the_capture_columns_reads_as_not_current
         assert lexstore.catalogue_schema_current(catalogue)
         for index in ("pages_capture_day", "pages_capture_lat", "pages_capture_lon"):
             catalogue.execute(f"DROP INDEX {index}")
-        for column in ("capture_day", "capture_date_json", "capture_lat", "capture_lon"):
+        for column in (
+            "capture_day", "capture_date_json", "capture_lat", "capture_lon",
+            "capture_date_source", "capture_date_source_json",
+        ):
             catalogue.execute(f"ALTER TABLE pages DROP COLUMN {column}")
 
         assert not lexstore.catalogue_schema_current(catalogue)  # the stamp is current; the page shape is not
@@ -420,9 +443,30 @@ def test_a_store_catalogue_built_before_the_capture_columns_reads_as_not_current
 
         assert lexstore.catalogue_schema_current(catalogue)
         kinds = {row[1]: row[2] for row in catalogue.execute("PRAGMA table_info(pages)") if row[1].startswith("capture_")}
-        assert kinds == {"capture_day": "TEXT", "capture_date_json": "TEXT", "capture_lat": "REAL", "capture_lon": "REAL"}
+        assert kinds == {
+            "capture_day": "TEXT", "capture_date_json": "TEXT", "capture_lat": "REAL", "capture_lon": "REAL",
+            "capture_date_source": "TEXT", "capture_date_source_json": "TEXT",
+        }
         indexes = {row[1] for row in catalogue.execute("PRAGMA index_list(pages)")}
         assert {"pages_capture_day", "pages_capture_lat", "pages_capture_lon"} <= indexes
+
+
+def test_a_store_catalogue_with_the_capture_columns_but_no_date_source_is_not_current_until_the_owner_pass():
+    """Catches a schema-18 store that reads as current over a page table with no date-source column, so a source filter fails."""
+    import sqlite3
+    from contextlib import closing
+
+    with closing(sqlite3.connect(":memory:")) as catalogue:
+        lexstore.create_catalogue_schema(catalogue)
+        lexstore.stamp_catalogue_schema(catalogue)
+        for column in ("capture_date_source", "capture_date_source_json"):
+            catalogue.execute(f"ALTER TABLE pages DROP COLUMN {column}")
+
+        assert not lexstore.catalogue_schema_current(catalogue)
+
+        lexstore.create_catalogue_schema(catalogue)
+
+        assert lexstore.catalogue_schema_current(catalogue)
 
 
 @pytest.mark.parametrize("coordinate", [0.00005, -0.00003])
