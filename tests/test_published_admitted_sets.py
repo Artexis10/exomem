@@ -535,17 +535,37 @@ def _enrol_store_collections(root: Path, count: int) -> list[str]:
 
 @pytest.fixture
 def store_requests(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
-    """The arguments of every request that reaches the collection-store thread."""
+    """The arguments of every request a command makes of the collection store, at either door.
+
+    The store thread's queue (`call`) and the read beside it (`read_beside`) each count once; a read
+    beside that falls back onto the queue counts once, and a background read that never queues is
+    not counted.
+    """
+    import threading
+
     from exomem.collection_store import runtime
 
     requests: list[dict] = []
-    real = runtime.StoreServer.call
+    real_call, real_beside = runtime.StoreServer.call, runtime.StoreServer.read_beside
+    beside = threading.local()
 
     def counting(self, work, **kwargs):
-        requests.append(kwargs)
-        return real(self, work, **kwargs)
+        if not getattr(beside, "active", False):
+            requests.append(kwargs)
+        return real_call(self, work, **kwargs)
+
+    def counting_beside(self, work, **kwargs):
+        if not kwargs.get("queue", True):
+            return real_beside(self, work, **kwargs)
+        requests.append({"beside": True})
+        beside.active = True
+        try:
+            return real_beside(self, work, **kwargs)
+        finally:
+            beside.active = False
 
     monkeypatch.setattr(runtime.StoreServer, "call", counting)
+    monkeypatch.setattr(runtime.StoreServer, "read_beside", counting_beside)
     return requests
 
 
