@@ -42,7 +42,7 @@
             "type": "object"
           },
           "type": "array",
-          "description": "A compact observation keeps only `derived_from` a saved Source or Evidence page, cited in the note's sources; other relations need a rich `kind`."
+          "description": "A compact observation keeps only a source citation, such as `derived_from` a saved Source or Evidence page; other relations need a rich `kind`."
         },
         "kind": {
           "type": "string",

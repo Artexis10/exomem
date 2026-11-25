@@ -394,7 +394,7 @@ class AddObservation(Wire):
     context: str | None = None
     links: list[Link] | None = Field(
         default=None,
-        description="A compact observation keeps only `derived_from` a saved Source or Evidence page, cited in the note's sources; other relations need a rich `kind`.",
+        description="A compact observation keeps only a source citation, such as `derived_from` a saved Source or Evidence page; other relations need a rich `kind`.",
     )
     kind: str | None = Field(default=None, description="A rich kind, such as hypothesis; omit for a compact observation.")
     verdict: str | None = Field(default=None, description="Verdict in words, never a number; needs a rich `kind`. See inspect_memory schema.infer.")

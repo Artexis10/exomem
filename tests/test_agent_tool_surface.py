@@ -199,6 +199,27 @@ def test_a_compact_add_with_unit_metadata_is_refused_with_both_ways_out(build, v
     assert "Retries stay under five" not in _vault_text(vault, "Jitter policy")
 
 
+def test_editing_a_compact_observation_with_unit_metadata_names_the_field_and_the_rich_kind_route(build, vault) -> None:
+    async def scenario(client):
+        await _new_note(client, "Jitter policy")
+        added = await _call(client, "add_observation", {
+            "note": "Jitter policy", "category": "finding", "text": "First wording", "tags": ["reliability"],
+        })
+        return await _call(client, "edit_note", {
+            "note": "Jitter policy", "why": "Date it", "action": "edit_observation",
+            "observation": added.get("unit_id"), "category": "finding", "text": "First wording",
+            "as_of": "2026-11-25",
+        })
+
+    refused = _session(build(), scenario)
+
+    error = refused.get("error", {})
+    assert error.get("code") == "COMPACT_METADATA_REQUIRES_RICH_KIND", refused
+    # The unit is already compact and has no rows, so the exits are on this call, not on the page.
+    assert "as_of" in error["message"] and "`kind`" in error["message"], refused
+    assert "editing the page" not in error["message"], refused
+
+
 def test_a_stale_unit_id_is_refused_and_leaves_the_page_unchanged(build, vault) -> None:
     async def scenario(client):
         await _new_note(client, "Jitter policy")

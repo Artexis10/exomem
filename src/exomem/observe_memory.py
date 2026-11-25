@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, assert_never, get_args
@@ -82,6 +83,13 @@ class ObserveMemoryError(ValueError):
 
     def __post_init__(self) -> None:
         ValueError.__init__(self, f"{self.code}: {self.reason}")
+
+    def leaf_error(self) -> ValueError:
+        """The leaf-contract refusal a caller reads: the code and reason, then the remediation."""
+        message = f"{self.code}: {self.reason}"
+        if self.remediation:
+            message += f" Remediation: {self.remediation}"
+        return ValueError(message)
 
 
 def _legacy_routing_remediation(resolution: dict[str, Any]) -> str:
@@ -224,7 +232,7 @@ def observe_memory(
             "INVALID_OBSERVE_INPUT",
             "remove accepts only the parent, unit reference, and drift guards",
         )
-    proposal_mode = "update" if op == "validate" and (unit_ref or unit) else op
+    proposal_mode = _proposal_mode(op, unit_ref=unit_ref, unit=unit)
     if proposal_mode in {"add", "update"}:
         # These are the closed required argument fields, spelled by the serving surface.
         missing = {}
@@ -644,24 +652,24 @@ def observe_memory(
                 "INVALID_SEMANTIC_DATE_ORDER", "until must be on or after as_of",
             )
         preserved_metadata = _preserved_metadata(base_unit)
-        # Names the argument each governed value came from, in `_GOVERNED_ARGUMENT_KEYS` order.
-        governed_passed = tuple(
-            key
-            for key, value in zip(
-                _GOVERNED_ARGUMENT_KEYS,
-                (normalized_verdict, normalized_check_by, normalized_as_of, normalized_until),
-                strict=True,
-            )
-            if value is not None
+        governed_passed = _governed_names(
+            verdict=normalized_verdict,
+            check_by=normalized_check_by,
+            as_of=normalized_as_of,
+            until=normalized_until,
         )
         if selected_kind == _COMPACT_KIND and (governed_passed or preserved_metadata):
-            if base_unit is None:
-                raise _compact_add_metadata_refusal(
-                    language,
+            if base_unit is None or base_unit.form != "rich":
+                # A compact unit, new or existing, carries no rows, so the only exit that applies
+                # is to leave the fields out of this call.
+                raise _compact_metadata_refusal(
                     passed=governed_passed,
-                    category=normalized_category,
-                    projects=page_projects,
-                    page_type=page_type,
+                    kinds=_rich_kind_remediation(
+                        language,
+                        category=normalized_category,
+                        projects=page_projects,
+                        page_type=page_type,
+                    ),
                 )
             # Every exit named here has to actually exist. `verdict=""` and
             # `check_by=""` really do clear those rows, but no argument clears
@@ -1409,30 +1417,67 @@ def _rich_kind_remediation(
     return f"{hint}Pass `kind` with one of the admitted kinds: {', '.join(kinds)}."
 
 
-def _compact_add_metadata_refusal(
-    language: semantic_language_registry.SemanticLanguageRegistry,
-    *,
-    passed: tuple[str, ...],
-    category: str,
-    projects: tuple[str, ...],
-    page_type: str | None,
-) -> ObserveMemoryError:
-    """Governed metadata passed to a compact add: name each field and both exits.
+def _compact_metadata_refusal(*, passed: tuple[str, ...], kinds: str) -> ObserveMemoryError:
+    """Governed metadata sent with a compact unit: name each field and both exits.
 
-    An add has no existing unit to convert and no row to clear, so the edit remediation
-    would send the caller nowhere. Both exits here are a retry of the same call.
+    The refusal for converting a rich unit to compact names no field, and its exits (convert
+    the unit, edit the page to drop its rows) do not apply to a compact unit, which has no
+    rows. Both exits here are a retry of the same call; `kinds` says which rich kinds to pass.
     """
     fields = ", ".join(passed)
     return ObserveMemoryError(
         "COMPACT_METADATA_REQUIRES_RICH_KIND",
         f"Governed unit metadata ({fields}) needs a rich kind, and a compact observation "
         "carries no metadata",
-        f"Retry one of two ways: omit {fields} to add a compact observation, or keep "
-        f"{fields} by adding a rich unit. "
-        + _rich_kind_remediation(
-            language, category=category, projects=projects, page_type=page_type
-        ),
+        f"Retry one of two ways: omit {fields} to keep a compact observation, or keep "
+        f"{fields} by passing a rich kind. {kinds}",
     )
+
+
+def argument_refusal(arguments: Mapping[str, Any]) -> ObserveMemoryError | None:
+    """The compact-metadata refusal that a call's arguments alone decide, or None.
+
+    The busy intake queues a save and replays it later, so a save that is certain to be
+    refused would otherwise come back as a queued receipt and fail only at the replay. This
+    reads no page. A unit reference without `kind` keeps the unit's own kind, which only the
+    page knows, so that call is left to the replay.
+    """
+    mode = _proposal_mode(
+        str(arguments.get("operation") or "").strip().lower(),
+        unit_ref=arguments.get("unit_ref"),
+        unit=arguments.get("unit"),
+    )
+    kind = arguments.get("kind")
+    if kind is None:
+        compact_kind = mode in {"add", "validate"}
+    else:
+        compact_kind = semantic_language_registry.normalize_label(kind) == _COMPACT_KIND
+    if not compact_kind:
+        return None
+    passed = _governed_names(**{
+        key: arguments[key]
+        for key in _GOVERNED_ARGUMENT_KEYS
+        if str(arguments.get(key) or "").strip()
+    })
+    if not passed:
+        return None
+    kinds = _admitted_kind_keys(
+        semantic_language_registry.core_registry(), projects=(), page_type=None
+    )
+    return _compact_metadata_refusal(
+        passed=passed,
+        kinds=f"Pass `kind` with a core rich kind ({', '.join(kinds)}) or one this vault defines.",
+    )
+
+
+def _proposal_mode(op: str, *, unit_ref: str | None, unit: str | None) -> str:
+    """The operation as the write handles it: a preview that names a unit previews an update."""
+    return "update" if op == "validate" and (unit_ref or unit) else op
+
+
+def _governed_names(**values: Any) -> tuple[str, ...]:
+    """The governed arguments that carry a value, named in `_GOVERNED_ARGUMENT_KEYS` order."""
+    return tuple(key for key in _GOVERNED_ARGUMENT_KEYS if values.get(key) is not None)
 
 
 def _page_projects(frontmatter: dict[Any, Any]) -> tuple[str, ...]:
