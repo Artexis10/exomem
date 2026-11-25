@@ -67,8 +67,9 @@
 - [x] 5.4 Build the span index on demand: the request set, the state row, batched builds within the hold bound, maintenance on writes, retraction and re-admission, a reset on a field's removal or type change, and empty copies in snapshots and replicas.
   - Check: tests in which the index and the direct path return identical spans, totals and order for every case of 5.2; a large selection before the build refused `TIMELINE_WARMING` with a retry hint and progress, never an empty list; a restored snapshot that warms.
   - Evidence: `tests/test_record_timeline_query.py::test_the_index_answers_every_query_as_the_versions_do` (every query of 5.2, on both encodings), `::test_a_large_selection_before_the_build_is_refused_never_answered_short`, `::test_writes_keep_a_built_index_current` (an edit, a past point, a correction, a bulk upsert, a retraction and a re-admission), `::test_a_field_removed_or_retyped_loses_its_index` and `::test_a_restored_copy_warms_rather_than_read_a_copied_index` (the replica copy). The seeding helper for stores before schema 21 in `tests/test_typed_history_generations.py` now skips the index, which such a store lacks.
-- [ ] 5.5 List each built timeline index and its state in `inspect`.
+- [x] 5.5 List each built timeline index and its state in `inspect`.
   - Check: a test of an inspect reply before, during and after a build.
+  - Evidence: `tests/test_record_timeline_query.py::test_inspect_lists_each_timeline_index_and_its_state`, on both encodings. `tests/test_collection_store_wire.py` compares a file and a store inspection without the store-only `timeline_indexes`, as it does without `projection`.
 
 ## 6. Contract and guidance
 

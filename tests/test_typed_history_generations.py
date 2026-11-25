@@ -36,11 +36,12 @@ def before_timeline_facts(patch):
 
     An edit reads its row's latest effective times from those tables. A store before them holds no stated
     time, so every write it took is current, as the release that wrote it placed it. It has no span index
-    either, so a write keeps none current and a derived pass builds none.
+    either, so a write keeps none current, a derived pass builds none and an inspection lists none.
     """
     patch.setattr(timeline, "latest_bounds", lambda conn, row_ids: {})
     patch.setattr(timeline_index, "maintain", lambda conn, manifest, txn_id: None)
     patch.setattr(timeline_index, "backfill", lambda conn, manifest, *, limit: False)
+    patch.setattr(timeline_index, "listing", lambda conn, collection_id, readable: [])
 
 
 def before_retractable_rows(patch):

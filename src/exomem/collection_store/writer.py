@@ -665,7 +665,8 @@ class CollectionWriter:
                                           for item in rows[:record_governance._MAX_ITEM_ENTRIES - 1])],
                     "diagnostics": diagnostics,
                     "audit": None, "saved_views": [], "lifecycle_guards": {},
-                    "coverage": {"committed": len(rows)}, "legacy": None}, selection
+                    "coverage": {"committed": len(rows)}, "legacy": None,
+                    **self._timeline_inspection(manifest, field_plan.manifest)}, selection
         allowed = selection.released
         basis = selection.inspection_basis
         release = self._operation.summary_release(manifest.collection_id)
@@ -837,8 +838,16 @@ class CollectionWriter:
                 "state": "blocked" if held else "unknown" if not observations["complete"] else "partial" if observations["unreflected"] else "complete",
             },
             "projection": {"pending_views": pending, "held_view_corrections": len(corrections)},
+            **self._timeline_inspection(manifest, field_plan.manifest),
         })
         return payload, selection
+
+    def _timeline_inspection(self, manifest, readable) -> dict[str, Any]:
+        """A Records collection's timeline indexes on the fields the caller reads, each ready or building."""
+        if manifest.semantic_profile != "records":
+            return {}
+        return {"timeline_indexes": timeline_index.listing(self.connection, manifest.collection_id,
+                                                           readable.schema.fields)}
 
     def _inspection_audit(self, row, *, complete):
         from . import history

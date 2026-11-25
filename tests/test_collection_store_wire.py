@@ -632,6 +632,7 @@ def test_inspect_shape_guards_and_store_only_projection(paired, profile):
     assert {d["code"] for d in stored["diagnostics"]} == {"PROJECTION_PENDING"}
     if profile == "records":
         assert stored.pop("projection") == {"pending_views": 3, "held_view_corrections": 0}
+        assert stored.pop("timeline_indexes") == []  # the store's span indexes; the file path has none
     else:
         assert set(stored) == set(inspections[0])
     stored["diagnostics"] = []
@@ -783,5 +784,6 @@ def test_records_nonempty_saved_views_match_definitions_and_mode_local_identity(
     assert inspections[1].pop("field_release_basis")["collection_id"] == CID
     for inspection in inspections:
         inspection.pop("projection", None)
+        inspection.pop("timeline_indexes", None)
         inspection["diagnostics"] = []
     same_wire(*inspections)

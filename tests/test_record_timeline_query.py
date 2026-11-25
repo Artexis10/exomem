@@ -1,4 +1,4 @@
-"""`query_records` with `timeline`: one field's spans over effective time (OpenSpec record-value-timeline 5.1-5.4).
+"""`query_records` with `timeline`: one field's spans over effective time (OpenSpec record-value-timeline 5.1-5.5).
 
 Each case names the failure only it catches. Store collections run on the real CollectionWriter, in the JSON
 encoding (one view file per row) and the typed one (a summary view). The lamps, shelves and dates are invented,
@@ -510,3 +510,23 @@ def test_a_restored_copy_warms_rather_than_read_a_copied_index(lamps, monkeypatc
         restored = CollectionWriter(lamps.root, handle)
         assert pytest.raises(OpError, from_index, monkeypatch, restored, **QUERIES["every span"]).value.code == \
             "TIMELINE_WARMING"
+
+
+# --- 5.5 inspect ----------------------------------------------------------------------------------------------
+
+
+def test_inspect_lists_each_timeline_index_and_its_state(lamps, monkeypatch):
+    def listed():
+        with request_scope(OWNER), preview_store(lamps.root, lamps.handle):
+            return record_memory(lamps.root, "inspect", collection=LAMPS)["timeline_indexes"]
+
+    before = listed()
+    pytest.raises(OpError, from_index, monkeypatch, lamps, **QUERIES["every span"])
+    lamps.seed_timeline_indexes()
+    lamps.backfill_derived(LAMPS, limit=1, projection=False, rollup=False, references=False)
+    during = listed()
+    build(lamps)
+
+    assert before == []
+    assert during == [{"field": "location", "state": "building"}]
+    assert listed() == [{"field": "location", "state": "ready"}]
