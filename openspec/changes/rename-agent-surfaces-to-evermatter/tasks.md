@@ -9,8 +9,8 @@
 
 ## 2. Settings prefix (D3)
 
-- [ ] 2.1 Resolve `EVERMATTER_X` and its `EXOMEM_X` alias per source: the process environment, the `.env` loads before their conflict check, the standalone hooks' alias normalisers, setup's `.env` route lookup and the early resource preload. Refuse a conflict in the service and in credential-writing commands.
-- [ ] 2.2 Emit only `EVERMATTER_*` from setup, the installers (shell and PowerShell), the service files, the container images, the Helm chart, cellctl manifests and the remote setup wizard. Cover both names in every scrub and denylist.
+- [ ] 2.1 Settings release S1: resolve `EVERMATTER_X`, `EXOMEM_X` and `KB_MCP_X` per source in every reader: the process environment, the `.env` loads before their conflict check, the standalone hooks' alias normalisers, setup's `.env` route lookup and the early resource preload. Refuse a conflict in the service and in credential-writing commands, and skip the hook run on a conflict. No writer changes.
+- [ ] 2.2 Settings release S2, at least one release after S1: emit only `EVERMATTER_*` from setup, the installers (shell and PowerShell), the service files, the container images, the Helm chart and the remote setup wizard. Make cellctl choose the names per cell from its target image. Cover every name in each scrub and denylist.
 
 ## 3. Release B: emit the new names
 
@@ -27,12 +27,15 @@
   - the capture hook fires;
   - recall answers;
   - an old plugin install moves through `renames`.
-- [x] 3.9 Run skill activation on real Claude models with "Exomem" and "Evermatter" prompts, old names against new.
+- [x] 3.9 Run skill activation on real Claude models with "Exomem" and "Evermatter" prompts, old names against new. Done on 2026-11-25 with `claude plugin eval` (Claude Code 2.1.332, claude-sonnet-5-5, one draw, a deterministic Skill-call grader) on 10 prompts, half naming each product: 10 of 10 activated with the old skills and 10 of 10 with the new.
 
 ## 4. Listings
 
 - [ ] 4.1 Operator: rename the Claude directory and ChatGPT app listings.
 
 ## 5. Compatibility window (optional for archive)
+
+Archive this change after `rename-to-evermatter` and before `rename-stored-identifiers-to-evermatter`, because all three modify the same requirement.
+
 
 - [ ] 5.1 On or after 2027-11-23, review use of the old names and remove them from the accepted sets only with evidence.

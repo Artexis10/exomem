@@ -42,22 +42,31 @@ Release A teaches every reader both names and changes nothing a user sees. Relea
 
 The accepted server names live in `client_config` beside the emitted `SERVER_NAME`. The readiness service names live beside the readiness payload that emits them. Every reader imports these; no reader keeps its own copy. Release B changes the emitted value and leaves the accepted set unchanged.
 
-### D3. Settings take the `EVERMATTER_` prefix; `EXOMEM_` stays an alias
+### D3. Settings take the `EVERMATTER_` prefix: readers first, writers a release later
 
-The documented name of every setting becomes `EVERMATTER_X`. `EXOMEM_X` keeps working as an alias through the compatibility window. A promotion that copies one prefix over the other after the fact is wrong: it beats values that our own code forces, that a `.env` file sets or that an isolation recipe exports, and the literal-name conflict checks never see a conflict across the two prefixes.
+The documented name of every setting becomes `EVERMATTER_X`. `EXOMEM_X` and the legacy `KB_MCP_X` stay working aliases through the compatibility window. A promotion that copies one prefix over another after the fact is wrong: it beats values that our own code forces, that a `.env` file sets or that an isolation recipe exports, and the literal-name conflict checks never see a conflict across prefixes.
 
-Each source therefore resolves the two names before its own rules apply:
-- The process environment fills `EVERMATTER_X` from `EXOMEM_X` only when `EVERMATTER_X` is unset.
+Each source therefore resolves the names before its own rules apply:
+- The process environment fills `EVERMATTER_X` from `EXOMEM_X`, and then from `KB_MCP_X`, only when every name earlier in that order is unset.
 - A `.env` load resolves its keys before the conflict check and the override.
-- The standalone hooks resolve the names in their own alias normaliser.
+- The standalone hooks resolve the names in their own alias normaliser. One function defines the names for a setting. The hooks keep a copy, because they cannot import the package, and a test keeps that copy in step.
 
-When a source sets both names to different values, the service and every command that writes a credential refuse to start and name the two variables. The hooks log the conflict and use the `EVERMATTER_` value. Writers emit only `EVERMATTER_*`: setup, the installers, the service files, the container images, the Helm chart, cellctl manifests and the remote setup wizard. Scrubs and denylists cover both names. One function defines the pair of names for a setting. The hooks keep a copy, because they cannot import the package, and a test keeps that copy in step.
+When one source sets `EVERMATTER_X` and `EXOMEM_X` to different values, the service and every command that writes a credential refuse to start and name both variables, without their values. This control prevents a service from running on the wrong vault, state root or credential. When it fires wrongly, the operator pays one refused start and fixes it by deleting one line. The hooks never pick on a conflict: they skip the run and log the conflict, and the capture queue keeps the work.
+
+The release order prevents version skew:
+1. Settings release S1 teaches every reader both names. No writer changes.
+2. Settings release S2, at least one release later, makes setup, the installers (shell and PowerShell), the service files, the container images, the Helm chart and the remote setup wizard emit only `EVERMATTER_*`. Scrubs and denylists cover every name.
+3. cellctl renders each cell's manifest with the names that the cell's target image reads. An image older than S1, including the previous image on a refused upgrade, gets `EXOMEM_*`. cellctl emits `EVERMATTER_*` only for an image at S1 or later.
+
+A local downgrade below S1 after S2 rewrote a `.env` or service file needs `evermatter setup` again. The release notes say so.
 
 ### D4. Plugins move through the marketplace `renames` map; the marketplace id stays
 
 Claude Code documents a top-level `renames` map in `marketplace.json`. It rewrites `enabledPlugins` and `pluginConfigs` to the new plugin name and shows a one-time notice. A git-hosted marketplace needs one `/plugin install` of the new name. Claude Code documents no path for renaming a marketplace, so the marketplace id stays `exomem`. The marketplace schema has no display-name field, so its description names Evermatter.
 
 ### D5. Existing client configurations move only when the user asks
+
+This section describes Release B. D7 widens it in Release C.
 
 `evermatter setup --migrate` renames the stdio server key that setup wrote, and the managed instruction block, with a backup of each file (once per run, before the first change). It adds the new prefix beside the old one in explicit checkpoint bindings. It never edits rules or hooks that the user wrote. It lists the ones that no `exomem` server answers any more instead, and doctor lists the same ones on every run.
 
@@ -78,14 +87,15 @@ Release B renamed nothing that holds a sign-in. The local plugin kept the name `
 Release C1 covers local installs:
 - The local plugin becomes `evermatter`, with server key `evermatter`, through a `renames` entry.
 - `evermatter setup --migrate` also renames each URL registration. For each one it prints the client's sign-in step: `/mcp` in Claude Code, and `codex mcp login evermatter` in Codex.
-- The renamed plugin's SessionStart hook shows a one-time notice naming the sign-in step, once a session finds the server unauthenticated.
+- The renamed plugin's SessionStart hook shows a notice naming the sign-in step once per install after the rename, when the plugin has a server address configured. The hook cannot see whether Claude Code holds a sign-in, because the hooks authenticate with their own local credential.
+- `setup --migrate` keeps the `exomem` key for a URL registration that points at the current Cloud host. That registration moves in C2 with the address, so its user signs in once.
 
 Release C2 renames `exomem-cloud` to `evermatter-cloud`, with server key `evermatter`, and moves its address to `https://mcp.evermatter.ai/mcp`. It ships only after the Cloud serves that host and accepts its token audience, and after the service notice has gone out.
 
 ## Risks / Trade-offs
 
 - Each connection that signs in needs one new sign-in after Release C (D6).
-- A user's own permission rules that name `mcp__exomem__*` stop matching for a server that the migration renamed. Doctor lists them, and the migration never runs unasked. A rule that still has an `exomem` server behind it, such as a kept URL server, matches and is not listed.
+- A user's own permission rules that name `mcp__exomem__*` stop matching for a server that the migration renamed. Doctor lists them, and the migration never runs unasked. A rule that still has an `exomem` server behind it matches and is not listed.
 - Codex's OAuth keying is undocumented, so Codex Cloud users may need one `codex mcp login` after migrating. The release notes say so.
 - Once the plugins rename, `renames` stays append-only, so the old plugin names remain in `marketplace.json` permanently.
 

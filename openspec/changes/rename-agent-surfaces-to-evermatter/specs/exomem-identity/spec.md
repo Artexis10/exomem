@@ -39,10 +39,50 @@ The MCP server key, the serverInfo name, the plugin names, the skill names and t
 
 - **WHEN** one source sets `EVERMATTER_VAULT_PATH` and `EXOMEM_VAULT_PATH` to different values
 - **THEN** the service and every command that writes a credential refuse to start and name both variables, without their values
-- **AND** the hooks log the conflict and use the `EVERMATTER_` value
+- **AND** the hooks skip the run and log the conflict, and the capture queue keeps the work
+
+#### Scenario: A cell on an older image keeps its settings
+
+- **WHEN** cellctl renders a manifest for a cell whose target image predates the release that reads `EVERMATTER_*`
+- **THEN** the manifest carries the `EXOMEM_*` names
 
 #### Scenario: A plugin rename moves an enabled install
 
 - **WHEN** a user has the `exomem` plugin enabled and the marketplace update brings the `renames` entry
 - **THEN** Claude Code enables `evermatter` in its place
-- **AND** the plugin tells the user the one sign-in step if its server holds no sign-in
+- **AND** the plugin tells the user the one sign-in step once, when it has a server address configured
+
+## MODIFIED Requirements
+
+### Requirement: Exomem Is the Canonical Internal Name
+
+The Python import package SHALL be `exomem`, and the CLI SHALL be reachable as `python -m exomem`. Every setting SHALL be documented under the `EVERMATTER_` prefix. The `EXOMEM_` and `KB_MCP_` prefixes SHALL stay working aliases through the compatibility window. Identifiers in code, the skill scaffold, tests and scripts SHALL use the exomem name. Prose that a person reads SHALL use the product name, Evermatter.
+
+#### Scenario: Package imports under the new name
+
+- **WHEN** `import exomem` (or any submodule) is executed in an installed environment
+- **THEN** the package loads and all functionality is available under the `exomem` name
+
+#### Scenario: Configuration documented under the new prefix
+
+- **WHEN** a user consults the README or deployment docs for configuration
+- **THEN** every variable is documented as `EVERMATTER_*`, with a note that `EXOMEM_*` and `KB_MCP_*` names remain honored
+
+### Requirement: Legacy `KB_MCP_*` Environment Variables Keep Working
+
+The system SHALL honor legacy `KB_MCP_*` environment variables by filling each `EVERMATTER_*` equivalent at package import when neither `EVERMATTER_*` nor `EXOMEM_*` is set for that setting. An explicitly set `EVERMATTER_*` or `EXOMEM_*` value SHALL take precedence over a conflicting legacy value. The promotion SHALL be re-runnable for environments populated after import, and SHALL log a single advisory line when legacy names were promoted.
+
+#### Scenario: Old .env keeps working unchanged
+
+- **WHEN** a process starts with only `KB_MCP_VAULT_PATH` set
+- **THEN** the vault resolves exactly as before
+
+#### Scenario: New name wins on conflict
+
+- **WHEN** both `EXOMEM_DISABLE_CLIP` and `KB_MCP_DISABLE_CLIP` are set to different values
+- **THEN** the `EXOMEM_DISABLE_CLIP` value is used
+
+#### Scenario: Late-set legacy variables are recoverable
+
+- **WHEN** a legacy variable is set after import and `promote_legacy()` is called again
+- **THEN** the corresponding setting becomes visible

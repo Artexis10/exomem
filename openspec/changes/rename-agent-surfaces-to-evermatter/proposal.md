@@ -18,7 +18,7 @@ These names are interfaces. Clients store them, and hooks and permission rules m
   - The local plugin becomes `evermatter` through the marketplace `renames` map.
   - `setup --migrate` renames HTTP registrations and prints the sign-in step.
   - The Cloud plugin becomes `evermatter-cloud` at the `mcp.evermatter.ai` address, after the Cloud serves that host and a service notice has gone out.
-- **Settings take the `EVERMATTER_` prefix in their own release (D3).** `EXOMEM_*` stays a working alias that fills only unset values, and a conflict between the two is refused.
+- **Settings take the `EVERMATTER_` prefix (D3).** One release teaches every reader both names. A later release makes the writers emit only `EVERMATTER_*`, and cellctl emits them only for cell images that read them. `EXOMEM_*` and `KB_MCP_*` stay working aliases that fill only unset values. The service and credential-writing commands refuse a conflict between the two prefixes.
 - The marketplace id stays `exomem`, and its description names Evermatter (the marketplace schema has no display-name field). Claude Code documents no path for renaming a marketplace, so a rename would strand every install.
 - Stored identifiers move in `rename-stored-identifiers-to-evermatter`: the `exomem_id` frontmatter key, the `exomem://` reference scheme, state and config paths, the Python package and the Cloud infrastructure names.
 
