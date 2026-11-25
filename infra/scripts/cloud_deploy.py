@@ -99,12 +99,13 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 def urllib_transport(method: str, url: str, headers: dict[str, str], body: bytes | None) -> tuple[int, bytes]:
     request = urllib.request.Request(url, data=body, method=method, headers=headers)
     try:
-        with urllib.request.build_opener(_NoRedirect()).open(request, timeout=HTTP_TIMEOUT) as response:
-            return response.status, response.read()
-    except urllib.error.HTTPError as error:
-        return error.code, error.read()
+        try:
+            with urllib.request.build_opener(_NoRedirect()).open(request, timeout=HTTP_TIMEOUT) as response:
+                return response.status, response.read()
+        except urllib.error.HTTPError as error:
+            return error.code, error.read()
     except http.client.HTTPException as error:
-        # A truncated or malformed answer is a failed connection to callers, like a timeout.
+        # A truncated or malformed answer, error statuses included, is a failed connection to callers, like a timeout.
         raise OSError("bad HTTP answer") from error
 
 
@@ -417,7 +418,7 @@ def report_release_behind(settings: Settings, tools: Tools, github: GitHub, tag:
         if fleet_version is not None and newest is not None and fleet_version < newest:
             try:
                 first_missed = github.first_release_after(fleet_version)
-            except (Stop, OSError):
+            except Stop:
                 # The list read only feeds this alert, so its failure must not stop the rollout.
                 first_missed = None
             if first_missed is None:
