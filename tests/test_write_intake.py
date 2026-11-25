@@ -392,6 +392,32 @@ def test_a_save_sent_after_a_queued_one_runs_after_it(
     assert one["finished_at"] <= two["finished_at"]
 
 
+def test_a_compact_save_with_governed_metadata_behind_the_queue_is_refused_at_once_and_never_queued(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect: a save sent behind a backlog was accepted as queued and failed only at the replay."""
+    _writer, holder = managers
+    observe = _command("observe_memory")
+    page = "Knowledge Base/Notes/Insights/percentage-based-feature-flag-rollout.md"
+    plain = {
+        "path": page, "operation": "add", "category": "operating_constraint",
+        "content": "A busy vault must not lose a save",
+    }
+    paused = threading.Event()
+    real_claim = write_intake._claim_head
+    monkeypatch.setattr(write_intake, "_claim_head", lambda root: 0.05 if not paused.is_set() else real_claim(root))
+    with _Hold(holder, vault):
+        first = _send(observe, vault, plain)
+    # The boundary is free, but the first save is still queued, so the next one would queue behind it.
+    with pytest.raises(ValueError, match="COMPACT_METADATA_REQUIRES_RICH_KIND") as refused:
+        _send(observe, vault, {**plain, "content": "Dated constraint", "as_of": "2026-11-25"},
+              scope="principal:session-b")
+    assert [item["ref"] for item in write_intake.read(vault)["items"]] == [first["queued_write"]["ref"]]
+    paused.set()
+    _wait_for_state(vault, first["queued_write"]["ref"], "applied")
+    assert "as_of" in str(refused.value) and "`kind`" in str(refused.value)
+
+
 def test_a_write_the_intake_does_not_accept_keeps_the_busy_refusal(
     vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
