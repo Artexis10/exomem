@@ -172,8 +172,6 @@ def scratch_documents(
     namespace for the restore Job to read, as the cell's own Jobs do.
     """
 
-    if not credential.get("b2-key-id") and object_store_key is None:
-        raise ValueError("the cell has no stored object-store key and no custodian key Secret")
     spec = CellManifestSpec(
         cell_id=cell_id, image=image, replicas=0, read_only=False,
         storage_gib=storage_gib, storage_class=storage_class, local_volume=local_volume,
@@ -201,6 +199,8 @@ def scratch_documents(
     if len(documents) != len(SCRATCH_DOCUMENTS) + 1 or documents[0]["kind"] != "Namespace":
         raise RuntimeError("cellctl no longer renders the documents a scratch restore needs")
     if not spec.b2_key_id:
+        if object_store_key is None:
+            raise ValueError("the cell has no stored object-store key and no custodian key Secret")
         documents.append({
             "apiVersion": "v1", "kind": "Secret", "type": object_store_key.get("type", "Opaque"),
             "metadata": {"name": OBJECT_STORE_KEY_SECRET, "namespace": scratch,
