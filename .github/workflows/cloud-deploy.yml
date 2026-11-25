@@ -10,9 +10,10 @@ name: cloud-deploy
 #   fired: the tag run starts from a github.token dispatch, and such a run's
 #   completion starts no other workflow (v0.172.0-v0.174.0 started none).
 # - It also runs once a day. A daily run re-reports the active alerts (a release that
-#   waits on a platform upgrade, a fleet behind the newest release for two days, a
-#   pinned cell) and retries a rollout that a missed dispatch left behind. With the
-#   fleet current it resolves the alerts and ends CELL_IMAGE_CURRENT.
+#   waits on a platform upgrade, a fleet that has missed a release for too long, a
+#   pinned cell, a failing run) even when no release lands, and retries a rollout that
+#   a missed dispatch left behind. With the fleet current it resolves the alerts and
+#   ends CELL_IMAGE_CURRENT.
 # - The `cloud-deploy` environment holds EXOMEM_DEPLOY_TOKEN and the alert
 #   capability, and admits only main (docs/runbooks/cloud-platform-deploy.md).
 #   Without the token, the run does nothing and succeeds.
@@ -61,4 +62,5 @@ jobs:
           EXOMEM_SUBSTRATE_URL: ${{ vars.EXOMEM_SUBSTRATE_URL }}
           CLOUD_DEPLOY_POLL_INTERVAL_SECONDS: ${{ vars.CLOUD_DEPLOY_POLL_INTERVAL_SECONDS }}
           CLOUD_DEPLOY_POLL_TIMEOUT_SECONDS: ${{ vars.CLOUD_DEPLOY_POLL_TIMEOUT_SECONDS }}
+          CLOUD_DEPLOY_RELEASE_BEHIND_HOURS: ${{ vars.CLOUD_DEPLOY_RELEASE_BEHIND_HOURS }}
         run: python3 infra/scripts/cloud_deploy.py

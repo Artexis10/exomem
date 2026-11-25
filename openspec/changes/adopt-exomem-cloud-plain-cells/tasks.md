@@ -338,6 +338,9 @@ Tasks 6.0, 6.1 and 6.3 retain their specific unreconciled evidence, without repe
   A production-shaped Sandbox checkout already proved payment and signed webhooks with a stand-in controller. Production acceptance uses one paid onboarding journey.
   That Sandbox proof does not establish a fresh production cell, connector sign-in or this full journey.
   Public admission stays on the waitlist; operator invitations admit directly when capacity is available.
+  Progress (2026-11-25): the first paid friend journey ran on 2026-10-23. The friend invitation was delivered, the checkout reached an active entitlement, the cell became Ready, and the connector sign-in followed the same day.
+  A read-only control-database read on 2026-11-25 showed the cell following the fleet image with no pin, seven app grants live on 365-day token families, three of them used that day, and a backup at 02:06 UTC.
+  Still unverified: cited recall on that cell, a restore of that cell's backup, a recipient export, and ordered deletion. Prove deletion on a complimentary ("Covered") tenant, never on the paying one.
   The recovery drills live in `qualify-cloud-recovery-after-launch`; they remain evidence limits, not invitation gates.
   Keep refresh, restorable backup, recipient export and ordered deletion acceptance explicit. Do not delete a paying tenant merely to complete a checklist.
 

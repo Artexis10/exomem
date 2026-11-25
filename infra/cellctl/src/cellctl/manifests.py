@@ -1795,10 +1795,14 @@ def render_restic_verify_job(
 class BackupStores(Protocol):
     """The two object stores cellctl's configuration names for cell backups."""
 
-    object_storage_bucket: str
-    object_storage_endpoint: str
-    cell_data_backup_bucket: str
-    cell_data_endpoint: str
+    @property
+    def object_storage_bucket(self) -> str: ...
+    @property
+    def object_storage_endpoint(self) -> str: ...
+    @property
+    def cell_data_backup_bucket(self) -> str: ...
+    @property
+    def cell_data_endpoint(self) -> str: ...
 
 
 def backup_store(stores: BackupStores, *, stored_key: bool) -> dict[str, str]:
