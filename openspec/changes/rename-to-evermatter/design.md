@@ -16,7 +16,7 @@ The design follows the rule of thumb in "Writing effective tools for agents" on 
 - The rename lands without conflicting with the open pull requests beyond docs and user-facing strings.
 
 **Non-Goals**
-- Renaming the Python package, settings, state paths, vault keys, database identifiers or wire names.
+- Renaming the Python package, settings, state paths, vault keys, database identifiers or wire names. (Superseded on 2026-11-25 by `rename-agent-surfaces-to-evermatter` and `rename-stored-identifiers-to-evermatter`. Wire names such as token audiences keep their bytes.)
 - Renaming the MCP server key or the plugin and skill identifiers.
 
 ## Decisions
