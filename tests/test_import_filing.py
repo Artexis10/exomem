@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
 import time
 from pathlib import Path
 
@@ -94,12 +95,12 @@ def _drive(filer: import_filing.Filer, import_id: str, *, calls: int = 40) -> No
     raise AssertionError("the stage was still on the list after the calls")
 
 
-def _file_call(vault: Path, import_id: str) -> dict:
+def _file_call(vault: Path, import_id: str, **arguments) -> dict:
     """An agent's own `file` call, through the dispatcher, as the local owner."""
     command = write_intake.command_named("adoption_studio")
     with principal_module.request_scope(principal_module.local_owner_principal(surface="mcp")):
         return writer_lease.invoke_command(
-            command, vault, action="file", path=f"_Imports/{import_id}")
+            command, vault, action="file", path=f"_Imports/{import_id}", **arguments)
 
 
 @pytest.fixture
@@ -131,7 +132,8 @@ def test_a_series_file_is_not_registered_outside_the_cell_it_was_imported_for(va
     filer = import_filing.Filer(vault)
     filer.scan()
 
-    assert import_filing.read_view(vault, import_id) == {"state": "unknown", "stop": None, "person": []}
+    view = import_filing.read_view(vault, import_id)
+    assert view["state"] == "unknown" and view["progress"] is None and view["needs"] == []
 
 
 def test_a_crash_after_the_cell_committed_a_call_repeats_it_under_its_identity_and_files_each_file_once(
@@ -217,6 +219,8 @@ def test_a_free_space_stop_parks_the_stage_and_a_later_call_resumes_it(vault: Pa
     assert import_filing.SPACE_CHECK_SECONDS in delays
     assert parked["state"] == "parked" and parked["stop"]["code"] == "INSUFFICIENT_SPACE"
     assert [need["need"] for need in parked["person"]] == ["free_space"]
+    (need,) = parked["needs"]
+    assert need["need"] == "free_space" and need["bytes"] >= 1 << 50  # the chunk plus the reserve that the volume must hold
     assert _sources(vault) == []
 
     monkeypatch.delenv("EXOMEM_IMPORT_RESERVE_BYTES")
@@ -259,11 +263,11 @@ def test_the_filing_view_of_a_stage_with_no_record_is_unknown_and_reports_no_cou
     reply = adoption_run.status(vault, path=f"_Imports/{import_id}", view="filing")
 
     assert reply["state"] == "unknown"
-    assert "progress" not in reply and "rate" not in reply
+    assert reply["progress"] is None and "left_out" not in reply and "rate" not in reply
     assert reply["path"] == f"_Imports/{import_id}"
 
 
-def test_the_filing_view_reads_the_record_alone_and_reports_the_measured_rate_once_two_calls_finished(
+def test_the_filing_view_reads_the_record_alone_and_reports_the_measured_rate_once_filed_work_is_covered(
     vault: Path, one_step_calls, monkeypatch,
 ) -> None:
     """A client polls this view for a stage of tens of thousands of files: it may open no run, inventory or outcome."""
@@ -271,8 +275,9 @@ def test_the_filing_view_reads_the_record_alone_and_reports_the_measured_rate_on
     filer = import_filing.Filer(vault)
     filer.register(import_id, principal=_owner(), surface=None)
     filer.run_once(import_id)
-    assert "rate" not in adoption_run.status(vault, path=f"_Imports/{import_id}", view="filing")
-    filer.run_once(import_id)
+    assert "rate" not in adoption_run.status(vault, path=f"_Imports/{import_id}", view="filing")  # one sample is no window
+    while "rate" not in import_filing.read_view(vault, import_id):
+        assert filer.run_once(import_id) is not None
     opened: list[str] = []
     real_open = Path.read_text
     monkeypatch.setattr(Path, "read_text", lambda self, *a, **k: opened.append(self.name) or real_open(self, *a, **k))
@@ -280,8 +285,128 @@ def test_the_filing_view_reads_the_record_alone_and_reports_the_measured_rate_on
     reply = adoption_run.status(vault, path=f"_Imports/{import_id}", view="filing")
 
     assert opened == [f"{import_id}.json"]
-    assert reply["state"] == "working" and reply["rate"]["over_calls"] == 2
-    assert set(reply["progress"]) >= {"filed", "remaining"}
+    assert reply["state"] in ("working", "done") and reply["rate"]["files_per_minute"] > 0
+    assert set(reply["progress"]) == {"total", "filed", "skipped_duplicates", "failed", "left_out", "remaining"}
+
+
+def test_a_stage_filed_in_one_call_after_its_registration_shows_a_rate_and_never_0_0(vault: Path) -> None:
+    """The first call's files count: with only the calls as samples, a stage that one call filed showed 0.0 files a minute."""
+    import_id = _stage(vault)
+    filer = import_filing.Filer(vault)
+    filer.register(import_id, principal=_owner(), surface=None, fresh_stage=True)
+
+    _drive(filer, import_id)
+
+    view = import_filing.read_view(vault, import_id)
+    assert view["state"] == "done" and view["progress"]["filed"] == len(FILES)
+    assert view["rate"]["files_per_minute"] > 0
+
+
+def test_a_stage_that_lists_no_manifest_reports_no_total_and_no_remaining_but_its_counts(vault: Path) -> None:
+    """With no receipt the total is unknown: a total of 0 would read as nothing to file, and `remaining` as 0 would say done."""
+    import_id = _stage(vault)
+    (import_stage.receipt_path(vault, import_id)).unlink()
+    filer = import_filing.Filer(vault)
+    filer.register(import_id, principal=_owner(), surface=None)
+
+    filer.run_once(import_id)
+
+    progress = import_filing.read_view(vault, import_id)["progress"]
+    assert progress["total"] is None and progress["remaining"] is None
+    assert isinstance(progress["filed"], int)
+
+
+def test_a_done_stage_lists_what_it_left_out_by_reason_and_counts_the_rest_as_remaining_none(vault: Path) -> None:
+    """The person must see which files were not filed and why: `done` with no list says everything went in."""
+    import_id = _stage(vault, files={**FILES, ".draft.md": b"# draft\n", "Archive/.old.md": b"# old\n"})
+    filer = import_filing.Filer(vault)
+    filer.register(import_id, principal=_owner(), surface=None)
+
+    _drive(filer, import_id)
+
+    view = import_filing.read_view(vault, import_id)
+    assert view["state"] == "done" and view["needs"] == []
+    assert view["left_out"] == {
+        "by_reason": {"outside_run": 2},
+        "items": [{"path": ".draft.md", "code": "outside_run"}, {"path": "Archive/.old.md", "code": "outside_run"}],
+        "truncated": False,
+    }
+    assert view["progress"] == {
+        "total": 5, "filed": len(FILES), "skipped_duplicates": 0, "failed": 0, "left_out": 2, "remaining": 0}
+
+
+def test_a_done_stage_lists_at_most_100_left_out_files_and_counts_them_all(vault: Path) -> None:
+    """A stage of thousands of hidden files must not put thousands of paths in a view that a client polls."""
+    hidden = {f".h{n:03}.md": b"# h\n" for n in range(import_filing.LEFT_OUT_ITEMS + 1)}
+    import_id = _stage(vault, files={**FILES, **hidden})
+    filer = import_filing.Filer(vault)
+    filer.register(import_id, principal=_owner(), surface=None)
+
+    _drive(filer, import_id)
+
+    left_out = import_filing.read_view(vault, import_id)["left_out"]
+    assert sum(left_out["by_reason"].values()) == len(hidden)
+    assert len(left_out["items"]) == import_filing.LEFT_OUT_ITEMS and left_out["truncated"] is True
+    assert [item["path"] for item in left_out["items"]] == sorted(item["path"] for item in left_out["items"])
+
+
+def _spy_on_file_calls(monkeypatch) -> list[str]:
+    """The name of the thread that makes each `file` call."""
+    callers: list[str] = []
+    real = adoption_run.file
+
+    def spy(*args, **kwargs):
+        callers.append(threading.current_thread().name)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(adoption_run, "file", spy)
+    return callers
+
+
+def test_a_wake_call_after_the_login_ended_registers_the_stage_under_the_new_login_and_files_nothing_itself(
+    vault: Path, cloud_cell, monkeypatch,
+) -> None:
+    """Home wakes a stage whose Cloud login ended: the call must resume it for the new caller and answer without filing."""
+    import_id = _stage(vault)
+    filer = import_filing.Filer(vault)
+    cloud_owner = write_intake.principal_record(principal_module.cloud_owner_principal(CELL, surface="cloud-import"))
+    filer.register(import_id, principal=cloud_owner, surface=None)
+    monkeypatch.delenv("EXOMEM_CLOUD_CELL_TOKEN")  # the cell no longer holds the login that registered the stage
+    filer.run_once(import_id)
+    ended = import_filing.read_view(vault, import_id)
+    assert ended["state"] == "parked" and ended["stop"]["code"] == "IMPORT_FILING_LOGIN_ENDED"
+    assert ended["needs"] == [{"need": "login"}]
+
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_TOKEN", "t" * 64)
+    callers = _spy_on_file_calls(monkeypatch)
+    import_filing.start(vault)
+    try:
+        started = time.monotonic()
+        reply = _file_call(vault, import_id, wait=False)
+        answered_in = time.monotonic() - started
+        view = _wait_for(vault, import_id, "done")
+    finally:
+        import_filing.stop(vault)
+
+    assert reply["state"] == "working" and reply["needs"] == [] and reply["mutated"] is False
+    assert answered_in < 5 and "MainThread" not in callers and set(callers) == {"exomem-import-filer"}
+    assert view["state"] == "done" and len(_sources(vault)) == len(FILES)
+
+
+def test_a_wake_call_from_a_login_the_cell_cannot_replay_refuses_and_registers_nothing(vault: Path) -> None:
+    """A delegated session may be narrowed after the call: filing as it later would exceed what the owner still grants."""
+    import_id = _stage(vault, filing=None)
+    command = write_intake.command_named("adoption_studio")
+    delegated = principal_module.local_owner_principal(surface="mcp").with_authorization_session("session-1")
+    import_filing.start(vault)
+    try:
+        with principal_module.request_scope(delegated):
+            with pytest.raises(ValueError, match="IMPORT_FILING_LOGIN_NOT_REPLAYABLE"):
+                writer_lease.invoke_command(command, vault, action="file", path=f"_Imports/{import_id}", wait=False)
+    finally:
+        import_filing.stop(vault)
+
+    assert import_filing.read_view(vault, import_id)["state"] == "unknown"
 
 
 def test_the_filing_view_refuses_a_run_id_and_a_path_that_is_not_a_staged_folder(vault: Path) -> None:

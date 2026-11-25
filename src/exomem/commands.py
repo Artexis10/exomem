@@ -12478,6 +12478,7 @@ def op_adoption_studio(
     limit: Annotated[int, Field(ge=1, le=adoption_run_module.STATUS_PAGE_ITEMS)] = adoption_run_module.STATUS_PAGE_ITEMS,
     revision: str | None = None,
     upload: str | None = None,
+    wait: bool = True,
 ) -> dict:
     """Review and import a collection in a resumable run.
 
@@ -12532,13 +12533,15 @@ def op_adoption_studio(
             with none is refused.
         view: For run `status`, summary by default; inventory, selection, plan,
             outcomes or stale pages. Full is the explicit browser compatibility view.
-            `filing` takes the staged `path` and no run_id: state, progress, stop, person and
-            rate of the cell's own filing; `unknown` is not zero.
+            `filing` takes the staged `path` and no run_id: state, progress, left_out (when done), stop,
+            needs, person and rate of the cell's own filing; `unknown` is not zero.
         offset: For status pages, a zero-based row offset.
         limit: For status pages, from 1 to 100 rows, also bounded by response bytes.
         revision: For status pages, the preceding summary's revision; restart paging if it changed.
         upload: For `file`, the `token` that upload_files returned for lane import, in place of `path`.
             The first call unpacks the archive into a staged folder; repeats carry on. Its reply names `path`.
+        wait: For `file`, false only registers `path` for the cell to file under your login (it replaces an
+            ended one) and answers the `view="filing"` reply; it files nothing in the call.
     """
     action = (action or "").strip()
     if action not in _ADOPTION_STUDIO_ACTIONS:
@@ -12594,6 +12597,12 @@ def op_adoption_studio(
         if action == "file":
             from . import due_state as due_state_module
 
+            if wait is False:
+                if upload is not None or continuation:
+                    raise adoption_run_module.AdoptionRunError(
+                        "IMPORT_REQUEST_INVALID", "file with wait false takes the staged path alone")
+                import_filing_module.wake(vault_root, path or "", collection)
+                return adoption_run_module.status(vault_root, path=path, view="filing")
             if upload is not None:
                 from . import import_upload
 
@@ -15401,6 +15410,9 @@ def invocation_writes_outside_writer(command: Command, kwargs: dict[str, Any]) -
 
     The lease treats it as a read; read-only cells and the call ledger still treat it as a write.
     """
+    if command.name == "adoption_studio" and kwargs.get("action") == "file" and kwargs.get("wait") is False:
+        # Registers a stage in the cell's private filing record and files nothing, so it never waits for a filing call.
+        return True
     return command.name == "transfer_artifact" and kwargs.get("operation") == "cancel"
 
 

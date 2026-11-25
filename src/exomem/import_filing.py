@@ -45,6 +45,8 @@ _REPLY_WORKING, _REPLY_STOPPED, _REPLY_DONE = "working", "stopped", "done"  # no
 _KB_NOT_INITIALIZED = "KB_NOT_INITIALIZED"
 #: The login behind the stage's registration ended; only a new `file` call from a valid login resumes it.
 STOP_LOGIN_ENDED = "IMPORT_FILING_LOGIN_ENDED"
+#: A `file` call with `wait` false came from a login that the cell cannot replay (a delegated authorization session).
+STOP_NOT_REPLAYABLE = "IMPORT_FILING_LOGIN_NOT_REPLAYABLE"
 #: The `file` reply could not be read as a reply.
 STOP_REPLY_UNREADABLE = "IMPORT_FILING_REPLY_UNREADABLE"
 #: The mutation protocol's final answer for an identity: its outcome will never be known, so the next call has a new one.
@@ -53,6 +55,15 @@ _OUTCOME_UNKNOWN = "MUTATION_OUTCOME_UNKNOWN"
 _STALE_CONTINUATION = "INVALID_CONTINUATION"
 #: The cell is not warm yet: a wait, not a try.
 _WARMING = "MUTATION_WARMING"
+
+#: The three things the filing view says the person has to do before the stage can go on.
+NEED_FREE_SPACE = "free_space"
+NEED_LOGIN = "login"
+NEED_SUPPORT = "support"
+#: The need that a `file` reply's `person` entry names for a stop on free space (`adoption_run._filing_reply`).
+_PERSON_FREE_SPACE = "free_space"
+#: The most left-out members that a `done` record lists; the counts by reason cover them all.
+LEFT_OUT_ITEMS = 100
 
 MAX_TRIES_PER_HOUR = 5
 FIRST_BACKOFF_SECONDS = 5.0
@@ -106,23 +117,50 @@ def _update(vault_root: Path, import_id: str, change: Callable[[dict], None]) ->
         return record
 
 
-def _fresh_record(import_id: str, principal: dict, surface: dict | None, collection: str | None) -> dict:
+def _fresh_record(
+    import_id: str, principal: dict, surface: dict | None, collection: str | None, *, total: int | None, baseline: bool,
+) -> dict:
+    # A baseline sample is a registration with no work behind it: the first call's files then count toward `rate`.
     return {
         "version": RECORD_VERSION, "import_id": import_id, "state": WORKING, "principal": principal,
         "surface": surface, "collection": collection, "seq": 0, "call": None, "next_action": None, "continuation": None,
-        "progress": None, "stop": None, "person": [], "calls": [], "busy": [], "as_of": _now(),
+        "total": total, "progress": None, "left_out": None, "stop": None, "needs": [], "person": [],
+        "calls": [[time.time(), 0]] if baseline else [], "busy": [], "as_of": _now(),
     }
 
 
-def _rate(calls: list) -> dict | None:
-    """Files handled per minute over the last calls; None until two calls have finished."""
-    if len(calls) < 2:
+def _rate(samples: list) -> dict | None:
+    """Files handled per minute over the newest samples; None until a window of two covers filed work.
+
+    A sample is the files handled at a time: one when a stage is registered with nothing filed, and one after each
+    finished call. A window that covers no filed work has no rate, so a stage never shows 0.0 for work it did.
+    """
+    if len(samples) < 2:
         return None
-    (first_at, first_handled), (last_at, last_handled) = calls[0], calls[-1]
-    if last_at <= first_at:
+    (first_at, first_handled), (last_at, last_handled) = samples[0], samples[-1]
+    if last_at <= first_at or last_handled <= first_handled:
         return None
-    per_minute = max(0, last_handled - first_handled) / ((last_at - first_at) / 60)
-    return {"files_per_minute": round(per_minute, 1), "over_calls": len(calls)}
+    per_minute = (last_handled - first_handled) / ((last_at - first_at) / 60)
+    return {"files_per_minute": round(per_minute, 1), "over_calls": len(samples)}
+
+
+def _progress(record: dict) -> dict | None:
+    """The contract's counts: what the last call reported, the manifest's total and what is neither filed nor left out.
+
+    On `done` each failed member is also one of the left-out members, so `remaining` takes it away once; before
+    `done` nothing is left out yet, and a failed member is taken away as failed.
+    """
+    counts = record.get("progress")
+    if not isinstance(counts, dict):
+        return None
+    total = record.get("total")
+    left_out = (record.get("left_out") or {}).get("count", 0)
+    settled = left_out if record["state"] == DONE else counts["failed"]
+    remaining = None if total is None else max(0, total - counts["filed"] - counts["skipped_duplicates"] - settled)
+    return {
+        "total": total, "filed": counts["filed"], "skipped_duplicates": counts["skipped_duplicates"],
+        "failed": counts["failed"], "left_out": left_out, "remaining": remaining,
+    }
 
 
 def read_view(vault_root: Path, import_id: str) -> dict:
@@ -134,14 +172,65 @@ def read_view(vault_root: Path, import_id: str) -> dict:
     """
     record = read_record(vault_root, import_id)
     if record is None:
-        return {"state": UNKNOWN, "stop": None, "person": []}
+        return {"state": UNKNOWN, "progress": None, "stop": None, "needs": [], "person": []}
     view: dict[str, Any] = {
-        "state": record["state"], "progress": record.get("progress"), "stop": record.get("stop"),
-        "person": record.get("person") or [], "as_of": record.get("as_of"),
+        "state": record["state"], "as_of": record.get("as_of"), "progress": _progress(record),
+        "stop": record.get("stop"), "needs": record.get("needs") or [], "person": record.get("person") or [],
     }
+    if record["state"] == DONE and record.get("left_out") is not None:
+        view["left_out"] = {key: record["left_out"][key] for key in ("by_reason", "items", "truncated")}
     if (rate := _rate(record.get("calls") or [])) is not None:
         view["rate"] = rate
     return view
+
+
+def _counts(progress: object) -> dict[str, int] | None:
+    """The three counts of a `file` reply's `progress` that the view keeps; None when the reply has not all three."""
+    if not isinstance(progress, dict):
+        return None
+    counts = {key: progress.get(key) for key in ("filed", "skipped_duplicates", "failed")}
+    return counts if all(isinstance(value, int) and not isinstance(value, bool) for value in counts.values()) else None
+
+
+def _stage_total(vault_root: Path, import_id: str) -> int | None:
+    """The members that the stage's receipt or record lists, but the series file; None when it lists none."""
+    stage = import_stage.read(vault_root, import_id)
+    if stage is None:
+        return None
+    return sum(1 for path in stage.members if path != import_stage.SERIES_FILE)
+
+
+def _left_out(vault_root: Path, import_id: str) -> dict:
+    """The members that adoption did not file, once, for a stage that just finished: counts by reason and a bounded list.
+
+    A `done` stage is never filed again unless a caller files it again, so this is read once and stored; the
+    view then answers without opening a run. Raises when the runs cannot be read, so the stage is not `done` yet.
+    """
+    from . import adoption_run
+
+    members = sorted(adoption_run.unfiled_members(vault_root, import_id), key=lambda member: member["path"])
+    by_reason: dict[str, int] = {}
+    for member in members:
+        by_reason[member["code"]] = by_reason.get(member["code"], 0) + 1
+    return {
+        "count": len(members), "by_reason": dict(sorted(by_reason.items())),
+        "items": [{"path": member["path"], "code": member["code"]} for member in members[:LEFT_OUT_ITEMS]],
+        "truncated": len(members) > LEFT_OUT_ITEMS,
+    }
+
+
+def _stopped_needs(vault_root: Path, reply: dict, person: list) -> list[dict]:
+    """What a stop asks of the person: free space (with the bytes the run records) or, for any other stop, support."""
+    if not any(isinstance(entry, dict) and entry.get("need") == _PERSON_FREE_SPACE for entry in person):
+        return [{"need": NEED_SUPPORT}]
+    from . import adoption_run
+
+    try:
+        stop = adoption_run.AdoptionRunStore(vault_root).load(reply.get("run_id")).get("apply_stop") or {}
+        needed = stop["chunk_bytes"] + stop["reserve_bytes"]
+    except (adoption_run.AdoptionRunError, KeyError, TypeError):
+        needed = None
+    return [{"need": NEED_FREE_SPACE, "bytes": needed if isinstance(needed, int) else None}]
 
 
 # --------------------------------------------------------------------------- the filer
@@ -184,21 +273,30 @@ class Filer:
         with self._condition:
             self._condition.notify_all()
 
-    def register(self, import_id: str, *, principal: dict, surface: dict | None, collection: str | None = None) -> bool:
+    def register(
+        self, import_id: str, *, principal: dict, surface: dict | None, collection: str | None = None,
+        fresh_stage: bool = False,
+    ) -> bool:
         """List a stage, or list it again with the principal of the newest caller; False when it ended `discarded`.
 
         The stored principal is the owner who asked for the filing. A principal that `write_intake.principal_record`
         refuses (a delegated session) is never passed here, so such a caller's stage stays foreground-only.
+        `fresh_stage` says nothing has filed the stage yet, so the record starts with a baseline for `rate`.
         """
         with _RECORD_LOCK:
             record = read_record(self.vault_root, import_id)
             if record is not None and record["state"] == DISCARDED:
                 return False
             if record is None:
-                record = _fresh_record(import_id, principal, surface, collection)
+                total = _stage_total(self.vault_root, import_id)
+                record = _fresh_record(import_id, principal, surface, collection, total=total, baseline=fresh_stage)
             else:
-                record.update(principal=principal, surface=surface, state=WORKING, stop=None, person=[], busy=[])
+                record.update(
+                    principal=principal, surface=surface, state=WORKING, stop=None, needs=[], person=[], busy=[],
+                    left_out=None)
                 record["collection"] = collection or record.get("collection")
+                if record.get("total") is None:
+                    record["total"] = _stage_total(self.vault_root, import_id)
             record["as_of"] = _now()
             _write_record(self.vault_root, record)
         with self._condition:
@@ -257,7 +355,7 @@ class Filer:
             if record is None or record["state"] in (DONE, DISCARDED):
                 continue
             if self._discarded(import_id):
-                _update(root, import_id, lambda held: held.update(state=DISCARDED, stop=None, person=[]))
+                _update(root, import_id, lambda held: held.update(state=DISCARDED, stop=None, needs=[], person=[]))
                 continue
             with self._condition:
                 self._due[import_id] = 0.0
@@ -283,7 +381,7 @@ class Filer:
         if principal is None:
             log.info("import filer did not register %s: no Cloud owner for its cell", import_id)
             return
-        self.register(import_id, principal=principal, surface=None)
+        self.register(import_id, principal=principal, surface=None, fresh_stage=True)
 
     def _discarded(self, import_id: str) -> bool:
         window = import_stage.window_record(self.vault_root, import_id)
@@ -308,7 +406,9 @@ class Filer:
         if login is auth_sessions.OriginLogin.UNREADABLE:
             return FIRST_BACKOFF_SECONDS
         if login is auth_sessions.OriginLogin.NOT_VALID:
-            self._park(import_id, STOP_LOGIN_ENDED, "the login that registered this import has ended", person=[])
+            self._park(
+                import_id, STOP_LOGIN_ENDED, "the login that registered this import has ended", person=[],
+                needs=[{"need": NEED_LOGIN}])
             return None
         call = self._begin_call(import_id)
         try:
@@ -366,26 +466,34 @@ class Filer:
         """
         if call.get("action", "file") == "start":
             if not isinstance(reply, dict):
-                self._park(import_id, STOP_REPLY_UNREADABLE, "the start call answered with something that is not a reply", person=[])
+                self._park(
+                    import_id, STOP_REPLY_UNREADABLE, "the start call answered with something that is not a reply",
+                    person=[], needs=[{"need": NEED_SUPPORT}])
                 return None
             _update(self.vault_root, import_id, lambda held: held.update(call=None, next_action=None, busy=[]))
             return 0.0
         filing = reply.get("filing") if isinstance(reply, dict) else None
         if filing not in (_REPLY_WORKING, _REPLY_STOPPED, _REPLY_DONE):
-            self._park(import_id, STOP_REPLY_UNREADABLE, "the file call answered with something that is not a filing reply", person=[])
+            self._park(
+                import_id, STOP_REPLY_UNREADABLE, "the file call answered with something that is not a filing reply",
+                person=[], needs=[{"need": NEED_SUPPORT}])
             return None
-        progress = reply.get("progress") if isinstance(reply.get("progress"), dict) else None
+        counts = _counts(reply.get("progress"))
         person = reply.get("person") if isinstance(reply.get("person"), list) else []
         continuation = reply.get("continuation") if isinstance(reply.get("continuation"), str) else None
         stop = reply.get("stop") if isinstance(reply.get("stop"), dict) else None
+        # Both are read before the record changes: a fault here leaves the call stored, and its repeat reads them again.
+        left_out = _left_out(self.vault_root, import_id) if filing == _REPLY_DONE else None
+        needs = _stopped_needs(self.vault_root, reply, person) if filing == _REPLY_STOPPED else []
 
         def change(record: dict) -> None:
-            record.update(call=None, progress=progress, person=person, busy=[])
+            record.update(call=None, progress=counts, left_out=left_out, needs=needs, person=person, busy=[])
             record["state"] = {_REPLY_WORKING: WORKING, _REPLY_STOPPED: PARKED, _REPLY_DONE: DONE}[filing]
             record["continuation"] = None if filing == _REPLY_DONE else continuation
             record["stop"] = stop if filing == _REPLY_STOPPED else None
-            handled = sum((progress or {}).get(key) or 0 for key in ("filed", "skipped_duplicates"))
-            record["calls"] = [*record["calls"], [time.time(), handled]][-_RATE_CALLS:]
+            if counts is not None:
+                handled = counts["filed"] + counts["skipped_duplicates"]
+                record["calls"] = [*record["calls"], [time.time(), handled]][-_RATE_CALLS:]
 
         _update(self.vault_root, import_id, change)
         if filing == _REPLY_DONE:
@@ -395,7 +503,7 @@ class Filer:
         if continuation is not None:
             return SPACE_CHECK_SECONDS  # a stop with a continuation is the free-space stop: ask again later
         if self._discarded(import_id):
-            _update(self.vault_root, import_id, lambda held: held.update(state=DISCARDED, stop=None, person=[]))
+            _update(self.vault_root, import_id, lambda held: held.update(state=DISCARDED, stop=None, needs=[], person=[]))
         return None
 
     def _after_error(self, import_id: str, error: Exception, call: dict) -> float | None:
@@ -415,9 +523,11 @@ class Filer:
             # The identity is spent, or the continuation is stale: a path alone carries on the newest scan.
             return self._back_off(import_id, code, reason, new_call=True)
         if self._discarded(import_id):
-            _update(self.vault_root, import_id, lambda held: held.update(state=DISCARDED, call=None, stop=None, person=[]))
+            _update(
+                self.vault_root, import_id,
+                lambda held: held.update(state=DISCARDED, call=None, stop=None, needs=[], person=[]))
             return None
-        self._park(import_id, code, reason, person=[], clear_call=True)
+        self._park(import_id, code, reason, person=[], needs=[{"need": NEED_SUPPORT}], clear_call=True)
         return None
 
     def _back_off(self, import_id: str, code: str, reason: str, *, new_call: bool = False) -> float | None:
@@ -439,7 +549,8 @@ class Filer:
                 record.update(call=None, continuation=None)
             if len(tries) >= MAX_TRIES_PER_HOUR:
                 parked = True
-                record.update(state=PARKED, stop={"code": code, "reason": reason}, person=[])
+                record.update(
+                    state=PARKED, stop={"code": code, "reason": reason}, needs=[{"need": NEED_SUPPORT}], person=[])
 
         record = _update(self.vault_root, import_id, change)
         if parked or record is None:
@@ -447,9 +558,11 @@ class Filer:
         tries = len(record["busy"])
         return 0.0 if new_call else min(MAX_BACKOFF_SECONDS, FIRST_BACKOFF_SECONDS * 2 ** max(0, tries - 1))
 
-    def _park(self, import_id: str, code: str, reason: str, *, person: list, clear_call: bool = False) -> None:
+    def _park(
+        self, import_id: str, code: str, reason: str, *, person: list, needs: list[dict], clear_call: bool = False,
+    ) -> None:
         def change(record: dict) -> None:
-            record.update(state=PARKED, stop={"code": code, "reason": reason}, person=person)
+            record.update(state=PARKED, stop={"code": code, "reason": reason}, needs=needs, person=person)
             if clear_call:
                 record["call"] = None
         _update(self.vault_root, import_id, change)
@@ -493,6 +606,13 @@ def stop(vault_root: Path, *, timeout: float = 10.0) -> None:
         filer.stop(timeout=timeout)
 
 
+def _import_id_of(path: str) -> str | None:
+    """The import ID of a staged folder path, `_Imports/<id>`, or None for any other path."""
+    parts = [part for part in path.strip("/").split("/") if part]
+    ok = len(parts) == 2 and parts[0] == vault.IMPORT_STAGE_DIRNAME and vault.is_import_id(parts[1])
+    return parts[1] if ok else None
+
+
 def note_file_call(vault_root: Path, path: str, collection: str | None = None) -> None:
     """Register the stage that a `file` call names, so the cell finishes it after the call returns.
 
@@ -501,10 +621,8 @@ def note_file_call(vault_root: Path, path: str, collection: str | None = None) -
     caller's own call goes on whatever happens here.
     """
     filer = filer_for(vault_root)
-    if filer is None:
-        return
-    parts = [part for part in path.strip("/").split("/") if part]
-    if len(parts) != 2 or parts[0] != vault.IMPORT_STAGE_DIRNAME or not vault.is_import_id(parts[1]):
+    import_id = _import_id_of(path)
+    if filer is None or import_id is None:
         return
     try:
         from . import write_intake
@@ -512,6 +630,41 @@ def note_file_call(vault_root: Path, path: str, collection: str | None = None) -
 
         principal = write_intake.principal_record(principal_module.effective_principal())
         if principal is not None:
-            filer.register(parts[1], principal=principal, surface=write_intake.surface_record(), collection=collection)
+            filer.register(import_id, principal=principal, surface=write_intake.surface_record(), collection=collection)
     except Exception:  # noqa: BLE001 - a registration fault never fails the caller's own file call
         log.warning("import filer could not register %s", path, exc_info=True)
+
+
+def wake(vault_root: Path, path: str, collection: str | None = None) -> None:
+    """Register the stage under the caller's login: `file` with `wait` false. The caller then reads the filing view.
+
+    It makes no `file` call: the filer's thread does, as the caller, after the reply. A stage that ended `done`
+    or `discarded` stays as it is, and a stage whose login ended goes on under this caller's. Raises
+    `AdoptionRunError` when the call cannot register the stage, so the caller never reads a view as a promise.
+    """
+    from . import write_intake
+    from .adoption_run import AdoptionRunError
+    from .governance import principal as principal_module
+
+    import_id = _import_id_of(path)
+    if import_id is None:
+        raise AdoptionRunError(
+            "IMPORT_REQUEST_INVALID", f"wait false takes the staged folder, {vault.IMPORT_STAGE_DIRNAME}/<id>")
+    filer = filer_for(vault_root)
+    if filer is None:
+        raise AdoptionRunError(
+            "IMPORT_REQUEST_INVALID",
+            "this server does not file in the background; call file again with its continuation until filing is not working")
+    record = read_record(vault_root, import_id)
+    if record is not None and record["state"] in (DONE, DISCARDED):
+        return
+    if not (vault_root / vault.IMPORT_STAGE_DIRNAME / import_id).is_dir():
+        raise AdoptionRunError("IMPORT_REQUEST_INVALID", f"no staged folder {vault.IMPORT_STAGE_DIRNAME}/{import_id}")
+    principal = write_intake.principal_record(principal_module.effective_principal())
+    if principal is None:
+        raise AdoptionRunError(
+            STOP_NOT_REPLAYABLE,
+            "this login cannot be replayed by the cell, so it cannot file in the background; "
+            "call file again with its continuation until filing is not working")
+    filer.register(
+        import_id, principal=principal, surface=write_intake.surface_record(), collection=collection, fresh_stage=True)

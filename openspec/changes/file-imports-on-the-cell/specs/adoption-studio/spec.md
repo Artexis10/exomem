@@ -40,7 +40,7 @@ A stop for free space, an unresolved recovery, a repeated busy answer or another
 
 ### Requirement: A filing record answers status at constant cost
 
-After each filer call the cell SHALL write one filing record per stage with `state`, `progress`, `stop`, `person`, `as_of` and, once two calls have finished, `rate` in files per minute. `state` SHALL be `working`, `parked`, `done` or `discarded`. `adoption_studio status` with the stage `path` and `view="filing"` SHALL return that record without reading runs, inventories or outcomes. The cell SHALL NOT state a time left.
+After each filer call the cell SHALL write one filing record per stage. `adoption_studio status` with the stage `path` and `view="filing"` SHALL return its `state`, `as_of`, `progress`, `stop`, `needs`, `person` and `rate` without reading runs, inventories or outcomes. `progress` SHALL carry `total`, `filed`, `skipped_duplicates`, `failed`, `left_out` and `remaining`. `state` SHALL be `working`, `parked`, `done` or `discarded`. The cell SHALL NOT state a time left.
 
 #### Scenario: Home polls a large import
 
@@ -50,7 +50,63 @@ After each filer call the cell SHALL write one filing record per stage with `sta
 #### Scenario: A stage that the filer has not seen
 
 - **WHEN** a client reads the filing view of a stage with no filing record
-- **THEN** the reply says `state` `unknown` and reports no zero counts
+- **THEN** the reply says `state` `unknown`, `progress` null and no `rate`, and reports no zero counts
+
+#### Scenario: A stage with no manifest has no total
+
+- **WHEN** the stage's receipt lists no members and a filer call has finished
+- **THEN** `progress` carries the call's counts, `total` is null and `remaining` is null
+
+### Requirement: A finished stage lists what it left out
+
+A `done` filing view SHALL carry `left_out`: the number of left-out members by reason code, up to 100 of them as `{path, code}` in stable order, and `truncated` true when more exist. The filer SHALL read them once, when it sees `done`, and store them in the record. `progress.left_out` SHALL be that count, and `remaining` SHALL count each member once.
+
+#### Scenario: A stage with hidden files finishes
+
+- **WHEN** a stage with two hidden files and three eligible files is filed
+- **THEN** the filing view says `done`, `left_out.by_reason` counts the two hidden files, `items` lists their paths and codes, and `progress.remaining` is 0
+
+#### Scenario: Thousands of files are left out
+
+- **WHEN** a stage leaves out more than 100 members
+- **THEN** `left_out.items` lists 100 of them, `truncated` is true and `by_reason` counts all of them
+
+### Requirement: A stop states what it needs
+
+The filing view's `needs` SHALL be a list of objects, empty unless the stage is `parked`. A free-space stop SHALL give `{need: "free_space", bytes}` with the bytes that the next chunk and the reserve need when the stop knows them, else null. An ended login SHALL give `{need: "login"}`. Any other stop SHALL give `{need: "support"}`.
+
+#### Scenario: Filing stops for lack of room
+
+- **WHEN** the next chunk and the reserve do not fit the free space
+- **THEN** `needs` holds `free_space` with the bytes that the volume must hold
+
+### Requirement: A rate covers filed work only
+
+The filer SHALL sample the files filed when it registers a stage that nothing has filed, and after each call. The filing view SHALL omit `rate` until two samples exist and their window covers filed work, and SHALL NOT report 0.0 for a stage that filed work.
+
+#### Scenario: A stage that one call filed
+
+- **WHEN** a stage that the cell registered fresh is filed in one call
+- **THEN** the filing view carries a `rate` above 0
+
+#### Scenario: One sample is no window
+
+- **WHEN** a foreground `file` call registered the stage and one filer call has finished
+- **THEN** the filing view carries no `rate`
+
+### Requirement: A file call with wait false registers without filing
+
+`adoption_studio` `file` with `wait` false and the stage `path` SHALL register the stage with the filer under the caller's login, replacing an ended one. It SHALL make no `file` call in the request, SHALL NOT wait for a running filing call, and SHALL return the filing view. It SHALL refuse a login that the cell cannot replay, and a server with no filer.
+
+#### Scenario: Home wakes a stage whose login ended
+
+- **WHEN** a stage is `parked` with a `login` need and Home calls `file` with `wait` false from a valid login
+- **THEN** the call returns the filing view as `working` with no `login` need, and the filer's thread files the stage
+
+#### Scenario: A delegated session cannot register a stage
+
+- **WHEN** a delegated authorization session calls `file` with `wait` false
+- **THEN** the call refuses with `IMPORT_FILING_LOGIN_NOT_REPLAYABLE` and the stage stays unregistered
 
 ### Requirement: Imported Sources record the origin their uploader stated
 
