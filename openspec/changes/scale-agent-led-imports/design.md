@@ -2,7 +2,7 @@
 
 ## Context
 
-The import routes are `exomem cloud import` (encrypted archive, a cell Job unpacks it into `_Imports/<import_id>/`) and local `exomem import` (a resumable copy into the same layout). Both end at `adoption_studio`, which files each item as a Source and keeps the staged copy until a discard. Peak disk use is therefore the staged copy plus the filed copy. On a Cloud cell the volume must hold both. The adoption inventory caps at `MAX_CANDIDATES_DEFAULT` (5,000) because every chunk rewrites the whole run object (`AdoptionRunStore.save`). The eligibility ceiling is `client_artifacts.fetch_budget().max_file_bytes`, which on a Cloud cell is the gateway's client-pull cap of 100 MiB, even for a file that is already on the cell.
+The import routes are `exomem cloud import` (encrypted archive, a cell Job unpacks it into `_Imports/<import_id>/`) and local `exomem import` (a resumable copy into the same layout). Both end at `adoption_studio`, which files each item as a Source and keeps the staged copy until a discard. Peak disk use is therefore the staged copy plus the filed copy. On a Cloud cell the volume must hold both. The adoption inventory caps at `MAX_CANDIDATES_DEFAULT` (5,000) because a call rewrites the whole run object (`AdoptionRunStore.save`). The eligibility ceiling is `client_artifacts.fetch_budget().max_file_bytes`, which on a Cloud cell is the gateway's client-pull cap of 100 MiB, even for a file that is already on the cell.
 
 ## Goals
 
@@ -73,7 +73,7 @@ Link resolution on a paged collection uses the full stat-only walk that `build_i
 - a link resolves by exact path, or by a bare name that is unique across the whole walk;
 - a match by alias only stays unresolved, because later pages' aliases are unknown.
 
-`plan` refuses a page while an earlier page of the same collection still has unapplied plan items, so destinations cannot collide. The cap stays, because it bounds the run object that every chunk rewrites.
+`plan` refuses a page while an earlier page of the same collection still has unapplied plan items, so destinations cannot collide. The cap stays, because it bounds the run object that each call rewrites (D9).
 
 ### D5. Large staged artifacts get their own ceiling and one streamed pass
 
@@ -94,6 +94,17 @@ Substrate admission still multiplies declared bytes by two. On attachable storag
 An apply call holds the vault boundary for its whole leaf, which can take most of a request budget. A derived proof that waits that long gives up, and the drain backs off. So the call lends the boundary between two committed chunks. Only a hold that opts in can borrow: the derived receipt proof and the component completion, which are brief and write no canonical content. The lender keeps the cross-process lock, so another process still waits.
 
 A loan first hands off custody of the call's batches, then advances the commit generation, as a release would. The handoff re-proves every batch of the call that shares a path with a new one, so the call prices it at the measured time per proved batch times all of its batches. It lends only when that handoff ends before the earliest borrower gives up, the borrower could not wait for the next chunk, and the handoff fits in the time left for the next chunk. No offer outlives that time. A call in a new process lends only after a first handoff has been measured.
+
+### D9. Filing writes the run object and the bookkeeping once per call
+
+A chunk's fixed cost decided how fast a large import filed. The 2026-11-25 rehearsal measured about 3.5 s per chunk at 25 items: the run object written twice, the live log read and rewritten, the Sources index and top index rewritten, and two canonical commits. So a call now pays those costs once:
+
+- **Run object.** A call writes `run.json` whole at most once. Each chunk commits its outcomes as `journal.json` beside it, in the same batch as its pages. The journal holds every change since the last full save and names that save's generation, and `load` folds it in. A crash leaves either the older journal or the newer one, and the import index or the `import_chunk` token resolves a committed chunk as before (D2).
+- **Bookkeeping.** The run carries the applied items that no Sources index or log has recorded. The call's first chunk batch records the items of earlier calls, the batch that completes the page records the rest, and `finish` or `cancel` records what is still owed. Each recording is one log entry that counts its items, with one provenance token. Before a batch records carried items, the run saves an intent with that token, so a stop between the intent and the commit never records them twice.
+- **Pacing.** The chunk cap rises from 25 to 250 items; the pacer's fixed-plus-rate fit sizes a chunk, and the fit carries across calls for 300 s, so a call does not start with probe chunks.
+- **Pages.** `plan` shares one read connection per lexical store for a page, and a later page's `start` carries the first page's scan summary instead of reading every staged note again.
+
+The Sources index and the log therefore lag the Sources by up to one call while a page files. A run that stops being called keeps its last call's items unrecorded until a later `apply`, `finish` or `cancel`.
 
 ## Risks
 
