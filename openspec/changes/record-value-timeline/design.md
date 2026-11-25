@@ -127,6 +127,8 @@ Options weighed:
 - `natural_key` is an object of the collection's natural-key field values. The reader serializes it as the writer does and finds the current row by `(collection_id, natural_key)`. When no current row holds it, the reader derives the `hashed-v1` item key from it and finds a retracted row, whose stored natural key retraction cleared.
 - `item_id` is the row id a query returns. The reader takes its key through the existing binder; a stale version still names the same row.
 - A caller to whom any natural-key field is withheld cannot match a key, because each match would confirm a hidden value (`FieldPlan.natural_key_withheld`). That caller, and a caller who cannot read the row, get `RECORD_NOT_FOUND`, identical to a key that names no row.
+- A key that is not exactly the declared natural-key fields is refused `INVALID_RECORD_ARGUMENTS`, after the withheld check, so the refusal never names a hidden field.
+- A retracted row is found by the key its identity derives from, which is the key it was created with. A row that changed its key before retraction is found by that original key, or by `item_key`. Finding it by a later key would need stored past keys; the timeline of the key fields (delivery 2) answers that question instead.
 
 This works on file-canonical collections too, because their history exists. It needs no schema change and ships first (D10).
 

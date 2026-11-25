@@ -19,7 +19,7 @@
   - Check: tests for lookup by key on a typed and a JSON collection; a retracted row found by key; a withheld natural-key field and an absent key giving identical refusals; a stale `item_id` naming the same row.
   - Evidence: `tests/test_record_history_natural_key.py` (9 cases: JSON and typed lookup, retracted row, moved key, withheld field against absent key, unreadable row against absent key, stale `item_id`, selector and key-shape refusals, file-canonical collection). A mutation that removed the `natural_key_withheld` check failed the withheld case.
 - [x] 2.2 Update the `history` operation entry, the `inspect_memory` routing and `describe`. Regenerate `docs/capabilities.md` and the MCP tool schema fixture.
-  - Check: the fixture diff shows only the two added history arguments.
+  - Check: `scripts/generate-capabilities.py --check` passes, and the regenerated `docs/capabilities.md` adds only the new history argument. The MCP schema fixture stays byte-identical, because `inspect_memory` takes an opaque `arguments` object.
   - Evidence: `scripts/generate-capabilities.py` added `natural_key` to the `record_memory` row (`item_id` was already there). `scripts/dump-tool-schemas.py` left `tests/fixtures/mcp_tool_schemas.json` and the discovery fingerprint unchanged, because `inspect_memory` takes an opaque `arguments` object, so the fixture shows no history arguments at all. The routing is covered by `tests/test_operation_entries.py` and `tests/test_record_history_natural_key.py`.
 
 ## 3. Store schema 21
