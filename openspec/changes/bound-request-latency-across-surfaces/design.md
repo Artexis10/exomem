@@ -512,6 +512,14 @@ A store keeps the page rows, page identities and unit revisions of its two lates
 
 The journal names a page's path after the page's rows are gone, so a Source erasure restarts it once the derived owners drop the erased page. The restart writes one row that names no page and deletes every older row, in one transaction. The journal then names no erased path, and no position from before the restart can vouch for a gap, so each kept state reads whole once. Deleting only the erased page's rows would let a kept state patch across a gap that no longer names that page.
 
+A repair rebuild must not bring those rows back. It copies the live catalogue or parses the files, and replays the writes that land while it builds, so it can still name the erased page. Three rules close that:
+
+- The rebuild reads the Source retirement generation when it starts, and declines to publish when an erasure advanced it since, as a detached catalogue's adoption does.
+- A rebuild that copies the live catalogue starts its own journal, so it never carries history that the live journal has since dropped.
+- The eraser advances the generation before it restarts the journal. A rebuild that publishes before the restart is restarted with the live catalogue. One that publishes after it either started before the advance and declines, or started after the page's rows were dropped.
+
+The rebuild's replay of a deleted page now also drops the page's unit revision, as the live delete path does.
+
 The recall rows, the page identities and their fingerprint, and the unit revisions and their fingerprint are now derived from that state. They hold the same values in the same order as before, so every cache key and every result is unchanged. Each state fill records the span `lexical.catalogue_rows`, with `patched` and `paths_read`. SQLite's session extension records changesets, but Python's `sqlite3` module does not expose it. `sqlite3_update_hook` sees only the writes of its own connection.
 
 Proof: `tests/test_catalogue_change_journal.py` checks that the journal names every path that a page, full-text or unit revision write touched. It also checks that a diverged copy, DDL, a missing trigger, the bound and a restart each stop a patch. The Source eraser's test that no live store names an erased page covers the restart's purpose. A seeded run of edits, renames, deletions and moves in and out of the knowledge base and its raw material patches at every step. At each step it equals a store that kept nothing, row for row and in order. The existing seeded tests of the page and unit statistics now run through the patched state and still equal a store that kept nothing.

@@ -9224,9 +9224,11 @@ class LexicalStore:
         """Restart the live catalogue's change journal (`_restart_change_journal`) under the barrier.
 
         The kept catalogue states can no longer patch, so they are dropped with it rather than held until
-        evicted. False when the barrier or the catalogue refused the write.
+        evicted. False when the barrier or the catalogue refused the write. A failed catalogue recovers only
+        through a repair, so its refusal schedules one, as `delete_rel_paths` does; a busy barrier does not.
         """
         if self._failed:
+            _schedule_runtime_catalog_repair(self.vault_root)
             return False
         from .vault import VaultLockError
 
@@ -9238,8 +9240,13 @@ class LexicalStore:
                         _restart_change_journal(conn)
                 finally:
                     conn.close()
-        except (VaultLockError, sqlite3.Error) as e:
+        except VaultLockError as e:
             log.info("lexical change journal restart deferred (%s)", e)
+            return False
+        except sqlite3.Error as e:
+            self._note_query_failure(e, "lexical change journal restart deferred (%s)")
+            if self._failed:
+                _schedule_runtime_catalog_repair(self.vault_root)
             return False
         with self._term_frequency_cache_lock:
             self._catalogue_row_states.clear()
@@ -9749,6 +9756,8 @@ class LexicalStore:
         except Exception:  # noqa: BLE001 - housekeeping never blocks a rebuild
             log.debug("lexical orphan rebuild-temp sweep failed", exc_info=True)
 
+        from . import source_custody
+
         try:
             with self._publication_lock():
                 start_identity = catalog_semantic_identity(self.vault_root)
@@ -9757,6 +9766,7 @@ class LexicalStore:
                     for scope in ("kb", "vault")
                 }
                 start_live_guard = self._live_publication_guard()
+                retired_through = source_custody.retirement_generation(self.vault_root)
         except VaultLockError as e:
             log.warning(
                 "lexical atomic rebuild baseline deferred (%s); live sidecar preserved", e
@@ -9791,6 +9801,7 @@ class LexicalStore:
                             start_identity,
                             start_checkpoints,
                             start_live_guard,
+                            retired_through,
                         )
                     finally:
                         self._last_parked_seconds = foreground_priority.pass_waited() - parked_before
@@ -9831,8 +9842,10 @@ class LexicalStore:
         start_identity: str,
         start_checkpoints: dict,
         start_live_guard: dict,
+        retired_through: int | None,
     ) -> bool:
         from . import freshness as freshness_module
+        from . import source_custody
 
         members, signatures = self._walk_entries()  # the corpus scan
         # The projection identity must not have shifted under the scan.
@@ -10029,6 +10042,12 @@ class LexicalStore:
                             "lexical atomic publish aborted: live catalog advanced past build"
                         )
                         return self._decline_rebuild("publish_conflict")
+                    if source_custody.retired_since(self.vault_root, retired_through):
+                        # A Source erased during the build may still be named by the rows this temp copied
+                        # or replayed. The next pass builds after the erasure. An unreadable generation
+                        # declines too, as a detached adoption does: it cannot rule an erasure out.
+                        log.info("lexical atomic publish aborted: a Source was retired during the build")
+                        return self._decline_rebuild("source_changed")
                     published = self._replace_live_catalog(temp_path)
                     if published:
                         # The whole catalogue replaced the adopted one, so no heal is owed.
@@ -10230,6 +10249,9 @@ class LexicalStore:
             # the replacement its own frequency revision.
             conn.execute("DELETE FROM meta")
             self._create_catalog_tables(conn)
+            # The copied journal is the live catalogue's history, which a Source erasure may restart after
+            # this copy; the replacement starts its own, so no kept state patches across a rebuild.
+            _restart_change_journal(conn)
         return None
 
     @staticmethod
@@ -11453,6 +11475,9 @@ class LexicalStore:
                 self._delete_rowid(conn, row[0])
             else:
                 self._delete_semantic_units(conn, rel)
+            # As on the live delete path: the delete triggers stamped a revision for rows that are gone, and a
+            # page inserted again below stamps a new one.
+            conn.execute("DELETE FROM unit_revisions WHERE parent_path = ?", (rel,))
         for sp in delta.changed:
             path = Path(sp)
             if self._rel(path) is None:

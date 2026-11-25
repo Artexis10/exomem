@@ -1549,6 +1549,86 @@ def test_foreground_delta_after_temp_target_rebases_replacement(
     assert not any("deletedcontent" in c for c in contents)
 
 
+def test_a_source_erasure_during_the_build_declines_the_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The temp copied a page's rows before a Source erasure; publishing it after would name the page again.
+
+    The erasure advances the retirement generation while the build runs, so the
+    rebuild declines and the live catalogue stays the one the eraser cleaned.
+    """
+    from exomem import source_custody
+
+    kept = _kb_file(tmp_path, "kept.md", "- [config] keptcontent ^u1")
+    erased = _kb_file(tmp_path, "erased.md", "- [config] erasedcontent ^u2")
+    _seed(tmp_path, [kept, erased])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    live_inode = store.path.stat().st_ino
+
+    real_fold = lexstore.LexicalStore._fold_to_single_file
+    state = {"erased": False}
+
+    def fold_then_erase(conn: Any) -> bool:
+        if not state["erased"]:
+            state["erased"] = True
+            erased.unlink()
+            freshness.on_files_changed(tmp_path, changed=[], deleted=[erased])
+            with writer_lease.active_manager().mutation_guard(tmp_path):
+                assert source_custody.advance_retirement_generation(tmp_path)
+        return real_fold(conn)
+
+    monkeypatch.setattr(store, "_fold_to_single_file", fold_then_erase)
+    published = store.rebuild_atomic()
+    monkeypatch.undo()
+
+    assert state["erased"]
+    assert published is False
+    assert store.path.stat().st_ino == live_inode
+
+
+def test_a_rebuild_keeps_no_revision_or_journal_history_of_a_page_deleted_during_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page deleted while the build runs leaves no unit revision in the replacement, and the copied journal
+    history does not survive it: a Source erasure may have restarted the live journal since the copy."""
+    kept = _kb_file(tmp_path, "kept.md", "- [config] keptcontent ^u1")
+    deleted = _kb_file(tmp_path, "deleted.md", "- [config] deletedcontent ^u2")
+    _seed(tmp_path, [kept, deleted])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    kept_rel = kept.relative_to(tmp_path).as_posix()
+    deleted_rel = deleted.relative_to(tmp_path).as_posix()
+    with sqlite3.connect(store.path) as live:
+        assert live.execute(f"SELECT count(*) FROM {lexstore.CHANGE_JOURNAL} WHERE path = ?", (kept_rel,)).fetchone()[0]
+    live.close()
+
+    real_fold = lexstore.LexicalStore._fold_to_single_file
+    state = {"deleted": False}
+
+    def fold_then_delete(conn: Any) -> bool:
+        if not state["deleted"]:
+            state["deleted"] = True
+            deleted.unlink()
+            freshness.on_files_changed(tmp_path, changed=[], deleted=[deleted])
+        return real_fold(conn)
+
+    monkeypatch.setattr(store, "_fold_to_single_file", fold_then_delete)
+    published = store.rebuild_atomic()
+    monkeypatch.undo()
+
+    assert published is True
+    with sqlite3.connect(store.path) as live:
+        assert live.execute("SELECT count(*) FROM pages WHERE path = ?", (deleted_rel,)).fetchone() == (0,)
+        assert live.execute(
+            "SELECT count(*) FROM unit_revisions WHERE parent_path = ?", (deleted_rel,)
+        ).fetchone() == (0,)
+        assert live.execute(
+            f"SELECT count(*) FROM {lexstore.CHANGE_JOURNAL} WHERE path = ?", (kept_rel,)
+        ).fetchone() == (0,)
+    live.close()
+
+
 def test_live_blessed_inside_the_replayed_span_does_not_veto_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

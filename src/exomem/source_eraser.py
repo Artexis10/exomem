@@ -365,12 +365,15 @@ class _Eraser:
         if not progress.get("caches_fenced"):
             from . import lexstore
 
-            # The catalogue's change journal still names the dropped page; it is the history kept catalogue
-            # states patch from, so it restarts here too.
-            if not lexstore.restart_change_journal(self.root):
-                return {"state": "unknown", "reason": "journal_unwritable"}
             if not source_custody.advance_retirement_generation(self.root):
                 return {"state": "unknown", "reason": "generation_unwritable"}
+            # The catalogue's change journal still names the dropped page; it is the history kept catalogue
+            # states patch from, so it restarts too, after the advance. A repair rebuild that publishes before the
+            # restart is restarted with the live catalogue. One that publishes after it either started before
+            # the advance, so it declines (`LexicalStore.rebuild_atomic`), or started after the page's rows were
+            # dropped and its own journal began then (`LexicalStore._seed_from_live`).
+            if not lexstore.restart_change_journal(self.root):
+                return {"state": "unknown", "reason": "journal_unwritable"}
             progress["caches_fenced"] = True
             self.ledger.save(self.reference, progress)
         return {"state": "acknowledged"}
