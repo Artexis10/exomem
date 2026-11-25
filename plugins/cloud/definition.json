@@ -15,9 +15,11 @@
   ],
   "resource": "https://exomem.substratesystems.io/mcp",
   "profile": "product-cloud",
-  "connector_edition": {
-    "name": "evermatter-hooks",
-    "display_name": "Evermatter hooks"
+  "edition_identities": {
+    "claude-connector-hooks": {
+      "name": "evermatter-hooks",
+      "display_name": "Evermatter hooks"
+    }
   },
   "author": {
     "name": "Substrate Systems OÜ",

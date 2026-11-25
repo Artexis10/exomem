@@ -26,7 +26,15 @@ from fastmcp.server.transforms import Transform
 from fastmcp.utilities.versions import dedupe_with_versions
 from starlette.middleware import Middleware as ASGIMiddleware
 
-from . import __version__, capabilities, cloud_cell, edit_operations, guards, multi_edit
+from . import (
+    __version__,
+    capabilities,
+    client_config,
+    cloud_cell,
+    edit_operations,
+    guards,
+    multi_edit,
+)
 from . import commands as commands_module
 from .access_log import AccessLogMiddleware, WorkerRequestTimingMiddleware
 from .command_surface import DEFAULT_TOOL_SHAPE
@@ -982,7 +990,7 @@ def build_server(
         health_listener = HealthListener(host=http_host, port=health_port)
         lifespan = health_listener.lifespan(lifespan)
     mcp = ExomemFastMCP(
-        "exomem",
+        client_config.SERVER_NAME,
         instructions=SERVER_INSTRUCTIONS,
         # The source offer: a client sees the running release and the source repository in the
         # initialize handshake. The instructions carry a hard 900-character limit, so the offer
@@ -993,9 +1001,10 @@ def build_server(
         icons=server_icons(),
         lifespan=lifespan,
     )
-    # The server key stays `exomem` so clients keep matching `mcp__exomem__*`
-    # tools; the human-facing title in the initialize handshake is the product
-    # name. FastMCP 4.0.3 forwards no `title` kwarg, so set it on the low-level
+    # The serverInfo name is the server key a new install registers, so a client builds
+    # `mcp__evermatter__*` tool names; an install that holds the old key `exomem` keeps its
+    # own key, whatever this name says. The human-facing title in the initialize handshake is
+    # the product name. FastMCP 4.0.3 forwards no `title` kwarg, so set it on the low-level
     # server the same way `_exomem_cell_traffic` is attached below.
     mcp._mcp_server.title = "Evermatter"
     mcp.add_middleware(RefusalFloorMiddleware())

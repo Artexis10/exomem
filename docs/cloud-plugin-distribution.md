@@ -26,7 +26,7 @@ and `mcp.json`, complete canonical skills, public assets, one deterministic ZIP
 per edition, and `release.json`. Check regenerates into temporary storage and rejects drift,
 missing/extra files and symlinks. A valid bundle is not proof of native behaviour.
 
-Claude has two editions. The directory edition, `generated/claude`, contains
+Claude has three editions. The directory edition, `generated/claude`, contains
 skills, the remote MCP connection, the icon, README and LICENSE. The Claude
 directory refuses command hooks and non-text files from publishers that are not
 Verified organizations, so the build fails if a hook or another file type enters

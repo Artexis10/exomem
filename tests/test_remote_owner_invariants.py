@@ -72,7 +72,10 @@ def test_only_the_operator_setup_wizard_writes_an_environment_file() -> None:
     # ...and that writer is reachable only from the operator's CLI, never from
     # a product command, a REST route, a transfer route or the MCP server.
     assert _importers(modules, "remote_setup_wizard") <= {"setup_wizard.py", "__main__.py"}
-    assert _importers(modules, "setup_wizard") <= {"__main__.py"}
+    # `rename_migration` is the operator's `setup --migrate` body: only the setup wizard runs it
+    # (never a product command, route or server), so it may reach the wizard it belongs to.
+    assert _importers(modules, "setup_wizard") <= {"__main__.py", "rename_migration.py"}
+    assert _importers(modules, "rename_migration") <= {"setup_wizard.py"}
 
 
 #: Every in-process `.env` loader must resolve its file through one of these

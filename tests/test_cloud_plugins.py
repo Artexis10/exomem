@@ -156,11 +156,14 @@ def test_connector_edition_adds_hooks_to_an_existing_connection_without_a_server
         assert ".mcp.json" not in names
         assert "mcpServers" not in json.loads(connector.read(".claude-plugin/plugin.json"))
         with zipfile.ZipFile(tmp_path / "claude-hooks.zip") as hooked:
-            hook_files = {name for name in hooked.namelist() if name.startswith("hooks/")}
-            assert hook_files and hook_files <= names
-            for name in hook_files:
+            shared = {
+                name for name in hooked.namelist() if name.startswith(("hooks/", "skills/"))
+            }
+            assert any(name.startswith("hooks/") for name in shared)
+            assert any(name.startswith("skills/") for name in shared)
+            assert shared <= names
+            for name in shared:
                 assert connector.read(name) == hooked.read(name)
-        assert any(name.startswith("skills/exomem/") for name in names)
         manifest = json.loads(connector.read(".claude-plugin/plugin.json"))
     marketplace = json.loads((ROOT / ".claude-plugin/marketplace.json").read_text())
     listed = {entry["name"]: entry["source"] for entry in marketplace["plugins"]}
@@ -186,7 +189,7 @@ def test_claude_directory_edition_ships_only_admitted_files(tmp_path: Path) -> N
 
 @pytest.mark.parametrize(
     ("relative", "content"),
-    [("hooks/hooks.json", '{"hooks":{}}'), ("skills/exomem/scripts/run.py", "print(1)\n")],
+    [("hooks/hooks.json", '{"hooks":{}}'), ("skills/evermatter/scripts/run.py", "print(1)\n")],
 )
 def test_claude_directory_validation_rejects_hooks_and_scripts(
     tmp_path: Path, relative: str, content: str
@@ -379,9 +382,9 @@ def test_openai_package_pins_every_install_line_to_the_release(tmp_path: Path) -
     cloud_plugins.build_packages(ROOT, tmp_path)
     package = tmp_path / "openai"
 
-    importing = (package / "skills/exomem/references/importing.md").read_text()
+    importing = (package / "skills/evermatter/references/importing.md").read_text()
     assert f"uvx evermatter@{release}" in importing
-    routing = (package / "skills/exomem/references/operation-routing.md").read_text()
+    routing = (package / "skills/evermatter/references/operation-routing.md").read_text()
     assert f"pip install evermatter=={release}" in routing
 
     offenders = [
@@ -395,7 +398,7 @@ def test_openai_package_pins_every_install_line_to_the_release(tmp_path: Path) -
 
 def test_openai_submission_rejects_a_mutable_install_line(tmp_path: Path) -> None:
     cloud_plugins.build_packages(ROOT, tmp_path)
-    planted = tmp_path / "openai" / "skills/exomem/references/importing.md"
+    planted = tmp_path / "openai" / "skills/evermatter/references/importing.md"
     text = planted.read_text()
     planted.write_text(text + "\nUse `uvx exomem@latest` to retry the command.\n")
 
@@ -432,7 +435,7 @@ def test_cloud_packages_share_complete_canonical_skill_bytes(tmp_path: Path) -> 
         == hashlib.sha256((ROOT / "plugins/cloud/evals/cases.json").read_bytes()).hexdigest()
     )
     assert release["profile"] == "product-cloud"
-    for name in ("exomem", *(str(item["name"]) for item in workflow_skills.list_skills())):
+    for name in ("evermatter", *(str(item["name"]) for item in workflow_skills.list_skills())):
         payload = package_skills.skill_payload(name)
         for provider in ("claude", "openai"):
             for relative, content in payload.items():
@@ -446,9 +449,9 @@ def test_cloud_packages_share_complete_canonical_skill_bytes(tmp_path: Path) -> 
                 for name in archive.namelist()
             )
             assert (
-                archive.read("skills/exomem-capture/references/writing.md")
+                archive.read("skills/evermatter-capture/references/writing.md")
                 == (
-                    tmp_path / provider / "skills/exomem-capture/references/writing.md"
+                    tmp_path / provider / "skills/evermatter-capture/references/writing.md"
                 ).read_bytes()
             )
 

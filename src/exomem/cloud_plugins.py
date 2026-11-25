@@ -198,14 +198,17 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
     repository = definition["repository"].removeprefix("https://github.com/")
     full_install = f"/plugin install {definition['name']} --marketplace {repository}"
     for edition, (provider, hooked, bundles_server) in _EDITIONS.items():
-        # The connector edition is its own marketplace plugin, so it takes its own name.
-        identity_override = definition["connector_edition"] if not bundles_server else {}
+        # An edition listed as its own marketplace plugin names itself in the definition.
+        identity_override = definition.get("edition_identities", {}).get(edition, {})
         target = destination / edition
         if target.exists():
             shutil.rmtree(target)
         target.mkdir()
         skills = target / "skills"
-        for name in ("exomem", *(str(item["name"]) for item in workflow_skills.list_skills())):
+        for name in (
+            workflow_skills.CORE_SKILL_NAME,
+            *(str(item["name"]) for item in workflow_skills.list_skills()),
+        ):
             for relative, content in package_skills.skill_payload(name).items():
                 path = skills / name / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -240,9 +243,15 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
             "## Data handling\n\n"
             "MCP tool arguments, including user turns sent to `recall_context`, reach "
             "the authenticated Evermatter service. Reads return authorized account "
-            "content; successful writes persist governed memory in that account. OAuth "
-            "selects the account, and this package reaches Evermatter only through that "
-            "admitted MCP connection. It does not import a local vault or share "
+            "content; successful writes persist governed memory in that account. "
+            + (
+                "OAuth selects the account, and this package reaches Evermatter only through "
+                "that admitted MCP connection. "
+                if bundles_server
+                else "The connection you added selects the account, and this package reaches "
+                "Evermatter only through that admitted MCP connection. "
+            )
+            + "It does not import a local vault or share "
             "authorization between accounts. Your AI provider also processes the "
             "conversation and tool results under its policies.\n\n"
             "## Surface support\n\n"
@@ -290,7 +299,11 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                     "transcript and workspace metadata for cadence and structural "
                     "continuation, keeping bounded state in `CLAUDE_PLUGIN_DATA`, not "
                     "inside the versioned package. Hook logs contain metadata only, "
-                    "not prompt or assistant snippets. Hooks do not execute in Claude Chat.\n"
+                    "not prompt or assistant snippets. Hooks do not execute in Claude Chat. "
+                    "By default the capture check runs after a turn that lands work (a commit, "
+                    "push, merge, pull request or a file handed over). To check after every "
+                    "substantial reply instead, set `EXOMEM_PROMINENCE=maximal` in the "
+                    "session's environment.\n"
                 )
         if provider == "claude":
             manifest = {
@@ -312,6 +325,8 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
             path = target / ".claude-plugin/plugin.json"
             path.parent.mkdir()
             path.write_bytes(_json_bytes(manifest))
+            # The Cloud plugin keeps the server key `exomem` for now: renaming it signs every
+            # Claude Code install out once, and that move is the operator's decision (tasks 3.1, 3.4).
             if bundles_server:
                 (target / ".mcp.json").write_bytes(
                     _json_bytes(
@@ -368,6 +383,8 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                 },
             }
             (target / "plugin.json").write_bytes(_json_bytes(manifest))
+            # Same as the Claude edition above: the server key stays `exomem` until the operator
+            # decides how the Cloud plugin's sign-in moves.
             (target / "mcp.json").write_bytes(
                 _json_bytes(
                     {

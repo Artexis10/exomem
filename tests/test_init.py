@@ -40,7 +40,7 @@ def test_init_scaffolds_a_fresh_vault(tmp_path: Path) -> None:
     assert (
         conventions.conventions_hash == activation_conventions.load_conventions().conventions_hash
     )
-    assert (shipped / "workflow-skills" / "exomem-capture" / "SKILL.md").exists()
+    assert (shipped / "workflow-skills" / "evermatter-capture" / "SKILL.md").exists()
 
     # log.md carries the `---` separator the writers prepend after.
     assert "---" in (kb / "log.md").read_text(encoding="utf-8")

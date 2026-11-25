@@ -21,18 +21,18 @@ REPO_ROOT = pathlib.Path(exomem.__file__).parents[2]
 SRC_ROOT = pathlib.Path(exomem.__file__).parent
 
 SCAFFOLD_SKILL = SRC_ROOT / "_scaffold" / "_Schema" / "SKILL.md"
-PLUGIN_SKILL = REPO_ROOT / "plugins" / "claude-code" / "skills" / "exomem" / "SKILL.md"
+PLUGIN_SKILL = REPO_ROOT / "plugins" / "claude-code" / "skills" / "evermatter" / "SKILL.md"
 
 CAPTURE_SKILL_SOURCE = (
-    SRC_ROOT / "_scaffold" / "_Schema" / "workflow-skills" / "exomem-capture" / "SKILL.md"
+    SRC_ROOT / "_scaffold" / "_Schema" / "workflow-skills" / "evermatter-capture" / "SKILL.md"
 )
 CAPTURE_SKILL_PLUGIN = (
-    REPO_ROOT / "plugins" / "claude-code" / "skills" / "exomem-capture" / "SKILL.md"
+    REPO_ROOT / "plugins" / "claude-code" / "skills" / "evermatter-capture" / "SKILL.md"
 )
 
 OPERATIONS_SOURCE = SRC_ROOT / "_scaffold" / "_Schema" / "references" / "operations.md"
 OPERATIONS_PLUGIN = (
-    REPO_ROOT / "plugins" / "claude-code" / "skills" / "exomem" / "references" / "operations.md"
+    REPO_ROOT / "plugins" / "claude-code" / "skills" / "evermatter" / "references" / "operations.md"
 )
 
 #: The Stop-hook capture check is not a carrier: it names the incident rules and points
