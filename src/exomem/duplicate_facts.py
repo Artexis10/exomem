@@ -28,7 +28,7 @@ import hashlib
 import json
 import sqlite3
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,7 +36,7 @@ from typing import Any
 
 from . import page_citations, relation_registry, semantic_index
 from . import structured_collections as collections
-from .collection_store import connection, derived_rows, reference_index, typed_storage
+from .collection_store import connection, derived_rows, reference_index, schema, typed_storage
 from .collection_store.related_pages import subject_fields, subject_names
 from .entity_candidates import identity_key
 from .query_engine import reference_resolution, runtime
@@ -49,6 +49,8 @@ ROWS_PER_PAGE = 300
 MIN_VALUE_CHARS = 4
 #: Store transactions one `changed_rows` call reads, so a burst of writes is read over several ticks.
 MAX_SCAN_TXNS = 64
+#: Characters of one value that an item quotes. A bound on a reply's size, not a vocabulary.
+QUOTE_CHARS = 160
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +74,7 @@ class Candidate:
     label: str
     row_value: str
     unit_text: str
+    unit_match: int  # where the row value occurs in `identity_key(unit_text)`, as `_occurrences` accepted it
 
     @property
     def key(self) -> str:
@@ -82,6 +85,50 @@ class Candidate:
     def signal(self) -> str:
         """Changes when either value changes, so a decision about the old words does not bind the new ones."""
         return _digest(identity_key(self.row_value), identity_key(self.unit_text))
+
+    def quotes(self) -> dict[str, str]:
+        """The three values as an item quotes them: each at most `QUOTE_CHARS` long, the unit around the row value."""
+        folded = len(identity_key(self.row_value))
+        return {
+            "label": excerpt(self.label),
+            "row_value": excerpt(self.row_value),
+            "unit_text": excerpt(self.unit_text, match=(self.unit_match, self.unit_match + folded)),
+        }
+
+
+def excerpt(text: str, limit: int = QUOTE_CHARS, match: tuple[int, int] | None = None) -> str:
+    """`text` whole when it fits `limit`, else `limit` characters of it, each side that was cut marked with "…".
+
+    `match` is a span of `identity_key(text)`: the window is centred on the words that hold it, so the quote shows the
+    value it was opened for. Without it the window is the head of the text.
+    """
+    if len(text) <= limit:
+        return text
+    start = 0
+    if match is not None:
+        first, last = _raw_span(text, *match)
+        start = max(0, min(first - max(0, limit - (last - first)) // 2, len(text) - limit))
+    end = min(len(text), start + limit)
+    return f"{'…' if start else ''}{text[start:end].strip()}{'…' if end < len(text) else ''}"
+
+
+def _raw_span(text: str, first: int, last: int) -> tuple[int, int]:
+    """The offsets in `text` of the words that hold the span `first`..`last` of `identity_key(text)`.
+
+    The fold collapses whitespace and can change a word's length, so the two texts are aligned word by word.
+    """
+    folded_at = raw_at = 0
+    start = end = None
+    for word in text.split():
+        raw_at = text.index(word, raw_at)
+        for piece in identity_key(word).split():
+            if start is None and folded_at + len(piece) > first:
+                start = raw_at
+            if start is not None and end is None and folded_at + len(piece) >= last:
+                end = raw_at + len(word)
+            folded_at += len(piece) + 1
+        raw_at += len(word)
+    return (0 if start is None else start), (len(text) if end is None else end)
 
 
 def proposed_relation(registry: relation_registry.RelationRegistry | None = None) -> str | None:
@@ -185,27 +232,32 @@ def _citing_rows(root: Path, ref: str) -> tuple[dict[str, dict[str, None]], int,
             return keys, rows, False
 
 
-def changed_rows(root: Path, after: int | None) -> tuple[int, dict[int, tuple[str, ...]]] | None:
-    """The store transaction reached, and the page identities that each row changed after `after` now links.
+def changed_rows(root: Path, mark: tuple[str, int] | None) -> tuple[tuple[str, int], dict[int, tuple[str, ...]]] | None:
+    """The mark reached, and the page identities that each row changed after `mark` now links.
 
-    This is the worker's own work list, built as the owner and shown to no caller: it names no row or page
-    to anyone. A row whose links were all removed, or that is gone, maps to an empty tuple, so a candidate that
-    rested on it is refreshed. With `after` None it reports only where the store stands, so a first scan never
-    replays history. None means the store could not be read now; the caller keeps its mark and asks again.
+    A mark is `(store instance id, last store transaction read)`. This is the worker's own work list, built as the
+    owner and shown to no caller: it names no row or page to anyone. A row whose links were all removed, or that is
+    gone, maps to an empty tuple, so a candidate that rested on it is refreshed. With no mark it reports only where
+    the store stands, so a first scan never replays history. With no store the mark is `("", 0)`, and a store that
+    then appears, or one that replaces the marked store (a restore counts its transactions again), is read from its
+    first transaction. None means the store could not be read now; the caller keeps its mark and asks again.
     One call reads at most `MAX_SCAN_TXNS` transactions.
     """
     store = connection.store_path(Path(root))
     if not store.exists():
-        return None
+        return ("", 0), {}
     try:
         with closing(connection.open_reader(store)) as conn:
-            if after is None:
-                return conn.execute("SELECT coalesce(max(txn_id), 0) FROM txns").fetchone()[0], {}
+            row = conn.execute("SELECT value FROM store_meta WHERE key=?", (schema.META_INSTANCE_ID,)).fetchone()
+            instance = "" if row is None else str(row[0])
+            if mark is None:
+                return (instance, conn.execute("SELECT coalesce(max(txn_id), 0) FROM txns").fetchone()[0]), {}
+            after = mark[1] if mark[0] == instance else 0
             through = conn.execute(
                 "SELECT max(txn_id) FROM (SELECT txn_id FROM txns WHERE txn_id > ? ORDER BY txn_id LIMIT ?)",
                 (after, MAX_SCAN_TXNS)).fetchone()[0]
             if through is None:
-                return after, {}
+                return (instance, after), {}
             effects = conn.execute(
                 "SELECT DISTINCT txn_id, row_id FROM audit_effects "
                 "WHERE txn_id > ? AND txn_id <= ? AND row_id IS NOT NULL ORDER BY txn_id", (after, through)).fetchall()
@@ -217,12 +269,12 @@ def changed_rows(root: Path, after: int | None) -> tuple[int, dict[int, tuple[st
                 through = held - 1
                 effects = [effect for effect in effects if effect[0] <= through]
                 if through <= after:
-                    return after, {}
+                    return (instance, after), {}
             rows = sorted({row_id for _, row_id in effects})
             linked: dict[int, set[str]] = {row_id: set() for row_id in rows}
             for row_id, matches in reference_index.link_entries(conn, rows).items():
                 linked[row_id].update(page for match in matches if (page := reference_index.link_page(match)))
-            return through, {row_id: tuple(sorted(found)) for row_id, found in linked.items()}
+            return (instance, through), {row_id: tuple(sorted(found)) for row_id, found in linked.items()}
     except (connection.CollectionStoreError, connection.CollectionStoreUnavailable, sqlite3.Error):
         return None
 
@@ -289,28 +341,31 @@ def _row_candidates(lookup, row_id: int, item_key: str, label: str, values: Mapp
     found = []
     for unit_ref, unit_text in units:
         text = identity_key(unit_text)
-        if not any(_contains(text, name) for name in folded_names):
+        labelled = [(at, at + len(name)) for name in folded_names for at in _occurrences(text, name)]
+        if not labelled:
             continue
-        # A value that the label itself spells is not a second statement of it.
-        rest = text
-        for name in folded_names:
-            rest = rest.replace(name, " ")
         for field in texts:
             value = values.get(field)
-            if type(value) is str and len(identity_key(value)) >= MIN_VALUE_CHARS and _contains(rest, identity_key(value)):
-                found.append(Candidate(lookup.collection_id, row_id, row_ref, field, unit_ref, label, value, unit_text))
+            folded = identity_key(value) if type(value) is str else ""
+            if len(folded) < MIN_VALUE_CHARS:
+                continue
+            # A value that only the label spells is not a second statement of it, so an occurrence of the value that
+            # overlaps one of the label's does not count.
+            at = next((at for at in _occurrences(text, folded)
+                       if not any(at < end and start < at + len(folded) for start, end in labelled)), None)
+            if at is not None:
+                found.append(Candidate(lookup.collection_id, row_id, row_ref, field, unit_ref, label, value, unit_text, at))
     return found
 
 
-def _contains(text: str, needle: str) -> bool:
-    """Whether `needle` occurs in `text` with no letter or digit touching it on either side."""
+def _occurrences(text: str, needle: str) -> Iterator[int]:
+    """Where `needle` occurs in `text` with no letter or digit touching it on either side."""
     start = text.find(needle)
     while start != -1:
         end = start + len(needle)
         if not (start and text[start - 1].isalnum()) and not (end < len(text) and text[end].isalnum()):
-            return True
+            yield start
         start = text.find(needle, start + 1)
-    return False
 
 
 def _digest(*parts: str) -> str:

@@ -2,7 +2,7 @@
 name: evermatter-review
 description: Use Evermatter's Epistemic Inbox and audit queues to surface stale conclusions, contradictions, relation debt, and unprocessed sources safely. Part of Evermatter, formerly Exomem.
 metadata:
-  skill_contract: e7eb1bf4846cedd0d9402a2f9b9bdf5603041ce8422327e876739f8dd0607fb5
+  skill_contract: 1668c9d4bda7d696a30e15b8ccbd4e62995f60c04260a0d298e0a4b0d05f0a51
   version: "0.2.0"
 ---
 

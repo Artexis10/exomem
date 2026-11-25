@@ -24,6 +24,11 @@ PER_REPLY = 30
 UNAVAILABLE = "RELATED_PAGES_UNAVAILABLE"
 
 
+def unavailable_warning(cause: str) -> str:
+    """The warning that says no lookup ran, so that a reply with no `related_pages` never reads as "no pages"."""
+    return f"{UNAVAILABLE}: {cause}, so no related pages were looked up."
+
+
 def subject_fields(manifest) -> list[str]:
     """The fields whose text values name what a row is about: its natural-key fields, then its presentation title field.
 
@@ -104,7 +109,7 @@ class RelatedPages:
         if rows:
             notes["related_pages"] = rows
         if self._unavailable and (made is None or made):
-            notes["warnings"] = [f"{UNAVAILABLE}: the page index could not be read, so no related pages were looked up."]
+            notes["warnings"] = [unavailable_warning("the page index could not be read")]
         return notes
 
     def _page(self, path: str) -> dict[str, str] | None:

@@ -126,7 +126,8 @@ a reply), each with its title and ref, whose title or alias matches the row's ke
 value. Read them before you leave an unknown or a placeholder in a row, and replace it with
 what they say or link the page. The server does not decide what counts as unknown; you do.
 When the reply carries a `RELATED_PAGES_UNAVAILABLE` warning, no lookup ran: search the
-subject yourself.
+subject yourself. A vault that keeps its records as files only, with no collection store,
+never runs the lookup, so every write there that creates rows carries the warning.
 
 Ask one question only when two collections compete, an identity is unresolved, or the type
 or scope is unclear in a way that changes the action.

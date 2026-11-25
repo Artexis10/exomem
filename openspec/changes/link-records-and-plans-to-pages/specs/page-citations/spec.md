@@ -175,6 +175,15 @@ When the citations of a page cannot be read, because a link index is still build
 - **WHEN** a collection with a link field has an index that is still building, and a page that no row cites changes
 - **THEN** the dreamer processes the page for every other family, and the detector compares the page after the index is built
 
+### Requirement: Owed comparisons run inside the tick's budget and wait when the read keeps failing
+
+The detector SHALL compare an owed page itself, inside the dreamer tick's budgets and at most a fixed number of pages per tick, and SHALL NOT queue it as a page change, which would run every other family on it again. While a link index builds, a tick SHALL do no page work. When every index is built and a page still cannot be read, the detector SHALL wait before it tries again, not retry on every tick.
+
+#### Scenario: The reader stays unavailable
+
+- **WHEN** every link index is built, a page is owed a comparison and the citations still cannot be read over three ticks in a row
+- **THEN** the detector tries once, waits for the rest of its wait, and compares the page on the first tick after the wait once the read works
+
 ### Requirement: A row written while its collection's index builds is compared once it is built
 
 The detector SHALL NOT pass a row that its collection's link index has not yet reached. It SHALL compare the row, with the page that the row links, after the index reaches it.
@@ -183,6 +192,20 @@ The detector SHALL NOT pass a row that its collection's link index has not yet r
 
 - **WHEN** an agent writes a row that restates a unit of a linked page while its collection's link index is still building, and the index then finishes
 - **THEN** the detector opens its review item with no further change to the row or the page
+
+### Requirement: The row mark belongs to the store that counted it
+
+The detector SHALL keep, with its row mark, the identifier of the store instance that counted the mark. With no store, it SHALL record the start of the store's log. A store that appears afterwards, and a store that replaces the marked one, SHALL be read from its first transaction, so no row written before the first read and no row of a restored store passes unseen.
+
+#### Scenario: Rows written as the store first appears
+
+- **WHEN** the dreamer runs while the vault has no store, and a collection is then created, seeded with a row that restates a unit of a linked page, and indexed
+- **THEN** the detector opens its review item with no further change to the row or the page
+
+#### Scenario: A restored store
+
+- **WHEN** a store with a different instance identifier, and lower transaction numbers than the mark, replaces the marked store
+- **THEN** the detector reads the new store from its first transaction
 
 ### Requirement: A page that no row cites costs no citation read
 
@@ -195,7 +218,7 @@ The detector SHALL decide that no row cites a page with one indexed probe before
 
 ### Requirement: A duplicate-fact item names only what its reader may read
 
-The detector SHALL build its shared proposals as the owner and SHALL store no row value. It SHALL serve each item by comparing again as its reader, so a row, field, collection or page that the reader may not read SHALL be neither compared nor named, and the item SHALL read like one that does not exist.
+The detector SHALL build its shared proposals as the owner and SHALL store no row value. It SHALL serve each item by comparing again as its reader, so a row, field, collection or page that the reader may not read SHALL be neither compared nor named, and the item SHALL read like one that does not exist. A page that the reader may not read SHALL cost no row read.
 
 #### Scenario: A collection the caller cannot read
 
@@ -210,3 +233,17 @@ A unit that contains the normalised field value and mentions the row's label SHA
 
 - **WHEN** a row records `location: home office`, and the page that the row links to has a unit that says the item is in the home office
 - **THEN** the job opens one review item that proposes `duplicates` between the row and that unit, and changes nothing else
+
+#### Scenario: The label's letters sit inside a longer word
+
+- **WHEN** a row has the label `Ann` and the value `annual audit`, and a unit says "The annual audit runs at Ann's office."
+- **THEN** the job opens the item, because the letters of the label inside "annual" are no mention of the label and hide nothing
+
+### Requirement: A duplicate-fact item quotes the value it was opened for
+
+An item SHALL quote the label, the row value and the unit text, each in at most 160 characters. The unit quote SHALL be a window around the matched value, so the quote shows the value that opened the item. A quote that is cut SHALL carry the mark "…" on each side that was cut.
+
+#### Scenario: The match sits late in a long unit
+
+- **WHEN** a unit is longer than 160 characters and holds the row value after its 160th character
+- **THEN** the item's unit quote holds the row value, starts and ends with "…" where the unit continues, and is no longer than 160 characters plus the marks

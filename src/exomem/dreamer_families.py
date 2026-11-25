@@ -2614,14 +2614,18 @@ CURATION = _subject_family(CURATION_FAMILY, CURATION_KIND, _curation_view, subje
 DUPLICATE_FAMILY = "upkeep_duplicate"
 DUPLICATE_KIND = "fact.duplicate"
 
-#: The last store transaction whose rows the worker has queued pages for.
+#: The last store transaction whose rows the worker has queued pages for, as `{"instance": id, "txn": number}`.
+#: The instance id ties the number to the store that counted it.
 _DUPLICATE_TXN_META = "duplicate_txn"
 #: A sidecar meta key per page whose rows the family could not read, `duplicate_owed:<path>`: the page is owed a
-#: comparison, and `_queue_owed_duplicates` queues it again once the link indexes are built.
+#: comparison, and `refresh_owed_duplicates` makes it once the link indexes are built.
 _DUPLICATE_OWED = "duplicate_owed:"
-
-#: Characters of the unit shown beside the two values.
-_DUPLICATE_UNIT_CHARS = 240
+#: Until when the owed pages wait, set when the link indexes are built and the rows still cannot be read.
+_DUPLICATE_OWED_UNTIL = "duplicate_owed_until"
+#: Owed pages one tick compares, and seconds the owed pages wait after a read that failed with the indexes built
+#: (no corpus is published, or the reader is busy). Bounds on a tick's work, not a vocabulary.
+_DUPLICATE_OWED_PER_TICK = 8
+_DUPLICATE_OWED_BACKOFF = 300.0
 
 
 def _duplicate_page(ctx: Context, rel_path: str) -> tuple[Any, str] | None:
@@ -2672,9 +2676,7 @@ def _duplicate_views(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
                 "field": item.field,
                 "unit_ref": item.unit_ref,
                 "relation": relation,
-                "label": item.label,
-                "row_value": item.row_value,
-                "unit_text": item.unit_text[:_DUPLICATE_UNIT_CHARS],
+                **item.quotes(),
                 # Whether the pass compared every citing row, so an item never reads as the page's whole answer.
                 "rows_compared": found.rows,
                 "rows_complete": found.complete,
@@ -2693,8 +2695,11 @@ def _duplicate_stored(kwargs: dict[str, Any]) -> dict[str, Any]:
     return {**kwargs, "measures": measures}
 
 
-def _duplicate_refresh(ctx: Context, rel_path: str) -> None:
-    """Recompute one page's candidates as the owner, write each, and resolve the ones that no longer hold."""
+def _duplicate_compare(ctx: Context, rel_path: str) -> bool:
+    """Recompute one page's candidates as the owner, write each, and resolve the ones that no longer hold.
+
+    False, with nothing written, when the page's rows cannot be read now.
+    """
     from .governance import principal
 
     try:
@@ -2703,10 +2708,7 @@ def _duplicate_refresh(ctx: Context, rel_path: str) -> None:
     except Deferred as deferred:
         if deferred.reason != "records_unavailable":
             raise
-        # Only this family is behind. Raising would roll back the page's work in every other family and hold the
-        # page, so the page is owed a comparison instead, and the candidates already stored stay as they were.
-        ctx.store.set_meta(ctx.conn, _DUPLICATE_OWED + rel_path, True)
-        return
+        return False
     ctx.conn.execute("DELETE FROM meta WHERE key=?", (_DUPLICATE_OWED + rel_path,))
     stale = _open_for_subject(ctx, DUPLICATE_FAMILY, rel_path)
     for key, kwargs in views.items():
@@ -2715,6 +2717,58 @@ def _duplicate_refresh(ctx: Context, rel_path: str) -> None:
             ctx.conn, producer=PRODUCER, now=ctx.now, parked=ctx.parked, **_duplicate_stored(kwargs)
         )
     _resolve_all(ctx, stale)
+    return True
+
+
+def _duplicate_refresh(ctx: Context, rel_path: str) -> None:
+    """Compare one page's rows, or owe the page the comparison when they cannot be read now."""
+    if not _duplicate_compare(ctx, rel_path):
+        # Only this family is behind. Raising would roll back the page's work in every other family and hold the
+        # page, so the page is owed a comparison instead, and the candidates already stored stay as they were.
+        ctx.store.set_meta(ctx.conn, _DUPLICATE_OWED + rel_path, True)
+
+
+def refresh_owed_duplicates(ctx: Context, halt: Callable[[int], str | None]) -> tuple[int, str | None]:
+    """Compare the pages whose rows the family could not read, inside the tick's budget: `(compared, stop)`.
+
+    Only this family has work on an owed page, so the page never goes through the page queue, which would run
+    every family on it again. A tick compares at most `_DUPLICATE_OWED_PER_TICK` pages, and `halt(compared)` ends
+    it when a budget or a foreground request does. While a link index builds, a tick costs one reader statement and
+    no page work. When the indexes are built and a page still cannot be read (no corpus is published, or the reader
+    is busy), the same cause holds for the rest, so the owed pages wait `_DUPLICATE_OWED_BACKOFF` seconds.
+    `stop` is the reason the tick ended before every owed page was compared and the next tick may continue: the
+    halt reason, or "pages" at the bound. It is None when none remains or when the owed pages wait.
+    """
+    from . import duplicate_facts
+
+    store, conn = ctx.store, ctx.conn
+
+    def owed(limit: int) -> list[Any]:
+        return conn.execute(
+            "SELECT key FROM meta WHERE key GLOB ? ORDER BY key LIMIT ?", (_DUPLICATE_OWED + "*", limit)).fetchall()
+
+    if not owed(1):
+        return 0, None
+    until = store.get_meta(conn, _DUPLICATE_OWED_UNTIL)
+    if isinstance(until, (int, float)) and ctx.now < until:
+        return 0, None
+    if not duplicate_facts.indexes_ready(ctx.vault_root):
+        return 0, None
+    compared = 0
+    for (key,) in owed(_DUPLICATE_OWED_PER_TICK):
+        if (stop := halt(compared)) is not None:
+            return compared, stop
+        try:
+            with store.write(conn):
+                read = _duplicate_compare(ctx, str(key).removeprefix(_DUPLICATE_OWED))
+                if not read:
+                    store.set_meta(conn, _DUPLICATE_OWED_UNTIL, ctx.now + _DUPLICATE_OWED_BACKOFF)
+        except Deferred:
+            return compared, None  # a dependency of the page read is unavailable now; the next tick asks again
+        if not read:
+            return compared, None
+        compared += 1
+    return compared, "pages" if owed(1) else None
 
 
 def _duplicate_on_delete(ctx: Context, rel_path: str) -> None:
@@ -2746,6 +2800,9 @@ def _duplicate_propose(ctx: Context, row: dict[str, Any]) -> dict[str, Any] | No
 
 
 def _duplicate_release(ctx: Context, row: dict[str, Any], keep) -> dict[str, Any] | None:
+    # A page the caller may not read is answered before any row is read for it.
+    if not _visible(keep, str(row.get("subject_path") or "")):
+        return None
     return _released(_duplicate_view(ctx, row), row)
 
 
@@ -2769,11 +2826,13 @@ def _queue_changed_rows(ctx: Context) -> None:
     """
     from . import duplicate_facts
 
-    mark = ctx.store.get_meta(ctx.conn, _DUPLICATE_TXN_META)
-    scan = duplicate_facts.changed_rows(ctx.vault_root, mark if type(mark) is int else None)
+    stored = ctx.store.get_meta(ctx.conn, _DUPLICATE_TXN_META)
+    valid = isinstance(stored, dict) and isinstance(stored.get("instance"), str) and type(stored.get("txn")) is int
+    mark = (stored["instance"], stored["txn"]) if valid else None
+    scan = duplicate_facts.changed_rows(ctx.vault_root, mark)
     if scan is None:
         return
-    through, linked = scan
+    reached, linked = scan
     queue: set[str] = set()
     if linked:
         for subject, measures in ctx.conn.execute(
@@ -2798,31 +2857,12 @@ def _queue_changed_rows(ctx: Context) -> None:
                 return
             finally:
                 ctx.close()
-    if not queue and through == mark:
+    if not queue and reached == mark:
         return  # a write bumps the sidecar's generation, which every reader's memo follows
     with ctx.store.write(ctx.conn):
         if queue:
             ctx.store.pending_add(ctx.conn, sorted(queue))
-        ctx.store.set_meta(ctx.conn, _DUPLICATE_TXN_META, through)
-
-
-def _queue_owed_duplicates(ctx: Context) -> None:
-    """Queue the pages whose rows the family could not read, once every link index is built.
-
-    A page is owed when its citations were unreadable at its turn (an index was building, or the reader was
-    busy). Nothing is queued, and the debts stay, while an index builds, so a building index costs one reader
-    statement a tick and no page work.
-    """
-    from . import duplicate_facts
-
-    owed = ctx.conn.execute(
-        "SELECT key FROM meta WHERE substr(key, 1, ?) = ?", (len(_DUPLICATE_OWED), _DUPLICATE_OWED)).fetchall()
-    if not owed or not duplicate_facts.indexes_ready(ctx.vault_root):
-        return
-    with ctx.store.write(ctx.conn):
-        ctx.store.pending_add(ctx.conn, sorted(str(key).removeprefix(_DUPLICATE_OWED) for (key,) in owed))
-        ctx.conn.execute(
-            "DELETE FROM meta WHERE substr(key, 1, ?) = ?", (len(_DUPLICATE_OWED), _DUPLICATE_OWED))
+        ctx.store.set_meta(ctx.conn, _DUPLICATE_TXN_META, {"instance": reached[0], "txn": reached[1]})
 
 
 def _queue_profiles_daily(ctx: Context) -> None:
@@ -2853,13 +2893,11 @@ def tick_start(ctx: Context) -> None:
     pages are queued again when the hash moves. Profile pages are queued
     again once a day, because a date passing is no write. Pages that linked rows
     changed since the last tick are queued again, because a row write is no page
-    change, and so are the pages whose rows the duplicate family could not read
-    once the link indexes are built. Writes only on those changes.
+    change. Writes only on those changes.
     """
     store, conn = ctx.store, ctx.conn
     _queue_profiles_daily(ctx)
     _queue_changed_rows(ctx)
-    _queue_owed_duplicates(ctx)
     if store.get_meta(conn, CAPACITY_BEHIND_META) and not store.capacity_exceeded(conn):
         with store.write(conn):
             store.pending_add(conn, sorted(store.seen_map(conn)))

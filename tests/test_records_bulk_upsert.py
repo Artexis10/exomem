@@ -160,6 +160,20 @@ def test_twenty_four_rows_commit_under_one_guard_as_one_verified_chain(vault_roo
         assert row["transition_id"] in log
 
 
+def test_a_files_only_vault_says_it_looked_up_no_related_pages(vault_root: Path) -> None:
+    """Only a vault store looks up the pages that name a new row, so a files-only reply with no `related_pages` read as
+    "no page names this row" and the agent wrote its unknown beside a page that held the answer."""
+    appended = records.append_record(
+        vault_root, LEDGER_COLLECTION_PATH, item=ledger_item(slug="entry-one"), why="record one entry"
+    )
+    bulk = _bulk(vault_root, _rows(2, start=10))
+    for reply in (appended, bulk):
+        assert [text.split(":")[0] for text in reply["warnings"]] == ["RELATED_PAGES_UNAVAILABLE"]
+        assert "related_pages" not in reply
+    replayed = _bulk(vault_root, _rows(2, start=10), expected_container_hash=bulk["after_container_hash"])
+    assert replayed["counts"]["unchanged"] == 2 and "warnings" not in replayed
+
+
 @pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)
 def test_the_response_hash_chains_the_next_guarded_call(vault_root: Path) -> None:
     first = _bulk(vault_root, _rows(3))

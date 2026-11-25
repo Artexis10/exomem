@@ -7,6 +7,7 @@ pages that carry an `exomem_id` the way captured pages do, and run the real drea
 from __future__ import annotations
 
 import json
+import time
 
 import dreamer_fixture as fx
 import pytest
@@ -71,9 +72,9 @@ def row(store, collection, number, name, location, link):
                                    item_key=key(number), why="record")
 
 
-def tick(vault):
+def tick(vault, now=None):
     publish(vault)  # a citation read borrows the corpus generation that a running service keeps current
-    results = fx.run_to_quiet(vault)
+    results = fx.run_to_quiet(vault, now=now)
     assert all(result.stop_reason != "error" for result in results), results
     return results
 
@@ -137,7 +138,7 @@ def test_a_restated_fact_opens_one_item_per_candidate_and_writes_nothing_else(wo
     assert (fx.tree_state(vault), store_state(store)) == (pages, rows)
 
 
-def test_a_caller_never_sees_a_hidden_row_or_page_named_in_an_item(world):
+def test_a_caller_never_sees_a_hidden_row_or_page_named_in_an_item(world, monkeypatch):
     """The worker compares as the owner, so an item that carried a hidden collection's value or a hidden
     page's title would show a caller what they may not read."""
     store, vault = world
@@ -161,10 +162,20 @@ def test_a_caller_never_sees_a_hidden_row_or_page_named_in_an_item(world):
     policy._CACHE.clear()
     membership.clear_memo()
     egress.clear_decision_memo()
+    read = []
+    real = duplicate_facts.candidates
+
+    def recorded(root, rel_path, ref):
+        read.append(rel_path)
+        return real(root, rel_path, ref)
+
+    monkeypatch.setattr(duplicate_facts, "candidates", recorded)
     seen = served(vault, _external())
     assert len(seen) == 1 and "home office" in seen[0]["why"]
     text = json.dumps(seen)
     assert not any(secret in text for secret in ("attic", "Vault Door", "sub-basement", "Secrets"))
+    # A page the caller may not read costs no row read.
+    assert set(read) == {"Knowledge Base/Notes/Widget Service.md"}
 
 
 def test_a_page_cited_by_more_rows_than_one_read_returns_is_walked_and_a_bound_is_reported(world, monkeypatch):
@@ -263,3 +274,143 @@ def test_a_page_no_row_cites_opens_no_query_session(world, monkeypatch):
     tick(vault)
     assert opened, "a page that a row cites is read through the citation reader"
     assert len(served(vault, owner_principal())) == 1
+
+
+def quotes(item):
+    """The three quoted values of a duplicate item, as its sentence prints them."""
+    why = item["why"]
+    return (why.split('("', 1)[1].split('")', 1)[0], why.split('holds "', 1)[1].split('" in ', 1)[0],
+            why.split('says "', 1)[1].split('"; the proposed', 1)[0])
+
+
+def test_a_long_unit_is_quoted_around_the_match_with_a_mark_on_each_side_that_was_cut(world):
+    """A quote cut at the unit's first characters left out the value it was shown for, and gave no sign that
+    anything was cut, so the owner judged a statement they could not read."""
+    store, vault = world
+    lead = "The Widget Service is described at length in the maintenance log before anything is said of where it sits. " * 3
+    tail = " Spare filters are kept on the shelf by the east door and the pump parts are labelled in red. " * 2
+    unit = f"{lead}It stands in the boiler room beside the main valve.{tail}"
+    assert unit.index("boiler room") > duplicate_facts.QUOTE_CHARS
+    service_page(vault, "Notes/Widget Service.md", "Widget Service", WIDGET, unit)
+    row(store, SERVICES, 1, "Widget Service", "boiler room", f"exomem://memory/{WIDGET}")
+    _ready(store, SERVICES)
+    tick(vault)
+    [item] = served(vault, owner_principal())
+    *_, quoted = quotes(item)
+    assert "boiler room" in quoted and quoted.startswith("…") and quoted.endswith("…")
+    assert len(quoted) <= duplicate_facts.QUOTE_CHARS + 2
+
+
+def test_a_row_value_as_long_as_the_unit_is_quoted_from_its_start_and_marked_as_cut(world):
+    """The row value is bounded as the unit is, so an item stays the size of its three quotes."""
+    store, vault = world
+    value = ("the spare filters are kept in the cabinet by the east door, next to the labelled pump parts " * 3).strip()
+    service_page(vault, "Notes/Widget Service.md", "Widget Service", WIDGET, f"The Widget Service: {value}")
+    row(store, SERVICES, 1, "Widget Service", value, f"exomem://memory/{WIDGET}")
+    _ready(store, SERVICES)
+    tick(vault)
+    [item] = served(vault, owner_principal())
+    _, held, unit = quotes(item)
+    assert held == value[: duplicate_facts.QUOTE_CHARS].rstrip() + "…"
+    assert unit.startswith("…") and len(unit) <= duplicate_facts.QUOTE_CHARS + 2
+
+
+def test_a_label_inside_a_longer_word_does_not_hide_the_value_that_contains_it(world):
+    """Removing every occurrence of the label as text cut "ann" out of "annual" and left no value to find."""
+    store, vault = world
+    service_page(vault, "Notes/Ann Service.md", "Ann Service", WIDGET, "The annual audit runs at Ann's office.")
+    row(store, SERVICES, 1, "Ann", "annual audit", f"exomem://memory/{WIDGET}")
+    _ready(store, SERVICES)
+    tick(vault)
+    assert len(served(vault, owner_principal())) == 1
+
+
+def test_rows_written_as_the_store_first_appears_are_compared(world, monkeypatch, tmp_path):
+    """A sweep that finds no store kept no mark, so the first scan after the store existed took the store's head as
+    the mark and replayed nothing: every row written before that scan was never compared."""
+    store, vault = world
+    real = store.handle.path
+    monkeypatch.setattr(connection, "store_path", lambda root: tmp_path / "no-store.sqlite")
+    service_page(vault, "Notes/Widget Service.md", "Widget Service", WIDGET, "The Widget Service runs in the home office.")
+    tick(vault)
+    monkeypatch.setattr(connection, "store_path", lambda root: real)
+    row(store, SERVICES, 1, "Widget Service", "home office", f"exomem://memory/{WIDGET}")
+    _ready(store, SERVICES)
+    for _ in range(3):
+        tick(vault)
+    assert len(served(vault, owner_principal())) == 1
+
+
+def test_a_store_that_replaces_the_old_one_is_read_from_its_first_transaction(world):
+    """A restored or replaced store counts its transactions again from the start, so a mark kept from the old one
+    would sit ahead of every new row."""
+    store, vault = world
+    service_page(vault, "Notes/Widget Service.md", "Widget Service", WIDGET, "The Widget Service runs in the home office.")
+    _ready(store, SERVICES)
+    tick(vault)
+    conn = dreamer_store.DreamerStore(vault).connect()
+    try:
+        dreamer_store.DreamerStore.set_meta(conn, dreamer_families._DUPLICATE_TXN_META,
+                                            {"instance": "another-store", "txn": 10_000})
+        conn.commit()
+    finally:
+        conn.close()
+    row(store, SERVICES, 1, "Widget Service", "home office", f"exomem://memory/{WIDGET}")
+    tick(vault)
+    assert len(served(vault, owner_principal())) == 1
+
+
+def owed(vault):
+    conn = dreamer_store.DreamerStore(vault).connect()
+    try:
+        return [key for (key,) in conn.execute("SELECT key FROM meta WHERE key GLOB 'duplicate_owed:*'")]
+    finally:
+        conn.close()
+
+
+def owe_a_page(world):
+    """A page whose rows were unreadable at its turn: the Gadgets link index has not been built."""
+    store, vault = world
+    service_page(vault, "Notes/Widget Service.md", "Widget Service", WIDGET, "The Widget Service runs in the home office.")
+    row(store, SERVICES, 1, "Widget Service", "home office", f"exomem://memory/{WIDGET}")
+    _ready(store, SERVICES)
+    store.create_collection(path("Gadgets"), collection_text(GADGETS, "Gadgets", "name", FIELDS),
+                            why="declare", scaffold=False)
+    tick(vault)
+    assert owed(vault) == ["duplicate_owed:Knowledge Base/Notes/Widget Service.md"]
+    assert served(vault, owner_principal()) == []
+    return store, vault
+
+
+def test_an_owed_page_is_compared_by_this_family_alone_and_not_run_through_every_family_again(world):
+    """Queueing an owed page as a page change ran all eight families on it for one family's debt."""
+    store, vault = owe_a_page(world)
+    _ready(store, GADGETS)
+    results = [*tick(vault), *tick(vault)]
+    assert [result.processed for result in results] == [(), ()]
+    assert owed(vault) == [] and len(served(vault, owner_principal())) == 1
+
+
+def test_owed_pages_wait_after_a_read_that_fails_with_every_index_built_and_stop_with_the_tick(world, monkeypatch):
+    """A reader that stays unavailable (no corpus, a busy reader) cost one failed comparison every tick, and a tick
+    that a shutdown or a foreground request ended still went on to compare owed pages."""
+    store, vault = owe_a_page(world)
+    _ready(store, GADGETS)
+    real = duplicate_facts.candidates
+    attempts = []
+
+    def unreadable(root, rel_path, ref):
+        attempts.append(rel_path)
+        return None
+
+    monkeypatch.setattr(duplicate_facts, "candidates", unreadable)
+    base = time.time()
+    tick(vault, now=base)
+    tick(vault, now=base + 10)
+    tick(vault, now=base + 20)
+    assert len(attempts) == 1 and len(owed(vault)) == 1
+    monkeypatch.setattr(duplicate_facts, "candidates", real)
+    stopped = dreamer.run_once(vault, clock=dreamer.Clock(time=lambda: base + 400), should_stop=lambda: True)
+    assert stopped.stop_reason != "error" and len(owed(vault)) == 1
+    tick(vault, now=base + 400)
+    assert owed(vault) == [] and len(served(vault, owner_principal())) == 1

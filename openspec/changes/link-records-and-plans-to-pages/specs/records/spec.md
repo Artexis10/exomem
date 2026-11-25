@@ -37,3 +37,12 @@ The lookup SHALL read the page index as stored and never refresh it. When that i
 
 - **WHEN** an agent appends a row while the page index has not been built
 - **THEN** the reply carries a `RELATED_PAGES_UNAVAILABLE` warning and no `related_pages`
+
+### Requirement: A files-only vault reports that no lookup ran
+
+A vault that keeps its records as files and has no collection store SHALL NOT compute related pages. A Records append or bulk upsert there that creates rows SHALL carry a `RELATED_PAGES_UNAVAILABLE` warning, so a reply with no `related_pages` never reads as "no page names this row". A replay or an update creates no row and SHALL NOT carry it.
+
+#### Scenario: A files-only append is reported
+
+- **WHEN** an agent appends a Records row in a vault with no collection store
+- **THEN** the reply carries a `RELATED_PAGES_UNAVAILABLE` warning and no `related_pages`

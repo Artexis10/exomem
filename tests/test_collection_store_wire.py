@@ -33,6 +33,13 @@ def normalized(value):
         mask(result, ("before_item_hash", "after_item_hash", "before_container_hash",
                       "after_container_hash", "before_manifest_hash", "after_manifest_hash"), "<hash>")
         mask(result, ("audit_correlation",), "<identity>")
+        # The records spec rules this one: a files-only vault carries the warning on every row it creates, and a store's
+        # depends on the state of its page index.
+        if result.get("warnings"):
+            result["warnings"] = [text for text in result["warnings"]
+                                  if not str(text).startswith("RELATED_PAGES_UNAVAILABLE")]
+            if not result["warnings"]:
+                del result["warnings"]
         if result.get("receipt_version") == 2 and result.get("operation") in {"revise", "rebaseline"}:
             mask(result, ("payload_hash",), "<hash>")
     if result.get("kind") == "collection" and result.get("report_only") is True:
