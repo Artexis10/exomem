@@ -53,9 +53,10 @@ class Recorded:
     """Serves recorded answers by method and path, in order; the last answer repeats."""
 
     def __init__(self, rollout: list[str], put: str = "substrate_put_ok", deployments: list | None = None,
-                 releases: str = "github_releases") -> None:
+                 releases: str = "github_releases", github_reachable: bool = True) -> None:
         self.rollout = [copy.deepcopy(ANSWERS[name]) for name in rollout]
-        self.releases = releases if releases in ("unavailable", "garbled") else copy.deepcopy(ANSWERS[releases])
+        self.releases = releases if releases in ("unavailable", "garbled", "unreachable") else copy.deepcopy(ANSWERS[releases])
+        self.github_reachable = github_reachable
         self.put = ANSWERS[put]
         self.deployments = ANSWERS["github_platform_deployments"] if deployments is None else deployments
         self.calls: list[tuple[str, str, bytes | None]] = []
@@ -63,11 +64,15 @@ class Recorded:
     def __call__(self, method: str, url: str, headers: dict, body: bytes | None) -> tuple[int, bytes]:
         self.calls.append((method, url, body))
         path = url.split(".test", 1)[1]
+        if "/repos/" in path and not self.github_reachable:
+            raise OSError("connection reset")
         if path == "/repos/example-owner/example-repo/releases/latest":
             return 200, json.dumps(ANSWERS["github_release_latest"]).encode()
         if path == f"/repos/example-owner/example-repo/releases?per_page={cloud_deploy.RELEASE_SCAN_LIMIT}":
             if self.releases == "unavailable":
                 return 502, b"{}"
+            if self.releases == "unreachable":
+                raise OSError("connection reset")
             if self.releases == "garbled":
                 return 200, b"<html>busy</html>"
             return 200, json.dumps(self.releases).encode()
@@ -151,6 +156,17 @@ def test_an_unattested_digest_sets_nothing(capsys) -> None:
 
     assert (code, recorded.puts()) == (1, [])
     assert "ATTESTATION_UNVERIFIED" in log
+
+
+def test_a_github_that_cannot_be_reached_ends_the_run_on_a_failing_stop_that_alerts(capsys) -> None:
+    # Catches a network error that crashes the run with a traceback, so no alert says it failed.
+    recorded = Recorded(["substrate_rollout_behind"], github_reachable=False)
+
+    code, log, _ = _run(recorded, capsys)
+
+    assert (code, recorded.puts()) == (1, [])
+    assert log.splitlines()[-1] == "cloud-deploy: GITHUB_API_FAILED unreachable"
+    assert (cloud_deploy.FAILING_ALERT, True) in recorded.alerts()
 
 
 def test_an_image_is_verified_against_the_repository_that_built_it_and_no_other(monkeypatch) -> None:
@@ -564,7 +580,7 @@ def test_a_changed_chart_template_with_a_non_ascii_name_still_reaches_the_platfo
     assert cloud_deploy.platform_inputs(paths, ["infra/helm/platform/**"], [])
 
 
-@pytest.mark.parametrize("releases", ["unavailable", "garbled"])
+@pytest.mark.parametrize("releases", ["unavailable", "garbled", "unreachable"])
 def test_a_release_list_that_cannot_be_read_still_lets_the_rollout_go_on(capsys, releases) -> None:
     # Catches a read that only feeds the lag alert stopping a deploy for a day, whether it fails or answers 200 with no JSON.
     recorded = Recorded(["substrate_rollout_behind", "substrate_rollout_canary_on_target"], releases=releases)

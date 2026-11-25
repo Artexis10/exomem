@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import http.client
 import json
 import os
 import subprocess
@@ -64,8 +65,8 @@ CELL_PINNED_ALERT = "cloud-cell-pinned"
 FAILING_ALERT = "cloud-deploy-failing"
 # A release gets two days for its rollout and any platform upgrade it needs before the fleet counts as behind.
 RELEASE_BEHIND_DEFAULT_HOURS = 48
-# The failing stops that name their cause in an alert of their own, so `cloud-deploy-failing` stays quiet for them.
 PAUSED_STOP = "ROLLOUT_PAUSED"
+# The failing stops that name their cause in an alert of their own, so `cloud-deploy-failing` stays quiet for them.
 # cellctl raises cloud-rollout-paused for a pause, so the pause stop counts as having its own alert.
 OWN_ALERT_STOPS = (PLATFORM_NEEDED_ALERT, BARRIER_ALERT, PAUSED_STOP)
 # The off switch: a run without the deploy token does nothing, and sends no alert.
@@ -102,6 +103,9 @@ def urllib_transport(method: str, url: str, headers: dict[str, str], body: bytes
             return response.status, response.read()
     except urllib.error.HTTPError as error:
         return error.code, error.read()
+    except http.client.HTTPException as error:
+        # A truncated or malformed answer is a failed connection to callers, like a timeout.
+        raise OSError("bad HTTP answer") from error
 
 
 def parse_release(tag: str) -> tuple[int, int, int] | None:
@@ -164,10 +168,13 @@ class GitHub:
         self.settings, self.transport = settings, transport
 
     def _get(self, path: str) -> Any:
-        status, body = self.transport("GET", f"{self.settings.github_api}{path}", {
-            "Authorization": f"Bearer {self.settings.github_token}",
-            "Accept": "application/vnd.github+json",
-        }, None)
+        try:
+            status, body = self.transport("GET", f"{self.settings.github_api}{path}", {
+                "Authorization": f"Bearer {self.settings.github_token}",
+                "Accept": "application/vnd.github+json",
+            }, None)
+        except OSError as error:
+            raise Stop("GITHUB_API_FAILED", ok=False, detail="unreachable") from error
         if status != 200:
             raise Stop("GITHUB_API_FAILED", ok=False, detail=str(status))
         try:
