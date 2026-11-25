@@ -232,7 +232,7 @@ Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "stopped"
 $managedStateRoot = Ensure-ExomemDotenvStateRootBinding `
     -AppDirectory $serviceAppDirectory `
     -ExpectedStateRoot $transitionReceipt.state_root
-[Environment]::SetEnvironmentVariable("EXOMEM_STATE_ROOT", $managedStateRoot, "Process")
+Set-ExomemProcessSetting -Name "EXOMEM_STATE_ROOT" -Value $managedStateRoot
 Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "bound"
 
 # --- 3. Upgrade that environment while the service remains stopped ------------

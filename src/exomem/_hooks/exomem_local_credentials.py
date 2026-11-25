@@ -100,8 +100,8 @@ def _rename_aliases(environ: MutableMapping[str, str]) -> list[str]:
     Copy of `exomem.env_compat.rename_settings` for a hook, which cannot import the
     package; `tests/test_setting_names_in_step.py` keeps the copy in step. EVERMATTER_X then
     KB_MCP_X fills EXOMEM_X only when it is unset. Returns the EVERMATTER_ names whose
-    value differs from a set EXOMEM_ name. This hook reads one credential, which the package
-    refuses on any conflict, so its caller treats every conflict as a refusal.
+    value differs from a set EXOMEM_ name. This hook reads one credential, and a conflict
+    over it is unclear which credential to send, so its caller treats every conflict as a refusal.
     """
     conflicts: list[str] = []
     for prefix in ("EVERMATTER_", "KB_MCP_"):  # the product's closed naming history

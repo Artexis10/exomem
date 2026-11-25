@@ -131,9 +131,10 @@ def test_the_cellctl_and_scheduler_readers_choose_like_env_compat(capsys, caplog
         assert aliases_in(capsys.readouterr().err) == warned
 
 
-# The matrix: a setting that picks data (VAULT_PATH) and one that does not (PORT), each with
-# every combination of the three names absent, empty, "a" or "b".
-SUFFIXES = ("VAULT_PATH", "PORT")
+# The matrix: every setting that picks data (the package's placement set, so a setting added there
+# is pinned in each copy) and one that does not (PORT), each with every combination of the three
+# names absent, empty, "a" or "b".
+SUFFIXES = (*sorted(env_compat.PLACEMENT_SETTINGS), "PORT")
 PREFIXES = ("EXOMEM_", "EVERMATTER_", "KB_MCP_")
 VALUES = (None, "", "a", "b")
 CASES = [
@@ -310,3 +311,118 @@ catch {{ 'refused: ' + $_.Exception.Message }}
 
     assert out.stdout.startswith("refused: "), out.stdout + out.stderr
     assert "EXOMEM_STATE_ROOT" not in dotenv.read_text()
+
+
+# A script that forces EXOMEM_X must leave no alias for it in the environment of the commands it
+# starts: the package refuses a process that holds both names with different values.
+CHILD = [sys.executable, "-m", "exomem.catalogue_prewarm"]  # exits 2 on the missing --vault, or 2 on a refusal
+CHILD_RAN = "the following arguments are required: --vault"
+
+
+def _child_env(**extra: str) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("EXOMEM_", "EVERMATTER_", "KB_MCP_"))}
+    env["PYTHONPATH"] = str(ROOT / "src")
+    return env | extra
+
+
+def _bash(tmp_path: Path, body: str, **env: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [BASH, "-c", f'. "{COMMON_SH}"; {body}'],
+        capture_output=True, text=True, timeout=120, check=False, cwd=tmp_path, env=_child_env(**env),
+    )
+
+
+@needs_bash
+def test_a_command_started_after_a_forced_state_root_runs_despite_an_inherited_alias(tmp_path) -> None:
+    """The failure: `export EXOMEM_STATE_ROOT=Y` left an inherited EVERMATTER_STATE_ROOT=X, and `exomem` exited 2."""
+    inherited = {"EVERMATTER_STATE_ROOT": str(tmp_path / "inherited-alias")}
+    child = " ".join(f'"{part}"' for part in CHILD)
+
+    plain = _bash(tmp_path, f'export EXOMEM_STATE_ROOT="{tmp_path / "forced"}"; {child}', **inherited)
+    forced = _bash(
+        tmp_path,
+        f'exomem_export_setting EXOMEM_STATE_ROOT "{tmp_path / "forced"}"; echo "root=$EXOMEM_STATE_ROOT"; {child}',
+        **inherited,
+    )
+
+    assert plain.returncode == 2 and "not run" in plain.stderr  # the failure this guards against
+    assert f"root={tmp_path / 'forced'}" in forced.stdout  # the forced value is the one in force
+    assert CHILD_RAN in forced.stderr and "not run" not in forced.stderr
+
+
+@needs_bash
+def test_the_installers_process_file_loads_a_dotenv_alias_over_an_inherited_name(tmp_path) -> None:
+    """The failure: sourcing the dotenv's EVERMATTER_VAULT_PATH beside an inherited EXOMEM_VAULT_PATH refused after publishing."""
+    script = (ROOT / "scripts" / "install-service.sh").read_text(encoding="utf-8")
+    (renderer,) = [
+        block for block in re.findall(r"<<'PY'\n(.*?)\nPY\n", script, re.S) if "dotenv_values(env_path)" in block
+    ]
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        f"EVERMATTER_VAULT_PATH={tmp_path / 'dotenv-vault'}\nEXOMEM_PORT=1\nKB_MCP_PORT=2\nOTHER_NAME=kept\n",
+        encoding="utf-8",
+    )
+    staged, process_file = tmp_path / "service.env", tmp_path / "process.sh"
+    rendered = subprocess.run(
+        [sys.executable, "-", dotenv, staged, process_file, tmp_path / "launchd.xml", tmp_path / "logs"],
+        input=renderer, capture_output=True, text=True, timeout=60, check=False,
+        env=_child_env(EXOMEM_MANAGED_STATE_ROOT_DEFAULT=str(tmp_path / "state"), PATH=os.environ["PATH"]),
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    published = staged.read_text(encoding="utf-8")
+    assert f'EVERMATTER_VAULT_PATH="{tmp_path / "dotenv-vault"}"' in published  # service.env keeps the dotenv's own name
+    assert "EXOMEM_VAULT_PATH" not in published
+
+    child = " ".join(f'"{part}"' for part in CHILD)
+    loaded = _bash(
+        tmp_path,
+        f'. "{process_file}"; echo "vault=$(exomem_process_setting EXOMEM_VAULT_PATH)"; '
+        f'echo "port=$EXOMEM_PORT other=$OTHER_NAME"; env | grep -c "^EVERMATTER_\\|^KB_MCP_" || true; {child}',
+        EXOMEM_VAULT_PATH=str(tmp_path / "shell-vault"), EVERMATTER_STATE_ROOT=str(tmp_path / "inherited-alias"),
+    )
+
+    assert f"vault={tmp_path / 'dotenv-vault'}" in loaded.stdout  # the loaded value wins, with no refusal
+    assert "port=1 other=kept" in loaded.stdout
+    assert loaded.stdout.splitlines()[-1] == "0"  # every alias is gone
+    assert CHILD_RAN in loaded.stderr and "not run" not in loaded.stderr
+
+
+@needs_pwsh
+def test_a_command_started_after_a_forced_state_root_runs_under_powershell_too(tmp_path) -> None:
+    child = " ".join(f"'{part}'" for part in CHILD)
+    script = f"""
+. '{COMMON_PS1}'
+$env:EVERMATTER_STATE_ROOT = '{tmp_path / "inherited-alias"}'
+[Environment]::SetEnvironmentVariable('EXOMEM_STATE_ROOT', '{tmp_path / "forced"}', 'Process')
+'plain: ' + ((& {child} 2>&1) | Out-String)
+Set-ExomemProcessSetting -Name 'EXOMEM_STATE_ROOT' -Value '{tmp_path / "forced"}'
+'forced: root=' + $env:EXOMEM_STATE_ROOT + ' ' + ((& {child} 2>&1) | Out-String)
+$env:EXOMEM_VAULT_PATH = '{tmp_path / "shell-vault"}'
+Set-ExomemProcessEnvFromMap -Map ([ordered]@{{ EVERMATTER_VAULT_PATH = '{tmp_path / "dotenv-vault"}'; OTHER_NAME = 'kept' }})
+'loaded: ' + $env:EXOMEM_VAULT_PATH + ' ' + $env:OTHER_NAME + ' ' + [string]($null -eq $env:EVERMATTER_VAULT_PATH)
+"""
+    out = subprocess.run(
+        [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True, text=True, timeout=120, check=False, cwd=tmp_path, env=_child_env(),
+    )
+
+    plain, _, rest = out.stdout.partition("forced: ")
+    forced, _, loaded = rest.partition("loaded: ")
+    assert "not run" in plain, out.stdout + out.stderr  # the failure this guards against
+    assert forced.startswith(f"root={tmp_path / 'forced'} ")  # the forced value is the one in force
+    assert CHILD_RAN in forced and "not run" not in forced
+    assert loaded.strip() == f"{tmp_path / 'dotenv-vault'} kept True"
+
+
+def test_no_service_script_forces_an_exomem_name_without_the_helper() -> None:
+    """The class guard: a forced EXOMEM_ name that skips the helper leaves an inherited alias beside it."""
+    forced = re.compile(
+        r"""^\s*export\s+EXOMEM_|SetEnvironmentVariable\(\s*["']EXOMEM_|\$env:EXOMEM_\w+\s*=""", re.MULTILINE
+    )
+    offenders = [
+        path.name
+        for path in sorted((ROOT / "scripts").glob("*.sh")) + sorted((ROOT / "scripts").glob("*.ps1"))
+        if forced.search(path.read_text(encoding="utf-8"))
+    ]
+
+    assert offenders == []

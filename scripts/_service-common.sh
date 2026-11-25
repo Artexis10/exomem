@@ -71,6 +71,17 @@ exomem_process_setting() {
     exomem_resolve_setting exomem_process_env_lookup "the process environment" "$1"
 }
 
+# Force EXOMEM_X to a value for every process this shell starts: set it and remove the
+# EVERMATTER_X and KB_MCP_X spellings from the process environment. A child that
+# inherited both names with different values would refuse to start (the package rule
+# above), so a forced value that left an inherited alias in place would stop it.
+exomem_export_setting() {
+    local name="$1" value="$2"
+    [[ "$name" == EXOMEM_?* ]] || { echo "exomem_export_setting takes an EXOMEM_ name, not $name" >&2; return 2; }
+    unset "EVERMATTER_${name#EXOMEM_}" "KB_MCP_${name#EXOMEM_}"
+    export "$name=$value"
+}
+
 exomem_transition_receipt_path() {
     local service_id="$1" root
     [[ "$service_id" =~ ^[A-Za-z0-9_.@-]+$ ]] || return 2

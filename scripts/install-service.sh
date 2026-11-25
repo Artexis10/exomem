@@ -611,7 +611,7 @@ elif [[ -z "$PERSISTED_STATE_ROOT" ]]; then
     # root while adding the rest of the parsed dotenv environment.
     persist_fresh_state_root_binding
 fi
-export EXOMEM_STATE_ROOT="$MANAGED_STATE_ROOT"
+exomem_export_setting EXOMEM_STATE_ROOT "$MANAGED_STATE_ROOT"
 
 if [[ "$MODE" == "release" ]]; then
     echo "Installing $PACKAGE_REQUIREMENT into the release service venv..."
@@ -706,10 +706,23 @@ Path(systemd_path).write_bytes(
         "utf-8"
     )
 )
-Path(process_path).write_text(
-    "".join(f"export {key}={shlex.quote(value)}\n" for key, value in values.items()),
-    encoding="utf-8",
-)
+# The process file is sourced by the installer's own shell, which then runs `exomem` commands.
+# Each setting lands there under its EXOMEM_ name (EXOMEM_, else EVERMATTER_, else KB_MCP_) with
+# its other spellings removed, so a value the dotenv names replaces what the shell inherited and
+# a command started from that shell never sees two names for it. The published service.env above
+# keeps the dotenv's own names.
+process_lines = []
+loaded = set()
+for key, value in values.items():
+    prefix = next((p for p in NAME_PREFIXES if key.startswith(p)), None)
+    if prefix is None:
+        process_lines.append(f"export {key}={shlex.quote(value)}\n")
+    elif key[len(prefix):] not in loaded:
+        suffix = key[len(prefix):]
+        loaded.add(suffix)
+        chosen = next(values[name] for name in names(suffix) if name in values)
+        process_lines.append(f"exomem_export_setting {NAME_PREFIXES[0]}{suffix} {shlex.quote(chosen)}\n")
+Path(process_path).write_text("".join(process_lines), encoding="utf-8")
 xml_lines = ["    <key>EnvironmentVariables</key>", "    <dict>"]
 for key, value in values.items():
     xml_lines.extend(
@@ -728,7 +741,7 @@ rm -f "$SERVICE_ENV_STAGING_FILE"
 SERVICE_ENV_STAGING_FILE=""
 
 # This file is generated from parsed values with shlex quoting; it contains no
-# caller-provided shell syntax.
+# caller-provided shell syntax. It sets each setting through exomem_export_setting.
 # shellcheck disable=SC1090
 source "$PROCESS_ENV_FILE"
 rm -f "$PROCESS_ENV_FILE"

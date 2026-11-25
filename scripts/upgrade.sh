@@ -143,10 +143,13 @@ if exomem_service_is_managed "$UNIT_FILE"; then
     # The diarizer sidecar venv is keyed by the active release's sidecar lock; building it is a
     # no-op when the lock is unchanged. The switch already succeeded, so a failure here is reported.
     # The build runs with the unit's EXOMEM_STATE_ROOT, so it lands where the service looks.
+    # The subshell forces both names through exomem_export_setting, so the build never inherits an alias beside them.
     { ACTIVE_PYTHON="$(printf '%s' "$RESULT" | "$VENV_PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["active"]["python"])')" \
-        && EXOMEM_DIARIZE="$(exomem_unit_env_value "$UNIT_FILE" EXOMEM_DIARIZE "$VENV_PYTHON")" \
-            EXOMEM_STATE_ROOT="$(exomem_unit_env_value "$UNIT_FILE" EXOMEM_STATE_ROOT "$VENV_PYTHON")" \
-            "$ACTIVE_PYTHON" -m exomem.diarizer_sidecar --if-enabled; } \
+        && (UNIT_DIARIZE="$(exomem_unit_env_value "$UNIT_FILE" EXOMEM_DIARIZE "$VENV_PYTHON")" \
+            && UNIT_STATE_ROOT="$(exomem_unit_env_value "$UNIT_FILE" EXOMEM_STATE_ROOT "$VENV_PYTHON")" \
+            && exomem_export_setting EXOMEM_DIARIZE "$UNIT_DIARIZE" \
+            && exomem_export_setting EXOMEM_STATE_ROOT "$UNIT_STATE_ROOT" \
+            && exec "$ACTIVE_PYTHON" -m exomem.diarizer_sidecar --if-enabled); } \
         || echo "Diarizer sidecar: build failed for $SERVED; transcripts carry no speakers until it is rebuilt" >&2
     echo "Managed serving version: $SERVED"
     exit 0
@@ -265,7 +268,7 @@ exomem_update_transition_receipt \
     "$MANAGED_STATE_ROOT" "$VAULT" "$PORT" stopped
 MANAGED_STATE_ROOT="$(exomem_bind_service_state_root \
     "$UNIT_FILE" "$VENV_PYTHON" "$MANAGED_STATE_ROOT")"
-export EXOMEM_STATE_ROOT="$MANAGED_STATE_ROOT"
+exomem_export_setting EXOMEM_STATE_ROOT "$MANAGED_STATE_ROOT"
 exomem_update_transition_receipt \
     "$VENV_PYTHON" "$TRANSITION_RECEIPT" "$SERVICE_ID" "$BINDING_PATH" \
     "$MANAGED_STATE_ROOT" "$VAULT" "$PORT" bound

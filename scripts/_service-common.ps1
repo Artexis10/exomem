@@ -155,6 +155,62 @@ function Get-ExomemProcessSetting {
     return Resolve-ExomemSetting -Name $Name -Source "the process environment" -Lookup $lookup
 }
 
+# The prefixes a setting's name may carry: EXOMEM_X is the name the package reads, the others are its
+# aliases (the package's env_compat holds the rule).
+$script:ExomemSettingPrefixes = @("EXOMEM_", "EVERMATTER_", "KB_MCP_")
+
+function Set-ExomemProcessSetting {
+    <#
+    .SYNOPSIS
+      Force EXOMEM_X to a value for every process this script starts.
+    .DESCRIPTION
+      Sets EXOMEM_X and removes the EVERMATTER_X and KB_MCP_X spellings from the process
+      environment. A child that inherited both names with different values refuses to start
+      (the package rule), so a forced value that left an inherited alias in place would stop it.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [AllowEmptyString()][string]$Value
+    )
+
+    $own = $script:ExomemSettingPrefixes[0]
+    if (-not $Name.StartsWith($own, [System.StringComparison]::Ordinal) -or $Name.Length -eq $own.Length) {
+        throw "Set-ExomemProcessSetting takes an $own name, not $Name"
+    }
+    $suffix = $Name.Substring($own.Length)
+    foreach ($prefix in $script:ExomemSettingPrefixes | Select-Object -Skip 1) {
+        # Remove-Item, not SetEnvironmentVariable($null): on Linux the latter leaves an empty
+        # variable in a child's environment, which the package still counts as a second name.
+        Remove-Item -LiteralPath "Env:$prefix$suffix" -ErrorAction SilentlyContinue
+    }
+    [Environment]::SetEnvironmentVariable($Name, $Value, "Process")
+}
+
+function Set-ExomemProcessEnvFromMap {
+    <#
+    .SYNOPSIS
+      Load a parsed dotenv map into the process environment.
+    .DESCRIPTION
+      Each setting lands as EXOMEM_X (EXOMEM_, else EVERMATTER_, else KB_MCP_; a placement
+      conflict in the map throws) with its other spellings removed, so a value the map names
+      replaces what the process inherited. Other names are set as they are.
+    #>
+    param([System.Collections.IDictionary]$Map, [string]$Source = "the dotenv")
+
+    $loaded = @{}
+    foreach ($key in @($Map.Keys)) {
+        $prefix = $script:ExomemSettingPrefixes | Where-Object { ([string]$key).StartsWith($_, [System.StringComparison]::Ordinal) } | Select-Object -First 1
+        if (-not $prefix) {
+            [Environment]::SetEnvironmentVariable([string]$key, [string]$Map[$key], "Process")
+            continue
+        }
+        $canonical = "EXOMEM_" + ([string]$key).Substring($prefix.Length)
+        if ($loaded.ContainsKey($canonical)) { continue }
+        $loaded[$canonical] = $true
+        Set-ExomemProcessSetting -Name $canonical -Value (Get-ExomemMapSetting -Map $Map -Name $canonical -Source $Source)
+    }
+}
+
 function Get-ExomemDefaultManagedStateRoot {
     <# Pin the installer/operator user's platform default for LocalSystem too. #>
     $base = if ($env:LOCALAPPDATA) {

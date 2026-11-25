@@ -153,13 +153,6 @@ function Read-DotenvMap {
     return $map
 }
 
-function Set-ProcessEnvFromMap {
-    param([System.Collections.IDictionary]$Map)
-    foreach ($entry in $Map.GetEnumerator()) {
-        [Environment]::SetEnvironmentVariable($entry.Key, [string]$entry.Value, "Process")
-    }
-}
-
 function Set-NssmEnvironment {
     param([System.Collections.IDictionary]$Map)
     # Merge by name so an in-place upgrade preserves opaque entries that are
@@ -316,7 +309,7 @@ $receiptStateRoot = if ($transitionReceipt) { [string]$transitionReceipt.state_r
 $pinnedStateRoot = Ensure-ExomemDotenvStateRootBinding `
     -AppDirectory $repoRoot `
     -ExpectedStateRoot $receiptStateRoot
-[Environment]::SetEnvironmentVariable("EXOMEM_STATE_ROOT", $pinnedStateRoot, "Process")
+Set-ExomemProcessSetting -Name "EXOMEM_STATE_ROOT" -Value $pinnedStateRoot
 if ($existingTransition) {
     Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "bound"
 }
@@ -373,7 +366,7 @@ if ($null -eq (Get-ExomemMapSetting -Map $serviceEnv -Name "EXOMEM_LOG_DIR" -Sou
     $serviceEnv["EXOMEM_LOG_DIR"] = $pinnedLogDir
 }
 $appLogDir = Get-ExomemMapSetting -Map $serviceEnv -Name "EXOMEM_LOG_DIR" -Source ".env"
-Set-ProcessEnvFromMap -Map $serviceEnv
+Set-ExomemProcessEnvFromMap -Map $serviceEnv -Source ".env"
 
 $script:StateRootTransitionBegan = $true
 Write-Host "Migrating machine-local state under the proven offline window..."
