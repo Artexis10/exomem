@@ -660,7 +660,7 @@ _REMAINING = {
     )),
     "adoption_studio": ("action", (
         # "updated", not "saved": a `file` call may only finish a page or stop for space, so it states the run moved on, never that files were saved.
-        _row("file", "import_memory", ("path", "collection", "continuation", "upload"), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("file", "import_memory", ("path", "collection", "continuation", "upload", "wait"), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("start", "import_memory", ("path", "include_hidden", "initialize_kb", "collection", "after", "consume"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("status", "read_import", ("run_id", "path", "after", "series_id", "next_window_bytes", "view", "offset", "limit", "revision")),
         _row("select", "import_memory", ("run_id", "include", "exclude", "overrides", "include_junk"), ("run_id",), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.

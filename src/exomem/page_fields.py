@@ -5,12 +5,17 @@ is data, not code. The governed pointer write reads this registry to decide whic
 values it may change on a page in an append-only tree, so the pointer set is part of the
 append-only contract: a field gains a role only in the shipped pack, through review. A
 vault overlay or a schema save may retire a shipped field, and nothing else. Code knows
-only the closed `role`, `writer`, `carries` and `shape` values.
+only the closed `role`, `writer`, `carries`, `shape` and `source` values.
+
+A `provenance` field records where an imported file came from. Filing writes it onto each
+Source of a stage whose series file states an origin; `source` says where the value comes
+from, and the filing code branches on that and never on the field's key.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,9 +25,17 @@ from .vocabulary import registry
 
 #: The closed `role` values this registry declares and the pointer write implements.
 # nosemgrep: ep-word-set -- A closed attribute value that the registry schema fixes, not vocabulary.
-ROLES = frozenset({"pointer"})
+ROLES = frozenset({"pointer", "provenance"})
 #: The role whose fields the governed pointer write may change.
 POINTER_ROLE = "pointer"
+#: The role of a field that filing writes to say where an imported file came from.
+PROVENANCE_ROLE = "provenance"
+#: The closed `source` values of a provenance field: a key of the series file's origin envelope,
+#: or the modification time of the staged member. An `envelope` entry names its key in `envelope`.
+SOURCE_ENVELOPE = "envelope"
+SOURCE_MEMBER_TIME = "member-time"
+# nosemgrep: ep-word-set -- The closed attribute values that the registry schema fixes, not vocabulary.
+SOURCES = frozenset({SOURCE_ENVELOPE, SOURCE_MEMBER_TIME})
 #: The closed `writer` values: the operation that alone writes a pointer field on a captured
 #: page, because it checks what a plain correction cannot (a relocation and its classification
 #: history, the raw file's identity, or the citing page's `sources:`).
@@ -42,6 +55,10 @@ SHAPE_LIST = "list"
 # nosemgrep: ep-word-set -- The closed attribute values that the registry schema fixes, not vocabulary.
 SHAPES = frozenset({SHAPE_LIST})
 PACK = "page-fields.yaml"
+#: The attribute names that every field takes, and the two that only a provenance field takes. The pointer-only
+#: names are what the schema's attribute set holds beyond these (`_POINTER_ONLY_ATTRIBUTES`, below `SPEC`).
+_COMMON_ATTRIBUTES = frozenset({"field", "role"})
+_PROVENANCE_ONLY_ATTRIBUTES = frozenset({"source", "envelope"})
 _MAX_FIELD_CHARS = 128
 #: The keys that the write protocol itself maintains, so no registry source may give one a role:
 #: identity, lineage, note type and the write stamp.
@@ -68,6 +85,7 @@ def _check(entry: registry.Entry, entries: Mapping[str, registry.Entry]) -> None
     if "shape" in attributes and attributes["shape"] not in SHAPES:
         raise registry.RegistryError(
             "INVALID_PAGE_FIELD: shape must be one of " + ", ".join(sorted(SHAPES)))
+    _check_role_attributes(attributes)
     name = attributes.get("field")
     # A frontmatter key on one line: the pointer write compares it with a parsed key.
     if (
@@ -83,6 +101,26 @@ def _check(entry: registry.Entry, entries: Mapping[str, registry.Entry]) -> None
         raise registry.RegistryError(
             f"PAGE_FIELD_PROTOCOL_OWNED: {name} is maintained by the write protocol itself, so "
             "no page field may declare it")
+
+
+def _check_role_attributes(attributes: Mapping[str, Any]) -> None:
+    """Each role takes its own attributes: a pointer has no `source`, and a provenance field has no pointer attribute."""
+    if attributes["role"] == PROVENANCE_ROLE:
+        pointer_only = sorted(_POINTER_ONLY_ATTRIBUTES & attributes.keys())
+        if pointer_only:
+            raise registry.RegistryError(
+                f"INVALID_PAGE_FIELD: a provenance field takes no {pointer_only[0]}")
+        if attributes.get("source") not in SOURCES:
+            raise registry.RegistryError(
+                "INVALID_PAGE_FIELD: source must be one of " + ", ".join(sorted(SOURCES)))
+        key = attributes.get("envelope")
+        if attributes["source"] == SOURCE_ENVELOPE:
+            if not isinstance(key, str) or not key or len(key) > _MAX_FIELD_CHARS:
+                raise registry.RegistryError("INVALID_PAGE_FIELD: an envelope field names its envelope key")
+        elif key is not None:
+            raise registry.RegistryError("INVALID_PAGE_FIELD: only an envelope field names an envelope key")
+    elif _PROVENANCE_ONLY_ATTRIBUTES & attributes.keys():
+        raise registry.RegistryError("INVALID_PAGE_FIELD: only a provenance field takes source or envelope")
 
 
 def _meaning(entry: registry.Entry) -> dict[str, Any]:
@@ -133,16 +171,18 @@ SPEC = registry.RegistrySpec(
     adapter=_Adapter(PACK, lambda: SPEC, _check),
     fields=frozenset({"label", "description", "status", "attributes"}),
     # The page-fields schema fixes these attribute names.
-    attributes=frozenset({"field", "role", "writer", "carries", "shape"}),
+    attributes=frozenset({"field", "role", "writer", "carries", "shape", "source", "envelope"}),
     immutable=frozenset(
         {
             "attributes.field", "attributes.role", "attributes.writer", "attributes.carries",
-            "attributes.shape",
+            "attributes.shape", "attributes.source", "attributes.envelope",
         }
     ),
     # Agents meet pointer fields only through a pointer write's refusal, not the bootstrap.
     summarize_keys=False,
 )
+#: The attribute names that only a pointer takes: the schema's attribute set without the common and provenance ones.
+_POINTER_ONLY_ATTRIBUTES = SPEC.attributes - _COMMON_ATTRIBUTES - _PROVENANCE_ONLY_ATTRIBUTES
 
 
 def fields_with_role(vault_root: Path | None, role: str) -> frozenset[str]:
@@ -172,6 +212,30 @@ def writers(vault_root: Path | None) -> dict[str, str]:
         for entry in snapshot.active
         if entry.attributes.get("role") == POINTER_ROLE and "writer" in entry.attributes
     }
+
+
+@dataclass(frozen=True, slots=True)
+class ProvenanceField:
+    """One active provenance entry: the frontmatter key to write, and where its value comes from.
+
+    `envelope` is the origin envelope's key for a `source` of `envelope`, else None.
+    """
+
+    field: str
+    source: str
+    envelope: str | None
+
+
+def provenance_fields(vault_root: Path | None) -> tuple[ProvenanceField, ...]:
+    """The active provenance entries, in pack order: what filing writes onto an imported Source."""
+    snapshot = registry.load(SPEC, vault_root)
+    return tuple(
+        ProvenanceField(
+            entry.attributes["field"], entry.attributes["source"], entry.attributes.get("envelope")
+        )
+        for entry in snapshot.active
+        if entry.attributes.get("role") == PROVENANCE_ROLE
+    )
 
 
 def fields_carrying(vault_root: Path | None, carries: str) -> tuple[str, ...]:

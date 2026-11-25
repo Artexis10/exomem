@@ -60,7 +60,7 @@ from . import overview as overview_module
 from .adopt import _TEXT_IMPORT_SUFFIXES
 from .governance import raw_protection
 from .kbdir import is_in_managed_root, managed_join, managed_root
-from .vault import PlannedWrite, batch_atomic_write, kb_root, parse_frontmatter
+from .vault import PlannedWrite, batch_atomic_write, is_import_id, kb_root, parse_frontmatter
 from .writer_lease import _FAST_ACK_DEADLINE_SECONDS
 
 RUNS_DIR = "_Adoption/runs"
@@ -68,7 +68,7 @@ SCHEMA_VERSION = 1
 # The plan layout `apply` understands. A plan made by an earlier layout is refused as stale.
 PLAN_FORMAT = 2
 # These are fixed status protocol views, not vault vocabulary.
-StatusView = Literal["summary", "inventory", "selection", "plan", "outcomes", "stale", "full"]
+StatusView = Literal["summary", "inventory", "selection", "plan", "outcomes", "stale", "filing", "full"]
 STATUS_PAGE_ITEMS = 100
 STATUS_PAGE_BYTES = 32 * 1024
 MAX_CANDIDATES_DEFAULT = 5000
@@ -1160,6 +1160,26 @@ def _stage_at(root: Path, source_root: str) -> import_stage.Stage | None:
     return import_stage.read(root, parts[1])
 
 
+def _origin_of(root: Path, stage: import_stage.Stage | None) -> dict[str, str]:
+    """What the series file of the stage states about who sent it, or nothing for a run outside a recorded stage."""
+    series = None if stage is None else import_stage.read_series(root, stage.import_id)
+    return {} if series is None else dict(series.origin)
+
+
+def _carry_origin(item: dict, origin: Mapping[str, str], row: Mapping | None) -> None:
+    """Put the stage's origin, and the member's file time from its inventory row, on a planned item.
+
+    The time is the member's mtime as the sender set it. A row with no usable time leaves it unstated, never a guess.
+    """
+    item["origin"] = dict(origin)
+    mtime = (row or {}).get("mtime")
+    try:
+        stamp = dt.datetime.fromtimestamp(mtime, dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return
+    item["file_modified"] = stamp
+
+
 def _recorded_stage(stage: import_stage.Stage | None) -> dict | None:
     """`{"stage": id, "proof": ...}` for the stage a run starts in, or None when it has no member manifest.
 
@@ -1352,6 +1372,7 @@ def start(
         "source_root": source_root,
         "collection": pinned["collection"] if pinned else _collection_of(root, source_root, collection, stage),
         "stage": _recorded_stage(stage),
+        "origin": _origin_of(root, stage),
         "consume": consume,
         "scan_summary": {
             "totals": scan.get("totals", {}),
@@ -1492,6 +1513,8 @@ def status(root: Path, *, run_id: str | None = None, path: str = "", view: Statu
         raise AdoptionRunError("IMPORT_REQUEST_INVALID", f"status requires offset >= 0 and limit from 1 to {STATUS_PAGE_ITEMS}")
     if offset and revision is None:
         raise AdoptionRunError("IMPORT_REQUEST_INVALID", "a later status page requires its run revision")
+    if view == "filing":
+        return _filing_view(root, run_id, path)
     if not run_id:
         return {"mode": "adoption", "mutated": False, **store.listing(path=path)}
     run = store.load(run_id)
@@ -1532,6 +1555,17 @@ def status(root: Path, *, run_id: str | None = None, path: str = "", view: Statu
     if view == "full":
         return presented
     return _status_view(run, presented, view=view, offset=offset, limit=limit, revision=revision)
+
+
+def _filing_view(root: Path, run_id: str | None, path: str) -> dict:
+    """The filing record of one staged folder, `_Imports/<id>`: one record read, never a run, inventory or outcome."""
+    from . import import_filing
+
+    parts = PurePosixPath(_clean(path)).parts
+    if run_id or len(parts) != 2 or parts[0] != IMPORT_STAGE_DIR or not is_import_id(parts[1]):
+        raise AdoptionRunError(
+            "IMPORT_REQUEST_INVALID", f"the filing view reads one staged folder by its path, {IMPORT_STAGE_DIR}/<id>, and takes no run_id")
+    return {"mode": "adoption", "mutated": False, "path": "/".join(parts), **import_filing.read_view(root, parts[1])}
 
 
 def select(
@@ -1745,6 +1779,7 @@ def plan(
         classification = selection.get("classification") or {}
         taxonomy = source_taxonomy.load_taxonomy(root) if classification else None
         inventory = {row["path"]: row for row in run.get("inventory") or []}
+        origin = run.get("origin") or {}
         ceiling = client_artifacts.adoption_ceiling()
         stage = adoption_consume.recorded(root, run) if run.get("consume", True) else None
         index = adoption_plan.read_import_index(root)
@@ -1771,6 +1806,8 @@ def plan(
             if isinstance(result, dict):
                 draft["skipped"].append(result)
             else:
+                if origin:
+                    _carry_origin(result[0], origin, inventory.get(rel))
                 draft["items"].append(result[0])
 
         progress = {
