@@ -10,8 +10,9 @@ import sqlite3
 from contextlib import closing
 
 import pytest
+from test_typed_history_generations import before_timeline_facts
 
-from exomem.collection_store import connection, history, schema, typed_storage
+from exomem.collection_store import chain, connection, history, schema, typed_storage
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import library_scope
 
@@ -73,6 +74,7 @@ def schema_20_store(tmp_path, monkeypatch):
     (root / "Knowledge Base").mkdir(parents=True)
     with monkeypatch.context() as earlier:
         earlier.setattr(schema, "SCHEMA_VERSION", 20)
+        before_timeline_facts(earlier)
         with connection.open_writer(path, lease_check=lambda: True) as handle, library_scope():
             writer = CollectionWriter(root, handle)
             for cid, title in ((LAMPS, "Lamps"), (SPARES, "Spares")):
@@ -112,3 +114,62 @@ def test_migration_keeps_every_row_version_and_proof(schema_20_store):
         guarded = {table for (table,) in conn.execute("SELECT tbl_name FROM sqlite_master WHERE type='trigger' "
                                                       "AND name LIKE '%append_only_update'")}
         assert {"version_effective", "timeline_points"} <= guarded
+
+
+@pytest.fixture
+def timeline_store(tmp_path):
+    """Lamp L-17 at schema 21: a stated append, a late move, a missed move, a correction of the late move and an
+    edit that states no time, so it records no fact and carries no marker.
+
+    Returns the store path and each write's transition id, by name.
+    """
+    root, path = tmp_path / "vault", tmp_path / "collections.sqlite"
+    (root / "Knowledge Base").mkdir(parents=True)
+    with connection.open_writer(path, lease_check=lambda: True) as handle, library_scope():
+        writer = CollectionWriter(root, handle)
+        writer.create_collection("Knowledge Base/Records/Lamps/_collection.md", equipment_manifest(LAMPS, "Lamps"),
+                                 why="declare", scaffold=False)
+        key = writer.append_record(LAMPS, item={"asset_tag": "L-17", "location": "Shelf A"}, why="capture",
+                                   effective_at="2026-03-01")["item_key"]
+        writes = {"move": edit(writer, LAMPS, key, {"location": "Shelf B"}, effective_at="2026-03-07"),
+                  "missed": edit(writer, LAMPS, key, {"location": "Repair Bench"}, effective_at="2026-03-03")}
+        writes["fix"] = edit(writer, LAMPS, key, {"location": "Shelf C"}, corrects=writes["move"]["audit_correlation"])
+        writes["lent"] = edit(writer, LAMPS, key, {"status": "lent"})
+    return path, {name: reply["audit_correlation"] for name, reply in writes.items()}
+
+
+@pytest.mark.parametrize(("table", "statement", "write"), [
+    ("version_effective", "UPDATE version_effective SET effective_at='2026-03-08' WHERE effective_at='2026-03-07'",
+     "move"),
+    ("timeline_points", "INSERT INTO timeline_points(row_id,field_path,txn_id,row_version,placement,effective_at,"
+     "value_json,corrects_txn) SELECT e.row_id,'status',e.txn_id,e.version_after,'past','2026-03-02','\"lent\"',NULL "
+     "FROM audit_effects e JOIN txns t ON t.txn_id=e.txn_id WHERE t.transition_id=:lent", "lent"),
+    ("timeline_points", "DELETE FROM timeline_points WHERE placement='past'", "missed"),
+    ("txns", "UPDATE txns SET timeline_version=NULL WHERE transition_id=:fix", "fix"),
+], ids=["changed effective time", "added point on an unmarked write", "removed point", "cleared marker"])
+def test_a_timeline_fact_changed_outside_the_writer_fails_verification_at_its_write(timeline_store, table,
+                                                                                    statement, write):
+    """A fact outside the event hash can be rewritten unseen, so history no longer proves what was believed."""
+    path, transitions = timeline_store
+    with closing(sqlite3.connect(path)) as raw:
+        for (trigger,) in raw.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name=?", (table,)):
+            raw.execute(f'DROP TRIGGER "{trigger}"')
+        raw.execute(statement, transitions)
+        raw.commit()
+        [(commit_seq,)] = raw.execute("SELECT commit_seq FROM txns WHERE transition_id=?", (transitions[write],))
+
+    with closing(connection.open_reader(path)) as reader, pytest.raises(chain.StoreChainError) as broken:
+        history.verify(reader, LAMPS)
+
+    assert broken.value.commit_seq == commit_seq
+
+
+def test_a_sound_store_with_timeline_facts_verifies_after_a_cold_reopen(timeline_store):
+    """A member rebuilt from the tables in another order or encoding than the writer hashed breaks every reopen."""
+    path, _ = timeline_store
+
+    with closing(connection.open_reader(path)) as reader:
+        history.verify(reader, LAMPS)
+        assert reader.execute("SELECT COUNT(*) FROM version_effective").fetchone() == (3,)
+        assert reader.execute("SELECT placement, corrects_txn IS NOT NULL FROM timeline_points "
+                              "ORDER BY txn_id").fetchall() == [("past", 0), ("current", 1)]

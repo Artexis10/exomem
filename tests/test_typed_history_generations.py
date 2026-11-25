@@ -21,12 +21,22 @@ from exomem.collection_store import (
     snapshot,
     source_dependencies,
     tables,
+    timeline,
     typed_storage,
     views,
     writer,
 )
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import library_scope
+
+
+def before_timeline_facts(patch):
+    """Let the maintained writer seed a store from before schema 21, which has no timeline fact tables.
+
+    An edit reads its row's latest effective times from those tables. A store before them holds no stated
+    time, so every write it took is current, as the release that wrote it placed it.
+    """
+    patch.setattr(timeline, "latest_bounds", lambda conn, row_ids: {})
 
 
 def before_retractable_rows(patch):
@@ -78,6 +88,7 @@ def before_retractable_rows(patch):
 
         return filled
 
+    before_timeline_facts(patch)  # a store from before schema 19 is also from before schema 21
     patch.setattr(schema, "ensure_schema", seeding_schema)
     patch.setattr(connection.WriterConnection, "close", closing_store)
     patch.setattr(snapshot, "_backup_fill", copying(backup_fill))

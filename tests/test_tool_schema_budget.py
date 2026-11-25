@@ -72,13 +72,17 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # refuses them without, added 77 B on 2026-11-25 (compact-add-metadata-refusal). Its `links` now says that a compact
 # observation keeps only a source citation, such as a `derived_from` link to a saved Source or Evidence page, and every
 # other relation needs a rich kind, which added 160 B the same day.
-TOTAL_BUDGET = 31_650
+# `effective_at` on `add_record` and `edit_record`, when the written values took effect, and `corrects` in
+# `edit_record.options`, which names the earlier write that an edit corrects, added 327 B on 2026-11-25
+# (record-value-timeline).
+TOTAL_BUDGET = 31_950
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
     "add_observation": 1850,
     "add_plan_item": 500,
-    "add_record": 940,
+    # effective_at joined add_record and edit_record on 2026-11-25 (record-value-timeline).
+    "add_record": 1100,
     "cancel_uploads": 600,
     "create_note": 1850,
     "decide_review_item": 1000,
@@ -87,7 +91,7 @@ TOOL_CEILINGS: dict[str, int] = {
     # (add-unit-level-supersession).
     "edit_note": 3700,
     "edit_plan_item": 750,
-    "edit_record": 850,
+    "edit_record": 1050,
     # inspect_name_drift joined the read door on 2026-11-23 (align-names-with-titles).
     "inspect_memory": 2230,
     "list_review_items": 750,

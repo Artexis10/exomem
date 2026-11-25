@@ -55,6 +55,8 @@ _RECORD_RECEIPT_FIELDS = (
     "payload_hash",
     "outcome",
     "audit_correlation",
+    # A Records append or update says when it took effect and where each changed field landed.
+    "timeline",
     "continuity",
     "acknowledged_gap_codes",
     "gap_fingerprint",

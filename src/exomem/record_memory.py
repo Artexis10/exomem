@@ -107,6 +107,8 @@ def record_memory(
     new_collection: dict[str, Any] | None = None,
     new_fields: list[str] | None = None,
     natural_key: dict[str, Any] | None = None,
+    effective_at: str | None = None,
+    corrects: str | None = None,
 ) -> dict[str, Any]:
     """Describe, validate, inspect, create, query, append, bulk_upsert, update, retract, revise, rebaseline, discard or import Records.
 
@@ -189,6 +191,14 @@ def record_memory(
             from the values, then writes the row, in one call; the reply names them in `added_fields`.
             Under advisory or off, or past the field bound, it refuses AUTOMATIC_FIELDS_REFUSED with the
             proposal. A declared field is never retyped, renamed or removed this way.
+        effective_at: append, update or bulk_upsert, store-routed collections only: when the written
+            values took effect, as a date (2026-03-07) or an RFC 3339 instant with its offset, no later
+            than the write. Omitted, the write takes effect when it is made (basis `written`). On
+            bulk_upsert it applies to every row, and a row's own `effective_at` wins. An update earlier
+            than a field's latest point records a past value and leaves the current value as it is.
+        corrects: update only: the `transition_id` of the write whose point this update replaces, as the
+            row's history lists it. Name the corrected values in `changes`, a corrected `effective_at`,
+            or both.
 
     retract takes one row out of current state with a required why. Its history stays, and
     appending the same natural key later brings the row back. A store-routed collection
@@ -256,6 +266,8 @@ def record_memory(
         "new_collection": new_collection,
         "new_fields": new_fields,
         "natural_key": natural_key,
+        "effective_at": effective_at,
+        "corrects": corrects,
     }
     _validate_arguments(action, values)
     # A leaf takes only the arguments it declares, and these two are the facade's alone.
@@ -276,6 +288,14 @@ def record_memory(
         selected, result = preview.dispatch(vault_root, "records", action, values)
         if selected:
             return result
+        from .collection_store import timeline
+
+        if timeline.given(values):
+            # Resolve under the caller's authority first, as a retraction does: the refusal never confirms
+            # that a withheld collection exists.
+            if collection is not None:
+                record_governance.resolve_collection(vault_root, collection)
+            raise timeline.unavailable()
         if action in {"import", "retract"} or query is not None or (action == "query" and item_key is not None):
             # Resolve under the caller's authority first: an absent or withheld selector
             # answers exactly as a sealed store-routed collection does, so the refusal
@@ -915,8 +935,9 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
         and values["changes"] is None
         and values["refresh_presentation"] is not True
         and values["held"] is None
+        and values["corrects"] is None
     ):
-        _invalid_arguments("update requires changes, held, or refresh_presentation=true")
+        _invalid_arguments("update requires changes, held, corrects, or refresh_presentation=true")
     if action in {"append", "update"} and values["hold"] is False and values["held"] is not None:
         # A resume that refuses again rewrites its held file in place, so
         # declining the hold would leave the previous attempt's diagnostics

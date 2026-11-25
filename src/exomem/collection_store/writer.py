@@ -65,6 +65,7 @@ from . import (
     source_dependencies,
     summary,
     tables,
+    timeline,
     tokens,
     typed_storage,
     types,
@@ -362,10 +363,10 @@ class CollectionWriter:
         return row, manifest, declared
 
     @staticmethod
-    def _rows_writable(manifest, action):
+    def _rows_writable(manifest, action, *, timeline_given=False):
         """The one gate on row mutations: a derived collection's rows change only through its imports."""
         if manifest.derived:
-            raise derived_rows.refused(action)
+            raise timeline.unavailable() if timeline_given else derived_rows.refused(action)
 
     def _collection_manifest(self, row):
         self._require_operation_context()
@@ -996,6 +997,7 @@ class CollectionWriter:
         requested: bool = False,
         _source_inputs: Sequence[version_sources.EffectInput] | None = None,
         _transition_id: str | None = None,
+        _timeline: list[dict[str, Any]] | None = None,
     ):
         """One chained txn; a ``control`` txn keeps the collection's generation and manifest.
 
@@ -1050,6 +1052,9 @@ class CollectionWriter:
             if not hasattr(self._publication, "source_bindings"):
                 self._publication.source_bindings = {}
             self._publication.source_bindings[txn_id] = _source_bindings
+        if _timeline is not None:
+            # The stated facts join the event material, so the hash chain covers them; the marker says so.
+            event["timeline"] = timeline.event_member(_timeline)
         event_hash = tokens.event_hash(event, version=event_version)
         return {
             "txn_id": txn_id,
@@ -1074,6 +1079,8 @@ class CollectionWriter:
             "store_head_hash": tokens.store_head_hash(previous, seq + 1, event_hash),
             "legacy_event_json": None,
             "event_version": event_version,
+            # A write without timeline facts leaves the marker out, so it inserts as every earlier release did.
+            **({"timeline_version": timeline.EVENT_VERSION} if _timeline is not None else {}),
         }
 
     def _insert_txn(self, txn: dict[str, Any], receipt: dict[str, Any]) -> None:
@@ -2944,6 +2951,36 @@ class CollectionWriter:
                                        f"exomem://{types.type_for_manifest(manifest).item_type}/{manifest.collection_id}/{key}")
         return tokens.item_version(manifest.collection_id, key, version, payload)
 
+    def _appended_placements(self, values, revived, effective):
+        """Each field an append sets is current; a revival names the fields that differ from the retracted
+        version, and refuses EFFECTIVE_BEFORE_CURRENT when one would land before that field's latest point."""
+        if revived is None:
+            return dict.fromkeys(values, timeline.CURRENT)
+        late = timeline.late_fields(self.connection, {revived["row_id"]: (values, effective)}).get(revived["row_id"])
+        if late:
+            raise timeline.before_current(late)
+        prior, _ = typed_storage.version_values(self.connection, revived["row_id"], revived["row_version"])
+        return {name: timeline.CURRENT for name in sorted({*values, *prior})
+                if not timeline.same(values.get(name, timeline.MISSING), prior.get(name, timeline.MISSING))}
+
+    def _record_timeline(self, txn, writes):
+        """Store each written row's stated time and points against the version this transaction wrote."""
+        stated = {key: write.effective.text for key, write in writes.items() if write.stated}
+        points = [[key, point["field"], point["placement"], point["effective_at"], point["value_json"],
+                   point["corrects_txn"]] for key, write in writes.items() for point in write.points]
+        if stated:
+            self._execute(
+                "INSERT INTO version_effective(row_id,row_version,effective_at) "
+                "SELECT e.row_id,e.version_after,s.value FROM audit_effects e JOIN json_each(?) s "
+                "ON s.key=e.item_key WHERE e.txn_id=?", (_json(stated), txn["txn_id"]))
+        if points:
+            self._execute(
+                "INSERT INTO timeline_points(row_id,field_path,txn_id,row_version,placement,effective_at,value_json,"
+                "corrects_txn) SELECT e.row_id,json_extract(p.value,'$[1]'),e.txn_id,e.version_after,"
+                "json_extract(p.value,'$[2]'),json_extract(p.value,'$[3]'),json_extract(p.value,'$[4]'),"
+                "json_extract(p.value,'$[5]') FROM json_each(?) p JOIN audit_effects e "
+                "ON e.item_key=json_extract(p.value,'$[0]') AND e.txn_id=?", (_json(points), txn["txn_id"]))
+
     def _insert_rows(self, table, rows):
         """Insert a batch's rows of one table as multi-row statements, with the writer's change accounting."""
         multirow.insert_rows(self._execute, self.connection, table, rows)
@@ -2987,7 +3024,7 @@ class CollectionWriter:
 
     @source_dependencies.bulk_operation
     def bulk_upsert_records(self, collection, *, rows, why, expected_container_hash,
-                            source=None, on_reject="abort", request_id=None, _import=None):
+                            source=None, on_reject="abort", effective_at=None, request_id=None, _import=None):
         """Plan Records rows under one guard; commit one transition with N effects.
 
         ``_import`` is an import job's batch settlement (``importer``): its
@@ -2996,13 +3033,13 @@ class CollectionWriter:
         with the rows.
         """
         arguments = dict(rows=rows, why=why, expected_container_hash=expected_container_hash,
-                         source=source, on_reject=on_reject)
+                         source=source, on_reject=on_reject, **record_inputs.when_given(effective_at=effective_at))
         with self._mutation() as preparation:
             identity, digest, replay, row, manifest, _ = self._identified_collection(
                 "bulk_upsert", collection, arguments, request_id, facade_profile="records")
             if replay is not None:
                 return replay
-            self._rows_writable(manifest, "bulk_upsert")
+            self._rows_writable(manifest, "bulk_upsert", timeline_given=timeline.given(arguments))
             current_hash = self._container(row)
             records._expect_hash(expected_container_hash, current_hash, "container")
             prepared = self._bulk_inputs
@@ -3020,10 +3057,12 @@ class CollectionWriter:
                 return result
             if _renders_rows(manifest):
                 self._preflight_views(path for _, _, _, path, _, _ in plans)
+            writes = prepared.timeline
             txn = self._txn(row, manifest, "bulk_upsert", why, identity, digest,
                             effects=[{"key": key, "payload_hash": tokens.payload_hash(manifest.schema.version, key, values, body),
                                       "sources": [source]} for key, values, body, _, _, source in plans],
-                            _source_inputs=source_inputs)
+                            _source_inputs=source_inputs,
+                            _timeline=[write.member(key) for key, write in writes.items() if write.records_facts] or None)
             scope = self.handle.write_scope
             if manifest.view_mode == summary.SUMMARY and all(before is None for _, _, _, _, before, _ in plans):
                 self._write_new_items(manifest, plans, txn, scope=scope)
@@ -3031,6 +3070,7 @@ class CollectionWriter:
                 for ordinal, (key, values, body, path, before, source_rel) in enumerate(plans):
                     self._write_item(manifest, key, values, body, path, txn, before, None, [source_rel],
                                      ordinal=ordinal, queue_log=False, scope=scope)
+            self._record_timeline(txn, writes)
             if is_log:
                 self._pending_log(manifest, txn["generation_after"])
             elif manifest.view_mode == summary.SUMMARY:
@@ -3040,6 +3080,8 @@ class CollectionWriter:
             for outcome in outcomes:
                 if outcome["outcome"] in {"inserted", "updated"}:
                     outcome["transition_id"] = txn["transition_id"]
+                    block = writes[outcome["item_key"]].receipt(txn["committed_at"])
+                    outcome.update(effective_at=block["effective_at"], effective_basis=block["effective_basis"])
             self._precommit(manifest)
             for guard in source_guards.values():
                 self._recheck_guard(guard, publication=True)
@@ -3105,6 +3147,7 @@ class CollectionWriter:
         hold=True,
         held=None,
         sources=(),
+        effective_at=None,
         request_id=None,
         _prepare=None,
         _validate_inputs=None,
@@ -3121,6 +3164,7 @@ class CollectionWriter:
             hold=hold,
             held=held,
             sources=list(sources),
+            **record_inputs.when_given(effective_at=effective_at),
         )
         with self._mutation(_prepare=_prepare) as preparation:
             if _validate_inputs is not None:
@@ -3133,7 +3177,7 @@ class CollectionWriter:
                 raise connection.CollectionStoreError("COLLECTION_STORE_INPUT_CHANGED", "record request identity changed")
             if self._record_inputs is not None and self._record_inputs.recheck_in_leaf:
                 record_inputs.recheck_selected(self, self._record_inputs, row, manifest, declared)
-            self._rows_writable(manifest, "append")
+            self._rows_writable(manifest, "append", timeline_given=effective_at is not None)
             candidate = self._record_inputs or record_inputs.append(self, row, manifest, declared, arguments)
             values, body, resumed, key = candidate.values, candidate.body, candidate.resumed, candidate.key
             try:
@@ -3156,6 +3200,9 @@ class CollectionWriter:
                 self._twins(manifest.collection_id, key, _natural_key(manifest, values))
                 existing = self._item(manifest.collection_id, key)
                 revived = None if existing is not None else self._retracted(manifest.collection_id, key)
+                write = candidate.timeline
+                if existing is None:
+                    write.placements = self._appended_placements(values, revived, write.effective)
                 payload = tokens.payload_hash(manifest.schema.version, key, values, body)
                 delivery_guard = (
                     records._validate_artifact_delivery(self.root, manifest, values, delivery)
@@ -3222,10 +3269,12 @@ class CollectionWriter:
                         effects={"key": key, "payload_hash": payload, "sources": verified},
                         _source_inputs=[version_sources.effect_input(key, payload, body, revived,
                             explicit=resolved_sources, prepared=origin_inputs)],
+                        _timeline=[write.member(key)] if write.records_facts else None,
                     )
                     item_hash = self._write_item(
                         manifest, key, values, body, path, txn, revived, resumed, verified
                     )
+                    self._record_timeline(txn, {key: write})
                     after_container = self._advance(txn)
                     result = records._result(
                         operation="append",
@@ -3239,6 +3288,7 @@ class CollectionWriter:
                         payload_hash=payload,
                         outcome="committed",
                         audit_correlation=txn["transition_id"],
+                        timeline=write.receipt(txn["committed_at"]),
                     )
                     self._precommit(manifest)
                     if delivery_guard:
@@ -3269,6 +3319,8 @@ class CollectionWriter:
         hold=True,
         held=None,
         sources=(),
+        effective_at=None,
+        corrects=None,
         request_id=None,
         _prepare=None,
         _validate_inputs=None,
@@ -3288,6 +3340,7 @@ class CollectionWriter:
             hold=hold,
             held=held,
             sources=list(sources),
+            **record_inputs.when_given(effective_at=effective_at, corrects=corrects),
         )
         with self._mutation(_prepare=_prepare) as preparation:
             if _validate_inputs is not None:
@@ -3300,7 +3353,7 @@ class CollectionWriter:
                 raise connection.CollectionStoreError("COLLECTION_STORE_INPUT_CHANGED", "record request identity changed")
             if self._record_inputs is not None and self._record_inputs.recheck_in_leaf:
                 record_inputs.recheck_selected(self, self._record_inputs, row, manifest, declared)
-            self._rows_writable(manifest, operation)
+            self._rows_writable(manifest, operation, timeline_given=timeline.given(arguments))
             candidate = self._record_inputs or record_inputs.update(self, row, manifest, declared, arguments)
             key, before, resumed = candidate.key, candidate.before, candidate.resumed
             changes, delete_fields, body = candidate.changes, candidate.delete_fields, candidate.supplied_body
@@ -3340,6 +3393,7 @@ class CollectionWriter:
                     _source_inputs=[version_sources.effect_input(key,
                         tokens.payload_hash(manifest.schema.version, key, final, final_body), final_body, before,
                         explicit=resolved_sources, prepared=origin_inputs)],
+                    _timeline=[candidate.timeline.member(key)] if candidate.timeline.records_facts else None,
                 )
                 item_hash = self._write_item(
                     manifest,
@@ -3352,6 +3406,7 @@ class CollectionWriter:
                     resumed,
                     verified,
                 )
+                self._record_timeline(txn, {key: candidate.timeline})
                 after_container = self._advance(txn)
                 result = records._result(
                     operation=operation,
@@ -3365,6 +3420,7 @@ class CollectionWriter:
                     payload_hash=None,
                     outcome="committed",
                     audit_correlation=txn["transition_id"],
+                    timeline=candidate.timeline.receipt(txn["committed_at"]),
                 )
                 self._precommit(manifest)
                 for guard in source_guards:

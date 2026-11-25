@@ -6271,6 +6271,7 @@ def _result(
     payload_hash: str | None,
     outcome: str,
     audit_correlation: str | None,
+    timeline: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     profile = profile_for(manifest.semantic_profile)
     if profile.name == "planning":
@@ -6291,4 +6292,6 @@ def _result(
         "payload_hash": payload_hash,
         "outcome": outcome,
         "audit_correlation": audit_correlation,
+        # A Records write says when it took effect and where each field it changed landed.
+        **({"timeline": dict(timeline)} if timeline is not None and profile.name == "records" else {}),
     }

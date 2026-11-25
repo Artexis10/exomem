@@ -11,7 +11,7 @@ from itertools import islice
 from pathlib import Path
 
 from .. import mutation_terminal, records
-from . import chain, tokens, typed_storage, types, version_sources
+from . import chain, timeline, tokens, typed_storage, types, version_sources
 
 # A6 fixes the generated history page limits.
 MAIN_ENTRIES = 200
@@ -183,6 +183,8 @@ def verify_event(conn, txn):
                     _fail(txn, "imported envelope binding differs")
             if envelope["imported_at"] != txn["committed_at"]:
                 _fail(txn, "imported time binding differs")
+            if txn.get("timeline_version") is not None:
+                _fail(txn, "an imported event carries a timeline marker")
             if original is None:
                 for row_id, key, version, payload, schema_version in conn.execute(
                     "SELECT v.row_id,i.item_key,v.row_version,v.payload_hash,v.schema_version FROM version_identity v "
@@ -204,6 +206,9 @@ def verify_event(conn, txn):
             version = txn.get("event_version", 1)
             if version == 2:
                 event.update(version_sources.event_fields(conn, txn))
+            if txn.get("timeline_version") is not None:
+                # `verify` finds a fact whose transaction carries no marker, set-based.
+                event["timeline"] = timeline.stored_member(conn, txn)
             digest = tokens.event_hash(event, version=version)
         if digest != txn["event_hash"]:
             _fail(txn, "event hash differs from immutable material")
@@ -238,8 +243,13 @@ def verify(conn, cid, *, proofs=None, pending=None):
             "SELECT 1 FROM txns WHERE txn_id=? AND collection_id=?", (watermark, cid)).fetchone() is None:
         through, business, generation = 0, None, 0
     txns = conn.execute("SELECT * FROM txns WHERE collection_id=? AND txn_id>? ORDER BY txn_id", (cid, through))
+    # A store before the timeline schema has no marker column and no facts.
+    unmarked = (timeline.unmarked_facts(conn, cid, through)
+                if any(column[0] == "timeline_version" for column in txns.description) else frozenset())
     for txn in _rows(txns):
         verify_event(conn, txn)
+        if txn["txn_id"] in unmarked:
+            _fail(txn, "a timeline fact without its marker")
         if txn["prev_event_hash"] != business or txn["generation_before"] != generation:
             _fail(txn, "collection predecessor differs")
         if txn["generation_after"] != generation:
@@ -516,8 +526,10 @@ def row_history(writer, manifest, *, item_key=None, natural_key=None, limit=None
             continue
         effect = conn.execute("SELECT version_before,version_after,hash_before,hash_after,effect FROM audit_effects "
                               "WHERE txn_id=? AND row_id=?", (txn["txn_id"], item["row_id"])).fetchone()
-        # A re-admission with unchanged content is still an event of its own, so only an update is skipped.
-        if effect is None or effect[0] is None or (effect[2] == effect[3] and effect[4] != "insert"):
+        # A re-admission with unchanged content is still an event of its own, so only an update is skipped,
+        # unless it records a timeline fact: a write that changed only past points is a revision.
+        if effect is None or effect[0] is None or (effect[2] == effect[3] and effect[4] != "insert"
+                                                   and txn.get("timeline_version") is None):
             continue
         if any(not writer._operation.allows_history_path(path) for path in event_paths(txn)):
             withheld = True
@@ -561,7 +573,7 @@ def row_history(writer, manifest, *, item_key=None, natural_key=None, limit=None
     # The public version is a position, so locate that position in canonical order.
     position = next((index + 1 for index, revision in enumerate(candidates) if revision["version"] == after), len(candidates))
     older = candidates if after is None else candidates[position:]
-    page = []
+    page, line = [], None
     for candidate in older[:page_size]:
         version = candidate["version"]
         if "name" in candidate:
@@ -581,11 +593,16 @@ def row_history(writer, manifest, *, item_key=None, natural_key=None, limit=None
             txn, effect = candidate["txn"], candidate["effect"]
             values, body = typed_storage.version_values(conn, item["row_id"], effect[0])
             receipt = json.loads(txn["receipt_json"])
+            if line is None:
+                # One set-based read of the row's versions and facts serves every revision of the page.
+                versions, facts = timeline.histories(conn, [item["row_id"]])[item["row_id"]]
+                line, stated = timeline.fold(versions, facts), {version.txn_id: version.stated for version in versions}
             revision = {"version": version, "status": "available", "at": txn["committed_at"],
                 "operation": txn["profile_operation"] or txn["operation"], "why": txn["why"],
                 "transition_id": txn["transition_id"], "before_item_hash": receipt.get("before_item_hash"),
                 "after_item_hash": receipt.get("after_item_hash"),
                 "prior": {"values": values, "body": body, "payload_hash": effect[2]},
+                **timeline.revision(line, txn["txn_id"], txn["committed_at"], stated.get(txn["txn_id"])),
                 "binding": None, "actor": {"audience": txn["actor"]}}
         page.append(record_history.project_revision(writer.root, writer._operation.policy, writer._operation.who, revision))
     truncated = len(older) > len(page)
@@ -788,7 +805,7 @@ class PageContext:
         return {"at": ("Imported " if txn["operation"] == "legacy_import" else "") + txn["committed_at"],
                 "operation": original["operation"] if original else txn["profile_operation"] or txn["operation"],
                 "actor": "agent", "why": None if omitted else original["rationale"] if original else txn["why"],
-                "paths": paths}
+                "paths": paths, "effective": [] if original else _stated_times(txn)}
 
     def events(self, readers, *, after=0, ids=None, newest=False):
         iterator = iter(transactions(self.conn, self.manifest.collection_id, newest=newest, after=after,
@@ -937,6 +954,16 @@ def render_page(conn, root, manifest, path, *, cache=None):
     return PageContext(conn, root, manifest, cache=cache).render_many((path,))[path]
 
 
+def _stated_times(txn):
+    """The stated effective times a write's receipt reports for its rows, also one that a correction inherits.
+
+    A write whose every time has basis `written` shows none."""
+    receipt = json.loads(txn["receipt_json"])
+    blocks = [receipt.get("timeline"), *(receipt.get("rows") or ())]
+    return sorted({block["effective_at"] for block in blocks
+                   if isinstance(block, dict) and block.get("effective_basis") == timeline.STATED})
+
+
 def _render(content, navigation):
     lines = ["# Collection history", "", "Generated history. Changes to this page are replaced.", ""]
     for path, label in navigation:
@@ -945,6 +972,8 @@ def _render(content, navigation):
         lines.extend((f"## {event['at']} {event['operation']}", "", f"Actor: {event['actor']}", ""))
         if event["why"] is not None:
             lines.extend(("Reason: " + event["why"].replace("\n", " "), ""))
+        if event["effective"]:
+            lines.extend(("Effective: " + ", ".join(event["effective"]), ""))
         for target in event["paths"]:
             lines.append("- [[" + target + "]]")
         if event["paths"]:

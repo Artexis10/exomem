@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 import uuid
@@ -11,7 +12,7 @@ from dataclasses import dataclass, field
 
 from .. import origin_bindings, planning, provenance, record_formats, records
 from .. import structured_collections as collections
-from . import connection, edit_back, link_values, related_pages, views
+from . import connection, edit_back, link_values, related_pages, timeline, views
 
 
 @dataclass
@@ -41,6 +42,16 @@ class PreparedRecord:
     recheck_in_leaf: bool = False
     link_notes: dict = field(default_factory=dict)
     related_notes: dict = field(default_factory=dict)
+    timeline: timeline.Write | None = None
+
+
+#: The timeline arguments join a request's identity only when given, so a request without them hashes as before.
+TIMELINE_ARGUMENTS = ("effective_at", "corrects")
+
+
+def when_given(**arguments):
+    """The timeline arguments a caller gave, for a request's identity."""
+    return {name: value for name, value in arguments.items() if value is not None}
 
 
 @dataclass(frozen=True)
@@ -57,12 +68,13 @@ def from_snapshot(writer, name, collection, arguments):
     action = "append" if name == "append_record" else arguments["operation"]
     # These private controls do not belong to the canonical request identity.
     public = {key: value for key, value in arguments.items()
-              if key not in ("request_id", "_prepare", "_validate_inputs")}
+              if key not in ("request_id", "_prepare", "_validate_inputs")
+              and not (key in TIMELINE_ARGUMENTS and value is None)}
     _identity, _digest, replay, row, manifest, declared = writer._identified_collection(
         action, collection, public, arguments["request_id"])
     if replay is not None:
         return None, replay
-    writer._rows_writable(manifest, action)
+    writer._rows_writable(manifest, action, timeline_given=timeline.given(public))
     prepare = append if name == "append_record" else update
     candidate = prepare(writer, row, manifest, declared, {**arguments, **deepcopy(public)})
     candidate.collection = collection
@@ -153,6 +165,8 @@ def _canonical_links(links, candidate, *, written=None):
 
 
 def append(writer, row, manifest, declared, arguments):
+    # A malformed or late time refuses the request before anything is held.
+    effective, stated = timeline.effective_of(arguments.get("effective_at"), now=dt.datetime.now(dt.UTC))
     item, item_key, body = arguments["item"], arguments["item_key"], arguments["body"]
     held_basis = resumed = writer._held(manifest.collection_id, arguments["held"], corrections=True)
     if (resumed and resumed["kind"] == "view-correction" and manifest.storage.strategy == "markdown-log"
@@ -184,6 +198,7 @@ def append(writer, row, manifest, declared, arguments):
     candidate = PreparedRecord("append_record", manifest.collection_id, arguments, manifest,
         views.store_identity(writer.connection), writer._container(row), key, values, body,
         writer._item(manifest.collection_id, key), resumed, held_basis, {})
+    candidate.timeline = timeline.Write(effective, stated, {})
     try:
         candidate.values = writer._validate(manifest, declared, key, values)
         _canonical_links(link_values.for_write(writer, manifest), candidate)
@@ -205,6 +220,8 @@ def append(writer, row, manifest, declared, arguments):
 def update(writer, row, manifest, declared, arguments):
     from .writer import _natural_key
 
+    effective, stated = timeline.effective_of(arguments.get("effective_at"), now=dt.datetime.now(dt.UTC))
+    corrects = arguments.get("corrects")
     key = records._validate_item_key(arguments["item_key"], manifest=manifest, candidate=arguments["changes"])
     before = writer._item(manifest.collection_id, key)
     if before is None:
@@ -223,7 +240,10 @@ def update(writer, row, manifest, declared, arguments):
         changes = records._apply_held_overrides(value.get("changes", {}), {} if changes is None else changes)
         delete_fields = delete_fields or tuple(value.get("delete_fields", ()))
         body = value.get("body") if body is None else body
-    if not isinstance(changes, Mapping) or (not changes and not delete_fields and body is None and not refresh):
+    if changes is None and corrects is not None:
+        changes = {}  # A correction may only re-date the point it corrects.
+    if not isinstance(changes, Mapping) or (not changes and not delete_fields and body is None and not refresh
+                                            and corrects is None):
         raise collections.CollectionError("INVALID_RECORD_CHANGES", "changes must be a non-empty object")
     if refresh and manifest.record_presentation is None and manifest.item_presentation is None:
         raise collections.CollectionError("INVALID_RECORD_PRESENTATION", "collection has no presentation recipe")
@@ -277,6 +297,14 @@ def update(writer, row, manifest, declared, arguments):
             if projection and projection[0] == hashlib.sha256(rendered.encode()).hexdigest():
                 raise collections.CollectionError("NOOP_RECORD_PRESENTATION", "managed presentation is already current")
         _canonical_links(links, candidate, written=changes)
+        candidate.timeline = timeline.place_update(writer.connection, before["row_id"], current=old_values,
+            values=candidate.values, named=(*changes, *delete_fields), effective=effective, stated_time=stated,
+            corrects=corrects)
+        # A past point leaves the current value as it is, so the version and its recheck keep that value.
+        kept = {name for name, placement in candidate.timeline.placements.items() if placement == timeline.PAST}
+        candidate.values = candidate.timeline.values
+        candidate.changes = {name: value for name, value in candidate.changes.items() if name not in kept}
+        candidate.delete_fields = tuple(name for name in candidate.delete_fields if name not in kept)
         writer._twins(manifest.collection_id, key, _natural_key(manifest, candidate.values))
         candidate.body, _ = records._normalize_item_origin(writer.root, manifest, key=key, values=candidate.values,
             body=final_body, prior_body=before["body"], item_path=lambda: None, render=lambda value: value,

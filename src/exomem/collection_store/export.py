@@ -249,6 +249,13 @@ def _plan_collection(root, conn, entry, store_id, plan_id, parents, *, views=Tru
         "AND operation!='legacy_import'", (cid,)).fetchone()
     row = {"collection_id": cid, "path": manifest_path, "layout": layout,
            "rows": conn.execute("SELECT COUNT(*) FROM items WHERE collection_id=?", (cid,)).fetchone()[0]}
+    # Files keep no timeline, as they keep no past versions, so the plan names the facts the export drops.
+    dropped = conn.execute(
+        "SELECT (SELECT COUNT(*) FROM item_rows i JOIN version_effective v ON v.row_id=i.row_id "
+        "WHERE i.collection_id=?1)+(SELECT COUNT(*) FROM item_rows i JOIN timeline_points p ON p.row_id=i.row_id "
+        "WHERE i.collection_id=?1)", (cid,)).fetchone()[0]
+    if dropped:
+        row["timeline_facts_dropped"] = dropped
     rendered, targets, resolved = None, {}, {}
     in_files = manifest.storage.strategy != collections.SQLITE_STORAGE
     try:

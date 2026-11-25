@@ -79,8 +79,6 @@ INSERT_SOURCE = item_sources.insert()
 INSERT_SOURCE_BINDING = version_source_bindings.insert()
 INSERT_EFFECT = audit_effects.insert()
 INSERT_TXN = txns.insert()
-INSERT_VERSION_EFFECTIVE = version_effective.insert()
-INSERT_TIMELINE_POINT = timeline_points.insert()
 ADVANCE = collections.update().where(collections.c.collection_id == bindparam("target_collection_id")).values(
     generation=bindparam("generation"), audit_head=bindparam("audit_head"), updated_txn=bindparam("updated_txn"))
 _PENDING = insert(projection_state)

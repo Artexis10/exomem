@@ -445,7 +445,7 @@ RECORDS = CommandOperations(
             "append", CHANGE_RECORDS,
             (
                 "collection", "item", "why", "item_key", "expected_container_hash", "body",
-                "delivery", "held", "hold", "new_collection", "new_fields",
+                "delivery", "held", "hold", "new_collection", "new_fields", "effective_at",
             ),
             ("collection", "why"), effect="write", outcome_verb="saved",  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         ),
@@ -454,6 +454,7 @@ RECORDS = CommandOperations(
             (
                 "collection", "item_id", "item_key", "changes", "expected_container_hash",
                 "expected_item_version", "why", "refresh_presentation", "held", "hold", "new_fields",
+                "effective_at", "corrects",
             ),
             # `item_id` stands for the key and both guards; the leaf asks for them when it is absent.
             ("collection", "why"),
@@ -469,7 +470,7 @@ RECORDS = CommandOperations(
         ),
         _entry(
             "bulk_upsert", CHANGE_RECORDS,
-            ("collection", "rows", "why", "expected_container_hash", "source", "on_reject"),
+            ("collection", "rows", "why", "expected_container_hash", "source", "on_reject", "effective_at"),
             ("collection", "rows", "why", "expected_container_hash"),
             effect="write", destructive=True, outcome_verb="saved",
         ),

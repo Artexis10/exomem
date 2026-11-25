@@ -155,6 +155,10 @@
         "held": {
           "type": "string"
         },
+        "effective_at": {
+          "type": "string",
+          "description": "When the values took effect: a date or an RFC 3339 instant, not after now. Omit for now."
+        },
         "options": {
           "type": "object",
           "description": "Rare knobs: delivery, item_key."
@@ -641,9 +645,13 @@
           "type": "boolean",
           "description": "Rebuild the row's Markdown view; `changes` may then be empty."
         },
+        "effective_at": {
+          "type": "string",
+          "description": "When the values took effect: a date or an RFC 3339 instant, not after now. Omit for now."
+        },
         "options": {
           "type": "object",
-          "description": "Rare knobs: new_fields."
+          "description": "Rare knobs: new_fields; corrects, the transition_id of a write to correct."
         },
         "detail": {
           "enum": [

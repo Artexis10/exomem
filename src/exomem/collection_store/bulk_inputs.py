@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import uuid
 from collections import ChainMap
@@ -11,7 +12,17 @@ from dataclasses import dataclass, field
 
 from .. import origin_bindings, provenance, records
 from .. import structured_collections as collections
-from . import link_values, related_pages, summary, tokens, typed_storage, version_sources, views
+from . import (
+    link_values,
+    record_inputs,
+    related_pages,
+    summary,
+    timeline,
+    tokens,
+    typed_storage,
+    version_sources,
+    views,
+)
 
 
 @dataclass
@@ -31,6 +42,12 @@ class PreparedBulk:
     source_guards: dict | None = None
     link_notes: dict = field(default_factory=dict)
     related: related_pages.RelatedPages | None = None
+    #: Each written row's effective time, by key.
+    timeline: dict = field(default_factory=dict)
+
+
+#: A store row may also state its own effective time; an import row takes its write time.
+_STORE_ROW_KEYS = records._BULK_ROW_KEYS | {"effective_at"}
 
 
 def validate(rows, why, source, on_reject):
@@ -54,20 +71,26 @@ def validate(rows, why, source, on_reject):
 def detach(writer, collection, arguments):
     """Read the candidate basis without starting publication or acquiring original bytes."""
     public = {name: arguments[name] for name in ("rows", "why", "expected_container_hash", "source", "on_reject")}
+    public.update(record_inputs.when_given(effective_at=arguments.get("effective_at")))
     with writer.read_snapshot(mutation=True):
         _identity, _digest, replay, row, manifest, _ = writer._identified_collection(
             "bulk_upsert", collection, public, arguments["request_id"], facade_profile="records")
         if replay is not None:
             return None, replay
         arguments = {**arguments, **deepcopy(public)}
-        writer._rows_writable(manifest, "bulk_upsert")
+        writer._rows_writable(manifest, "bulk_upsert", timeline_given=timeline.given(public))
+        now = dt.datetime.now(dt.UTC)
+        # A malformed or late batch time refuses the call; a row's own time refuses only that row.
+        batch = timeline.effective_of(arguments.get("effective_at"), now=now)
         before = writer._container(row)
         records._expect_hash(arguments["expected_container_hash"], before, "container")
         occupied = (dict(writer.handle.release_cache.state(manifest.collection_id).occupied_path_keys)
                     if manifest.item_filename and manifest.storage.strategy != "markdown-log"
                     and manifest.view_mode != summary.SUMMARY else {})
         links = link_values.for_write(writer, manifest)
-        candidates = prepare(writer, manifest, arguments["rows"], arguments["source"], arguments["_import"], links)
+        candidates = prepare(writer, manifest, arguments["rows"], arguments["source"], arguments["_import"], links,
+                             batch=batch, now=now)
+        _refuse_late(writer, candidates)
         identity = views.store_identity(writer.connection)
         # An import job reports itself, not each batch, so only a direct bulk upsert has a reply to list pages in.
         related = None if arguments["_import"] is not None else related_pages.for_write(
@@ -75,6 +98,20 @@ def detach(writer, collection, arguments):
     return PreparedBulk(manifest, before, uuid.uuid4().hex[:12], candidates, occupied, identity,
                         _digest, arguments, link_notes=links.notes() if links is not None else {},
                         related=related), None
+
+
+def _refuse_late(writer, candidates):
+    """Reject each row that would change a field at a time before that field's latest point (D3)."""
+    rows = {}
+    for candidate in candidates:
+        prior = candidate.before or candidate.retracted
+        if candidate.error is None and prior is not None:
+            rows[prior["row_id"]] = candidate
+    late = timeline.late_fields(writer.connection,
+                                {row_id: (candidate.values, candidate.effective[0]) for row_id, candidate in rows.items()})
+    for row_id, fields in late.items():
+        candidate, error = rows[row_id], timeline.before_current(fields)
+        candidate.error = records._bulk_reject(candidate.index, error.code, str(error), **error.details, **candidate.base)
 
 
 def acquire(root, prepared, *, why, on_reject, lifetime):
@@ -138,6 +175,7 @@ def acquire(root, prepared, *, why, on_reject, lifetime):
         if path is not None:
             occupied[collections._portable_path_key(path)] = 1
         source_guards[resolved.path] = resolved.guard
+        prepared.timeline[key] = timeline.Write(*candidate.effective, values)
         # A retracted row is the predecessor of its revival: the write names its version, never its content.
         predecessor = before or candidate.retracted
         plans.append((key, values, effective, path, predecessor, resolved.path))
@@ -171,6 +209,7 @@ class Candidate:
     before: dict | None = None
     retracted: dict | None = None
     conflict: list[str] | None = None
+    effective: tuple | None = None  # (Effective, stated)
 
     @property
     def base(self):
@@ -178,7 +217,7 @@ class Candidate:
                 "source": self.source.path}
 
 
-def prepare(writer, manifest, rows, source, settlement=None, links=None) -> list[Candidate]:
+def prepare(writer, manifest, rows, source, settlement=None, links=None, *, batch=None, now=None) -> list[Candidate]:
     """Resolve row values once, then fetch touched identities together under the caller's snapshot."""
     from .writer import _natural_key, _refuse_view_stamp
 
@@ -187,14 +226,17 @@ def prepare(writer, manifest, rows, source, settlement=None, links=None) -> list
     for index, raw in enumerate(rows):
         candidate = Candidate(index)
         candidates.append(candidate)
-        if (not isinstance(raw, Mapping) or set(raw) - records._BULK_ROW_KEYS
+        if (not isinstance(raw, Mapping) or set(raw) - (records._BULK_ROW_KEYS if settlement else _STORE_ROW_KEYS)
                 or not isinstance(raw.get("item"), Mapping)):
             candidate.error = records._bulk_reject(index, "INVALID_BULK_ROW",
-                "a row is an object of item, optional body and source; a source is required on the row or once for the batch")
+                "a row is an object of item and optional body, source and effective_at; a source is required on "
+                "the row or once for the batch")
             continue
         body = raw.get("body")
         reference = raw["source"] if raw.get("source") is not None else source
         try:
+            candidate.effective = (batch if raw.get("effective_at") is None
+                                   else (timeline.stated(raw["effective_at"], now=now), True))
             records._refuse_excluded_authored_names(raw["item"])
             _refuse_view_stamp(manifest, raw["item"])
             if body is not None:

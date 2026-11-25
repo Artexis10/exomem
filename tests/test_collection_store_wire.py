@@ -42,6 +42,9 @@ def normalized(value):
                 del result["warnings"]
         if result.get("receipt_version") == 2 and result.get("operation") in {"revise", "rebaseline"}:
             mask(result, ("payload_hash",), "<hash>")
+        # The record-value-timeline spec rules this one: a store-backed write reports when its values took effect,
+        # and a file-canonical collection has no timeline.
+        result.pop("timeline", None)
     if result.get("kind") == "collection" and result.get("report_only") is True:
         mask(result, ("snapshot",), "<hash>")
         mask(result.get("lifecycle_guards", {}),

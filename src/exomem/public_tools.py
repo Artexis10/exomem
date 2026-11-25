@@ -889,6 +889,9 @@ def _spell_collection_list(arguments: Mapping[str, Any]) -> dict[str, Any] | Non
     return None if arguments.get("collection") is not None else {}
 
 
+_EFFECTIVE_AT = "When the values took effect: a date or an RFC 3339 instant, not after now. Omit for now."
+
+
 class AddRecord(Wire):
     collection: str
     item: dict[str, Any] = Field(description="Fields by column name.")
@@ -897,6 +900,7 @@ class AddRecord(Wire):
     body: str | None = None
     hold: bool | None = None
     held: str | None = None
+    effective_at: str | None = Field(default=None, description=_EFFECTIVE_AT)
     options: dict[str, Any] | None = Field(default=None, description="Rare knobs: delivery, item_key.")
     detail: Detail | None = _DETAIL
 
@@ -905,7 +909,8 @@ def _add_record(wire: dict[str, Any], ctx: Context) -> Translated:
     leaf = {
         "action": "append", "collection": wire["collection"], "item": wire["item"], "why": wire["why"],
         "body": wire.get("body"), "hold": wire.get("hold"), "held": wire.get("held"),
-        "new_collection": wire.get("new_collection"), "response_detail": wire.get("detail"),
+        "new_collection": wire.get("new_collection"), "effective_at": wire.get("effective_at"),
+        "response_detail": wire.get("detail"),
     }
     return "record_memory", _leaf_call(wire, "options", ctx, "record_memory", "add_record", leaf)
 
@@ -920,7 +925,9 @@ class EditRecord(Wire):
     refresh_presentation: bool | None = Field(
         default=None, description="Rebuild the row's Markdown view; `changes` may then be empty."
     )
-    options: dict[str, Any] | None = Field(default=None, description="Rare knobs: new_fields.")
+    effective_at: str | None = Field(default=None, description=_EFFECTIVE_AT)
+    options: dict[str, Any] | None = Field(
+        default=None, description="Rare knobs: new_fields; corrects, the transition_id of a write to correct.")
     detail: Detail | None = _DETAIL
 
 
@@ -928,7 +935,8 @@ def _edit_record(wire: dict[str, Any], ctx: Context) -> Translated:
     leaf = {
         "action": "update", "collection": wire["collection"], "item_id": wire["record"], "changes": wire["changes"],
         "why": wire["why"], "body": wire.get("body"), "held": wire.get("held"),
-        "refresh_presentation": wire.get("refresh_presentation"), "response_detail": wire.get("detail"),
+        "refresh_presentation": wire.get("refresh_presentation"), "effective_at": wire.get("effective_at"),
+        "response_detail": wire.get("detail"),
     }
     return "record_memory", _leaf_call(wire, "options", ctx, "record_memory", "edit_record", leaf)
 

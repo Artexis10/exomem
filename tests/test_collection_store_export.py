@@ -1068,6 +1068,30 @@ def test_a_store_write_after_the_preview_makes_its_plan_stale(env, capsys):  # n
     nothing_changed(root, before, store_id)
 
 
+def test_an_export_preview_names_the_timeline_facts_it_drops(env, capsys):  # noqa: F811
+    """Files keep no timeline, so an export that drops a past point without saying so loses it unseen."""
+    root = env
+    migrated_and_written(root, capsys)
+    service = start_service(root)
+    try:
+        original = next(row for row in call(root, "record_memory", action="query", collection=WORK)["rows"]
+                        if row["record_id"] == KEY)
+        guards = call(root, "record_memory", action="inspect", collection=WORK)["lifecycle_guards"]
+        # The count before the store's own correction: a past point, dated by its write.
+        call(root, "record_memory", action="update", collection=WORK, item_key=KEY, changes={"count": 3},
+             expected_item_version=original["item_version"],
+             expected_container_hash=guards["expected_container_hash"], effective_at="2026-03-01",
+             why="the count in March")
+    finally:
+        service.stop()
+
+    assert run_export(root, "--dry-run", operator=False) == 0
+
+    dropped = {row["path"]: row.get("timeline_facts_dropped") for row in printed(capsys)["collections"]}
+    assert dropped.pop(WORK) == 2  # the past point and the effective time its write stated
+    assert set(dropped.values()) == {None}
+
+
 def test_a_collection_the_store_created_keeps_the_whole_vault_in_the_store(s1, capsys):  # noqa: F811
     """An export that drops a store-native summary collection, which file mode never held, or that
     exports the rest and leaves that one behind a retired fence (the current conservative rule)."""

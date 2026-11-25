@@ -14973,6 +14973,8 @@ def op_record_memory(
     new_collection: dict[str, Any] | None = None,
     new_fields: list[str] | None = None,
     natural_key: dict[str, Any] | None = None,
+    effective_at: str | None = None,
+    corrects: str | None = None,
 ) -> dict[str, Any]:
     """Read or update observed state; Planning uses plan_memory; originals use Sources/Evidence.
 
@@ -15004,6 +15006,8 @@ def op_record_memory(
         automatic: Create only: true for a minimal collection you start under silent proactive_capture; refused with the failed bound named.
         new_collection: Append only, {"natural_key": [item fields]}: a title that names no collection is created from the row under the automatic bounds, then the row is appended.
         new_fields: Append or update: names in item/changes the collection does not declare; under silent proactive_capture they are added, typed from the values, then the row is written.
+        effective_at: Append, update or bulk_upsert on a store collection: when the values took effect, a date or an RFC 3339 instant with offset, no later than the write; omitted, the write time (basis `written`). A row's own effective_at wins on bulk_upsert.
+        corrects: Update only: the transition_id of the write whose point this update replaces.
     """
     result = record_memory_module.record_memory(
         vault_root,
@@ -15050,6 +15054,8 @@ def op_record_memory(
         new_collection=new_collection,
         new_fields=new_fields,
         natural_key=natural_key,
+        effective_at=effective_at,
+        corrects=corrects,
     )
     # An item write answers `outcome: committed`; a bulk upsert answers `committed: true`. An import starts a job whose
     # batches commit later, outside this call, so the write log does not attribute them (method-use-evidence spec).
