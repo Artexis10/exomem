@@ -74,11 +74,14 @@ class MediaStorage:
     """add-cloud-media-store D10: a backup Job's copy of the cell's storage record (task 4.9).
 
     A figure is None when the cell could not read it: unknown, never 0. `captured_at` is the cell's reading time, as
-    the cell wrote it into its record. For a record the Job could not read, both figures are None and it is the hold start."""
+    the cell wrote it into its record. `media_observed_at` is the time of the owner census behind the media figure,
+    which offload recorded and which can be much older than the reading; None where that figure is. For a record the
+    Job could not read, both figures are None and `captured_at` is the hold start."""
 
     vault_bytes: int | None
     media_used_bytes: int | None
     captured_at: datetime
+    media_observed_at: datetime | None
 
 
 IDENTITY_CONFLICT = "IDENTITY_CONFLICT"

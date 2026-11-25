@@ -1422,7 +1422,9 @@ def test_the_backup_jobs_use_report_is_what_cellctl_reads(tmp_path) -> None:
     arguments = f"cell-media-census --vault {tmp_path}/data/vault"
     census = f'[ "$*" = "{arguments}" ] && echo "3 4096 {census_time.isoformat()}"'
     # add-cloud-media-store D10: the storage record follows the census on a line of its own.
-    record = f'{{"captured_at":"{census_time.isoformat()}","vault_bytes":9000,"media_used_bytes":null}}'
+    old_census = census_time - timedelta(days=3)
+    record = (f'{{"captured_at":"{census_time.isoformat()}","vault_bytes":9000,"media_used_bytes":4000,'
+              f'"media_observed_at":"{old_census.isoformat()}"}}')
     storage = f'[ "cell-media-storage --vault {tmp_path}/data/vault" = "$*" ] && echo \'{record}\''
     exomem = f'case "$1" in cell-media-census) {census} ;; cell-media-storage) {storage} ;; esac'
 
@@ -1434,10 +1436,10 @@ def test_the_backup_jobs_use_report_is_what_cellctl_reads(tmp_path) -> None:
     assert 0 < observed.backup_job_used_bytes <= observed.backup_job_total_bytes
     # D12: the media report is the record the cell image printed, with the cell's own census time.
     assert observed.backup_job_media_census == MediaCensus(evicted=3, evicted_bytes=4096, captured_at=census_time)
-    # D10: the storage record is the line the cell image printed, with the cell's own reading time and an unknown
-    # figure kept unknown.
+    # D10: the storage record is the line the cell image printed, with the cell's own reading time and the time of
+    # the owner census behind the media figure.
     assert observed.backup_job_media_storage == MediaStorage(
-        vault_bytes=9000, media_used_bytes=None, captured_at=census_time)
+        vault_bytes=9000, media_used_bytes=4000, captured_at=census_time, media_observed_at=old_census)
 
 
 @pytest.mark.parametrize("exomem", [
@@ -1480,7 +1482,8 @@ def test_a_backup_job_whose_storage_record_cannot_be_read_reports_both_figures_a
 
     assert observed.backup_job_snapshot_id == SNAPSHOT_ID
     assert observed.backup_job_media_storage == MediaStorage(
-        vault_bytes=None, media_used_bytes=None, captured_at=datetime.fromisoformat(CURRENT_HOLD))
+        vault_bytes=None, media_used_bytes=None, captured_at=datetime.fromisoformat(CURRENT_HOLD),
+        media_observed_at=None)
 
 
 async def test_a_local_cell_past_80_percent_use_grows_one_default_size_without_a_restart(

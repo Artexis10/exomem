@@ -1,10 +1,12 @@
 """The storage record: the cell's two storage figures for the backup report (add-cloud-media-store D10, task 4.9).
 
 A Cloud cell writes one JSON line beside its media ledger: the bytes that its volume holds without cached copies of
-stored originals (vault storage), the bytes of its stored originals each counted once (media storage), and the time
-of the reading. A figure that the cell cannot read is null, which is unknown and never 0; the status names the
-reason. The nightly backup Job copies the line into its termination message and cellctl publishes the figures to
-Home. The Job mounts the volume read-only, so the reader opens one file and needs no store, lease or database.
+stored originals (vault storage), the bytes of its stored originals each counted once (media storage), the time of
+the reading, and the time of the owner census behind the media figure. A figure that the cell cannot read is null,
+which is unknown and never 0; the status names the reason. The media figure is the census that offload recorded, which
+can be older than the reading, so the record dates it apart: cellctl publishes the figures as of the older of the two.
+The nightly backup Job copies the line into its termination message and cellctl publishes the figures to Home. The Job
+mounts the volume read-only, so the reader opens one file and needs no store, lease or database.
 
 The readers import only the state paths and `state_record_file`, so the Job's command starts in seconds.
 `refresh` is the cell's writer and imports the status code when it runs.
@@ -21,7 +23,7 @@ from . import state_paths
 from .state_record_file import RecordUnreadable, read_line, write_atomic
 
 RECORD_NAME = ".media-storage-record"
-# The line is a JSON object of two figures of at most 19 digits and an ISO-8601 time; the cap rejects anything else.
+# The line is a JSON object of two figures of at most 19 digits and two ISO-8601 times; the cap rejects anything else.
 MAX_RECORD_BYTES = 256
 # Substrate holds each figure in a bigint column.
 MAX_FIGURE = 2**63 - 1
@@ -33,11 +35,15 @@ REFRESH_SECONDS = 15 * 60
 
 @dataclass(frozen=True, slots=True)
 class StorageRecord:
-    """The two figures and when they were read; a figure is None when the cell could not read it."""
+    """The two figures and when they were read; a figure is None when the cell could not read it.
+
+    `media_observed_at` is the time of the owner census that `media_used_bytes` comes from: None where that figure is.
+    """
 
     captured_at: datetime
     vault_bytes: int | None
     media_used_bytes: int | None
+    media_observed_at: datetime | None
 
 
 def record_path(vault_root: Path) -> Path:
@@ -45,9 +51,12 @@ def record_path(vault_root: Path) -> Path:
 
 
 def format_line(record: StorageRecord) -> str:
+    census = record.media_observed_at
     return json.dumps(
         {"captured_at": record.captured_at.isoformat(timespec="seconds"), "vault_bytes": record.vault_bytes,
-         "media_used_bytes": record.media_used_bytes}, separators=(",", ":"))
+         "media_used_bytes": record.media_used_bytes,
+         "media_observed_at": None if census is None else census.isoformat(timespec="seconds")},
+        separators=(",", ":"))
 
 
 def parse_line(line: str) -> StorageRecord:
@@ -61,14 +70,16 @@ def parse_line(line: str) -> StorageRecord:
     try:
         captured_at = datetime.fromisoformat(fields["captured_at"])
         vault_bytes, media_used_bytes = fields["vault_bytes"], fields["media_used_bytes"]
+        census = fields["media_observed_at"]
+        media_observed_at = None if census is None else datetime.fromisoformat(census)
     except (KeyError, TypeError, ValueError):
-        raise RecordUnreadable("the storage record has no reading time or no figure") from None
-    if captured_at.tzinfo is None:
-        raise RecordUnreadable("the storage record has no time zone")
+        raise RecordUnreadable("the storage record has no reading time, census time or figure") from None
+    if captured_at.tzinfo is None or (media_observed_at is not None and media_observed_at.tzinfo is None):
+        raise RecordUnreadable("the storage record has a time without a time zone")
     for figure in (vault_bytes, media_used_bytes):
         if figure is not None and (type(figure) is not int or not 0 <= figure <= MAX_FIGURE):
             raise RecordUnreadable("the storage record holds a figure that is no byte count")
-    return StorageRecord(captured_at, vault_bytes, media_used_bytes)
+    return StorageRecord(captured_at, vault_bytes, media_used_bytes, media_observed_at)
 
 
 def write(vault_root: Path, record: StorageRecord) -> None:
@@ -96,7 +107,8 @@ def refresh(vault_root: Path, *, now: datetime | None = None) -> bool:
     """Write the record when it is due; True when it wrote one.
 
     The figures are the status's own (`import_windows.storage_figures`), so the record and the status never differ,
-    and nothing is counted afresh: the owner figure is the census that offload recorded. Only a served Cloud cell
+    and nothing is counted afresh: the owner figure is the census that offload recorded, dated by that census. A
+    census whose time cannot be read leaves the media figure null, since nothing could date it. Only a served Cloud cell
     writes one: a store that is off, or a personal vault, has none for the Job to copy, and a record left from before
     a turn-off is removed. A policy that cannot be read leaves the record to age out, and cellctl reads it as unknown.
     """
@@ -120,6 +132,19 @@ def refresh(vault_root: Path, *, now: datetime | None = None) -> bool:
     else:
         if 0 <= (now - written.captured_at).total_seconds() < REFRESH_SECONDS:
             return False
-    figures = import_windows.storage_figures(vault, config)
-    write(vault, StorageRecord(now, figures["vault_storage"].get("bytes"), figures["media_storage"].get("used_bytes")))
+    figures, census_time = import_windows.storage_figures(vault, config)
+    media_used_bytes = figures["media_storage"].get("used_bytes")
+    media_observed_at = None if media_used_bytes is None else _census_time(census_time)
+    if media_observed_at is None:
+        media_used_bytes = None
+    write(vault, StorageRecord(now, figures["vault_storage"].get("bytes"), media_used_bytes, media_observed_at))
     return True
+
+
+def _census_time(text: str | None) -> datetime | None:
+    """The census time that `text` holds; None when it is missing, unreadable or has no time zone."""
+    try:
+        parsed = None if text is None else datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed is not None and parsed.tzinfo is not None else None

@@ -525,10 +525,13 @@ def test_an_unreadable_media_census_counts_as_no_report_and_the_backup_still_cou
     None,
     "not json",
     "[]",
-    '{"captured_at":"2026-01-01T00:04:00","vault_bytes":1,"media_used_bytes":2}',
-    '{"captured_at":"2026-01-01T00:04:00+00:00","vault_bytes":-1,"media_used_bytes":2}',
-    '{"captured_at":"2026-01-01T00:04:00+00:00","vault_bytes":true,"media_used_bytes":2}',
-], ids=["absent", "not JSON", "not an object", "a time with no zone", "a negative figure", "a boolean figure"])
+    '{"captured_at":"2026-01-01T00:04:00","vault_bytes":1,"media_used_bytes":2,"media_observed_at":null}',
+    '{"captured_at":"2026-01-01T00:04:00+00:00","vault_bytes":-1,"media_used_bytes":2,"media_observed_at":null}',
+    '{"captured_at":"2026-01-01T00:04:00+00:00","vault_bytes":true,"media_used_bytes":2,"media_observed_at":null}',
+    '{"captured_at":"2026-01-01T00:04:00+00:00","vault_bytes":1,"media_used_bytes":2}',
+    '{"captured_at":"2026-01-01T00:04:00+00:00","vault_bytes":1,"media_used_bytes":2,"media_observed_at":"2026-01-01T00:00:00"}',
+], ids=["absent", "not JSON", "not an object", "a time with no zone", "a negative figure", "a boolean figure",
+        "no census time key", "a census time with no zone"])
 def test_an_unreadable_storage_record_counts_as_no_report_and_the_census_and_backup_still_count(
         storage: str | None) -> None:
     # A line that cellctl cannot read, or none from an image that predates it, must never publish a figure,

@@ -40,7 +40,7 @@ def write_atomic(path: Path, text: str) -> None:
 def read_line(path: Path, *, max_bytes: int, name: str) -> str:
     """The record's text without its newline; `name` words the refusal ("the <name> cannot be opened").
 
-    Raises `RecordUnreadable` for a missing, linked, oversize or non-ASCII file.
+    Raises `RecordUnreadable` for a missing, linked, oversize, non-ASCII or multi-line file.
     """
     try:
         # O_NOFOLLOW refuses a link, and O_NONBLOCK keeps a pipe from holding the Job; fstat then wants a regular file.
@@ -58,6 +58,9 @@ def read_line(path: Path, *, max_bytes: int, name: str) -> str:
     if len(raw) > max_bytes:
         raise RecordUnreadable(f"the {name} is longer than {max_bytes} bytes")
     try:
-        return raw.decode("ascii").removesuffix("\n")
+        text = raw.decode("ascii").removesuffix("\n")
     except UnicodeError:
         raise RecordUnreadable(f"the {name} is not ASCII") from None
+    if "\n" in text:  # The Job copies the record as one line of its termination message, which a second line would shift.
+        raise RecordUnreadable(f"the {name} has more than one line")
+    return text

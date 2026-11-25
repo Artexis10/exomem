@@ -26,6 +26,7 @@ from exomem import media_storage_record, media_store, state_record_file
 BACKUP_SOURCE = Path(__file__).resolve().parents[1] / "infra" / "cellctl" / "src" / "cellctl" / "backup_source.py"
 HOLD_START = "2026-11-01T01:00:00+00:00"
 READ_AT = datetime(2026, 11, 1, 12, 30, 15, tzinfo=UTC)
+CENSUS_AT = datetime(2026, 10, 2, 9, 0, 0, tzinfo=UTC)  # The owner census behind the media figure, a month older.
 
 
 def _backup_source():
@@ -53,7 +54,8 @@ def _termination_message(vault: Path, tmp_path: Path) -> str:
 
 
 def _unknown_line() -> str:
-    return json.dumps({"captured_at": HOLD_START, "vault_bytes": None, "media_used_bytes": None}, separators=(",", ":"))
+    return json.dumps({"captured_at": HOLD_START, "vault_bytes": None, "media_used_bytes": None,
+                       "media_observed_at": None}, separators=(",", ":"))
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the backup Job runs under Linux sh")
@@ -61,38 +63,45 @@ class TestBackupJobReport:
     def test_the_cell_writes_the_line_that_cellctl_parses(self, vault: Path) -> None:
         """Catches a change to one side of the record format: cellctl would read every report as no figures."""
         backup_source = _backup_source()
-        media_storage_record.write(vault, media_storage_record.StorageRecord(READ_AT, 9_000, 5_000))
-        media_storage_record.write(vault, media_storage_record.StorageRecord(READ_AT, None, 5_000))
+        media_storage_record.write(vault, media_storage_record.StorageRecord(READ_AT, 9_000, 5_000, CENSUS_AT))
+        media_storage_record.write(vault, media_storage_record.StorageRecord(READ_AT, None, 5_000, CENSUS_AT))
 
         line = media_storage_record.read(vault)
 
-        assert backup_source.parse_media_storage(line) == (None, 5_000, READ_AT)  # An unknown figure stays unknown.
-        assert backup_source.parse_media_storage(_unknown_line()) == (None, None, datetime.fromisoformat(HOLD_START))
+        # An unknown figure stays unknown, and the census keeps its own time.
+        assert backup_source.parse_media_storage(line) == (None, 5_000, READ_AT, CENSUS_AT)
+        assert backup_source.parse_media_storage(_unknown_line()) == (
+            None, None, datetime.fromisoformat(HOLD_START), None)
 
     def test_the_backup_jobs_command_copies_the_cells_record_to_line_three(self, vault: Path, tmp_path: Path) -> None:
         """Catches a Job that names no command the cell image has, or reports the hold start as the reading time."""
-        media_storage_record.write(vault, media_storage_record.StorageRecord(READ_AT, 9_000, 5_000))
+        media_storage_record.write(vault, media_storage_record.StorageRecord(READ_AT, 9_000, 5_000, CENSUS_AT))
 
         message = _termination_message(vault, tmp_path)
 
         assert message.split("\n")[:2] == ["0123 1 2", f"3 4096 {HOLD_START}"]
-        assert _backup_source().parse_media_storage(message.split("\n")[2]) == (9_000, 5_000, READ_AT)
+        assert _backup_source().parse_media_storage(message.split("\n")[2]) == (9_000, 5_000, READ_AT, CENSUS_AT)
 
-    @pytest.mark.parametrize("shape", ["missing", "link", "oversize", "malformed", "no zone", "negative"])
+    @pytest.mark.parametrize("shape", ["missing", "link", "oversize", "malformed", "no zone", "negative",
+                                       "census no zone", "no census key", "two lines"])
     def test_a_record_the_job_cannot_trust_reports_unknown_at_the_hold_start(
             self, vault: Path, tmp_path: Path, shape) -> None:
-        """Catches a reader that follows a link or reads an unbounded file on the Job's volume, or passes on a
-        record whose figure is no byte count."""
+        """Catches a reader that follows a link or reads an unbounded file on the Job's volume, passes on a record
+        whose figure is no byte count, or copies a second line that would shift the collection result."""
         record = media_storage_record.record_path(vault)
         record.parent.mkdir(parents=True, exist_ok=True)
-        line = '{"captured_at":"2026-11-01T12:30:15+00:00","vault_bytes":1,"media_used_bytes":2}\n'
+        line = ('{"captured_at":"2026-11-01T12:30:15+00:00","vault_bytes":1,"media_used_bytes":2,'
+                '"media_observed_at":"2026-10-02T09:00:00+00:00"}\n')
         if shape == "link":
             (tmp_path / "elsewhere").write_text(line, encoding="utf-8")
             record.symlink_to(tmp_path / "elsewhere")
         elif shape != "missing":
             record.write_text({"oversize": line + " " * 300, "malformed": "none\n",
-                               "no zone": line.replace("+00:00", ""),
-                               "negative": line.replace('"vault_bytes":1', '"vault_bytes":-1')}[shape],
+                               "no zone": line.replace("+00:00", "", 1),
+                               "negative": line.replace('"vault_bytes":1', '"vault_bytes":-1'),
+                               "census no zone": line.replace('"2026-10-02T09:00:00+00:00"', '"2026-10-02T09:00:00"'),
+                               "no census key": line.replace(',"media_observed_at":"2026-10-02T09:00:00+00:00"', ""),
+                               "two lines": line.replace(',"vault_bytes"', ',\n"vault_bytes"')}[shape],
                               encoding="utf-8")
 
         message = _termination_message(vault, tmp_path)
@@ -101,14 +110,14 @@ class TestBackupJobReport:
 
     def test_the_storage_command_starts_without_the_server_framework(self, vault: Path) -> None:
         """Catches a command that loads the whole CLI: on the Job's one CPU it outlasts the Job's bound."""
-        media_storage_record.write(vault, media_storage_record.StorageRecord(READ_AT, 9_000, 5_000))
+        media_storage_record.write(vault, media_storage_record.StorageRecord(READ_AT, 9_000, 5_000, CENSUS_AT))
         probe = ("import sys; from exomem.__main__ import main; "
                  "print(main(['cell-media-storage', '--vault', sys.argv[1]])); print('fastmcp' in sys.modules)")
 
         run = subprocess.run([sys.executable, "-c", probe, str(vault)], check=True, capture_output=True, text=True)
 
         assert run.stdout.splitlines() == [media_storage_record.format_line(
-            media_storage_record.StorageRecord(READ_AT, 9_000, 5_000)), "0", "False"]
+            media_storage_record.StorageRecord(READ_AT, 9_000, 5_000, CENSUS_AT)), "0", "False"]
 
 
 def _record(vault: Path):
@@ -138,6 +147,9 @@ def test_the_record_equals_the_status_figures_without_counting_a_cached_original
     assert (written.vault_bytes, written.media_used_bytes) == (
         status["vault_storage"]["bytes"], status["media_storage"]["used_bytes"])
     assert written.vault_bytes == 10_000 and written.media_used_bytes > cached.stat().st_size
+    # The status dates the same figure by the census too, to the second.
+    assert written.media_observed_at == datetime.fromisoformat(
+        status["media_allowance"]["observed_at"]).replace(microsecond=0)
 
 
 def test_a_figure_the_cell_cannot_read_is_null_in_the_record_and_never_zero(vault: Path, selected_store, monkeypatch):
@@ -150,7 +162,34 @@ def test_a_figure_the_cell_cannot_read_is_null_in_the_record_and_never_zero(vaul
     assert media_storage_record.refresh(vault, now=READ_AT)
 
     written = _record(vault)
-    assert (written.vault_bytes, written.media_used_bytes) == (None, None)
+    assert (written.vault_bytes, written.media_used_bytes, written.media_observed_at) == (None, None, None)
+
+
+def test_the_record_dates_the_media_figure_by_its_census_and_not_by_the_reading(
+        vault: Path, selected_store, monkeypatch):
+    """Catches a record that stamps a month-old owner census with the time it was copied: Home would show a figure
+    that deletions have since lowered as if it were read now."""
+    _window_policy(selected_store, monkeypatch)
+    monkeypatch.setattr(media_store, "recorded_census",
+                        lambda _vault: media_store.RecordedCensus(5_000, CENSUS_AT.isoformat()))
+
+    assert media_storage_record.refresh(vault, now=READ_AT)
+
+    written = _record(vault)
+    assert (written.captured_at, written.media_used_bytes, written.media_observed_at) == (READ_AT, 5_000, CENSUS_AT)
+
+
+@pytest.mark.parametrize("census_time", ["not a time", "2026-10-02T09:00:00"], ids=["unreadable", "no time zone"])
+def test_a_census_whose_time_cannot_be_read_leaves_the_media_figure_unknown(
+        vault: Path, selected_store, monkeypatch, census_time):
+    """Catches a media figure that nothing can date: cellctl would have to show it as read at the backup."""
+    _window_policy(selected_store, monkeypatch)
+    monkeypatch.setattr(media_store, "recorded_census", lambda _vault: media_store.RecordedCensus(5_000, census_time))
+
+    assert media_storage_record.refresh(vault, now=READ_AT)
+
+    written = _record(vault)
+    assert (written.media_used_bytes, written.media_observed_at) == (None, None)
 
 
 def test_the_tick_writes_the_record_every_quarter_hour_and_counts_nothing_afresh(
@@ -173,7 +212,7 @@ def test_the_tick_writes_the_record_every_quarter_hour_and_counts_nothing_afresh
 def test_a_store_that_is_off_leaves_no_record(vault: Path, selected_store):
     """Catches a record left from before the owner turned the store off: Home would keep showing its figures."""
     values, config = selected_store
-    media_storage_record.write(vault, media_storage_record.StorageRecord(READ_AT, 9_000, 5_000))
+    media_storage_record.write(vault, media_storage_record.StorageRecord(READ_AT, 9_000, 5_000, CENSUS_AT))
     config.write_text(json.dumps({"vaults": {str(vault): {**values, "enabled": False}}}))
 
     assert not media_storage_record.refresh(vault, now=READ_AT)
@@ -190,12 +229,12 @@ def test_a_personal_vault_writes_no_record(vault: Path):
 
 def test_a_failed_write_leaves_the_earlier_record_and_no_temporary_file(vault: Path, monkeypatch):
     """Catches a record written in place: the backup Job copying it mid-write reads half a line."""
-    media_storage_record.write(vault, media_storage_record.StorageRecord(READ_AT, 9_000, 5_000))
+    media_storage_record.write(vault, media_storage_record.StorageRecord(READ_AT, 9_000, 5_000, CENSUS_AT))
     before = media_storage_record.record_path(vault).read_bytes()
     monkeypatch.setattr(state_record_file.os, "replace", lambda *_args: (_ for _ in ()).throw(OSError("full")))
 
     with pytest.raises(OSError):
-        media_storage_record.write(vault, media_storage_record.StorageRecord(READ_AT, 1, 2))
+        media_storage_record.write(vault, media_storage_record.StorageRecord(READ_AT, 1, 2, CENSUS_AT))
 
     assert media_storage_record.record_path(vault).read_bytes() == before
     assert [path.name for path in media_storage_record.record_path(vault).parent.iterdir()

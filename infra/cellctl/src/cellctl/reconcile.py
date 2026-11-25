@@ -3810,10 +3810,18 @@ async def _reconcile_row(
         served = _media_mode(cluster_config, row) == MEDIA_SERVED
         media_usage = media_usage_updates(
             served=served, allowance_bytes=edge.store_policy.get("allowance_bytes") if served and edge else None,
-            report=observation.backup_job_media_storage, observed_at=decision.row_updates.get("last_backup_at"),
+            report=observation.backup_job_media_storage, backup_at=decision.row_updates.get("last_backup_at"),
             now=now, max_age=config.media_storage_max_age)
         if media_usage:
-            await db.write_observed(connection, row.cell_id, media_usage)
+            try:
+                await db.write_observed(connection, row.cell_id, media_usage)
+            except asyncpg.PostgresConnectionError:
+                raise  # A lost session is reopened by the loop, as for every other write.
+            except asyncpg.PostgresError as error:
+                # The figures are advisory and the backup is already recorded: a refusal (a constraint that differs
+                # from the column contract, a missing grant) must not skip the rollout write below.
+                logger.warning("cellctl: cell %s: the media usage figures were not written: %s",
+                               row.cell_id, _describe_error(error))
     if decision.rollout_updates and not pause_first:
         await db.write_rollout(connection, decision.rollout_updates)
     return changed or decision.apply_manifests
