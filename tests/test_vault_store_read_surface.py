@@ -222,6 +222,7 @@ SAMPLES = {
     "maintain_memory:maintenance-job": {"mode": "maintenance-job"},
     "maintain_memory:structured-files": {"mode": "structured-files", "collection": DATASET},
     "maintain_memory:tag-variants": {"mode": "tag-variants"},
+    "maintain_memory:path-variants": {"mode": "path-variants"},
     "maintain_memory:collections-store": {"mode": "collections-store"},
     "maintain_memory:collections-store-adopt-local": {"mode": "collections-store-adopt-local"},
     "maintain_memory:collections-store-export": {"mode": "collections-store-export"},
