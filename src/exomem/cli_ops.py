@@ -100,7 +100,7 @@ _REMEDIATION: dict[str, str | Callable[[], str]] = {
         "relation_review_hash. Send none when the page needs no relation review."
     ),
     "COMPACT_RELATIONS_REQUIRE_RICH_KIND": (
-        "Select an explicit governed rich kind or author a canonical note-level relation."
+        "Select an explicit governed rich kind or author a canonical note-level relation; a provenance link, such as the Source it came from, is recorded on the page."
     ),
     "DRIFT_GUARDS_REQUIRED": (
         "Re-read the parent and exact unit, then pass both expected_hash and expected_fingerprint."

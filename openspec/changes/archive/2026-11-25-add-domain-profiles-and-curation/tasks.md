@@ -54,5 +54,9 @@ This section was moved from task 3.3 of `deliver-session-context-and-skills`.
   - Design D7 records the result. Use, unrelated domains, outage and an asked-for curation proposal passed. Unconfirmed profile commits on a stated preference led to the preview's `next_action`, which cut them from 7 of 8 runs to 1 of 4. An upkeep item reaching the agent is checked at installed acceptance in 5.3, because the harness cannot run the delivery path.
 - [x] 5.2 Measure recall latency before and after on the recall latency instrument.
   - On a production-sized vault copy (3,329 notes), 48 turns with 3 alternating repeats each: activation candidate/main 1.016 [1.003, 1.029]. The profiles stage takes a median 10.0 ms (p95 13.6 ms).
-- [ ] 5.3 Run the full corpus, then independent review, CI, merge, the ordinary release and installed acceptance.
-- [ ] 5.4 Synchronize and archive after the nonoptional tasks have code, test and merge evidence. Run `openspec validate --all --strict` before and after.
+- [x] 5.3 Run the full corpus, then independent review, CI, merge, the ordinary release and installed acceptance.
+  - Shipped through releases 0.187.0 to 0.199.0, each PR reviewed and green on the full CI corpus.
+  - Installed acceptance on the owner's service (0.196.0): a turn in one domain served that domain's profile and its ancestor's, and no profile of an unrelated domain. The next turn with the continuity token returned each held profile `unchanged`. The global profile arrived under `stance`.
+  - Installed curation (0.199.0 and later): the upkeep queue held `upkeep_profile_curation` items, and the packet delivered them to the agent. Acceptance found two misses, fixed in the archiving PR: a narrower profile flagged its ancestor, and a unit on the profile's day whose page date had no time never counted.
+- [x] 5.4 Synchronize and archive after the nonoptional tasks have code, test and merge evidence. Run `openspec validate --all --strict` before and after.
+  - Archived in the PR that fixed the two curation misses; the CI OpenSpec strict gate passed before and after.

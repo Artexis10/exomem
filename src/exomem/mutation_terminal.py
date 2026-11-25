@@ -2671,9 +2671,12 @@ def project_terminal(
             f"{user_summary}{_unfiled_record_clause(records_routing)} "
             f"({cloud_cell.store_identity()['name']})"
         )
-        # An update that dropped relations says so where the person reads, with the repair.
-        if isinstance(leaf, Mapping) and leaf.get("relations_dropped") and isinstance(
-            leaf.get("outcome"), str
+        # An update that dropped relations, or a compact observation whose source link went to the
+        # page, says so where the person reads, with the repair or the page field it cites.
+        if (
+            isinstance(leaf, Mapping)
+            and (leaf.get("relations_dropped") or leaf.get("relations_cited"))
+            and isinstance(leaf.get("outcome"), str)
         ):
             compact["user_summary"] += f". {leaf['outcome']}"
     flagged = _identity_findings(artifact_receipt)
@@ -2978,6 +2981,10 @@ def project_terminal(
         refs = source_result_attribution.recipe(artifact_receipt or _path_projection(leaf)).sources
         if refs:
             source_result_attribution.bind(compact, refs, paths=(("user_summary",),))
+    # A leaf's own next step reaches the agent; the terminal's (guarded writes) already copied
+    # through `_ENVELOPE_KEYS`, and an identity finding's correction step still overrides it.
+    if isinstance(leaf, Mapping) and isinstance(leaf.get("next_action"), str):
+        compact.setdefault("next_action", leaf["next_action"])
     if flagged:
         compact["next_action"] = _correction_next_action(flagged[0][0], len(flagged))
     elif (filing_step := _unfiled_record_step(records_routing)) is not None:

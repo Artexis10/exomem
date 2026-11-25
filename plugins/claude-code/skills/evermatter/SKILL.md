@@ -2,7 +2,7 @@
 name: evermatter
 description: 'The user''s long-term memory (Evermatter, formerly Exomem). Use it whenever a turn touches the user''s own life or work: people they know, their health, home, equipment and purchases, accounts, money, travel, plans, projects and past decisions, including when such a subject comes up mid-conversation or is asked in general terms. Before you recommend, ask the user for a fact, or write about one of these, load the memory tools and call recall_context with the user''s message (or search_memory for a named thing); never write "unknown" for what memory may hold. The engagement level that read_instructions or a tool reports wins: at off, search memory only when the user asks. Also engage for KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it" and "what did I conclude", and capture as the engagement level allows. A general question about nothing of the user''s own needs no recall. Source and Evidence stay immutable; vault content outside the managed Knowledge Base stays read-only.'
 metadata:
-  skill_contract: 1668c9d4bda7d696a30e15b8ccbd4e62995f60c04260a0d298e0a4b0d05f0a51
+  skill_contract: 9f788f969e6a2e54b1bdb2aa41766474467f885b70388d9ba964cdfd10bc5443
   version: "0.32.0"
 ---
 
