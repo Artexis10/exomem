@@ -45,10 +45,6 @@ class PreparedRecord:
     timeline: timeline.Write | None = None
 
 
-#: The timeline arguments join a request's identity only when given, so a request without them hashes as before.
-TIMELINE_ARGUMENTS = ("effective_at", "corrects")
-
-
 def when_given(**arguments):
     """The timeline arguments a caller gave, for a request's identity."""
     return {name: value for name, value in arguments.items() if value is not None}
@@ -69,7 +65,8 @@ def from_snapshot(writer, name, collection, arguments):
     # These private controls do not belong to the canonical request identity.
     public = {key: value for key, value in arguments.items()
               if key not in ("request_id", "_prepare", "_validate_inputs")
-              and not (key in TIMELINE_ARGUMENTS and value is None)}
+              # The timeline arguments join the identity only when given, so a request without them hashes as before.
+              and not (key in timeline.ARGUMENTS and value is None)}
     _identity, _digest, replay, row, manifest, declared = writer._identified_collection(
         action, collection, public, arguments["request_id"])
     if replay is not None:

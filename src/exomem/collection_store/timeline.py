@@ -446,10 +446,14 @@ def unavailable() -> collections.CollectionError:
                         "when it is made. A derived collection's rows change only through its imports."})
 
 
+#: The write arguments that state a timeline fact: closed tool-schema field names.
+ARGUMENTS = ("effective_at", "corrects")
+
+
 def given(arguments: Mapping[str, Any]) -> bool:
     """Whether a request names a timeline argument, for itself or for any bulk row."""
     rows = arguments.get("rows")
-    return (arguments.get("effective_at") is not None or arguments.get("corrects") is not None
+    return (any(arguments.get(name) is not None for name in ARGUMENTS)
             or (isinstance(rows, list | tuple)
                 and any(isinstance(row, Mapping) and row.get("effective_at") is not None for row in rows)))
 
