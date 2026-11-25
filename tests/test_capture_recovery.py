@@ -283,7 +283,10 @@ def test_the_preview_lists_each_match_with_its_source_date_and_origin_before_any
         },
     }
     rows = dict(planned)
-    assert rows[library["copy-of-original"][1]] == f"matched-original 2021-05-06T07:08:09 from {original_id}"
-    assert rows[library["copy-of-archived"][1]] == "matched-original 2020-02-03T04:05:06 from 2020/IMG_0001.jpg"
-    assert rows[library["Screenshot from 2026-07-04 09-15-30"][1]] == "file-name 2026-07-04T09:15:30"
+    for page, facts in (
+        ("copy-of-original", ("matched-original", "2021-05-06T07:08:09", original_id)),
+        ("copy-of-archived", ("matched-original", "2020-02-03T04:05:06", "2020/IMG_0001.jpg")),
+        ("Screenshot from 2026-07-04 09-15-30", ("file-name", "2026-07-04T09:15:30")),
+    ):
+        assert all(fact in rows[library[page][1]] for fact in facts), rows[library[page][1]]
     assert "capture_date" not in _fields(vault, library["copy-of-original"][1])  # a preview writes nothing

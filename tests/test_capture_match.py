@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from exomem import capture_match
 from exomem.capture_match import AMBIGUOUS, NO_MATCH, Fingerprint, Location, Original, Pool
 
@@ -70,6 +72,7 @@ def test_an_empty_pool_matches_nothing():
 
 
 def test_a_candidate_that_cannot_be_read_again_is_not_confirmed(tmp_path):
+    pytest.importorskip("PIL")  # The core tier has no image decoder; there recovery never reaches confirm.
     gone = Location(tmp_path / "moved-away.jpg", ".jpg")
 
     assert not capture_match.confirm(gone, _original(0, "2021-05-06T07:08:09", "a"))

@@ -234,8 +234,9 @@ def with_name_date(
 
 #: The formats a camera writes an EXIF block into. A screenshot, a diagram or an export in another
 #: format never had one, so its missing camera metadata is no loss to warn about. A closed set that
-#: the formats' own specifications fix (file extensions), not vocabulary.
-_CAMERA_PHOTO_EXTS = frozenset({".jpg", ".jpeg", ".heic", ".heif"})
+#: the formats' own specifications fix (file extensions), not vocabulary. When it fires wrongly, a photo
+#: that a client re-encoded to another format (PNG, WebP) gets no notice and the user is not told to resend it.
+_CAMERA_PHOTO_EXTS = frozenset({".jpg", ".jpeg", ".heic"})
 
 
 def lacks_camera_metadata(vault_root: Path, path: Path, name: object) -> bool:
