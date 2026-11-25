@@ -61,5 +61,11 @@
 ## 7. Task leads rank like search
 
 - [x] 7.1 Order task leads by the reciprocal-rank fusion of the discovery lanes, at search's fusion constant and lane depth; verify that a page both readings rank leads when more keyword matches than leads crowd it.
-- [ ] 7.2 Replay the 2026-11-24 broad-question miss and the development cases on a vault copy, main against the fix; record where each needed page lands and the task-discovery latency.
+- [x] 7.2 Replay the 2026-11-24 broad-question miss and the development cases on a vault copy, main against the fix; record where each needed page lands and the task-discovery latency.
+  - Model-free replay on a production-sized vault copy: release 0.202.0 against the same release with this change, every lane warm, main run again last to show drift.
+  - The 2026-11-24 question moved from lead 7 to lead 3.
+  - Development cases (24): the needed page reached the first five leads in 4 on main and 5 with the change, +0.04 [−0.08, +0.17]. One case gained a page from no lead to lead 1. One case lost a page that only the keyword lane ranked, from lead 5 to below the first five.
+  - Frozen held-out cases (10): 4 against 5, +0.10 [0, 0.30], one gained and none lost.
+  - Task-discovery median on the development cases: 886 ms against 860 ms, −5.5 ms [−87, +54]. Main's own rerun drifted +145 ms.
+  - On the held-out cases: +97 ms [+6, +301], with no drift rerun. Most of it is in the deeper keyword lane. Ordering itself costs under 1 ms.
 - [ ] 7.3 Verify on the installed service that the broad question from the 2026-11-24 miss serves its compiled note among the rendered leads.
