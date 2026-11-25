@@ -1083,14 +1083,15 @@ def _record_held_row(
     guard: PathGuard,
     witness: tuple[int, int, int, int, int],
 ) -> None:
-    """Record one simple governed row's release evidence while its bytes are still in hand.
+    """Record one governed row's release evidence while its bytes are still in hand.
 
-    A row is simple when its permit depends on no other file: no container-parent binding and no
-    bridge contribution. Anything unclear leaves no record and takes the full release path. Only
-    scalars are stored — the page text dies with this frame.
+    A row whose permit depends on another file keeps its own scopes here and names that file: the
+    page an extracted part or a scene frame inherits from, or a container member's parent. Release
+    proves the dependency again from the dependency itself. Bridge rows and anything unclear leave no
+    record and take the full release path. Only scalars are stored: the page text dies with this frame.
     """
-    from . import document_containers
-    from .governance import connector_boundary
+    from . import document_containers, find_corpus
+    from .governance import membership
 
     if not rel.lower().endswith(".md") or sink.compiled is None:
         return
@@ -1101,21 +1102,29 @@ def _record_held_row(
     digest = hashlib.sha256(raw).hexdigest()
     if digest != guard.expected_content_hash:
         return
-    if document_containers.parent_binding_for_path(vault_root, rel, content=raw) is not None:
-        return
+    # A bridge's release depends on its own text and on resolving its ref across the vault.
     if bridges.maybe_bridge(raw) or any(
             rel == grant.path or any(rel == dependency.path for dependency in grant.bridge_of)
             for grant in sink.compiled.release_grants):
         return
-    scopes = connector_boundary._membership_sets(
-        vault_root, rel, sink.compiled, content=raw, who=who,
-    )
+    binding = document_containers.parent_binding_for_path(vault_root, rel, content=raw)
+    page = find_corpus.parse_page(vault_root / rel, 0, vault_root, content=raw)
+    if page is None:
+        return
+    basis = membership.held_scope_basis(page, sink.compiled, content_hash=digest)
+    if basis is None:
+        return
+    own, inherits = basis
+    # A part or frame whose parent sits in a container takes its binding from that parent: full path.
+    if binding is not None and (inherits is None or inherits["kind"] != membership.CONTAINER_INHERITANCE):
+        return
     sink[rel] = {
         "path": rel,
         "sha256": digest,
         "size": len(raw),
         "witness": list(witness),
-        "scopes": [sorted(scope) for scope in scopes],
+        "scopes": [sorted(own)],
+        "inherits": inherits,
         "identity": sink.identity,
     }
 

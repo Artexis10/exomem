@@ -2148,9 +2148,13 @@ def content_permits(vault_root: Path, path: str, who: RequestPrincipal, *,
     if snapshot is None and artifact_copy is None and not derived:
         held = _held_fast_evidence(vault_root, path)
         if held is not None:
-            # A held proof means these exact bytes have no container binding; its scopes replay
-            # against the live ceiling so a connector change still narrows the row.
-            return (connector_boundary.permits_scope_sets(vault_root, path, who, tuple(held.scopes))
+            # Held scopes replay against the live ceiling so a connector change still narrows the row,
+            # and a container member's current parents meet every content floor first.
+            parents = () if held.parent is None else (
+                held.parent.path, originals.sidecar_path(Path(held.parent.path)).as_posix())
+            return (all(content_permits(vault_root, parent, who, on_unavailable=on_unavailable)
+                        for parent in parents)
+                    and connector_boundary.permits_scope_sets(vault_root, path, who, tuple(held.scopes))
                     and raw_protection.permits(vault_root, path, who))
     return (_container_parents_permit(vault_root, path, who, snapshot=snapshot, artifact_copy=artifact_copy,
                                       on_unavailable=on_unavailable)
@@ -2295,13 +2299,18 @@ _DECIDE_PATH_BATCH = Batch(
 def container_parent_allows(
     vault_root: Path, rel_path: str, *, policy: Policy, principal: RequestPrincipal,
     purpose: str | None, content: bytes | None = None,
-    artifact_copy: reserved_paths.GenericFileCopy | None = None,
+    artifact_copy: reserved_paths.GenericFileCopy | None = None, binding: originals.BinaryBinding | None = None,
 ) -> bool:
-    """Meet current parent authority before any cached child disclosure or model scoring."""
+    """Meet current parent authority before any cached child disclosure or model scoring.
+
+    ``binding`` is a container member's parent that release already validated from held evidence,
+    so the member's own bytes need no second read; it is still rechecked below.
+    """
     from .. import document_containers
 
     try:
-        parent = document_containers.parent_binding_for_path(vault_root, rel_path, content=content, artifact_copy=artifact_copy)
+        parent = binding if binding is not None else document_containers.parent_binding_for_path(
+            vault_root, rel_path, content=content, artifact_copy=artifact_copy)
         if parent is None:
             return True
         # Recheck the validated binding before using its fingerprint without a local inode.
@@ -2526,9 +2535,10 @@ def _decide_path(
         note_checked_hash(rel_path, live_content_hash)
         if expected_content_hash is not None and expected_content_hash != live_content_hash:
             return None
-    if held is None and not container_parent_allows(
+    if (held is None or held.parent is not None) and not container_parent_allows(
             vault_root, rel_path, policy=policy, principal=who,
-            purpose=purpose, content=raw, artifact_copy=artifact_copy):
+            purpose=purpose, content=raw, artifact_copy=artifact_copy,
+            binding=held.parent if held is not None else None):
         return Decision(DISCLOSURE_MIN)
     canonical = projection_decision(
         vault_root, rel_path, policy=policy, audience=audience, purpose=purpose,
@@ -6259,12 +6269,14 @@ def exact_report_paths(paths: frozenset[str]) -> Iterator[None]:
 class _HeldEvidenceScope:
     """One request's held release proofs plus its lazily computed release identity."""
 
-    __slots__ = ("evidence", "identity", "identity_ready")
+    __slots__ = ("evidence", "identity", "identity_ready", "proven")
 
     def __init__(self, evidence: Mapping[str, Any]) -> None:
         self.evidence = evidence
         self.identity: str | None = None
         self.identity_ready = False
+        # A dependent row's evidence with its dependencies proven once for this request, or None.
+        self.proven: dict[str, Any | None] = {}
 
 
 _HELD_REPORT_EVIDENCE: ContextVar[_HeldEvidenceScope | None] = ContextVar(
@@ -6288,8 +6300,9 @@ def _held_fast_evidence(vault_root: Path, rel_path: str) -> Any | None:
     Held evidence is accepted only for an exact report row whose file is byte-identical to the one
     the job proved: not on native Windows, not tombstoned now, the same stat witness as the job
     read, and a release-admission identity recomputed under the current policy, principal, purpose
-    and tombstones that equals the one held. Anything else — and any error — means None, which
-    sends the row down the ordinary full-proof path.
+    and tombstones that equals the one held. A row that inherits scopes gets them again from its
+    parent, never from its own bytes, and a container member's parent binding is validated again.
+    Anything else — and any error — means None, which sends the row down the ordinary full-proof path.
     """
     try:
         scope = _HELD_REPORT_EVIDENCE.get()
@@ -6314,7 +6327,15 @@ def _held_fast_evidence(vault_root: Path, rel_path: str) -> Any | None:
             ))
         if scope.identity is None or scope.identity != held.identity:
             return None
-        return held
+        if held.inherits is None:
+            return held
+        if rel_path not in scope.proven:
+            scope.proven[rel_path] = None
+            inherited, parent = membership_module.live_inherited_scopes(
+                Path(vault_root), rel_path, held.inherits, policy_module.load(Path(vault_root)),
+            )
+            scope.proven[rel_path] = replace(held, scopes=(held.scopes[0] | inherited,), parent=parent)
+        return scope.proven[rel_path]
     except Exception:  # noqa: BLE001 - any unprovable dependency takes the full path
         return None
 

@@ -358,8 +358,13 @@ def _canonical_path(value: object) -> str:
     return value
 
 
-def _parent_binding_for_page(root: Path, path: str, frontmatter: Mapping, *, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> originals.BinaryBinding | None:
-    """Validate a child binding against location, parent companion and current byte identities."""
+def _parent_binding_for_page(root: Path, path: str, frontmatter: Mapping, *, artifact_copy: reserved_paths.GenericFileCopy | None = None,
+                             artifact_proven: bool = False) -> originals.BinaryBinding | None:
+    """Validate a child binding against location, parent companion and current byte identities.
+
+    ``artifact_proven`` skips only the child's own payload identity, for a caller that proved those
+    bytes unchanged another way: that proof reads the child page, which such a caller avoids.
+    """
     root = state_paths.resolved_vault_path(root, expanduser=False)
     binding = frontmatter.get("container_member")
     # The reserved subtree cannot become public by deleting the provenance block.
@@ -395,7 +400,8 @@ def _parent_binding_for_page(root: Path, path: str, frontmatter: Mapping, *, art
         if not isinstance(descriptor, dict) or descriptor.get("artifact_path") != parent:
             raise ValueError("container parent companion names different bytes")
     parent_binding = _require_identity(root, parent, binding["parent_sha256"], binding["parent_size"])
-    _require_identity(root, artifact, binding["artifact_sha256"], binding["artifact_size"], artifact_copy=artifact_copy)
+    if not artifact_proven:
+        _require_identity(root, artifact, binding["artifact_sha256"], binding["artifact_size"], artifact_copy=artifact_copy)
     return parent_binding
 
 

@@ -344,15 +344,26 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             assert {("rewritten", path) for path in paths}.issubset(seen)
             assert ("pointer_repointed", evidence) in seen
 
-            unrelated = vault / KB / "Notes" / "unrelated.md"
-            unrelated.write_text("# An unrelated observation\n", encoding="utf-8")
-            freshness.on_files_changed(vault, changed=[unrelated])
-            vault_module.on_inbound_files_changed(
-                vault, changed_rels=[unrelated.relative_to(vault).as_posix()], deleted_rels=[],
-            )
-            stale = await preview(preview_run_id=run_id)
+            async def after_writing(page, text):
+                page.write_text(text, encoding="utf-8")
+                freshness.on_files_changed(vault, changed=[page])
+                vault_module.on_inbound_files_changed(
+                    vault, changed_rels=[page.relative_to(vault).as_posix()], deleted_rels=[],
+                )
+                lexstore.ensure_fresh(vault)
+                return await preview(preview_run_id=run_id)
+
+            kept = await after_writing(vault / KB / "Notes" / "unrelated.md", "# An unrelated observation\n")
+            assert kept.get("snapshot_current") and kept["result"]["preview_digest"] == digest, kept
+            citation = vault / KB / "Notes" / "new-citation.md"
+            stale = await after_writing(citation, f"See [[{source}]].\n")
             assert stale.get("error", {}).get("code") == "RECLASSIFICATION_PREVIEW_STALE", stale
             assert "result" not in stale
+            citation.unlink()
+            freshness.on_files_changed(vault, deleted=[citation])
+            vault_module.on_inbound_files_changed(
+                vault, changed_rels=[], deleted_rels=[citation.relative_to(vault).as_posix()],
+            )
 
             governance = vault / KB / "_Governance"
             scope = governance / "scopes" / "field-log.yaml"
@@ -516,7 +527,13 @@ def _served_preview(vault, source_schema, monkeypatch, *, pause_at_referrer):
 
     ``pause_at_referrer(stop)`` runs on the build thread as it reads its first referrer, with the job's stop event.
     """
-    from exomem import file_watcher, foreground_priority, freshness, reclassification_preview, server
+    from exomem import (
+        file_watcher,
+        foreground_priority,
+        freshness,
+        reclassification_preview,
+        server,
+    )
     from exomem import vault as vault_module
 
     monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)

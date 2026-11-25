@@ -14,6 +14,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
+import os
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -21,7 +22,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from .. import document_containers, find_corpus, memory_refs, reserved_paths
+from .. import document_containers, find_corpus, memory_refs, originals, reserved_paths
 from ..find_types import ParsedPage
 from ..kbdir import managed_root_rel, managed_split_parts
 from . import companions
@@ -683,6 +684,67 @@ def _frame_video(page: ParsedPage) -> ParsedPage | None:
     """The video page of a scene frame, else None."""
     edge = _edge_of(page)
     return None if edge is None or edge.kind != FRAME_EDGE else _read_parent(page, edge.parent)
+
+
+#: A container member's inherited scopes come from its parent's companion page and binary.
+CONTAINER_INHERITANCE = "container"
+
+
+def held_scope_basis(
+    page: ParsedPage, policy: Policy, *, content_hash: str,
+) -> tuple[frozenset[str], dict[str, Any] | None] | None:
+    """A page's own scopes and, separately, where it inherits the rest, as `evaluate_snapshot` combines them.
+
+    A holder keeps the page's own scopes with its bytes' evidence and rereads only the inherited part,
+    through `live_inherited_scopes`, because a parent can be retagged while the page stays unchanged.
+    A container member also holds the stat witness of its own payload binary. None means the page
+    cannot be held this way.
+    """
+    if policy.empty or not policy.scopes:
+        return frozenset(), None
+    edge = _edge_of(page)
+    if edge is not None and edge.kind == PART_EDGE:
+        return frozenset(), {"kind": PART_EDGE, "parent": edge.parent}
+    own = _page_membership(page, policy, _registry_assignment(page.vault_root, page.rel_path, policy))
+    if edge is not None and edge.kind == FRAME_EDGE:
+        return own, {"kind": FRAME_EDGE, "parent": edge.parent}
+    claim = page.frontmatter.get("container_member")
+    if claim is not None and page.vault_root is not None and document_containers.parent_for_page(
+            page.vault_root, page.rel_path, page.frontmatter) is not None:
+        try:
+            info = os.stat(page.vault_root / claim["artifact_path"], follow_symlinks=False)
+        except (OSError, TypeError, KeyError):
+            return None  # A payload held elsewhere has no local witness: the full path proves it.
+        witness = [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+        return own, {"kind": CONTAINER_INHERITANCE, "claim": claim, "artifact_witness": witness}
+    return evaluate_snapshot(page, policy, content_hash=content_hash), None
+
+
+def live_inherited_scopes(
+    root: Path, path: str, inherited: Mapping[str, Any], policy: Policy,
+) -> tuple[frozenset[str], originals.BinaryBinding | None]:
+    """The scopes `path` inherits now, read from its parent alone, and a container member's parent binding.
+
+    Raises `MembershipUnresolved` when the parent cannot be read or no longer validates.
+    """
+    kind = inherited.get("kind")
+    if kind in {PART_EDGE, FRAME_EDGE}:
+        return evaluate(_read_parent_path(root, inherited["parent"]), policy), None
+    if kind == CONTAINER_INHERITANCE:
+        try:
+            info = os.stat(root / inherited["claim"]["artifact_path"], follow_symlinks=False)
+            if [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns] != inherited["artifact_witness"]:
+                raise MembershipUnresolved("container payload changed")
+            binding = document_containers._parent_binding_for_page(
+                root, path, {"container_member": inherited["claim"]}, artifact_proven=True,
+            )
+        except (ValueError, OSError, KeyError, TypeError, reserved_paths.ReservedPathLeafError) as error:
+            raise MembershipUnresolved("container parent provenance is unavailable") from error
+        if binding is None:
+            raise MembershipUnresolved("container parent provenance is unavailable")
+        scopes = _current_parent_scopes(root, originals.sidecar_path(Path(binding.path)).as_posix(), policy)
+        return scopes | evaluate_path_only(root, binding.path, policy).require_classified(), binding
+    raise MembershipUnresolved("unknown inheritance")
 
 
 def evaluate(page: ParsedPage, policy: Policy) -> frozenset[str]:

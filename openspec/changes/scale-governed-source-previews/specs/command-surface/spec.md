@@ -23,15 +23,15 @@ A background reclassification preview on a governed vault SHALL complete for 10,
 
 ### Requirement: A dependent governed referrer is released without rereading its bytes
 
-The terminal release SHALL release a referrer that has a container parent or bridge dependency from held evidence for its own bytes, plus current proof of each dependency. It SHALL take the full path when the referrer or any dependency changed.
+The terminal release SHALL release a referrer that inherits scopes from a container parent, an extraction-part Source or a scene-frame video from held evidence for its own bytes, plus current proof of each dependency read from the dependency itself. It SHALL take the full path when the referrer or any dependency changed. Bridge rows SHALL keep full verification.
 
 #### Scenario: A dependent referrer releases from held evidence
 
-- **WHEN** a completed report page holds a governed referrer with a current container parent
+- **WHEN** a completed report page holds a governed referrer with a current container parent or extraction-part Source
 - **THEN** release reads none of the referrer's bytes
-- **AND** a changed parent sends that row down the full path
+- **AND** a retagged parent, or a replaced container payload, withholds that row and refuses the page
 
-#### Scenario: A bridge dependency or a changed referrer takes the full path
+#### Scenario: A bridge row or a changed referrer takes the full path
 
-- **WHEN** a held referrer's bridge dependency changed, or the referrer itself changed, after the report was built
+- **WHEN** a row is a bridge page, a release-grant path or a grant's bridge dependency, or the referrer itself changed after the report was built
 - **THEN** release proves that row through the full path and refuses the page if its value changes

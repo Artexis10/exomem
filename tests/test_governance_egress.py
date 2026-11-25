@@ -5903,3 +5903,92 @@ def test_held_evidence_scales_a_large_report_without_byte_reads(
     retained.require_complete_projection(out)
     # The route's disclosure budget is tens of seconds; the held path is a stat per row.
     assert elapsed < 30, f"held release took {elapsed:.2f}s for 10 rows"
+
+
+def _recorded_row(vault: Path, rel: str):
+    """The evidence a preview build records for `rel`, through the build's own guarded read."""
+    from exomem import maintenance_jobs, reclassify_source
+
+    with reclassify_source.held_evidence_sink() as sink:
+        reclassify_source._witnessed_read(reclassify_source.read_guarded_text, sink, vault, vault / rel)
+    assert rel in sink, "the build recorded no evidence for this row"
+    return maintenance_jobs.HeldEvidence.from_record(sink[rel])
+
+
+def _release(vault: Path, rel: str, held):
+    from exomem import reclassification_preview
+
+    result = {"entries": [{"path": rel}]}
+    retained = reclassification_preview.RetainedReport(result, rel, held_evidence={rel: held})
+    with egress.exact_report_paths(retained.exact_paths), egress.held_report_evidence(retained.held_evidence):
+        return retained, egress.postfilter("list_directory", result, vault)
+
+
+def _tag_scope(vault: Path, tag: str) -> None:
+    """One scope selecting pages by `tag`, withheld entirely from the external audience."""
+    write_rule(vault, ceiling=0)
+    target = _gov_dir(vault) / "scopes" / "patterns.yaml"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(f'governance_version: 1\nid: {SCOPE_ID}\ntags: [{tag}]\n', encoding="utf-8")
+    _reset_caches()
+
+
+def _retag(page: Path, tag: str) -> None:
+    """Add `tag` to the page's own top-level tags, leaving every other byte as it was."""
+    text = page.read_text(encoding="utf-8")
+    assert "\ntags: [" in text
+    page.write_text(text.replace("\ntags: [", f"\ntags: [{tag}, ", 1), encoding="utf-8")
+
+
+@pytest.mark.parametrize("change", ["container parent retagged", "container payload replaced", "part source retagged"])
+def test_a_dependent_held_row_releases_unread_until_a_dependency_changes(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, change: str,
+) -> None:
+    """A row that inherits scopes is released from held evidence plus its dependencies, read live.
+
+    Each change leaves every byte of the row as it was, so only a proof of the dependency itself can
+    see it: the row is then withheld and the page refused as stale.
+    """
+    import io
+    import zipfile
+
+    from exomem import extraction_parts, media_processing, preserve
+    from exomem.cli_ops import OpError
+
+    monkeypatch.setattr(preserve, "_MAX_EXTRACT_BYTES", 32 * 1024)
+    if change.startswith("container"):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("mimetype", b"application/vnd.etsi.asic-e+zip")
+            archive.writestr("contract.docx", b"document bytes")
+        stored = preserve.preserve_stream(vault, scope="Examples", category="Documents",
+                                          filename="bundle.asice", stream=io.BytesIO(buffer.getvalue()))
+        child = stored.document_container["payloads"][0]
+        media_processing.reconcile_media(vault, child)
+        rel, parent = child + ".md", vault / stored.sidecar_path
+    else:
+        stored = preserve.preserve_stream(vault, scope="Examples", category="Documents",
+                                          filename="notes.txt", stream=io.BytesIO(b"plain notes"))
+        parent = vault / stored.sidecar_path
+        preserve.update_sidecar_extraction(vault, parent, text="Clause. " * 9000, engine="upload")
+        rel = sorted(extraction_parts.folder_for(parent).glob("*.md"))[-1].relative_to(vault).as_posix()
+    _tag_scope(vault, "private-parent")
+
+    with request_scope(_external()):
+        held = _recorded_row(vault, rel)
+        assert held.inherits is not None
+        reads = _byte_read_spies(monkeypatch, rel)
+        retained, released = _release(vault, rel, held)
+        assert released["entries"] == [{"path": rel}]
+        assert reads == []
+        retained.require_complete_projection(released)
+
+        if change == "container payload replaced":
+            (vault / child).write_bytes(b"other document!")
+        else:
+            _retag(parent, "private-parent")
+        _reset_caches()
+        retained, withheld = _release(vault, rel, held)
+    assert withheld["entries"] == []
+    with pytest.raises(OpError, match="RECLASSIFICATION_PREVIEW_STALE"):
+        retained.require_complete_projection(withheld)

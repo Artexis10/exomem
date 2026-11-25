@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from threading import Event
 from typing import Any
 
@@ -17,10 +17,14 @@ from . import (
     capabilities,
     freshness,
     maintenance_jobs,
+    move_file,
+    path_mentions,
     query_data,
+    recall_policy,
     reclassify_source,
     request_budget,
     reserved_paths,
+    vault,
 )
 from .cli_ops import OpError
 from .governance import connector_boundary, lifecycle
@@ -127,6 +131,62 @@ def _snapshot_key(root: Path) -> str | None:
     return _digest(generation)
 
 
+#: More changes than this since a build are not checked one by one: the report is rebuilt instead.
+_MAX_CHECKED_CHANGES = 256
+
+
+def _build_basis(root: Path) -> dict[str, Any]:
+    """The private start point against which later changes are judged for this build's report."""
+    return {
+        "vault": list(freshness.consumer_checkpoint(root, "vault")),
+        "recall": list(recall_policy.recall_policy_identity(root)),
+    }
+
+
+def _changes_leave_report(
+    root: Path, basis: Mapping[str, Any] | None, source: str, in_report: Callable[[set[str]], bool | None],
+) -> bool:
+    """Whether every change since the build started leaves its report as it is.
+
+    A change alters the report when it touches the Source or a report row, adds or removes a page with
+    the Source's file stem (which decides whether a bare-name link resolves), or leaves a page that now
+    links to the Source or names its path. The access policy and the caller's authority are bound
+    separately. Anything this cannot prove, such as lost change history, counts as a change.
+    """
+    try:
+        instance, generation, triple = basis["vault"]  # type: ignore[index]
+        start = freshness.FreshnessCheckpoint(instance, generation, None if triple is None else tuple(triple))
+        if tuple(basis["recall"]) != tuple(recall_policy.recall_policy_identity(root)):  # type: ignore[index]
+            return False
+    except (KeyError, TypeError, ValueError):
+        return False
+    current = freshness.preview_reference_generation(root)
+    if current is None or current[0] != instance or current[3] is not None:
+        return False
+    delta = freshness.delta_since(root, "vault", start)
+    if not delta.complete or len(delta.changed) + len(delta.deleted) > _MAX_CHECKED_CHANGES:
+        return False
+    changed = {freshness.registry_rel(root, path) for path in delta.changed}
+    touched = changed | {freshness.registry_rel(root, path) for path in delta.deleted}
+    if None in touched:
+        return False
+    if not touched:
+        return True
+    paired = move_file.paired_move(root, source, source)
+    targets = [source, *([paired[0]] if paired else [])]
+    stem = PurePosixPath(source).stem.casefold()
+    if (set(targets) & touched or any(PurePosixPath(rel).stem.casefold() == stem for rel in touched)
+            or in_report(touched) is not False):
+        return False
+    if not changed:
+        return True
+    inbound = vault.cached_inbound_wikilinks(root, source)
+    if inbound is None or changed & {hit.path for hit in inbound}:
+        return False
+    mentions = path_mentions.find_pages(root, targets, current_published=True)
+    return mentions.complete and not changed & set(mentions.pages)
+
+
 def retained_report_identity(root: Path, who: RequestPrincipal) -> _RetainedAdmission | None:
     """Recheck exactly the release inputs that a retained summary or page can depend on."""
     try:
@@ -174,7 +234,9 @@ def _entries(report: Mapping[str, Any]) -> Iterator[tuple[str, str, str | None]]
 def _build(
     root: Path, args: Mapping[str, Any], who: RequestPrincipal,
     surface: capabilities.ActiveSurfaceDescriptor | None, authority: _Authority, snapshot_key: str, stop: Event,
-) -> tuple[dict[str, Any], Iterator[tuple[str, str, str | None]], dict[str, dict[str, Any]]]:
+) -> tuple[
+    dict[str, Any], Iterator[tuple[str, str, str | None]], dict[str, dict[str, Any]], dict[str, Any],
+]:
     from .command_surface import resolve_command
     from .commands import PRODUCT_COMMANDS
     from .writer_lease import invoke_command
@@ -199,6 +261,7 @@ def _build(
                 raise _not_found()
             if stop.is_set() or _authority_binding(root, who) != authority:
                 raise _not_found()
+            basis = _build_basis(root)
             if _snapshot_key(root) != snapshot_key:
                 raise reclassify_source.preview_warming()
             result = invoke_command(command, root, operation="propose-reclassification", **args)
@@ -206,7 +269,9 @@ def _build(
                     or stop.is_set() or _authority_binding(root, who) != authority):
                 raise _not_found()
             if _snapshot_key(root) != snapshot_key:
-                raise reclassify_source.preview_warming()
+                rows = {path for _, path, _ in _entries(result)}
+                if not _changes_leave_report(root, basis, args["path"], lambda touched: bool(touched & rows)):
+                    raise reclassify_source.preview_warming()
             if (auth_sessions.origin_revalidates_in_background(who)
                     and auth_sessions.origin_login_state_sync(who) is not auth_sessions.OriginLogin.VALID):
                 raise _not_found()
@@ -216,7 +281,7 @@ def _build(
     finally:
         _JOB_REPORT.reset(token)
     summary = {key: value for key, value in result.items() if key not in {"referrers", "refusals"}}
-    return summary, _entries(result), held
+    return summary, _entries(result), held, basis
 
 
 def report(
@@ -265,9 +330,13 @@ def report(
             root, binding=authority.key, request_key=request_key, snapshot_key=snapshot_key,
             run_id=preview_run_id, cursor=cursor,
         )
-        if (result.get("state") == maintenance_jobs.COMPLETED
-                and result.get("snapshot_current") is not True):
-            raise _stale_report()
+        if (result.get("state") == maintenance_jobs.COMPLETED and result.get("snapshot_current") is not True):
+            if snapshot_key is None or not _changes_leave_report(
+                root, maintenance_jobs.source_preview_basis(root, preview_run_id), path,
+                lambda touched: maintenance_jobs.source_preview_rows_among(root, preview_run_id, touched),
+            ):
+                raise _stale_report()
+            result["snapshot_current"] = True
         if result.get("state") in {maintenance_jobs.CANCELLED, maintenance_jobs.INTERRUPTED}:
             raise _interrupted()
         if result.get("error_code") == "RECLASSIFICATION_PREVIEW_UNAVAILABLE":

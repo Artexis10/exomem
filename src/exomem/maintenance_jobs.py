@@ -91,16 +91,34 @@ _HELD_INSERT = "INSERT OR REPLACE INTO held_evidence (run_id, path, record) VALU
 
 @dataclass(frozen=True)
 class HeldEvidence:
-    """A simple governed row's release proof, held privately beside its preview job."""
+    """A governed row's release proof, held privately beside its preview job."""
 
     path: str
     sha256: str
     size: int
     #: (st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns) of the file when the job read it.
     witness: tuple[int, int, int, int, int]
+    #: The row's own scopes. Release adds what it inherits, read again from ``inherits``.
     scopes: tuple[frozenset[str], ...]
     #: Canonical serialization of the release-admission identity the row was decided under.
     identity: str
+    #: Where the row inherits further scopes, or None: `membership.held_scope_basis`.
+    inherits: Mapping[str, Any] | None = None
+    #: A container member's parent binary binding, set only when release proves it again.
+    parent: Any | None = None
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, Any]) -> HeldEvidence:
+        """Decode one stored record; raises KeyError, TypeError or ValueError for a malformed one."""
+        return cls(
+            path=record["path"],
+            sha256=record["sha256"],
+            size=record["size"],
+            witness=tuple(record["witness"]),
+            scopes=tuple(frozenset(scope) for scope in record["scopes"]),
+            identity=record["identity"],
+            inherits=record.get("inherits"),
+        )
 
 #: Terminal rows older than this are pruned, beyond the newest ``RETAIN_NEWEST``.
 RETAIN_SECONDS = 30 * 24 * 3600
@@ -724,6 +742,41 @@ def source_preview_status(
         raise OpError("NOT_FOUND", "No Source preview matches this request.") from None
 
 
+def source_preview_basis(vault_root: Path, run_id: str) -> Mapping[str, Any] | None:
+    """The private build basis a completed preview job recorded, which no response carries."""
+    try:
+        with request_budget.locked(_LIVE_LOCK), _store(vault_root, create=False, bounded=True) as conn:
+            row = conn.execute(
+                "SELECT outcome FROM jobs WHERE run_id = ? AND mode = ? AND state = ?",
+                (run_id, _SOURCE_PREVIEW, COMPLETED),
+            ).fetchone()
+    except (FileNotFoundError, sqlite3.OperationalError):
+        return None
+    if row is None:
+        return None
+    try:
+        basis = json.loads(row["outcome"]).get("basis")
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return basis if isinstance(basis, Mapping) else None
+
+
+def source_preview_rows_among(vault_root: Path, run_id: str, paths: Iterable[str]) -> bool | None:
+    """Whether any of ``paths`` is a row of the completed preview's report; None when unknown."""
+    wanted = sorted(set(paths))
+    if not wanted:
+        return False
+    try:
+        with request_budget.locked(_LIVE_LOCK), _store(vault_root, create=False, bounded=True) as conn:
+            row = conn.execute(
+                f"SELECT 1 FROM entries WHERE run_id = ? AND path IN ({','.join('?' * len(wanted))}) LIMIT 1",
+                (run_id, *wanted),
+            ).fetchone()
+    except (FileNotFoundError, sqlite3.OperationalError):
+        return None
+    return row is not None
+
+
 def source_preview_held_evidence(
     vault_root: Path, run_id: str, paths: Iterable[str],
 ) -> dict[str, HeldEvidence]:
@@ -744,15 +797,7 @@ def source_preview_held_evidence(
     held: dict[str, HeldEvidence] = {}
     for row in rows:
         try:
-            record = json.loads(row["record"])
-            held[row["path"]] = HeldEvidence(
-                path=record["path"],
-                sha256=record["sha256"],
-                size=record["size"],
-                witness=tuple(record["witness"]),
-                scopes=tuple(frozenset(scope) for scope in record["scopes"]),
-                identity=record["identity"],
-            )
+            held[row["path"]] = HeldEvidence.from_record(json.loads(row["record"]))
         except (KeyError, TypeError, ValueError):
             continue
     return held
@@ -965,6 +1010,7 @@ def _run_source_preview(
     state, error_code, outcome = FAILED, _SOURCE_PREVIEW_FAILED, {}
     published = None
     held: list[tuple[str, str]] | None = None
+    basis = None
     try:
         with foreground_priority.background_job(), foreground_priority.bulk(stop=live.stop):
             _JOB.set(live)
@@ -972,6 +1018,7 @@ def _run_source_preview(
             summary, entries = built[0], built[1]
             if len(built) > 2 and built[2]:
                 held = sorted((path, _canonical(record)) for path, record in built[2].items())
+            basis = built[3] if len(built) > 3 else None
             buffer = []
             limit = query_data.MAX_RESPONSE_BYTES // 2
             for kind, path, value in entries:
@@ -986,6 +1033,8 @@ def _run_source_preview(
             raise_if_stopped()
         published = buffer
         state, error_code, outcome = COMPLETED, None, {"result": result, "has_entries": bool(published)}
+        if basis is not None:
+            outcome["basis"] = basis
     except JobStop as stop:
         state, error_code = stop.state, stop.code
     except foreground_priority.BulkCancelled:
