@@ -1,11 +1,13 @@
-"""Legacy environment-variable compatibility (KB_MCP_* → EXOMEM_*).
+"""Environment-variable compatibility (KB_MCP_* and EVERMATTER_* → EXOMEM_*).
 
-The project renamed its internals from kb_mcp to exomem; every configuration
-variable is now `EXOMEM_*` and internal code reads only that prefix. Existing
-deployments configured with `KB_MCP_*` keep working through promotion: at
-package import (and on demand, for env populated later), each `KB_MCP_X` value
-is copied to `EXOMEM_X` when the new name is unset. An explicitly set
-`EXOMEM_X` always wins over a conflicting legacy value.
+Internal code reads only the `EXOMEM_*` prefix. Two other prefixes reach it
+through promotion: at package import (and on demand, for env populated later),
+each `KB_MCP_X` value is copied to `EXOMEM_X` when that name is unset, and each
+`EVERMATTER_X` value is copied to `EXOMEM_X` always.
+
+The two rules differ on a conflict, for one reason. `KB_MCP_*` is the older name,
+so an explicitly set `EXOMEM_X` wins over it. `EVERMATTER_*` is the product name
+a user sets on purpose after the rename, so it wins over `EXOMEM_X`.
 """
 
 from __future__ import annotations
@@ -17,32 +19,42 @@ log = logging.getLogger(__name__)
 
 LEGACY_PREFIX = "KB_MCP_"
 CANONICAL_PREFIX = "EXOMEM_"
+PRODUCT_PREFIX = "EVERMATTER_"
+
+# Every prefix that may spell a setting: the one place a reader of a file that
+# declares settings (such as a `.env` read before promotion) learns the names.
+ACCEPTED_PREFIXES = (CANONICAL_PREFIX, LEGACY_PREFIX, PRODUCT_PREFIX)
 
 _advised = False
 
 
 def promote_legacy() -> list[str]:
-    """Copy each `KB_MCP_X` env value to `EXOMEM_X` when the new name is unset.
+    """Copy `KB_MCP_X` and `EVERMATTER_X` env values to `EXOMEM_X`.
 
-    Returns the canonical names that were populated from legacy values this
-    call. Safe to call repeatedly (idempotent per variable); call again after
-    any late environment loading. Logs one advisory line, once per process,
-    the first time anything is promoted.
+    `KB_MCP_X` fills `EXOMEM_X` only when that name is unset; `EVERMATTER_X`
+    overwrites it. Returns the canonical names that were populated this call.
+    Safe to call repeatedly (idempotent per variable); call again after any
+    late environment loading. Logs one advisory line, once per process, the
+    first time anything is promoted.
     """
     global _advised
     promoted: list[str] = []
     for key in list(os.environ):
-        if not key.startswith(LEGACY_PREFIX):
-            continue
-        canonical = CANONICAL_PREFIX + key[len(LEGACY_PREFIX):]
-        if os.environ.get(canonical) is None:
-            os.environ[canonical] = os.environ[key]
-            promoted.append(canonical)
+        if key.startswith(LEGACY_PREFIX):
+            canonical = CANONICAL_PREFIX + key[len(LEGACY_PREFIX):]
+            if os.environ.get(canonical) is None:
+                os.environ[canonical] = os.environ[key]
+                promoted.append(canonical)
+        elif key.startswith(PRODUCT_PREFIX):
+            canonical = CANONICAL_PREFIX + key[len(PRODUCT_PREFIX):]
+            if os.environ.get(canonical) != os.environ[key]:
+                os.environ[canonical] = os.environ[key]
+                promoted.append(canonical)
     if promoted and not _advised:
         _advised = True
         log.info(
-            "legacy KB_MCP_* environment variables detected and honored "
-            "(%d promoted); prefer the EXOMEM_* names going forward",
+            "KB_MCP_* and EVERMATTER_* environment variables detected and honored "
+            "(%d promoted to EXOMEM_*); code reads the EXOMEM_* names",
             len(promoted),
         )
     return promoted

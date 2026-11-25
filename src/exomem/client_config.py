@@ -26,6 +26,9 @@ from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
 
 SERVER_NAME = "exomem"
+# Every server key a reader accepts: a client stores the key it was given, so an old
+# install keeps `exomem` while a new one may hold `evermatter`. Writers emit SERVER_NAME only.
+SERVER_NAMES = ("exomem", "evermatter")
 
 
 def normalize_mcp_url(raw: str) -> str:
@@ -91,7 +94,9 @@ class McpRoute:
             raise ValueError("stdio MCP route requires a command")
         return cls(transport="stdio", command=tuple(command), env=dict(env))
 
-    def claude_add_argv(self, executable: str, *, scope: str) -> list[str]:
+    def claude_add_argv(
+        self, executable: str, *, scope: str, name: str = SERVER_NAME
+    ) -> list[str]:
         if self.transport == "stdio":
             payload = json.dumps(
                 self.as_claude_config(),
@@ -105,7 +110,7 @@ class McpRoute:
                 "add-json",
                 "--scope",
                 scope,
-                SERVER_NAME,
+                name,
                 payload,
             ]
         argv = [
@@ -117,11 +122,11 @@ class McpRoute:
         ]
         if self.transport == "http":
             assert self.url is not None
-            return [*argv, "--scope", scope, SERVER_NAME, self.url]
+            return [*argv, "--scope", scope, name, self.url]
         raise AssertionError(f"unsupported Claude MCP transport: {self.transport}")
 
-    def codex_add_argv(self, executable: str) -> list[str]:
-        argv = [executable, "mcp", "add", SERVER_NAME]
+    def codex_add_argv(self, executable: str, *, name: str = SERVER_NAME) -> list[str]:
+        argv = [executable, "mcp", "add", name]
         if self.transport == "http":
             assert self.url is not None
             return [*argv, "--url", self.url]
@@ -148,15 +153,22 @@ def codex_config_path() -> Path:
     return codex_home() / "config.toml"
 
 
-def codex_mcp_exists(path: Path) -> bool:
+def codex_mcp_name(path: Path) -> str | None:
+    """The accepted server key that Codex's config registers, or None."""
     if not path.is_file():
-        return False
+        return None
     try:
         document = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise ValueError(f"cannot inspect Codex MCP registration in {path}: {exc}") from exc
     servers = document.get("mcp_servers")
-    return isinstance(servers, dict) and SERVER_NAME in servers
+    if not isinstance(servers, dict):
+        return None
+    return next((name for name in SERVER_NAMES if name in servers), None)
+
+
+def codex_mcp_exists(path: Path) -> bool:
+    return codex_mcp_name(path) is not None
 
 
 def _toml_string(value: str) -> str:
@@ -166,9 +178,9 @@ def _toml_string(value: str) -> str:
     return f'"{escaped}"'
 
 
-def render_codex_block(route: McpRoute) -> str:
-    """Render the `[mcp_servers.exomem]` section Codex expects."""
-    lines = [f"[mcp_servers.{SERVER_NAME}]"]
+def render_codex_block(route: McpRoute, *, name: str = SERVER_NAME) -> str:
+    """Render the `[mcp_servers.<name>]` section Codex expects."""
+    lines = [f"[mcp_servers.{name}]"]
     if route.transport == "http":
         assert route.url is not None
         lines.append(f"url = {_toml_string(route.url)}")
@@ -184,7 +196,11 @@ def render_codex_block(route: McpRoute) -> str:
 
 
 def _section_bounds(text: str, header: str) -> tuple[int, int] | None:
-    """Return (start, end) line indices of a TOML section, or None if absent."""
+    """Return (start, end) line indices of a TOML section, or None if absent.
+
+    The section runs through its own sub-tables (`[mcp_servers.x.env]`), so a
+    replacement leaves none behind to clash with the new block.
+    """
     lines = text.splitlines()
     start = None
     for i, line in enumerate(lines):
@@ -193,10 +209,13 @@ def _section_bounds(text: str, header: str) -> tuple[int, int] | None:
             break
     if start is None:
         return None
+    subtable_prefixes = (header[:-1] + ".", "[" + header[:-1] + ".")
     end = len(lines)
     for j in range(start + 1, len(lines)):
         stripped = lines[j].strip()
         if stripped.startswith("[") and stripped.endswith("]"):
+            if stripped.startswith(subtable_prefixes):
+                continue
             end = j
             break
     return start, end
@@ -204,6 +223,10 @@ def _section_bounds(text: str, header: str) -> tuple[int, int] | None:
 
 def merge_codex_mcp(block: str, *, path: Path | None = None, replace: bool = False) -> dict:
     """Merge the exomem MCP block into Codex's config.toml.
+
+    An existing registration under either accepted server key counts as the
+    registration: ``replace=True`` swaps its section, sub-tables included, for
+    ``block`` (which names ``SERVER_NAME``) instead of adding a second server.
 
     Returns {"action": "created"|"added"|"replaced"|"exists", "path": str,
     "diff": str, "backup": str|None}.
@@ -215,10 +238,16 @@ def merge_codex_mcp(block: str, *, path: Path | None = None, replace: bool = Fal
         ValueError: the merge would produce invalid TOML (nothing is written).
     """
     path = Path(path) if path is not None else codex_config_path()
-    header = f"[mcp_servers.{SERVER_NAME}]"
 
     original = path.read_text(encoding="utf-8") if path.is_file() else ""
-    bounds = _section_bounds(original, header)
+    bounds = next(
+        (
+            found
+            for name in SERVER_NAMES
+            if (found := _section_bounds(original, f"[mcp_servers.{name}]")) is not None
+        ),
+        None,
+    )
 
     if bounds is not None and not replace:
         return {"action": "exists", "path": str(path), "diff": "", "backup": None}
@@ -271,6 +300,16 @@ def _write_user_file(path: Path, original: str, updated: str) -> tuple[str, str 
 # that span and uninstall removes only it. They are protocol tokens Evermatter owns.
 LEARNING_BEGIN = "<!-- BEGIN exomem learning instruction (managed by exomem setup) -->"
 LEARNING_END = "<!-- END exomem learning instruction -->"
+EVERMATTER_LEARNING_BEGIN = (
+    "<!-- BEGIN evermatter learning instruction (managed by evermatter setup) -->"
+)
+EVERMATTER_LEARNING_END = "<!-- END evermatter learning instruction -->"
+# Every marker pair a reader accepts, for the same reason as SERVER_NAMES: a file keeps the
+# pair it was written with. Writers emit LEARNING_BEGIN and LEARNING_END only.
+LEARNING_PAIRS = (
+    (LEARNING_BEGIN, LEARNING_END),
+    (EVERMATTER_LEARNING_BEGIN, EVERMATTER_LEARNING_END),
+)
 
 
 def instruction_file(client: str, home: Path) -> Path:
@@ -295,16 +334,24 @@ def _read_user_text(path: Path) -> str | None:
 
 def _learning_span(lines: list[str], path: Path) -> tuple[int, int] | None:
     """Line indexes of the BEGIN and END markers, or None when neither is present."""
-    begins = [i for i, line in enumerate(lines) if line.strip() == LEARNING_BEGIN]
-    ends = [i for i, line in enumerate(lines) if line.strip() == LEARNING_END]
+    begin_markers = {begin for begin, _ in LEARNING_PAIRS}
+    end_markers = {end for _, end in LEARNING_PAIRS}
+    begins = [(i, line.strip()) for i, line in enumerate(lines) if line.strip() in begin_markers]
+    ends = [(i, line.strip()) for i, line in enumerate(lines) if line.strip() in end_markers]
     if not begins and not ends:
         return None
-    if len(begins) == 1 and len(ends) == 1 and begins[0] < ends[0]:
-        return begins[0], ends[0]
+    if (
+        len(begins) == 1
+        and len(ends) == 1
+        and begins[0][0] < ends[0][0]
+        and (begins[0][1], ends[0][1]) in LEARNING_PAIRS
+    ):
+        return begins[0][0], ends[0][0]
     # Guessing which marker is stray could delete the user's own lines, so refuse.
     raise ValueError(
         f"{path} does not hold exactly one Evermatter learning-instruction span. "
-        f"Keep one {LEARNING_BEGIN!r} line above one {LEARNING_END!r} line, "
+        f"Keep one {LEARNING_BEGIN!r} line above one {LEARNING_END!r} line "
+        f"(or the {EVERMATTER_LEARNING_BEGIN!r} and {EVERMATTER_LEARNING_END!r} pair), "
         "or delete every marker line, then run the command again."
     )
 
@@ -377,7 +424,7 @@ def remove_learning_instruction(path: Path) -> dict:
         return absent
     # Placing refuses a file it cannot decode, so a file without either marker holds
     # nothing of Evermatter's: report it absent rather than fail an unrelated uninstall.
-    if LEARNING_BEGIN.encode() not in raw and LEARNING_END.encode() not in raw:
+    if not any(marker.encode() in raw for pair in LEARNING_PAIRS for marker in pair):
         return absent
     original = _read_user_text(path)
     lines = original.splitlines(keepends=True)

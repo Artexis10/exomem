@@ -164,19 +164,26 @@ def _project_entry(config: dict, project_dir: Path) -> dict:
     return {}
 
 
-def _registered_server(config: dict) -> dict | None:
-    servers = config.get("mcpServers")
+def _server_entry(servers: object) -> tuple[str, dict] | None:
+    """The (key, entry) that an `mcpServers` map holds under an accepted server key, or None."""
     if not isinstance(servers, dict):
         return None
-    value = servers.get("exomem")
-    return value if isinstance(value, dict) else None
+    for name in client_config.SERVER_NAMES:
+        value = servers.get(name)
+        if isinstance(value, dict):
+            return name, value
+    return None
 
 
-def _claude_registrations(*, config_path: Path, project_dir: Path) -> dict[str, dict]:
-    """Inventory registrations without `claude mcp list/get` health checks."""
+def _registered_server(config: dict) -> tuple[str, dict] | None:
+    return _server_entry(config.get("mcpServers"))
+
+
+def _claude_registrations(*, config_path: Path, project_dir: Path) -> dict[str, tuple[str, dict]]:
+    """Inventory registrations as scope -> (key, entry), without `claude mcp list/get` checks."""
     user_config = _read_json_object(config_path)
     project_config = _read_json_object(project_dir / ".mcp.json")
-    found: dict[str, dict] = {}
+    found: dict[str, tuple[str, dict]] = {}
     candidates = (
         ("local", _registered_server(_project_entry(user_config, project_dir))),
         ("project", _registered_server(project_config)),
@@ -248,15 +255,15 @@ def _legacy_stdio_plugins(claude: str, run_fn, run_kwargs: dict) -> list[str]:
         if not isinstance(plugin, dict) or plugin.get("enabled") is not True:
             continue
         plugin_id = str(plugin.get("id") or plugin.get("name") or "")
-        if "exomem" not in plugin_id.casefold():
+        if not any(name in plugin_id.casefold() for name in client_config.SERVER_NAMES):
             continue
-        servers = plugin.get("mcpServers")
-        server = servers.get("exomem") if isinstance(servers, dict) else None
-        if not isinstance(server, dict):
+        entry = _server_entry(plugin.get("mcpServers"))
+        if entry is None:
             raise ValueError(
                 f"could not verify Claude plugin state for {plugin_id}: "
                 "Evermatter MCP inventory is missing"
             )
+        server = entry[1]
         if server.get("command") or server.get("args"):
             legacy.append(plugin_id)
             continue
@@ -359,7 +366,7 @@ def _register_claude(
     scope_text = _format_scopes(existing_scopes)
     desired_is_active = (
         existing_scopes == [scope]
-        and _registration_matches(route, registrations[scope])
+        and _registration_matches(route, registrations[scope][1])
     )
     if desired_is_active:
         report("register", f"[skipped: already registered in {scope}]")
@@ -376,7 +383,10 @@ def _register_claude(
             return
         replace = True
 
-    argv = route.claude_add_argv(claude, scope=scope)
+    # A replace keeps the server key the user already holds, so their tool prefix and the
+    # rules that match it survive; only an explicit migration renames the key.
+    kept_name = next(iter(dict.fromkeys(name for name, _entry in registrations.values())), None)
+    argv = route.claude_add_argv(claude, scope=scope, name=kept_name or client_config.SERVER_NAME)
     if replace:
         paths = (config_path, project_dir / ".mcp.json")
         try:
@@ -385,10 +395,10 @@ def _register_claude(
             report("register", f"[failed: could not snapshot Claude configuration: {exc}]")
             return
         failure = ""
-        for existing_scope in existing_scopes:
+        for existing_scope, (existing_name, _entry) in registrations.items():
             try:
                 result = run_fn(
-                    [claude, "mcp", "remove", "exomem", "--scope", existing_scope],
+                    [claude, "mcp", "remove", existing_name, "--scope", existing_scope],
                     **run_kwargs,
                 )
             except Exception as exc:  # noqa: BLE001 - restore is the safety boundary
@@ -467,13 +477,16 @@ def _register_codex(
     codex_home: Path | None = None,
 ) -> None:
     """Register the MCP server with Codex, preferring its CLI over file surgery."""
-    block = client_config.render_codex_block(route)
     path = _resolve_codex_home(codex_home) / "config.toml"
     try:
-        existing = client_config.codex_mcp_exists(path)
+        existing_name = client_config.codex_mcp_name(path)
     except ValueError as exc:
         report("register-codex", f"[failed: {exc}]")
         return
+    existing = existing_name is not None
+    # A replace keeps the server key the user already holds (see _register_claude).
+    name = existing_name or client_config.SERVER_NAME
+    block = client_config.render_codex_block(route, name=name)
     replace = replace_client_registration and existing
     if existing and not replace:
         if yes or not _ask_yn(input_fn, f"exomem is already in {path}. Replace it?", False):
@@ -491,14 +504,14 @@ def _register_codex(
             return
         failure = ""
         try:
-            removed = run_fn([codex, "mcp", "remove", "exomem"], **run_kwargs)
+            removed = run_fn([codex, "mcp", "remove", existing_name], **run_kwargs)
             if removed.returncode != 0:
                 detail = (removed.stderr or "").strip() or (
                     f"codex mcp remove exited {removed.returncode}"
                 )
                 failure = detail
             else:
-                added = run_fn(route.codex_add_argv(codex), **run_kwargs)
+                added = run_fn(route.codex_add_argv(codex, name=name), **run_kwargs)
                 if added.returncode != 0:
                     failure = (added.stderr or "").strip() or (
                         f"codex mcp add exited {added.returncode}"
@@ -533,7 +546,7 @@ def _register_codex(
         return
 
     if codex:
-        argv = route.codex_add_argv(codex)
+        argv = route.codex_add_argv(codex, name=name)
         try:
             result = run_fn(argv, **run_kwargs)
         except Exception as exc:  # noqa: BLE001 - fall back to the config file
@@ -921,7 +934,7 @@ def run_setup(
             )
         claude = which_fn("claude")
         if not claude:
-            snippet = {"mcpServers": {"exomem": route.as_claude_config()}}
+            snippet = {"mcpServers": {client_config.SERVER_NAME: route.as_claude_config()}}
             print_fn("  claude CLI not found — add this to .mcp.json or Claude Code settings:")
             print_fn(json.dumps(snippet, indent=2))
             report("register", "[skipped: no claude CLI — snippet printed above]")

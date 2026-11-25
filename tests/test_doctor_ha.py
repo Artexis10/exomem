@@ -335,6 +335,32 @@ def test_ha_probe_accepts_compatible_release_drift(
     assert report.success is True
 
 
+def test_ha_probe_accepts_a_replica_that_reports_the_evermatter_service_name(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_ha_env(monkeypatch)
+    responses = {
+        "https://desktop.example.com/health/ready": (200, _ready("desktop", "0.20.1")),
+        "https://laptop.example.com/health/ready": (
+            200,
+            {**_ready("laptop", "0.20.1"), "service": "evermatter"},
+        ),
+    }
+    monkeypatch.setattr(doctor_module, "_probe_get", lambda url: responses[url])
+    monkeypatch.setattr(doctor_module, "_check_edge_ingress", lambda **_kwargs: [])
+
+    report = doctor_module.doctor(
+        vault=str(vault),
+        profile="ha",
+        probe=True,
+        replica_urls=["https://desktop.example.com", "https://laptop.example.com"],
+    )
+    checks = {check.id: check for check in report.checks}
+
+    assert checks["ha.replica.2"].status == "pass"
+    assert checks["ha.compatibility"].status == "pass"
+
+
 def test_ha_probe_rejects_incompatible_or_duplicate_replicas(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

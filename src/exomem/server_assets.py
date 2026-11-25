@@ -336,7 +336,10 @@ def register_health_routes(
         process (the GIL is handed back per syscall), and a probe that times out
         gets the pod killed mid index build."""
         _record_health_probe()
-        payload: dict[str, object] = {"status": "ok", "service": "exomem"}
+        payload: dict[str, object] = {
+            "status": "ok",
+            "service": runtime_readiness_module.SERVICE_NAME,
+        }
         facts, refresh, wedged = liveness.current()
         payload.update(facts)
         if refresh:

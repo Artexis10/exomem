@@ -67,6 +67,25 @@ def test_promote_legacy_never_clobbers_explicit_new_name(monkeypatch) -> None:
     assert os.environ["EXOMEM_RENAME_PROBE2"] == "new-wins"
 
 
+def test_evermatter_prefix_is_used_when_it_is_the_only_one_set(monkeypatch) -> None:
+    monkeypatch.delenv("EXOMEM_RENAME_PROBE3", raising=False)
+    monkeypatch.setenv("EVERMATTER_RENAME_PROBE3", "product-value")
+    try:
+        promoted = env_compat.promote_legacy()
+        assert "EXOMEM_RENAME_PROBE3" in promoted
+        assert os.environ["EXOMEM_RENAME_PROBE3"] == "product-value"
+        assert "EXOMEM_RENAME_PROBE3" not in env_compat.promote_legacy()  # idempotent
+    finally:
+        os.environ.pop("EXOMEM_RENAME_PROBE3", None)
+
+
+def test_evermatter_prefix_wins_over_a_conflicting_exomem_value(monkeypatch) -> None:
+    monkeypatch.setenv("EXOMEM_RENAME_PROBE4", "old-name")
+    monkeypatch.setenv("EVERMATTER_RENAME_PROBE4", "product-wins")
+    env_compat.promote_legacy()
+    assert os.environ["EXOMEM_RENAME_PROBE4"] == "product-wins"
+
+
 def test_dotenv_legacy_vars_promoted_at_server_build(vault, monkeypatch) -> None:
     """A pre-rename .env (KB_MCP_* keys) loads inside build_server, after the
     import-time promotion — the post-dotenv re-promotion must cover it."""
