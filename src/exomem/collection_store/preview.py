@@ -804,30 +804,39 @@ def dispatch(
         # A query that names one row answers that row and its body; Records names the key item_key, Planning plan_id.
         key = args.pop("item_key", args.pop("plan_id", None))
         with writer.read_collection(collection, facade_profile=profile) as manifest:
-            if key is not None:
-                column = collection_profiles.profile_for(manifest.semantic_profile).item_id_property
-                args["filters"] = [{"column": column, "op": "eq", "value": key}]
-                args["limit"] = 1
-            if profile == "planning":
-                # One named row is found whatever its lifecycle.
-                projected = planning.query(vault_root, manifest, **args, **({"lifecycle": "all"} if key is not None else {}))
+            if manifest.derived:
+                # The store holds none of a derived collection's rows, so the legacy arguments read them as a typed query.
+                from . import derived_query
+
+                typed = derived_query.typed_query(manifest, key, args)
             else:
-                include_history = args.pop("include_agent_history", False)
-                from .history import agent_history
+                if key is not None:
+                    column = collection_profiles.profile_for(manifest.semantic_profile).item_id_property
+                    args["filters"] = [{"column": column, "op": "eq", "value": key}]
+                    args["limit"] = 1
+                if profile == "planning":
+                    # One named row is found whatever its lifecycle.
+                    projected = planning.query(vault_root, manifest, **args, **({"lifecycle": "all"} if key is not None else {}))
+                else:
+                    include_history = args.pop("include_agent_history", False)
+                    from .history import agent_history
 
-                result = record_governance.query_collection(vault_root, manifest, **args)
-                projected = record_governance.project_query_result(
-                    result, manifest, output_format=args.get("output_format", "json"),
-                    agent_history=agent_history(writer, manifest) if include_history else None,
-                )
-                # The ids go on before the projection is sealed: a sealed payload that changes is refused.
-                from .. import collection_refs
+                    result = record_governance.query_collection(vault_root, manifest, **args)
+                    projected = record_governance.project_query_result(
+                        result, manifest, output_format=args.get("output_format", "json"),
+                        agent_history=agent_history(writer, manifest) if include_history else None,
+                    )
+                    # The ids go on before the projection is sealed: a sealed payload that changes is refused.
+                    from .. import collection_refs
 
-                projected = collection_refs.mark_rows(projected, profile="records")
-                projected = writer._operation.query_metadata_evidence(projected, writer, manifest, result)
-            if key is not None and projected.get("rows"):
-                projected = {**projected, **writer.row_body(manifest.collection_id, key)}
-            return True, projected
+                    projected = collection_refs.mark_rows(projected, profile="records")
+                    projected = writer._operation.query_metadata_evidence(projected, writer, manifest, result)
+                if key is not None and projected.get("rows"):
+                    projected = {**projected, **writer.row_body(manifest.collection_id, key)}
+                return True, projected
+        from ..query_engine import route
+
+        return True, route.run(writer, collection, typed, facade_profile=profile)
     if action == "create":
         return True, _mutate(vault_root, writer.create_collection, **args)
     if action == "import" and profile == "records":
