@@ -468,6 +468,36 @@ def _endpoints_used(monkeypatch, tmp_path, *arguments) -> CloudImportClientConfi
     return seen[0]
 
 
+def test_a_label_reaches_the_import_and_one_the_cell_would_drop_is_refused_before_any_upload(tmp_path, monkeypatch, capsys):
+    """Catches a label that the cell leaves out unseen: an overlong one would never reach its Sources."""
+    sent = []
+
+    async def capture(source, config, checkpoint, **kwargs):
+        sent.append(kwargs["origin_label"])
+        return {"import_id": "e91b0d91-79ab-4c9c-950b-a85e80c3a7ef", "windows": 1}
+
+    class NoCell:
+        def __init__(self, config, oauth):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *error):
+            return None
+
+    monkeypatch.setattr(cloud_import_windows, "McpCell", NoCell)
+    monkeypatch.setattr(cloud_import_windows, "import_folder", capture)
+    base = ["import", str(tmp_path), "--checkpoint", str(tmp_path / "cp")]
+
+    assert cloud_import_client.main([*base, "--label", "Phone photos"]) == 0
+    with pytest.raises(SystemExit):
+        cloud_import_client.main([*base, "--label", "x" * 201])
+
+    assert sent == ["Phone photos"]
+    assert "--label" in capsys.readouterr().err
+
+
 def test_a_folder_resume_connects_mcp_only_when_it_calls_a_cell_tool(tmp_path, monkeypatch):
     """Catches eager MCP entry that prevents REST from releasing an import's hold on the cell."""
     from types import SimpleNamespace

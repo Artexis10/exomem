@@ -1008,8 +1008,20 @@ def _kept_now(source: Path, member: Member) -> import_selection.Kept | None:
     return import_selection.Kept(member.path, info.st_size, info.st_mtime_ns, (info.st_dev, info.st_ino))
 
 
-def _series_file(label: str, members: list[Member]) -> str:
-    return json.dumps({"label": label, "paths": [member.path for member in members]}, ensure_ascii=False)
+#: The browser family a command-line upload states. It is the sender's own word for what it is; the cell stores it.
+CLI_FAMILY = "cli"
+
+
+def _series_file(label: str, members: list[Member], *, file: bool, origin_label: str | None) -> str:
+    """The file every window carries: the series' paths, its origin and, unless `--no-file`, the cell's filing request."""
+    document: dict = {"label": label, "paths": [member.path for member in members]}
+    if file:
+        document["filing"] = import_stage.FILING_CELL
+    origin = {import_stage.ORIGIN_BROWSER: CLI_FAMILY}
+    if origin_label:
+        origin[import_stage.ORIGIN_LABEL] = origin_label
+    document["origin"] = origin
+    return json.dumps(document, ensure_ascii=False)
 
 
 async def _preflight(run: _Run, members: list[Member], reading: Reading) -> None:
@@ -1047,7 +1059,8 @@ def _classify(kept: import_selection.Kept, reading: Reading) -> Member:
 async def import_folder(source: Path, config: CloudImportClientConfig, checkpoint: Path, *, cell: Cell, api, uploads=None,
                         include_hidden: bool = False, use_gitignore: bool = True, progress: Progress | None = None,
                         poll_seconds: float = WAIT_POLL_SECONDS, sleep=asyncio.sleep, clock=time.monotonic,
-                        resend_residual: bool = False, file: bool = False, collection: str | None = None) -> dict:
+                        resend_residual: bool = False, file: bool = False, collection: str | None = None,
+                        origin_label: str | None = None) -> dict:
     """Send a folder as windows, or as one import when the cell reports no window budget. See the module docstring.
 
     `file` also files each landed window through the cell's `file`, while the series waits and at its end; a cell that
@@ -1058,7 +1071,8 @@ async def import_folder(source: Path, config: CloudImportClientConfig, checkpoin
     try:
         return await _import_folder(source, config, checkpoint, cell=cell, api=api, uploads=uploads, include_hidden=include_hidden,
                                     use_gitignore=use_gitignore, progress=progress, poll_seconds=poll_seconds, sleep=sleep,
-                                    clock=clock, resend=resend_residual, held=held, file=file, collection=collection)
+                                    clock=clock, resend=resend_residual, held=held, file=file, collection=collection,
+                                    origin_label=origin_label)
     except Stopped:
         raise
     except Exception as error:  # noqa: BLE001 -- provider errors may contain presigned URLs
@@ -1071,7 +1085,7 @@ async def import_folder(source: Path, config: CloudImportClientConfig, checkpoin
 
 
 async def _import_folder(source, config, checkpoint, *, cell, api, uploads, include_hidden, use_gitignore, progress,
-                         poll_seconds, sleep, clock, resend, held, file, collection) -> dict:
+                         poll_seconds, sleep, clock, resend, held, file, collection, origin_label) -> dict:
     # nosemgrep: ep-word-membership -- the series file's own reserved name, fixed by D12.
     if os.path.lexists(source / import_stage.SERIES_FILE):
         raise CloudImportError(PREFLIGHT, "SERIES_FILE_IN_SOURCE", f"the source folder holds a file named {import_stage.SERIES_FILE} "
@@ -1105,14 +1119,14 @@ async def _import_folder(source, config, checkpoint, *, cell, api, uploads, incl
                                                        "so the series cannot go on")
         return await _older_cell(source, config, checkpoint, limits, options, **{k: settings[k] for k in ("api", "uploads", "progress", "poll_seconds")})
     if series is None:
-        series = await _begin(source, config, record, first, options, settings)
+        series = await _begin(source, config, record, first, options, settings, origin_label)
     if series not in held:
         held.append(series)
     run = run or _Run(series, record, source, config, **settings)
     return await run.drive()
 
 
-async def _begin(source, config, record, first, options, settings) -> Series:
+async def _begin(source, config, record, first, options, settings, origin_label) -> Series:
     """Select, classify and refuse before any upload; then record the series."""
     progress = settings["progress"]
     selection = import_selection.select(source, include_hidden=options["include_hidden"], use_gitignore=options["use_gitignore"])
@@ -1129,7 +1143,8 @@ async def _begin(source, config, record, first, options, settings) -> Series:
         await run.wait(since, "the cell reports an unknown figure: " + "; ".join(reading.unknown_reasons() or ["its limits"]))
         reading = Reading.of(await settings["cell"].status())
     members = _sorted([_classify(kept, reading) for kept in selection.kept])
-    series.members, series.series_file = members, _series_file(source.name, members)
+    series.members = members
+    series.series_file = _series_file(source.name, members, file=settings["file"], origin_label=origin_label)
     await _preflight(run, members, reading)
     offloadable = sum(m.size for m in members if m.klass == OFFLOADABLE)
     if offloadable:

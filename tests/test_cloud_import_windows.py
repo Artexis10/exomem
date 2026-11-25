@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import tarfile
@@ -125,6 +126,7 @@ class FakeCloud:
         self.rows: dict[str, dict] = {}
         self.parts: dict[str, dict[int, bytes]] = {}
         self.members: dict[str, dict[str, bytes]] = {}
+        self.member_times: dict[str, dict[str, int]] = {}
         self.completed: list[str] = []
         self.registered_at: list[float] = []
         self.registered_calls: list[int] = []
@@ -232,6 +234,7 @@ class FakeCloud:
         plain = subprocess.run(["age", "-d", "-i", str(self.identity)], input=cipher, capture_output=True, check=True).stdout
         with tarfile.open(fileobj=io.BytesIO(plain)) as archive:
             self.members[import_id] = {m.name: archive.extractfile(m).read() for m in archive if m.isfile()}
+            self.member_times[import_id] = {m.name: m.mtime for m in archive if m.isfile()}
         if self.refuse_when(self.members[import_id]):
             row.update(observed_state="failed", error_code=self.refusal_code)
             return
@@ -541,6 +544,58 @@ def test_each_window_carries_the_series_file_with_the_label_and_every_path_relat
     series = next(iter(files.values()))
     assert series["label"] == "Field Notes"
     assert sorted(series["paths"]) == ["a01.bin", "a02.bin", "a03.bin", "n01.md", "sub/deep.md"]
+
+
+def _stage_with(tmp_path: Path, series_file: bytes) -> tuple[Path, str]:
+    """A cell's stage that holds one series file, as the import Job leaves it."""
+    import uuid
+
+    import_id = str(uuid.uuid4())
+    stage = tmp_path / "vault" / "_Imports" / import_id
+    stage.mkdir(parents=True)
+    (stage / import_stage.SERIES_FILE).write_bytes(series_file)
+    return tmp_path / "vault", import_id
+
+
+def test_each_window_asks_the_cell_to_file_and_states_the_command_line_origin_the_cell_reads_back(rig, tmp_path):
+    """Catches a series file the cell cannot read, or without the request, so Cloud keeps waiting for an assistant."""
+    rig.files(a01__bin=800, a02__bin=800, n01__md=100)
+    rig.cell.budget = rig.cell.reachable = rig.cell.refill = 1200
+
+    rig.run(file=True, origin_label="  Phone photos ")
+
+    assert len(rig.cloud.completed) >= 2
+    for import_id in rig.cloud.completed:
+        vault, stage_id = _stage_with(tmp_path / import_id, rig.cloud.members[import_id][import_stage.SERIES_FILE])
+        series = import_stage.read_series(vault, stage_id)
+        assert series.filing == "cell"
+        assert series.origin == {"browser_family": "cli", "label": "Phone photos"}
+
+
+def test_a_no_file_run_states_the_origin_and_never_asks_the_cell_to_file(rig, tmp_path):
+    """Catches `--no-file` that still asks the cell to file, which would delete the person's choice to upload only."""
+    rig.files(a01__bin=800, n01__md=100)
+
+    rig.run(file=False)
+
+    (import_id,) = rig.cloud.completed
+    vault, stage_id = _stage_with(tmp_path, rig.cloud.members[import_id][import_stage.SERIES_FILE])
+    series = import_stage.read_series(vault, stage_id)
+    assert series.filing is None
+    assert series.origin == {"browser_family": "cli"}
+
+
+def test_each_archive_member_carries_the_modification_time_of_its_source_file(rig):
+    """Catches an archive that stamps every member with the upload time, so each Source's file_modified would be wrong."""
+    rig.files(a01__bin=800, n01__md=100)
+    stamps = {"a01.bin": 1_500_000_000, "n01.md": 1_600_000_000}
+    for name, stamp in stamps.items():
+        os.utime(rig.source / name, (stamp, stamp))
+
+    rig.run(file=True)
+
+    (import_id,) = rig.cloud.completed
+    assert rig.cloud.member_times[import_id] == stamps | {import_stage.SERIES_FILE: rig.cloud.member_times[import_id][import_stage.SERIES_FILE]}
 
 
 # -- Resuming
