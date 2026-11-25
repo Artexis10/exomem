@@ -126,7 +126,7 @@ The owner approved the autonomous organisation plan on 2026-10-26. It changes th
 
 This independently authorized repair adds no entity barrier and does not close task 2.9 or the held behaviour measurement.
 Its deterministic proof does not establish no-nudge semantic autonomy.
-A read-only census on 2026-11-25 sampled three organic captures from 24 and 25 November. None linked an existing entity that it named, so semantic autonomy remains unestablished.
+A read-only census on 2026-11-25 sampled 18 notes that agents wrote in ordinary use between 15 and 25 November. They named things that already had an entity page 58 times and linked 30 of them; 11 of the 18 notes left at least one such name unlinked. Semantic autonomy therefore remains unestablished.
 
 Delivery evidence: #2136 merged as `1c288447861562872d7bbba65557b02b6e262070` and shipped in 0.147.0.
 Its reviewed head was `f235c4308a3c63432e591745a19caf27f182eab8`; CI run `40387270740` passed.
