@@ -32,13 +32,13 @@ def _migrate_claude_servers(
 ) -> None:
     project_file = project_dir / ".mcp.json"
     try:
-        user_config = setup_wizard._read_json_object(config_path)
-        project_config = setup_wizard._read_json_object(project_file)
+        user_config = client_config.read_json_object(config_path)
+        project_config = client_config.read_json_object(project_file)
     except ValueError as exc:
         report("claude", f"[failed: {exc}]")
         return
     scopes = {
-        "local": setup_wizard._project_entry(user_config, project_dir).get("mcpServers"),
+        "local": client_config.project_entry(user_config, project_dir).get("mcpServers"),
         "project": project_config.get("mcpServers"),
         "user": user_config.get("mcpServers"),
     }
@@ -217,32 +217,6 @@ def _migrate_bindings(*, client: str, home: Path, print_fn, report) -> None:
     report(step, f"[done] bound {', '.join(bindings[len(prior['bindings']) :])}")
 
 
-def dead_references(
-    *, claude_home: Path, codex_home: Path, claude_config_path: Path, project_dir: Path
-) -> tuple[list[client_config.UserReference], list[Path]]:
-    """The user's rules and hooks that name `mcp__exomem__` in a client with no `exomem` server.
-
-    Such a rule matches no tool. A rule with an `exomem` server behind it still works, so it is
-    not listed. Returns the dead rules and every file read. Raises ``ValueError`` when a
-    client's registrations cannot be read, because then no rule can be judged. A Claude Code
-    scope that holds both keys reports only `evermatter`, so a rule there counts as dead.
-    """
-    references, read = client_config.user_references(
-        claude_home=claude_home, codex_home=codex_home, project_dir=project_dir
-    )
-    legacy = client_config.LEGACY_SERVER_NAME
-    holds_legacy = {
-        "claude": any(
-            key == legacy
-            for key, _ in setup_wizard._claude_registrations(
-                config_path=claude_config_path, project_dir=project_dir
-            ).values()
-        ),
-        "codex": client_config.codex_mcp_name(codex_home / "config.toml") == legacy,
-    }
-    return [ref for ref in references if not holds_legacy[ref.client]], read
-
-
 def migrate(
     *,
     claude_home: Path | None = None,
@@ -259,7 +233,7 @@ def migrate(
     claude_config_path = (
         Path(claude_config_path)
         if claude_config_path
-        else setup_wizard._default_claude_config_path(dict(os.environ))
+        else client_config.default_claude_config_path(dict(os.environ))
     )
     project_dir = Path.cwd() if project_dir is None else Path(project_dir)
     steps: list[tuple[str, str]] = []
@@ -300,7 +274,7 @@ def migrate(
     _migrate_bindings(client="codex", home=codex_home, print_fn=print_fn, report=report)
 
     try:
-        references, _read = dead_references(
+        references, _read = client_config.dead_references(
             claude_home=claude_home,
             codex_home=codex_home,
             claude_config_path=claude_config_path,

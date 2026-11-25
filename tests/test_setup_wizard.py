@@ -48,7 +48,7 @@ def _messy_vault(tmp_path: Path) -> Path:
 def test_default_claude_config_path_honors_relocated_config_dir(tmp_path: Path) -> None:
     config_dir = tmp_path / "relocated-claude"
 
-    assert setup_wizard._default_claude_config_path(  # noqa: SLF001
+    assert client_config.default_claude_config_path(
         {"CLAUDE_CONFIG_DIR": str(config_dir)}
     ) == config_dir / ".claude.json"
 

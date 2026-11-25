@@ -136,65 +136,6 @@ def _server_command(which_fn) -> list[str]:
     return ["uvx", "exomem", "--transport", "stdio"]
 
 
-def _read_json_object(path: Path) -> dict:
-    if not path.is_file():
-        return {}
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError(f"cannot inspect Claude MCP registrations in {path}: {exc}") from exc
-    if not isinstance(value, dict):
-        raise ValueError(f"cannot inspect Claude MCP registrations in {path}: expected an object")
-    return value
-
-
-def _project_entry(config: dict, project_dir: Path) -> dict:
-    target = project_dir.resolve()
-    projects = config.get("projects")
-    if not isinstance(projects, dict):
-        return {}
-    for raw_path, value in projects.items():
-        if not isinstance(raw_path, str) or not isinstance(value, dict):
-            continue
-        try:
-            if Path(raw_path).expanduser().resolve() == target:
-                return value
-        except OSError:
-            continue
-    return {}
-
-
-def _server_entry(servers: object) -> tuple[str, dict] | None:
-    """The (key, entry) that an `mcpServers` map holds under an accepted server key, or None."""
-    if not isinstance(servers, dict):
-        return None
-    for name in client_config.SERVER_NAMES:
-        value = servers.get(name)
-        if isinstance(value, dict):
-            return name, value
-    return None
-
-
-def _registered_server(config: dict) -> tuple[str, dict] | None:
-    return _server_entry(config.get("mcpServers"))
-
-
-def _claude_registrations(*, config_path: Path, project_dir: Path) -> dict[str, tuple[str, dict]]:
-    """Inventory registrations as scope -> (key, entry), without `claude mcp list/get` checks."""
-    user_config = _read_json_object(config_path)
-    project_config = _read_json_object(project_dir / ".mcp.json")
-    found: dict[str, tuple[str, dict]] = {}
-    candidates = (
-        ("local", _registered_server(_project_entry(user_config, project_dir))),
-        ("project", _registered_server(project_config)),
-        ("user", _registered_server(user_config)),
-    )
-    for scope, server in candidates:
-        if server is not None:
-            found[scope] = server
-    return found
-
-
 def _registration_matches(route: client_config.McpRoute, server: dict) -> bool:
     if route.transport == "http":
         return server.get("url") == route.url and server.get("type", "http") == "http"
@@ -257,7 +198,7 @@ def _legacy_stdio_plugins(claude: str, run_fn, run_kwargs: dict) -> list[str]:
         plugin_id = str(plugin.get("id") or plugin.get("name") or "")
         if not any(name in plugin_id.casefold() for name in client_config.SERVER_NAMES):
             continue
-        entry = _server_entry(plugin.get("mcpServers"))
+        entry = client_config.server_entry(plugin.get("mcpServers"))
         if entry is None:
             raise ValueError(
                 f"could not verify Claude plugin state for {plugin_id}: "
@@ -298,14 +239,6 @@ def _configured_mcp_url(
     if configured is None and "EXOMEM_BASE_URL" in environ:
         configured = environ["EXOMEM_BASE_URL"]
     return client_config.normalize_mcp_url(configured) if configured is not None else None
-
-
-def _default_claude_config_path(environ: dict[str, str]) -> Path:
-    """Return Claude's user-state path, including configured relocation."""
-    config_dir = environ.get("CLAUDE_CONFIG_DIR")
-    if config_dir:
-        return Path(config_dir).expanduser() / ".claude.json"
-    return Path.home() / ".claude.json"
 
 
 def _resolve_client_route(
@@ -354,7 +287,7 @@ def _register_claude(
     report,
 ) -> None:
     try:
-        registrations = _claude_registrations(
+        registrations = client_config.claude_registrations(
             config_path=config_path,
             project_dir=project_dir,
         )
@@ -697,7 +630,7 @@ def run_setup(
     environ = dict(os.environ if environ is None else environ)
     project_dir = Path.cwd() if project_dir is None else Path(project_dir)
     claude_config_path = (
-        _default_claude_config_path(environ)
+        client_config.default_claude_config_path(environ)
         if claude_config_path is None
         else Path(claude_config_path)
     )

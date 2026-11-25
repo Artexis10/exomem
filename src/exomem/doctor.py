@@ -4057,14 +4057,14 @@ def _check_legacy_tool_references() -> DoctorCheck:
     only in a client that holds no `exomem` server. A warning, never a failure: the install
     works either way. Read-only; setup never edits what the user wrote.
     """
-    from . import client_config, rename_migration, setup_wizard
+    from . import client_config
     from .install_skill import client_home
 
     try:
-        dead, read = rename_migration.dead_references(
+        dead, read = client_config.dead_references(
             claude_home=client_home("claude"),
             codex_home=client_home("codex"),
-            claude_config_path=setup_wizard._default_claude_config_path(dict(os.environ)),
+            claude_config_path=client_config.default_claude_config_path(dict(os.environ)),
             project_dir=Path.cwd(),
         )
     except ValueError as exc:

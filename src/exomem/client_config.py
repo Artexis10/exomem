@@ -176,6 +176,94 @@ def codex_mcp_name(path: Path) -> str | None:
     return next((name for name in SERVER_NAMES if name in servers), None)
 
 
+def default_claude_config_path(environ: dict[str, str]) -> Path:
+    """Return Claude's user-state path, including configured relocation."""
+    config_dir = environ.get("CLAUDE_CONFIG_DIR")
+    if config_dir:
+        return Path(config_dir).expanduser() / ".claude.json"
+    return Path.home() / ".claude.json"
+
+
+def read_json_object(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot inspect Claude MCP registrations in {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"cannot inspect Claude MCP registrations in {path}: expected an object")
+    return value
+
+
+def project_entry(config: dict, project_dir: Path) -> dict:
+    target = project_dir.resolve()
+    projects = config.get("projects")
+    if not isinstance(projects, dict):
+        return {}
+    for raw_path, value in projects.items():
+        if not isinstance(raw_path, str) or not isinstance(value, dict):
+            continue
+        try:
+            if Path(raw_path).expanduser().resolve() == target:
+                return value
+        except OSError:
+            continue
+    return {}
+
+
+def server_entry(servers: object) -> tuple[str, dict] | None:
+    """The (key, entry) that an `mcpServers` map holds under an accepted server key, or None."""
+    if not isinstance(servers, dict):
+        return None
+    for name in SERVER_NAMES:
+        value = servers.get(name)
+        if isinstance(value, dict):
+            return name, value
+    return None
+
+
+def claude_registrations(*, config_path: Path, project_dir: Path) -> dict[str, tuple[str, dict]]:
+    """Inventory registrations as scope -> (key, entry), without `claude mcp list/get` checks."""
+    user_config = read_json_object(config_path)
+    project_config = read_json_object(project_dir / ".mcp.json")
+    found: dict[str, tuple[str, dict]] = {}
+    candidates = (
+        ("local", server_entry(project_entry(user_config, project_dir).get("mcpServers"))),
+        ("project", server_entry(project_config.get("mcpServers"))),
+        ("user", server_entry(user_config.get("mcpServers"))),
+    )
+    for scope, server in candidates:
+        if server is not None:
+            found[scope] = server
+    return found
+
+
+def dead_references(
+    *, claude_home: Path, codex_home: Path, claude_config_path: Path, project_dir: Path
+) -> tuple[list[UserReference], list[Path]]:
+    """The user's rules and hooks that name `mcp__exomem__` in a client with no `exomem` server.
+
+    Such a rule matches no tool. A rule with an `exomem` server behind it still works, so it is
+    not listed. Returns the dead rules and every file read. Raises ``ValueError`` when a
+    client's registrations cannot be read, because then no rule can be judged. A Claude Code
+    scope that holds both keys reports only `evermatter`, so a rule there counts as dead.
+    """
+    references, read = user_references(
+        claude_home=claude_home, codex_home=codex_home, project_dir=project_dir
+    )
+    holds_legacy = {
+        "claude": any(
+            key == LEGACY_SERVER_NAME
+            for key, _ in claude_registrations(
+                config_path=claude_config_path, project_dir=project_dir
+            ).values()
+        ),
+        "codex": codex_mcp_name(codex_home / "config.toml") == LEGACY_SERVER_NAME,
+    }
+    return [ref for ref in references if not holds_legacy[ref.client]], read
+
+
 def _toml_string(value: str) -> str:
     """Quote a TOML basic string. Windows paths are full of backslashes, so
     escaping them (rather than emitting a literal string) is the safe choice."""

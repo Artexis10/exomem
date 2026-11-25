@@ -24,6 +24,7 @@ from exomem import (
     semantic_language_registry,
     semantic_units,
     set_frontmatter_field,
+    workflow_skills,
 )
 from exomem import (
     find as find_module,
@@ -1549,7 +1550,7 @@ _PLUGIN = (
     / "plugins"
     / "claude-code"
     / "skills"
-    / "exomem"
+    / workflow_skills.CORE_SKILL_NAME
 )
 
 
