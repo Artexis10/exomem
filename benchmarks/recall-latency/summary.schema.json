@@ -77,7 +77,8 @@
                   "filtered_hybrid",
                   "temporal",
                   "mixed",
-                  "unit"
+                  "unit",
+                  "dimension_filter"
                 ]
               },
               "state": {
@@ -233,7 +234,8 @@
                   "filtered_hybrid",
                   "temporal",
                   "mixed",
-                  "unit"
+                  "unit",
+                  "dimension_filter"
                 ]
               },
               "state": {
@@ -840,7 +842,8 @@
             "filtered_hybrid",
             "temporal",
             "mixed",
-            "unit"
+            "unit",
+            "dimension_filter"
           ]
         },
         "principal": {
