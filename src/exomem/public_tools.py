@@ -392,13 +392,16 @@ class AddObservation(Wire):
     text: str = Field(description="The observation, on one line.")
     tags: list[str] | None = None
     context: str | None = None
-    links: list[Link] | None = None
+    links: list[Link] | None = Field(
+        default=None,
+        description="A compact observation keeps only a source citation, such as `derived_from` a saved Source or Evidence page; other relations need a rich `kind`.",
+    )
     kind: str | None = Field(default=None, description="A rich kind, such as hypothesis; omit for a compact observation.")
-    verdict: str | None = Field(default=None, description="A rich verdict in words, never a number; see inspect_memory schema.infer.")
+    verdict: str | None = Field(default=None, description="Verdict in words, never a number; needs a rich `kind`. See inspect_memory schema.infer.")
     anchor: str | None = Field(default=None, description="Unique within the note; derived when omitted.")
-    as_of: str | None = Field(default=None, description="ISO date this starts to hold.")
-    until: str | None = Field(default=None, description="ISO date this stops holding.")
-    check_by: str | None = Field(default=None, description="ISO date to revisit.")
+    as_of: str | None = Field(default=None, description="ISO date this starts to hold; needs a rich `kind`.")
+    until: str | None = Field(default=None, description="ISO date this stops holding; needs a rich `kind`.")
+    check_by: str | None = Field(default=None, description="ISO date to revisit; needs a rich `kind`.")
     unlinked_reason: str | None = _UNLINKED
     review: str | None = _REVIEW
     preview: bool | None = _PREVIEW

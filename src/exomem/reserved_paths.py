@@ -734,6 +734,16 @@ _REGISTRY = (
         patterns=(_OWNERSHIP_TEMP_RE,),
         rebuildable=False,
     ),
+    # Born in the external state root, so it has nothing to migrate from the vault. The version each
+    # connected app was last told about. Rebuilt by recomputation: without the file every app is new on its
+    # next call, which records the running version and tells nothing, so a lost file costs one missed notice.
+    InternalStateDescriptor(
+        "app-update-notices",
+        "release_notes",
+        StatePlacement.EXTERNAL_STATE,
+        exact=(".app-update-notices.json",),
+        rebuildable=True,
+    ),
     InternalStateDescriptor(
         "lexical-rebuild",
         "lexstore",

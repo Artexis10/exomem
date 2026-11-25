@@ -2719,6 +2719,22 @@ class WorkingSetIndex:
             return ""
         return str(row[0]) if row else ""
 
+    def names_built(self) -> bool:
+        """Whether the page-name map holds a row. An index nothing has built holds none and answers every name
+        with silence, which a caller that reports "no page" must tell from a name that no page bears.
+
+        A file that does not exist is not built and is not created here: `_connect` would make an empty one in
+        the machine-local state root, which a read-side caller must not do."""
+        if disabled() or not Path(self.path).exists():
+            return False
+        conn = self._connect()
+        if conn is None:
+            return False
+        try:
+            return conn.execute("SELECT 1 FROM page_names LIMIT 1").fetchone() is not None
+        except sqlite3.Error:
+            return False
+
     def resolve_names(self, names: Iterable[str]) -> dict[str, tuple[str, ...]]:
         """Map wikilink names to EVERY vault path that bears them.
 

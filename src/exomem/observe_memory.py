@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, assert_never, get_args
@@ -82,6 +83,13 @@ class ObserveMemoryError(ValueError):
 
     def __post_init__(self) -> None:
         ValueError.__init__(self, f"{self.code}: {self.reason}")
+
+    def leaf_error(self) -> ValueError:
+        """The leaf-contract refusal a caller reads: the code and reason, then the remediation."""
+        message = f"{self.code}: {self.reason}"
+        if self.remediation:
+            message += f" Remediation: {self.remediation}"
+        return ValueError(message)
 
 
 def _legacy_routing_remediation(resolution: dict[str, Any]) -> str:
@@ -224,7 +232,7 @@ def observe_memory(
             "INVALID_OBSERVE_INPUT",
             "remove accepts only the parent, unit reference, and drift guards",
         )
-    proposal_mode = "update" if op == "validate" and (unit_ref or unit) else op
+    proposal_mode = _proposal_mode(op, unit_ref=unit_ref, unit=unit)
     if proposal_mode in {"add", "update"}:
         # These are the closed required argument fields, spelled by the serving surface.
         missing = {}
@@ -335,6 +343,8 @@ def observe_memory(
     removed_unit = None
     dropped_relations: tuple[tuple[str, str], ...] = ()
     dropped_outcome: str | None = None
+    lifted_frontmatter: list[tuple[str, str]] | None = None
+    lift_resolver: Any = None
     link_warnings: list[str] = []
     if proposal_mode == "remove":
         assert current_unit is not None
@@ -588,16 +598,32 @@ def observe_memory(
             and semantic_language_registry.normalize_label(kind) != _COMPACT_KIND
         )
         if normalized_relations and not explicit_rich_kind:
-            raise ObserveMemoryError(
-                "COMPACT_RELATIONS_REQUIRE_RICH_KIND",
-                "typed unit relations require an explicit governed non-observation kind",
-                _rich_kind_remediation(
-                    language,
-                    category=normalized_category,
-                    projects=page_projects,
-                    page_type=page_type,
-                ),
-            )
+            # A rich unit that keeps its kind on update carries its own relations, so only a unit
+            # that is compact lifts a provenance link to the page.
+            if selected_kind in semantic_kinds.compact_kinds():
+                lift_resolver = find.writer_resolver_snapshot(vault_root)
+                lifted_frontmatter = _liftable_frontmatter_targets(
+                    current.definitions.snapshots["relations"].typed
+                    if current.definitions is not None
+                    else relation_registry.core_registry(),
+                    normalized_relations,
+                    vault_root=vault_root,
+                    resolver=lift_resolver,
+                )
+            if lifted_frontmatter is None:
+                raise ObserveMemoryError(
+                    "COMPACT_RELATIONS_REQUIRE_RICH_KIND",
+                    "typed unit relations require an explicit governed non-observation kind",
+                    _rich_kind_remediation(
+                        language,
+                        category=normalized_category,
+                        projects=page_projects,
+                        page_type=page_type,
+                    ),
+                )
+            # Every relation is a provenance link to captured material, so the unit commits
+            # compact and each target lands in its page field in the same atomic write.
+            normalized_relations = ()
         base_unit = current_unit if proposal_mode == "update" else None
         if base_unit is not None and relations is None and base_unit.relations:
             # `relations` replaces on update, so a call that omits it removes every relation the
@@ -626,13 +652,25 @@ def observe_memory(
                 "INVALID_SEMANTIC_DATE_ORDER", "until must be on or after as_of",
             )
         preserved_metadata = _preserved_metadata(base_unit)
-        if selected_kind == _COMPACT_KIND and (
-            normalized_verdict is not None
-            or normalized_check_by is not None
-            or normalized_as_of is not None
-            or normalized_until is not None
-            or preserved_metadata
-        ):
+        governed_passed = _governed_names(
+            verdict=normalized_verdict,
+            check_by=normalized_check_by,
+            as_of=normalized_as_of,
+            until=normalized_until,
+        )
+        if selected_kind == _COMPACT_KIND and (governed_passed or preserved_metadata):
+            if base_unit is None or base_unit.form != "rich":
+                # A compact unit, new or existing, carries no rows, so the only exit that applies
+                # is to leave the fields out of this call.
+                raise _compact_metadata_refusal(
+                    passed=governed_passed,
+                    kinds=_rich_kind_remediation(
+                        language,
+                        category=normalized_category,
+                        projects=page_projects,
+                        page_type=page_type,
+                    ),
+                )
             # Every exit named here has to actually exist. `verdict=""` and
             # `check_by=""` really do clear those rows, but no argument clears
             # an unowned row, so converting a unit that carries one means
@@ -720,9 +758,23 @@ def observe_memory(
     # Validation and its commit render the same authored day, including across midnight.
     pinned = temporal.parse(semantic_writes.transition_token_stamp(transition_token))
     authored_day = today or (pinned.day if pinned is not None else dt.date.today())
+    fm_text = editable.fm_text
+    lifted_cited: list[str] = []
+    if lifted_frontmatter:
+        fm_text, lifted_cited, lift_warnings = _lift_frontmatter_targets(
+            fm_text,
+            frontmatter,
+            lifted_frontmatter,
+            vault_root=vault_root,
+            resolver=lift_resolver,
+        )
+        link_warnings.extend(lift_warnings)
+    lifted_outcome = (
+        _lifted_relations_outcome(lifted_cited, preview=previewing) if lifted_cited else None
+    )
     after_source = _rebuild_source(
         editable.original_text,
-        editable.fm_text,
+        fm_text,
         after_body,
         today=authored_day,
     )
@@ -857,6 +909,8 @@ def observe_memory(
             semantic=preflight.as_dict(),
             dropped_relations=dropped_relations,
             dropped_outcome=dropped_outcome,
+            lifted_cited=lifted_cited,
+            lifted_outcome=lifted_outcome,
             warnings=link_warnings,
         )
 
@@ -918,6 +972,8 @@ def observe_memory(
         semantic=committed.as_dict(),
         dropped_relations=dropped_relations,
         dropped_outcome=dropped_outcome,
+        lifted_cited=lifted_cited,
+        lifted_outcome=lifted_outcome,
         timings=(
             timings.as_dict() if timings is not None and write_timings_enabled() else None
         ),
@@ -1361,6 +1417,69 @@ def _rich_kind_remediation(
     return f"{hint}Pass `kind` with one of the admitted kinds: {', '.join(kinds)}."
 
 
+def _compact_metadata_refusal(*, passed: tuple[str, ...], kinds: str) -> ObserveMemoryError:
+    """Governed metadata sent with a compact unit: name each field and both exits.
+
+    The refusal for converting a rich unit to compact names no field, and its exits (convert
+    the unit, edit the page to drop its rows) do not apply to a compact unit, which has no
+    rows. Both exits here are a retry of the same call; `kinds` says which rich kinds to pass.
+    """
+    fields = ", ".join(passed)
+    return ObserveMemoryError(
+        "COMPACT_METADATA_REQUIRES_RICH_KIND",
+        f"Governed unit metadata ({fields}) needs a rich kind, and a compact observation "
+        "carries no metadata",
+        f"Retry one of two ways: omit {fields} to keep a compact observation, or keep "
+        f"{fields} by passing a rich kind. {kinds}",
+    )
+
+
+def argument_refusal(arguments: Mapping[str, Any]) -> ObserveMemoryError | None:
+    """The compact-metadata refusal that a call's arguments alone decide, or None.
+
+    The busy intake queues a save and replays it later, so a save that is certain to be
+    refused would otherwise come back as a queued receipt and fail only at the replay. This
+    reads no page. A unit reference without `kind` keeps the unit's own kind, which only the
+    page knows, so that call is left to the replay.
+    """
+    mode = _proposal_mode(
+        str(arguments.get("operation") or "").strip().lower(),
+        unit_ref=arguments.get("unit_ref"),
+        unit=arguments.get("unit"),
+    )
+    kind = arguments.get("kind")
+    if kind is None:
+        compact_kind = mode in {"add", "validate"}
+    else:
+        compact_kind = semantic_language_registry.normalize_label(kind) == _COMPACT_KIND
+    if not compact_kind:
+        return None
+    passed = _governed_names(**{
+        key: arguments[key]
+        for key in _GOVERNED_ARGUMENT_KEYS
+        if str(arguments.get(key) or "").strip()
+    })
+    if not passed:
+        return None
+    kinds = _admitted_kind_keys(
+        semantic_language_registry.core_registry(), projects=(), page_type=None
+    )
+    return _compact_metadata_refusal(
+        passed=passed,
+        kinds=f"Pass `kind` with a core rich kind ({', '.join(kinds)}) or one this vault defines.",
+    )
+
+
+def _proposal_mode(op: str, *, unit_ref: str | None, unit: str | None) -> str:
+    """The operation as the write handles it: a preview that names a unit previews an update."""
+    return "update" if op == "validate" and (unit_ref or unit) else op
+
+
+def _governed_names(**values: Any) -> tuple[str, ...]:
+    """The governed arguments that carry a value, named in `_GOVERNED_ARGUMENT_KEYS` order."""
+    return tuple(key for key in _GOVERNED_ARGUMENT_KEYS if values.get(key) is not None)
+
+
 def _page_projects(frontmatter: dict[Any, Any]) -> tuple[str, ...]:
     projects: set[str] = set()
     project = frontmatter.get("project")
@@ -1405,6 +1524,113 @@ def _canonical_context(value: str | None) -> str | None:
             "INVALID_SEMANTIC_CONTEXT", "context must be non-empty single-line text"
         )
     return context
+
+
+def _liftable_frontmatter_targets(
+    rel_registry: relation_registry.RelationRegistry,
+    relations: tuple[tuple[str, str], ...],
+    *,
+    vault_root: Path,
+    resolver: Any,
+) -> list[tuple[str, str]] | None:
+    """Each relation's (field, target) when every one is a source citation, else None.
+
+    A relation lifts only when the registry gives it the closed `sources` behaviour, its core
+    relation binds the page's `sources` field forward, and its target names captured material.
+    A vault extension takes the field of its core parent, because only the shipped pack binds
+    fields. Anything else keeps the compact refusal, so a supersession, an association or an
+    evidence link never reaches a page field through this path.
+    """
+    from . import epistemic_graph, source_closure
+
+    sources_field, _ = epistemic_graph.declared_sources_binding()
+    lifted: list[tuple[str, str]] = []
+    for kind, target in relations:
+        definition = rel_registry.resolve(kind).definition
+        if definition is None or not rel_registry.has_label(kind, "sources"):
+            return None
+        core = definition if definition.core else rel_registry.core.get(definition.parent or "")
+        # The lift writes only the field whose closure the commit verifies; a relation bound to
+        # another field keeps the refusal that names the rich form.
+        if core is None or (sources_field, "forward") not in core.frontmatter_fields:
+            return None
+        # A target that is no captured material cannot be cited here; the refusal that names the
+        # rich form is the honest answer, where the commit's closure refusal would say to drop it.
+        if source_closure.resolve_reference(vault_root, target, resolver=resolver) is None:
+            return None
+        lifted.append((sources_field, target))
+    return lifted
+
+
+def _lift_frontmatter_targets(
+    fm_text: str,
+    frontmatter: dict[str, Any],
+    lifted: list[tuple[str, str]],
+    *,
+    vault_root: Path,
+    resolver: Any,
+) -> tuple[str, list[str], list[str]]:
+    """Splice each lifted target into its declared frontmatter field.
+
+    The writer is the same canonical-link normaliser `create_note` runs for its
+    `sources` argument, and the value lands in the canonical `[[path]]` form.
+    Existing entries keep their bytes; a target the field already cites, in any
+    spelling the normaliser reads as the same page, is not duplicated. Returns
+    the patched YAML, the rendered links this call cites and any normaliser
+    warnings.
+    """
+    from . import note, record_formats
+
+    grouped: dict[str, list[str]] = {}
+    for field, target in lifted:
+        grouped.setdefault(field, []).append(target)
+    cited: list[str] = []
+    warnings: list[str] = []
+    for field, targets in grouped.items():
+        canonicals, field_warnings = note._normalize_sources(
+            targets, vault_root=vault_root, resolver=resolver
+        )
+        warnings.extend(field_warnings)
+        existing_raw = frontmatter.get(field)
+        existing_values: list[Any] = (
+            []
+            if existing_raw is None
+            else [existing_raw]
+            if isinstance(existing_raw, str)
+            else list(existing_raw)
+        )
+        existing_canonicals, _ = note._normalize_sources(
+            [str(value) for value in existing_values], vault_root=vault_root, resolver=resolver
+        )
+        known = set(existing_canonicals)
+        additions: list[str] = []
+        for canonical in canonicals:
+            rendered = vault.render_wikilink_target(canonical, vault_root)
+            cited.append(rendered)
+            if canonical in known:
+                continue
+            additions.append(rendered)
+            known.add(canonical)
+        if not additions:
+            continue
+        merged = [
+            *existing_values,
+            *(f"[[{rendered}]]" for rendered in additions),
+        ]
+        # `fm_text` conventionally ends on its last content byte while the
+        # splice contract takes a terminated block; normalize in both directions.
+        fm_text = record_formats.splice_frontmatter_fields(
+            fm_text if fm_text.endswith("\n") else fm_text + "\n",
+            {field: merged},
+        ).removesuffix("\n")
+    return fm_text, cited, warnings
+
+
+def _lifted_relations_outcome(cited: list[str], *, preview: bool) -> str:
+    named = ", ".join(cited)
+    if preview:
+        return f"Committing this will cite {named} in the page's frontmatter."
+    return f"Cited {named} in the page's frontmatter."
 
 
 def _canonical_relations(values: list[dict[str, Any]]) -> tuple[tuple[str, str], ...]:
@@ -1861,6 +2087,8 @@ def _result(
     semantic: dict[str, Any],
     dropped_relations: tuple[tuple[str, str], ...] = (),
     dropped_outcome: str | None = None,
+    lifted_cited: list[str] | None = None,
+    lifted_outcome: str | None = None,
     timings: dict[str, Any] | None = None,
     warnings: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -1877,6 +2105,9 @@ def _result(
             {"kind": kind, "target": target} for kind, target in dropped_relations
         ]
         value["outcome"] = dropped_outcome
+    elif lifted_cited and lifted_outcome is not None:
+        value["relations_cited"] = lifted_cited
+        value["outcome"] = lifted_outcome
     if timings is not None:
         value["timings"] = timings
     if warnings:

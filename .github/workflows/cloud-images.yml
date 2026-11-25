@@ -115,7 +115,7 @@ jobs:
 
       - name: Build the cellctl image for this runner's architecture
         run: |
-          docker build --tag exomem-cellctl:smoke infra/cellctl
+          docker build --build-context repository=. --tag exomem-cellctl:smoke infra/cellctl
           test "$(docker image inspect --format '{{.Architecture}}' exomem-cellctl:smoke)" = "${{ matrix.arch }}"
       # asyncpg and cryptography are the compiled extensions cellctl loads.
       - name: cellctl and its compiled dependencies import in the cellctl image

@@ -145,6 +145,38 @@ def test_claude_cloud_hooks_use_canonical_bytes_and_native_mcp_binding(tmp_path:
             assert not any(name.startswith("hooks/") for name in archive.namelist())
 
 
+def test_connector_edition_adds_hooks_to_an_existing_connection_without_a_server(
+    tmp_path: Path,
+) -> None:
+    # An account that already connects Evermatter (a self-hosted server, a separate
+    # connector) must get the hooks without a second server bound to Evermatter Cloud.
+    cloud_plugins.build_packages(ROOT, tmp_path)
+    with zipfile.ZipFile(tmp_path / "claude-connector-hooks.zip") as connector:
+        names = set(connector.namelist())
+        assert ".mcp.json" not in names
+        assert "mcpServers" not in json.loads(connector.read(".claude-plugin/plugin.json"))
+        with zipfile.ZipFile(tmp_path / "claude-hooks.zip") as hooked:
+            shared = {
+                name for name in hooked.namelist() if name.startswith(("hooks/", "skills/"))
+            }
+            assert any(name.startswith("hooks/") for name in shared)
+            assert any(name.startswith("skills/") for name in shared)
+            assert shared <= names
+            for name in shared:
+                assert connector.read(name) == hooked.read(name)
+        manifest = json.loads(connector.read(".claude-plugin/plugin.json"))
+    marketplace = json.loads((ROOT / ".claude-plugin/marketplace.json").read_text())
+    listed = {entry["name"]: entry["source"] for entry in marketplace["plugins"]}
+    assert listed[manifest["name"]] == "./plugins/cloud/generated/claude-connector-hooks"
+    hooked_manifest = json.loads(
+        (ROOT / "plugins/cloud/generated/claude-hooks/.claude-plugin/plugin.json").read_text()
+    )
+    # Both editions sit in one marketplace; a person picks between them by these labels.
+    assert manifest["name"] != hooked_manifest["name"]
+    assert manifest["displayName"] != hooked_manifest["displayName"]
+    assert manifest["description"] != hooked_manifest["description"]
+
+
 def test_claude_directory_edition_ships_only_admitted_files(tmp_path: Path) -> None:
     # Catch the directory edition regaining command hooks or a script, which the
     # directory refuses from an unverified publisher.
@@ -172,6 +204,23 @@ def test_claude_directory_validation_rejects_hooks_and_scripts(
     planted.write_text(content)
     with pytest.raises(ValueError, match="Claude directory edition"):
         cloud_plugins._validate_claude_directory(tmp_path / "claude")
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"description": "x" * 501}, "description"),
+        ({"name": "Evermatter Hooks"}, "lowercase-hyphenated"),
+    ],
+)
+def test_claude_manifest_validation_rejects_what_claude_ai_refuses(
+    override: dict, message: str
+) -> None:
+    # claude.ai refused an uploaded plugin whose description ran past 500 characters;
+    # the build must fail before such a package ships.
+    manifest = {"name": "evermatter", "description": "Fits."} | override
+    with pytest.raises(ValueError, match=message):
+        cloud_plugins._validate_claude_manifest(manifest)
 
 
 def test_registered_cloud_hooks_do_not_read_or_forward_local_credentials(tmp_path: Path) -> None:
@@ -487,7 +536,12 @@ def test_cloud_openai_schema_and_public_archives(tmp_path: Path) -> None:
     assert json.loads((tmp_path / "openai/mcp.json").read_text())["mcpServers"] == {
         "exomem": {"type": "streamable-http", "url": "https://exomem.substratesystems.io/mcp"}
     }
-    archives = [tmp_path / "claude.zip", tmp_path / "claude-hooks.zip", tmp_path / "openai.zip"]
+    archives = [
+        tmp_path / "claude.zip",
+        tmp_path / "claude-hooks.zip",
+        tmp_path / "claude-connector-hooks.zip",
+        tmp_path / "openai.zip",
+    ]
     assert_public_artifacts_clean(
         archives,
         labels={path: f"plugins/cloud/generated/{path.name}" for path in archives},

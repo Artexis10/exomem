@@ -262,6 +262,9 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build]
+# The release build writes this gitignored file into the Cloud cell image's source tree
+# (scripts/user_notes.py generate). Naming it keeps a build that honours .gitignore from dropping it.
+artifacts = ["/src/exomem/user_release_notes.json"]
 # The bundled sample vault ships authored Markdown and schema content, never
 # rebuildable indexes, local worker locks, coordination state, or voice profiles
 # that happen to exist in a dirty source tree.

@@ -41,6 +41,7 @@ from .command_surface import DEFAULT_TOOL_SHAPE
 from .edge_ingress import EdgeIngressMiddleware
 from .server_assets import (
     register_asset_routes,
+    register_claude_plugin_route,
     register_health_routes,
     register_oauth_metadata_route,
     server_icons,
@@ -1043,6 +1044,7 @@ def build_server(
         register_oauth_metadata_route(
             mcp, base_url=runtime.base_url, auth_enabled=auth is not None
         )
+        register_claude_plugin_route(mcp, base_url=runtime.base_url)
         transfer_config = register_transfer_routes(
             mcp, vault_root=runtime.vault_root, media_worker=runtime.media_worker
         )

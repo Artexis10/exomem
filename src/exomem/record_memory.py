@@ -11,6 +11,7 @@ from typing import Any, Literal, Never
 from . import (
     automatic_collection,
     collection_refs,
+    kbdir,
     operation_entries,
     query_data,
     record_governance,
@@ -105,6 +106,7 @@ def record_memory(
     automatic: bool | None = None,
     new_collection: dict[str, Any] | None = None,
     new_fields: list[str] | None = None,
+    natural_key: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Describe, validate, inspect, create, query, append, bulk_upsert, update, retract, revise, rebaseline, discard or import Records.
 
@@ -166,9 +168,13 @@ def record_memory(
         query: query only, for a store-routed collection: a typed v1 query object
             instead of the legacy shaping arguments; store-mode `describe` names its
             grammar route.
-        item_id: update or retract only: the row `id` a query returned. It stands for item_key,
-            expected_item_version and expected_container_hash, which the call reads under
-            the writer lease. A stale id is refused with the current one.
+        item_id: update, retract or history: the row `id` a query returned. On update and retract it
+            stands for item_key, expected_item_version and expected_container_hash, which the call
+            reads under the writer lease, and a stale id is refused with the current one. On history
+            it names the row whatever version the id carries.
+        natural_key: history only: the values of the collection's natural-key fields, as the row was
+            written, e.g. {"asset_tag": "L-17"}. A retracted row is found by the natural key it was created with, or by item_key.
+            History takes exactly one of item_key, item_id and natural_key.
         automatic: create only: true when you start the collection yourself under silent
             proactive_capture. Unless the bounds in `automatic_collection` hold, the server refuses
             AUTOMATIC_CREATION_REFUSED and names the failed bound; nothing is created. The receipt
@@ -190,18 +196,24 @@ def record_memory(
     """
     collection = collection_refs.resolve_collection(vault_root, collection, profile="records")
     if item_id is not None:
-        if action not in {"update", "retract"} or any(
+        reads_history = action == "history"
+        if reads_history:
+            _require_one_history_selector({"item_key": item_key, "item_id": item_id, "natural_key": natural_key})
+        elif action not in {"update", "retract"} or any(
                 v is not None for v in (item_key, expected_container_hash, expected_item_version)):
-            _invalid_arguments("item_id applies to update or retract and replaces item_key and both guards")
+            _invalid_arguments("item_id applies to update, retract or history and replaces item_key and both guards")
         from .collection_store import preview
 
-        bound = preview.bind_row(vault_root, str(collection), item_id) or collection_refs.bind_item(
+        # A reader guards no write, so the id names its row at any version.
+        bound = preview.bind_row(vault_root, str(collection), item_id, stale_ok=reads_history) or collection_refs.bind_item(
             lambda **kw: record_memory(vault_root, "query", **kw),
-            collection=str(collection), item_id=item_id, profile="records",
+            collection=str(collection), item_id=item_id, profile="records", stale_ok=reads_history,
         )
-        item_key, expected_item_version, expected_container_hash = (
-            bound["item_key"], bound["expected_item_version"], bound["expected_container_hash"],
-        )
+        item_key = bound["item_key"]
+        if not reads_history:
+            expected_item_version, expected_container_hash = (
+                bound["expected_item_version"], bound["expected_container_hash"],
+            )
     values = {
         "collection": collection,
         "manifest_path": manifest_path,
@@ -243,6 +255,7 @@ def record_memory(
         "automatic": automatic,
         "new_collection": new_collection,
         "new_fields": new_fields,
+        "natural_key": natural_key,
     }
     _validate_arguments(action, values)
     # A leaf takes only the arguments it declares, and these two are the facade's alone.
@@ -361,11 +374,12 @@ def record_memory(
                 agent_history=history,
             ), profile="records")
         if action == "history":
-            assert collection is not None and item_key is not None
+            assert collection is not None
             return record_history.read(
                 vault_root,
                 collection,
                 item_key=item_key,
+                natural_key=natural_key,
                 semantic_profile="records",
                 limit=limit,
                 continuation=continuation,
@@ -671,7 +685,40 @@ def parse_manifest_contract(*, store_mode: bool = False, store_vault: bool = Fal
     return {
         **manifest_authoring_contract(store=store_mode or store_vault),
         "bulk_upsert": _bulk_upsert_contract(store_mode=store_mode),
+        "history": _history_contract(),
         "writer_lease": UNSUPPORTED_WRITERS,
+    }
+
+
+def _history_contract() -> dict[str, Any]:
+    """The `history` action's contract, from the selectors its operation entry accepts."""
+    return {
+        "why": "read one row's retained revisions, newest first, each with its reason",
+        "select_by": "exactly one of " + ", ".join(operation_entries.HISTORY_SELECTORS),
+        "arguments": {
+            "item_key": "the row's internal UUID identity",
+            "item_id": "the row `id` that a query returned; a stale id still names the row",
+            "natural_key": (
+                "an object with a value for each of the collection's natural-key fields, and no other "
+                "field, as the row was written"
+            ),
+        },
+        "retracted": (
+            "item_key finds a retracted row; natural_key finds it only by the key its identity "
+            "derives from (the key it was created with, unless an item_key was given); item_id "
+            "names only a current row"
+        ),
+        "refusal": (
+            "by item_key or natural_key: RECORD_NOT_FOUND, alike for a row that does not exist, a row "
+            "the caller may not read, and a natural key with a field the caller may not read; by "
+            "item_id: the row binder's refusals (ITEM_NOT_FOUND and its siblings), alike for an "
+            "absent and a hidden row"
+        ),
+        "example": {
+            "action": "history",
+            "collection": kbdir.managed_join("Records/Publications/_collection.md"),
+            "natural_key": {"published_on": "2026-09-01", "slug": "entry-one"},
+        },
     }
 
 
@@ -859,6 +906,8 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
             action_argument_contract(action, _ACTION_FIELDS[action], _REQUIRED_FIELDS[action])
         )
         _invalid_arguments("; ".join(parts))
+    if action == "history":
+        _require_one_history_selector(values)
     if action == "append" and values["item"] is None and values["held"] is None:
         _invalid_arguments("append requires item or held")
     if (
@@ -898,6 +947,16 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
     if action == "query" and values["item_key"] is not None and supplied - {"collection", "item_key"}:
         _invalid_arguments("a query with item_key reads that one row and its body, so it takes only collection; "
                            "remove " + ", ".join(sorted(supplied - {"collection", "item_key"})))
+
+
+def _require_one_history_selector(given: Mapping[str, Any]) -> None:
+    """Refuse a history call that selects its row by none of the selectors or by several."""
+    chosen = [name for name in operation_entries.HISTORY_SELECTORS if given.get(name) is not None]
+    if len(chosen) != 1:
+        _invalid_arguments(
+            "history takes exactly one of " + ", ".join(operation_entries.HISTORY_SELECTORS)
+            + (f"; got {', '.join(chosen)}" if chosen else "")
+        )
 
 
 def refuse_arguments(detail: str) -> Never:

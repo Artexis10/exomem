@@ -101,13 +101,16 @@ def id_head(item_id: str) -> str:
     return page_ids.part_head(key) if key is not None else item_id.partition(".")[0]
 
 
-def bound_row(item_id: str, matches: Sequence[tuple[str, str]], snapshot: str | None, *, profile: str) -> dict[str, str]:
+def bound_row(
+    item_id: str, matches: Sequence[tuple[str, str]], snapshot: str | None, *, profile: str, stale_ok: bool = False
+) -> dict[str, str]:
     """The binding `item_id` stands for among the readable rows that carry its head (`id_head`).
 
     `matches` are `(item_key, item_version)` of the rows the caller may read, never of withheld
     ones, so a withheld row answers as an absent one. `snapshot` is the container hash the
     query of that read returned. A row's key is no row id: it is refused for a row the caller may
-    read, and answers as no row otherwise.
+    read, and answers as no row otherwise. A stale id is refused unless `stale_ok`: a reader of the
+    row, which needs no version guard, takes the head's row at its current version.
     """
     key_named = memory_refs.normalize_id(item_id)
     if key_named is not None:
@@ -129,7 +132,7 @@ def bound_row(item_id: str, matches: Sequence[tuple[str, str]], snapshot: str | 
         raise OpError("AMBIGUOUS_ITEM", f"id {item_id} names more than one row of this collection.")
     key, version = matches[0]
     current = page_ids.part_id(key, version)
-    if current != item_id:
+    if current != item_id and not stale_ok:
         raise OpError(
             "STALE_ITEM",
             f"id {item_id} is stale: the row has changed and now has id {current}. "
@@ -140,7 +143,7 @@ def bound_row(item_id: str, matches: Sequence[tuple[str, str]], snapshot: str | 
 
 
 def bind_item(
-    query: Callable[..., Mapping[str, Any]], *, collection: str, item_id: str, profile: str
+    query: Callable[..., Mapping[str, Any]], *, collection: str, item_id: str, profile: str, stale_ok: bool = False
 ) -> dict[str, str]:
     """The `item_key`, `expected_item_version` and `expected_container_hash` that `item_id` stands for.
 
@@ -172,4 +175,6 @@ def bind_item(
             "ITEM_SCAN_INCOMPLETE",
             "this collection is too large to find a row by its id; filter the query to the row and use its key.",
         )
-    return bound_row(item_id, [(row[column], row["item_version"]) for row in found], snapshot, profile=profile)
+    return bound_row(
+        item_id, [(row[column], row["item_version"]) for row in found], snapshot, profile=profile, stale_ok=stale_ok
+    )

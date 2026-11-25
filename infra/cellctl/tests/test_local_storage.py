@@ -19,7 +19,14 @@ from cellctl import reconcile
 from cellctl.decide import StorageRoom, decide
 from cellctl.manifests import STORAGE_CLASS, ResourceSettings, namespace_name
 from cellctl.reconcile import ClusterConfig
-from cellctl.state import IDENTITY_CONFLICT, CellRow, ClusterObservation, MediaCensus, RolloutRow
+from cellctl.state import (
+    IDENTITY_CONFLICT,
+    CellRow,
+    ClusterObservation,
+    MediaCensus,
+    MediaStorage,
+    RolloutRow,
+)
 from cellctl.storage.fake_hetzner import FakeHetznerVolumeProvider
 from cellctl.storage_config import LocalStorage, StorageConfig
 
@@ -1414,8 +1421,14 @@ def test_the_backup_jobs_use_report_is_what_cellctl_reads(tmp_path) -> None:
     census_time = datetime.fromisoformat(CURRENT_HOLD) + timedelta(minutes=30)
     arguments = f"cell-media-census --vault {tmp_path}/data/vault"
     census = f'[ "$*" = "{arguments}" ] && echo "3 4096 {census_time.isoformat()}"'
+    # add-cloud-media-store D10: the storage record follows the census on a line of its own.
+    old_census = census_time - timedelta(days=3)
+    record = (f'{{"captured_at":"{census_time.isoformat()}","vault_bytes":9000,"media_used_bytes":4000,'
+              f'"media_observed_at":"{old_census.isoformat()}"}}')
+    storage = f'[ "cell-media-storage --vault {tmp_path}/data/vault" = "$*" ] && echo \'{record}\''
+    exomem = f'case "$1" in cell-media-census) {census} ;; cell-media-storage) {storage} ;; esac'
 
-    observed, data = _run_backup_job(tmp_path, census)
+    observed, data = _run_backup_job(tmp_path, exomem)
 
     filesystem = os.statvfs(data)
     assert observed.backup_job_snapshot_id == SNAPSHOT_ID
@@ -1423,6 +1436,10 @@ def test_the_backup_jobs_use_report_is_what_cellctl_reads(tmp_path) -> None:
     assert 0 < observed.backup_job_used_bytes <= observed.backup_job_total_bytes
     # D12: the media report is the record the cell image printed, with the cell's own census time.
     assert observed.backup_job_media_census == MediaCensus(evicted=3, evicted_bytes=4096, captured_at=census_time)
+    # D10: the storage record is the line the cell image printed, with the cell's own reading time and the time of
+    # the owner census behind the media figure.
+    assert observed.backup_job_media_storage == MediaStorage(
+        vault_bytes=9000, media_used_bytes=4000, captured_at=census_time, media_observed_at=old_census)
 
 
 @pytest.mark.parametrize("exomem", [
@@ -1439,11 +1456,34 @@ def test_a_backup_job_whose_census_does_not_complete_reports_the_media_census_as
     from .test_k8s_client import CURRENT_HOLD
 
     monkeypatch.setattr(backup_source, "MEDIA_CENSUS_SECONDS", 1)
+    monkeypatch.setattr(backup_source, "MEDIA_STORAGE_SECONDS", 1)  # The same stub answers the storage command.
     observed, _data = _run_backup_job(tmp_path, exomem)
 
     assert observed.backup_job_snapshot_id == SNAPSHOT_ID
     assert observed.backup_job_media_census == MediaCensus(
         evicted=None, evicted_bytes=None, captured_at=datetime.fromisoformat(CURRENT_HOLD))
+
+
+@pytest.mark.parametrize("exomem", [
+    pytest.param("echo 'usage: exomem'; exit 2", id="an older image has no such command"),
+    pytest.param("echo '{\"captured_at\":\"2026-10-31T01:30:00+00:00\"'; exit 1", id="the command fails after it printed"),
+    pytest.param("exec sleep 600", id="the command does not finish"),
+])
+def test_a_backup_job_whose_storage_record_cannot_be_read_reports_both_figures_as_unknown_at_the_hold_start(
+        tmp_path, monkeypatch, exomem) -> None:
+    # The backup itself succeeded, so its snapshot and census still count. An unreadable record, or a read that
+    # hangs, says unknown at the hold start: never a figure and never 0 bytes.
+    from cellctl import backup_source
+
+    from .test_k8s_client import CURRENT_HOLD
+
+    monkeypatch.setattr(backup_source, "MEDIA_STORAGE_SECONDS", 1)
+    observed, _data = _run_backup_job(tmp_path, exomem)
+
+    assert observed.backup_job_snapshot_id == SNAPSHOT_ID
+    assert observed.backup_job_media_storage == MediaStorage(
+        vault_bytes=None, media_used_bytes=None, captured_at=datetime.fromisoformat(CURRENT_HOLD),
+        media_observed_at=None)
 
 
 async def test_a_local_cell_past_80_percent_use_grows_one_default_size_without_a_restart(

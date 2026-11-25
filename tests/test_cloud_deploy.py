@@ -7,10 +7,12 @@ Substrate answers, and reads what the public Actions log would show.
 
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import re
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -38,6 +40,11 @@ ENV = {
     "CLOUD_DEPLOY_POLL_INTERVAL_SECONDS": "15",
     "CLOUD_DEPLOY_POLL_TIMEOUT_SECONDS": "600",
 }
+# The run's clock: two hours after the newest recorded release's publish time (2026-11-10T09:00:00Z).
+NOW = datetime(2026, 11, 10, 11, 0, tzinfo=UTC)
+# What a run that finds no lag sends once it has read the view: `cloud-release-behind` and `cloud-cell-pinned`, both resolved.
+LAG_RESOLVED = [(cloud_deploy.RELEASE_BEHIND_ALERT, False), (cloud_deploy.CELL_PINNED_ALERT, False)]
+FAILING_RESOLVED = (cloud_deploy.FAILING_ALERT, False)
 # Only the chart and controller's test and Markdown files changed since the platform's release.
 TESTS_AND_DOCS = ["infra/cellctl/tests/test_reconcile.py", "infra/helm/platform/OWNERSHIP.md", "src/exomem/server.py"]
 
@@ -45,8 +52,11 @@ TESTS_AND_DOCS = ["infra/cellctl/tests/test_reconcile.py", "infra/helm/platform/
 class Recorded:
     """Serves recorded answers by method and path, in order; the last answer repeats."""
 
-    def __init__(self, rollout: list[str], put: str = "substrate_put_ok", deployments: list | None = None) -> None:
-        self.rollout = [ANSWERS[name] for name in rollout]
+    def __init__(self, rollout: list[str], put: str = "substrate_put_ok", deployments: list | None = None,
+                 releases: str = "github_releases", github_reachable: bool = True) -> None:
+        self.rollout = [copy.deepcopy(ANSWERS[name]) for name in rollout]
+        self.releases = releases if releases in ("unavailable", "garbled", "unreachable") else copy.deepcopy(ANSWERS[releases])
+        self.github_reachable = github_reachable
         self.put = ANSWERS[put]
         self.deployments = ANSWERS["github_platform_deployments"] if deployments is None else deployments
         self.calls: list[tuple[str, str, bytes | None]] = []
@@ -54,8 +64,18 @@ class Recorded:
     def __call__(self, method: str, url: str, headers: dict, body: bytes | None) -> tuple[int, bytes]:
         self.calls.append((method, url, body))
         path = url.split(".test", 1)[1]
+        if "/repos/" in path and not self.github_reachable:
+            raise OSError("connection reset")
         if path == "/repos/example-owner/example-repo/releases/latest":
             return 200, json.dumps(ANSWERS["github_release_latest"]).encode()
+        if path == f"/repos/example-owner/example-repo/releases?per_page={cloud_deploy.RELEASE_SCAN_LIMIT}":
+            if self.releases == "unavailable":
+                return 502, b"{}"
+            if self.releases == "unreachable":
+                raise OSError("connection reset")
+            if self.releases == "garbled":
+                return 200, b"<html>busy</html>"
+            return 200, json.dumps(self.releases).encode()
         if path.startswith("/repos/example-owner/example-repo/deployments?"):
             return 200, json.dumps(self.deployments).encode()
         if path.startswith("/repos/example-owner/example-repo/deployments/") and "/statuses?" in path:
@@ -89,6 +109,7 @@ def _run(recorded: Recorded, capsys, *, attested: bool = True, changed: list[str
         changed_paths=lambda base, head: TESTS_AND_DOCS if changed is None else changed,
         sleep=slept.append,
         monotonic=lambda: next(clock),
+        now=lambda: NOW,
     )
     code = cloud_deploy.main(env or ENV, tools)
     out = capsys.readouterr()
@@ -123,7 +144,8 @@ def test_an_attested_release_that_passes_every_gate_sets_the_image_and_waits_for
     assert recorded.puts() == [{"cellImage": IMAGE, "release": "v0.171.0"}]
     assert slept == [15.0, 15.0]
     assert log.splitlines()[-1] == "cloud-deploy: CANARY_ON_TARGET"
-    assert recorded.alerts() == [(cloud_deploy.PLATFORM_NEEDED_ALERT, False), (cloud_deploy.BARRIER_ALERT, False)]
+    assert recorded.alerts() == [*LAG_RESOLVED, (cloud_deploy.PLATFORM_NEEDED_ALERT, False),
+                                 (cloud_deploy.BARRIER_ALERT, False), FAILING_RESOLVED]
 
 
 def test_an_unattested_digest_sets_nothing(capsys) -> None:
@@ -134,6 +156,17 @@ def test_an_unattested_digest_sets_nothing(capsys) -> None:
 
     assert (code, recorded.puts()) == (1, [])
     assert "ATTESTATION_UNVERIFIED" in log
+
+
+def test_a_github_that_cannot_be_reached_ends_the_run_on_a_failing_stop_that_alerts(capsys) -> None:
+    # Catches a network error that crashes the run with a traceback, so no alert says it failed.
+    recorded = Recorded(["substrate_rollout_behind"], github_reachable=False)
+
+    code, log, _ = _run(recorded, capsys)
+
+    assert (code, recorded.puts()) == (1, [])
+    assert log.splitlines()[-1] == "cloud-deploy: GITHUB_API_FAILED unreachable"
+    assert (cloud_deploy.FAILING_ALERT, True) in recorded.alerts()
 
 
 def test_an_image_is_verified_against_the_repository_that_built_it_and_no_other(monkeypatch) -> None:
@@ -245,7 +278,7 @@ def test_a_chart_template_change_sets_nothing_and_raises_the_platform_alert(caps
     code, log, _ = _run(recorded, capsys, changed=["infra/helm/platform/templates/cellctl.yaml", *TESTS_AND_DOCS])
 
     assert (code, recorded.puts()) == (1, [])
-    assert recorded.alerts() == [(cloud_deploy.PLATFORM_NEEDED_ALERT, True)]
+    assert recorded.alerts() == [*LAG_RESOLVED, (cloud_deploy.PLATFORM_NEEDED_ALERT, True), FAILING_RESOLVED]
     assert log.splitlines()[-1] == "cloud-deploy: cloud-release-platform-needed 1 platform input(s) changed"
 
 
@@ -255,7 +288,7 @@ def test_no_platform_deployment_sets_nothing_and_raises_the_platform_alert(capsy
     code, log, _ = _run(recorded, capsys)
 
     assert (code, recorded.puts()) == (1, [])
-    assert recorded.alerts() == [(cloud_deploy.PLATFORM_NEEDED_ALERT, True)]
+    assert recorded.alerts() == [*LAG_RESOLVED, (cloud_deploy.PLATFORM_NEEDED_ALERT, True), FAILING_RESOLVED]
     assert "NO_PLATFORM_DEPLOYMENT" in log
 
 
@@ -280,7 +313,7 @@ def test_a_full_page_of_unsuccessful_deployments_fails_visibly_and_sets_nothing(
 
     assert code == 1
     assert "PLATFORM_DEPLOYMENT_SCAN_LIMIT" in log
-    assert recorded.puts() == [] and recorded.alerts() == []
+    assert recorded.puts() == [] and recorded.alerts() == [*LAG_RESOLVED, (cloud_deploy.FAILING_ALERT, True)]
 
 
 def test_controller_tests_and_markdown_alone_pass_the_platform_gate(capsys) -> None:
@@ -314,8 +347,154 @@ def test_the_fleet_already_on_the_release_succeeds_before_any_gate(capsys) -> No
 
     code, log, _ = _run(recorded, capsys, changed=["infra/helm/platform/values.yaml"])
 
-    assert (code, recorded.puts(), recorded.alerts()) == (0, [], [])
+    assert (code, recorded.puts(), recorded.alerts()) == (0, [], [*LAG_RESOLVED, FAILING_RESOLVED])
     assert log.splitlines()[-1] == "cloud-deploy: CELL_IMAGE_CURRENT"
+
+
+@pytest.mark.parametrize(("rollout", "run", "last_line"), [
+    pytest.param("substrate_rollout_behind", {"changed": ["infra/helm/platform/templates/cellctl.yaml"]},
+                 "cloud-deploy: cloud-release-platform-needed 1 platform input(s) changed", id="platform gate"),
+    pytest.param("substrate_rollout_paused", {}, "cloud-deploy: ROLLOUT_PAUSED UPGRADE_READINESS_TIMEOUT",
+                 id="paused rollout"),
+])
+def test_a_fleet_that_missed_a_release_for_over_two_days_raises_the_alert_whichever_stop_ends_the_run(
+        capsys, rollout: str, run: dict, last_line: str) -> None:
+    # Catches an alert measured from the newest release: it is 2 hours old, as releases come every few
+    # hours, so it would never fire. The fleet missed v0.170.1 49 hours ago and three releases since.
+    recorded = Recorded([rollout], releases="github_releases_fleet_several_behind")
+
+    code, log, _ = _run(recorded, capsys, **run)
+
+    assert code == 1
+    assert (cloud_deploy.RELEASE_BEHIND_ALERT, True) in recorded.alerts()
+    assert "cloud-deploy: RELEASE_BEHIND hours=49" in log
+    assert log.splitlines()[-1] == last_line
+
+
+def test_the_days_before_a_missed_release_counts_as_behind_come_from_the_repository_variable(capsys) -> None:
+    # Catches a threshold that only a code change can move: with 72 hours, the release missed 49
+    # hours ago is not behind yet.
+    recorded = Recorded(["substrate_rollout_behind", "substrate_rollout_canary_on_target"],
+                        releases="github_releases_fleet_several_behind")
+
+    _, log, _ = _run(recorded, capsys, env={**ENV, "CLOUD_DEPLOY_RELEASE_BEHIND_HOURS": "72"})
+
+    assert recorded.alerts()[0] == (cloud_deploy.RELEASE_BEHIND_ALERT, False)
+    assert "RELEASE_BEHIND" not in log
+
+
+@pytest.mark.parametrize("hours", ["0", "-3", "1.5", "two"])
+def test_a_release_behind_threshold_that_is_not_a_positive_whole_number_stops_the_run_at_start(hours: str) -> None:
+    # Catches a zero or negative threshold that would raise the alert on every run, as the poll settings
+    # stop a run on a value they cannot read.
+    with pytest.raises(ValueError, match="CLOUD_DEPLOY_RELEASE_BEHIND_HOURS|invalid literal"):
+        cloud_deploy.Settings.from_env({**ENV, "CLOUD_DEPLOY_RELEASE_BEHIND_HOURS": hours})
+
+
+def test_a_fleet_that_missed_only_a_young_release_is_not_behind_yet(capsys) -> None:
+    # Catches an alert on every release's first hours, before its rollout can finish.
+    recorded = Recorded(["substrate_rollout_behind", "substrate_rollout_canary_on_target"])
+
+    _, log, _ = _run(recorded, capsys)
+
+    assert recorded.alerts()[0] == (cloud_deploy.RELEASE_BEHIND_ALERT, False)
+    assert "RELEASE_BEHIND" not in log
+
+
+@pytest.mark.parametrize(("cell_image", "release"), [
+    pytest.param("ghcr.io/example/other@sha256:" + "4" * 64, "v0.171.0", id="newest release by tag"),
+    pytest.param(IMAGE, "v0.170.0", id="newest release by digest"),
+    pytest.param("ghcr.io/example/other@sha256:" + "4" * 64, "v0.172.0", id="ahead of the newest release"),
+    pytest.param("ghcr.io/example/other@sha256:" + "4" * 64, "not-a-release", id="a tag that is not a release"),
+])
+def test_a_fleet_that_is_current_or_ahead_or_unreadable_is_not_behind(capsys, cell_image: str, release: str) -> None:
+    # Catches an alert on a fleet that has everything the newest release has, with five missed
+    # releases on the page that would make a wrong comparison fire it.
+    recorded = Recorded(["substrate_rollout_behind", "substrate_rollout_canary_on_target"],
+                        releases="github_releases_fleet_several_behind")
+    fleet = recorded.rollout[0]["view"]
+    fleet["cell_image"], fleet["release"] = cell_image, release
+
+    _, log, _ = _run(recorded, capsys)
+
+    assert recorded.alerts()[0] == (cloud_deploy.RELEASE_BEHIND_ALERT, False)
+    assert "RELEASE_BEHIND" not in log
+
+
+def test_a_fleet_release_that_substrate_does_not_report_sends_no_lag_transition_and_says_so(capsys) -> None:
+    # Catches an unknown fleet release read as current, which would resolve an alert no run could raise.
+    recorded = Recorded(["substrate_rollout_behind", "substrate_rollout_canary_on_target"],
+                        releases="github_releases_fleet_several_behind")
+    recorded.rollout[0]["view"]["release"] = None
+
+    code, log, _ = _run(recorded, capsys)
+
+    assert code == 0
+    assert cloud_deploy.RELEASE_BEHIND_ALERT not in [alert for alert, _ in recorded.alerts()]
+    assert log.splitlines().count("cloud-deploy: RELEASE_BEHIND_UNKNOWN") == 1
+
+
+@pytest.mark.parametrize("published_at", ["not a time", None, "2026-11-08T10:00:00"],
+                         ids=["unparseable", "missing", "no zone"])
+def test_a_publish_time_that_cannot_be_read_sends_no_lag_transition_and_the_run_goes_on(
+        capsys, published_at: str | None) -> None:
+    # Catches an unknown publish time read as "not behind", and a GitHub oddity that blocks every rollout.
+    recorded = Recorded(["substrate_rollout_behind", "substrate_rollout_canary_on_target"])
+    recorded.releases[0]["published_at"] = published_at
+
+    code, log, _ = _run(recorded, capsys)
+
+    assert code == 0
+    assert cloud_deploy.RELEASE_BEHIND_ALERT not in [alert for alert, _ in recorded.alerts()]
+    assert "cloud-deploy: RELEASE_TIME_UNREADABLE" in log
+    assert log.splitlines()[-1] == "cloud-deploy: CANARY_ON_TARGET"
+
+
+@pytest.mark.parametrize(("run", "failing"), [
+    pytest.param({"attested": False}, True, id="unattested image"),
+    pytest.param({"changed": ["infra/helm/platform/templates/cellctl.yaml"]}, False, id="platform gate has its own alert"),
+    pytest.param({}, False, id="run ends ok"),
+])
+def test_a_run_that_ends_on_a_failing_stop_without_an_alert_of_its_own_sends_the_failing_alert(
+        capsys, run: dict, failing: bool) -> None:
+    # Catches a daily run that goes red for a cause no alert names, and an alert that stays active
+    # after the cause is fixed or after another alert took it over.
+    recorded = Recorded(["substrate_rollout_behind", "substrate_rollout_canary_on_target"])
+
+    _run(recorded, capsys, **run)
+
+    assert recorded.alerts()[-1] == (cloud_deploy.FAILING_ALERT, failing)
+
+
+@pytest.mark.parametrize(("rollout", "active"), [("substrate_rollout_cell_pinned", True),
+                                                 ("substrate_rollout_behind", False)])
+def test_cells_pinned_off_the_fleet_image_raise_the_alert_and_none_resolve_it(
+        capsys, rollout: str, active: bool) -> None:
+    # Catches a cell that stays on an old image, outside every rollout, with no one told.
+    recorded = Recorded([rollout, "substrate_rollout_canary_on_target"])
+
+    _, log, _ = _run(recorded, capsys)
+
+    assert (cloud_deploy.CELL_PINNED_ALERT, active) in recorded.alerts()
+    assert ("cloud-deploy: CELLS_PINNED 1" in log) is active
+    assert "PINNED_UNKNOWN" not in log
+
+
+@pytest.mark.parametrize("count", ["absent", -1, True], ids=["absent", "negative", "boolean"])
+def test_a_pin_count_that_substrate_does_not_report_sends_nothing_and_says_so(capsys, count: object) -> None:
+    # Catches Substrate before the companion change reading as "no pinned cells", which would
+    # resolve an alert that no run could have raised.
+    recorded = Recorded(["substrate_rollout_behind", "substrate_rollout_canary_on_target"])
+    cells = recorded.rollout[0]["view"]["cells"]
+    if count == "absent":
+        del cells["pinned_off_fleet"]
+    else:
+        cells["pinned_off_fleet"] = count
+
+    _, log, _ = _run(recorded, capsys)
+
+    assert cloud_deploy.CELL_PINNED_ALERT not in [alert for alert, _ in recorded.alerts()]
+    assert log.splitlines().count("cloud-deploy: PINNED_UNKNOWN") == 1
 
 
 def test_without_its_deploy_token_the_workflow_does_nothing(capsys) -> None:
@@ -342,14 +521,15 @@ def test_the_gate_globs_select_the_chart_and_controller_build_inputs() -> None:
 
 def test_the_release_tag_run_dispatches_the_workflow_on_main_only() -> None:
     # Catches a release that publishes and never deploys (v0.172.0-v0.174.0: the tag
-    # run's completion fired no workflow_run), and a deploy token that a branch can reach.
+    # run's completion fired no workflow_run), a deploy token that a branch can reach, and a
+    # dropped daily schedule, which leaves a fleet behind with nothing to re-check it.
     workflow = yaml.safe_load((ROOT / ".github/workflows/cloud-deploy.yml").read_text(encoding="utf-8"))
     triggers = workflow[True]  # YAML 1.1 reads the `on` key as true.
     (job,) = workflow["jobs"].values()
     release = yaml.safe_load((ROOT / ".github/workflows/release-please.yml").read_text(encoding="utf-8"))
     dispatch = release["jobs"]["deploy-cells"]
 
-    assert triggers == {"workflow_dispatch": None}
+    assert set(triggers) == {"workflow_dispatch", "schedule"}  # No trigger that a branch or pull request reaches.
     assert job["if"] == "github.ref == 'refs/heads/main'"
     assert job["environment"] == "cloud-deploy"
     assert workflow["concurrency"] == {"group": "cloud-deploy", "cancel-in-progress": False}
@@ -372,7 +552,8 @@ def test_every_release_and_rollout_alert_has_a_runbook_step() -> None:
     rows = {line.split("|")[1].strip().strip("`") for line in runbook.splitlines() if line.startswith("| `")}
 
     assert len(rollout_alerts) == 4
-    for alert in (cloud_deploy.PLATFORM_NEEDED_ALERT, cloud_deploy.BARRIER_ALERT, *rollout_alerts):
+    for alert in (cloud_deploy.PLATFORM_NEEDED_ALERT, cloud_deploy.BARRIER_ALERT, cloud_deploy.RELEASE_BEHIND_ALERT,
+                  cloud_deploy.CELL_PINNED_ALERT, cloud_deploy.FAILING_ALERT, *rollout_alerts):
         assert alert in rows, alert
 
 
@@ -397,3 +578,37 @@ def test_a_changed_chart_template_with_a_non_ascii_name_still_reaches_the_platfo
 
     assert paths == ["infra/helm/platform/templates/café.yaml"]
     assert cloud_deploy.platform_inputs(paths, ["infra/helm/platform/**"], [])
+
+
+@pytest.mark.parametrize("releases", ["unavailable", "garbled", "unreachable"])
+def test_a_release_list_that_cannot_be_read_still_lets_the_rollout_go_on(capsys, releases) -> None:
+    # Catches a read that only feeds the lag alert stopping a deploy for a day, whether it fails or answers 200 with no JSON.
+    recorded = Recorded(["substrate_rollout_behind", "substrate_rollout_canary_on_target"], releases=releases)
+
+    code, log, _ = _run(recorded, capsys)
+
+    assert code == 0
+    assert recorded.puts()
+    assert "cloud-deploy: RELEASE_BEHIND_UNKNOWN" in log
+    assert log.splitlines()[-1] == "cloud-deploy: CANARY_ON_TARGET"
+
+
+def test_the_run_that_sets_the_newest_release_resolves_the_lag_it_reported(capsys) -> None:
+    # Catches an "active" email at the moment the fix lands, with "resolved" a day later.
+    recorded = Recorded(["substrate_rollout_behind", "substrate_rollout_canary_on_target"],
+                        releases="github_releases_fleet_several_behind")
+
+    code, _, _ = _run(recorded, capsys)
+
+    lag = [active for alert, active in recorded.alerts() if alert == cloud_deploy.RELEASE_BEHIND_ALERT]
+    assert code == 0
+    assert lag == [True, False]
+
+
+def test_a_paused_rollout_leaves_the_failing_alert_to_cellctls_pause_alert(capsys) -> None:
+    # Catches a deliberate hold emailing twice a day for one cause: cellctl already raises cloud-rollout-paused.
+    recorded = Recorded(["substrate_rollout_paused"])
+
+    _run(recorded, capsys)
+
+    assert recorded.alerts()[-1] == (cloud_deploy.FAILING_ALERT, False)

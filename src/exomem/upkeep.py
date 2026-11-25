@@ -51,6 +51,7 @@ FAMILY_ORDER: tuple[str, ...] = (
     dreamer_families.ALIAS_FAMILY,
     dreamer_families.PROFILE_FAMILY,
     dreamer_families.CONVENTION_FAMILY,
+    dreamer_families.DUPLICATE_FAMILY,
 )
 
 #: Closed per-kind labels. UI strings, not matching lists.
@@ -63,6 +64,7 @@ LABELS: dict[str, str] = {
     dreamer_families.FOLD_KIND: "Conversation recaps name this page since it changed",
     dreamer_families.PROFILE_KIND: "A linked page has no summary",
     dreamer_families.CURATION_KIND: "A profile may be out of date",
+    dreamer_families.DUPLICATE_KIND: "A record and a page state the same fact",
 }
 
 _LINK_WHY: dict[str, str] = {
@@ -175,6 +177,19 @@ def _why(row: dict[str, Any], visible_origins: int) -> str:
         if row.get("reason_code") == "learned_alias_referenced":
             return f'{notes} "{spelling}", a name this page learned that links cannot resolve'
         return f'{notes} "{spelling}", which resolves to no page and matches this page\'s name'
+    if kind == dreamer_families.DUPLICATE_KIND:
+        if "row_value" not in measures:
+            return "a record's field repeats a statement of a page it links"
+        why = (
+            f'the record {measures.get("row_ref") or ""} ("{measures.get("label") or ""}") holds '
+            f'"{measures["row_value"]}" in {measures.get("field") or ""}, '
+            f'and a unit of this page ({measures.get("unit_ref") or ""}) says "{measures.get("unit_text") or ""}"; '
+            f'the proposed relation between the record and that unit is `{measures.get("relation") or ""}`'
+        )
+        if measures.get("rows_complete") is False:
+            # The pass stopped at its bound, so this item is not the page's whole answer.
+            why += f"; only the first {measures.get('rows_compared')} records that cite this page were compared"
+        return why
     if kind == dreamer_families.TAG_KIND:
         return f"tag spellings in use: {measures.get('why') or ''}"
     if kind == dreamer_families.CATEGORY_KIND:

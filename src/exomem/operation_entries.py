@@ -371,6 +371,8 @@ READ_PLANS = "read_plans"
 CHANGE_PLANS = "change_plans"
 
 _RECORD_IMPORT_FIELDS = ("collection", "import_request")
+#: The arguments that each select the one row `history` reads; a call gives exactly one of them.
+HISTORY_SELECTORS = ("item_key", "item_id", "natural_key")
 _RECORD_QUERY_FIELDS = (
     "collection", "view", "filters", "columns", "sort_by", "descending", "limit",
     "aggregate", "date_from", "date_to", "date_column", "expand_children", "expand_child",
@@ -422,8 +424,8 @@ RECORDS = CommandOperations(
         ),
         _entry("query", READ_RECORDS, _RECORD_QUERY_FIELDS, ("collection",), effect="read"),
         _entry(
-            "history", READ_RECORDS, ("collection", "item_key", "limit", "continuation"),
-            ("collection", "item_key"), effect="read",
+            "history", READ_RECORDS, ("collection", *HISTORY_SELECTORS, "limit", "continuation"),
+            ("collection",), effect="read",
         ),
         _entry(
             "import", READ_RECORDS, _RECORD_IMPORT_FIELDS, _RECORD_IMPORT_FIELDS,

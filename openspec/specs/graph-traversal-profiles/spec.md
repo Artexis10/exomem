@@ -7,7 +7,8 @@ Provide deterministic, read-only traversal profiles over the epistemic graph: im
 
 ### Requirement: Built-in deterministic traversal profiles
 The system SHALL provide immutable built-in `epistemic`, `provenance`, `causal`,
-`decision`, and `all` profiles. Each profile SHALL define relation families,
+`decision`, and `all` profiles, shipped as a core vocabulary pack rather than
+defined in code. Each profile SHALL define relation families,
 edge directions, extension-parent expansion, deterministic priority, and bounded
 defaults. Omitting a profile SHALL preserve current broad context behavior by
 using `all`.

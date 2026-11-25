@@ -26,7 +26,7 @@ and `mcp.json`, complete canonical skills, public assets, one deterministic ZIP
 per edition, and `release.json`. Check regenerates into temporary storage and rejects drift,
 missing/extra files and symlinks. A valid bundle is not proof of native behaviour.
 
-Claude has two editions. The directory edition, `generated/claude`, contains
+Claude has three editions. The directory edition, `generated/claude`, contains
 skills, the remote MCP connection, the icon, README and LICENSE. The Claude
 directory refuses command hooks and non-text files from publishers that are not
 Verified organizations, so the build fails if a hook or another file type enters
@@ -42,6 +42,32 @@ service credentials or directly inject a compiler packet. Exec-form registration
 invoke the canonical Python scripts directly and require a real `python3`
 executable on a supported, normally trusted execution surface. They do not
 run in Claude Chat. Skills remain the same portable operating contract.
+
+The connector edition, `generated/claude-connector-hooks`, is listed in the
+repository marketplace as `evermatter-self-hosted`. It carries the same hooks and
+skills as the hooked edition and bundles no MCP server. Install it on an
+account that already connects Evermatter, for example a self-hosted server
+added as a connector. Its hooks then activate that existing connection. The
+hooked edition would add a second server that points at Evermatter Cloud.
+
+The server edition, `claude-server`, is a template that ships inside the Python
+package at `src/exomem/_plugins/claude-server.zip`, outside the marketplace. It
+carries the hooked edition's hooks and skills and a server at the reserved origin
+`https://server.invalid`. A self-hosted server with `EXOMEM_BASE_URL` serves it at
+`/claude-plugin.zip`, with its own origin in place of the placeholder and a plugin
+name derived from its host, so its user installs everything in one upload.
+The template keeps the release placeholder in its skills and manifest, and the
+server fills in its installed release, so a release cut leaves it unchanged.
+`scripts/cloud-plugin.py check` compares the packaged template with a fresh build.
+
+The two marketplace editions name themselves in `plugins/cloud/definition.json`
+under `edition_identities`. The hooked edition shows as "Evermatter" and the
+connector edition as "Evermatter (self-hosted)". Each description opens with the
+account it serves, so a person can choose from the listing alone. Claude
+manifests carry the short `claude_summary` after that lead; the readme keeps the
+full description. The build refuses a Claude manifest whose description exceeds
+500 characters, which claude.ai's plugin upload rejects, or whose name breaks the
+directory's lowercase-hyphen rule.
 
 Hook installation health does not prove that the client loaded or executed the
 registration. Native acceptance must observe a normally trusted fresh session,

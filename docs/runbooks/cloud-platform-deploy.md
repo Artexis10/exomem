@@ -714,10 +714,35 @@ is for a stopped self-hosted server; this runbook has no Cloud procedure for it.
 |---|---|---|
 | `cloud-release-platform-needed` | The release changes the chart or cellctl since the platform's release, or no platform Deployment exists | Upgrade the platform to the release ("Render and upgrade the release"), then "Record the platform Deployment". The next run resolves the alert |
 | `cloud-release-barrier` | A barrier entry at or below the release is not crossed. The workflow log names its ID | Do the entry's runbook step (`runbook` in `infra/contracts/upgrade-barriers-v1.json`), upgrade the platform, and record the Deployment with the ID in `CROSSED` |
+| `cloud-release-behind` | The fleet has run an older release for longer than `CLOUD_DEPLOY_RELEASE_BEHIND_HOURS` (default 48), counted from the oldest release that it lacks. The daily workflow log shows `RELEASE_BEHIND hours=<n>` | Resolve the alert that names the cause: `cloud-release-platform-needed`, `cloud-release-barrier` or `cloud-rollout-paused`. With none active, read the code that the newest `cloud-deploy` run prints. The next run resolves the alert. A run that prints `RELEASE_BEHIND_UNKNOWN` sends no transition: the rollout view had no fleet release, or the release list could not be read |
+| `cloud-cell-pinned` | A running or read-only cell has its own image, and it differs from the fleet's `cell_image`. The log shows `CELLS_PINNED <count>` | "Find the cells pinned off the fleet image", then clear each cell's own image. The next run resolves the alert |
+| `cloud-deploy-failing` | The newest `cloud-deploy` run ended on a failing code that has no alert of its own, such as `ATTESTATION_UNVERIFIED`, `CELL_IMAGE_NOT_PUBLISHED`, `GITHUB_API_FAILED` or a `SUBSTRATE_` code. The run's log shows the code | Read the code in the newest `cloud-deploy` run's log and fix its cause. The next run resolves the alert |
 | `cloud-rollout-paused` | The rollout is paused, for any error code | "Read and clear a paused rollout". For `UPGRADE_FORWARD_ONLY`, "End a forward-only hold" |
 | `cloud-rollout-held` | A cell's upgrade or restore hold is older than `alerts.rollout_held_warn_seconds` | Find the cell in cellctl's log (`grep cloud-rollout-held`). Check its pod and its backup or restore Job with `kubectl -n exo-cell-<cell id> get pods,jobs` |
 | `cloud-rollout-stalled` | A cell has stayed behind its target for longer than `alerts.rollout_stalled_warn_seconds` | Find the cell in cellctl's log. A busy cell rolls only in the last `cellctl.upgradeWindow.forceMinutes` of its window: raise that value, or set `cellctl.upgradeWindow.enabled: false` for one platform upgrade |
 | `cloud-rollout-canary-waiting` | The canary has stayed behind its target for longer than `alerts.canary_wait_warn_seconds` | Check the canary's pod and readiness. A canary that is stopped or refused holds every tenant |
+
+### Find the cells pinned off the fleet image
+
+The rollout view counts these cells but does not name them.
+
+Load `EXOMEM_ADMIN_TOKEN`, `EXOMEM_SUBSTRATE_URL` and `EXOMEM_CELLCTL_DSN` into the shell for these steps only.
+
+1. Read the fleet's image from the rollout view:
+
+   ```bash
+   FLEET_IMAGE=$(curl --fail-with-body -sS -H "Authorization: Bearer $EXOMEM_ADMIN_TOKEN" "$EXOMEM_SUBSTRATE_URL/api/exomem/admin/cloud-release/rollout" | jq -r .view.cell_image)
+   ```
+
+2. List each running or read-only cell whose own image is another:
+
+   ```bash
+   psql "$EXOMEM_CELLCTL_DSN" --command "SELECT cell_id, desired_image FROM exomem_cloud_cells WHERE desired_state IN ('running','read_only') AND desired_image IS NOT NULL AND desired_image <> '$FLEET_IMAGE' ORDER BY cell_id"
+   ```
+
+3. For each cell, set `CELL_ID` and clear its own image with step 4 of "End a forward-only hold". A cell whose own image stays set keeps the alert active.
+
+Expected result: step 2 lists no rows, and `cloud-cell-pinned` resolves on the next `cloud-deploy` run.
 
 ### Rotate a key under upgrade windows
 

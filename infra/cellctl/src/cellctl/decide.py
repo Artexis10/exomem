@@ -17,6 +17,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from .backup_source import MAX_FIGURE
 from .backup_window import DEFAULT_BACKUP_WINDOW, within_backup_window
 from .barriers import Barrier
 from .capacity import GIB, pool_takes
@@ -44,6 +45,7 @@ from .state import (
     CellRow,
     ClusterObservation,
     Decision,
+    MediaStorage,
     RolloutRow,
     row_hold_kind,
 )
@@ -96,6 +98,10 @@ class ReconcileConfig:
     # up hourly. Under an hour, so its newest backup is never more than an
     # hour old plus the time one backup takes (RPO <= 1 h).
     snapshot_backup_interval: timedelta = timedelta(minutes=55)
+    # add-cloud-media-store D10: the oldest storage record that a backup report may carry and still publish its
+    # figures. The cell rewrites it every quarter hour (media_storage_record.REFRESH_SECONDS), and a backup takes at
+    # most backup_deadline, so a record older than this means the cell stopped writing it. Its figures are unknown.
+    media_storage_max_age: timedelta = timedelta(hours=1)
     # D8: the nightly backup window, as [start_hour, end_hour) UTC.
     backup_window: tuple[int, int] = DEFAULT_BACKUP_WINDOW
     # D8: at most this many backup holds run at once across the fleet.
@@ -356,6 +362,45 @@ def usage_updates(used: int | None, total: int | None, observed_at: datetime | N
     if used is None or total is None or observed_at is None or not 0 <= used <= total or total == 0:
         return {}
     return {"used_bytes": used, "filesystem_bytes": total, "usage_observed_at": observed_at}
+
+
+def media_usage_updates(
+    *,
+    served: bool,
+    allowance_bytes: object,
+    report: MediaStorage | None,
+    backup_at: datetime | None,
+    now: datetime,
+    max_age: timedelta,
+) -> dict[str, object]:
+    """add-cloud-media-store D10 task 4.9: the four media usage columns for one backup report, written together.
+
+    A cell whose store the edge does not serve writes all four NULL: it has no media store to report. A served cell
+    writes its allowance, the time of its reading and each figure that its record gives. A figure is NULL, which Home
+    shows as unknown and never 0, when the Job reported no readable record, the record was written more than `max_age`
+    from now (the cell stopped writing it), or the cell itself could not read the figure. With no current record the
+    time is the backup's: it states when cellctl found no figure. Otherwise it is the cell's own, never the backup's:
+    the record's write time, or for a media figure the older of that and the owner census behind it, which offload
+    recorded and which a quiet cell may not have renewed for days; a figure that names no census time is NULL. The
+    allowance is NULL when the policy sets none or one that Substrate's column cannot hold. A served cell's write
+    waits for a backup that has a time to state.
+    """
+    if not served:
+        return {"vault_used_bytes": None, "media_used_bytes": None, "media_allowance_bytes": None,
+                "media_usage_observed_at": None}
+    if backup_at is None:
+        return {}
+    allowance = allowance_bytes if type(allowance_bytes) is int and 0 <= allowance_bytes <= MAX_FIGURE else None
+    if report is None or abs(now - report.captured_at) > max_age:
+        return {"vault_used_bytes": None, "media_used_bytes": None, "media_allowance_bytes": allowance,
+                "media_usage_observed_at": backup_at}
+    census = report.media_observed_at if report.media_used_bytes is not None else None
+    return {
+        "vault_used_bytes": report.vault_bytes,
+        "media_used_bytes": None if census is None else report.media_used_bytes,
+        "media_allowance_bytes": allowance,
+        "media_usage_observed_at": report.captured_at if census is None else min(report.captured_at, census),
+    }
 
 
 def nightly_backup_due(

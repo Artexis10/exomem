@@ -521,6 +521,34 @@ def test_an_unreadable_media_census_counts_as_no_report_and_the_backup_still_cou
             observation.backup_job_total_bytes) == (snapshot, 900, 1000)
 
 
+@pytest.mark.parametrize("storage", [
+    None,
+    "not json",
+    "[]",
+    '{"captured_at":"2026-01-01T00:04:00","vault_bytes":1,"media_used_bytes":2,"media_observed_at":null}',
+    '{"captured_at":"2026-01-01T00:04:00+00:00","vault_bytes":-1,"media_used_bytes":2,"media_observed_at":null}',
+    '{"captured_at":"2026-01-01T00:04:00+00:00","vault_bytes":true,"media_used_bytes":2,"media_observed_at":null}',
+    '{"captured_at":"2026-01-01T00:04:00+00:00","vault_bytes":1,"media_used_bytes":2}',
+    '{"captured_at":"2026-01-01T00:04:00+00:00","vault_bytes":1,"media_used_bytes":2,"media_observed_at":"2026-01-01T00:00:00"}',
+], ids=["absent", "not JSON", "not an object", "a time with no zone", "a negative figure", "a boolean figure",
+        "no census time key", "a census time with no zone"])
+def test_an_unreadable_storage_record_counts_as_no_report_and_the_census_and_backup_still_count(
+        storage: str | None) -> None:
+    # A line that cellctl cannot read, or none from an image that predates it, must never publish a figure,
+    # and must not cost the backup its snapshot or the turned-off cell its census.
+    current_backup = hold_job_name("cell-backup", CURRENT_HOLD)
+    snapshot = "a" * 64
+    lines = [f"{snapshot} 900 1000", "3 4096 2026-01-01T00:04:00+00:00", *([] if storage is None else [storage])]
+    pod = _job_pod(current_backup, snapshot_id="\n".join(lines))
+
+    observation = _client(hold_started_at=CURRENT_HOLD, jobs={current_backup: _job(succeeded=True)},
+                          pods=[pod]).observe(CELL_ID, NAMESPACE)
+
+    assert observation.backup_job_media_storage is None
+    assert observation.backup_job_media_census is not None and observation.backup_job_media_census.evicted == 3
+    assert (observation.backup_job_snapshot_id, observation.backup_job_used_bytes) == (snapshot, 900)
+
+
 def test_the_current_holds_failed_backup_is_observed() -> None:
     jobs = {
         hold_job_name("cell-backup", EARLIER_HOLD): _job(succeeded=True),

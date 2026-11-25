@@ -1,6 +1,7 @@
 # cellctl, the Evermatter Cloud cell controller (design D4).
 #
-# Built from infra/cellctl as the context. The runtime runs as UID 1000 with
+# Built from infra/cellctl as the context, with the repository root as the named
+# `repository` context for the licence terms. The runtime runs as UID 1000 with
 # a read-only root filesystem (templates/cellctl.yaml): nothing is written at
 # runtime except the heartbeat under the /tmp emptyDir, and bytecode is
 # compiled at build time. The chart's exec probes call `python3`, which the
@@ -25,6 +26,10 @@ COPY src/cellctl /opt/cellctl/lib/python3.12/site-packages/cellctl
 RUN /opt/cellctl/bin/python3 -m compileall -q /opt/cellctl/lib/python3.12/site-packages/cellctl
 
 FROM ${PYTHON_IMAGE}
+# The image ships only this repository's FSL-1.1-ALv2 code (docs/licensing/licence-change.md),
+# with the licence terms. Every build passes the repository root as the `repository` context.
+LABEL org.opencontainers.image.licenses="FSL-1.1-ALv2"
+COPY --from=repository LICENSE /LICENSE
 COPY --from=build /opt/cellctl /opt/cellctl
 ENV PATH=/opt/cellctl/bin:${PATH} \
     PYTHONDONTWRITEBYTECODE=1 \

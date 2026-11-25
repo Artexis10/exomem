@@ -8,9 +8,13 @@
     "description": "Evermatter (formerly Exomem): governed long-term memory for AI agents, over a markdown vault you own.",
     "version": "1.0.0"
   },
+  "renames": {
+    "exomem": "evermatter",
+    "evermatter-hooks": "evermatter-self-hosted"
+  },
   "plugins": [
     {
-      "name": "exomem",
+      "name": "evermatter",
       "source": "./plugins/claude-code",
       "description": "Evermatter (formerly Exomem): MCP server, ten skills, and capture/retrieve hooks in one install. Raw sources stay immutable, conclusions carry provenance, nothing is deleted - it is superseded.",
       "category": "knowledge",
@@ -26,6 +30,11 @@
     {
       "name": "exomem-cloud",
       "source": "./plugins/cloud/generated/claude-hooks",
+      "category": "knowledge"
+    },
+    {
+      "name": "evermatter-self-hosted",
+      "source": "./plugins/cloud/generated/claude-connector-hooks",
       "category": "knowledge"
     }
   ]

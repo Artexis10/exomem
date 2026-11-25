@@ -291,8 +291,9 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
             "reserved or punctuation-bearing bracket labels outside category grammar",
         ],
         "relation_rule": (
-            "Compact units do not carry typed unit relations; use a canonical note-level "
-            "relation or the rich form."
+            "Compact units do not carry typed unit relations; a provenance link, such as "
+            "the Source it came from, is recorded on the page instead, and any "
+            "other relation uses a canonical note-level relation or the rich form."
         ),
     }
     rich = {

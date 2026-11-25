@@ -390,6 +390,7 @@ _LEXICAL_REPAIR_RESULTS = frozenset(
         "published",
         "targeted",
         "advanced",
+        "deferred",
         "delta_unavailable",
         "identity_changed",
         "source_changed",

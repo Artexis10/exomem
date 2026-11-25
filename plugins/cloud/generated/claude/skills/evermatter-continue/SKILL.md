@@ -2,7 +2,7 @@
 name: evermatter-continue
 description: Resume prior project or session context from Evermatter when the user wants to continue, pick something back up, or remember what was happening on a topic. Part of Evermatter, formerly Exomem.
 metadata:
-  skill_contract: b6b13804a1d4b1ad37c99f66a475bb63843df51ea116dba9abf1f5c9c12057e7
+  skill_contract: 9f788f969e6a2e54b1bdb2aa41766474467f885b70388d9ba964cdfd10bc5443
   version: "0.1.0"
 ---
 
@@ -100,7 +100,7 @@ Resuming reads Planning; it never moves it. Route explicit user intent to Planni
 ## Mistakes to avoid
 Do not invent prior context from memory. Do not treat a scoped miss as absence. Do not dump long note bodies when a state brief is enough.
 
-<!-- exomem-semantic-authoring:v12 sha256:531316a2be37ad20214f80f7a0831929be57f46105228e019e292d6ac92aafd9 -->
+<!-- exomem-semantic-authoring:v12 sha256:26c49ad6461355e0e9d3441c6130f290676aada986db30c37c2f97278c54fc47 -->
 ## Semantic authoring contract
 
 Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material.
@@ -120,7 +120,7 @@ Compact grammar: `- [category] content #tags (context) ^anchor`. Parse valid com
 - Compact tags: zero or more optional secondary retrieval labels; tags do not replace the primary category or governed kind. Write `#slug`. Use 1-64 Unicode letters or digits, `_`, `-`, or `/`; begin with a letter or digit; do not use empty path segments or a trailing `/`. Use one contiguous trailing run after content and before optional context and anchor.
 - Compact context: one optional authored qualifier for the observation. Write `(<context>)`. Use one balanced, unescaped parenthesized suffix preceded by whitespace.
 - Compact anchor: one optional stable authored unit identifier. Write `^anchor`. Use 1-64 ASCII letters, digits, or hyphens and begin and end alphanumeric. Place it at the end of the line.
-- Compact exclusions: observation-shaped rows inside fenced code blocks; task labels `[ ]`, `[x]`, `[X]`, and `[-]`; reserved or punctuation-bearing bracket labels outside category grammar. Compact units do not carry typed unit relations; use a canonical note-level relation or the rich form.
+- Compact exclusions: observation-shaped rows inside fenced code blocks; task labels `[ ]`, `[x]`, `[X]`, and `[-]`; reserved or punctuation-bearing bracket labels outside category grammar. Compact units do not carry typed unit relations; a provenance link, such as the Source it came from, is recorded on the page instead, and any other relation uses a canonical note-level relation or the rich form.
 - Rich: write `## <Governed Kind>` with optional leading metadata `- category: <open category>`, `- id: <stable-id>`, `- tags: <comma-separated tags>`, `- context: <context>`, `- relations: <relation-type>: [[Target]]`, `- verdict: <epistemic outcome>`, `- check_by: <ISO revisit date>`, `- as_of: <ISO start date>`, `- until: <ISO last valid date>`. Metadata rows are optional and leading; the canonical writer emits category, id, tags, context, relations, verdict, check_by, as_of and until; category defaults to the governed kind when omitted. Accepted metadata order is flexible while rows remain leading. After optional leading metadata, add a blank line and a substantive Markdown body. Typed unit relations require the rich form. A `#anchor` target addresses a unit. Entity pages admit the same unit writers as compiled pages, and a same-page `supersedes: [[#anchor]]` edge records a claim-level supersession.
 - Epistemic corrections: Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request read_instructions with profile=full for history guidance. Keep an anchored unit's identity when its wording changes. Preserve a false historical proposition and author its verdict; add a distinct corrective unit when useful. Refutation and contradiction do not imply supersession or reduce rank. The semantic writer retains prior interpretations atomically. Read revision_history with read_page(part=history), optionally for unit_ref, using history_limit and history_continuation in options. When it carries lookup=stale, repeat the same call shortly instead of reading absence or paging on. Existing history remains the page's operation log. Entity pages take the same unit writers, and other legacy pages use their existing edit owner; Records use guarded row corrections and history. Corrections need no dated child, special user nudge, or confirmation beyond the active engagement policy.
 - Rich boundary: A heading at level N owns content until the next non-fenced heading at level N or shallower; deeper headings remain in its body. `empty_rich_unit` means a recognized rich heading has no substantive body; Add substantive body content or remove the empty recognized heading.

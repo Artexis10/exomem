@@ -919,6 +919,11 @@ def op_bootstrap(
         from . import activity as activity_module
 
         return activity_module.payload(vault_root)
+    if section == bootstrap_core_module.WHATS_NEW_SECTION:
+        # The release notes of the running image for Home: no vault content, no reference payload.
+        from . import release_notes as release_notes_module
+
+        return release_notes_module.payload()
 
     session_requested = profile == "session"
     session_unavailable: str | None = None
@@ -9362,10 +9367,7 @@ def op_observe_memory(
             )
             if refusal is not None:
                 raise refusal from error
-        message = f"{error.code}: {error.reason}"
-        if error.remediation:
-            message += f" Remediation: {error.remediation}"
-        raise ValueError(message) from error
+        raise error.leaf_error() from error
 
 
 def op_replace_memory(
@@ -9489,6 +9491,14 @@ def op_settle_source_capture(
 ) -> dict:
     """Close local capture admission or observe its retained receipt under the canonical boundary."""
     return capture_attempts_module.settle(vault_root, reservation, retire_owned=retire_owned)
+
+
+#: The step a committed save_source reply asks for when the saved file could be the current state
+#: of something a note already states. The projection merges it with the capture-sweep ask.
+_SAVE_SOURCE_PRESENTED_NEXT = (
+    "If the person presents this file as the current state, such as an applied or final export, "
+    "update the note's current statement now and cite this Source; keep the earlier value as dated history."
+)
 
 
 def op_capture_source(
@@ -9726,6 +9736,10 @@ def op_capture_source(
                 )
             except ValueError as exc:
                 out["compile_guidance"] = {"available": False, "error": str(exc)}
+    # A settled replay (`mutated: false`) wrote nothing, so only a committed save asks for the
+    # presentation step. A custody_only Source is safekeeping, not material a note cites.
+    if out.get("mutated") is not False and custody_only is not True:
+        out["next_action"] = _SAVE_SOURCE_PRESENTED_NEXT
     return out
 
 
@@ -14977,6 +14991,7 @@ def op_record_memory(
     automatic: bool | None = None,
     new_collection: dict[str, Any] | None = None,
     new_fields: list[str] | None = None,
+    natural_key: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Read or update observed state; Planning uses plan_memory; originals use Sources/Evidence.
 
@@ -15003,7 +15018,8 @@ def op_record_memory(
         source: bulk_upsert preserved Source/Evidence path; required once for the batch or on each row.
         on_reject: bulk_upsert: abort writes nothing; skip commits the rest.
         query: v1 query object; grammar via describe.
-        item_id: Update or retract: the row `id` a query returned; stands for item_key and both guards, read under the writer lease.
+        item_id: Update or retract: the row `id` a query returned; stands for item_key and both guards, read under the writer lease. History: names the row at any version.
+        natural_key: History only: the natural-key field values, e.g. {"asset_tag": "L-17"}; finds a retracted row too. History takes exactly one of item_key, item_id, natural_key.
         automatic: Create only: true for a minimal collection you start under silent proactive_capture; refused with the failed bound named.
         new_collection: Append only, {"natural_key": [item fields]}: a title that names no collection is created from the row under the automatic bounds, then the row is appended.
         new_fields: Append or update: names in item/changes the collection does not declare; under silent proactive_capture they are added, typed from the values, then the row is written.
@@ -15052,6 +15068,7 @@ def op_record_memory(
         automatic=automatic,
         new_collection=new_collection,
         new_fields=new_fields,
+        natural_key=natural_key,
     )
     # An item write answers `outcome: committed`; a bulk upsert answers `committed: true`. An import starts a job whose
     # batches commit later, outside this call, so the write log does not attribute them (method-use-evidence spec).
@@ -15713,6 +15730,18 @@ def busy_intake_applies(command: Command, arguments: Mapping[str, Any]) -> bool:
     if operations.selector is not None:
         action = _resolved_invocation_selector(command, dict(arguments), operations.selector)
     return operations.queues_when_busy(action, arguments)
+
+
+def refusal_before_queueing(command: Command, arguments: Mapping[str, Any]) -> ValueError | None:
+    """The refusal that a save's arguments alone are certain to get, or None.
+
+    A queued receipt promises a save, and a replay that the arguments already condemn would
+    fail only later. The check reads no page; `observe_memory` is the one command that has it.
+    """
+    if command.name != "observe_memory":
+        return None
+    error = observe_memory_module.argument_refusal(arguments)
+    return None if error is None else error.leaf_error()
 
 
 _MCRC = frozenset({"mcp", "rest", "cli"})

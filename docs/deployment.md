@@ -480,6 +480,8 @@ service name, so it keeps working across the rename. Verify with
 
 ## 7. Add to claude.ai
 
+To install everything in one upload, open `https://kb.example.com/claude-plugin.zip`, upload the file as a plugin in Claude, then connect Evermatter from the plugin's **Connectors** tab. The plugin carries the connection, every skill and the hooks. To add only the connection:
+
 1. claude.ai → Settings → Connectors → **Add custom connector**
 2. **Name**: `Knowledge Base` (or whatever)
 3. **Server URL**: `https://kb.example.com/mcp` (this host's public hostname)
@@ -1595,8 +1597,8 @@ the new one. A restricted caller never gets the owner's map: its packet is built
 
 The `budget` block has two sizes. `used_chars` is the prose the packet charges against `max_chars`.
 `serialized_chars` is the length of the packet as the cell builds it, in compact JSON, without the
-`serialized_chars` field itself. A Cloud cell adds its `service_notice` field to the reply after that
-count, so the count excludes it. A map item omits `topics` when it has none, and omits
+`serialized_chars` field itself. A Cloud cell adds its `service_notice` and `update_notice` fields to
+the reply after that count, so the count excludes both. A map item omits `topics` when it has none, and omits
 `lifecycle_class` and `state` when they are unset.
 
 A client that holds the current map can send its `continuity` token back. When the map that the

@@ -16,6 +16,7 @@ import logging
 import re
 import shlex
 from dataclasses import dataclass, field
+from typing import Protocol
 from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives import serialization
@@ -28,6 +29,7 @@ from .backup_source import (
     media_census_command,
     media_collect_command,
     media_manifest_command,
+    media_storage_command,
 )
 from .cell_readiness import CELL_HEALTH_PORT, CELL_HEALTH_PORT_ENV, CELL_READINESS_PATH
 from .export_layout import (
@@ -1725,7 +1727,11 @@ def render_backup_job(
         # D12: the cell's drain record, "<evicted count> <evicted bytes> <census time>", on a line of its own.
         # The census time is the cell's. A record that the Job cannot read reports unknown at the hold start.
         media_census_command(spec.hold_started_at),
-        # collect-released-media D5: only after the prune succeeded, and last, once the termination message is whole.
+        # add-cloud-media-store D10: the cell's storage record, a JSON line of its own after the census. A record that
+        # the Job cannot read reports both figures null at the hold start.
+        media_storage_command(spec.hold_started_at),
+        # collect-released-media D5: only after the prune succeeded, and last, once the termination message is whole. Its
+        # result is the fourth line (k8s_client._media_collection).
         *([media_collect_command()] if collects and retention is not None else []),
     ]
     pod_spec = _job_pod_spec(
@@ -1789,6 +1795,29 @@ def render_restic_verify_job(
             "template": {"metadata": {"labels": labels}, "spec": pod},
         },
     }
+
+
+class BackupStores(Protocol):
+    """The two object stores cellctl's configuration names for cell backups."""
+
+    @property
+    def object_storage_bucket(self) -> str: ...
+    @property
+    def object_storage_endpoint(self) -> str: ...
+    @property
+    def cell_data_backup_bucket(self) -> str: ...
+    @property
+    def cell_data_endpoint(self) -> str: ...
+
+
+def backup_store(stores: BackupStores, *, stored_key: bool) -> dict[str, str]:
+    """The bucket and S3 endpoint a cell's backup and restore Jobs reach. An old cell keeps the
+    founder-account bucket its stored key was minted for; a new cell reads the custodian's key,
+    which only the locked cell-data bucket accepts (D9). The operator restore tools use this rule too."""
+
+    if stored_key:
+        return {"bucket_name": stores.object_storage_bucket, "endpoint": stores.object_storage_endpoint}
+    return {"bucket_name": stores.cell_data_backup_bucket, "endpoint": stores.cell_data_endpoint}
 
 
 def render_restore_job(

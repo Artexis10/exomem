@@ -15,11 +15,14 @@ before, so nothing here needs a vault-wide snapshot.
 Families never write the vault, never take the writer lease, never enqueue graph
 debt, never build or repair an index and never load a model. They hold no
 writer handle; the route each proposal carries names an existing governed leaf
-the agent calls under that leaf's own authority.
+the agent calls under that leaf's own authority. The duplicate-fact family also
+reads Records rows, read-only and as the owner, and serves each of them as the
+caller may read it.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import sqlite3
@@ -61,7 +64,13 @@ class Deferred(Exception):
 
 #: Closed Deferred.reason protocol: why a page is held, as status reports it.
 DEFERRAL_REASONS = frozenset(
-    {"graph_unavailable", "identity_cache_cold", "identity_unavailable", "status_unavailable"}
+    {
+        "graph_unavailable",
+        "identity_cache_cold",
+        "identity_unavailable",
+        "records_unavailable",
+        "status_unavailable",
+    }
 )
 #: The reasons that hold every page, not just the one that met them.
 VAULT_WIDE_DEFERRALS = frozenset({"graph_unavailable"})
@@ -681,10 +690,17 @@ def _stamp(updated: Any, origin: Any) -> str:
     return str(value) if value else ""
 
 
-def _after(value: str, since: str) -> bool:
-    """Whether `value` is known to be later than `since`; two values that share a day order only when both have a time."""
+def _not_before(value: str, since: str) -> bool:
+    """Whether `value` may be later than `since`: later, or on its day when either lacks a time.
+
+    An unknown order counts as newer: a miss would hide a new preference for good, while a wrong item is visible
+    and its dismissal holds until the evidence changes.
+    """
     later, bound = temporal.parse(value), temporal.parse(since)
-    return later is not None and bound is not None and temporal.compare(later, bound) is temporal.Order.AFTER
+    return (
+        later is not None and bound is not None
+        and temporal.compare(later, bound) in (temporal.Order.AFTER, temporal.Order.INDETERMINATE)
+    )
 
 
 def _hydration_entities(ctx: Context, rel_path: str) -> list[str]:
@@ -2168,7 +2184,7 @@ _CURATION_PROFILES_SQL = (
 _CURATION_UNIT_PAGES_SQL = (
     "SELECT f.path, f.updated_date, f.origin_date, f.lifecycle_status FROM graph_nodes f "
     "WHERE f.node_key IN ({keys}) AND f.kind = 'file' "
-    # From the day before the profile's: `_after` then decides each page to the second before any read.
+    # From the day before the profile's: `_not_before` then decides each page before any read.
     "AND substr(COALESCE(NULLIF(f.updated_date, ''), NULLIF(f.origin_date, ''), ''), 1, 10) >= ? "
     "AND EXISTS (SELECT 1 FROM graph_nodes u WHERE u.path = f.path AND u.kind = ? AND {labels})"
 )
@@ -2344,11 +2360,14 @@ def _curation_candidates(
 
     evidence = _curation_scope(ctx, subject, scope, taxonomy)
     pages = evidence.linked | (evidence.members or frozenset())
-    candidates = sorted(path for path in pages if path != subject and _visible(keep, path))
+    # A profile page is never evidence, the subject included: its lines are already curated, and a narrower
+    # profile serves beside its ancestors rather than feeding them.
+    profiles = frozenset(_profile_paths(ctx))
+    candidates = sorted(path for path in pages if path != subject and path not in profiles and _visible(keep, path))
     plan = semantic_language_registry.unit_query_plan(ctx.registry(), categories=sorted(categories))
     labels, params = plan.predicate("u.unit_category", "u.unit_kind")
     graph = ctx.graph()
-    # A day early, so a page whose written day is earlier than the profile's only by its UTC offset still reaches `_after`.
+    # A day early, so a page whose written day is earlier than the profile's only by its UTC offset still reaches `_not_before`.
     bound = temporal.parse(since)
     floor = (bound.day - timedelta(days=1)).isoformat() if bound is not None else since[:10]
     # The chunks follow the sorted candidates, so sorting each chunk's rows keeps the whole walk in path order.
@@ -2360,14 +2379,14 @@ def _curation_candidates(
         yield from sorted(
             (str(path), _stamp(updated, origin))
             for path, updated, origin, status in rows
-            if ctx.live_status(status, str(path)) and _after(_stamp(updated, origin), since)
+            if ctx.live_status(status, str(path)) and _not_before(_stamp(updated, origin), since)
         )
 
 
 def _new_units(
     ctx: Context, subject: str, scope: Any, taxonomy: Any, since: str, today: date, keep
 ) -> tuple[dict[str, list[str]], bool]:
-    """Live units of the curation categories dated after `since`, by page, and whether the count is partial.
+    """Live units of the curation categories not known to precede `since`, by page, and whether the count is partial.
 
     A unit with no date of its own takes its page's. Visibility and eligibility decide each page before the
     page limit counts it, so pages the caller may not see or that are not live never use up the limit. The
@@ -2415,8 +2434,8 @@ def _new_units(
 
 
 def _unit_newer(as_of: str, page_date: str, since: str) -> bool:
-    """A unit's own date decides by day; a unit with no date of its own takes its page's time."""
-    return as_of[:10] > since[:10] if as_of else _after(page_date, since)
+    """A unit's own date decides; a unit with no date of its own takes its page's."""
+    return _not_before(as_of or page_date, since)
 
 
 def _dated_lines(ctx: Context, subject: str, today: date) -> frozenset[tuple[str, str, str]]:
@@ -2480,7 +2499,7 @@ def _curation_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None
     """The curation proposal on one profile page, as a caller whose predicate is `keep` sees it.
 
     Two kinds of evidence, both structural. A live unit of a `preferences` or `constraints` role category,
-    dated after the profile's own update, on a page the profile links or (for a domain profile) a page of its
+    not known to precede the profile's own update, on a page the profile links or (for a domain profile) a page of its
     domain. And a line of the profile that a typed relation supersedes or opposes, whose `until` has passed or
     whose `check_by` has passed. A global profile reads the pages it links alone, so a new unit elsewhere is
     no evidence about it. A count that stopped at a limit, or a domain whose pages are unknown, is partial.
@@ -2590,6 +2609,272 @@ def _curation_subjects(ctx: Context, rel_path: str) -> list[str]:
 CURATION = _subject_family(CURATION_FAMILY, CURATION_KIND, _curation_view, subjects_of=_curation_subjects)
 
 
+# ----------------------------------------------------------------------
+# duplicate facts: `upkeep_duplicate`
+# ----------------------------------------------------------------------
+#
+# A Records row that links a page may state, in a text field, what one unit of that page already says.
+# The proposal is the registry's relation for "states the same thing twice" between the row and the unit.
+# No accept route exists yet: a relation between a row and a unit needs a relationship row, which the
+# design leaves out (D10), so the owner can dismiss or snooze an item and read both values to decide.
+# The family writes no page and no row. The sidecar holds the row's ref, field and unit ref, never a
+# value: `release` reads both values again as the caller, so a row the caller may not read answers as a
+# row that does not exist.
+
+DUPLICATE_FAMILY = "upkeep_duplicate"
+DUPLICATE_KIND = "fact.duplicate"
+
+#: The last store transaction whose rows the worker has queued pages for, as `{"instance": id, "txn": number}`.
+#: The instance id ties the number to the store that counted it.
+_DUPLICATE_TXN_META = "duplicate_txn"
+#: A sidecar meta key per page whose rows the family could not read, `duplicate_owed:<path>`: the page is owed a
+#: comparison, and `refresh_owed_duplicates` makes it once the link indexes are built.
+_DUPLICATE_OWED = "duplicate_owed:"
+#: Until when the owed pages wait, set when the link indexes are built and the rows still cannot be read.
+_DUPLICATE_OWED_UNTIL = "duplicate_owed_until"
+#: Owed pages one tick compares, and seconds the owed pages wait after a read that failed with the indexes built
+#: (no corpus is published, or the reader is busy). Bounds on a tick's work, not a vocabulary.
+_DUPLICATE_OWED_PER_TICK = 8
+_DUPLICATE_OWED_BACKOFF = 300.0
+
+
+def _duplicate_page(ctx: Context, rel_path: str) -> tuple[Any, str] | None:
+    """The parsed page and its memory ref, or None for a page no row can link (it has no identity)."""
+    from . import memory_refs
+
+    page = ctx.page(rel_path)
+    identity = memory_refs.normalize_id(page.frontmatter.get(memory_refs.ID_FIELD)) if page is not None else None
+    return None if identity is None else (page, memory_refs.memory_ref(identity))
+
+
+def _duplicate_views(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
+    """The page's candidates as `{proposal_key: upsert arguments}` for the current principal, with both values.
+
+    The stored row drops the values (`_duplicate_stored`). Raises `Deferred` when the rows cannot be read now.
+    """
+    from . import duplicate_facts
+
+    identified = _duplicate_page(ctx, rel_path)
+    relation = duplicate_facts.proposed_relation()
+    if identified is None or relation is None:
+        return {}
+    page, ref = identified
+    memo = ctx.shared.setdefault("duplicates", {})
+    if rel_path not in memo:
+        memo[rel_path] = duplicate_facts.candidates(ctx.vault_root, rel_path, ref)
+    found = memo[rel_path]
+    if found is None:
+        raise Deferred("records_unavailable")
+    return {
+        item.key: {
+            "family": DUPLICATE_FAMILY,
+            "kind": DUPLICATE_KIND,
+            "subject_path": rel_path,
+            "subject_ref": ref,
+            "proposal_key": item.key,
+            "evidence": [
+                {"path": rel_path, "ref": ref, "sig": _sig(ctx, rel_path), "role": "subject", "origin": "", "title": page.title}
+            ],
+            "evidence_count": 1,
+            "route": {"tool": "read_memory", "args": {"identifier": rel_path}},
+            "reason_code": "row_value_restated",
+            "signal_version": item.signal,
+            "measures": {
+                "collection": item.collection,
+                "row_id": item.row_id,
+                "row_ref": item.row_ref,
+                "field": item.field,
+                "unit_ref": item.unit_ref,
+                "relation": relation,
+                **item.quotes(),
+                # Whether the pass compared every citing row, so an item never reads as the page's whole answer.
+                "rows_compared": found.rows,
+                "rows_complete": found.complete,
+            },
+        }
+        for item in found.items
+    }
+
+
+#: The measures that name a value. They reach a caller only through `release`, never the sidecar.
+_DUPLICATE_VALUES = ("label", "row_value", "unit_text")
+
+
+def _duplicate_stored(kwargs: dict[str, Any]) -> dict[str, Any]:
+    measures = {name: value for name, value in kwargs["measures"].items() if name not in _DUPLICATE_VALUES}
+    return {**kwargs, "measures": measures}
+
+
+def _duplicate_compare(ctx: Context, rel_path: str) -> bool:
+    """Recompute one page's candidates as the owner, write each, and resolve the ones that no longer hold.
+
+    False, with nothing written, when the page's rows cannot be read now.
+    """
+    from .governance import principal
+
+    try:
+        with principal.owner_local_producer(ctx.vault_root, "duplicate_facts"):
+            views = _duplicate_views(ctx, rel_path)
+    except Deferred as deferred:
+        if deferred.reason != "records_unavailable":
+            raise
+        return False
+    ctx.conn.execute("DELETE FROM meta WHERE key=?", (_DUPLICATE_OWED + rel_path,))
+    stale = _open_for_subject(ctx, DUPLICATE_FAMILY, rel_path)
+    for key, kwargs in views.items():
+        stale.discard(dreamer_store.candidate_id(DUPLICATE_KIND, rel_path, key))
+        ctx.store.upsert_proposal(
+            ctx.conn, producer=PRODUCER, now=ctx.now, parked=ctx.parked, **_duplicate_stored(kwargs)
+        )
+    _resolve_all(ctx, stale)
+    return True
+
+
+def _duplicate_refresh(ctx: Context, rel_path: str) -> None:
+    """Compare one page's rows, or owe the page the comparison when they cannot be read now."""
+    if not _duplicate_compare(ctx, rel_path):
+        # Only this family is behind. Raising would roll back the page's work in every other family and hold the
+        # page, so the page is owed a comparison instead, and the candidates already stored stay as they were.
+        ctx.store.set_meta(ctx.conn, _DUPLICATE_OWED + rel_path, True)
+
+
+def refresh_owed_duplicates(ctx: Context, halt: Callable[[int], str | None]) -> tuple[int, str | None]:
+    """Compare the pages whose rows the family could not read, inside the tick's budget: `(compared, stop)`.
+
+    Only this family has work on an owed page, so the page never goes through the page queue, which would run
+    every family on it again. A tick compares at most `_DUPLICATE_OWED_PER_TICK` pages, and `halt(compared)` ends
+    it when a budget or a foreground request does. While a link index builds, a tick costs one reader statement and
+    no page work. When the indexes are built and a page still cannot be read (no corpus is published, or the reader
+    is busy), the same cause holds for the rest, so the owed pages wait `_DUPLICATE_OWED_BACKOFF` seconds.
+    `stop` is the reason the tick ended before every owed page was compared and the next tick may continue: the
+    halt reason, or "pages" at the bound. It is None when none remains or when the owed pages wait.
+    """
+    from . import duplicate_facts
+
+    store, conn = ctx.store, ctx.conn
+
+    def owed(limit: int) -> list[Any]:
+        return conn.execute(
+            "SELECT key FROM meta WHERE key GLOB ? ORDER BY key LIMIT ?", (_DUPLICATE_OWED + "*", limit)).fetchall()
+
+    if not owed(1):
+        return 0, None
+    until = store.get_meta(conn, _DUPLICATE_OWED_UNTIL)
+    if isinstance(until, (int, float)) and ctx.now < until:
+        return 0, None
+    if not duplicate_facts.indexes_ready(ctx.vault_root):
+        return 0, None
+    compared = 0
+    for (key,) in owed(_DUPLICATE_OWED_PER_TICK):
+        if (stop := halt(compared)) is not None:
+            return compared, stop
+        try:
+            with store.write(conn):
+                read = _duplicate_compare(ctx, str(key).removeprefix(_DUPLICATE_OWED))
+                if not read:
+                    store.set_meta(conn, _DUPLICATE_OWED_UNTIL, ctx.now + _DUPLICATE_OWED_BACKOFF)
+        except Deferred:
+            return compared, None  # a dependency of the page read is unavailable now; the next tick asks again
+        if not read:
+            return compared, None
+        compared += 1
+    return compared, "pages" if owed(1) else None
+
+
+def _duplicate_on_delete(ctx: Context, rel_path: str) -> None:
+    ctx.conn.execute("DELETE FROM meta WHERE key=?", (_DUPLICATE_OWED + rel_path,))
+    _resolve_all(ctx, _open_for_subject(ctx, DUPLICATE_FAMILY, rel_path))
+
+
+def _duplicate_revalidate(ctx: Context, row: dict[str, Any]) -> None:
+    _duplicate_refresh(ctx, str(row.get("subject_path") or ""))
+
+
+def _duplicate_view(ctx: Context, row: dict[str, Any]) -> dict[str, Any] | None:
+    """One stored candidate as the current principal may read it, or None when it no longer holds."""
+    return _duplicate_views(ctx, str(row.get("subject_path") or "")).get(str(row.get("proposal_key") or ""))
+
+
+def _duplicate_propose(ctx: Context, row: dict[str, Any]) -> dict[str, Any] | None:
+    view = _duplicate_view(ctx, row)
+    if view is None:
+        return None
+    view = _duplicate_stored(view)
+    view["fingerprint"] = dreamer_store.proposal_fingerprint(
+        family=view["family"],
+        subject_ref=view["subject_ref"],
+        signal_version=view["signal_version"],
+        evidence=view["evidence"],
+    )
+    return view
+
+
+def _duplicate_release(ctx: Context, row: dict[str, Any], keep) -> dict[str, Any] | None:
+    # A page the caller may not read is answered before any row is read for it.
+    if not _visible(keep, str(row.get("subject_path") or "")):
+        return None
+    return _released(_duplicate_view(ctx, row), row)
+
+
+DUPLICATE = Family(
+    name=DUPLICATE_FAMILY,
+    kinds=(DUPLICATE_KIND,),
+    on_page=_duplicate_refresh,
+    on_delete=_duplicate_on_delete,
+    revalidate=_duplicate_revalidate,
+    propose=_duplicate_propose,
+    release=_duplicate_release,
+)
+
+
+def _queue_changed_rows(ctx: Context) -> None:
+    """Queue the pages that rows changed since the last tick link, and the pages whose candidates rested on those rows.
+
+    A row write is no page change, so the page watcher cannot see it. The store's transaction log can: the
+    worker keeps the last transaction it has queued for and reads the next few. Nothing is queued, and the mark
+    stays, when the store or the graph cannot be read now.
+    """
+    from . import duplicate_facts
+
+    stored = ctx.store.get_meta(ctx.conn, _DUPLICATE_TXN_META)
+    valid = isinstance(stored, dict) and isinstance(stored.get("instance"), str) and type(stored.get("txn")) is int
+    mark = (stored["instance"], stored["txn"]) if valid else None
+    scan = duplicate_facts.changed_rows(ctx.vault_root, mark)
+    if scan is None:
+        return
+    reached, linked = scan
+    queue: set[str] = set()
+    if linked:
+        for subject, measures in ctx.conn.execute(
+            "SELECT subject_path, measures_json FROM candidates WHERE family=? AND state='open'",
+            (DUPLICATE_FAMILY,),
+        ):
+            if json.loads(measures).get("row_id") in linked:
+                queue.add(str(subject))
+        identities = sorted({identity for found in linked.values() for identity in found})
+        if identities:
+            try:
+                queue.update(
+                    str(row[0])
+                    for row in ctx.graph().execute(
+                        "SELECT path FROM graph_nodes WHERE kind='file' "
+                        "AND exomem_id IN (SELECT value FROM json_each(?))",
+                        (json.dumps(identities),),
+                    )
+                )
+            except (sqlite3.Error, Deferred):
+                # The graph is not readable now; the mark stays and the next tick asks again.
+                return
+            finally:
+                ctx.close()
+    if not queue and reached == mark:
+        return  # a write bumps the sidecar's generation, which every reader's memo follows
+    with ctx.store.write(ctx.conn):
+        if queue:
+            ctx.store.pending_add(ctx.conn, sorted(queue))
+        ctx.store.set_meta(ctx.conn, _DUPLICATE_TXN_META, {"instance": reached[0], "txn": reached[1]})
+
+
 def _queue_profiles_daily(ctx: Context) -> None:
     """Queue every profile page once a day: its `until` and `check_by` dates change a line's currency with no write."""
     today = date.fromtimestamp(ctx.now).isoformat()
@@ -2616,11 +2901,13 @@ def tick_start(ctx: Context) -> None:
     report incomplete until that drains. A category row's signal is anchored
     on the registry's content hash, which no page change reports, so its
     pages are queued again when the hash moves. Profile pages are queued
-    again once a day, because a date passing is no write. Writes only on
-    those changes.
+    again once a day, because a date passing is no write. Pages that linked rows
+    changed since the last tick are queued again, because a row write is no page
+    change. Writes only on those changes.
     """
     store, conn = ctx.store, ctx.conn
     _queue_profiles_daily(ctx)
+    _queue_changed_rows(ctx)
     if store.get_meta(conn, CAPACITY_BEHIND_META) and not store.capacity_exceeded(conn):
         with store.write(conn):
             store.pending_add(conn, sorted(store.seen_map(conn)))
@@ -2680,7 +2967,7 @@ def release(
 
 
 #: The families this build implements, in registry order.
-REGISTRY: list[Family] = [LINK, HYDRATION, ALIAS, CONVENTION, FOLD, PROFILE, CURATION]
+REGISTRY: list[Family] = [LINK, HYDRATION, ALIAS, CONVENTION, FOLD, PROFILE, CURATION, DUPLICATE]
 
 
 def family_names() -> tuple[str, ...]:
