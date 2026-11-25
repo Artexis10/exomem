@@ -42,6 +42,7 @@ promotion follows `proactive_capture`.
 ## 1. Protocol and evidence contract
 
 - [ ] 1.1 Add failing pure-logic tests for family descriptors, allowed outcomes, fingerprint/version binding, unknown-family refusal and non-inheritance of future actions; verify the tests fail for the missing behaviours before implementation.
+  Status 2026-11-25: open; the behaviour shipped in #1105 (`b78e6ca81bc803d007a942baa108040d3048f391`) and its regressions pass, but no preserved evidence shows the requested red-before-implementation order and none can be created now. No owner.
 - [x] 1.2 Implement the family/work-item protocol and typed decision validation in focused vocabulary modules; verify the tests from 1.1, including a synthetic future-family adapter that cannot load code or grant itself authority.
 - [x] 1.3 Implement registry-aware evidence adapters over the shipped relation resolver and entity-type registry without changing their persistence semantics; verify exact aliases, distinct nearby meanings, unavailable recurrence and bounded continuation in scoped tests.
 - [x] 1.4 Implement the decision state machine and receipt-bound completion in review state; verify stale decisions refuse, proposal is not applied, committed receipts reconcile once, and unchanged evidence retains its disposition across restart.
@@ -50,9 +51,11 @@ promotion follows `proactive_capture`.
 
 - [ ] 2.1 Add failing tests for a resolved generic pair/edge supported by two independent origins, copy-equivalent origin negatives, explicit agent meaning questions, single keyword negatives and unavailable independence evidence; verify the current unknown-label-only advisory cannot satisfy the positive case and the runtime never labels a supplier/equivalence meaning.
   Complemented by `promote-referents-without-nudges` task 2.7: a single write that authors the generic relation between two entities is offered predicates whose declared endpoints fit, with no origin count. The two-origin generic-pair signal stays here and waits on close-memory-loop task 4.3.
+  Status 2026-11-25: open; the behaviour shipped in #1105 (`b78e6ca81bc803d007a942baa108040d3048f391`) and its regressions pass, but no preserved evidence shows the requested red-before-implementation order and none can be created now. No owner.
 - [x] 2.2 Connect current-write context and bounded indexed origin/pair evidence to vocabulary work items in mutation/review projections; verify one advisory of at most 1 KiB per write, four items per default review page, explicit continuation, and zero full-corpus scans or model calls on the write path.
 - [x] 2.3 Implement fingerprinted notification deduplication, deferral, family quiet and state-based resolution without moving original evidence; verify restart persistence, explicit access to quiet work, no re-notification from unrelated registry edits, and that linked non-quietable integrity findings remain visible until state repair.
 - [ ] 2.4 Add soft-failure and recovery tests before implementing optional guidance recovery; verify committed terminals keep their receipt/replay identity, unavailable is not empty, and bounded projection recovery reconstructs missed work without repeating the content mutation.
+  Status 2026-11-25: open; the behaviour shipped in #1105 (`b78e6ca81bc803d007a942baa108040d3048f391`) and its regressions pass, but no preserved evidence shows the requested red-before-implementation order and none can be created now. No owner.
 - [x] 2.5 Expose review/context/typed-decision variants through canonical command definitions and supported MCP/REST/CLI adapters; verify cross-surface schema fidelity, capability discovery and the same leaf results without a generic execution payload.
 - [x] 2.6 Update bootstrap and the generic skill scaffold with pre-write consideration, review disposition, truthful generic/no-edge examples and v1 permission limits; verify bootstrap/scaffold contract tests, hookless consumption and the scaffold privacy gate.
 
@@ -66,18 +69,22 @@ promotion follows `proactive_capture`.
 ## 4. Versioned additive authority foundation
 
 - [ ] 4.1 Add failing authorization tests for opt-in activation, default no grants, separate entity/type/edge actions, vault-wide type/entity creation grants, exact approval for narrower new entities and resolved project edge scope; verify v1 is unchanged, new entities cannot assert project membership and an older client cannot downgrade an activated vault.
+  Status 2026-11-25: open; the behaviour shipped in #1105 (`b78e6ca81bc803d007a942baa108040d3048f391`) and its regressions pass, but no preserved evidence shows the requested red-before-implementation order and none can be created now. No owner.
 - [x] 4.2 Implement activation/grant records under external authority custody, reusing existing principal/session/secret-handling contracts; verify restart persistence, bounded expiry, generation validation and cross-principal/cross-vault isolation.
 - [ ] 4.3 Implement pending approval request/status variants and a trusted user-control approval ceremony distinct from ordinary agent credentials; verify agent self-approval, forged confirmation fields and retrieved permission text cannot mint approval, while an authenticated user approves the displayed exact effects. Inspect the real control surface with Chrome DevTools if rendered UI changes.
   Not on the owner's path: `promote-referents-without-nudges` design decision 2 keeps v2 opt-in, and no upgrade or approval step gates a v1 owner's promotion.
+  Status 2026-11-25: open; `src/exomem/vocabulary_control.py` is imported nowhere else in `src/exomem` and the standalone server exposes no vocabulary control route. Not approved scope after the 2026-11-25 programme close, no owner.
 - [x] 4.4 Implement one-shot exact-action approval and scoped grant evaluation over canonical payloads/targets; verify single operation-identity reservation, proven pre-commit retry, uncertain-outcome recovery, refusal under a new identity, out-of-scope endpoints, project-label laundering, global registry effects, changed reviewed hashes and unsupported future actions.
 
 ## 5. Enforcement and recovery gates
 
 - [ ] 5.1 Add failing complete-before/after effect-classification tests for typed writers, generic file creation/replacement, imports and registry saves; verify every route enters the same authority gate in v2, a permitted type addition mixed with an unauthorized existing-definition change refuses atomically, and entity creation cannot smuggle connections or a new project-key registration through an entity-only grant.
+  Status 2026-11-25: open; the behaviour shipped in #1105 (`b78e6ca81bc803d007a942baa108040d3048f391`) and its regressions pass, but no preserved evidence shows the requested red-before-implementation order and none can be created now. No owner.
 - [x] 5.2 Integrate effect classification and live authority validation into canonical mutation leaves under their commit boundary; verify permission cannot be bypassed through a legacy adapter, generic payload or cached preview and all existing validation/write-scope/lease gates remain intact.
 - [x] 5.3 Serialize revocation against commit and bind non-secret authority evidence to canonical receipts; verify revoke-before-commit refusal, committed-before-revoke history, atomic one-shot spend/receipt linkage with crash recovery, replay without reapplication, current receipt disclosure and expired-authority refusal for remaining curation steps.
 - [x] 5.4 Implement runtime admission and downgrade fences for activated authority state; verify supported deploy/rollback routes cannot serve weaker structural writes, unreadable authority refuses writes but permits authorized reads, and no migration silently grants authority.
 - [ ] 5.5 Obtain independent security review of the trusted approval channel, complete writer-route inventory, scope checks, revoke/commit race and downgrade reproduction; verify each blocking finding is resolved with rerunnable evidence before exposing v2 activation.
+  Status 2026-11-25: open; v2 activation is not exposed, so the security review has no activated surface to review. Not approved scope after the 2026-11-25 programme close, no owner.
 
 ## 6. Ordinary-agent acceptance and delivery
 
@@ -87,12 +94,17 @@ promotion follows `proactive_capture`.
 - [x] 6.4 Run affected suites during development, then the full lean suite, required integration/capability checks, lint and public-artifact/privacy validation at the completion boundary; verify actual outputs and obtain independent end-to-end verification of the claimed tranche.
 - [x] 6.5 Publish the implementation PRs with conventional titles and verification evidence; after authorized merges, verify default-branch state and remove only clean, pushed task worktrees with no live processes.
 - [ ] 6.6 After all non-optional integrations and acceptance tasks are evidenced as shipped, synchronize these deltas without discarding later scenarios and archive through OpenSpec; verify `openspec validate --all --strict` before and after archive. A planning PR alone does not complete or archive this change.
+  Status 2026-11-25: open; waits on tasks 4.3, 5.5 and 7.1 to 7.4, and on live activation acceptance. The change stays active.
 
 ## 7. Closed-loop programme authority extension
 
 Superseded for the owner's vault by `promote-referents-without-nudges` design decision 2: an owner's agent creates entities and typed edges under `proactive_capture` with no vault-wide `edge.add` grant. Tasks 7.1 to 7.4 stay open only for a v2 delegate that needs that grant; they no longer gate the close-memory-loop programme.
 
 - [ ] 7.1 Add failing scope tests for explicit vault-wide `edge.add` over existing and future canonical endpoints; verify same-vault resolution, cross-vault refusal, no caller-label proof, separate entity/type authority and no widening of existing project-edge grants.
+  Status 2026-11-25: open; only a v2 delegate needs it and none exists, because the owner's vault runs under `promote-referents-without-nudges` design decision 2. Not approved scope after the 2026-11-25 programme close, no owner.
 - [ ] 7.2 Extend grant validation, scope matching and trusted owner review with the versioned vault-edge scope and compatible reader/writer floor; verify migration creates no grants and older runtimes cannot serve weaker structural writes.
+  Status 2026-11-25: open; only a v2 delegate needs it and none exists, because the owner's vault runs under `promote-referents-without-nudges` design decision 2. Not approved scope after the 2026-11-25 programme close, no owner.
 - [ ] 7.3 Exercise separately receipted create-then-link and any supported combined create/link leaf under current authority; verify interruption, grant expiry, revocation and unknown outcomes cannot duplicate effects or authorize unresolved endpoints.
+  Status 2026-11-25: open; only a v2 delegate needs it and none exists, because the owner's vault runs under `promote-referents-without-nudges` design decision 2. Not approved scope after the 2026-11-25 programme close, no owner.
 - [ ] 7.4 Include the extension in independent security review and ordinary-agent acceptance from `close-memory-loop`; verify the complete owner-controlled opt-in workflow and maintain separate authority for role/convention edits, non-additive changes and Planning commitments.
+  Status 2026-11-25: open; only a v2 delegate needs it and none exists, because the owner's vault runs under `promote-referents-without-nudges` design decision 2. Not approved scope after the 2026-11-25 programme close, no owner.

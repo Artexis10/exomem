@@ -19,7 +19,7 @@ block. A name that the agent dismissed in an `undeclared_referents` block SHALL 
 block. Pages committed within one mutation batch SHALL count once. The block SHALL be
 withheld when the `structural_suggestions` authority class is `off` and whenever the
 graph index does not answer the lookup as available. Detection SHALL never create an
-Entity; an Entity is created only by a leaf call or a declaration that the agent makes.
+Entity; an Entity is created only by a leaf call that the agent makes.
 
 #### Scenario: The agent that holds the context is told
 - **WHEN** one eligible page already links an unresolved identity and a second page that
@@ -83,7 +83,7 @@ Entity; an Entity is created only by a leaf call or a declaration that the agent
 
 ### Requirement: A write names its undeclared referents
 
-Every committed durable page write SHALL carry an `undeclared_referents` block in its receipt when it newly wikilinks a name that resolves, in the writer's own view, to no page and no active Entity, and that no declaration of the same write covers.
+Every committed durable page write SHALL carry an `undeclared_referents` block in its receipt when it newly wikilinks a name that resolves, in the writer's own view, to no page and no active Entity.
 The block SHALL hold at most 3 names, each with the `create-entity` route.
 "Newly" SHALL be decided against the page's pre-write state, as for `entity_candidate`.
 A name that the same response's `entity_candidate` block carries SHALL be omitted.
@@ -105,7 +105,7 @@ The compact response projection SHALL carry the block, so that a hookless client
 - **WHEN** a page that already links an unpaged name is edited and still links it
 - **THEN** the receipt carries no block entry for that name
 
-#### Scenario: An existing Entity is not a referent to declare
+#### Scenario: An existing Entity is not an undeclared referent
 
 - **WHEN** a write newly links a name that resolves to an active Entity
 - **THEN** the receipt carries no block entry for that name

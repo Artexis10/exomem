@@ -1,4 +1,10 @@
-## ADDED Requirements
+# referent-promotion Specification
+
+## Purpose
+
+Let an agent promote the entities, types and typed edges that it meets through the ordinary writers, without a nudge. The server creates only what the agent asks for, surfaces each promotion once in the owner's next session, reverts each in one call, and never discloses a withheld page.
+
+## Requirements
 
 ### Requirement: Typed edges use the existing writers and one internal removal step
 
@@ -21,7 +27,7 @@ The step SHALL refuse a withheld subject exactly as a missing one.
 
 ### Requirement: Promotions carry provenance
 
-An entity creation or typed edge made by `create-entity`, an authored `## Relations` bullet or a declaration SHALL write a log entry on its page.
+An entity creation or typed edge made by `create-entity` or an authored `## Relations` bullet SHALL write a log entry on its page.
 `create-entity` SHALL accept the existing `ref` argument as the originating write's ref, and the `undeclared_referents` route SHALL fill it.
 The entry SHALL name the originating write's path and operation id when known, and the episode key when an episode leaf ran the effect.
 An origin ref that the caller cannot read SHALL record the origin as unknown and SHALL NOT refuse the creation; a withheld ref and a missing ref SHALL give the same result.
@@ -131,7 +137,7 @@ A revert SHALL run only on the user's request, which is its confirmation, and hi
 
 ### Requirement: Promotion never discloses a withheld page
 
-For a restricted caller, the `undeclared_referents` block, the typed-edge leaves, the relation advisory, promotion notices and a later activation SHALL be byte-identical between a vault holding a withheld entity that answers to a linked or declared name and the same vault without it.
+For a restricted caller, the `undeclared_referents` block, the typed-edge leaves, the relation advisory, promotion notices and a later activation SHALL be byte-identical between a vault holding a withheld entity that answers to a linked name and the same vault without it.
 This SHALL hold for a withheld entity at another path; at the same path, the entity writer's occupancy refusal names no path and stays reported debt until restricted writers get suffixed filenames.
 A withheld entity SHALL never be reused, linked, named or counted for that caller.
 
@@ -143,7 +149,7 @@ A withheld entity SHALL never be reused, linked, named or counted for that calle
 
 ### Requirement: The server creates only what the agent asks for
 
-The server SHALL NOT detect a referent in prose, choose a type or a predicate, or create an entity, type or edge that no leaf call or declaration names.
+The server SHALL NOT detect a referent in prose, choose a type or a predicate, or create an entity, type or edge that no leaf call names.
 A body name SHALL stay a wikilink until the agent creates its entity.
 
 #### Scenario: An incidental name stays unpromoted
