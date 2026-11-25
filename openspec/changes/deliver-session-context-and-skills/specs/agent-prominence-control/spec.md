@@ -20,3 +20,18 @@ The agent decides what counts as a new subject; no word list or detector SHALL d
 #### Scenario: A general question needs no recall
 - **WHEN** a turn asks a general question that needs nothing from the user's work or life
 - **THEN** the instructions ask for no recall
+
+### Requirement: The shipped skill's description asks for recall on the user's own subjects
+The description of the shipped skill SHALL ask the agent to recall before it recommends, asks the user for a fact, or writes about a subject of the user's own life or work. It SHALL also say that a general-knowledge question needs no recall, and that the engagement level a tool reports wins, so that at off the agent searches memory only when the user asks. The agent decides what counts; no word list or detector SHALL decide it.
+
+#### Scenario: A question about the user's own equipment in a client that hides server instructions
+- **WHEN** a client shows the skill's description but not the server instructions, and the user asks which cable to buy for their own monitor
+- **THEN** the agent recalls before it recommends, and answers from what memory records about the cables the user owns
+
+#### Scenario: A general question in the same client
+- **WHEN** the user asks a general-knowledge question that touches nothing of their own
+- **THEN** the agent answers without recall
+
+#### Scenario: The engagement level is off in the same client
+- **WHEN** the engagement level is off and the user asks which cable to buy for their own monitor without asking for memory
+- **THEN** the agent does not search memory
