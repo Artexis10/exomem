@@ -2512,6 +2512,46 @@ def _field_is_link(spec: collections.FieldSpec) -> bool:
     return spec.type == "array" and spec.items is not None and spec.items.type == "link"
 
 
+def selection_columns(
+    manifest: collections.CollectionManifest,
+    *,
+    filters: object,
+    sort_by: object,
+    date_column: object,
+    date_from: object,
+    date_to: object,
+    aggregate: object,
+) -> set[str] | None:
+    """The top-level names whose values decide which rows a query selects and what its aggregate says.
+
+    They are its filter, sort, date and aggregate columns, with the default date column when the
+    query bounds dates or aggregates without naming one. A name outside the schema is a child
+    table's column. None when the selection reads every column (a profile) or names a column in a
+    shape that validation refuses.
+    """
+    if aggregate is not None and (not isinstance(aggregate, str) or aggregate.strip() == "profile"):
+        return None  # a profile reads every column
+    aggregated = aggregate.split(":", 1)[1] if isinstance(aggregate, str) and ":" in aggregate else None
+    columns: list[object] = [sort_by, date_column, aggregated]
+    if filters is not None:
+        if not isinstance(filters, list):
+            return None
+        for predicate in filters:
+            if not isinstance(predicate, dict) or predicate.get("column") is None:
+                return None
+            columns.append(predicate["column"])
+    roots: set[str] = set()
+    for column in columns:
+        if column is not None:
+            if type(column) is not str or not column.strip():
+                return None
+            roots.add(column.strip().split(".", 1)[0])
+    dated = date_from or date_to or (aggregate and DEFAULT_DATE_COLUMN in manifest.schema.fields)
+    if date_column is None and dated:
+        roots.add(DEFAULT_DATE_COLUMN)  # it bounds dates and orders `latest`
+    return roots
+
+
 def _selection_roots(
     manifest: collections.CollectionManifest,
     *,
@@ -2533,32 +2573,16 @@ def _selection_roots(
     fields = manifest.schema.fields
     if expand_children or expand_child is not None or manifest.child_tables or set(fields) & system:
         return None
-    roots: set[str] = set()
-    columns = [sort_by, date_column]
-    if aggregate is not None:
-        if type(aggregate) is not str or aggregate.strip() == "profile":
-            return None  # a profile reads every column
-        columns.append(aggregate.split(":", 1)[1] if ":" in aggregate else None)
-    for column in columns:
-        if column is not None:
-            if type(column) is not str or not column.strip():
-                return None
-            roots.add(column.strip().split(".", 1)[0])
-    if date_column is None and (date_from or date_to or (aggregate and DEFAULT_DATE_COLUMN in fields)):
-        roots.add(DEFAULT_DATE_COLUMN)  # it bounds dates and orders `latest`
-    if filters is not None:
-        if not isinstance(filters, list):
+    roots = selection_columns(
+        manifest, filters=filters, sort_by=sort_by, date_column=date_column,
+        date_from=date_from, date_to=date_to, aggregate=aggregate,
+    )
+    if roots is None:
+        return None
+    for predicate in filters or ():
+        op = predicate.get("op", query_data.DEFAULT_OP)
+        if type(op) is not str or op not in query_data._OPS:
             return None
-        for predicate in filters:
-            if not isinstance(predicate, dict):
-                return None
-            column = predicate.get("column")
-            if type(column) is not str or not column:
-                return None
-            op = predicate.get("op", query_data.DEFAULT_OP)
-            if type(op) is not str or op not in query_data._OPS:
-                return None
-            roots.add(column.split(".", 1)[0])
     # Reuse the field schema's closed scalar types; arrays, objects and links can change selection.
     scalars = collections._PRESENTATION_SCALAR_TYPES - {"link"}
     if all(name in system or (name in fields and fields[name].type in scalars) for name in roots):

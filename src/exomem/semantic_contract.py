@@ -1981,7 +1981,7 @@ def evict_corpus_context(vault_root: Path) -> bool:
 # The decline reason for a proof whose checkpoint moved while it ran;
 # `find.writer_resolver_snapshot` retries on it, so it lives in one place.
 CHANGED_DURING_PROOF = "changed_during_proof"
-# The decline reasons after which a published corpus is still coming; `link_corpus_coming` reads them.
+# The decline reasons that a background warm repairs; `link_corpus_coming` starts one on them.
 CORPUS_ABSENT = "corpus_absent"
 CHECKPOINT_DIFFERS = "checkpoint_differs"
 LOCK_BUSY = "lock_busy"
@@ -2592,18 +2592,19 @@ def link_corpus_coming(vault_root: Path, declined: Mapping[str, int]) -> bool:
     """Whether the corpus that a declined `borrow_link_snapshot` lacked is on its way.
 
     A bounded-latency reader, such as a Records query, goes without the corpus while one is
-    coming, and walks the vault as before while none is. One is coming only while this process
-    keeps corpora in its cache and the watcher keeps the vault live, and only when the borrow found
-    the corpus absent, behind the watcher, or being published. For an absent corpus this call
-    starts the one background warm that publishes it (`find.schedule_link_index_warm`).
+    coming, and walks the vault as before while none is. One is coming only when this call starts
+    or joins the background warm that publishes it (`find.schedule_link_index_warm`): the borrow
+    found the corpus absent, behind the vault's event checkpoint, or its lock held, this process
+    keeps corpora in its cache, and the vault's change events are live. A lock holder may only be
+    reading, so a held lock gets the warm too. Without the cache a warm keeps nothing, and without
+    live events no published corpus can be borrowed.
     """
     root = Path(vault_root)
     if not corpus_context_cache_enabled() or not freshness.is_live(root, "vault"):
         return False
-    if f"declined_{CORPUS_ABSENT}" in declined:
-        find_module.schedule_link_index_warm(root)
-        return True
-    return f"declined_{CHECKPOINT_DIFFERS}" in declined or f"declined_{LOCK_BUSY}" in declined
+    if not any(f"declined_{reason}" in declined for reason in (CORPUS_ABSENT, CHECKPOINT_DIFFERS, LOCK_BUSY)):
+        return False
+    return find_module.schedule_link_index_warm(root)
 
 
 def _corpus_cache_key(root: Path) -> tuple[str, str]:

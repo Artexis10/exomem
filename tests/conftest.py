@@ -996,6 +996,27 @@ def corpus_cache_on(monkeypatch: pytest.MonkeyPatch):
     freshness.clear()
 
 
+@contextlib.contextmanager
+def held_link_index_warm(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Let a query start the background warm that publishes the link index, and hold that warm in the block.
+
+    A query sees the link index as coming only while such a warm runs; the block ends with the warm done.
+    """
+    release, build = threading.Event(), semantic_contract_module.warm_corpus_context
+
+    def held(root: Path) -> None:
+        release.wait(30)
+        build(root)
+
+    monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM", raising=False)
+    monkeypatch.setattr(semantic_contract_module, "warm_corpus_context", held)
+    try:
+        yield
+    finally:
+        release.set()
+        find_module.await_recall_resolver_warm()
+
+
 #: The single thread name every graph rebuild runs under, in both the
 #: registered-flight path (`graph_sync.GraphRebuildCoordinator.ensure_started`)
 #: and the warming path (`epistemic_graph.schedule_background_rebuild`).

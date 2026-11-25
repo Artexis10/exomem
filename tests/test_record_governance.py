@@ -10,7 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from conftest import _drain_background_threads
+from conftest import _drain_background_threads, held_link_index_warm
 from record_fixtures import (
     copy_dataset_fixture,
     copy_vehicle_maintenance_fixture,
@@ -1898,24 +1898,24 @@ def test_empty_columns_through_record_memory_still_withholds_link_fields(tmp_pat
 
 
 def test_a_query_that_selects_on_a_link_while_the_link_index_is_coming_is_refused_for_a_retry(
-    tmp_path: Path, corpus_cache_on: None
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """While the watcher's corpus is coming, a query goes without the link index and leaves bare
-    titles out. A filter on the link field would then match no row, and its distinct value would be
-    null. Both are refused with a wait instead, and the same queries answer once the corpus is published.
+    """While the warm that publishes the corpus runs, a query goes without the link index and leaves
+    bare titles out. A filter on the link field would then match no row, and its distinct value would
+    be null. Both are refused with a wait instead, and the same queries answer once the warm is done.
     """
     manifest = _empty_columns_fixture(tmp_path)
     (tmp_path / "Knowledge Base" / "Vehicle.md").write_text("# Vehicle\n", encoding="utf-8")
-    freshness.rebaseline(tmp_path)  # the watcher keeps the vault live; no corpus is published yet
+    freshness.rebaseline(tmp_path)  # the vault's change events are live; no corpus is published yet
     by_asset = {"collection": manifest.path, "filters": [{"column": "asset", "op": "eq", "value": "[[Vehicle]]"}]}
     distinct = {"collection": manifest.path, "aggregate": "distinct:asset"}
 
     refusals = []
-    for query in (by_asset, distinct):
-        with pytest.raises(OpError) as raised:
-            record_memory.record_memory(tmp_path, "query", **query)
-        refusals.append(raised.value)
-    _publish_corpus(tmp_path)  # what the background warm does
+    with held_link_index_warm(monkeypatch):
+        for query in (by_asset, distinct):
+            with pytest.raises(OpError) as raised:
+                record_memory.record_memory(tmp_path, "query", **query)
+            refusals.append(raised.value)
     matched = record_memory.record_memory(tmp_path, "query", **by_asset)
     values = record_memory.record_memory(tmp_path, "query", **distinct)
 
@@ -1926,10 +1926,10 @@ def test_a_query_that_selects_on_a_link_while_the_link_index_is_coming_is_refuse
 
 
 def test_a_saved_view_that_filters_on_a_link_while_the_link_index_is_coming_is_refused_for_a_retry(
-    tmp_path: Path, corpus_cache_on: None
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Without the link index a view's link filter value cannot be checked. The view is still
-    available, so it is refused with a wait, and it answers once the corpus is published."""
+    available, so it is refused with a wait, and it answers once the warm has published the corpus."""
     manifest = _empty_columns_fixture(tmp_path)
     (tmp_path / "Knowledge Base" / "Vehicle.md").write_text("# Vehicle\n", encoding="utf-8")
     manifest_file = tmp_path / "Knowledge Base" / "Records" / "vehicle-maintenance" / "_collection.md"
@@ -1941,11 +1941,10 @@ def test_a_saved_view_that_filters_on_a_link_while_the_link_index_is_coming_is_r
         ),
         encoding="utf-8",
     )
-    freshness.rebaseline(tmp_path)  # the watcher keeps the vault live; no corpus is published yet
+    freshness.rebaseline(tmp_path)  # the vault's change events are live; no corpus is published yet
 
-    with pytest.raises(OpError) as raised:
+    with held_link_index_warm(monkeypatch), pytest.raises(OpError) as raised:
         record_memory.record_memory(tmp_path, "query", collection=manifest.path, view="vehicle")
-    _publish_corpus(tmp_path)  # what the background warm does
     answered = record_memory.record_memory(tmp_path, "query", collection=manifest.path, view="vehicle")
 
     assert raised.value.code == "LINK_INDEX_WARMING"
@@ -1953,13 +1952,17 @@ def test_a_saved_view_that_filters_on_a_link_while_the_link_index_is_coming_is_r
     assert [row["asset"] for row in answered["rows"]] == ["[[Vehicle]]"]
 
 
-def test_a_query_in_a_process_the_watcher_does_not_keep_live_walks_for_its_links(
-    tmp_path: Path, corpus_cache_on: None
+@pytest.mark.parametrize("live_events", [False, True], ids=["no-live-events", "warms-off"])
+def test_a_query_with_no_corpus_coming_walks_for_its_links(
+    tmp_path: Path, corpus_cache_on: None, live_events: bool
 ) -> None:
-    """A one-shot process has no corpus coming, so its query walks the vault for the link index
-    as before: a bare title resolves, matches its filter and is counted, and nothing is unresolved."""
+    """No corpus is coming in a one-shot process, whose vault events are not live, nor where background
+    warms are turned off, which the suite does. Its query walks the vault for the link index as before:
+    a bare title resolves, matches its filter and is counted, and nothing is unresolved."""
     manifest = _empty_columns_fixture(tmp_path)
     (tmp_path / "Knowledge Base" / "Vehicle.md").write_text("# Vehicle\n", encoding="utf-8")
+    if live_events:
+        freshness.rebaseline(tmp_path)
 
     matched = record_memory.record_memory(
         tmp_path, "query", collection=manifest.path,
@@ -1970,6 +1973,28 @@ def test_a_query_in_a_process_the_watcher_does_not_keep_live_walks_for_its_links
     assert [row["asset"] for row in matched["rows"]] == ["[[Vehicle]]"]
     assert "unresolved_links" not in matched
     assert "[[Vehicle]]" in values["aggregate"]["distinct"]
+
+
+def test_a_link_filter_after_a_walk_cut_short_by_its_cap_is_refused_instead_of_matching_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A walk that stops at its cap leaves bare titles unresolved. A filter on that link field would match
+    no row and read as an empty answer, so it is refused, and a returned link field is named unresolved."""
+    manifest = _empty_columns_fixture(tmp_path)
+    (tmp_path / "Knowledge Base" / "Vehicle.md").write_text("# Vehicle\n", encoding="utf-8")
+    monkeypatch.setattr(record_governance, "_INTERNAL_LINK_INDEX_RAW_CANDIDATES", 1)
+
+    with request_scope(owner_principal(surface="mcp")):
+        with pytest.raises(OpError) as refused:
+            record_memory.record_memory(
+                tmp_path, "query", collection=manifest.path,
+                filters=[{"column": "asset", "op": "eq", "value": "[[Vehicle]]"}],
+            )
+        rows = record_memory.record_memory(tmp_path, "query", collection=manifest.path)
+
+    assert refused.value.code == "LINK_INDEX_INCOMPLETE"
+    assert "retry_after_ms" not in (refused.value.details or {})  # a retry would meet the same cap
+    assert list(rows["unresolved_links"]) == ["asset", "receipt"]
 
 
 def _parts_collection(tmp_path: Path) -> collections.CollectionManifest:

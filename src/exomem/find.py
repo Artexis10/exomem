@@ -8795,15 +8795,16 @@ def schedule_tombstone_proof_warm(vault_root: Path, *, stop: threading.Event) ->
     )
 
 
-def schedule_link_index_warm(vault_root: Path) -> None:
+def schedule_link_index_warm(vault_root: Path) -> bool:
     """Warm the corpus whose published generation a Records query borrows for its links.
 
-    The owner that restores the link index a query found absent (`semantic_contract.link_corpus_coming`).
-    The query answers without the index and never waits for this build.
+    The owner that publishes the link index a query found absent or behind
+    (`semantic_contract.link_corpus_coming`). The query never waits for this build. Returns whether a
+    warm now runs, started here or already running; with warms turned off, none ever will.
     """
     from . import semantic_contract
 
-    _schedule_resolver_warm(
+    return _schedule_resolver_warm(
         vault_root, _LINK_INDEX_WARMS, semantic_contract.warm_corpus_context, "exomem-link-index-warm",
     )
 
@@ -8815,14 +8816,17 @@ def _schedule_resolver_warm(
     thread_name: str,
     *,
     stop: threading.Event | None = None,
-) -> None:
-    """Run `build(root)` once on a daemon thread, unless one already runs in `inflight`."""
+) -> bool:
+    """Run `build(root)` once on a daemon thread, unless one already runs in `inflight`.
+
+    Returns whether a build now runs for `root`.
+    """
     if os.environ.get("EXOMEM_DISABLE_RESOLVER_WARM"):
-        return
+        return False
     key = Path(root)
     with _RECALL_REBUILD_LOCK:
         if key in inflight:
-            return
+            return True
         inflight.add(key)
 
     def _run() -> None:
@@ -8847,6 +8851,8 @@ def _schedule_resolver_warm(
     except RuntimeError:
         with _RECALL_REBUILD_LOCK:
             inflight.discard(key)
+        return False
+    return True
 
 
 def await_recall_resolver_warm(timeout: float = 30.0) -> bool:

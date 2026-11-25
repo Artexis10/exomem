@@ -1160,6 +1160,8 @@ class _LinkProjector:
     # index because a corpus is coming; both are settled once, on the first need.
     borrow_settled: bool = False
     corpus_coming: bool = False
+    # Whether a walk for the index stopped at one of its caps, so links it did not index were withheld.
+    walk_stopped_short: bool = False
     # The published corpus generation lent for this projector's life, when the index came
     # from it instead of a walk, and its per-identity owner lookup.
     borrowed: Any | None = None
@@ -1245,7 +1247,7 @@ class _LinkProjector:
             with call_spans.span("records.link_walk", {}) as measured:
                 complete = self._walk_candidate_index()
                 measured["walk" if complete else "incomplete"] = 1
-            self.candidate_index_complete = complete
+            self.candidate_index_complete, self.walk_stopped_short = complete, not complete
         return self.candidate_index_complete
 
     def index_available(self) -> bool:
@@ -1666,8 +1668,9 @@ def query_collection(
     (`semantic_contract.link_corpus_coming`). While one is coming, a returned link field's
     memory references and bare titles are left out and the result names that field in
     `unresolved_links`; a query that filters, sorts or aggregates on a link field is refused
-    with the retryable `LINK_INDEX_WARMING`. This is the flat query grammar only: a version-1
-    query (`query_engine.route`) keeps building its index inside its own deadline.
+    with the retryable `LINK_INDEX_WARMING`. When the walk stops at its cap, the same field is
+    named and the same selection is refused with `LINK_INDEX_INCOMPLETE`. This is the flat query
+    grammar only: a version-1 query (`query_engine.route`) keeps building its index inside its own deadline.
     """
     root = Path(vault_root)
     writer = selected_writer(root, collection)
@@ -1717,14 +1720,13 @@ def query_collection(
             plan = None if writer is None else writer._operation.field_plan(manifest)
             readable = manifest if plan is None else plan.manifest
             view = kwargs.get("view")
-            # A caller's own query names only fields its plan admits; a saved view names the author's.
-            shaping, named_from = kwargs, readable
+            shaping = kwargs
             if view is not None:
+                # A view that names a field the caller's plan withholds is unavailable to that caller.
                 shaping = _authorize_saved_view(root, manifest, view, links, readable=(
                     None if plan is None or plan.holds_every_field(manifest) else readable)).definition["query"]
-                named_from = manifest
             # Without the index a link field's values are left out, so selecting on one would answer wrongly.
-            if (selected := _selected_link_fields(named_from, shaping)) and links.awaits_corpus():
+            if (selected := _selected_link_fields(readable, shaping)) and links.awaits_corpus():
                 raise _link_index_warming(selected)
             try:
                 result = record_formats.query_collection(
@@ -1742,8 +1744,10 @@ def query_collection(
                 if error.code != "INVALID_RECORD_QUERY_FIELD":
                     raise
                 raise _with_readable_columns(error, readable, kwargs) from error
+            if selected and links.walk_stopped_short:
+                raise _link_index_incomplete(selected)
             returned = _returned_link_fields(result, readable)
-            if returned and links.awaits_corpus():
+            if returned and (links.awaits_corpus() or links.walk_stopped_short):
                 result = replace(result, unresolved_links=returned)
         egress.emit_boundary_receipt(collector)
         return result
@@ -1757,24 +1761,18 @@ def _link_fields(manifest: collections.CollectionManifest) -> tuple[str, ...]:
 
 
 def _selected_link_fields(manifest: collections.CollectionManifest, query: Mapping[str, Any]) -> tuple[str, ...]:
-    """The link fields whose values decide which rows `query` returns or what its aggregate says.
+    """The link fields of `manifest` whose values decide which rows `query` returns or what its aggregate says.
 
-    They are its filter, sort, date and aggregate columns, and every link field for a profile. A column
-    that is no top-level field names a column of an expanded child, so it counts each child that carries links.
+    A column outside the schema is a child table's, so it counts each child that carries links.
     """
     links = _link_fields(manifest)
-    aggregate = query.get("aggregate")
-    if not links or (type(aggregate) is str and aggregate.strip() == "profile"):
+    roots = None if not links else record_formats.selection_columns(
+        manifest, filters=query.get("filters"), sort_by=query.get("sort_by"),
+        date_column=query.get("date_column"), date_from=query.get("date_from"),
+        date_to=query.get("date_to"), aggregate=query.get("aggregate"),
+    )
+    if roots is None:
         return links
-    named = [query.get("sort_by"), query.get("date_column")]
-    if type(aggregate) is str and ":" in aggregate:
-        named.append(aggregate.split(":", 1)[1].strip())
-    filters = query.get("filters")
-    if isinstance(filters, Mapping):
-        named.extend(filters)
-    elif isinstance(filters, list):
-        named.extend(item.get("column") for item in filters if isinstance(item, Mapping))
-    roots = {column.split(".", 1)[0] for column in named if type(column) is str}
     in_child = bool(roots - set(manifest.schema.fields))
     children = {table.field for table in manifest.child_tables}
     return tuple(name for name in links if name in roots or (in_child and name in children))
@@ -1794,6 +1792,16 @@ def _link_index_warming(fields: Sequence[str]) -> collections.CollectionError:
             "retry_after_ms": _LINK_INDEX_RETRY_MS,
             "remediation": "Retry the same query shortly, or query without selecting on those link fields.",
         },
+    )
+
+
+def _link_index_incomplete(fields: Sequence[str]) -> collections.CollectionError:
+    """The refusal of a query that selected on link fields after its walk for the link index stopped at a cap."""
+    return collections.CollectionError(
+        "LINK_INDEX_INCOMPLETE",
+        f"the link index covers only part of this vault, so this query cannot filter, sort or "
+        f"aggregate on {collections.listed_within(fields)}",
+        {"remediation": "Query without selecting on those link fields; a published link index covers every page."},
     )
 
 
