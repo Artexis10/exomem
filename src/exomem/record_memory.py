@@ -713,7 +713,85 @@ def parse_manifest_contract(*, store_mode: bool = False, store_vault: bool = Fal
         **manifest_authoring_contract(store=store_mode or store_vault),
         "bulk_upsert": _bulk_upsert_contract(store_mode=store_mode),
         "history": _history_contract(),
+        "timeline": _timeline_contract(),
         "writer_lease": UNSUPPORTED_WRITERS,
+    }
+
+
+def _timeline_contract() -> dict[str, Any]:
+    """How to state when a value took effect, correct it, and read one field's values over time."""
+    from .collection_store import timeline, timeline_query
+
+    lamps = kbdir.managed_join("Records/Lamps/_collection.md")
+    guards = {"expected_container_hash": "from inspect's lifecycle_guards",
+              "expected_item_version": "the row's item_version from a query"}
+    return {
+        "why": "record a change on the day it happened even when you learn of it later, fix a wrong one, and ask "
+               "which value a field held at a time or over a period",
+        "applies_to": "store-routed Records collections; file-canonical, dataset and derived collections refuse "
+                      "effective_at, corrects and timeline with TIMELINE_UNAVAILABLE",
+        "effective_at": (
+            "on append, update and bulk_upsert: a date (2026-03-07) or an RFC 3339 instant with its offset, no "
+            "later than the write. The receipt's `timeline` block echoes it with its basis and each field's "
+            "placement"),
+        "basis": {timeline.STATED: "the write gave effective_at",
+                  timeline.WRITTEN: "the write gave none, so its values took effect when it was made"},
+        "placements": {
+            timeline.CURRENT: "the field's value now: no point of that field lies after effective_at",
+            timeline.PAST: (
+                "an update earlier than a field's latest point records the value at that time and leaves the "
+                "current value as it is. Append and bulk_upsert refuse it with EFFECTIVE_BEFORE_CURRENT"),
+        },
+        "corrects": (
+            "on update: corrects takes the reply's `audit_correlation` of the write to replace (its "
+            "transition_id, as the row's history lists it). Name the corrected values in changes, a corrected "
+            "effective_at, or both. The history keeps both writes, each naming the other"),
+        "query": {
+            "argument": {"timeline": {
+                "field": "a declared top-level scalar field",
+                "value": "optional {op, value}: the filter operators against each span's value; op defaults to eq",
+                "at": "an instant, or a date for its whole UTC day; excludes from, to and changes",
+                "from": "optional start of a window, inclusive", "to": "optional end of a window, inclusive",
+                "changes": "true lists only the spans that started in the window; needs from or to",
+            }},
+            "with": "filters (rows by their current values), columns (current values added to each span), "
+                    "descending, limit and continuation; every other query argument is refused",
+            "span": (
+                "id, value (or missing: true), previous (or first: true, or previous_missing: true), "
+                "effective_from, effective_to (null while current), effective_basis and written_at. A caller "
+                "who reads the whole row also gets transition_id, why and sources"),
+            "source": (
+                f"versions when the selected rows hold up to {timeline_query.DIRECT_BOUND} versions, else the "
+                "field's span index, which builds on first use"),
+        },
+        "codes": {
+            "EFFECTIVE_BEFORE_CURRENT": "append or bulk_upsert stated a time before a field's latest point",
+            "TIMELINE_POINT_NOT_FOUND": "corrects names no current point of the fields the update changes",
+            "TIMELINE_ORDER_CONFLICT": "the correction would change which point of a field is latest",
+            "TIMELINE_ARGUMENT_INVALID": "a timeline argument, or an argument that cannot go with timeline",
+            "TIMELINE_FIELD_NOT_SCALAR": "the field is an array, an object or a nested path",
+            "QUERY_FIELD_UNKNOWN": "the field is not one the caller may read, alike for absent and withheld",
+            "TIMELINE_WARMING": "the field's index is building: retry after details.retry_after_ms, or select "
+                                "fewer rows",
+            "TIMELINE_UNAVAILABLE": "the collection keeps no timeline",
+        },
+        "example": [
+            {"say": "Lamp L-17 moved to Shelf C on 7 March; I am recording it now",
+             "call": {"action": "update", "collection": lamps, "item_key": "the row's record_id from a query",
+                      "changes": {"location": "Shelf C"}, "effective_at": "2026-03-07", **guards,
+                      "why": "moved on 7 March"}},
+            {"say": "That move was to Shelf D, not Shelf C",
+             "call": {"action": "update", "collection": lamps, "item_key": "the same record_id",
+                      "changes": {"location": "Shelf D"}, "corrects": "the move's reply audit_correlation",
+                      **guards, "why": "it went to Shelf D"}},
+            {"say": "Where was L-17 during March?",
+             "call": {"action": "query", "collection": lamps,
+                      "filters": [{"column": "asset_tag", "op": "eq", "value": "L-17"}],
+                      "timeline": {"field": "location", "from": "2026-03-01", "to": "2026-03-31"}}},
+            {"say": "Which lamps were on Shelf A on 1 March?",
+             "call": {"action": "query", "collection": lamps, "timeline": {
+                 "field": "location", "value": {"op": "eq", "value": "Shelf A"}, "at": "2026-03-01"}}},
+        ],
     }
 
 

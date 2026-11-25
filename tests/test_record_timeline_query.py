@@ -1,4 +1,4 @@
-"""`query_records` with `timeline`: one field's spans over effective time (OpenSpec record-value-timeline 5.1-5.5).
+"""`query_records` with `timeline`: one field's spans over effective time (OpenSpec record-value-timeline 5.1-5.5, 6.1).
 
 Each case names the failure only it catches. Store collections run on the real CollectionWriter, in the JSON
 encoding (one view file per row) and the typed one (a summary view). The lamps, shelves and dates are invented,
@@ -530,3 +530,42 @@ def test_inspect_lists_each_timeline_index_and_its_state(lamps, monkeypatch):
     assert before == []
     assert during == [{"field": "location", "state": "building"}]
     assert listed() == [{"field": "location", "state": "ready"}]
+
+
+# --- 6.1 describe ---------------------------------------------------------------------------------------------
+
+
+def test_a_client_that_reads_only_describe_records_corrects_and_reads_a_late_move(tmp_path):
+    """Guidance whose example a client could not run as written would teach a call the server refuses."""
+    root = tmp_path / "vault"
+    (root / "Knowledge Base").mkdir(parents=True)
+    with connection.open_writer(tmp_path / "collections.sqlite", lease_check=lambda: True) as handle, \
+            library_scope(), request_scope(OWNER), preview_store(root, handle):
+        def call(arguments):
+            return record_memory(root, **arguments)
+
+        writer = CollectionWriter(root, handle)
+        writer.create_collection(LAMPS_PATH, manifest("typed"), why="declare", scaffold=False)
+        add(writer, {"asset_tag": "L-17", "location": "Shelf A"}, "2026-03-01")
+        guide = call({"action": "describe"})["timeline"]
+        late_move, correction, during_march, on_shelf_a = (step["call"] for step in guide["example"])
+
+        def filled(step, **extra):
+            """The step with the row's key and guards, which a client reads as for any edit."""
+            [row] = call({"action": "query", "collection": step["collection"], "filters": [L17],
+                          "columns": ["asset_tag"]})["rows"]
+            guards = call({"action": "inspect", "collection": step["collection"]})["lifecycle_guards"]
+            return {**step, "item_key": row["record_id"], "expected_item_version": row["item_version"],
+                    "expected_container_hash": guards["expected_container_hash"], **extra}
+
+        moved = call(filled(late_move))
+        corrected = call(filled(correction, corrects=moved["audit_correlation"]))
+        march = call(during_march)
+        shelf_a = call(on_shelf_a)
+
+    assert "audit_correlation" in guide["corrects"]
+    assert moved["timeline"]["effective_at"] == "2026-03-07"
+    assert corrected["outcome"] == "committed"
+    assert [(span["value"], span["effective_from"], span["effective_to"]) for span in march["spans"]] == [
+        ("Shelf A", "2026-03-01", "2026-03-07"), ("Shelf D", "2026-03-07", None)]
+    assert [(span["value"], span["effective_from"]) for span in shelf_a["spans"]] == [("Shelf A", "2026-03-01")]

@@ -73,8 +73,9 @@
 
 ## 6. Contract and guidance
 
-- [ ] 6.1 Teach `effective_at`, its basis, placements, `corrects`, `timeline` and the new codes in `describe`, with the lamp example.
+- [x] 6.1 Teach `effective_at`, its basis, placements, `corrects`, `timeline` and the new codes in `describe`, with the lamp example.
   - Check: a test client that reads only `describe` records a late move, corrects it and queries the timeline; `tests/test_scaffold_no_leak.py` passes.
+  - Evidence: `tests/test_record_timeline_query.py::test_a_client_that_reads_only_describe_records_corrects_and_reads_a_late_move` runs the four steps of `describe`'s `timeline.example` as written. It adds only what a client reads for any edit: the row's key, its guards, and the move's `audit_correlation` as `corrects`. `tests/test_scaffold_no_leak.py` passes.
 - [ ] 6.2 Update the scaffold skill reference (`references/operations.md`), `docs/records.md` and the schema-21 note in `docs/deployment.md`, and regenerate `docs/capabilities.md`.
   - Check: the no-leak test and the public-artifact privacy gate pass.
 
