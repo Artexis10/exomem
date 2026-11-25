@@ -13,8 +13,9 @@ belong to the caller (`capture_sweep.unlinked_mentions`).
 from __future__ import annotations
 
 import re
+import unicodedata
 from bisect import bisect_left, bisect_right
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from . import entity_recurrence, markdown_regions
@@ -37,6 +38,8 @@ class NameIndex:
     owners: Mapping[str, Sequence[str]]
     #: The first word of a name to the most words in any name that starts with it.
     runs: Mapping[str, int]
+    #: A one-word name to its written forms (NFC) on the Entities that answer to it.
+    forms: Mapping[str, frozenset[str]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,16 +61,21 @@ class Edit:
     new: str
 
 
-def build_index(entries: Iterable[entity_recurrence.RegistryEntry]) -> NameIndex:
+def build_index(entries: Iterable[entity_recurrence.RegistryEntry], *, max_chars: int) -> NameIndex:
     """The name index of these registry entries: every title and alias, once per Entity.
 
+    A name longer than `max_chars` is left out: it can never be offered, and it would cost scan time.
     One pass over the entries, with no per-name tokenising beyond the first word: it runs once per
     durable page write, so its cost is linear in the Entities the writer can see.
     """
     owners: dict[str, list[str]] = {}
     runs: dict[str, int] = {}
+    forms: dict[str, set[str]] = {}
     for entry in entries:
+        one_word = False
         for identity in entry.identities:
+            if len(identity) > max_chars:
+                continue
             # An Entity lists each of its names once, so a second path under a name is a second Entity.
             if (held := owners.get(identity)) is None:
                 owners[identity] = [entry.path]
@@ -75,9 +83,16 @@ def build_index(entries: Iterable[entity_recurrence.RegistryEntry]) -> NameIndex
                 held.append(entry.path)
             first, _, rest = identity.partition(" ")
             words = rest.count(" ") + 2 if rest else 1
+            one_word = one_word or not rest
             if runs.get(first, 0) < words:
                 runs[first] = words
-    return NameIndex(owners, runs)
+        if one_word:
+            for name in entry.names:
+                written = name.strip()
+                key = entity_recurrence.identity_key(written)
+                if key in owners and " " not in key:
+                    forms.setdefault(key, set()).add(unicodedata.normalize("NFC", written))
+    return NameIndex(owners, runs, {key: frozenset(held) for key, held in forms.items()})
 
 
 def prose_mask(text: str) -> tuple[Span, ...]:
@@ -152,11 +167,14 @@ def find_mentions(text: str, index: NameIndex, mask: Sequence[Span]) -> list[Men
 
 
 def _trims(word: str, *, trailing: bool = False) -> list[int]:
-    """How many characters may be cut from one edge of `word`: only non-alphanumeric ones, up to `_MAX_EDGE`."""
+    """How many characters may be cut from one edge of `word`: only punctuation, up to `_MAX_EDGE`.
+
+    A letter, a digit or a combining mark stops the cut: a mark belongs to the letter before it.
+    """
     edge = word[::-1] if trailing else word
     cuts = [0]
     for char in edge[:_MAX_EDGE]:
-        if char.isalnum():
+        if char.isalnum() or unicodedata.category(char).startswith("M"):
             break
         cuts.append(cuts[-1] + 1)
     return cuts
@@ -172,8 +190,12 @@ def _run_match(text, words, position, length, index, norm, blocked):  # noqa: AN
             for trail in _trims(first, trailing=True):
                 if lead + trail >= len(first):
                     continue
-                key = norm(first[lead : len(first) - trail])
-                if key in index.owners:
+                shown = first[lead : len(first) - trail]
+                key = norm(shown)
+                # A one-word name matches only in its written form: a vault that titles an Entity with a
+                # common word (`Signal`) must not link every sentence that uses it. A shape rule over the
+                # vault's own names, not a list of words; names of two or more words ignore case.
+                if key in index.owners and unicodedata.normalize("NFC", shown) in index.forms.get(key, ()):
                     start, end = words[position]
                     return key, start + lead, end - trail, 1
         return None
@@ -204,6 +226,7 @@ def edits_for(
     mask: Sequence[Span],
     *,
     max_chars: int,
+    shown: Callable[[str], str] | None = None,
 ) -> list[tuple[int, Edit]]:
     """`(index into mentions, edit)` in the order a `replace_text` call applies them; a mention with no unique anchor is left out.
 
@@ -213,24 +236,32 @@ def edits_for(
     and between the masked regions around it. Edits run from the last mention to the first, and each
     is counted against the page as the edits before it left it, so no edit can find its text moved
     or doubled by another. A span longer than `max_chars` is never used.
+
+    A surface that shows links by title counts the span there, not in the stored bytes. `shown` maps a
+    page to the form that surface reads, and the span must occur once in both.
     """
     current = raw.replace("\r\n", "\n")
+    view = shown(current) if shown else None
     limit = len(text)
     edits: list[tuple[int, Edit]] = []
     for at in sorted(range(len(mentions)), key=lambda i: mentions[i].start, reverse=True):
-        found = _anchor(text, mentions[at], replacements[at], mask, current, limit, max_chars)
+        found = _anchor(text, mentions[at], replacements[at], mask, current, view, limit, max_chars)
         if found is not None:
             edit, limit = found
             current = current.replace(edit.old, edit.new, 1)
+            view = shown(current) if shown else None
             edits.append((at, edit))
     return edits
 
 
 def _anchor(
-    text: str, mention: Mention, replacement: str, mask: Sequence[Span], current: str, limit: int,
-    max_chars: int,
+    text: str, mention: Mention, replacement: str, mask: Sequence[Span], current: str, view: str | None,
+    limit: int, max_chars: int,
 ) -> tuple[Edit, int] | None:
-    """The edit for one mention and where its span starts, or None when no span within bounds occurs once."""
+    """The edit for one mention and where its span starts, or None when no span within bounds occurs once.
+
+    `current` is the page in stored bytes and `view` the same page as a title-showing surface reads it.
+    """
     line_end = text.find("\n", mention.end)
     low, high = text.rfind("\n", 0, mention.start) + 1, min(len(text) if line_end < 0 else line_end, limit)
     owner = bisect_right([end for _start, end in mask], mention.start) - 1
@@ -246,7 +277,7 @@ def _anchor(
         old = text[lefts[left] : rights[right]]
         if len(old) > max_chars:
             return None
-        if current.count(old) == 1:
+        if current.count(old) == 1 and (view is None or view.count(old) == 1):
             new = text[lefts[left] : mention.start] + replacement + text[mention.end : rights[right]]
             return Edit(old, new), lefts[left]
     return None

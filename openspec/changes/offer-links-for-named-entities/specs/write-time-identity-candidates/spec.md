@@ -58,6 +58,16 @@ Each item SHALL replace the Entity's first unlinked mention with a wikilink to t
 - **WHEN** a listed Entity's name occurs twice in the note without a link
 - **THEN** the call's `old_text` for it is a longer span that occurs once, and the call links the first mention
 
+#### Scenario: The ready call works where links are shown by title
+
+- **WHEN** the note links a page whose title holds a listed Entity's name, and the agent sends the block's ready call on a surface that shows links by title
+- **THEN** the call's `old_text` occurs once there as well, and the call links the note's own mention
+
+#### Scenario: A one-word name matches only as it is written
+
+- **WHEN** an Entity's title is one word and the note uses that word in another case
+- **THEN** the note is not offered that Entity
+
 ### Requirement: The offer follows the write-advisory rules
 
 The block SHALL be withheld when `structural_suggestions` is `off` or `proactive_capture` resolves to `off`, and the `unlinked_mentions` family SHALL be quietable.

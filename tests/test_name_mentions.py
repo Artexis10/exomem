@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import unicodedata
+
 from exomem import entity_recurrence, name_mentions
 
 
 def _entry(path: str, title: str, *aliases: str) -> entity_recurrence.RegistryEntry:
     names = (title, *aliases)
     return entity_recurrence.RegistryEntry(
-        path=path, title=title,
+        path=path, title=title, names=names,
         identities=frozenset(entity_recurrence.identity_key(name) for name in names),
         tokens=frozenset(), entity_type="concept", entity_family="concept",
     )
@@ -22,12 +24,13 @@ INDEX = name_mentions.build_index([
     _entry("E/Dana Reyes.md", "Dana Reyes", "Dana"),
     _entry("E/Dana Freight.md", "Dana Freight", "Dana"),
     _entry("E/Zoë Åberg.md", "Zoë Åberg"),
-])
+    _entry("E/Signal.md", "Signal"),
+], max_chars=120)
 
 
-def _found(text: str) -> list[tuple[str, str]]:
+def _found(text: str, index: name_mentions.NameIndex = INDEX) -> list[tuple[str, str]]:
     return [(m.path.removeprefix("E/").removesuffix(".md"), m.written) for m in
-            name_mentions.find_mentions(text, INDEX, name_mentions.prose_mask(text))]
+            name_mentions.find_mentions(text, index, name_mentions.prose_mask(text))]
 
 
 def test_a_title_and_an_alias_match_whatever_their_case_and_punctuation() -> None:
@@ -48,6 +51,23 @@ def test_a_name_that_two_entities_answer_to_is_never_offered_and_takes_no_shorte
 
 def test_a_name_is_matched_on_word_boundaries_and_unicode() -> None:
     assert _found("Marinas and Marinade, but Zoë Åberg came.") == [("Zoë Åberg", "Zoë Åberg")]
+
+
+def test_a_one_word_name_matches_only_in_its_written_form() -> None:
+    assert _found("The signal was weak, SIGNAL too, but Signal held.") == [("Signal", "Signal")]
+
+
+def test_a_combining_mark_belongs_to_its_letter_and_is_never_trimmed_off() -> None:
+    plain = name_mentions.build_index([_entry("E/Quirene.md", "Quirene")], max_chars=120)
+    accented = name_mentions.build_index([_entry("E/Quirené.md", "Quirené")], max_chars=120)
+    decomposed = f"{unicodedata.normalize('NFD', 'Quirené')} arrived."
+    assert _found(decomposed, plain) == [], "the accent is not punctuation to cut"
+    assert _found(decomposed, accented) == [("Quirené", decomposed.removesuffix(" arrived."))]
+
+
+def test_a_name_longer_than_the_limit_is_not_indexed() -> None:
+    index = name_mentions.build_index([_entry("E/Long.md", "A title that runs on and on")], max_chars=10)
+    assert not index.owners and not index.runs and not index.forms
 
 
 def test_a_name_never_spans_a_line_break() -> None:

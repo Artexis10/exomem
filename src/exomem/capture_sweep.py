@@ -689,7 +689,7 @@ def _unlinked_group(
     registry = _registry_index(corpus, visible)
     if registry is None or not registry.entries:
         return None
-    index = name_mentions.build_index(registry.entries)
+    index = name_mentions.build_index(registry.entries, max_chars=MAX_UNLINKED_NAME_CHARS)
     mask = name_mentions.prose_mask(body)
     mentions = name_mentions.find_mentions(body, index, mask)
     if not mentions:
@@ -736,6 +736,7 @@ def _unlinked_group(
         [link[1] for _mention, link in chosen],
         mask,
         max_chars=MAX_UNLINKED_ANCHOR_CHARS,
+        shown=_title_view(root, corpus, visible),
     )
     # An Entity whose name has no unique anchor within bounds is not listed: the page's call must link
     # exactly the Entities its block lists.
@@ -748,6 +749,24 @@ def _unlinked_group(
         "mentions": listed,
         "edits": [{"old": edit.old, "new": edit.new} for _at, edit in edits],
     }
+
+
+def _title_view(root: Path, corpus: Any, visible: Callable[[str], bool] | None) -> Callable[[str], str]:
+    """A page as a surface that shows links by title reads it, in the writer's view.
+
+    The ready call works on either surface only if each `old_text` occurs once in the stored bytes and
+    once here, because `edit_note` counts it in this form on a title-showing surface.
+    """
+    from . import vault
+
+    resolver = corpus.link_resolver()
+
+    def shown(text: str) -> str:
+        if "[[" not in text:
+            return text
+        return vault.render_title_links(text, root, resolver=resolver, visible=visible).text
+
+    return shown
 
 
 def _linked_paths(

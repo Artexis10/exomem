@@ -178,6 +178,29 @@ def _quiet_the_family(call) -> None:
     assert "error" not in quieted, quieted
 
 
+def test_the_ready_call_works_where_a_link_is_shown_by_title_and_the_title_holds_the_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault, call = _served(tmp_path, monkeypatch)
+    _as(monkeypatch, "session-a")
+    _entity(call, "concept", "Quillon Barrowfield")
+    _note(call, "Pricing call", "A short pricing call.")
+    page = next(vault.rglob("Pricing call.md")).relative_to(vault).as_posix()
+    retitled = call("edit_note", {
+        "note": page, "why": "Retitle the note.", "action": "set_fields",
+        "fields": {"title": "Pricing call with Quillon Barrowfield"},
+    })
+    assert "error" not in retitled, retitled
+    prose = "Covered in [[Pricing call with Quillon Barrowfield]]. Quillon Barrowfield agreed."
+
+    written = _note(call, "Covered review", prose)
+    sent = _send(call, _ready(written))
+
+    assert "error" not in sent, sent
+    note = written["unlinked_mentions"]["pages"][0]["note"]
+    assert "[[Knowledge Base/Entities/Concepts/Quillon Barrowfield|Quillon Barrowfield]] agreed." in _read(vault, note)
+
+
 @pytest.mark.parametrize(
     "silence",
     [_switch_structural_suggestions_off, _switch_to_light_prominence, _quiet_the_family],

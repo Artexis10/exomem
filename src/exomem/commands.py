@@ -11454,12 +11454,14 @@ def _carrying_capture_sweep(vault_root: Path, result: Any) -> Any:
     return {**result, "capture_sweep": block}
 
 
-def _carrying_write_advisory(vault_root: Path, result: Any, key: str, batch_block: str) -> Any:
+def _carrying_write_advisory(
+    vault_root: Path, result: Any, key: str, batch_block: Callable[[Path], dict[str, Any] | None]
+) -> Any:
     """Attach the write-advisory block a batch's pages held, once, under `key`.
 
     Inside `due_state.batch_scope` the page seam holds these blocks rather than delivering them, so
     a subject that several pages raise is listed once, here. Gated on an actual commit like the
-    carriers beside it. `batch_block` names the `capture_sweep` function that takes the held entries.
+    carriers beside it. `batch_block` takes the held entries and returns the block.
     """
     from .writer_lease import active_mutation_committed
 
@@ -11468,9 +11470,7 @@ def _carrying_write_advisory(vault_root: Path, result: Any, key: str, batch_bloc
     if not active_mutation_committed():
         return result
     try:
-        from . import capture_sweep as capture_sweep_module
-
-        block = getattr(capture_sweep_module, batch_block)(vault_root)
+        block = batch_block(vault_root)
     except Exception:  # noqa: BLE001 — an advisory never breaks a committed batch
         log.debug("%s batch block failed (non-fatal)", key, exc_info=True)
         return result
@@ -11487,9 +11487,15 @@ def _carrying_batch_advisories(vault_root: Path, result: Any) -> Any:
     has exited and the deltas have been applied — and a leaf that acquired one
     but not the other would be a silent coverage gap rather than a visible one.
     """
+    from . import capture_sweep as capture_sweep_module
+
     carried = _carrying_capture_sweep(vault_root, _carrying_due_state(vault_root, result))
-    carried = _carrying_write_advisory(vault_root, carried, "undeclared_referents", "batch_referents")
-    return _carrying_write_advisory(vault_root, carried, "unlinked_mentions", "batch_unlinked_mentions")
+    carried = _carrying_write_advisory(
+        vault_root, carried, "undeclared_referents", capture_sweep_module.batch_referents
+    )
+    return _carrying_write_advisory(
+        vault_root, carried, "unlinked_mentions", capture_sweep_module.batch_unlinked_mentions
+    )
 
 
 def _set_family_disposition(

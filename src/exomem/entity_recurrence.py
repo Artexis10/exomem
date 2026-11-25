@@ -297,6 +297,8 @@ class RegistryEntry:
     title: str
     #: Every name this entry answers to, NFKC-normalised: title plus aliases.
     identities: frozenset[str]
+    #: The same names as written: the title, then each alias.
+    names: tuple[str, ...]
     #: The identity tokens of all of those names, for the lexical assist.
     tokens: frozenset[str]
     entity_type: str
@@ -609,6 +611,7 @@ def registry_from_facts(
                 path=rel_path,
                 title=title,
                 identities=identities,
+                names=names,
                 tokens=frozenset().union(*(identity_tokens(n) for n in names)),
                 entity_type=definition.id,
                 entity_family=entity_types.family_of(definition.id) or definition.id,

@@ -19,6 +19,7 @@ from . import (
     source_result_attribution,
 )
 from . import curation as curation_module
+from .capture_sweep import MAX_UNLINKED_MENTIONS, MAX_UNLINKED_NAME_CHARS
 from .kbdir import managed_join, managed_split
 from .operation_entries import OutcomeVerb
 
@@ -1637,11 +1638,10 @@ def _undeclared_referents_projection(leaf: Any) -> dict[str, Any] | None:
 
 
 #: Wire bounds on the advisory `unlinked_mentions` block (`write-time-identity-candidates` spec):
-#: at most five Entities in all, grouped by page, each with the name as written, its link target and
-#: the write-advisory handle that dismisses it, and per page the edits of one `edit_note` call. This
-#: module's own numbers, for the reason the bounds above are.
-_MAX_UNLINKED_MENTIONS = 5
-_MAX_UNLINKED_NAME_CHARS = 120
+#: at most `MAX_UNLINKED_MENTIONS` Entities in all, grouped by page, each with the name as written
+#: (at most `MAX_UNLINKED_NAME_CHARS`), its link target and the write-advisory handle that dismisses
+#: it, and per page the edits of one `edit_note` call. The count and name bounds are the producer's,
+#: imported so the projection checks the payload against the numbers that built it.
 _MAX_UNLINKED_LINK_CHARS = 512
 _MAX_UNLINKED_EDIT_CHARS = 1024
 _UNLINKED_WHY = "Link the Entities this note names."
@@ -1653,7 +1653,7 @@ def _unlinked_mention(value: Any) -> dict[str, Any] | None:
         return None
     name, link = value.get("name"), value.get("link")
     review, fingerprint = value.get("review"), value.get("fingerprint")
-    if not isinstance(name, str) or not 0 < len(name) <= _MAX_UNLINKED_NAME_CHARS:
+    if not isinstance(name, str) or not 0 < len(name) <= MAX_UNLINKED_NAME_CHARS:
         return None
     if not isinstance(link, str) or not 0 < len(link) <= _MAX_UNLINKED_LINK_CHARS:
         return None
@@ -1679,7 +1679,7 @@ def _unlinked_page(value: Any) -> dict[str, Any] | None:
     note, mentions, edits = value.get("note"), value.get("mentions"), value.get("edits")
     if not isinstance(note, str) or not 0 < len(note) <= _MAX_UNDECLARED_REFERENT_ORIGIN_CHARS:
         return None
-    if not isinstance(mentions, (list, tuple)) or not 0 < len(mentions) <= _MAX_UNLINKED_MENTIONS:
+    if not isinstance(mentions, (list, tuple)) or not 0 < len(mentions) <= MAX_UNLINKED_MENTIONS:
         return None
     projected = [_unlinked_mention(item) for item in mentions]
     if any(item is None for item in projected):
@@ -1718,12 +1718,12 @@ def _unlinked_mentions_projection(leaf: Any) -> dict[str, Any] | None:
             continue
         value = container.get("unlinked_mentions")
         pages = value.get("pages") if isinstance(value, Mapping) else None
-        if not isinstance(pages, (list, tuple)) or not 0 < len(pages) <= _MAX_UNLINKED_MENTIONS:
+        if not isinstance(pages, (list, tuple)) or not 0 < len(pages) <= MAX_UNLINKED_MENTIONS:
             continue
         projected = [_unlinked_page(item) for item in pages]
         if any(item is None for item in projected):
             continue
-        if sum(len(item["mentions"]) for item in projected) > _MAX_UNLINKED_MENTIONS:
+        if sum(len(item["mentions"]) for item in projected) > MAX_UNLINKED_MENTIONS:
             continue
         return {"pages": projected}
     return None
