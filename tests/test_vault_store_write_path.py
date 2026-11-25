@@ -695,6 +695,34 @@ def test_a_page_written_into_a_split_lands_in_the_fuller_stored_spelling(served)
     )
 
 
+@pytest.mark.skipif(sys.platform in {"win32", "darwin"}, reason="needs a case-sensitive volume")
+def test_a_stored_split_is_merged_into_its_canonical_spelling(served):
+    """Defect: the merge reads only the disk and misses pages that only the store holds."""
+    from exomem import path_variants
+
+    for stem in ("Gamma", "Delta"):
+        vault_module.batch_atomic_write(
+            [planned(served, f"Knowledge Base/Stored Only/{stem}.md", GAMMA_TEXT, create_only=True)],
+            vault_root=served,
+            post_commit_fanout=False,
+        )
+    vault_module.batch_atomic_write(
+        [planned(served, "Knowledge Base/stored only/Epsilon.md", GAMMA_TEXT, create_only=True)],
+        vault_root=served,
+        post_commit_fanout=False,
+    )
+
+    preview = path_variants.preview(served)
+    assert [unit["from"] for unit in preview["batch"]] == ["Knowledge Base/stored only/Epsilon.md"]
+    result = path_variants.apply(served, plan_id=preview["plan_id"], why="merge the stored split")
+
+    assert result["moved"] == [
+        {"from": "Knowledge Base/stored only/Epsilon.md", "to": "Knowledge Base/Stored Only/Epsilon.md"}
+    ]
+    rows = store_rows(served, "SELECT path FROM store_pages WHERE path LIKE ?", "Knowledge Base/%Epsilon.md")
+    assert rows == [("Knowledge Base/Stored Only/Epsilon.md",)]
+
+
 def test_the_rows_that_governed_commands_commit_equal_a_cold_derivation_from_the_files(
     served, tmp_path
 ):
