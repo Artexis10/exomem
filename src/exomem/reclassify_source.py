@@ -1085,10 +1085,11 @@ def _record_held_row(
 ) -> None:
     """Record one governed row's release evidence while its bytes are still in hand.
 
-    A row whose permit depends on another file keeps its own scopes here and names that file: the
-    page an extracted part or a scene frame inherits from, or a container member's parent. Release
-    proves the dependency again from the dependency itself. Bridge rows and anything unclear leave no
-    record and take the full release path. Only scalars are stored: the page text dies with this frame.
+    A row whose permit depends on another file keeps its own scopes here and names that file:
+    the page an extracted part or a scene frame inherits from, or a container member's parent.
+    Release proves the dependency again from the dependency itself. Bridge rows and anything
+    unclear leave no record and take the full release path. Only scalars are stored: the page
+    text dies with this frame.
     """
     from . import document_containers, find_corpus
     from .governance import membership
@@ -1115,8 +1116,10 @@ def _record_held_row(
     if basis is None:
         return
     own, inherits = basis
-    # A part or frame whose parent sits in a container takes its binding from that parent: full path.
-    if binding is not None and (inherits is None or inherits["kind"] != membership.CONTAINER_INHERITANCE):
+    # A part or frame whose parent sits in a container takes its binding from that parent:
+    # it takes the full path.
+    contained = inherits is not None and inherits["kind"] == membership.CONTAINER_INHERITANCE
+    if binding is not None and not contained:
         return
     sink[rel] = {
         "path": rel,
