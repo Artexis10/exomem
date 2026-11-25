@@ -24,6 +24,8 @@ Subcommands:
   cell, uploaded to controller-presigned parts; reports sizes and digests only
 - `cell-media-census` — Evermatter Cloud backup Job: the cell's last census of its
   evicted originals from its drain record, or `unknown unknown` when it cannot say
+- `cell-media-storage` — Evermatter Cloud backup Job: the cell's last reading of its
+  vault and media storage figures from its storage record, or nothing when it cannot say
 - `cell-media-manifest` — Evermatter Cloud backup Job: the media manifest that each
   snapshot carries, or an unknown manifest when the census cannot say
 - `cell-media-collect` — Evermatter Cloud backup Job: condemn the released media
@@ -109,7 +111,7 @@ def _is_cli_only_invocation(raw: list[str]) -> bool:
 # runtime: each bounds itself in seconds on one CPU.
 # nosemgrep: ep-word-set -- This CLI's own parser registers these subcommand names.
 _LEAN_COMMANDS: frozenset[str] = frozenset(
-    {"cell-media-census", "cell-media-manifest", "cell-media-collect"}
+    {"cell-media-census", "cell-media-storage", "cell-media-manifest", "cell-media-collect"}
 )
 
 
@@ -5453,6 +5455,13 @@ def _cell_media_census_main(argv: list[str]) -> int:
     return census_main(argv)
 
 
+def _cell_media_storage_main(argv: list[str]) -> int:
+    # It reads one file, so it loads no CLI, server framework or native runtime.
+    from .cell_media_storage import main as storage_main
+
+    return storage_main(argv)
+
+
 def _cell_media_manifest_main(argv: list[str]) -> int:
     # It runs on a read-only clone: it reads the vault and the media ledger, nothing more.
     from .media_manifest import main as manifest_main
@@ -5510,6 +5519,7 @@ _COMMANDS: dict[str, Callable[[list[str]], int]] = {
     "cell-init": _cell_init_main,
     "media-replicas": _media_replicas_main,
     "cell-media-census": _cell_media_census_main,
+    "cell-media-storage": _cell_media_storage_main,
     "cell-media-manifest": _cell_media_manifest_main,
     "cell-media-collect": _cell_media_collect_main,
     # A thin alias over the registry command, so there is exactly one leaf; the long form
@@ -5527,6 +5537,7 @@ _WITHOUT_CLI_LOG: frozenset[str] = frozenset(
         "cell-export",
         "cell-init",
         "cell-media-census",
+        "cell-media-storage",
         "cell-media-manifest",
         "cell-media-collect",
         "activate",

@@ -353,6 +353,16 @@ def _storage_figures(root: Path, volume: _Reading, allowance: dict) -> dict:
     return {"vault_storage": vault, "media_storage": media}
 
 
+def storage_figures(root: Path, config: dict) -> tuple[dict, str | None]:
+    """`vault_storage` and `media_storage` as the window budget reports them, read now, with the time of the census
+    behind `media_storage` (the status shows it as `media_allowance.observed_at`); None when no census is recorded.
+
+    The owner census is the one that offload recorded, never a fresh walk, so a caller on a timer adds no census.
+    """
+    allowance = _allowance(root, config, may_count=False)
+    return _storage_figures(root, _read(lambda: _volume(root)), allowance), allowance.get("observed_at")
+
+
 def _volume_section(volume: _Reading) -> dict:
     """The bytes that the volume uses, which the sender's admission rule needs; unknown when the volume cannot be read."""
     try:

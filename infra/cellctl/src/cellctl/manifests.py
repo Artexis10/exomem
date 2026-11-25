@@ -29,6 +29,7 @@ from .backup_source import (
     media_census_command,
     media_collect_command,
     media_manifest_command,
+    media_storage_command,
 )
 from .cell_readiness import CELL_HEALTH_PORT, CELL_HEALTH_PORT_ENV, CELL_READINESS_PATH
 from .export_layout import (
@@ -1726,7 +1727,11 @@ def render_backup_job(
         # D12: the cell's drain record, "<evicted count> <evicted bytes> <census time>", on a line of its own.
         # The census time is the cell's. A record that the Job cannot read reports unknown at the hold start.
         media_census_command(spec.hold_started_at),
-        # collect-released-media D5: only after the prune succeeded, and last, once the termination message is whole.
+        # add-cloud-media-store D10: the cell's storage record, a JSON line of its own after the census. A record that
+        # the Job cannot read reports both figures null at the hold start.
+        media_storage_command(spec.hold_started_at),
+        # collect-released-media D5: only after the prune succeeded, and last, once the termination message is whole. Its
+        # result is the fourth line (k8s_client._media_collection).
         *([media_collect_command()] if collects and retention is not None else []),
     ]
     pod_spec = _job_pod_spec(
