@@ -16,7 +16,8 @@ when the query returned no link field.
   and a background warm that publishes one runs. One function, `semantic_contract.link_corpus_coming`,
   makes this decision from the borrow's decline reason, and starts or joins that warm.
 - While a generation is coming, a returned link field leaves out its bare titles and memory references.
-  The reply names that field in `unresolved_links`, so a value left out never reads as an empty field.
+  The reply names each field that lost such a value in `unresolved_links`, so a value left out never
+  reads as an empty field. It names a link column of an expanded child table as the reply's columns do.
   Planning query replies carry the same key, null when the query could check every returned link field.
 - While a generation is coming, a filter, sort, date or aggregate column on a link field, and a saved
   view that filters on one, refuse with the retryable code `LINK_INDEX_WARMING` and `retry_after_ms`.
@@ -27,10 +28,12 @@ when the query returned no link field.
   link selection refused only until that warm is done.
 - When no generation is coming, as with the corpus cache off, background warms off, or a one-shot process
   whose vault change events are not live, the query runs the bounded walk as before. If that walk stops
-  at its cap, the query names each returned link field in `unresolved_links` and refuses a selection on
-  a link field with `LINK_INDEX_INCOMPLETE`, instead of answering without those values.
-- A query with explicit columns projects only the fields of those columns, so a query that returns no
-  link field resolves no link.
+  at its cap, the query names each returned link field that lost a value in `unresolved_links` and
+  refuses a selection on such a field with `LINK_INDEX_INCOMPLETE`, instead of answering without those
+  values. A link field whose values all name a page by path loses none, so a selection on it answers.
+- A query with explicit columns on a store-backed collection, when the store selects its rows, projects
+  only the fields of those columns, so it resolves no link when it returns no link field. A collection
+  kept in vault files still projects whole rows.
 
 Visible change: an agent that reads a Records or Planning query reply can receive `unresolved_links`.
 It then knows that the named fields are incomplete. A query that selects on a link field can receive

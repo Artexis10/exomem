@@ -18,7 +18,8 @@ from record_fixtures import (
     ledger_item,
     setup_ledger_collection,
 )
-from record_presentation_fixtures import manifest_text
+from record_presentation_fixtures import ITEM_KEY, manifest_text, setup_collection
+from record_presentation_fixtures import values as observation
 
 from exomem import (
     freshness,
@@ -1964,7 +1965,60 @@ def test_a_malformed_query_while_the_link_index_is_coming_gets_its_validation_er
             tmp_path, "query", collection=manifest.path, filters=[{"op": "eq", "value": "[[Vehicle]]"}]
         )
 
-    assert raised.value.code != "LINK_INDEX_WARMING"
+    assert raised.value.code == "BAD_FILTER"
+
+
+def test_a_selection_on_no_link_field_while_the_link_index_is_coming_answers_without_a_wait(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only link values are left out while the index is coming. In a collection whose child table carries a
+    link, a sort on the item id and a date bound on the absent default date column select on no link, so
+    they answer at once, and a misspelt column gets its own error, which a retry cannot fix."""
+    manifest = setup_collection(tmp_path)
+    item = observation(child_count=1)
+    item["measurements"][0]["source"] = "[[Observed Source]]"
+    records.append_record(tmp_path, manifest, item=item, item_key=ITEM_KEY, why="seed a child link")
+    freshness.rebaseline(tmp_path)  # the vault's change events are live; no corpus is published yet
+
+    def ask(**query: object) -> str:
+        try:
+            record_memory.record_memory(tmp_path, "query", collection=manifest.path, **query)
+        except OpError as refused:
+            return refused.code
+        return "answered"
+
+    with held_link_index_warm(monkeypatch):
+        outcomes = [
+            ask(sort_by="record_id"),
+            ask(date_from="2026-01-01"),
+            ask(filters=[{"column": "subjcet", "op": "eq", "value": "Sample <A>"}]),
+        ]
+
+    assert outcomes == ["answered", "answered", "INVALID_RECORD_QUERY_FIELD"]
+
+
+def test_a_child_link_column_left_out_while_the_link_index_is_coming_is_named_as_the_reply_names_it(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An expanded child row returns its link column under the column's own name. While the link index is
+    coming, that column's bare title is left out, so the reply names the column unresolved; once the warm
+    is done the same query returns the link."""
+    manifest = setup_collection(tmp_path)
+    item = observation(child_count=1)
+    item["measurements"][0]["source"] = "[[Observed Source]]"
+    records.append_record(tmp_path, manifest, item=item, item_key=ITEM_KEY, why="seed a child link")
+    (tmp_path / "Knowledge Base" / "Observed Source.md").write_text("# Observed Source\n", encoding="utf-8")
+    freshness.rebaseline(tmp_path)  # the vault's change events are live; no corpus is published yet
+    query = {"collection": manifest.path, "expand_child": "measurements", "columns": ["name", "source"]}
+
+    with held_link_index_warm(monkeypatch):
+        coming = record_memory.record_memory(tmp_path, "query", **query)
+    warmed = record_memory.record_memory(tmp_path, "query", **query)
+
+    assert [row.get("source") for row in coming["rows"]] == [None]
+    assert coming["unresolved_links"] == ["source"]
+    assert [row["source"] for row in warmed["rows"]] == ["[[Observed Source]]"]
+    assert "unresolved_links" not in warmed
 
 
 @pytest.mark.parametrize("live_events", [False, True], ids=["no-live-events", "warms-off"])
@@ -2010,6 +2064,43 @@ def test_a_link_filter_after_a_walk_cut_short_by_its_cap_is_refused_instead_of_m
     assert refused.value.code == "LINK_INDEX_INCOMPLETE"
     assert "retry_after_ms" not in (refused.value.details or {})  # a retry would meet the same cap
     assert list(rows["unresolved_links"]) == ["asset", "receipt"]
+
+
+def test_a_walk_cut_short_refuses_a_selection_only_on_a_link_field_that_lost_a_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A walk cut short at its cap leaves only bare titles and memory references unchecked. A field whose
+    links all name a page by path loses no value, so a filter on it answers and it is not named unresolved;
+    a filter on the field whose bare title was left out is refused."""
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Activity\n", encoding="utf-8")
+    (tmp_path / "Knowledge Base" / "Assets").mkdir()
+    (tmp_path / "Knowledge Base" / "Assets" / "Vehicle.md").write_text("# Vehicle\n", encoding="utf-8")
+    (fixture / "Events" / "2026-07-20-bare.md").write_text(
+        "---\ntype: record\n"
+        f"collection_id: {manifest.collection_id}\n"
+        "record_id: 33333333-3333-4333-8333-333333333333\nschema_version: 1\noccurred_on: 2026-07-20\n"
+        'asset: "[[Assets/Vehicle]]"\nreceipt: "[[Missing Receipt]]"\nstatus: completed\n---\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(record_governance, "_INTERNAL_LINK_INDEX_RAW_CANDIDATES", 1)
+
+    with request_scope(owner_principal(surface="mcp")):
+        by_asset = record_memory.record_memory(
+            tmp_path, "query", collection=manifest.path,
+            filters=[{"column": "asset", "op": "eq", "value": "[[Assets/Vehicle]]"}],
+        )
+        with pytest.raises(OpError) as refused:
+            record_memory.record_memory(
+                tmp_path, "query", collection=manifest.path,
+                filters=[{"column": "receipt", "op": "eq", "value": "[[Missing Receipt]]"}],
+            )
+
+    assert "2026-07-20" in [str(row["occurred_on"]) for row in by_asset["rows"]]
+    assert {row["asset"] for row in by_asset["rows"]} == {"[[Assets/Vehicle]]"}
+    assert by_asset["unresolved_links"] == ["receipt"]
+    assert refused.value.code == "LINK_INDEX_INCOMPLETE"
 
 
 def _parts_collection(tmp_path: Path) -> collections.CollectionManifest:

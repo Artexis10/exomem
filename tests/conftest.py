@@ -1038,6 +1038,8 @@ _VAULT_WALKING_THREAD_NAMES = frozenset(
         "exomem-refs-rebuild",
         # A managed request's cold graph proof (`epistemic_graph._start_background_proof`).
         "exomem-graph-proof",
+        # A Records query's link index warm (`find.schedule_link_index_warm`).
+        "exomem-link-index-warm",
         # Not a vault walk by design, but its readiness probe can reach one
         # (`available()` -> `_disk_vault_freshness`), and it stops only when
         # its runtime stops it: one still alive here leaked from its test.

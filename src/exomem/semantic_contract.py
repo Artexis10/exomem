@@ -1992,10 +1992,12 @@ def current_reference_identity_snapshot(
     *,
     declined: dict[str, int] | None = None,
     tolerate_external_pending: bool = False,
+    on_decline: Callable[[str], None] | None = None,
 ) -> ReferenceIdentitySnapshot | None:
     """Return the current cached identity authority without filesystem corpus work.
 
-    ``declined`` receives the first proof failure for the caller's existing span.
+    ``declined`` receives the first proof failure for the caller's existing span,
+    and ``on_decline`` receives it as the reason itself, for a caller that acts on it.
 
     ``tolerate_external_pending`` is for a read that may answer from the last
     published projection while the watcher, which has already seen an edit made
@@ -2007,6 +2009,8 @@ def current_reference_identity_snapshot(
     def decline(reason: str) -> None:
         if declined is not None:
             declined[f"declined_{reason}"] = 1
+        if on_decline is not None:
+            on_decline(reason)
 
     root = Path(vault_root)
     with request_budget.locked(_CORPUS_CONTEXT_UPDATE_LOCK):
@@ -2546,8 +2550,8 @@ def publish_capture_inventory(root: Path, witness, *, census: bool = False, excl
 
 def borrow_link_snapshot(
     vault_root: Path, *, declined: dict[str, int] | None = None
-) -> LinkSnapshot | None:
-    """Lend the last published corpus generation to a link projector, or None.
+) -> tuple[LinkSnapshot | None, str | None]:
+    """Lend the last published corpus generation to a link projector, or None with the reason it declined.
 
     Never builds, refreshes or waits on a build: the corpus lock is taken without
     blocking because a rebuild publishes while holding it, and a request thread
@@ -2556,26 +2560,31 @@ def borrow_link_snapshot(
     published generation, and the caller decides each page's existence and
     visibility live.
 
-    `declined` receives the first reason this borrow declined, as one closed
-    `declined_<reason>` counter; `link_corpus_coming` reads it.
+    The reason is the first one this borrow declined on, which `link_corpus_coming` reads.
+    `declined` receives the same reason as one closed `declined_<reason>` counter, for telemetry.
     """
-    if not _CORPUS_CONTEXT_UPDATE_LOCK.acquire(blocking=False):
+    reasons: list[str] = []
+
+    def decline(reason: str) -> None:
+        reasons.append(reason)
         if declined is not None:
-            declined[f"declined_{LOCK_BUSY}"] = 1
-        return None
+            declined[f"declined_{reason}"] = 1
+
+    if not _CORPUS_CONTEXT_UPDATE_LOCK.acquire(blocking=False):
+        decline(LOCK_BUSY)
+        return None, LOCK_BUSY
     try:
         snapshot = current_reference_identity_snapshot(
-            Path(vault_root), declined=declined, tolerate_external_pending=True
+            Path(vault_root), on_decline=decline, tolerate_external_pending=True
         )
     finally:
         _CORPUS_CONTEXT_UPDATE_LOCK.release()
     if snapshot is None:
-        return None
+        return None, reasons[0] if reasons else None
     context = snapshot._cache_context_identity
     if not isinstance(context, SemanticCorpusContext):
-        if declined is not None:
-            declined["declined_context_unusable"] = 1
-        return None
+        decline("context_unusable")
+        return None, reasons[0]
     return LinkSnapshot(
         _WikilinkResolverView(
             full_paths=context.resolver_full_paths,
@@ -2585,11 +2594,11 @@ def borrow_link_snapshot(
             candidates_by_key=context.resolver_candidates_by_key,
         ),
         snapshot.reference_owners,
-    )
+    ), None
 
 
-def link_corpus_coming(vault_root: Path, declined: Mapping[str, int]) -> bool:
-    """Whether the corpus that a declined `borrow_link_snapshot` lacked is on its way.
+def link_corpus_coming(vault_root: Path, declined: str | None) -> bool:
+    """Whether the corpus that `borrow_link_snapshot` declined to lend, for the reason `declined`, is on its way.
 
     A bounded-latency reader, such as a Records query, goes without the corpus while one is
     coming, and walks the vault as before while none is. One is coming only when this call starts
@@ -2602,7 +2611,7 @@ def link_corpus_coming(vault_root: Path, declined: Mapping[str, int]) -> bool:
     root = Path(vault_root)
     if not corpus_context_cache_enabled() or not freshness.is_live(root, "vault"):
         return False
-    if not any(f"declined_{reason}" in declined for reason in (CORPUS_ABSENT, CHECKPOINT_DIFFERS, LOCK_BUSY)):
+    if declined not in (CORPUS_ABSENT, CHECKPOINT_DIFFERS, LOCK_BUSY):
         return False
     return find_module.schedule_link_index_warm(root)
 

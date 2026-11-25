@@ -3255,9 +3255,8 @@ def test_a_link_filter_after_a_page_write_answers_once_the_warm_its_refusal_star
          relation_disposition="reviewed_none", relation_review_reason="an unrelated fixture page")
 
     def behind() -> bool:
-        declined: dict[str, int] = {}
-        lent = semantic_contract.borrow_link_snapshot(service.root, declined=declined)
-        return lent is None and f"declined_{semantic_contract.CHECKPOINT_DIFFERS}" in declined
+        lent, reason = semantic_contract.borrow_link_snapshot(service.root)
+        return lent is None and reason == semantic_contract.CHECKPOINT_DIFFERS
 
     _until(behind)
     try:

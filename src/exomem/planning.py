@@ -780,7 +780,8 @@ def _valid_query_payload(
         return False
     unresolved = payload["unresolved_links"]
     if unresolved is not None and (
-        not isinstance(unresolved, list) or not set(unresolved) <= set(record_governance._link_fields(manifest))
+        not isinstance(unresolved, list)
+        or not set(unresolved) <= set(record_governance._link_fields(manifest, payload["query"]))
     ):
         return False
     if (

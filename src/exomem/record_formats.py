@@ -3666,6 +3666,11 @@ def _safe_presentation_values(
     return result
 
 
+def expanded_child(manifest: collections.CollectionManifest, query: Mapping[str, Any]) -> str | None:
+    """The child field whose rows `query` expands into reply rows, else None; it raises a refused expansion's error."""
+    return _resolve_child_selector(manifest, bool(query.get("expand_children")), query.get("expand_child"))
+
+
 def _resolve_child_selector(
     manifest: collections.CollectionManifest, expand_children: bool, expand_child: str | None
 ) -> str | None:

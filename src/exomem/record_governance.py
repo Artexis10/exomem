@@ -1162,6 +1162,11 @@ class _LinkProjector:
     corpus_coming: bool = False
     # Whether a walk for the index stopped at one of its caps, so links it did not index were withheld.
     walk_stopped_short: bool = False
+    # The stripped link values withheld unchecked while a corpus is coming or after a walk stopped short,
+    # and what held them: a top-level field by name, and a child column by `id`, because two child
+    # tables may declare equal columns (`_link_fields` reads both).
+    unchecked_values: set[str] = dataclass_field(default_factory=set)
+    unchecked: set[str | int] = dataclass_field(default_factory=set)
     # The published corpus generation lent for this projector's life, when the index came
     # from it instead of a walk, and its per-identity owner lookup.
     borrowed: Any | None = None
@@ -1219,7 +1224,7 @@ class _LinkProjector:
         from . import semantic_contract
 
         with call_spans.span("records.link_index", {}) as measured:
-            borrowed = semantic_contract.borrow_link_snapshot(self.root, declined=measured)
+            borrowed, reason = semantic_contract.borrow_link_snapshot(self.root, declined=measured)
             if borrowed is not None:
                 self.borrowed = borrowed
                 self.owners_of = memory_refs.reference_owner_lookup(
@@ -1231,7 +1236,7 @@ class _LinkProjector:
             elif self.cold_index == "never":
                 complete, route = False, "incomplete"
             elif self.cold_index == "unless_corpus_coming" and semantic_contract.link_corpus_coming(
-                self.root, measured
+                self.root, reason
             ):
                 self.corpus_coming = True
                 complete, route = False, "awaited"
@@ -1409,7 +1414,7 @@ class _LinkProjector:
         for name, spec in self.manifest.schema.fields.items():
             if name not in projected:
                 continue
-            value = self._project_value(projected[name], spec)
+            value = self._project_value(projected[name], spec, name)
             if value is None or (spec.type == "array" and not value):
                 projected.pop(name)
             else:
@@ -1422,7 +1427,7 @@ class _LinkProjector:
         """Project only declared nested links at the audience egress boundary."""
         if column.type != "link":
             return value
-        return self._project_value(value, collections.FieldSpec("link", link_kind=column.link_kind))
+        return self._project_value(value, collections.FieldSpec("link", link_kind=column.link_kind), id(column))
 
     @staticmethod
     def carries_links(spec: collections.FieldSpec) -> bool:
@@ -1431,18 +1436,24 @@ class _LinkProjector:
             spec.type == "array" and spec.items is not None and _LinkProjector.carries_links(spec.items)
         )
 
-    def _project_value(self, value: Any, spec: collections.FieldSpec) -> Any:
+    def _project_value(self, value: Any, spec: collections.FieldSpec, holder: str | int | None = None) -> Any:
+        """`value` as this reader may see it; `holder`, the field or column that holds it, is noted when
+        a value is withheld unchecked."""
         if not self.carries_links(spec):
             return value
         if spec.type == "array" and spec.items is not None and isinstance(value, list | tuple):
             return [
                 result
                 for item in value
-                if (result := self._project_value(item, spec.items)) is not None
+                if (result := self._project_value(item, spec.items, holder)) is not None
             ]
         if spec.type != "link" or type(value) is not str:
             return value
-        return value if self._allowed(value) else None
+        if self._allowed(value):
+            return value
+        if holder is not None and value.strip() in self.unchecked_values:
+            self.unchecked.add(holder)
+        return None
 
     def _allowed(self, value: str) -> bool:
         raw = value.strip()
@@ -1455,7 +1466,7 @@ class _LinkProjector:
         try:
             if raw.lower().startswith(memory_refs.REF_PREFIX):
                 if not self._candidate_index_available():
-                    return False
+                    return self._unchecked(raw)
                 identity = memory_refs.parse_memory_ref(raw)
                 if identity is None or raw != memory_refs.memory_ref(identity):
                     return False
@@ -1481,7 +1492,7 @@ class _LinkProjector:
                 target_text = inner.split("|", 1)[0].strip().split("#", 1)[0].strip()
                 bare = "/" not in target_text
                 if bare and not self._candidate_index_available():
-                    return False
+                    return self._unchecked(raw)
                 # A bare title resolves over the borrowed generation filtered to the pages
                 # this reader may see. A path-shaped link never reads the borrowed index, so
                 # its verdict does not depend on which value came first; the pages that claim
@@ -1555,6 +1566,12 @@ class _LinkProjector:
         if allowed:
             self.named_pages[raw] = relative
         return allowed
+
+    def _unchecked(self, raw: str) -> bool:
+        """Withhold `raw` for want of the index, noting it when a corpus is coming or a walk stopped short."""
+        if self.corpus_coming or self.walk_stopped_short:
+            self.unchecked_values.add(raw)
+        return False
 
     def _names_file(self, key: str) -> bool:
         """Whether the explicit link key `key` names a Markdown file, as the target check reads it.
@@ -1665,12 +1682,13 @@ def query_collection(
     preconditions that must hold before that request is actually honoured.
 
     A query walks the vault for its link index only when no published one is coming
-    (`semantic_contract.link_corpus_coming`). While one is coming, a returned link field's
-    memory references and bare titles are left out and the result names that field in
-    `unresolved_links`; a query that filters, sorts or aggregates on a link field is refused
-    with the retryable `LINK_INDEX_WARMING`. When the walk stops at its cap, the same field is
-    named and the same selection is refused with `LINK_INDEX_INCOMPLETE`. This is the flat query
-    grammar only: a version-1 query (`query_engine.route`) keeps building its index inside its own deadline.
+    (`semantic_contract.link_corpus_coming`). While one is coming, a link field's memory
+    references and bare titles are left out, the result names each returned field that lost one
+    in `unresolved_links`, and a query that filters, sorts or aggregates on a link field is refused
+    with the retryable `LINK_INDEX_WARMING`. When the walk stops at its cap, the same fields are
+    named, and a selection on a field that lost a value is refused with `LINK_INDEX_INCOMPLETE`.
+    This is the flat query grammar only: a version-1 query (`query_engine.route`) keeps building
+    its index inside its own deadline.
     """
     root = Path(vault_root)
     writer = selected_writer(root, collection)
@@ -1744,28 +1762,52 @@ def query_collection(
                 if error.code != "INVALID_RECORD_QUERY_FIELD":
                     raise
                 raise _with_readable_columns(error, readable, kwargs) from error
-            if selected and links.walk_stopped_short:
-                raise _link_index_incomplete(selected)
-            returned = _returned_link_fields(result, readable)
-            if returned and (links.awaits_corpus() or links.walk_stopped_short):
+            # Only a field that lost a value to a missing index can answer wrongly or be marked.
+            unchecked = _link_fields(readable, result.query, links)
+            if lost := tuple(name for name in selected if name in unchecked):
+                raise _link_index_incomplete(lost)
+            if returned := tuple(name for name in _returned_link_fields(result, readable) if name in unchecked):
                 result = replace(result, unresolved_links=returned)
         egress.emit_boundary_receipt(collector)
         return result
 
 
-def _link_fields(manifest: collections.CollectionManifest) -> tuple[str, ...]:
-    """The top-level fields whose values link projection can withhold, in manifest order."""
-    children = {table.field for table in manifest.child_tables if any(column.type == "link" for column in table.columns)}
-    return tuple(name for name, spec in manifest.schema.fields.items()
-                 if _LinkProjector.carries_links(spec) or name in children)
+def _link_fields(
+    manifest: collections.CollectionManifest, query: Any, unchecked_in: _LinkProjector | None = None
+) -> tuple[str, ...]:
+    """The fields of a reply to `query` whose link values projection can withhold, named as its columns name
+    them, in manifest order: each top-level link field, the link columns of the child table it expands,
+    and each other child table that carries links. With `unchecked_in`, only those in which that projector
+    withheld a value unchecked.
+    """
+    expanded = _expanded_child(manifest, query)
+    tables = {table.field: table for table in manifest.child_tables}
+    names: list[str] = []
+    for name, spec in manifest.schema.fields.items():
+        if (table := tables.get(name)) is None:
+            if _LinkProjector.carries_links(spec) and (unchecked_in is None or name in unchecked_in.unchecked):
+                names.append(name)
+            continue
+        columns = [column.field for column in table.columns if column.type == "link"
+                   and (unchecked_in is None or id(column) in unchecked_in.unchecked)]
+        names.extend(columns if name == expanded else [name] if columns else [])
+    return tuple(names)
+
+
+def _expanded_child(manifest: collections.CollectionManifest, query: Any) -> str | None:
+    """The child field whose rows `query` expands, else None, also for an expansion that validation refuses."""
+    if not isinstance(query, Mapping):
+        return None
+    try:
+        return record_formats.expanded_child(manifest, query)
+    except collections.CollectionError:
+        return None
 
 
 def _selected_link_fields(manifest: collections.CollectionManifest, query: Mapping[str, Any]) -> tuple[str, ...]:
-    """The link fields of `manifest` whose values decide which rows `query` returns or what its aggregate says.
-
-    A column outside the schema is a child table's, so it counts each child that carries links.
-    """
-    links = _link_fields(manifest)
+    """The link fields of `manifest` whose values decide which rows `query` returns or what its aggregate
+    says, named as `_link_fields` names them."""
+    links = _link_fields(manifest, query)
     roots = None if not links else record_formats.selection_columns(
         manifest, filters=query.get("filters"), sort_by=query.get("sort_by"),
         date_column=query.get("date_column"), date_from=query.get("date_from"),
@@ -1774,9 +1816,7 @@ def _selected_link_fields(manifest: collections.CollectionManifest, query: Mappi
     if roots is None:
         # A profile reads every column; any other None is a shape that validation refuses, so let it answer.
         return links if record_formats.is_profile_aggregate(query.get("aggregate")) else ()
-    in_child = bool(roots - set(manifest.schema.fields))
-    children = {table.field for table in manifest.child_tables}
-    return tuple(name for name in links if name in roots or (in_child and name in children))
+    return tuple(name for name in links if name in roots)
 
 
 #: The wait a query that selects on a link field is told to take before it asks again for the link index.
@@ -1810,17 +1850,18 @@ def _returned_link_fields(
     result: record_formats.RecordQueryResult, manifest: collections.CollectionManifest
 ) -> tuple[str, ...]:
     """The link fields whose values `result` returns: its columns' own, every one for a whole row, else none."""
+    links = _link_fields(manifest, result.query)
     if result.aggregate is not None:
         # Only a `latest` answer returns a row; the other aggregates return no field value.
         carries_row = isinstance(result.aggregate, Mapping) and result.aggregate.get("row") is not None
-        return _link_fields(manifest) if carries_row else ()
+        return links if carries_row else ()
     if not result.rows:
         return ()
     columns = result.query.get("columns")
     if not columns:
-        return _link_fields(manifest)
+        return links
     roots = {str(column).split(".", 1)[0] for column in columns}
-    return tuple(name for name in _link_fields(manifest) if name in roots)
+    return tuple(name for name in links if name in roots)
 
 
 def _with_readable_columns(
@@ -2969,7 +3010,7 @@ def project_query_result(
         or not _valid_agent_history(agent_history)
         or (result.continuation is not None and type(result.continuation) is not str)
         or not isinstance(result.unresolved_links, tuple)
-        or not set(result.unresolved_links) <= set(_link_fields(manifest))
+        or not set(result.unresolved_links) <= set(_link_fields(manifest, result.query))
         or (
             isinstance(result.continuation, str)
             and not record_formats.validate_continuation(

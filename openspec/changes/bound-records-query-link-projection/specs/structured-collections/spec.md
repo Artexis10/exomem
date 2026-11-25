@@ -36,7 +36,8 @@ A memory reference whose owner an unpublished outside edit may have changed SHAL
 - **WHEN** no corpus generation can be borrowed and none is coming, as with the corpus cache off, background warms off, or vault change events that are not live
 - **THEN** the projector runs the bounded synchronous walk with its existing caps
 - **AND** a vault over the cap withholds the bare titles and memory references that the walk could not index
-- **AND** a query names each link field it returns in `unresolved_links`, and refuses a selection on a link field with the code `LINK_INDEX_INCOMPLETE` instead of answering without those values
+- **AND** a query names each returned link field that lost a value in `unresolved_links`, and refuses a selection on such a field with the code `LINK_INDEX_INCOMPLETE` instead of answering without those values
+- **AND** a link field whose values all name a page by path loses no value, so a selection on it answers
 
 #### Scenario: A stale memory reference is withheld
 
@@ -49,7 +50,7 @@ A memory reference whose owner an unpublished outside edit may have changed SHAL
 
 ### Requirement: A query does not walk for links while a corpus generation is coming
 
-A Records or Planning query in the flat query grammar SHALL NOT walk the vault while a corpus generation is coming: the corpus cache is on, vault change events are live, the borrow found no generation, one behind the event checkpoint, or its lock held, and a warm that publishes one runs. Such a query SHALL name each returned link field in `unresolved_links` and SHALL refuse a selection on a link field with the retryable code `LINK_INDEX_WARMING`. A version-1 query keeps its own bounded walk.
+A Records or Planning query in the flat query grammar SHALL NOT walk the vault while a corpus generation is coming: the corpus cache is on, vault change events are live, the borrow found no current generation or its lock held, and a warm that publishes one runs. Such a query SHALL name each returned link field that lost a value in `unresolved_links` and SHALL refuse a selection on a link field with the retryable code `LINK_INDEX_WARMING`. A version-1 query keeps its own bounded walk.
 
 #### Scenario: While a generation is coming a query answers without walking
 
@@ -57,6 +58,7 @@ A Records or Planning query in the flat query grammar SHALL NOT walk the vault w
 - **THEN** the query does not walk the vault
 - **AND** it leaves out each bare title and memory reference in that field
 - **AND** it names the field in `unresolved_links`, so a value left out never reads as an empty field
+- **AND** it names a link column of an expanded child table by the column's name, as the reply's columns name it
 
 #### Scenario: While a generation is coming a selection on a link field is refused for a retry
 
