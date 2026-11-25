@@ -159,13 +159,13 @@ class CollectionError(ValueError):
         ValueError.__init__(self, f"{self.code}: {self.reason}")
 
 
-#: A listed name set past this many characters is summarised, so the public Planning
-#: message cap (512) never cuts a name in half.
+#: A listed name set past this many UTF-8 bytes is summarised, so neither the public Planning
+#: message cap (512) nor inspect's 512-byte reason cap cuts a name in half or drops the reason.
 LISTED_BUDGET = 300
 
 
 def listed_within(names: Iterable[str]) -> str:
-    """`names` joined by commas, ended with "and N more" once the next name would pass `LISTED_BUDGET`.
+    """`names` joined by commas, ended with "and N more" once the next name would pass `LISTED_BUDGET` bytes.
 
     When the first name alone passes the budget, nothing is listed and the text is the count:
     a cut name would read as a real one.
@@ -173,7 +173,7 @@ def listed_within(names: Iterable[str]) -> str:
     names = list(names)
     shown: list[str] = []
     for name in names:
-        if len(", ".join([*shown, name])) > LISTED_BUDGET:
+        if len(", ".join([*shown, name]).encode("utf-8")) > LISTED_BUDGET:
             break
         shown.append(name)
     if names and not shown:
@@ -2351,12 +2351,13 @@ def _validate_saved_view_literals(
         candidates = raw if operator in {"in", "nin"} and isinstance(raw, list | tuple) else (raw,)
         if semantic_profile == "planning" and field_name == "horizon":
             valid = all(_registered_horizon(planning_values, item) for item in candidates)
+            allowed = ""
         elif field is not None and field.enum:
             valid = all(item in field.enum for item in candidates)
+            allowed = f"; allowed: {enum_listing(field.enum)}"
         else:
             continue
         if not valid:
-            allowed = "" if field is None or not field.enum else f"; allowed: {enum_listing(field.enum)}"
             raise CollectionError(
                 "INVALID_SAVED_VIEW",
                 f"saved view {field_name} literal is outside the profile vocabulary{allowed}",

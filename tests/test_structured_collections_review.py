@@ -254,6 +254,12 @@ def test_manifest_nested_data_is_deeply_immutable_and_schema_values_are_strict(
     with pytest.raises(collections.CollectionError) as excinfo:
         collections.validate_field_value("rating", "1", rating)
     assert str(excinfo.value).endswith("field is outside its enum: rating; allowed: 1, 2")
+    # Inspect drops a reason past 512 bytes, so a long non-ASCII listing is cut by bytes, not characters.
+    labels = collections.FieldSpec("enum", enum=tuple(f"状態ラベル番号{n:02}" for n in range(20)))
+    with pytest.raises(collections.CollectionError) as excinfo:
+        collections.validate_field_value("status", "other", labels)
+    assert len(str(excinfo.value).encode("utf-8")) <= 512
+    assert str(excinfo.value).endswith(" more")
     with pytest.raises(collections.CollectionError) as excinfo:
         manifest.schema.validate(
             {
