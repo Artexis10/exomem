@@ -521,6 +521,45 @@ def test_a_write_takes_the_boundary_while_the_offload_scan_walks_the_vault(
     assert all(ledger.get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE) for path in paths)
 
 
+def test_an_allowance_refusal_recorded_during_the_offload_scan_takes_no_census_under_its_hold(
+    vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The worker can refuse a queued original while the scan walks; each such refusal cost a whole-vault census.
+
+    That census ran inside the scan's per-item hold, so a save waited as long as the old walk.
+    """
+    from exomem import media_allowance, media_jobs, media_store, originals
+
+    first = _preserved(vault, category="first")
+    second = _preserved(vault, category="second")
+    ledger = media_jobs.MediaJobStore(vault)
+    walk = media_store._offload_candidates
+    censuses: list[str] = []
+    real_census = media_allowance.reference_usage
+
+    def counted_census(*args, **kwargs):
+        censuses.append("census")
+        return real_census(*args, **kwargs)
+
+    def walk_with_a_refusal_ahead_of_it(root: Path):
+        for index, path in enumerate(walk(root)):
+            if index == 0:  # the worker refuses the original that the walk has not reached yet
+                later = second if Path(path).resolve() == first.resolve() else first
+                with pytest.raises(media_store.MediaStoreError):  # it records the refusal, then raises it
+                    media_store._require_allowance(
+                        ledger, originals.original_state(vault, later),
+                        sorted(media_allowance.ALLOWANCE_REFUSAL_CODES)[0],
+                    )
+            yield path
+
+    monkeypatch.setattr(media_store, "_offload_candidates", walk_with_a_refusal_ahead_of_it)
+    monkeypatch.setattr(media_allowance, "reference_usage", counted_census)
+
+    media_store.enqueue_offloads(vault)
+
+    assert censuses == []
+
+
 @pytest.mark.parametrize("new_bound", [None, 100_000])
 def test_a_size_refusal_parks_until_the_configured_bound_allows_it(vault: Path, selected_store, new_bound):
     """An original above the object bound stays resident through discovery and offloads once the bound allows it."""
