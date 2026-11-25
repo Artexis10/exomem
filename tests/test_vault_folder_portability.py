@@ -233,6 +233,65 @@ def test_one_apply_moves_files_that_share_a_linking_page(vault: Path) -> None:
     assert "Evidence/Garden/d" in text and "Evidence/Garden/e" in text
 
 
+def test_a_merge_receipt_names_where_each_file_landed(vault: Path) -> None:
+    """Defect: the receipt names the planned path, though a nested split sent the file elsewhere."""
+    from exomem import path_variants
+
+    notes = vault / "Knowledge Base" / "Notes"
+    for name in ("a", "b", "c"):
+        _page(notes / "Garden" / f"{name}.md")
+    _page(notes / "garden" / "Beds" / "x.md")
+    _page(notes / "garden" / "beds" / "y.md")
+
+    preview = path_variants.preview(vault)
+    result = path_variants.apply(vault, plan_id=preview["plan_id"], why="merge the garden split")
+
+    assert result["moved"]
+    for move in result["moved"]:
+        assert (vault / move["to"]).is_file(), move
+
+
+def test_a_plan_examines_a_bounded_number_of_files(vault: Path) -> None:
+    """Defect: every preview resolves and checks every file of a large split, so a call outlives its budget."""
+    from exomem import path_variants
+
+    evidence = vault / "Knowledge Base" / "Evidence"
+    count = path_variants.EXAMINE_LIMIT + 10
+    for index in range(count + 1):
+        _page(evidence / "Garden" / f"kept-{index}.md")
+    for index in range(count):
+        _page(evidence / "garden" / f"moved-{index}.md")
+
+    preview = path_variants.preview(vault)
+
+    assert len(preview["batch"]) == path_variants.BATCH_UNITS
+    assert preview["files_examined"] == path_variants.BATCH_UNITS
+    assert preview["files_pending"] == count
+
+
+def test_an_apply_short_of_time_stops_and_says_what_is_left(vault: Path) -> None:
+    """Defect: an apply keeps moving past the request budget, and the call is cut off with no answer."""
+    from exomem import path_variants, request_budget
+
+    evidence = vault / "Knowledge Base" / "Evidence"
+    for name in ("a", "b", "c"):
+        _page(evidence / "Garden" / f"{name}.md")
+    for name in ("d", "e"):
+        _page(evidence / "garden" / f"{name}.md")
+    preview = path_variants.preview(vault)
+
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=0.0))
+    try:
+        result = path_variants.apply(vault, plan_id=preview["plan_id"], why="merge the garden split")
+    finally:
+        request_budget.reset_current(token)
+
+    assert result["outcome"] == "partial" and result["moved"] == []
+    assert result["stopped"]["code"] == "BUDGET_SHORT" and result["files_remaining"] == 2
+    assert result["next"] == {"tool": "maintain_memory", "args": {"mode": "path-variants"}}
+    assert sorted(p.name for p in (evidence / "garden").iterdir()) == ["d.md", "e.md"]
+
+
 def test_a_stale_empty_folder_is_not_removed(vault: Path) -> None:
     """Defect: a folder that gained a file after the preview is removed with it."""
     from exomem import path_variants

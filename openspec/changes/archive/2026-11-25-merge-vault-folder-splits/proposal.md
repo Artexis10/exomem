@@ -5,7 +5,7 @@ A folder whose name differs from a sibling only by letter case or Unicode form (
 ## What Changes
 
 - A write whose destination passes through a folder that has a variant sibling lands under one canonical spelling of that folder, whichever spelling the caller named. The canonical spelling is the registered project folder when the project registry names one of the spellings, otherwise the spelling whose folder holds the most entries, otherwise the first in code-point order. A path that already exists at the requested spelling keeps it. The write still warns about the split.
-- A new maintenance mode `path-variants` previews every split: its canonical spelling, the files still to move, the next bounded batch of moves with the links each rewrites, and the variant folders that are already empty. Its apply, bound to the preview's `plan_id`, moves that batch through the ordinary file move, which rewrites links and records each append-only page it repoints so the move can be undone. It then removes only the listed empty variant folders, also inside an append-only tree, and records the removal in the log.
+- A new maintenance mode `path-variants` previews every split: its canonical spelling, the files still to move, the next bounded batch of moves with the links each rewrites, and the variant folders that are already empty. Its apply, bound to the preview's `plan_id`, moves that batch through the ordinary file move, which rewrites links. The merge is one-way: bytes are kept, links are rewritten, and each moved page's lineage names its old path. It then removes only the listed empty variant folders, also inside an append-only tree, and records the removal in the log.
 - `path_variants` joins the default audit, and its finding names the merge.
 
 ## Capabilities

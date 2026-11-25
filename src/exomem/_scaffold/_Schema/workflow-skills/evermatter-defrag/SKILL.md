@@ -2,7 +2,7 @@
 name: evermatter-defrag
 description: Reconcile duplicate, stale, or conflicting Evermatter memory while preserving history through review, merge, or supersession. Part of Evermatter, formerly Exomem.
 metadata:
-  skill_contract: 10f64fb161100f88c6451cafed2995a8552f9e7def24a918906e37ee9ccea314
+  skill_contract: 90d22060a186902670b34164a91d4861168c8ef2347014275191b62d2d9d0d20
   version: "0.1.0"
 ---
 

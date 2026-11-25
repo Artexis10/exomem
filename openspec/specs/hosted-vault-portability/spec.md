@@ -301,7 +301,7 @@ The canonical spelling of a split SHALL be the spelling that the project registr
 
 ### Requirement: The preview's apply moves a batch into the canonical spelling
 
-`maintain_memory(mode="path-variants", apply=true, plan_id, why)` SHALL move the batch that the preview with that `plan_id` listed, from the other spellings into the canonical spelling within their own tree, through the ordinary file move with link rewrites. Each move SHALL record the append-only pages it repoints so that it can be undone. A file whose move or link rewrite would be refused SHALL be listed as blocked, not moved.
+`maintain_memory(mode="path-variants", apply=true, plan_id, why)` SHALL move the batch that the preview with that `plan_id` listed, from the other spellings into the canonical spelling within their own tree, through the ordinary file move with link rewrites. The merge SHALL be one-way: each move keeps the file's bytes, rewrites the links to it, and records its old path in the moved page's lineage, and no operation moves the files back. A file whose move or link rewrite would be refused SHALL be listed as blocked, not moved.
 
 #### Scenario: A split is merged
 

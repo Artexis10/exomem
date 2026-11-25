@@ -1189,6 +1189,8 @@ def _check_path_variants(vault_root: Path) -> list[AuditFinding]:
                         proposed_fix=(
                             f"preview the merge with {capabilities.active_call_text('maintain_memory', {'mode': 'path-variants'})}; "
                             "nothing is merged until its plan is applied"
+                            if set(group) <= set(subdirs)
+                            else "rename one of these by hand; only folders are merged"
                         ),
                         paths=[f"{prefix}{name}" for name in group],
                         meta={"class": "defect"},

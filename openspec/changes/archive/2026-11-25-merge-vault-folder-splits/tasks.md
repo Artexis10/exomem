@@ -10,7 +10,7 @@
 
 - [x] 2.1 `maintain_memory(mode="path-variants")` previews each split: canonical spelling, files to move, empty variant folders, and the plan id.
 - [x] 2.2 Its apply removes only the empty variant folders that the preview listed and logs them; a folder that gained an entry is refused as stale.
-- [x] 2.3 The apply moves a bounded batch through `move_file` with link rewrites and undo records, taking a fresh digest for each move after the first.
+- [x] 2.3 The apply moves a bounded batch through `move_file` with link rewrites, re-previewing a move only when an earlier move made its digest stale.
 - [x] 2.4 An end-to-end test merges a split with a linked page and an Evidence binary, applies the batch, removes the emptied folders, and passes the export collision check.
 
 ## 3. Owner sees splits

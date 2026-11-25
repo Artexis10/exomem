@@ -22,9 +22,13 @@ Alternative considered: keep each write on its requested spelling and rely on th
 
 The rule applies to a directory component of a destination that exists and has a variant sibling. A destination whose full remaining path already exists at the requested spelling keeps it, so an update never forks a file. The walk lists a folder only at a directory component, never the destination folder itself. A write into a large folder therefore costs no extra listing of that folder. Reads, deletes and index keys keep the host's spelling, as before.
 
-### D3. The merge moves through `move_file`, in bounded batches
+### D3. The merge moves through `move_file`, in batches bounded by count and time
 
-Moving a file safely involves lineage, media bindings, originals, the store and link rewrites, and `move_file` already does all of it. A curation plan would add crash-safe resume, but a curation `move` step accepts only one unpaired Markdown page, and a split is mostly captured files with their pages. So the apply calls `move_file` once per file: the page of a captured pair carries its bytes. Each move previews first, and the plan id binds the batch's moves and their digests. A move after the first in a batch takes a fresh digest, because an earlier move may have rewritten a page that it rewrites too. Each move is atomic on its own, so a failure stops the batch and reports the files moved so far. `record_repoints` makes each move undoable. A batch is bounded, so one call stays short; the preview names the next batch until none is left.
+Moving a file safely involves lineage, media bindings, originals, the store and link rewrites, and `move_file` already does all of it. A curation plan would add crash-safe resume, but a curation `move` step accepts only one unpaired Markdown page, and a split is mostly captured files with their pages. So the apply calls `move_file` once per file: the page of a captured pair carries its bytes.
+
+A plan resolves destinations only until its batch is full and previews no move, so its cost follows the batch, not the size of the split. The plan id binds the batch's moves and the empty folders. A move's preview scans the vault for the pages that link to the file, so it grows with the vault. The preview therefore previews the batch only while the request budget allows, and marks the rest unpreviewed. The apply previews each move and commits it with that preview's digest, which `move_file` checks against the referrers it finds at commit. It skips and lists a move that `move_file` refuses, and it stops when the budget runs short and points to a new preview. Measured on a store-mode vault with 800 pages on each side, on one laptop under memory pressure: preview 22.4 s to 15.5 s, and an apply of 16 moves 53.8 s to 32.2 s.
+
+The merge is one-way: no operation moves the files back. `record_repoints` keeps the owner-only bytes of each append-only page a move repoints.
 
 ### D4. Empty variant folders are removed by the preview's own apply
 

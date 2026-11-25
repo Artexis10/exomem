@@ -6,11 +6,17 @@ folds what is already under the other spellings into it.
 
 `preview` lists every split, its canonical spelling, the files still under each other spelling,
 and the other spellings that are left as empty folders. It plans one bounded batch of moves, each
-previewed by `move_file`, whose referrer rewrites and digest join the `plan_id`. `apply` plans
-again, refuses a changed plan, then moves the batch one file at a time through `move_file`, which
-rewrites links and records each repointed append-only page so the move can be undone. It then
-removes the listed empty folders, which only a held `rmdir` of a still-empty folder can do.
-Preview again for the next batch.
+whose `plan_id` binds its moves and the empty folders; the preview also shows, while time allows,
+the links each move rewrites. `apply` plans again, refuses a changed plan, then previews and moves
+the batch one file at a time through `move_file`, which rewrites links and refuses a move whose
+referrers changed since its own preview. A file whose move `move_file` refuses is skipped and
+listed. Both calls stop early when the request budget runs short and say what is left. The merge is one-way: the bytes are kept, links are rewritten and each moved page's
+lineage names its old path, but no operation moves the files back. It then removes the listed empty
+folders, which only a held `rmdir` of a still-empty folder can do. Preview again for the next batch.
+
+A plan resolves destinations only until its batch is full and previews no move, so its cost
+follows the batch, not the size of the split. A move's preview scans the vault for its referrers,
+so a call's moves are bounded by time as well as by the batch.
 """
 
 from __future__ import annotations
@@ -21,6 +27,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -35,6 +42,11 @@ MODE = "path-variants"
 BATCH_UNITS = 16
 #: The splits and blocked files one answer lists; the counts cover all of them.
 LIST_LIMIT = 50
+#: The candidates one plan examines to fill its batch. Each costs a destination, so a split whose
+#: leading files are all blocked still answers in bounded time and lists them.
+EXAMINE_LIMIT = 4 * BATCH_UNITS
+#: The time a move is assumed to take before one has been measured in this call, in seconds.
+FIRST_MOVE_RESERVE = 2.0
 _WHY_BYTES = 512
 _STALE = "STALE_PATH_VARIANT_PLAN: the vault changed since the preview; preview again"
 
@@ -94,12 +106,7 @@ def _splits(root: Path, view: Any) -> list[_Split]:
 
 def _entries_reader(root: Path, view: Any, parent: str) -> Callable[[str], set[str] | None]:
     def entries(name: str) -> set[str] | None:
-        rel = f"{parent}/{name}" if parent else name
-        stored = {child.name for child in view.children(rel)} if view is not None else set()
-        on_disk = vault._disk_entries(root / rel)  # noqa: SLF001 -- the one folder-entry reader
-        if on_disk is None and not stored:
-            return None
-        return stored | (on_disk or set())
+        return vault.folder_entries(root, view, f"{parent}/{name}" if parent else name)
 
     return entries
 
@@ -120,36 +127,41 @@ def _exists(root: Path, view: Any, rel: str) -> bool:
     return os.path.lexists(root / rel) or (view is not None and bool(view.held_pages((rel,))))
 
 
-def _units(root: Path, view: Any, split: _Split, name: str) -> tuple[list[dict], list[dict]]:
-    """The moves that fold spelling `name` of `split` into its canonical one, and the blocked files.
+def _candidates(root: Path, view: Any, folder: str) -> tuple[list[str], list[dict]]:
+    """The files that move out of `folder`, and the hidden files that do not, from one walk.
 
-    A captured artifact moves with its page, so only the page of a pair is a unit.
+    A captured artifact moves with its page, so only the page of a pair is a candidate.
     """
     from .move_file import _paired_artifact
 
-    source = split.path(name)
-    files = _files_under(root, view, source)
+    files = _files_under(root, view, folder)
     present = set(files)
     held = (lambda rel: bool(view.held_pages((rel,)))) if view is not None else None
-    units: list[dict] = []
-    blocked: list[dict] = []
+    candidates: list[str] = []
+    hidden: list[dict] = []
     for rel in files:
+        if Path(rel).name.startswith("."):
+            hidden.append({"path": rel, "code": "HIDDEN_FILE", "reason": "move or delete a hidden file by hand"})
+            continue
         pair = _paired_artifact(root, rel, held)
         if pair is not None and rel == pair[1] and pair[0] in present:
             continue
-        if Path(rel).name.startswith("."):
-            blocked.append({"path": rel, "code": "HIDDEN_FILE", "reason": "move or delete a hidden file by hand"})
-            continue
-        rest = rel[len(source) + 1 :]
-        target = vault.respell_new_path(root, f"{split.path(split.canonical)}/{rest}", replacing=rel)
-        taken = [path for path in (target, *([target.removesuffix(".md")] if pair else [])) if _exists(root, view, path)]
-        if taken:
-            blocked.append(
-                {"path": rel, "code": "DESTINATION_TAKEN", "reason": f"{taken[0]} already exists"}
-            )
-            continue
-        units.append({"from": rel, "to": target})
-    return units, blocked
+        candidates.append(rel)
+    return candidates, hidden
+
+
+def _destination(root: Path, view: Any, split: _Split, name: str, rel: str) -> dict:
+    """Where `rel` lands in the canonical spelling, or why it cannot move there."""
+    rest = rel[len(split.path(name)) + 1 :]
+    target = vault.respell_new_path(root, f"{split.path(split.canonical)}/{rest}", replacing=rel)
+    checks = [target]
+    if rel.lower().endswith(".md") and (root / rel[:-3]).is_file():
+        # The page of a captured file: its bytes land beside it.
+        checks.append(target[:-3])
+    for path in checks:
+        if _exists(root, view, path):
+            return {"path": rel, "code": "DESTINATION_TAKEN", "reason": f"{path} already exists"}
+    return {"from": rel, "to": target}
 
 
 def _empty_tree(root: Path, view: Any, folder: str) -> list[str] | None:
@@ -186,7 +198,7 @@ def _previewed(root: Path, unit: dict) -> dict:
 def _plan(root: Path) -> dict[str, Any]:
     with _store_view(root) as view:
         splits = _splits(root, view)
-        pending: list[dict] = []
+        queued: list[tuple[_Split, str, str]] = []
         blocked: list[dict] = []
         empty: list[str] = []
         listed: list[dict] = []
@@ -209,21 +221,22 @@ def _plan(root: Path) -> dict[str, Any]:
                     empty.extend(tree)
                     row["variants"].append({"name": name, "files": 0, "empty": True})
                     continue
-                units, stuck = _units(root, view, split, name)
-                pending.extend(units)
-                blocked.extend(stuck)
-                row["variants"].append({"name": name, "files": len(units) + len(stuck)})
+                candidates, hidden = _candidates(root, view, split.path(name))
+                queued.extend((split, name, rel) for rel in candidates)
+                blocked.extend(hidden)
+                row["variants"].append({"name": name, "files": len(candidates) + len(hidden)})
             listed.append(row)
-    blocked_before_preview = len(blocked)
-    batch: list[dict] = []
-    for unit in pending:
-        if len(batch) == BATCH_UNITS:
-            break
-        previewed = _previewed(root, unit)
-        if "digest" in previewed:
-            batch.append(previewed)
-        else:
-            blocked.append({"path": unit["from"], "code": previewed["code"], "reason": previewed["reason"]})
+        batch: list[dict] = []
+        examined = 0
+        for split, name, rel in queued:
+            if len(batch) == BATCH_UNITS or examined == EXAMINE_LIMIT:
+                break
+            examined += 1
+            unit = _destination(root, view, split, name, rel)
+            if "to" in unit:
+                batch.append(unit)
+            else:
+                blocked.append({"path": rel, "code": unit["code"], "reason": unit["reason"]})
     plan_id = hashlib.sha256(
         json.dumps(
             {"batch": batch, "empty": empty},
@@ -232,6 +245,7 @@ def _plan(root: Path) -> dict[str, Any]:
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+    examined_blocked = examined - len(batch)
     return {
         "batch": batch,
         "empty": empty,
@@ -241,12 +255,11 @@ def _plan(root: Path) -> dict[str, Any]:
             "split_count": len(splits),
             "splits": listed[:LIST_LIMIT],
             "splits_truncated": len(listed) > LIST_LIMIT,
-            # Movable as far as this plan knows: files past the batch are previewed in a later one.
-            "files_pending": len(pending) - (len(blocked) - blocked_before_preview),
-            "batch": [
-                {"from": unit["from"], "to": unit["to"], "referrers_rewritten": unit["referrers_rewritten"]}
-                for unit in batch
-            ],
+            # Files still to move, less those this plan examined and found blocked; a file past the
+            # examined ones may yet be blocked when a later plan reaches it.
+            "files_pending": len(queued) - examined_blocked,
+            "files_examined": examined,
+            "batch": [{"from": unit["from"], "to": unit["to"]} for unit in batch],
             "empty_folders": empty[:LIST_LIMIT],
             "empty_folder_count": len(empty),
             "blocked": blocked[:LIST_LIMIT],
@@ -255,10 +268,46 @@ def _plan(root: Path) -> dict[str, Any]:
     }
 
 
+class _Pace:
+    """Whether another move still fits the request budget, from the slowest move so far."""
+
+    def __init__(self) -> None:
+        self.slowest = FIRST_MOVE_RESERVE
+
+    def fits(self) -> bool:
+        return request_budget.can_afford(2 * self.slowest)
+
+    @contextmanager
+    def timed(self) -> Iterator[None]:
+        started = time.monotonic()
+        try:
+            yield
+        finally:
+            self.slowest = max(self.slowest, time.monotonic() - started)
+
+
 def preview(vault_root: Path) -> dict[str, Any]:
-    """Read-only: each split, the next batch of moves into its canonical spelling, and empty folders."""
-    plan = _plan(Path(vault_root))
+    """Read-only: each split, the next batch of moves into its canonical spelling, and empty folders.
+
+    Each move of the batch is previewed while time allows: the pages whose links it rewrites, or
+    why `move_file` would refuse it (the apply then skips it). A move left unpreviewed says so.
+    """
+    root = Path(vault_root)
+    plan = _plan(root)
     public = dict(plan["public"])
+    pace = _Pace()
+    rows = []
+    for unit in plan["batch"]:
+        if not pace.fits():
+            rows.append({**unit, "previewed": False})
+            continue
+        with pace.timed():
+            previewed = _previewed(root, unit)
+        if "digest" in previewed:
+            rows.append({**unit, "previewed": True, "referrers_rewritten": previewed["referrers_rewritten"]})
+        else:
+            rows.append({**unit, "previewed": True, "refused": {"code": previewed["code"], "reason": previewed["reason"]}})
+    public["batch"] = rows
     if plan["batch"] or plan["empty"]:
         public["apply"] = {
             "tool": "maintain_memory",
@@ -275,7 +324,12 @@ def _validate(plan_id: object, why: object) -> None:
 
 
 def _remove_empty(root: Path, folders: list[str]) -> list[str]:
-    """Remove each listed folder, deepest first; refuse as stale when one is not empty or has lost its sibling."""
+    """Remove the listed folders, deepest first, or none: each must still be empty but for listed folders."""
+    listed = set(folders)
+    for rel in folders:
+        names = vault._listed(root / rel) if (root / rel).is_dir() else None  # noqa: SLF001
+        if names is None or any(f"{rel}/{name}" not in listed for name in names):
+            raise ValueError(_STALE)
     removed: list[str] = []
     acquired = held_fs.acquire(root)
     if not acquired.ok:
@@ -284,11 +338,13 @@ def _remove_empty(root: Path, folders: list[str]) -> list[str]:
         for rel in folders:
             request_budget.checkpoint()
             found = filesystem.parent(rel, access="mutate")
+            # Every folder was checked empty under the mutation boundary, so only a write from
+            # outside the service can fail one here; the folders removed so far are reported.
             if not found.ok:
-                raise ValueError(_STALE)
+                break
             with found.require() as held:
                 if not filesystem.unlink_directory(held).ok:
-                    raise ValueError(_STALE)
+                    break
             removed.append(rel)
     return removed
 
@@ -302,36 +358,29 @@ def _split_spellings(folders: list[str]) -> list[str]:
 def apply(vault_root: Path, *, plan_id: str, why: str) -> dict[str, Any]:
     """Move one confirmed batch into canonical spellings and remove the listed empty folders."""
     from .move_file import MoveFileError, move_file
+    from .pointer_write import PREVIEW_REQUIRED
 
     _validate(plan_id, why)
     root = Path(vault_root)
-    # Planning walks the vault and previews each move, so it runs before any boundary; each move
-    # takes the boundary itself and refuses when its referrers changed since this plan.
+    # Planning walks the vault, so it runs before any boundary; each move takes the boundary itself
+    # and refuses when its referrers changed since its own preview.
     plan = _plan(root)
     if plan["public"]["plan_id"] != plan_id:
         raise ValueError(_STALE)
     moved: list[dict] = []
+    skipped: list[dict] = []
     stopped: dict[str, str] | None = None
-    for index, unit in enumerate(plan["batch"]):
-        # An earlier move of this batch may have rewritten a page that this one rewrites too, so
-        # each move after the first takes its digest from a fresh preview; the plan id bound the moves.
-        current = unit if index == 0 else _previewed(root, {"from": unit["from"], "to": unit["to"]})
-        if "digest" not in current:
-            stopped = {"path": unit["from"], "code": current["code"], "reason": current["reason"]}
+    pace = _Pace()
+    for unit in plan["batch"]:
+        if not pace.fits():
+            stopped = {"path": unit["from"], "code": "BUDGET_SHORT", "reason": "the call ran short of time; preview again"}
             break
-        try:
-            move_file(
-                root,
-                old_path=unit["from"],
-                new_path=unit["to"],
-                update_wikilinks=True,
-                preview_digest=current["digest"],
-                record_repoints=True,
-            )
-        except MoveFileError as error:
-            stopped = {"path": unit["from"], "code": error.code, "reason": error.reason}
-            break
-        moved.append({"from": unit["from"], "to": unit["to"]})
+        with pace.timed():
+            outcome = _move(root, unit, move_file, MoveFileError, PREVIEW_REQUIRED)
+        if "to" in outcome and "code" not in outcome:
+            moved.append(outcome)
+        else:
+            skipped.append(outcome)
     removed: list[str] = []
     if stopped is None and plan["empty"]:
         with writer_lease.active_manager().mutation_guard(
@@ -364,19 +413,46 @@ def apply(vault_root: Path, *, plan_id: str, why: str) -> dict[str, Any]:
                     "PATH_VARIANT_AUDIT_UNAVAILABLE: the vault log is required to record the removal"
                 )
             removed = _remove_empty(root, plan["empty"])
-            vault.batch_atomic_write(list(log_plan.writes), vault_root=root)
+            if removed:
+                vault.batch_atomic_write(list(log_plan.writes), vault_root=root)
     remaining = plan["public"]["files_pending"] - len(moved)
     outcome = "committed" if moved or removed else "unchanged"
     if stopped is not None:
-        outcome = "partial" if moved else "refused"
+        outcome = "partial"
     return {
         "mode": MODE,
         "outcome": outcome,
         "plan_id": plan_id,
         "moved": moved,
+        "skipped": skipped,
         "removed_folders": removed,
         **({"stopped": stopped} if stopped is not None else {}),
         "files_remaining": remaining,
-        # After a move, a new preview lists what remains: more files, or the folders the moves emptied.
-        **({"next": {"tool": "maintain_memory", "args": {"mode": MODE}}} if moved else {}),
+        # A new preview lists what remains: more files, or the folders the moves emptied.
+        **({"next": {"tool": "maintain_memory", "args": {"mode": MODE}}} if moved or stopped else {}),
     }
+
+
+def _move(root: Path, unit: dict, move_file: Callable, error_type: type, preview_required: str) -> dict:
+    """Preview one move and commit it with that preview's digest: where it landed, or why it did not move."""
+    for _attempt in (1, 2):
+        previewed = _previewed(root, {"from": unit["from"], "to": unit["to"]})
+        if "digest" not in previewed:
+            return {"path": unit["from"], "code": previewed["code"], "reason": previewed["reason"]}
+        try:
+            result = move_file(
+                root,
+                old_path=unit["from"],
+                new_path=unit["to"],
+                update_wikilinks=True,
+                preview_digest=previewed["digest"],
+                # Keeps the bytes of each append-only page the move repoints, owner-only.
+                record_repoints=True,
+            )
+        except error_type as error:
+            if error.code == preview_required:
+                # A page this move rewrites changed between its preview and its commit.
+                continue
+            return {"path": unit["from"], "code": error.code, "reason": error.reason}
+        return {"from": result.old_path, "to": result.new_path}
+    return {"path": unit["from"], "code": preview_required, "reason": "its referrers kept changing; preview again"}

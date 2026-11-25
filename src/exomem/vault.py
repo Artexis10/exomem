@@ -7927,13 +7927,6 @@ def _respell_in_store(vault_root: Path, parts: list[str], replacing: str | None)
             names.update(_listed(vault_root / prefix if prefix else vault_root))
             return names
 
-        def entries(folder: str) -> set[str] | None:
-            stored = {child.name for child in view.children(folder)}
-            on_disk = _disk_entries(vault_root / folder)
-            if on_disk is None and not stored:
-                return None
-            return stored | (on_disk or set())
-
         for index, part in enumerate(parts):
             prefix = "/".join(spelled)
             names = names_in(prefix)
@@ -7945,7 +7938,9 @@ def _respell_in_store(vault_root: Path, parts: list[str], replacing: str | None)
                         exists=lambda name, prefix=prefix, rest=rest: _stored_or_on_disk(
                             vault_root, view, "/".join(filter(None, (prefix, name, *rest)))
                         ),
-                        entries=lambda name, prefix=prefix: entries(f"{prefix}/{name}" if prefix else name),
+                        entries=lambda name, prefix=prefix: folder_entries(
+                            vault_root, view, f"{prefix}/{name}" if prefix else name
+                        ),
                     )
                 spelled.append(part)
                 continue
@@ -7955,6 +7950,18 @@ def _respell_in_store(vault_root: Path, parts: list[str], replacing: str | None)
                 break
             spelled.append(variant)
     return "/".join(spelled)
+
+
+def folder_entries(vault_root: Path, view: Any, rel: str) -> set[str] | None:
+    """The names in folder `rel`, from the store view (or None in file mode) and the disk.
+
+    None when neither holds a folder there.
+    """
+    stored = {child.name for child in view.children(rel)} if view is not None else set()
+    on_disk = _disk_entries(vault_root / rel)
+    if on_disk is None and not stored:
+        return None
+    return stored | (on_disk or set())
 
 
 def _stored_or_on_disk(vault_root: Path, view: Any, rel: str) -> bool:
