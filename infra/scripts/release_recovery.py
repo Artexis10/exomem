@@ -39,6 +39,9 @@ from packaging.version import Version
 
 # GitHub's image attestation protocol fixes this predicate and these field formats.
 SLSA_PREDICATE = "https://slsa.dev/provenance/v1"
+# PyPI's JSON API can trail the first upload of a new project by minutes, so qualification
+# observes it with a backoff that stays bounded (300 s in total) inside the job timeout.
+PYPI_OBSERVATION_PAUSES = (10, 20, 30, 60, 60, 60, 60)
 
 
 def _digest(value: object, *, label: str) -> str:
@@ -398,7 +401,7 @@ def qualify_python(
         download_release(tag, sorted(names), official)
         if any(sha256(path) != sha256(official / path.name) for path in files):
             raise ValueError("immutable distribution differs between producer and GitHub")
-        for observation in range(6):
+        for pause in (*PYPI_OBSERVATION_PAUSES, None):
             urls = [
                 row
                 for row in release_pypi_files(packages, package["version"])
@@ -410,11 +413,11 @@ def qualify_python(
             missing = missing_distributions(files, urls)
             if not missing:
                 break
-            if observation == 5:
+            if pause is None:
                 raise ValueError(
                     "official PyPI distributions remain missing after bounded observation"
                 )
-            time.sleep(10)
+            time.sleep(pause)
         if {row["filename"] for row in urls} != names:
             raise ValueError("official PyPI filenames differ from the producer set")
         for row in urls:

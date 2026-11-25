@@ -480,7 +480,8 @@ jobs:
     needs: [plan, build-artifacts, publish-pypi]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.build-artifacts.result == 'success' && needs.plan.outputs.dry_run != 'true' && (needs.publish-pypi.result == 'success' || (needs.publish-pypi.result == 'skipped' && needs.plan.outputs.pypi_present == 'true')) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Room for the bounded PyPI observation (release_recovery.PYPI_OBSERVATION_PAUSES).
+    timeout-minutes: 10
     permissions:
       contents: read
       actions: read
