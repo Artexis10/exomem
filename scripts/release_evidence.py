@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import zipfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 # These names and events are the repository's closed Actions/release protocol.
@@ -112,6 +113,38 @@ def trusted_full(run: dict, repository: str, workflow_id: int) -> bool:
         and run.get("workflow_id") == workflow_id
         and (run.get("repository") or {}).get("full_name") == repository
         and (run.get("head_repository") or {}).get("full_name") == repository
+    )
+
+
+def main_full_due(repository: str, hours: float) -> bool:
+    """A release cut reuses Full evidence on main (release_cuts.py pick-source); keep it recent.
+
+    Full on main is due when none is queued or running, the newest one started more than
+    `hours` ago, and main has moved since that run's commit. A cut's own Full run tests a
+    main commit too (release_cuts.py pick-source reuses it), so it counts here as well.
+    """
+    workflow_id = api("actions/workflows/ci.yml")["id"]
+    latest = [
+        run
+        for event in FULL_EVENTS
+        for run in api(f"actions/workflows/ci.yml/runs?event={event}&per_page=100")[
+            "workflow_runs"
+        ]
+        if (
+            run.get("head_branch") == "main"
+            or (run.get("head_branch") or "").startswith(CUT_PREFIX)
+        )
+        and trusted_full(run, repository, workflow_id)
+    ]
+    if any(run["status"] != "completed" for run in latest):
+        return False
+    newest = max(latest, key=lambda run: run["created_at"], default=None)
+    if newest is None:
+        return True
+    started = datetime.fromisoformat(newest["created_at"].replace("Z", "+00:00"))
+    return (
+        datetime.now(UTC) - started > timedelta(hours=hours)
+        and newest["head_sha"] != api("commits/main")["sha"]
     )
 
 
@@ -467,7 +500,7 @@ def refresh_checks(repository: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     # The command names are this helper's closed CLI protocol.
-    parser.add_argument("command", choices=("scope", "record", "select", "refresh"))
+    parser.add_argument("command", choices=("scope", "record", "select", "refresh", "main-full"))
     parser.add_argument("--source")
     parser.add_argument("--run-id", type=int)
     parser.add_argument("--attempt", type=int)
@@ -503,6 +536,18 @@ def main() -> int:
         if receipt["tested_commit"] != os.environ["GITHUB_SHA"]:
             raise ValueError("actual checkout differs from GITHUB_SHA")
         args.output.write_text(json.dumps(receipt, indent=2) + "\n")
+    elif args.command == "main-full":
+        hours = float(os.environ.get("FULL_EVIDENCE_HOURS") or 4)
+        if hours <= 0 or not main_full_due(repository, hours):
+            print("Full evidence on main is recent, running or switched off; nothing dispatched")
+            return 0
+        command("gh", "workflow", "run", "ci.yml", "--ref", "main")
+        # The next check must see this run as in flight, or it would dispatch a second one.
+        for _ in range(12):
+            time.sleep(5)
+            if not main_full_due(repository, hours):
+                break
+        print(f"dispatched Full on main: no Full run on main in the last {hours:g} h")
     elif args.command == "select":
         if not args.source:
             parser.error("select requires --source")
