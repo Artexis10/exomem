@@ -3,10 +3,12 @@
 
 Diagnosis harness, not a gate. Each run is a fresh child process with a temp vault and state root. It creates
 an invented equipment collection in the store and writes ``--rows`` rows through the real bulk upsert. The
-typed run uses a summary collection, which the store creates typed. The JSON run uses one view file per row,
-which keeps the JSON encoding; the run publishes no view file. Each run reports the encoding the store holds. Each row gets 5 to 20 versions, about 10 on average, each with a stated effective time. A
-40-value `location` field changes in about half the versions. A 4-value `status` field changes in about a
-third of them and is skewed toward one value; the run reports the share of status spans that value holds.
+typed run uses a summary collection, which the store creates typed. The JSON run uses a collection with one
+view file per row, which keeps the JSON encoding. Each run reports the encoding the store holds.
+
+Each row gets 5 to 20 versions, about 10 on average, each with a stated effective time. A 40-value
+`location` field changes in about half the versions. A 4-value `status` field changes in about a third of
+them and is skewed toward one value; the run reports the share of status spans that value holds.
 About 1% of rows then gain a past point and 0.5% a correction, through the real edit.
 
 The write cases time one owner edit by row id through the governed Records route: with a stated
