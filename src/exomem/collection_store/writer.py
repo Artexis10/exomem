@@ -66,6 +66,7 @@ from . import (
     summary,
     tables,
     timeline,
+    timeline_index,
     tokens,
     typed_storage,
     types,
@@ -1136,6 +1137,9 @@ class CollectionWriter:
         manifest = self._collection_manifest(self._collection_row(txn["collection_id"]))[0]
         self._pending_basis(history.main_path(manifest), txn["collection_id"], "history", 0)
         self._execute(tables.INSERT_TXN, data)
+        # After the transaction row: the versions it wrote join `txns`, so the spans read them.
+        timeline_index.maintain(index_migrations.AccountedWriter(self.connection, self._execute), manifest,
+                                txn["txn_id"])
         if self._publication.deferred_create is None and warnable:
             self._publication.bind(receipt)
 
@@ -2177,8 +2181,8 @@ class CollectionWriter:
         return result
 
     def backfill_derived(self, collection, *, limit=128, projection=True, rollup=True,
-                         references=True) -> tuple[bool, bool]:
-        """Advance this collection's query projection, building rollups and reference index by one batch each, in one transaction.
+                         references=True, timeline=True) -> tuple[bool, bool]:
+        """Advance this collection's query projection, building rollups, reference index and one timeline index by one batch each, in one transaction.
 
         Internal maintenance under the writer lease and current authority, not a
         public route; the serving store thread drives it. A collection with no
@@ -2198,8 +2202,24 @@ class CollectionWriter:
                 ready = rollups.backfill_batch(accounted, manifest.collection_id, limit=limit)
             if references:
                 reference_index.backfill(accounted, manifest, limit=limit)
+            if timeline:
+                timeline_index.backfill(accounted, manifest, limit=limit)
             self._precommit(manifest)
         return published, ready
+
+    def seed_timeline_indexes(self) -> None:
+        """Give each field that a timeline query asked to index a warming state row, which the derived pass builds."""
+        requested = timeline_index.take(self.handle.path)
+        if not requested:
+            return
+        with self._mutation():
+            accounted = index_migrations.AccountedWriter(self.connection, self._execute)
+            for collection_id, field in requested:
+                try:
+                    manifest = self._collection_manifest(self._collection_row(collection_id))[0]
+                except collections.CollectionError:
+                    continue  # the collection went away; nothing to build
+                timeline_index.seed(accounted, manifest, field)
 
     def seed_references(self) -> None:
         """Seed warming state rows for declarations a store gained outside the create path."""

@@ -1,4 +1,4 @@
-"""`query_records` with `timeline`: one field's spans over effective time (OpenSpec record-value-timeline 5.1-5.3).
+"""`query_records` with `timeline`: one field's spans over effective time (OpenSpec record-value-timeline 5.1-5.4).
 
 Each case names the failure only it catches. Store collections run on the real CollectionWriter, in the JSON
 encoding (one view file per row) and the typed one (a summary view). The lamps, shelves and dates are invented,
@@ -13,6 +13,9 @@ The stocked lamps and their `location` spans:
 
 from __future__ import annotations
 
+import shutil
+import sqlite3
+import time
 from contextlib import contextmanager
 
 import pytest
@@ -23,6 +26,9 @@ from test_record_timeline_schema import LAMPS, equipment_manifest
 from exomem.cli_ops import OpError
 from exomem.collection_store import (
     connection,
+    snapshot,
+    timeline_index,
+    timeline_query,
     typed_storage,
 )
 from exomem.collection_store.preview import preview_store
@@ -114,6 +120,20 @@ def refused(writer, **arguments):
     with pytest.raises(OpError) as raised:
         query(writer, **arguments)
     return raised.value
+
+
+def from_index(monkeypatch, writer, **arguments):
+    """The reply that the span index gives, by lowering the direct bound below every selection."""
+    with monkeypatch.context() as patched:
+        patched.setattr(timeline_query, "DIRECT_BOUND", 0)
+        return query(writer, **arguments)
+
+
+def build(writer, *, batch=1):
+    """Run the serving store thread's steps: seed the requested indexes, then build them batch by batch."""
+    writer.seed_timeline_indexes()
+    while timeline_index.due(writer.connection, LAMPS):
+        writer.backfill_derived(LAMPS, limit=batch, projection=False, rollup=False, references=False)
 
 
 def tags(writer, who=OWNER):
@@ -375,3 +395,118 @@ def test_a_withheld_row_leaves_no_span_total_or_continuation_trace(lamps):
     assert (first["total_matched"], second["total_matched"]) == (4, 4)
     assert [without(span) for span in (*first["spans"], *second["spans"])] == [
         without(span) for span in others if span["effective_from"] >= "2026-03-01"]
+
+
+# --- 5.4 the span index ---------------------------------------------------------------------------------------
+
+
+def test_the_index_answers_every_query_as_the_versions_do(lamps, monkeypatch):
+    direct = {name: query(lamps, **arguments) for name, arguments in QUERIES.items()}
+
+    warming = pytest.raises(OpError, from_index, monkeypatch, lamps, **QUERIES["one row"]).value
+    build(lamps)
+
+    assert warming.code == "TIMELINE_WARMING"
+    assert warming.details["retry_after_ms"] > 0 and warming.details["progress"] == {"percent_built": 0}
+    for name, arguments in QUERIES.items():
+        indexed = from_index(monkeypatch, lamps, **arguments)
+        assert indexed["timeline"]["source"] == "index", name
+        assert {**indexed, "timeline": direct[name]["timeline"]} == direct[name], name
+
+
+def test_a_large_selection_before_the_build_is_refused_never_answered_short(lamps, monkeypatch):
+    """A warming index answered as it stands would return a partial list that reads as the whole timeline."""
+    from_index_refusal = pytest.raises(OpError, from_index, monkeypatch, lamps, **QUERIES["every span"]).value
+    lamps.seed_timeline_indexes()
+    lamps.backfill_derived(LAMPS, limit=1, projection=False, rollup=False, references=False)
+
+    building = pytest.raises(OpError, from_index, monkeypatch, lamps, **QUERIES["every span"]).value
+
+    assert from_index_refusal.code == building.code == "TIMELINE_WARMING"
+    assert 0 < building.details["progress"]["percent_built"] < 100
+    assert "retry_after_ms" in building.details["remediation"]
+
+
+def test_writes_keep_a_built_index_current(typed_lamps, monkeypatch):
+    """Each kind of write changes spans differently; an index that missed one would answer from a stale history."""
+    keys = typed_lamps.keys
+    pytest.raises(OpError, from_index, monkeypatch, typed_lamps, **QUERIES["every span"])
+    build(typed_lamps)
+
+    def agree():
+        direct = query(typed_lamps, **QUERIES["every span"])
+        indexed = from_index(monkeypatch, typed_lamps, **QUERIES["every span"])
+        assert {**indexed, "timeline": direct["timeline"]} == direct
+        return spans(typed_lamps, direct)
+
+    edit(typed_lamps, keys["L-19"], {"location": "Shelf F"}, effective_at="2026-03-12")
+    assert ("L-19", "Shelf F", "2026-03-12", None) in agree()
+    edit(typed_lamps, keys["L-18"], {"location": "Repair Bench"}, effective_at="2026-02-27")  # a past point
+    assert ("L-18", "Repair Bench", "2026-02-27", "2026-03-03") in agree()
+    move = edit(typed_lamps, keys["L-17"], {"location": "Shelf G"}, effective_at="2026-03-08")["audit_correlation"]
+    edit(typed_lamps, keys["L-17"], {"location": "Shelf H"}, corrects=move, why="it was Shelf H")
+    assert ("L-17", "Shelf H", "2026-03-08", None) in agree()
+    container = typed_lamps.current_guards(LAMPS, keys["L-19"])[0]
+    counted = typed_lamps.bulk_upsert_records(
+        LAMPS, rows=[{"item": {"asset_tag": "L-19", "location": "Shelf J"}},
+                     {"item": {"asset_tag": "L-21", "location": "Shelf K"}}],
+        why="count", expected_container_hash=container, source=SOURCE, effective_at="2026-03-20")
+    assert counted["committed"] is True
+    assert {("L-19", "Shelf J", "2026-03-20", None), ("L-21", "Shelf K", "2026-03-20", None)} <= set(agree())
+    assert [span["sources"] for span in query(typed_lamps, **QUERIES["every span"])["spans"]
+            if span["value"] in {"Shelf J", "Shelf K"}] == [[SOURCE], [SOURCE]]
+    container, version = typed_lamps.current_guards(LAMPS, keys["L-18"])
+    typed_lamps.retract_record(LAMPS, item_key=keys["L-18"], expected_container_hash=container,
+                               expected_item_version=version, why="sold")
+    assert "L-18" not in {tag for tag, *_ in agree()}
+    add(typed_lamps, {"asset_tag": "L-18", "location": "Shelf L"}, "2026-03-21")  # brought back
+    assert ("L-18", "Shelf L", "2026-03-21", None) in agree()
+
+
+def test_a_field_removed_or_retyped_loses_its_index(lamps, monkeypatch):
+    """An index kept across a type change would compare values under the old type's keys."""
+    encoding = "json-v1" if typed_storage.collection_encoding(lamps.connection, LAMPS) == typed_storage.JSON_V1 \
+        else "typed"
+    declared = manifest(encoding).replace(
+        "    status: {type: string}\n", "    status: {type: string}\n    notes: {type: string}\n    bay: {type: string}\n")
+    revise(lamps, declared)
+    for field in ("notes", "bay"):
+        pytest.raises(OpError, from_index, monkeypatch, lamps, timeline={"field": field})
+    build(lamps)
+    built = lamps.connection.execute("SELECT count(*) FROM field_spans").fetchone()[0]
+
+    revise(lamps, declared.replace("    bay: {type: string}\n", "").replace(
+        "    notes: {type: string}\n", "    notes: {type: integer}\n"))
+
+    assert built > 0
+    assert lamps.connection.execute("SELECT field_path,ready FROM field_span_state").fetchall() == [("notes", 0)]
+    assert lamps.connection.execute("SELECT count(*) FROM field_spans").fetchone() == (0,)
+    assert pytest.raises(OpError, from_index, monkeypatch, lamps, timeline={"field": "notes"}).value.code == \
+        "TIMELINE_WARMING"
+
+
+def revise(writer, text):
+    with request_scope(OWNER), preview_store(writer.root, writer.handle):
+        guards = record_memory(writer.root, "inspect", collection=LAMPS)["lifecycle_guards"]
+    writer.revise_collection(LAMPS, manifest_text=text, **guards, why="revise")
+
+
+def test_a_restored_copy_warms_rather_than_read_a_copied_index(lamps, monkeypatch, tmp_path):
+    pytest.raises(OpError, from_index, monkeypatch, lamps, **QUERIES["every span"])
+    build(lamps)
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    with snapshot._staged_copy(snapshot._collection_fill(lamps.handle.path), directory=stage,
+                               deadline=time.monotonic() + 10, attaches_source=True) as artifact:
+        shutil.copy(artifact.path, tmp_path / "restored.sqlite")
+    copy = sqlite3.connect(tmp_path / "restored.sqlite")
+    try:
+        assert copy.execute("SELECT (SELECT count(*) FROM field_spans),(SELECT count(*) FROM field_span_state)"
+                            ).fetchone() == (0, 0)
+    finally:
+        copy.close()
+
+    with connection.open_writer(tmp_path / "restored.sqlite", lease_check=lambda: True) as handle:
+        restored = CollectionWriter(lamps.root, handle)
+        assert pytest.raises(OpError, from_index, monkeypatch, restored, **QUERIES["every span"]).value.code == \
+            "TIMELINE_WARMING"

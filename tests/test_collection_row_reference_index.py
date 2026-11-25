@@ -369,11 +369,11 @@ def test_backfill_due_lists_projection_rollup_and_reference_index(world):
     world.rebuild_references(DIARY)
     due = {row[0]: row[1:] for row in index_migrations.backfill_due(world.handle.connection)}
     assert DIARY in due
-    projection, rollup, reference = due[DIARY]
+    projection, rollup, reference, timelines = due[DIARY]
     assert reference is True
-    # The diary's projection is built and it declares no rollup: it is due on the
-    # reference flag alone, so a row that drops that kind stops listing it.
-    assert due[DIARY] == (False, False, True)
+    # The diary's projection is built, it declares no rollup and no timeline index warms: it is
+    # due on the reference flag alone, so a row that drops that kind stops listing it.
+    assert due[DIARY] == (False, False, True, False)
 
 
 # --- 10. bulk writes maintain the index -------------------------------------------------

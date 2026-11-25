@@ -22,6 +22,7 @@ from exomem.collection_store import (
     source_dependencies,
     tables,
     timeline,
+    timeline_index,
     typed_storage,
     views,
     writer,
@@ -34,9 +35,12 @@ def before_timeline_facts(patch):
     """Let the maintained writer seed a store from before schema 21, which has no timeline fact tables.
 
     An edit reads its row's latest effective times from those tables. A store before them holds no stated
-    time, so every write it took is current, as the release that wrote it placed it.
+    time, so every write it took is current, as the release that wrote it placed it. It has no span index
+    either, so a write keeps none current and a derived pass builds none.
     """
     patch.setattr(timeline, "latest_bounds", lambda conn, row_ids: {})
+    patch.setattr(timeline_index, "maintain", lambda conn, manifest, txn_id: None)
+    patch.setattr(timeline_index, "backfill", lambda conn, manifest, *, limit: False)
 
 
 def before_retractable_rows(patch):

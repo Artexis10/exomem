@@ -2259,7 +2259,7 @@ class StoreServer:
         collection whose batch is refused waits the retry interval; the others keep advancing.
         """
         from ..governance import principal
-        from . import capability, index_migrations, reference_index
+        from . import capability, index_migrations, reference_index, timeline_index
         from .preview import _mutate, preview_store
 
         if self.runtime is None or self._idle_released() or not capability.records_summary_enabled(self.root):
@@ -2280,6 +2280,14 @@ class StoreServer:
             except Exception:  # noqa: BLE001 - a store that cannot seed now is retried next tick
                 logger.warning("reference index seeding could not run; retrying later", exc_info=True)
                 return IMPORT_RETRY_SECONDS
+        if timeline_index.requested(self.runtime.path):
+            # A timeline query asked for a field's index; its state row makes the field due below.
+            try:
+                with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
+                    _mutate(self.root, writer.seed_timeline_indexes)
+            except Exception:  # noqa: BLE001 - the asking query asks again when it is retried
+                self._retrying("timeline index seeding could not run")
+                return IMPORT_RETRY_SECONDS
         try:
             with connection.store_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
                 due = index_migrations.backfill_due(reader)
@@ -2292,14 +2300,14 @@ class StoreServer:
         due = [row for row in due if row[0] not in self._backfill_refused]
         if not due:
             return min((at - now for at in self._backfill_refused.values()), default=IMPORT_IDLE_SECONDS)
-        collection_id, projection, rollup, references = next(
+        collection_id, projection, rollup, references, timelines = next(
             (row for row in due if row[0] > self._backfill_last), due[0])
         self._backfill_last = collection_id
         try:
             with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
                 try:
                     _mutate(self.root, writer.backfill_derived, collection_id, limit=BACKFILL_BATCH_ROWS,
-                            projection=projection, rollup=rollup, references=references)
+                            projection=projection, rollup=rollup, references=references, timeline=timelines)
                 except Exception:  # noqa: BLE001 - one refused collection leaves the others to advance
                     logger.warning("derived backfill of %s could not advance; retrying later",
                                    collection_id, exc_info=True)
