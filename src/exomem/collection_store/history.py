@@ -440,8 +440,37 @@ def agent_history(writer, manifest):
             **{name: assessment[name] for name in ("discontinuity", "discontinuities") if name in assessment}}
 
 
-def row_history(writer, manifest, *, item_key, limit=None, continuation=None):
-    """Merge retained legacy corrections with canonical versions in the existing envelope."""
+def _natural_key_item(writer, manifest, natural_key):
+    """The item key of the row that `natural_key` names: the current row that holds it, else the retracted one.
+
+    A retraction clears the row's stored natural key but not its identity, which derives from that key,
+    so the retracted row is found by the key its natural key derives. A caller to whom any natural-key
+    field is withheld cannot match: each match would confirm a hidden value, so that caller, like a key
+    that names no row, is refused RECORD_NOT_FOUND, and before the key's shape can name a hidden field.
+    """
+    from .. import record_history
+    from .. import structured_collections as collections
+
+    if writer._operation.field_plan(manifest).natural_key_withheld:
+        raise collections.CollectionError("RECORD_NOT_FOUND", "record key does not exist")
+    serialized = record_history.natural_key_text(manifest, natural_key)
+    cid, conn = manifest.collection_id, writer.connection
+    found = conn.execute("SELECT item_key FROM items WHERE collection_id=? AND natural_key=?",
+                         (cid, serialized)).fetchone()
+    if found is None:
+        found = conn.execute("SELECT item_key FROM item_rows WHERE collection_id=? AND item_key=? "
+                             "AND retracted_txn IS NOT NULL",
+                             (cid, collections.derived_item_key(manifest, natural_key))).fetchone()
+    if found is None:
+        raise collections.CollectionError("RECORD_NOT_FOUND", "record key does not exist")
+    return found[0]
+
+
+def row_history(writer, manifest, *, item_key=None, natural_key=None, limit=None, continuation=None):
+    """Merge retained legacy corrections with canonical versions in the existing envelope.
+
+    The row is named by its `item_key` or its `natural_key`.
+    """
     from .. import record_governance, record_history, registry_history
     from .. import structured_collections as collections
     from ..governance import egress
@@ -449,6 +478,8 @@ def row_history(writer, manifest, *, item_key, limit=None, continuation=None):
     page_size, after = record_history._page_bounds(limit, continuation)
     cid, conn = manifest.collection_id, writer.connection
     manifest = writer._collection_manifest(writer._collection_row(manifest))[0]
+    if natural_key is not None:
+        item_key = _natural_key_item(writer, manifest, natural_key)
     from . import governance
 
     subject = next(iter(governance.iter_subjects(

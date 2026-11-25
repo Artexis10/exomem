@@ -15,10 +15,12 @@
 
 ## 2. History by natural key (delivery 1, no schema change)
 
-- [ ] 2.1 Let `records.history` select a row by exactly one of `item_key`, `item_id` and `natural_key`, on store-backed and file-canonical collections. Resolve `natural_key` to the current row, or else to the retracted row whose `hashed-v1` key derives from it. Apply `FieldPlan.natural_key_withheld` before matching.
+- [x] 2.1 Let `records.history` select a row by exactly one of `item_key`, `item_id` and `natural_key`, on store-backed and file-canonical collections. Resolve `natural_key` to the current row, or else to the retracted row whose `hashed-v1` key derives from it. Apply `FieldPlan.natural_key_withheld` before matching.
   - Check: tests for lookup by key on a typed and a JSON collection; a retracted row found by key; a withheld natural-key field and an absent key giving identical refusals; a stale `item_id` naming the same row.
-- [ ] 2.2 Update the `history` operation entry, the `inspect_memory` routing and `describe`. Regenerate `docs/capabilities.md` and the MCP tool schema fixture.
+  - Evidence: `tests/test_record_history_natural_key.py` (9 cases: JSON and typed lookup, retracted row, moved key, withheld field against absent key, unreadable row against absent key, stale `item_id`, selector and key-shape refusals, file-canonical collection). A mutation that removed the `natural_key_withheld` check failed the withheld case.
+- [x] 2.2 Update the `history` operation entry, the `inspect_memory` routing and `describe`. Regenerate `docs/capabilities.md` and the MCP tool schema fixture.
   - Check: the fixture diff shows only the two added history arguments.
+  - Evidence: `scripts/generate-capabilities.py` added `natural_key` to the `record_memory` row (`item_id` was already there). `scripts/dump-tool-schemas.py` left `tests/fixtures/mcp_tool_schemas.json` and the discovery fingerprint unchanged, because `inspect_memory` takes an opaque `arguments` object, so the fixture shows no history arguments at all. The routing is covered by `tests/test_operation_entries.py` and `tests/test_record_history_natural_key.py`.
 
 ## 3. Store schema 21
 
