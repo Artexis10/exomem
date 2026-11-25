@@ -10938,13 +10938,11 @@ def _review_question_submission(path: Any, query: Any, family: Any) -> bool:
 
 
 @review_ids_module.marks_items
-@_reads_one_store_snapshot
 def op_review_memory(
     vault_root: Path,
     mode: str = "attention",
     categories: list[str] | None = None,
     limit: int | None = None,
-    filters: dict[str, Any] | None = None,
     continuation: _OptionalRelationText = None,
     query: str = "",
     sources: list[str] | None = None,
@@ -10976,7 +10974,6 @@ def op_review_memory(
             apply-proposal or triage_memory. Modes: references/governance.md.
         categories: Category filter (attention, activation, audit) or upkeep family.
         limit: Result cap; vocabulary defaults to 4, other modes 25.
-        filters: Review listing predicates over unit.dimension, with Boolean composition.
         continuation: Opaque vocabulary pagination token.
         query: Topic for evolution when `path` is absent; in vocabulary mode, the
             meaning question to record.
@@ -11004,15 +11001,6 @@ def op_review_memory(
         raise ValueError(
             "INVALID_REVIEW_ARGUMENTS: window_days is only supported by dispositions mode"
         )
-    from .public_tools import REVIEW_QUEUES
-    from .review_dimensions import ReviewDimensions
-
-    listing = mode in REVIEW_QUEUES.values() and not (
-        mode == "vocabulary" and _review_question_submission(path, query, family)
-    )
-    dimensions = ReviewDimensions(vault_root, filters) if listing else None
-    if filters is not None and not listing:
-        raise ValueError("INVALID_REVIEW_ARGUMENTS: filters require a review listing")
     if mode == "vocabulary":
         question_submission = _review_question_submission(path, query, family)
         unrelated = any(
@@ -11071,7 +11059,6 @@ def op_review_memory(
             limit=limit,
             continuation=continuation,
             **({"state": state} if state != "open" else {}),
-            dimensions=dimensions,
         )
     if family is not None:
         raise ValueError("INVALID_REVIEW_ARGUMENTS: family is only supported by vocabulary review")
@@ -11083,34 +11070,24 @@ def op_review_memory(
         from . import upkeep as upkeep_module
 
         return upkeep_module.review(
-            vault_root, state=state, categories=categories, limit=limit, dimensions=dimensions,
+            vault_root, state=state, categories=categories, limit=limit
         )
     if limit is None:
         limit = 25
     if mode == "plan-progress":
         # `path` is a collection selector here, not a memory identifier, so it
         # is passed through before the page-oriented resolution below.
-        return plan_progress_module.review(vault_root, collection=path, limit=limit, dimensions=dimensions)
+        return plan_progress_module.review(vault_root, collection=path, limit=limit)
     if path:
         path = page_names_module.resolve_page(vault_root, path, field="path")
-
-    def attention_listing(selected_categories):
-        from . import vocabulary_entities
-
-        report = attention_module.attention(
-            vault_root, categories=selected_categories, limit=limit, state=state, dimensions=dimensions,
-        )
-        return vocabulary_entities.annotate_report(vault_root, report.as_dict())
-
     if mode == "attention":
-        return attention_listing(categories)
+        return op_attention(vault_root, categories=categories, limit=limit, state=state)
     if mode == "activation":
         return attention_module.activation(
             vault_root,
             categories=categories,
             limit=limit,
             state=state,
-            dimensions=dimensions,
         ).as_dict()
     if mode == "item":
         if not ref:
@@ -11141,7 +11118,7 @@ def op_review_memory(
             )
         return write_intake.read(vault_root, ref=ref, limit=limit)
     if mode == "procedure_approvals":
-        return procedure_approval_operation_module.listing(vault_root, limit, dimensions=dimensions)
+        return procedure_approval_operation_module.listing(vault_root, limit)
     if mode == held_operation_module.LIST_MODE:
         return held_operation_module.listing(vault_root, limit)
     if mode == "dispositions":
@@ -11154,21 +11131,31 @@ def op_review_memory(
             legacy_sample_limit=legacy_sample_limit,
         )
     if mode == "stale":
-        return attention_listing(["stale_review"])
+        return op_attention(vault_root, categories=["stale_review"], limit=limit, state=state)
     if mode == "contradiction":
-        return attention_listing(["corpus_contradictions"])
+        return op_attention(
+            vault_root,
+            categories=["corpus_contradictions"],
+            limit=limit,
+            state=state,
+        )
     if mode == "unprocessed-sources":
-        return attention_listing(["unprocessed_source"])
+        return op_attention(
+            vault_root,
+            categories=["unprocessed_source"],
+            limit=limit,
+            state=state,
+        )
     if mode == "relation-debt":
-        return attention_listing(["relation_debt"])
+        return op_attention(vault_root, categories=["relation_debt"], limit=limit, state=state)
     if mode == "relation-queue":
-        return relation_queue_module.build_queue(vault_root, limit_pages=limit, dimensions=dimensions)
+        return relation_queue_module.build_queue(vault_root, limit_pages=limit)
     if mode == "adoption":
         adoption_run_id: str | None = None
         if ref and ref.startswith("exomem://adoption/run/"):
             adoption_run_id = ref.rsplit("/", 1)[-1] or None
         return adoption_proposals_module.build_queue(
-            vault_root, run_id=adoption_run_id, state=state, limit=limit, dimensions=dimensions,
+            vault_root, run_id=adoption_run_id, state=state, limit=limit
         )
     if mode == "provenance":
         return op_provenance_report(vault_root, tag=tag, key=key, value=value, path=path)

@@ -7,7 +7,6 @@ not the wording of a reply. Nothing here calls a leaf directly.
 from __future__ import annotations
 
 import asyncio
-import datetime as dt
 import json
 from pathlib import Path
 
@@ -261,94 +260,6 @@ async def _acorn_candidate(client):
     rows = [item for group in queue.get("groups", []) for item in group.get("items", [])]
     return next((row for row in rows if row.get("from", "").endswith("acorn.md")
                  and row.get("to", "").endswith("birch.md")), None)
-
-
-def test_review_dimension_filter_keeps_the_ranked_window_and_records_only_returned_items(
-    build, vault, monkeypatch,
-):
-    from exomem import attention, audit, epistemic_graph, file_watcher, lexstore, review_state
-
-    notes = vault / "Knowledge Base/Notes/Insights"
-    claim, question = "Knowledge Base/Notes/Insights/review-claim.md", "Knowledge Base/Notes/Insights/review-question.md"
-    (notes / "review-claim.md").write_text("---\ntype: insight\n---\n## Claim\n\nA measured result.\n")
-    (notes / "review-question.md").write_text("---\ntype: insight\n---\n## Open question\n\nWhat changes the result?\n")
-    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "auto")
-    file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
-    lexstore.ensure_fresh(vault)
-    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
-    findings = [audit.AuditFinding("relation_debt", "info", path, "Review the connection.")
-                for path in (claim, question)]
-    monkeypatch.setattr(attention.audit_module, "audit", lambda *args, **kwargs: audit.AuditReport(
-        findings=findings, summary={"relation_debt": len(findings)},
-    ))
-
-    async def scenario(client):
-        assert epistemic_graph.EpistemicGraphIndex(vault).validate_startup_snapshot() is True
-        arguments = {"queue": "unlinked", "filters": {"unit.dimension": {"$eq": "uncertainty"}}}
-        prefix = await _call(client, "list_review_items", {**arguments, "limit": 1})
-        surfaced_before = review_state.ReviewStateStore(vault).load().get("surfaced", {})
-        expanded = await _call(client, "list_review_items", {**arguments, "limit": 2})
-        return prefix, surfaced_before, expanded
-
-    prefix, surfaced_before, expanded = _session(build(), scenario)
-    assert "error" not in prefix, prefix
-    assert prefix["items"] == []
-    assert prefix["dimension_coverage"]["unsearched"] == 1
-    assert prefix["dimension_coverage"]["complete"] is False
-    assert surfaced_before == {}
-    assert [row["path"] for row in expanded["items"]] == [question]
-    assert expanded["items"][0]["dimension_status"] == "known"
-    assert "uncertainty" in expanded["items"][0]["dimensions"]
-
-
-@pytest.mark.parametrize(("category", "heading"), [
-    ("prediction_window", "Prediction"), ("question_aging", "Open question"),
-])
-def test_id_bearing_due_units_keep_their_selected_dimension_target(
-    build, vault, monkeypatch, category, heading,
-):
-    from exomem import audit, epistemic_graph, file_watcher, lexstore
-
-    class DueDate(dt.date):
-        @classmethod
-        def today(cls):
-            return cls(2026, 8, 16)
-
-    path = "Knowledge Base/Notes/Insights/due-review-subject.md"
-    (vault / path).write_text(
-        "---\ntitle: Due review subject\ntype: insight\nstatus: active\n"
-        "exomem_id: 9bc714ea-3919-46e8-8cef-7a502e892f35\n"
-        "created: 2025-01-01\nupdated: 2026-08-15\n---\n\n"
-        f"## {heading}\n- id: due-unit\n- check_by: 2026-08-02\n\n"
-        "The next trial may change the measured result.\n\n"
-        "## Claim\n- id: credited-unit\n- asserted_by: The project steward\n\n"
-        "The present measurement is repeatable.\n",
-    )
-    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "auto")
-    file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
-    assert lexstore.ensure_fresh(vault)
-    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
-    monkeypatch.setattr(audit.dt, "date", DueDate)
-
-    async def scenario(client):
-        assert epistemic_graph.EpistemicGraphIndex(vault).validate_startup_snapshot() is True
-        arguments = {"categories": [category], "limit": 25}
-        listed = await _call(client, "list_review_items", arguments)
-        matched = await _call(client, "list_review_items", {
-            **arguments, "filters": {"unit.dimension": {"$eq": "uncertainty"}},
-        })
-        sibling = await _call(client, "list_review_items", {
-            **arguments, "filters": {"unit.dimension": {"$eq": "attribution"}},
-        })
-        return listed, matched, sibling
-
-    listed, matched, sibling = _session(build(), scenario)
-    assert len(listed["items"]) == 1, listed
-    assert listed["items"][0]["dimension_status"] == "known", listed
-    assert "uncertainty" in listed["items"][0]["dimensions"]
-    assert [item["ref"] for item in matched["items"]] == [listed["items"][0]["ref"]]
-    assert sibling["items"] == []
-    assert sibling["dimension_coverage"]["filter_unresolved"] == 0
 
 
 def test_an_agent_accepts_a_suggested_relation_by_review_item_id(build, vault) -> None:

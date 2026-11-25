@@ -467,28 +467,6 @@ def test_the_listing_pages_by_limit_and_says_when_it_is_empty(vault, mcp, monkey
     assert [len(ids) for ids in lookups] == [1, 2]
 
 
-def test_dimension_filter_preserves_the_approval_reference_prefix(vault, mcp, monkeypatch):
-    from exomem import epistemic_graph, file_watcher, lexstore
-
-    first = write_page(vault, "early-procedure", OTHER_ID)
-    second = write_page(vault, "later-procedure", REF_ID, body=METHOD + "\n## Open question\n\nWhat changes this method?\n")
-    assert "error" not in approve(mcp, f"exomem://memory/{OTHER_ID}", facts_of(vault, first).version)
-    assert "error" not in approve(mcp, REF, facts_of(vault, second).version)
-    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "auto")
-    file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
-    assert lexstore.ensure_fresh(vault)
-    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
-
-    expression = {"unit.dimension": {"$eq": "uncertainty"}}
-    prefix = call(mcp, "read_review", {"kind": "procedure_approvals", "limit": 1, "filters": expression})
-    assert prefix["approvals"] == []
-    assert prefix["total"] == 2 and prefix["dimension_coverage"]["unsearched"] == 1
-    assert prefix["dimension_coverage"]["complete"] is False
-    expanded = call(mcp, "read_review", {"kind": "procedure_approvals", "limit": 2, "filters": expression})
-    assert [item["path"] for item in expanded["approvals"]] == [second]
-    assert expanded["approvals"][0]["dimension_status"] == "known"
-
-
 @pytest.mark.parametrize("limit", [0, 101])
 def test_the_listing_refuses_a_limit_outside_its_bounds(vault, mcp, limit) -> None:
     refused = call(mcp, "read_review", {"kind": "procedure_approvals", "limit": limit})

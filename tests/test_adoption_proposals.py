@@ -302,14 +302,6 @@ def test_review_memory_adoption_mode_lists_open_items(tmp_path: Path) -> None:
     assert len(items) == 1
     assert items[0]["kind"] == "compilation"
     assert items[0]["state"] == "open"
-    assert items[0]["dimension_status"] == "not_applicable"
-    assert "dimensions" not in items[0]
-    filtered = commands.op_review_memory(
-        vault, mode="adoption", limit=50, filters={"$not": {"unit.dimension": {"$eq": "kind"}}},
-    )
-    assert filtered["items"] == []
-    assert filtered["dimension_coverage"]["not_applicable"] == 1
-    assert filtered["dimension_coverage"]["filter_unresolved"] == 0
 
 
 # --- 18 ---

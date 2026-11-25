@@ -296,7 +296,7 @@ def _quarantine_result(
     }
 
 
-def listing(vault_root: Path, limit: int | None = None, *, dimensions=None) -> dict[str, Any]:
+def listing(vault_root: Path, limit: int | None = None) -> dict[str, Any]:
     """Every ref with approval entries: its page, its verdict, its latest entry, its findings."""
     who = effective_principal()
     root = Path(vault_root)
@@ -316,8 +316,6 @@ def listing(vault_root: Path, limit: int | None = None, *, dimensions=None) -> d
     holders = _holders(root, shown)
     approvals: list[dict[str, Any]] = []
     findings: list[dict[str, Any]] = []
-    targets = []
-    findings_by_ref = {}
     for ref in shown:
         page = _resolve(root, holders[ref], who)
         result = procedure_approval.verdict(
@@ -338,16 +336,7 @@ def listing(vault_root: Path, limit: int | None = None, *, dimensions=None) -> d
                 "client": result.entry.client,
             }
         approvals.append(row)
-        findings_by_ref[ref] = [item.row() for item in result.findings]
-        findings.extend(findings_by_ref[ref])
-        if dimensions is not None:
-            from .review_dimensions import ReviewTarget
-
-            targets.append(ReviewTarget(page.path, available=page.unique))
-    dimension_coverage = None
-    if dimensions is not None:
-        approvals, dimension_coverage = dimensions.select(approvals, targets, unsearched=len(refs) - len(shown))
-        findings = [finding for row in approvals for finding in findings_by_ref[row["ref"]]]
+        findings.extend(item.row() for item in result.findings)
     counts = {
         value: sum(row["verdict"] == value for row in approvals)
         for value in (procedure_approval.APPROVED, procedure_approval.STALE, procedure_approval.UNAPPROVED)
@@ -363,9 +352,6 @@ def listing(vault_root: Path, limit: int | None = None, *, dimensions=None) -> d
         )
         if findings:
             sentence += f" {_count(len(findings), 'finding needs', 'findings need')} your attention."
-    if dimensions is not None and dimensions.filtered:
-        sentence = (f"Showing {len(approvals)} known dimension matches in {len(shown)} approval entries; "
-                    f"{dimension_coverage['filter_unresolved']} unresolved, {len(refs) - len(shown)} beyond the window.")
     return {
         "kind": LISTING,
         "outcome": sentence,
@@ -374,5 +360,4 @@ def listing(vault_root: Path, limit: int | None = None, *, dimensions=None) -> d
         "truncated": len(shown) < len(refs),
         "approvals": approvals,
         "findings": findings,
-        **({"dimension_coverage": dimension_coverage} if dimension_coverage is not None else {}),
     }

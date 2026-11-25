@@ -11042,7 +11042,6 @@ class EpistemicGraphIndex:
         limit_pages: int = 50,
         limit_per_page: int = 10,
         status_basis: lifecycle_statuses.Basis | None = None,
-        select_sources: Callable[[Collection[str]], Mapping[str, Mapping[str, Any]]] | None = None,
     ) -> dict[str, Any]:
         """Assemble the relation queue after the caller's aggregate admission.
 
@@ -11811,11 +11810,8 @@ class EpistemicGraphIndex:
         fit = relation_queue.RelationFit(
             self.vault_root, basis=type_basis, page_lookup=menu_page,
         )
-        dimension_fields = select_sources(tuple(selected)) if select_sources is not None else None
 
         for source in selected:
-            if dimension_fields is not None and source not in dimension_fields:
-                continue
             if len(groups) >= page_cap:
                 break
             pages_scanned += 1
@@ -11899,8 +11895,6 @@ class EpistemicGraphIndex:
                     "signal_version": signal_version,
                     "source_path": source,
                 }
-                if dimension_fields is not None:
-                    item.update(dimension_fields[source])
                 # A generic candidate names no relation: it carries the ranked options and the
                 # plain link, and accept refuses without a choice.
                 generic = relation_queue.generic_choice(

@@ -1005,27 +1005,23 @@ REVIEW_QUEUES: dict[str, str] = {  # nosemgrep: ep-word-dict -- the closed queue
 }
 
 class ListReviewItems(Wire):
-    queue: Literal[*REVIEW_QUEUES] | None = None
-    categories: list[str] | None = None
+    queue: Literal[*REVIEW_QUEUES] | None = Field(default=None, description="One queue; due items by default.")
+    categories: list[str] | None = Field(default=None, description="Keep only these finding categories, or upkeep families.")
     limit: int | None = None
-    filters: dict[str, Any] = Field(
-        default_factory=dict, description="unit.dimension operator objects ($eq/$in); Boolean composition allowed.",
-    )
 
 
 def _spell_review_queue(arguments: Mapping[str, Any]) -> dict[str, Any] | None:
     """The wire call of one review mode: the mode's queue name, and the limits the wire takes."""
     queue = next((name for name, mode in REVIEW_QUEUES.items() if mode == arguments.get("mode")), None)
-    if queue is None or set(arguments) - {"mode", "categories", "limit", "filters"}:
+    if queue is None or set(arguments) - {"mode", "categories", "limit"}:
         return None  # Another field means another operation: a meaning question names a path and a family.
     return _given({"queue": None if queue == "due" else queue, "categories": arguments.get("categories"),
-                   "limit": arguments.get("limit"), "filters": arguments.get("filters")})
+                   "limit": arguments.get("limit")})
 
 
 def _list_review_items(wire: dict[str, Any], ctx: Context) -> Translated:
     return "review_memory", {"mode": REVIEW_QUEUES[wire.get("queue") or "due"],
-                             **_given({"categories": wire.get("categories"), "limit": wire.get("limit"),
-                                       "filters": wire.get("filters") or None})}
+                             **_given({"categories": wire.get("categories"), "limit": wire.get("limit")})}
 
 
 Decision = Literal["accept", "dismiss", "snooze", "reopen", "competing"]
@@ -1223,7 +1219,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           claims=(("plan_memory", "update"), ("plan_memory", "triage")),
           captures=True),
     _tool("list_review_items", "List review items",
-          "Review due work or one queue; categories can name upkeep families.",
+          "List what needs the person's review: due items by default, or one queue.",
           ListReviewItems, "read", _list_review_items,
           [Route("review_memory", reverse=_spell_review_queue)], idempotent=True,
           claims=(("review_memory", "attention"), ("review_memory", "activation"), ("review_memory", "stale"), ("review_memory", "contradiction"), ("review_memory", "unprocessed-sources"), ("review_memory", "relation-debt"), ("review_memory", "relation-queue"), ("review_memory", "adoption"), ("review_memory", "upkeep"), ("review_memory", "plan-progress"), ("review_memory", "vocabulary"), ("review_memory", "procedure_approvals"),)),

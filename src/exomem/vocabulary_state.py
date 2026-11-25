@@ -547,7 +547,6 @@ class VocabularyState:
         continuation: str | None = None,
         visible: Callable[[dict[str, Any]], bool] | None = None,
         state: str = "open",
-        select: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None,
     ) -> dict[str, Any]:
         from . import vocabulary_review_index
 
@@ -558,7 +557,6 @@ class VocabularyState:
             continuation=continuation,
             state=state,
             visible=visible,
-            select=select,
         )
 
     def rebuild_review_projection(

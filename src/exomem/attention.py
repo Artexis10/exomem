@@ -156,9 +156,6 @@ class AttentionItem:
     # When this signal first reached a served surface, from the first-surfaced
     # ledger. Absent until the ledger holds a record — it is never backfilled.
     first_surfaced_at: str | None = None
-    #: Producer target scopes stay outside reasons, fingerprints and the wire.
-    review_targets: list[tuple[str, str | None, bool]] | None = None
-    dimension_info: dict | None = None
     # True when the item's page, or a page a reason relates, changed after the
     # pass this listing ranks. The item may no longer hold; read the page first.
     page_changed: bool = False
@@ -176,8 +173,6 @@ class AttentionItem:
             out["disposition"] = self.disposition
         if self.first_surfaced_at is not None:
             out["first_surfaced_at"] = self.first_surfaced_at
-        if self.dimension_info is not None:
-            out.update(self.dimension_info)
         if self.page_changed:
             out["page_changed"] = True
         if self.item_id is not None:
@@ -214,7 +209,6 @@ class AttentionReport:
     # an offer was armed on THIS surfacing, so a client never has to read an
     # empty list as "nothing to say".
     quiet_offers: list[dict] | None = None
-    dimension_coverage: dict | None = None
     # When the whole-vault pass this listing ranks started (UTC), and whether a
     # newer pass is due or running. Absent when the listing ran its own pass.
     as_of: str | None = None
@@ -239,8 +233,6 @@ class AttentionReport:
             out["coverage"] = self.coverage
         if self.quiet_offers:
             out["quiet_offers"] = self.quiet_offers
-        if self.dimension_coverage is not None:
-            out["dimension_coverage"] = self.dimension_coverage
         if self.as_of is not None:
             out["as_of"] = self.as_of
             out["refreshing"] = self.refreshing
@@ -369,22 +361,12 @@ def _rank(
     reasons_by_path: dict[str, list[dict]] = {}
     severity_by_path: dict[str, int] = {}
     display_path: dict[str, str] = {}
-    targets_by_path: dict[str, list[tuple[str, str | None, bool]]] = {}
     for c in category_order:
         if c not in selected:
             continue
         for rank, f in enumerate(per_cat[c], start=1):
             anchor = _anchor(f)
             display_path[anchor] = f.path
-            meta = f.meta or {}
-            unit_ref = meta.get("unit_ref")
-            page_scope = f.review_scope == "page" or (
-                f.review_scope is None and "unit_ref" not in meta and not meta.get("review_partition")
-            )
-            targets_by_path.setdefault(anchor, []).append((
-                f.path, None if page_scope else unit_ref,
-                page_scope or isinstance(unit_ref, str) and bool(unit_ref),
-            ))
             reasons_by_path.setdefault(anchor, []).append(_reason(c, rank, f))
             severity_by_path[anchor] = max(
                 severity_by_path.get(anchor, 0), _SEVERITY_RANK.get(f.severity, 0)
@@ -423,7 +405,6 @@ def _rank(
             categories=cats,
             reasons=reasons,
             proposed_fix=proposed_fix,
-            review_targets=targets_by_path[p],
         ))
 
     truncated = total - len(items)
@@ -453,7 +434,6 @@ def attention(
     now: dt.datetime | None = None,
     state: str = "open",
     record_surfacing: bool = True,
-    dimensions=None,
 ) -> AttentionReport:
     """Compose the selected epistemic queues into one ranked review surface. Read-only.
 
@@ -530,7 +510,6 @@ def attention(
             payload=state_payload,
             annotations=annotations,
             record_surfacing=record_surfacing and not _LOOKUP.get(),
-            dimensions=dimensions,
         ),
         held,
     )
@@ -674,7 +653,6 @@ def activation(
     today=None,
     state: str = "open",
     record_surfacing: bool = True,
-    dimensions=None,
 ) -> AttentionReport:
     """Rank deterministic existing-corpus activation measurements. Read-only."""
     resolved = (
@@ -739,7 +717,6 @@ def activation(
             payload=state_payload,
             annotations=annotations,
             record_surfacing=record_surfacing and not _LOOKUP.get(),
-            dimensions=dimensions,
         ),
         held,
     )
@@ -1152,7 +1129,6 @@ def _apply_review_state(
     payload: dict | None = None,
     annotations: dict[str, str] | None = None,
     record_surfacing: bool = True,
-    dimensions=None,
 ) -> AttentionReport:
     all_paths: list[str] = []
     for item in report.items:
@@ -1250,27 +1226,6 @@ def _apply_review_state(
     else:
         eligible = [item for item in report.items if item.state == state]
     shown_items = eligible[:limit] if limit > 0 else eligible
-    dimension_coverage = None
-    if dimensions is not None and record_surfacing:
-        from .review_dimensions import ReviewTarget
-
-        targets = []
-        for item in shown_items:
-            scopes = item.review_targets or [(item.path, None, True)]
-            if any(unit is None and available for _path, unit, available in scopes):
-                targets.append(ReviewTarget(item.path))
-            elif all(available for _path, _unit, available in scopes) and len({unit for _path, unit, _ in scopes}) == 1:
-                targets.append(ReviewTarget(item.path, scopes[0][1]))
-            else:
-                targets.append(ReviewTarget(item.path, available=False))
-        classifications = dimensions.classify(targets)
-        dimension_coverage = dimensions.coverage(classifications, unsearched=len(eligible) - len(shown_items))
-        selected = []
-        for item, classification in zip(shown_items, classifications, strict=True):
-            if dimensions.keep(classification):
-                item.dimension_info = classification.fields()
-                selected.append(item)
-        shown_items = selected
     offers: list[dict] = []
     if record_surfacing:
         _stamp_first_surfaced(vault_root, shown_items, known=payload)
@@ -1283,11 +1238,6 @@ def _apply_review_state(
         truncated,
         report.upstream_truncated,
     )
-    if dimensions is not None and dimensions.filtered and dimension_coverage is not None:
-        note = (f"Showing {len(shown_items)} known dimension matches in a window of "
-                f"{dimension_coverage['window']} eligible items; "
-                f"{dimension_coverage['filter_unresolved']} unresolved, "
-                f"{dimension_coverage['unsearched']} beyond the window.")
     return AttentionReport(
         items=shown_items,
         summary=report.summary,
@@ -1301,5 +1251,4 @@ def _apply_review_state(
         coverage=report.coverage,
         meta=report.meta,
         quiet_offers=offers or None,
-        dimension_coverage=dimension_coverage,
     )

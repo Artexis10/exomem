@@ -1182,7 +1182,6 @@ def build_queue(
     limit_pages: int = _DEFAULT_LIMIT_PAGES,
     limit_per_page: int = _DEFAULT_LIMIT_PER_PAGE,
     today=None,
-    dimensions=None,
 ) -> dict[str, Any]:
     """Assemble one bounded graph-native relation-acceptance queue.
 
@@ -1196,25 +1195,12 @@ def build_queue(
     if refusal is not None:
         return refusal
     vault_root = Path(vault_root)
-    dimension_coverage = None
-
-    def select_sources(paths):
-        nonlocal dimension_coverage
-        from .review_dimensions import ReviewTarget
-
-        classifications = dimensions.classify([ReviewTarget(path) for path in paths])
-        dimension_coverage = dimensions.coverage(classifications, unsearched=None)
-        dimension_coverage["unit"] = "candidate_source_pages"
-        return {path: classification.fields() for path, classification in zip(paths, classifications, strict=True)
-                if dimensions.keep(classification)}
-
     batch = epistemic_graph_module.EpistemicGraphIndex(
         vault_root
     ).relation_review_batch(
         limit_pages=limit_pages,
         limit_per_page=limit_per_page,
         status_basis=lifecycle_statuses.Basis(vault_root),
-        select_sources=select_sources if dimensions is not None else None,
     )
     status = str(batch.get("status") or "warming")
     if status != "available":
@@ -1267,7 +1253,6 @@ def build_queue(
         "mutated": False,
         "groups": groups,
         "retryable": False,
-        **({"dimension_coverage": dimension_coverage} if dimension_coverage is not None else {}),
     }
 
 
