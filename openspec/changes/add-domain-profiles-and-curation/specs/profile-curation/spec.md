@@ -13,6 +13,8 @@ The background upkeep pass SHALL raise one `upkeep_profile_curation` item for a 
 
 The evidence pages of a domain profile SHALL be the pages in its domain or a descendant domain, together with the pages that the profile page links to.
 The evidence pages of a global profile SHALL be the pages that it links to.
+A profile page SHALL NOT be an evidence page of any profile, because its lines are already curated.
+A unit without its own date SHALL take its page's date. A unit dated on the profile's update day SHALL count as newer unless both dates carry a time and the unit's time is not later.
 Links SHALL be resolved through the product's link resolution and followed one step only.
 Detection SHALL resolve roles to categories through the context-role registry. It SHALL use registered domains and typed relations only, SHALL run no model, and SHALL write nothing to the vault.
 The product SHALL hold no list of categories, roles or domains in code.
@@ -26,6 +28,16 @@ The product SHALL hold no list of categories, roles or domains in code.
 
 - **WHEN** the games profile links its long detail note, the note is not a member of the games domain, and the note gains a unit of a preference category after the profile was last updated
 - **THEN** the upkeep pass raises one `upkeep_profile_curation` item for the games profile that names the new unit
+
+#### Scenario: A preference saved on the profile's day without a time raises curation
+
+- **WHEN** the games profile was updated at 09:00 on a day, and a games note dated only by that day gains a preference unit
+- **THEN** the upkeep pass raises one `upkeep_profile_curation` item for the games profile that names the unit
+
+#### Scenario: A narrower profile does not flag its ancestor
+
+- **WHEN** the board-games profile, whose domain is below games, gains a preference line after the games profile was last updated
+- **THEN** the upkeep pass raises no `upkeep_profile_curation` item for the games profile
 
 #### Scenario: A vault's own preference category is detected
 
