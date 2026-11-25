@@ -38,8 +38,8 @@ PASS = "vault_store_registry_pass"
 #: the store holds, and this build's version. A store that an older build set up lacks an object
 #: that this build derives; its pass creates the objects and derives every page, and only then
 #: records this version. Version 1 adds inbound links; version 2 adds page admission;
-#: version 3 adds payload hashes for legacy Evidence pages; version 4 adds authored unit row keys
-#: and title contact.
+#: version 3 adds payload hashes for legacy Evidence pages; version 4 adds lineage prior paths;
+#: version 5 adds authored unit row keys and title contact.
 OWNER_SCHEMA = "vault_store_owner_schema"
 # These generations are the closed introduction versions of the owners' derived projections.
 INBOUND_LINKS_OWNER_VERSION = 1

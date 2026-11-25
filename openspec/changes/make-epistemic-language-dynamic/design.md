@@ -158,7 +158,7 @@ Its primary key covers all three columns; an index starts with `row_key`.
 The projection uses neutral occurrences, because admitted kinds can carry rows that the neutral candidate interpretation rejects.
 It stores no dimension, family or resolved meaning.
 
-Existing stores acquire the projection through owner generation 3 of the current bounded rederivation job.
+Existing stores acquire the projection through owner generation 5 of the current bounded rederivation job.
 Each pass records its owner generation beside its target and cursor.
 A missing or different generation restarts from the first page; an interrupted pass in the same generation resumes its cursor.
 The final batch alone stamps the generation current.
@@ -170,7 +170,7 @@ This prevents incomplete presence facts from becoming falsely complete matches o
 A wrong refusal temporarily costs only the dependent caller while the normal background job completes.
 Unrelated recall and simplified kind-only dimensions remain available.
 Readiness uses each projection's introduction generation from the existing owner mechanism.
-Inbound links require generation 1, so complete inbound rows stay available during the generation 3 row-key pass.
+Inbound links require generation 1, so complete inbound rows stay available during the generation 5 row-key pass.
 The same job records the completed parser version separately, using `semantic_index.PARSER_VERSION` as its required value.
 Missing, malformed or different parser records require a full bounded pass without owner DDL when the owner generation is current.
 Each pass records both generations; it resumes only when both match the running build.
@@ -215,7 +215,7 @@ The material lane retains a named page's title terms only within that resolved p
 For each resolved subject request, its residual task may identify exactly one admitted material parent by title.
 The lookup reads a separate `title_fts(stemmed)` projection with the existing tokenizer and title tokenization.
 This adds one short indexed row per page through the common lexical builders; BM25 text and statistics stay unchanged.
-The final unshipped catalogue generation 18 and owner generation 3 include this projection.
+Lexical schema 20 and owner generation 5, both unshipped, include this projection.
 
 Title postings narrow the existing per-request scope before candidate-local visibility, lifecycle and exclusions decide which matches count.
 Original `TokenUnit` values retain their run flags and strict-majority contact thresholds before the query's limit of two.
@@ -285,7 +285,7 @@ Resolve requested targets in batches by precedence. Exact-path success must not 
 
 The family operation supplies no retired-alias fallback. A retired alias names a removed item file, while family edges require ordinarily admitted, existing endpoint nodes. An alias reached only after ordinary namespace resolution fails cannot supply such an endpoint. Preserve public alias behavior in the legacy wrapper. Keep access-policy filesystem fallbacks there too.
 
-Common page writes, deletion, replay and cold verification maintain the projection. Fold it into unshipped catalogue 18 and owner 3 readiness. Released-owner writers must tolerate its absence through explicit transaction-cached capabilities. Future key-normalization changes invalidate the existing derived generation; add no separate job or attestation.
+Common page writes, deletion, replay and cold verification maintain the projection. Fold it into the readiness of unshipped lexical schema 20 and owner generation 5. Released-owner writers must tolerate its absence through explicit transaction-cached capabilities. Future key-normalization changes invalidate the existing derived generation; add no separate job or attestation.
 
 Prove full-resolver parity, lower-bound ambiguity diagnostics, hidden collision admission, incomplete negation, legacy-owner writes and cold parity. Prove author-selected private-family membership through public results before caps. Check retired aliases at the real endpoint boundary. Reuse the maintained load instrument for the recorded keyword and hybrid budgets.
 
