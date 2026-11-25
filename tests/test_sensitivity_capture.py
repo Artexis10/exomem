@@ -303,3 +303,49 @@ def test_an_episode_revision_keeps_the_class_and_a_different_declaration_is_refu
 
     assert revised["sensitivity"]["classes"] == ["identity"]
     assert _page(vault, revised["source"]["path"])[0]["sensitivity"] == ["identity"]
+
+
+CLINIC_MANIFEST = """---
+type: collection
+exomem_id: 7a1c3e52-4d0b-4f6a-8e21-9b3d5c7e1f40
+title: Clinic visits
+semantic_profile: records
+collection_version: 1
+schema_version: 1
+lifecycle: active
+sensitivity: [health]
+storage:
+  strategy: markdown-items
+  source: Entries
+  format_version: 1
+item_schema:
+  natural_key: [visit]
+  fields:
+    visit: {type: string, required: true}
+    sensitivity: {type: array, items: {type: string}}
+---
+"""
+
+
+def test_a_file_collection_refuses_a_class_floor_and_keeps_the_classes_a_row_names(
+    vault: Path, agent: Callable[..., dict]
+) -> None:
+    """A floor that a file collection accepts and never applies, which reads as classified rows that are not,
+    or an add_record `sensitivity` that never reaches the row."""
+    create = {"manifest_path": "Knowledge Base/Records/Clinic/_collection.md", "why": "Track visits",
+              "scaffold": True}
+    refused = agent("manage_memory", {"operation": "records.create", "arguments": {
+        **create, "manifest_text": CLINIC_MANIFEST}})
+    assert refused["error"]["code"] == "INVALID_COLLECTION_MANIFEST"
+    assert "only a store collection can declare one" in refused["error"]["message"]
+    assert not (vault / create["manifest_path"]).exists()
+
+    made = agent("manage_memory", {"operation": "records.create", "arguments": {
+        **create, "manifest_text": CLINIC_MANIFEST.replace("sensitivity: [health]\n", "")}})
+    assert "error" not in made, made
+    added = agent("add_record", {"collection": "Clinic visits", "item": {"visit": "Scan"}, "why": "Log a scan",
+                                 "sensitivity": ["financial"]})
+
+    assert "error" not in added, added
+    [row] = (vault / "Knowledge Base/Records/Clinic/Entries").glob("*.md")
+    assert _page(vault, row.relative_to(vault).as_posix())[0]["sensitivity"] == ["financial"]

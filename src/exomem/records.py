@@ -4816,7 +4816,15 @@ def _refuse_excluded_authored_names(names: object) -> None:
 
 
 def _refuse_store_only_features(manifest: collections.CollectionManifest) -> None:
-    """A file collection is one view per row; summary rows and row references live only in a store collection."""
+    """A file collection is one view per row; summary rows, row references and a class floor live only in a store collection."""
+    if manifest.sensitivity:
+        raise collections.CollectionError(
+            "INVALID_COLLECTION_MANIFEST",
+            "a file collection keeps no row governance metadata to carry a sensitivity floor; only a store "
+            "collection can declare one",
+            {"field": "sensitivity", "received": list(manifest.sensitivity),
+             "expected": "a collection whose rows live in the store", "example": "remove the sensitivity declaration"},
+        )
     if found := collections.declared_references(manifest.schema):
         raise collections.CollectionError(
             "INVALID_FIELD_REFERENCE",

@@ -909,13 +909,26 @@ class AddRecord(Wire):
     body: str | None = None
     hold: bool | None = None
     held: str | None = None
+    sensitivity: list[str] | None = Field(
+        default=None,
+        description="Classes this row carries on top of its collection's own; needs a `sensitivity` array field in the item schema.",
+    )
     options: dict[str, Any] | None = Field(default=None, description="Rare knobs: delivery, item_key.")
     detail: Detail | None = _DETAIL
 
 
+def _row_item(wire: dict[str, Any]) -> dict[str, Any]:
+    """The row's fields. A `sensitivity` argument joins the item's own classes in its `sensitivity` field."""
+    item = wire["item"]
+    if wire.get("sensitivity") is None:
+        return item
+    held = item.get("sensitivity")
+    return {**item, "sensitivity": [*(held if isinstance(held, list) else []), *wire["sensitivity"]]}
+
+
 def _add_record(wire: dict[str, Any], ctx: Context) -> Translated:
     leaf = {
-        "action": "append", "collection": wire["collection"], "item": wire["item"], "why": wire["why"],
+        "action": "append", "collection": wire["collection"], "item": _row_item(wire), "why": wire["why"],
         "body": wire.get("body"), "hold": wire.get("hold"), "held": wire.get("held"),
         "new_collection": wire.get("new_collection"), "response_detail": wire.get("detail"),
     }
