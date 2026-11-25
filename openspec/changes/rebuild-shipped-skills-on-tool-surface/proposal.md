@@ -29,7 +29,7 @@ tools in a few exact steps.
 
 ## Impact
 
-- Specs: `skill-loading`.
+- Specs: `skill-loading` and `portable-agent-contract`.
 - Code: `workflow_skills.py` (contract validation), `working_set_learning.py` (advisory spelling), the skill scaffold under
   `src/exomem/_scaffold/_Schema/`, the generated plugin trees, and the tests that read the skill text.
 - No tool, schema or tool description changes.

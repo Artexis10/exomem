@@ -377,3 +377,15 @@ def test_builds_and_unpacks_every_public_contract_distribution(
 
     assert f"v{contract.version}" in concise
     assert contract.content_digest in concise
+
+
+def test_every_workflow_carries_the_same_preamble() -> None:
+    """Each workflow repeats the lines that send the agent to the core skill and the authoring contract, so a
+    workflow read alone still finds them. This keeps the nine copies in step: an edit to one must reach all."""
+    root = Path(__file__).resolve().parents[1] / "src" / "exomem" / "_scaffold" / "_Schema" / "workflow-skills"
+    preambles = {}
+    for skill in sorted(root.glob("*/SKILL.md")):
+        body = skill.read_text(encoding="utf-8").split("\n---\n", 1)[1]
+        preambles[skill.parent.name] = body.split(f"# {skill.parent.name}\n", 1)[1].split("\n## ", 1)[0].strip()
+    assert len(preambles) == 9
+    assert len(set(preambles.values())) == 1, preambles

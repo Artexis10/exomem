@@ -71,7 +71,7 @@ def test_scaffold_and_deployed_claude_code_copies_match() -> None:
     assert (ROOT / "src/exomem/_scaffold/_Schema/SKILL.md").read_bytes() == (
         ROOT / "plugins/claude-code/skills/evermatter/SKILL.md"
     ).read_bytes()
-    for reference in ("operations.md", "write-scope.md"):
+    for reference in ("tools.md", "write-scope.md"):
         assert (
             ROOT / "src/exomem/_scaffold/_Schema/references" / reference
         ).read_bytes() == (

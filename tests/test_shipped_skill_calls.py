@@ -17,15 +17,14 @@ from pathlib import Path
 
 import pytest
 
+from markdown_it import MarkdownIt
+
 from exomem import commands
 from exomem.public_surface import DOORS, PASSTHROUGH_COMMANDS, help_for, public_surface
 
 SCHEMA = Path(__file__).resolve().parents[1] / "src" / "exomem" / "_scaffold" / "_Schema"
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "mcp_tool_schemas.json"
 
-# CommonMark delimits inline code with backticks and blocks with fence lines: a syntax rule, not a reading of words.
-_INLINE_CODE = re.compile(r"`([^`\n]+)`")
-_FENCE = re.compile(r"^\s*(```|~~~)")
 # A door operation is spelled `<area>.<action>` in lowercase snake case: the format the doors publish.
 _OPERATION_SHAPE = re.compile(r"^[a-z_]+\.[a-z_-]+$")
 
@@ -39,16 +38,18 @@ def _shipped_files() -> list[Path]:
 
 
 def _spans(path: Path) -> Iterator[tuple[int, str]]:
-    in_fence = False
-    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        if _FENCE.match(line):
-            in_fence = not in_fence
-            continue
-        if in_fence:
-            yield number, line.strip()
-        else:
-            for match in _INLINE_CODE.finditer(line):
-                yield number, match.group(1).strip()
+    """Every code span and every line of a code block, with its line number, as CommonMark parses the file.
+
+    An inline span that wraps onto the next line arrives as one span, its line break read as a space.
+    """
+    for token in MarkdownIt("commonmark").parse(path.read_text(encoding="utf-8")):
+        if token.type in ("fence", "code_block") and token.map:
+            for offset, line in enumerate(token.content.splitlines()):
+                yield token.map[0] + 1 + (offset + 1 if token.type == "fence" else offset), line.strip()
+        elif token.type == "inline" and token.map:
+            for child in token.children or ():
+                if child.type == "code_inline":
+                    yield token.map[0] + 1, child.content.strip()
 
 
 @cache

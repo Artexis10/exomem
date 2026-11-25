@@ -205,7 +205,7 @@ adding the user's name (or the cue proposal) and a `why`.
   To quiet the whole kind, call
   `manage_memory(operation="review.set_family", arguments={"ref": "exomem://review/family/activation-naming", "action": "quiet", "why": "<why>"})`.
 
-A stale hash refuses the write: read again and decide again. To undo a learned name, edit it out of
+If the page changed after the advisory, read it again and decide again. To undo a learned name, edit it out of
 `learned_aliases`. To undo a registry change, read
 `inspect_memory(operation="schema.history", arguments={"subject": "activation-conventions"})` and
 call `manage_memory(operation="schema.restore", arguments={"subject": "activation-conventions", "version": "<version>", "expected_hash": "<hash>", "why": "<why>"})`.
