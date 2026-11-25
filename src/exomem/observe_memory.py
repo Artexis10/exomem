@@ -336,6 +336,7 @@ def observe_memory(
     dropped_relations: tuple[tuple[str, str], ...] = ()
     dropped_outcome: str | None = None
     lifted_frontmatter: list[tuple[str, str]] | None = None
+    lift_resolver: Any = None
     link_warnings: list[str] = []
     if proposal_mode == "remove":
         assert current_unit is not None
@@ -589,14 +590,18 @@ def observe_memory(
             and semantic_language_registry.normalize_label(kind) != _COMPACT_KIND
         )
         if normalized_relations and not explicit_rich_kind:
-            rel_registry = (
-                current.definitions.snapshots["relations"].typed
-                if current.definitions is not None
-                else relation_registry.core_registry()
-            )
-            lifted_frontmatter = _liftable_frontmatter_targets(
-                rel_registry, normalized_relations
-            )
+            # A rich unit that keeps its kind on update carries its own relations, so only a unit
+            # that is compact lifts a provenance link to the page.
+            if selected_kind in semantic_kinds.compact_kinds():
+                lift_resolver = find.writer_resolver_snapshot(vault_root)
+                lifted_frontmatter = _liftable_frontmatter_targets(
+                    current.definitions.snapshots["relations"].typed
+                    if current.definitions is not None
+                    else relation_registry.core_registry(),
+                    normalized_relations,
+                    vault_root=vault_root,
+                    resolver=lift_resolver,
+                )
             if lifted_frontmatter is None:
                 raise ObserveMemoryError(
                     "COMPACT_RELATIONS_REQUIRE_RICH_KIND",
@@ -608,9 +613,8 @@ def observe_memory(
                         page_type=page_type,
                     ),
                 )
-            # Every relation declares a forward page field, so the unit commits
-            # compact and each target lands in that frontmatter field in the
-            # same atomic write instead of on the unit.
+            # Every relation is a provenance link to captured material, so the unit commits
+            # compact and each target lands in its page field in the same atomic write.
             normalized_relations = ()
         base_unit = current_unit if proposal_mode == "update" else None
         if base_unit is not None and relations is None and base_unit.relations:
@@ -735,18 +739,19 @@ def observe_memory(
     pinned = temporal.parse(semantic_writes.transition_token_stamp(transition_token))
     authored_day = today or (pinned.day if pinned is not None else dt.date.today())
     fm_text = editable.fm_text
-    lifted_outcome = None
+    lifted_cited: list[str] = []
     if lifted_frontmatter:
         fm_text, lifted_cited, lift_warnings = _lift_frontmatter_targets(
             fm_text,
             frontmatter,
             lifted_frontmatter,
             vault_root=vault_root,
-            resolver=find.writer_resolver_snapshot(vault_root),
+            resolver=lift_resolver,
         )
         link_warnings.extend(lift_warnings)
-        if lifted_cited:
-            lifted_outcome = _lifted_relations_outcome(lifted_cited)
+    lifted_outcome = (
+        _lifted_relations_outcome(lifted_cited, preview=previewing) if lifted_cited else None
+    )
     after_source = _rebuild_source(
         editable.original_text,
         fm_text,
@@ -884,6 +889,7 @@ def observe_memory(
             semantic=preflight.as_dict(),
             dropped_relations=dropped_relations,
             dropped_outcome=dropped_outcome,
+            lifted_cited=lifted_cited,
             lifted_outcome=lifted_outcome,
             warnings=link_warnings,
         )
@@ -946,6 +952,7 @@ def observe_memory(
         semantic=committed.as_dict(),
         dropped_relations=dropped_relations,
         dropped_outcome=dropped_outcome,
+        lifted_cited=lifted_cited,
         lifted_outcome=lifted_outcome,
         timings=(
             timings.as_dict() if timings is not None and write_timings_enabled() else None
@@ -1439,27 +1446,35 @@ def _canonical_context(value: str | None) -> str | None:
 def _liftable_frontmatter_targets(
     rel_registry: relation_registry.RelationRegistry,
     relations: tuple[tuple[str, str], ...],
+    *,
+    vault_root: Path,
+    resolver: Any,
 ) -> list[tuple[str, str]] | None:
-    """Each relation's (field, target) when every one lifts to a page field, else None.
+    """Each relation's (field, target) when every one is a source citation, else None.
 
-    The test is the registry declaration alone: a relation whose entry binds no
-    forward `frontmatter_fields` entry stays a compact refusal. A vault overlay
-    declaring a new provenance relation gets the same lift without a code change.
+    A relation lifts only when the registry gives it the closed `sources` behaviour (the link a
+    page cites its captured material by), its core relation declares a forward page field, and
+    its target names captured material. A vault extension takes the field of its core parent,
+    because only the shipped pack binds fields. Anything else keeps the compact refusal, so a
+    supersession or an association never reaches a page field through this path.
     """
+    from . import source_closure
+
     lifted: list[tuple[str, str]] = []
     for kind, target in relations:
         definition = rel_registry.resolve(kind).definition
-        if definition is None:
+        if definition is None or not rel_registry.has_label(kind, "sources"):
             return None
+        core = definition if definition.core else rel_registry.core.get(definition.parent or "")
         field = next(
-            (
-                name
-                for name, direction in definition.frontmatter_fields
-                if direction == "forward"
-            ),
+            (name for name, direction in core.frontmatter_fields if direction == "forward"),
             None,
-        )
+        ) if core is not None else None
         if field is None:
+            return None
+        # A target that is no captured material cannot be cited here; the refusal that names the
+        # rich form is the honest answer, where the commit's closure refusal would say to drop it.
+        if source_closure.resolve_reference(vault_root, target, resolver=resolver) is None:
             return None
         lifted.append((field, target))
     return lifted
@@ -1477,9 +1492,10 @@ def _lift_frontmatter_targets(
 
     The writer is the same canonical-link normaliser `create_note` runs for its
     `sources` argument, and the value lands in the canonical `[[path]]` form.
-    Existing entries keep their bytes; a target the field already cites is not
-    duplicated. Returns the patched YAML, the rendered links this call cites
-    and any normaliser warnings.
+    Existing entries keep their bytes; a target the field already cites, in any
+    spelling the normaliser reads as the same page, is not duplicated. Returns
+    the patched YAML, the rendered links this call cites and any normaliser
+    warnings.
     """
     from . import note, record_formats
 
@@ -1501,19 +1517,18 @@ def _lift_frontmatter_targets(
             if isinstance(existing_raw, str)
             else list(existing_raw)
         )
-        existing_targets = {
-            target
-            for value in existing_values
-            for target in semantic_contract._frontmatter_targets(value)
-        }
+        existing_canonicals, _ = note._normalize_sources(
+            [str(value) for value in existing_values], vault_root=vault_root, resolver=resolver
+        )
+        known = set(existing_canonicals)
         additions: list[str] = []
         for canonical in canonicals:
             rendered = vault.render_wikilink_target(canonical, vault_root)
             cited.append(rendered)
-            if canonical in existing_targets or rendered in existing_targets:
+            if canonical in known:
                 continue
             additions.append(rendered)
-            existing_targets.add(rendered)
+            known.add(canonical)
         if not additions:
             continue
         merged = [
@@ -1529,8 +1544,10 @@ def _lift_frontmatter_targets(
     return fm_text, cited, warnings
 
 
-def _lifted_relations_outcome(cited: list[str]) -> str:
+def _lifted_relations_outcome(cited: list[str], *, preview: bool) -> str:
     named = ", ".join(cited)
+    if preview:
+        return f"Committing this will cite {named} in the page's frontmatter."
     return f"Cited {named} in the page's frontmatter."
 
 
@@ -1988,6 +2005,7 @@ def _result(
     semantic: dict[str, Any],
     dropped_relations: tuple[tuple[str, str], ...] = (),
     dropped_outcome: str | None = None,
+    lifted_cited: list[str] | None = None,
     lifted_outcome: str | None = None,
     timings: dict[str, Any] | None = None,
     warnings: list[str] | None = None,
@@ -2005,7 +2023,8 @@ def _result(
             {"kind": kind, "target": target} for kind, target in dropped_relations
         ]
         value["outcome"] = dropped_outcome
-    elif lifted_outcome is not None:
+    elif lifted_cited and lifted_outcome is not None:
+        value["relations_cited"] = lifted_cited
         value["outcome"] = lifted_outcome
     if timings is not None:
         value["timings"] = timings

@@ -2657,9 +2657,12 @@ def project_terminal(
             f"{user_summary}{_unfiled_record_clause(records_routing)} "
             f"({cloud_cell.store_identity()['name']})"
         )
-        # An update that dropped relations says so where the person reads, with the repair.
-        if isinstance(leaf, Mapping) and leaf.get("relations_dropped") and isinstance(
-            leaf.get("outcome"), str
+        # An update that dropped relations, or a compact observation whose source link went to the
+        # page, says so where the person reads, with the repair or the page field it cites.
+        if (
+            isinstance(leaf, Mapping)
+            and (leaf.get("relations_dropped") or leaf.get("relations_cited"))
+            and isinstance(leaf.get("outcome"), str)
         ):
             compact["user_summary"] += f". {leaf['outcome']}"
     flagged = _identity_findings(artifact_receipt)

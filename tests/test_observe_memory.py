@@ -553,6 +553,20 @@ def test_a_compact_observation_lifts_a_provenance_relation_to_the_page(
 ) -> None:
     _write_source_page(tmp_path)
     page = _write_page(tmp_path)
+    unwritten = page.read_bytes()
+
+    preview = commands.op_observe_memory(
+        tmp_path,
+        path=PAGE,
+        operation="validate",
+        category="config",
+        content="The applied export holds the five-minute value.",
+        relations=[{"kind": "derived_from", "target": "applied-export"}],
+    )
+
+    assert page.read_bytes() == unwritten
+    assert preview["mutated"] is False
+    assert "Cited" not in preview["outcome"]
 
     result = commands.op_observe_memory(
         tmp_path,
@@ -567,6 +581,7 @@ def test_a_compact_observation_lifts_a_provenance_relation_to_the_page(
     assert "- [config] The applied export holds the five-minute value." in text
     frontmatter, _, _ = vault.parse_frontmatter(text)
     assert frontmatter["sources"] == ["[[Knowledge Base/Sources/applied-export]]"]
+    assert result["relations_cited"] == ["Knowledge Base/Sources/applied-export"]
     assert "applied-export" in result["outcome"]
 
     again = commands.op_observe_memory(
@@ -609,7 +624,12 @@ def test_a_compact_observation_keeps_existing_page_sources(tmp_path: Path) -> No
     ]
 
 
-def test_a_compact_observation_refuses_a_non_provenance_relation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("kind", ["supersedes", "cites"])
+def test_a_compact_observation_refuses_a_relation_that_is_no_page_source_field(
+    tmp_path: Path, kind: str,
+) -> None:
+    """`supersedes` declares a page field but is no source citation; `cites` is one without a field."""
+    _write_source_page(tmp_path)
     page = _write_page(tmp_path)
     before = page.read_bytes()
 
@@ -620,7 +640,7 @@ def test_a_compact_observation_refuses_a_non_provenance_relation(tmp_path: Path)
             operation="add",
             category="config",
             content="Typed relation needs rich form",
-            relations=[{"kind": "supports", "target": "[[Observe]]"}],
+            relations=[{"kind": kind, "target": "applied-export"}],
         )
 
     assert page.read_bytes() == before
@@ -640,13 +660,118 @@ def test_a_compact_observation_refuses_a_mixed_call_whole(tmp_path: Path) -> Non
             content="One liftable, one not",
             relations=[
                 {"kind": "derived_from", "target": "applied-export"},
-                {"kind": "supports", "target": "[[Observe]]"},
+                {"kind": "supersedes", "target": "applied-export"},
             ],
         )
 
     assert page.read_bytes() == before
     frontmatter, _, _ = vault.parse_frontmatter(page.read_text(encoding="utf-8"))
     assert frontmatter.get("sources") is None
+
+
+def test_a_compact_source_link_to_a_note_that_is_no_captured_material_asks_for_the_rich_form(
+    tmp_path: Path,
+) -> None:
+    """Catches a refusal that tells the agent to drop a link the rich form would accept."""
+    page = _write_page(tmp_path)
+    before = page.read_bytes()
+
+    with pytest.raises(ValueError, match="COMPACT_RELATIONS_REQUIRE_RICH_KIND"):
+        commands.op_observe_memory(
+            tmp_path,
+            path=PAGE,
+            operation="add",
+            category="config",
+            content="Derived from another note",
+            relations=[{"kind": "derived_from", "target": "[[Observe]]"}],
+        )
+
+    assert page.read_bytes() == before
+
+
+def test_a_rich_unit_edited_without_its_kind_keeps_its_source_relation_on_the_unit(
+    tmp_path: Path,
+) -> None:
+    """Catches an edit that omits `kind` lifting a rich unit's relation off the unit."""
+    _write_source_page(tmp_path)
+    page = _write_page(
+        tmp_path,
+        source=_page_source(
+            "## Claim\n- category: rule\n- id: claim-one\n"
+            "- relations: derived_from: [[Knowledge Base/Sources/applied-export]]\n\n"
+            "Current claim.\n"
+        ),
+    )
+    unit = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units[0]
+    before = page.read_bytes()
+
+    with pytest.raises(ValueError, match="COMPACT_RELATIONS_REQUIRE_RICH_KIND"):
+        commands.op_observe_memory(
+            tmp_path,
+            path=PAGE,
+            operation="update",
+            unit_ref=unit.unit_ref,
+            expected_fingerprint=unit.fingerprint,
+            expected_hash=_page_hash(page),
+            category="rule",
+            content="Changed claim.",
+            relations=[{"kind": "derived_from", "target": "applied-export"}],
+        )
+
+    assert page.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [
+        "[[applied-export]]",
+        "[[Knowledge Base/Sources/applied-export|the export]]",
+        "{ref}",
+    ],
+)
+def test_a_compact_observation_does_not_cite_a_source_the_page_already_cites_in_another_form(
+    tmp_path: Path, existing: str,
+) -> None:
+    source_page = _write_source_page(tmp_path)
+    existing = existing.format(
+        ref=memory_refs.ref_from_markdown(source_page.read_text(encoding="utf-8"))
+    )
+    page = _write_page(
+        tmp_path,
+        source=_page_source("# Observe\n\nExisting prose.\n").replace(
+            "updated: 2026-07-15\n", f'updated: 2026-07-15\nsources:\n  - "{existing}"\n',
+        ),
+    )
+
+    commands.op_observe_memory(
+        tmp_path,
+        path=PAGE,
+        operation="add",
+        category="config",
+        content="Another reading of the same export.",
+        relations=[{"kind": "derived_from", "target": "applied-export"}],
+    )
+
+    frontmatter, _, _ = vault.parse_frontmatter(page.read_text(encoding="utf-8"))
+    assert frontmatter["sources"] == [existing]
+
+
+def test_the_hosted_add_summary_says_which_source_the_page_now_cites(tmp_path: Path) -> None:
+    """Catches the cited-Source sentence living in the raw result while the agent's reply omits it."""
+    from exomem import writer_lease
+
+    _write_source_page(tmp_path)
+    _write_page(tmp_path)
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "observe_memory")
+
+    with request_scope(owner_principal(surface="cli")):
+        result = writer_lease.invoke_command(
+            command, tmp_path, path=PAGE, operation="add", category="config",
+            content="The applied export holds the five-minute value.",
+            relations=[{"kind": "derived_from", "target": "applied-export"}],
+        )
+
+    assert "Knowledge Base/Sources/applied-export" in result["user_summary"]
 
 
 def test_rich_authoring_and_compact_relation_rejection(tmp_path: Path) -> None:

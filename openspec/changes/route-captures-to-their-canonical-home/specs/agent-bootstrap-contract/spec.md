@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Bootstrap Teaches The Semantic Unit Language
-The bootstrap contract SHALL explain the semantic unit language: observation syntax, categories versus governed kinds, filtered and explained retrieval, canonical typed relations and their review. It SHALL tell agents to mutate one unit structurally rather than by string surgery, that a compact observation needs a rich governed kind for a typed relation except a provenance relation, which is recorded on the page, and that ranking scores are not confidence.
+The bootstrap contract SHALL explain the semantic unit language: observation syntax, categories versus governed kinds, filtered and explained retrieval, canonical typed relations and their review. It SHALL tell agents to mutate one unit structurally rather than by string surgery, that a compact observation needs a rich governed kind for a typed relation except a provenance link, which is recorded on the page, and that ranking scores are not confidence.
 
 #### Scenario: Bootstrap covers the whole language
 - **WHEN** a generic agent reads the full bootstrap contract

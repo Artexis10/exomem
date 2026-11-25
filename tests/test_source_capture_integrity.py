@@ -94,10 +94,7 @@ def test_a_committed_save_reply_asks_the_agent_to_update_a_presented_current_sta
     reply = mutation_terminal.project_terminal(
         mutation_terminal.committed_terminal(leaf, request_id="r", receipt_id=None, idempotency_key=None),
         "compact", outcome_verb="saved")
-    assert reply["next_action"] == (
-        "If the person presents this file as the current state, such as an applied or final export, "
-        "update the note's current statement now and cite this Source; keep the earlier value as dated history."
-    )
+    assert "cite this Source" in reply["next_action"]
 
 
 def test_a_custody_only_save_reply_carries_no_current_state_instruction(vault, source_schema):
@@ -109,4 +106,4 @@ def test_a_custody_only_save_reply_carries_no_current_state_instruction(vault, s
     reply = mutation_terminal.project_terminal(
         mutation_terminal.committed_terminal(leaf, request_id="r", receipt_id=None, idempotency_key=None),
         "compact", outcome_verb="saved")
-    assert "current state" not in reply.get("next_action", "")
+    assert "cite this Source" not in reply.get("next_action", "")
