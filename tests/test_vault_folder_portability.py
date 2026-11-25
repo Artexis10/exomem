@@ -124,7 +124,7 @@ def test_an_existing_split_warns_and_does_not_block(vault: Path) -> None:
 
     assert target.read_text() == "x"
     warnings = vault_module.folder_split_warnings(vault, target.parent)
-    assert len(warnings) == 1 and "'Garden'" in warnings[0] and "path_variants" in warnings[0]
+    assert len(warnings) == 1 and "'Garden'" in warnings[0] and "path-variants" in warnings[0]
 
 
 def test_a_capture_into_an_existing_split_lands_in_the_fuller_spelling(vault: Path) -> None:
@@ -258,6 +258,23 @@ def test_a_stray_folder_does_not_take_the_writes_of_a_declared_one(vault: Path) 
     assert vault_module.respell_new_path(vault, "Knowledge Base/notes/Research/new-idea.md") == (
         "Knowledge Base/Notes/Research/new-idea.md"
     )
+
+
+def test_a_stray_top_level_folder_never_takes_an_undeclared_tree(vault: Path) -> None:
+    """Defect: a stray `evidence/` with more entries takes the Evidence tree, and the merge moves it there one-way."""
+    from exomem import path_variants
+
+    kb = vault / "Knowledge Base"
+    preserve_module.preserve(vault, scope="garden", category="shared", filename="seed.txt", content="tomato")
+    for name in ("a", "b", "c"):
+        _page(kb / "evidence" / f"{name}.md")
+
+    later = preserve_module.preserve(vault, scope="garden", category="shared", filename="later.txt", content="x")
+    preview = path_variants.preview(vault)
+
+    assert later.path.startswith("Knowledge Base/Evidence/garden/shared/")
+    [split] = [row for row in preview["splits"] if row["parent"] == "Knowledge Base"]
+    assert split["mergeable"] is False and preview["move_count"] == 0 and preview["folders"] == []
 
 
 def test_the_nfc_spelling_of_a_unicode_split_wins(vault: Path) -> None:

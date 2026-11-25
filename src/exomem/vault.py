@@ -6080,10 +6080,10 @@ def folder_split_warnings(vault_root: Path, directory: Path) -> list[str]:
     for part in relative.parts:
         variants = sibling_name_variants(current, part)
         if variants and (current / part).is_dir():
-            audit_call = active_call_text("maintain_memory", {"mode": "audit", "categories": ["path_variants"]})
+            preview_call = active_call_text("maintain_memory", {"mode": "path-variants"})
             warnings.append(
                 f"folder '{part}' also exists as {', '.join(repr(v) for v in variants)}; "
-                f"run {audit_call} to see the split"
+                f"preview a merge with {preview_call}"
             )
         current = current / part
     return warnings
@@ -7854,14 +7854,22 @@ def canonical_variant(
     other form. Next comes a spelling that the layout declares (`layout.declared_folders`) or that
     the project registry names, because code reads those folders by their exact spelling. Then the
     folder with the most entries, which a merge into it only grows, and last code-point order.
+
+    At the top of the vault or of the managed root, code reads folders that no registry declares
+    (such as the Evidence tree), so a split there with no declared spelling has no canonical one:
+    a count could send a whole tree into a spelling that code never reads.
     """
     counts = {name: len(found) for name in spellings if (found := entries(name)) is not None}
     if not counts:
         return None
-    from . import layout, project_keys
+    from . import kbdir, layout, project_keys
 
     declared = layout.declared_folders(vault_root)
     registered = set(project_keys.load_project_registry(vault_root).project_to_folder.values())
+    if parent in {"", kbdir.kb_dirname()} and not any(
+        (f"{parent}/{name}" if parent else name) in declared for name in counts
+    ):
+        return None
 
     def rank(name: str) -> tuple[bool, bool, int, str]:
         path = f"{parent}/{name}" if parent else name

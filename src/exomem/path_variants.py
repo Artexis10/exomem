@@ -36,7 +36,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from . import access, held_fs, maintenance_jobs, request_budget, vault
+from . import access, held_fs, kbdir, maintenance_jobs, request_budget, vault
 
 MODE = "path-variants"
 #: The splits, moves and other rows one answer lists; the counts cover all of them, and a job's
@@ -50,6 +50,8 @@ class _Split:
     parent: str
     spellings: tuple[str, ...]
     canonical: str | None
+    #: Why the merge leaves this split to the owner, or None when it merges it.
+    refusal: str | None = None
 
     def path(self, name: str) -> str:
         return f"{self.parent}/{name}" if self.parent else name
@@ -117,7 +119,16 @@ def _splits(root: Path, view: Any) -> list[_Split]:
                 if len(folders) == len(spellings)
                 else None
             )
-            found.append(_Split(parent, tuple(spellings), canonical))
+            if len(folders) < len(spellings):
+                refusal = "a file shares its name with another entry; rename one by hand"
+            elif not kbdir.is_in_managed_root(f"{parent}/_"):
+                # Agents change nothing outside the managed knowledge base.
+                refusal = "it is outside the knowledge base; rename one by hand"
+            elif canonical is None:
+                refusal = "no spelling is a declared top-level folder; rename one by hand"
+            else:
+                refusal = None
+            found.append(_Split(parent, tuple(spellings), canonical, refusal))
     return found
 
 
@@ -213,13 +224,9 @@ def _plan(root: Path) -> dict[str, Any]:
                 # A split inside a spelling that folds into another is planned with that spelling.
                 continue
             row: dict[str, Any] = {"parent": split.parent, "canonical": split.canonical, "variants": []}
-            refusal = (
-                "a file shares its name with another entry; rename one by hand"
-                if split.canonical is None
-                else next(
-                    (reason for name in split.spellings if (reason := access.writable_reason(root, split.path(name)))),
-                    None,
-                )
+            refusal = split.refusal or next(
+                (reason for name in split.spellings if (reason := access.writable_reason(root, split.path(name)))),
+                None,
             )
             if refusal is not None:
                 row["mergeable"] = False
@@ -250,6 +257,7 @@ def _plan(root: Path) -> dict[str, Any]:
         "moves": moves,
         "folders": folders,
         "blocked": blocked,
+        "listed": listed,
         "public": {
             "mode": MODE,
             "plan_id": plan_id,
@@ -274,9 +282,18 @@ def preview(vault_root: Path) -> dict[str, Any]:
     """
     root = Path(vault_root)
     plan = _plan(root)
+    # A job's receipt drops a long list from the report, so each row is also an entry.
     maintenance_jobs.record_planned((unit["from"], unit["to"]) for unit in plan["moves"])
+    maintenance_jobs.record_planned((folder, "removed once empty") for folder in plan["folders"])
     maintenance_jobs.record_planned(
-        ((row["path"], f"{row['code']}: {row['reason']}") for row in plan["blocked"]),
+        (
+            *((row["path"], f"{row['code']}: {row['reason']}") for row in plan["blocked"]),
+            *(
+                (f"{row['parent']}/{row['variants'][0]['name']}" if row["parent"] else row["variants"][0]["name"], row["reason"])
+                for row in plan["listed"]
+                if row.get("mergeable") is False
+            ),
+        ),
         kind=maintenance_jobs.SKIPPED_PAGE,
     )
     public = dict(plan["public"])
@@ -313,6 +330,9 @@ def apply(vault_root: Path, *, plan_id: str, why: str) -> dict[str, Any]:
             maintenance_jobs.record_paths([outcome["to"]], committed=True)
         else:
             skipped.append(outcome)
+            maintenance_jobs.record_planned(
+                [(outcome["path"], f"{outcome['code']}: {outcome['reason']}")], kind=maintenance_jobs.SKIPPED_PAGE
+            )
     maintenance_jobs.checkpoint("folders", done=total, total=total)
     removed, kept, stopped = _remove_emptied(root, plan["folders"], plan_id, why)
     complete = not skipped and not kept and stopped is None

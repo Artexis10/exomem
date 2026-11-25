@@ -699,7 +699,8 @@ def test_a_remote_merge_of_folder_splits_runs_as_the_owners_previewed_job(server
 
     assert previewed["state"] == "completed"
     assert {(entry["path"], entry["value"]) for entry in planned if entry["kind"] == "planned"} == {
-        (f"Knowledge Base/Evidence/garden/{name}.md", f"Knowledge Base/Evidence/Garden/{name}.md") for name in ("d", "e")
+        *((f"Knowledge Base/Evidence/garden/{name}.md", f"Knowledge Base/Evidence/Garden/{name}.md") for name in ("d", "e")),
+        ("Knowledge Base/Evidence/garden", "removed once empty"),
     }
     assert started["state"] == "running"
     assert merged["state"] == "completed" and merged["receipt"]["notes"]["outcome"] == "committed"
@@ -707,6 +708,45 @@ def test_a_remote_merge_of_folder_splits_runs_as_the_owners_previewed_job(server
         f"Knowledge Base/Evidence/Garden/{name}.md" for name in ("d", "e")
     }
     assert not (evidence / "garden").exists()
+
+
+@pytest.mark.skipif(sys.platform in {"win32", "darwin"}, reason="needs a case-sensitive volume")
+def test_a_remote_merge_lists_each_refused_move_with_its_reason(server, vault, monkeypatch) -> None:
+    """Defect: a remote owner sees only a count of skipped moves, never which files or why."""
+    from exomem import path_variants
+
+    evidence = vault / "Knowledge Base" / "Evidence"
+    for folder, names in (("Garden", ("a", "b", "c")), ("garden", ("d", "e"))):
+        (evidence / folder).mkdir(parents=True)
+        for name in names:
+            (evidence / folder / f"{name}.md").write_text("---\ntype: note\n---\n\nBody.\n", encoding="utf-8")
+    moving = path_variants._move
+    refused = "Knowledge Base/Evidence/garden/e.md"
+
+    def move(root, unit):
+        # The ordinary move refuses this one, as it does a page an append-only referrer cannot repoint.
+        if unit["from"] == refused:
+            return {"path": refused, "code": "APPEND_ONLY", "reason": "a referrer cannot be repointed"}
+        return moving(root, unit)
+
+    monkeypatch.setattr(path_variants, "_move", move)
+
+    async def scenario(client):
+        _, previewed = await _preview_job(client, {"kind": "path-variants"})
+        started = await _call(client, "repair_memory", {
+            "kind": "path-variants", "dry_run": False,
+            "plan_id": previewed["receipt"]["result"]["plan_id"], "why": "merge the garden split",
+        })
+        merged = await _until_terminal(client, started["run_id"])
+        return merged, await _receipt_entries(client, started["run_id"])
+
+    merged, entries = _session(server, scenario)
+
+    assert merged["receipt"]["notes"]["outcome"] == "partial"
+    assert [(entry["path"], entry["value"]) for entry in entries if entry["kind"] == "skipped"] == [
+        (refused, "APPEND_ONLY: a referrer cannot be repointed")
+    ]
+    assert (evidence / "garden" / "e.md").is_file()
 
 
 def test_a_remote_conversion_runs_only_as_the_owners_previewed_job(server, vault, monkeypatch) -> None:

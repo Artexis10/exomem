@@ -287,7 +287,7 @@ When a destination passes through, or ends at, a folder that has a variant sibli
 
 ### Requirement: A split's canonical spelling comes from data
 
-The canonical spelling of a split SHALL be, in order: the spelling in NFC form; a spelling the vault's layout declares (the managed root, the scaffold's folders, a folder a registry gives a type or placement) or the project registry names; the folder with the most direct entries; the first in code-point order. Writers and the merge SHALL use this one rule.
+The canonical spelling of a split SHALL be, in order: the spelling in NFC form; a spelling the vault's layout declares (the managed root, the scaffold's folders, a folder a registry gives a type or placement) or the project registry names; the folder with the most direct entries; the first in code-point order. At the top of the vault or of the managed root, a split with no declared spelling SHALL have none. Writers and the merge SHALL use this one rule.
 
 #### Scenario: The registry names the canonical spelling
 
@@ -306,7 +306,7 @@ The canonical spelling of a split SHALL be, in order: the spelling in NFC form; 
 
 ### Requirement: A preview lists every folder split
 
-`maintain_memory(mode="path-variants")`, a dry run by default, SHALL list without changing the vault every split among the names an export keeps, with its canonical spelling, every move into it, each file it cannot move and why, the other spellings it removes once empty, and a `plan_id` that binds the moves and those folders. A group of names that includes a file SHALL be listed as not mergeable. A remote owner's preview SHALL run as a maintenance job whose receipt lists every move.
+`maintain_memory(mode="path-variants")`, a dry run by default, SHALL list without changing the vault every split among the names an export keeps, with its canonical spelling, every move into it, each file it can tell will not move and why, the other spellings it removes once empty, and a `plan_id` that binds the moves and those folders. A split with a file among its names, outside the managed root, or without a canonical spelling SHALL be listed as not mergeable.
 
 #### Scenario: A split is previewed
 
@@ -316,7 +316,7 @@ The canonical spelling of a split SHALL be, in order: the spelling in NFC form; 
 
 ### Requirement: The preview's apply merges every split into its canonical spelling
 
-`maintain_memory(mode="path-variants", dry_run=false, plan_id, why)` SHALL move every file the preview with that `plan_id` listed into the canonical spelling within its own tree, through the ordinary file move with link rewrites. A plan that changed since the preview SHALL be refused before anything moves. A move the file move refuses SHALL be skipped and listed. A remote merge SHALL run as a maintenance job that reports its progress and stops between moves when cancelled.
+`maintain_memory(mode="path-variants", dry_run=false, plan_id, why)` SHALL move every file the preview with that `plan_id` listed into the canonical spelling within its own tree, through the ordinary file move with link rewrites. A plan that changed since the preview SHALL be refused before anything moves. A move the file move refuses SHALL be skipped and listed with its reason.
 
 #### Scenario: A split is merged
 
@@ -324,16 +324,20 @@ The canonical spelling of a split SHALL be, in order: the spelling in NFC form; 
 - **THEN** every file is under `Evidence/Garden/`
 - **AND** the link names the moved file
 
-#### Scenario: A remote owner merges as a job
-
-- **WHEN** the owner previews and applies over a remote surface
-- **THEN** each call returns a maintenance job
-- **AND** the apply job's receipt lists each moved file
-
 #### Scenario: A file arrives after the preview
 
 - **WHEN** a file is written under a listed spelling before the apply
 - **THEN** the apply refuses the stale plan and changes nothing
+
+### Requirement: A remote merge runs as a maintenance job
+
+A remote owner's preview and apply SHALL each run as a maintenance job. The apply job SHALL report its progress and stop between moves when cancelled. Each job's receipt SHALL list every row of its plan, and every move the file move refused with its reason.
+
+#### Scenario: A remote owner merges as a job
+
+- **WHEN** the owner previews and applies over a remote surface
+- **THEN** each call returns a maintenance job
+- **AND** the apply job's receipt lists each moved file and each refused move with its reason
 
 ### Requirement: A split merge is one-way
 
