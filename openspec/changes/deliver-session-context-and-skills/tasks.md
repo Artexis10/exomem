@@ -24,7 +24,8 @@
   - Provider outage, proved with the same actor against a server whose every call fails. The agent made at most 3 tool calls a turn and did not loop. It said memory was unavailable and asked for the missing facts. It answered general turns with no memory call.
   - Still open: the Codex case, which needs a Codex client run.
 
-- [ ] 3.3 Evaluate pick-by-problem routing tables (a note whose rows map a problem to the method or source to use) as a method carrier beside skills; specify before code.
+- [x] 3.3 Evaluate pick-by-problem routing tables (a note whose rows map a problem to the method or source to use) as a method carrier beside skills; specify before code.
+  - Moved: `add-domain-profiles-and-curation` owns routing tables. Its task 4.1 ran this evaluation on real models, and its `vault-skills` delta carries routing tables as ordinary vault skills.
 
 ## 4. Verify and deliver
 
