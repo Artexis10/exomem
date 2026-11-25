@@ -20,6 +20,7 @@ from . import (
     query_data,
     reclassify_source,
     request_budget,
+    reserved_paths,
 )
 from .cli_ops import OpError
 from .governance import connector_boundary, lifecycle
@@ -32,6 +33,11 @@ from .governance.principal import (
 
 # Bound work before reading candidates' bodies. Results also meet the normal response-byte bound.
 _INLINE_CANDIDATES = 256
+# A background build has its own budget, not a request's: a request budget is a latency bound for one
+# answer, and a build is one bounded job that holds the single preview slot. On 10,000 governed referrers in
+# one folder the build took about 29 s on a laptop (linear in referrers), so ten minutes bounds a build of
+# about 200,000 referrers and frees the slot within that time. Cancellation still stops it per referrer.
+_BUILD_BUDGET_SECONDS = 600.0
 _JOB_REPORT: ContextVar[dict[str, Any] | None] = ContextVar("source_reclassification_job_report", default=None)
 
 
@@ -53,6 +59,13 @@ def _not_found() -> OpError:
 def _stale_report() -> OpError:
     return OpError(
         "RECLASSIFICATION_PREVIEW_STALE", "The complete report cannot be released from this snapshot.",
+        "Request a new preview without a run identifier.",
+    )
+
+
+def _interrupted() -> OpError:
+    return OpError(
+        "RECLASSIFICATION_PREVIEW_INTERRUPTED", "The preview stopped before its report was complete.",
         "Request a new preview without a run identifier.",
     )
 
@@ -171,7 +184,7 @@ def _build(
     )
     if command is None:
         raise _not_found()
-    budget = request_budget.RequestBudget(seconds=request_budget.budget_seconds())
+    budget = request_budget.RequestBudget(seconds=_BUILD_BUDGET_SECONDS)
     check = request_budget.ReadCheckpoint(budget, bound_disclosure=True)
     original: dict[str, Any] = {}
     token = _JOB_REPORT.set(original)
@@ -179,7 +192,7 @@ def _build(
         with (
             request_scope(who), invocation_scope(), request_budget.checking(check),
             capabilities.active_surface(surface) if surface is not None else nullcontext(),
-            reclassify_source.held_evidence_sink() as held,
+            reclassify_source.held_evidence_sink() as held, reserved_paths.folder_listing_scope(),
         ):
             if (auth_sessions.origin_revalidates_in_background(who)
                     and auth_sessions.origin_login_state_sync(who) is not auth_sessions.OriginLogin.VALID):
@@ -255,6 +268,8 @@ def report(
         if (result.get("state") == maintenance_jobs.COMPLETED
                 and result.get("snapshot_current") is not True):
             raise _stale_report()
+        if result.get("state") in {maintenance_jobs.CANCELLED, maintenance_jobs.INTERRUPTED}:
+            raise _interrupted()
         if result.get("error_code") == "RECLASSIFICATION_PREVIEW_UNAVAILABLE":
             raise reclassify_source.preview_unavailable()
         if result.get("error_code") == "RECLASSIFICATION_PREVIEW_WARMING":

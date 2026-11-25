@@ -1487,6 +1487,58 @@ def _require_literal_source_entries(
                 raise ReservedPathLeafError("IDENTITY_CHANGED")
 
 
+#: Folder listings that one scope reuses, keyed by the folder's held version. See `folder_listing_scope`.
+_FOLDER_LISTINGS: ContextVar[dict[held_fs.FileVersion, dict[str, tuple[str, ...]]] | None] = ContextVar(
+    "reserved_paths_folder_listings", default=None,
+)
+#: A folder changed this recently can change again within one timestamp tick, so its version cannot
+#: prove a listing current. Two seconds covers the coarsest change-time granularity a vault may sit on.
+_SETTLED_FOLDER_NS = 2_000_000_000
+
+
+@contextmanager
+def folder_listing_scope() -> Iterator[None]:
+    """Reuse one listing of each unchanged folder to resolve physical names within this scope.
+
+    A build that resolves thousands of pages in one flat folder would otherwise list the folder once
+    per page. A listing is reused only while the folder keeps the same held identity and change times,
+    and never outside the scope that made it.
+    """
+    token = _FOLDER_LISTINGS.set({})
+    try:
+        yield
+    finally:
+        _FOLDER_LISTINGS.reset(token)
+
+
+def _scoped_leaf_names(
+    filesystem: held_fs.HeldFilesystem, parent: held_fs.HeldDirectory, leaf: str,
+) -> tuple[str, ...] | None:
+    """The physical names whose NFKC form is ``leaf``, from this scope's current listing, or None."""
+    listings = _FOLDER_LISTINGS.get()
+    if listings is None:
+        return None
+    before = filesystem.directory_version(parent)
+    if not before.ok:
+        return None
+    version = before.require()
+    by_leaf = listings.get(version)
+    if by_leaf is None:
+        if time.time_ns() - max(version.mtime_ns, version.change_time_ns) < _SETTLED_FOLDER_NS:
+            return None
+        grouped: dict[str, list[str]] = {}
+        try:
+            for name in filesystem.iter_names(parent):
+                grouped.setdefault(unicodedata.normalize("NFKC", name), []).append(name)
+        except held_fs.HeldFsError:
+            return None
+        after = filesystem.directory_version(parent)
+        if not after.ok or after.require() != version:
+            return None
+        by_leaf = listings[version] = {key: tuple(names) for key, names in grouped.items()}
+    return by_leaf.get(leaf, ())
+
+
 def _physical_leaf_candidates(
     filesystem: held_fs.HeldFilesystem,
     parent: held_fs.HeldDirectory,
@@ -1503,9 +1555,14 @@ def _physical_leaf_candidates(
     so a caller can require exactly one before trusting it.
     """
 
-    children = filesystem.children(
-        parent,
-        name_filter=lambda name: unicodedata.normalize("NFKC", name) == leaf,
+    names = _scoped_leaf_names(filesystem, parent, leaf)
+    children = (
+        filesystem.children(
+            parent,
+            name_filter=lambda name: unicodedata.normalize("NFKC", name) == leaf,
+        )
+        if names is None
+        else filesystem.children(parent, names=names)
     )
     if not children.ok:
         code = children.error.code if children.error is not None else "IO_REFUSED"

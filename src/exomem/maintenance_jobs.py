@@ -991,8 +991,12 @@ def _run_source_preview(
     except foreground_priority.BulkCancelled:
         state, error_code = _stopped(live)
     except (Exception, request_budget.ReadBudgetExhausted) as error:  # noqa: BLE001 - worker terminal
-        state = FAILED
-        error_code = _source_preview_error_code(error.code if isinstance(error, OpError) else None)
+        if live.stop.is_set():
+            # A build that notices its stop refuses in its own words; the job still ended by the stop.
+            state, error_code = _stopped(live)
+        else:
+            state = FAILED
+            error_code = _source_preview_error_code(error.code if isinstance(error, OpError) else None)
     finally:
         _finish(live, state, error_code, outcome, preview_entries=published, preview_held=held)
 

@@ -456,3 +456,40 @@ def test_withheld_move_source_is_absent_without_mutation(
     source.unlink()
     egress.clear_decision_memo()
     assert withheld == attempt()
+
+
+def test_a_scoped_folder_listing_still_refuses_a_new_alias_spelling(vault: Path, monkeypatch) -> None:
+    """A build resolves a whole folder from one listing, and a later alias still refuses."""
+    import os
+
+    from exomem import held_fs, reserved_paths
+
+    directory = vault.joinpath(*_DIRECTORY)
+    _write_page(directory, _DECOMPOSED_NAME)
+    rel = f"{_DIRECTORY_REL}/{_COMPOSED_NAME}"
+    neighbour = f"{_RELATION_TARGET}.md"
+    with held_fs.acquire(vault).require() as filesystem:
+        backend = type(filesystem)
+    listings: list[object] = []
+    iter_names = backend.iter_names
+
+    def counted(self, parent):
+        listings.append(parent.identity)
+        return iter_names(self, parent)
+
+    monkeypatch.setattr(backend, "iter_names", counted)
+    # The folder was written a moment ago; treat it as settled so this scope keeps its listing.
+    monkeypatch.setattr(reserved_paths, "_SETTLED_FOLDER_NS", 0)
+    with reserved_paths.folder_listing_scope():
+        assert reserved_paths.resolve_physical_relative(vault, rel) == f"{_DIRECTORY_REL}/{_DECOMPOSED_NAME}"
+        assert reserved_paths.resolve_physical_relative(vault, neighbour) == neighbour
+        if os.name != "nt":  # native Windows has no directory change times to trust, so it lists each time
+            assert len(listings) == 1
+        _write_page(directory, _COMPOSED_NAME, body="composed body")
+        if (directory / _COMPOSED_NAME).samefile(directory / _DECOMPOSED_NAME):
+            pytest.skip("requires distinct NFC and NFD files on disk")
+        # A later change time, as the settle window guarantees in real time, whatever the clock's tick.
+        os.utime(directory, ns=(1, 1))
+        with pytest.raises(reserved_paths.ReservedPathLeafError) as refused:
+            reserved_paths.resolve_physical_relative(vault, rel)
+    assert refused.value.code == "AMBIGUOUS_PATH"

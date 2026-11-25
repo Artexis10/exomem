@@ -176,6 +176,23 @@ def test_an_interrupted_source_preview_never_publishes_its_staged_result(server,
     }
 
 
+def test_a_source_preview_that_refuses_after_its_stop_ends_interrupted(server, vault):
+    building = threading.Event()
+
+    def build(stop):
+        building.set()
+        assert stop.wait(_DEADLINE_SECONDS)
+        raise OpError("NOT_FOUND", "The build noticed its stop.")
+
+    identity = {"binding": "owner-binding", "request_key": "source-request", "snapshot_key": "snapshot"}
+    handle = maintenance_jobs.start_source_preview(vault, **identity, build=build)
+    assert building.wait(_DEADLINE_SECONDS)
+    maintenance_jobs.stop_all(vault, wait=_DEADLINE_SECONDS)
+    assert maintenance_jobs.source_preview_status(vault, **identity, run_id=handle["run_id"]) == {
+        "run_id": handle["run_id"], "state": "interrupted",
+    }
+
+
 def test_a_source_preview_claim_does_not_wait_for_a_busy_job_store(server, vault):
     def unexpected_build(_stop):
         pytest.fail("the busy store must leave the worker unstarted")

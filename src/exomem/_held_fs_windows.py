@@ -11,7 +11,7 @@ import errno
 import os
 import secrets
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from ctypes import (
     POINTER,
     Structure,
@@ -1167,11 +1167,12 @@ class WindowsHeldFilesystem(HeldFilesystem):
         parent: HeldDirectory,
         *,
         name_filter: Callable[[str], bool] | None = None,
+        names: Iterable[str] | None = None,
     ) -> HeldResult[tuple[SagaRecord, ...]]:
         try:
             checked = self._check_directory(parent)
             records: list[SagaRecord] = []
-            for name in sorted(self._entries(checked)):
+            for name in sorted(set(names) if names is not None else self._entries(checked)):
                 if name_filter is not None and not name_filter(name):
                     continue
                 try:
