@@ -1,4 +1,4 @@
-"""`query_records` with `timeline`: one field's spans over effective time (OpenSpec record-value-timeline 5.1-5.2).
+"""`query_records` with `timeline`: one field's spans over effective time (OpenSpec record-value-timeline 5.1-5.3).
 
 Each case names the failure only it catches. Store collections run on the real CollectionWriter, in the JSON
 encoding (one view file per row) and the typed one (a summary view). The lamps, shelves and dates are invented,
@@ -16,6 +16,8 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 import pytest
+from test_collection_field_admission import GUEST
+from test_governance_egress import _external, write_rule, write_scope
 from test_record_timeline_schema import LAMPS, equipment_manifest
 
 from exomem.cli_ops import OpError
@@ -301,3 +303,75 @@ def test_a_retracted_row_has_no_spans(typed_lamps):
 
     assert spans(typed_lamps, reply) == [("L-17", "Shelf A", "2026-03-01", "2026-03-01T14:00:00Z")]
     assert reply["total_matched"] == 1
+
+
+# --- 5.3 governance -------------------------------------------------------------------------------------------
+
+
+@pytest.fixture(params=["json-v1", "typed"])
+def classified_lamps(request, tmp_path):
+    """The stocked lamps with `location` classified, so a guest reads each lamp's tag and status but not where it is."""
+    text = manifest(request.param).replace("    location: {type: string}\n",
+                                           "    location: {type: string, classification: location}\n")
+    with stocked(tmp_path, request.param, text=text) as writer:
+        yield writer
+
+
+def without(span, *names):
+    return {name: value for name, value in span.items() if name not in {"id", *names}}
+
+
+def test_a_withheld_field_is_refused_as_an_undeclared_one(classified_lamps):
+    """A refusal that differed would tell a guest the collection holds a location it may not read."""
+    withheld = refused(classified_lamps, who=GUEST, timeline={"field": "location"})
+    undeclared = refused(classified_lamps, who=GUEST, timeline={"field": "no_such_field"})
+
+    assert withheld.code == "QUERY_FIELD_UNKNOWN"
+    assert (withheld.code, str(withheld), withheld.details) == (undeclared.code, str(undeclared), undeclared.details)
+    assert "location" not in str(withheld.details)
+
+
+def test_a_field_reader_gets_the_values_and_times_but_not_the_writes(classified_lamps):
+    """A transition id, a reason or a source page names a write that also changed the withheld location."""
+    writes = ("transition_id", "why", "sources")
+    owner = query(classified_lamps, timeline={"field": "status"})
+    guest = query(classified_lamps, who=GUEST, timeline={"field": "status"})
+
+    assert all(set(writes) <= span.keys() for span in owner["spans"])
+    assert [without(span) for span in guest["spans"]] == [without(span, *writes) for span in owner["spans"]]
+    assert spans(classified_lamps, guest, GUEST) == spans(classified_lamps, owner)
+
+
+def withhold(writer, key):
+    """Withhold one lamp's row from external callers: a scope on its ref, at ceiling 0."""
+    write_scope(writer.root, paths="Unrelated/**")
+    scope = writer.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+    scope.write_text(scope.read_text() + f"refs: [exomem://record/{LAMPS}/{key}]\n")
+    write_rule(writer.root, ceiling=0)
+
+
+def test_a_withheld_row_leaves_no_span_total_or_continuation_trace(lamps):
+    """A span, a count or a stale continuation of a withheld lamp would show that the lamp exists."""
+    hidden = lamps.keys["L-18"]
+    withhold(lamps, hidden)
+    stranger = _external()
+    owner = query(lamps, **QUERIES["every span"])
+    others = [span for span, (tag, *_) in zip(owner["spans"], spans(lamps, owner), strict=True) if tag != "L-18"]
+
+    seen = query(lamps, who=stranger, **QUERIES["every span"])
+    seen_tags = [tag for tag, *_ in spans(lamps, seen, stranger)]
+    one_lamp = query(lamps, who=stranger, filters=[L18], timeline={"field": "location"})
+    no_lamp = query(lamps, who=stranger, filters=[{"column": "asset_tag", "op": "eq", "value": "L-99"}],
+                    timeline={"field": "location"})
+    first = query(lamps, who=stranger, **QUERIES["a page"])
+    edit(lamps, hidden, {"location": "Shelf M"}, effective_at="2026-03-15")
+    second = query(lamps, who=stranger, **QUERIES["a page"], continuation=first["continuation"])
+
+    assert "L-18" not in seen_tags
+    assert ([without(span) for span in seen["spans"]], seen["total_matched"]) == (
+        [without(span) for span in others], len(others))
+    assert (one_lamp["spans"], one_lamp["total_matched"]) == ([], 0)
+    assert one_lamp == no_lamp
+    assert (first["total_matched"], second["total_matched"]) == (4, 4)
+    assert [without(span) for span in (*first["spans"], *second["spans"])] == [
+        without(span) for span in others if span["effective_from"] >= "2026-03-01"]
