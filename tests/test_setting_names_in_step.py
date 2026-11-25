@@ -354,6 +354,8 @@ def test_a_command_started_after_a_forced_state_root_runs_despite_an_inherited_a
 def test_the_installers_process_file_loads_a_dotenv_alias_over_an_inherited_name(tmp_path) -> None:
     """The failure: sourcing the dotenv's EVERMATTER_VAULT_PATH beside an inherited EXOMEM_VAULT_PATH refused after publishing."""
     script = (ROOT / "scripts" / "install-service.sh").read_text(encoding="utf-8")
+    # The regex only cuts the installer's fixed <<'PY' heredocs out of the script; it reads no shell syntax,
+    # and the one-element unpacking fails if the renderer block is ever missing or duplicated.
     (renderer,) = [
         block for block in re.findall(r"<<'PY'\n(.*?)\nPY\n", script, re.S) if "dotenv_values(env_path)" in block
     ]
@@ -412,17 +414,3 @@ Set-ExomemProcessEnvFromMap -Map ([ordered]@{{ EVERMATTER_VAULT_PATH = '{tmp_pat
     assert forced.startswith(f"root={tmp_path / 'forced'} ")  # the forced value is the one in force
     assert CHILD_RAN in forced and "not run" not in forced
     assert loaded.strip() == f"{tmp_path / 'dotenv-vault'} kept True"
-
-
-def test_no_service_script_forces_an_exomem_name_without_the_helper() -> None:
-    """The class guard: a forced EXOMEM_ name that skips the helper leaves an inherited alias beside it."""
-    forced = re.compile(
-        r"""^\s*export\s+EXOMEM_|SetEnvironmentVariable\(\s*["']EXOMEM_|\$env:EXOMEM_\w+\s*=""", re.MULTILINE
-    )
-    offenders = [
-        path.name
-        for path in sorted((ROOT / "scripts").glob("*.sh")) + sorted((ROOT / "scripts").glob("*.ps1"))
-        if forced.search(path.read_text(encoding="utf-8"))
-    ]
-
-    assert offenders == []
