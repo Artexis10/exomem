@@ -1,12 +1,15 @@
 ## ADDED Requirements
 
 ### Requirement: A Unique Material Title May Qualify Its Parent Units
-For a resolved subject request, the served material lane SHALL test residual task terms against admitted titles within that request's existing scope. It SHALL use indexed title postings and original token-unit contact thresholds before counting two matches. Exactly one complete match MAY qualify the parent's existing selected semantic units through the normal wildcard query, category exclusions, reader admission and hydration. The title witness SHALL remain separate from unit facts. Subject-only, ambiguous or incomplete title contact SHALL add no parent units. Incomplete or interrupted title contact SHALL remain visible through existing lane diagnostics while body results remain usable. The title projection SHALL use common transactional derivation, replay and deletion and SHALL participate in existing content-custody and offline verification. Recall SHALL consume published readiness without scanning or rebuilding the corpus. Arbitrary SQL corruption after valid publication is outside this transactional write guarantee.
+For a resolved subject request, the served material lane SHALL test residual task terms against admitted titles within that request's existing scope. It SHALL use indexed title postings and original token-unit contact thresholds before counting two matches. Exactly one complete match MAY qualify the parent's existing selected semantic units through the normal wildcard query, category exclusions, reader admission and hydration. The title witness SHALL remain separate from unit facts.
 
 #### Scenario: A title identifies material with no body contact
 - **WHEN** a resolved project's residual task matches exactly one admitted material title and its units do not repeat that title
 - **THEN** the lane may append those selected units in source order without duplicate body hits or a category exemption
 - **AND** another project's title does not compete across request scopes
+
+### Requirement: Incomplete Title Contact Adds No Parent Units
+Subject-only, ambiguous or incomplete title contact SHALL add no parent units. Incomplete or interrupted title contact SHALL remain visible through existing lane diagnostics while body results remain usable.
 
 #### Scenario: A withheld early title cannot hide an admitted competitor
 - **WHEN** a title lookup encounters a withheld title before two admitted contacts
@@ -15,6 +18,15 @@ For a resolved subject request, the served material lane SHALL test residual tas
 #### Scenario: An unavailable title projection preserves ordinary material
 - **WHEN** title lookup is incomplete or reaches its deadline and body matches exist
 - **THEN** the lane keeps those body results and reports the unavailable or interrupted title lookup
+
+### Requirement: The Material Title Projection Derives Transactionally
+The title projection SHALL use common transactional derivation, replay and deletion and SHALL participate in existing content-custody and offline verification. Recall SHALL consume published readiness without scanning or rebuilding the corpus. Arbitrary SQL corruption after valid publication is outside this transactional write guarantee.
+
+#### Scenario: Title rows follow their page's transactional derivation
+- **WHEN** a page's derived rows are written, replayed or deleted
+- **THEN** its title projection rows change in the same derivation transaction
+- **AND** content-custody and offline verification cover those rows
+- **AND** recall reads the projection's published readiness without scanning or rebuilding the corpus
 
 ### Requirement: Kinds and verdicts have one registry source
 The built-in unit kinds and verdicts SHALL be entries of the shipped vocabulary pack, and vaults MAY add entries through a reviewed registry save. A kind entry SHALL carry a `traits` list whose values come from the closed kind-trait set that the registry schema declares and code implements. The kind sets this change replaces SHALL become trait reads, and any remaining branch on a kind key SHALL be named as debt. Verdict entries SHALL carry labels and descriptions and no behaviours, because a verdict is state. The shipped kinds SHALL be today's built-in kinds plus `belief`, the shipped verdicts SHALL be today's verdicts, and the shipped traits SHALL reproduce the behaviour of the hard-coded kind sets they replace.
