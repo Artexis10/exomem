@@ -1041,8 +1041,9 @@ Schema 21 records when a Records value took effect. It adds two append-only
 tables for stated effective times and past or corrected points, a nullable
 `timeline_version` column on `txns`, and two derived tables for the span index.
 It rewrites no existing row, so earlier history reads as taking effect when it
-was written. The derived tables start empty, and a store snapshot or replica
-copies them empty, so each index builds again on first use. Every earlier
+was written. The derived tables start empty. A replica copies them empty, so
+each of its indexes builds again on first use, and a backup copies them with
+the rows they index. Every earlier
 release refuses a schema-21 store. Back up the store with the release that you
 run now before you upgrade. To go back, restore that backup, which loses later
 writes, or roll forward.
