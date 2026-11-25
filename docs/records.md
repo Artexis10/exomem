@@ -164,6 +164,33 @@ alike, so a refusal never confirms that the row once existed. A collection that
 renders one view file per row, and a collection that keeps file authority,
 refuse with `RETRACT_UNAVAILABLE`, because the file would remain.
 
+A collection in the store also keeps when each value took effect, apart from
+when it was written. `describe` returns the whole `timeline` contract with a
+worked example.
+
+- `effective_at` on `append`, `update` and `bulk_upsert` states when the
+  written values took effect: a date such as 2026-03-07, or an RFC 3339 instant
+  with its offset, no later than the write. Without it, the values take effect
+  when the write is made, with basis `written`.
+- An `update` earlier than a field's latest point records a past value and
+  keeps the current value. `append` and `bulk_upsert` refuse such a time with
+  `EFFECTIVE_BEFORE_CURRENT`.
+- `corrects` on `update` takes the reply's `audit_correlation` of the write to
+  replace. `history` keeps both writes, and each names the other.
+- `query` with `timeline: {field, value?, at? or from?/to?, changes?}` lists one
+  field's spans: each value with the effective times it held from and to.
+  `filters` select rows by their current values. A withheld field is refused as
+  an undeclared one, and a withheld row adds no span, total or continuation.
+- A selection whose rows hold more versions than the bound that `describe`
+  names reads the field's span index. The first such query starts the build and
+  answers `TIMELINE_WARMING` with `retry_after_ms` and its progress. It never
+  answers with a partial list.
+  `inspect` lists each built index under `timeline_indexes` with its state.
+
+File-canonical, dataset and derived collections keep no timeline. They refuse
+`effective_at`, `corrects` and `timeline` with `TIMELINE_UNAVAILABLE`, and an
+export preview names the timeline facts that an export drops.
+
 One service holds the writer lease. Two independent writers against the same
 store are unsupported. Backups use the collection backup command.
 A direct copy of an open SQLite file can omit

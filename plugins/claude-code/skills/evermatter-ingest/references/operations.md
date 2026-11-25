@@ -152,6 +152,30 @@ canonical files. Datasets are query-only in this delivery. A migration between
 shapes is explicit and provenance-preserving; a derived view never becomes
 canonical merely because it was generated.
 
+### When a value took effect
+
+A store-routed Records collection keeps when each value took effect, apart from
+when it was written. `describe` returns the whole `timeline` contract with a
+worked example.
+
+- To record a change you learn of later, give `effective_at` on `add_record` or
+  `edit_record`: a date such as 2026-03-07, or an RFC 3339 instant with its
+  offset, no later than the write. Without it, the values take effect when the
+  write is made.
+- An edit earlier than a field's latest point records a past value and keeps
+  the current value. An add refuses such a time with `EFFECTIVE_BEFORE_CURRENT`.
+- To fix a recorded change, edit the row with `corrects` set to the reply's
+  `audit_correlation` of that write, and name the corrected values or
+  `effective_at`. The row's history keeps both writes.
+- To ask what a field held at a time or over a period, call `query_records` with
+  `timeline: {field, value?, at? or from?/to?, changes?}`. Each span gives a
+  value with the effective times it held from and to.
+- When a timeline query over many rows answers `TIMELINE_WARMING`, retry after
+  `retry_after_ms`, or select fewer rows with `filters`.
+
+File-canonical, dataset and derived collections keep no timeline and refuse
+these arguments with `TIMELINE_UNAVAILABLE`.
+
 ### Retiring a hand-kept back-link field
 
 A collection that kept a manual list of "which rows link to me" can retire it

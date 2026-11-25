@@ -1037,6 +1037,16 @@ release before the one that introduced schema 19 cannot open the migrated store:
 refuses a store schema newer than it supports, as it does for any newer schema. Back
 up the store with the release that you run now before you upgrade.
 
+Schema 21 records when a Records value took effect. It adds two append-only
+tables for stated effective times and past or corrected points, a nullable
+`timeline_version` column on `txns`, and two derived tables for the span index.
+It rewrites no existing row, so earlier history reads as taking effect when it
+was written. The derived tables start empty, and a store snapshot or replica
+copies them empty, so each index builds again on first use. Every earlier
+release refuses a schema-21 store. Back up the store with the release that you
+run now before you upgrade. To go back, restore that backup, which loses later
+writes, or roll forward.
+
 If an earlier release refuses at startup with `STATE_MIGRATION_MANIFEST_INVALID`
 or `STATE_COMPATIBILITY_UNSUPPORTED` after a rollback, the vault holds state
 that the release cannot use. Roll forward to a release that supports it.
