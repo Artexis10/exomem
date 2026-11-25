@@ -259,7 +259,7 @@ def test_a_vault_sets_the_size_of_its_skills_block(skills_vault):
     block = _activate(skills_vault)["skills"]
 
     assert _names(block) == ["alpha"]
-    assert block["omitted"] == 2
+    assert block["names"] == {"skill": ["mid", "zeta"]} and block["omitted"] == 0
     assert block["generation"] != whole["generation"]
 
 
@@ -391,12 +391,15 @@ def test_the_turn_that_receives_the_catalogue_is_pointed_at_it_first(skills_vaul
 # --------------------------------------------------------------------------- #
 
 
-def _one_item_bound(root: Path, items: list[dict]) -> None:
+def _one_item_bound(root: Path, items: list[dict], *, names_chars: int = 0) -> None:
     """Set the vault's bound to its longest line, so exactly one item is listed and `omitted` counts the others.
 
-    The profile budgets stay, or the profile floor would fall back to the shipped one and touch no domain.
+    The profile budgets stay, or the profile floor would fall back to the shipped one and touch no domain. The names
+    of unlisted items are off unless `names_chars` allows them, so the turn's items are tested on their own.
     """
-    _set_profile_budgets(root, skills_max_chars=max(vault_skills.chars({"items": [item]}) for item in items))
+    _set_profile_budgets(
+        root, skills_max_chars=max(vault_skills.chars({"items": [item]}) for item in items), skills_names_max_chars=names_chars,
+    )
 
 
 def _topic_skill(root: Path, name: str, *topics: str) -> str:
@@ -530,3 +533,74 @@ def test_an_overflowing_catalogue_is_held_once_while_the_turns_domains_change(do
         assert later["skills"]["state"] == "unchanged" and later["skills"]["items"] == []
         assert (later.get("next_action") or {}).get("state") != "skill_check"
     assert _turn(second["skills"]) == [] and _turn(third["skills"]) == ["zulu-lantern"]
+
+
+# --------------------------------------------------------------------------- #
+# A catalogue that overflows still names every item it had no room to list
+# --------------------------------------------------------------------------- #
+
+
+def _named(block: dict) -> list[tuple[str, str]]:
+    return [(kind, name) for kind, names in (block.get("names") or {}).items() for name in names]
+
+
+def test_an_overflowing_catalogue_names_a_collection_that_shares_no_word_or_domain_with_the_turn(skills_vault):
+    """The agent sees the collection and decides: no topic, domain or shared word is needed to offer it."""
+    _collection(skills_vault, "Pantry", "Pantry counts", "Counts of jars kept on each shelf.")
+    _refresh(skills_vault)
+    whole = _activate(skills_vault, turn=NO_SKILL_NAMED)["skills"]
+    _one_item_bound(skills_vault, whole["items"], names_chars=2000)
+
+    block = _activate(skills_vault, turn=NO_SKILL_NAMED)["skills"]
+
+    assert _names(block) == ["alpha"]
+    assert _named(block) == [("skill", "mid"), ("skill", "zeta"), ("collection", "Pantry counts")]
+    assert block["omitted"] == 0
+    assert "collection='<name>'" in block["names_advice"]
+
+
+def test_names_past_their_bound_are_counted_as_omitted(skills_vault):
+    whole = _activate(skills_vault, turn=NO_SKILL_NAMED)["skills"]
+    _one_item_bound(skills_vault, whole["items"], names_chars=len(vault_skills.names_text({"skill": ["mid"]})))
+
+    block = _activate(skills_vault, turn=NO_SKILL_NAMED)["skills"]
+
+    assert _named(block) == [("skill", "mid")] and block["omitted"] == 1
+
+
+def test_a_held_overflowing_catalogue_repeats_no_names(skills_vault):
+    whole = _activate(skills_vault, turn=NO_SKILL_NAMED)["skills"]
+    _one_item_bound(skills_vault, whole["items"], names_chars=2000)
+    first = _activate(skills_vault, turn=NO_SKILL_NAMED)
+
+    later = _activate(skills_vault, turn=NO_SKILL_NAMED, continuity=first["continuity"])["skills"]
+
+    assert _named(first["skills"]) and later["state"] == "unchanged" and "names" not in later
+
+
+def test_a_collection_the_caller_cannot_see_is_never_named(skills_vault):
+    hidden = _collection(skills_vault, "Depot Stock", "Depot stock", DEPOT_BODY)
+    _withhold(skills_vault, hidden, ceiling=0)
+    _refresh(skills_vault)
+    whole = _activate(skills_vault, turn=NO_SKILL_NAMED, caller=_external())["skills"]
+    _one_item_bound(skills_vault, whole["items"], names_chars=2000)
+
+    block = _activate(skills_vault, turn=NO_SKILL_NAMED, caller=_external())["skills"]
+
+    assert "Depot stock" not in [name for _, name in _named(block)] + _names(block)
+
+
+def test_names_fill_their_bound_exactly_across_both_kinds(skills_vault):
+    """The bound counts the grouped text the hook writes, so names that exactly fill it are all served."""
+    _collection(skills_vault, "Pantry", "Pantry counts", "Counts of jars kept on each shelf.")
+    _refresh(skills_vault)
+    whole = _activate(skills_vault, turn=NO_SKILL_NAMED)["skills"]
+    exact = len(vault_skills.names_text({"skill": ["mid", "zeta"], "collection": ["Pantry counts"]}))
+
+    _one_item_bound(skills_vault, whole["items"], names_chars=exact)
+    filled = _activate(skills_vault, turn=NO_SKILL_NAMED)["skills"]
+    _one_item_bound(skills_vault, whole["items"], names_chars=exact - 1)
+    short = _activate(skills_vault, turn=NO_SKILL_NAMED)["skills"]
+
+    assert filled["names"] == {"skill": ["mid", "zeta"], "collection": ["Pantry counts"]} and filled["omitted"] == 0
+    assert short["names"] == {"skill": ["mid", "zeta"]} and short["omitted"] == 1

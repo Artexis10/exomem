@@ -127,7 +127,9 @@ resolution:
 # global stance lines every maps response carries (0..8000). `skills_max_chars` caps the
 # skills catalogue sent once per conversation (0..8000), and `skill_summary_max_chars` the
 # summary of each skill in it (40..1000). When the catalogue overflows, `skills_turn_max_chars`
-# caps the unlisted items of the turn's domains, named beside it on each turn (0..8000; 0 turns them off). When the deployment configures a method-fit placement,
+# caps the unlisted items of the turn's domains, named beside it on each turn (0..8000; 0 turns them off).
+# `skills_names_max_chars` caps the names of the items the catalogue had no room to list, sent with it so the
+# agent sees every skill and collection it may choose from (0..8000; 0 turns them off). When the deployment configures a method-fit placement,
 # a bounded model may select at most `method_fit_max_items` skills or Records collections for a
 # turn from their authored descriptions (0..6; 0 turns selection off), and each selected method
 # carries at most `method_contract_max_chars` of its body (0..8000). `domain_profile_max_chars` caps one domain's profile lines
@@ -144,6 +146,7 @@ budgets:
   skills_max_chars: 3500
   skill_summary_max_chars: 200
   skills_turn_max_chars: 800
+  skills_names_max_chars: 2400
   method_fit_max_items: 2
   method_contract_max_chars: 2400
   domain_profile_max_chars: 1200

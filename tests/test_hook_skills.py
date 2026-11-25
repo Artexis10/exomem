@@ -280,3 +280,32 @@ def test_two_selected_methods_render_once_each_and_neither_is_dropped():
     assert sum("Records/Depot/_collection.md" in line for line in text.splitlines()) == 1
     # Contracts are cut at whole lines, never mid-step.
     assert "of alpha.\\n" in text and "load the rest with read_page" in text
+
+
+def test_the_hook_writes_the_names_exactly_as_the_service_counted_them():
+    """The service fits the names to its bound by this text; a hook line that differs could drop names for good."""
+    from exomem import vault_skills
+
+    names = {"skill": ["mid"], "collection": ["Depot stock", "Tide  log"]}
+
+    assert hook._skill_names_text(names) == vault_skills.names_text(names) == "skills: mid. collections: Depot stock; Tide log."
+
+
+def test_the_hook_names_bound_is_the_largest_one_a_vault_may_set():
+    assert hook._SKILLS_NAMES_MAX_CHARS == activation_conventions.BUDGET_BOUNDS["skills_names_max_chars"][1]
+
+
+def test_names_at_the_largest_bound_a_vault_may_set_are_all_rendered():
+    """The advice sits outside the cap, so a names text the service fitted to the largest bound still renders whole."""
+    from exomem import vault_skills
+
+    names: dict[str, list[str]] = {"collection": []}
+    for index in range(400):
+        candidate = {"collection": [*names["collection"], f"Collection {index:03d}"]}
+        if len(vault_skills.names_text(candidate)) > hook._SKILLS_NAMES_MAX_CHARS:
+            break
+        names = candidate
+
+    text = hook._format_skills_block({"state": "ready", "items": [], "names": names, "names_advice": "Open one by name.", "omitted": 0})
+
+    assert vault_skills.names_text(names) in text and len(names["collection"]) > 250
