@@ -122,7 +122,7 @@ def _read_told(path: Path) -> dict[str, str]:
 
 
 def _write_told(path: Path, told: dict[str, str]) -> None:
-    handle, staged = tempfile.mkstemp(prefix=f".{STATE_FILENAME}.", dir=path.parent)
+    handle, staged = tempfile.mkstemp(prefix=f".{STATE_FILENAME}.", suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
             json.dump({"schema": STATE_SCHEMA, "apps": told}, stream)
