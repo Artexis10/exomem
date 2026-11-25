@@ -345,8 +345,6 @@ class TurnAnalysis:
     #: Turn-local nominal/value, quotation or supplied alternatives: only the
     #: conversation carry reads this veto, never ordinary resolution/carries.
     local_material: str = ""
-    #: Token-aligned phrase streams stay separate across conversation segments.
-    phrase_texts: tuple[str, ...] = ()
 
 
 #: A follow-up is short: at most this many tokens. "what about the second
@@ -1086,7 +1084,6 @@ def analyze_turn(turn: str, *, vocabulary: ReferentialVocabulary | None = None) 
     )
     content = working_set_anaphora.content_words(anaphora_tokens, vocabulary=_vocabulary_words(vocabulary))
     return TurnAnalysis(
-        phrase_texts=tuple(dict.fromkeys(f" {' '.join(sequence)} " for sequence in (tokens, folded_tokens))),
         text=text,
         tokens=tokens,
         ngrams=tuple(ngrams),
@@ -1339,9 +1336,7 @@ def _spaced_compounds(
     )
 
 
-def _turn_phrases(
-    analysis: TurnAnalysis, stopwords: frozenset[str], names: Iterable[str] = (),
-) -> frozenset[str]:
+def _turn_phrases(analysis: TurnAnalysis, stopwords: frozenset[str]) -> frozenset[str]:
     """Every phrase of the turn an indexed name can equal exactly.
 
     A single turn TOKEN is a phrase too (it also feeds unigram `exact_alias`
@@ -1352,13 +1347,8 @@ def _turn_phrases(
     dropped, never added (the verbatim spelling is already covered, so nothing
     is lost by not also adding its unsound fold).
     """
-    # Registered names define their own length; the general n-gram window cannot truncate an exact name.
-    registered = frozenset(
-        name for name in names if " " in name
-        and any(f" {name} " in text for text in analysis.phrase_texts)
-    )
     return (
-        registered | frozenset(analysis.ngrams)
+        frozenset(analysis.ngrams)
         | frozenset(analysis.tokens)
         | frozenset(analysis.words)
         | frozenset(
@@ -1574,6 +1564,7 @@ def candidates_for(
         for term in frozenset(analysis.tokens) - stopwords
         if (folded := _fold_lexical_term(term)) is not None
     )
+    phrases = _turn_phrases(analysis, stopwords)
     cue_categories = eligible_categories
     claims_winner = _claims_winner(analysis, routing_targets)
     if bands is None:
@@ -1607,9 +1598,6 @@ def candidates_for(
             checkpoint()
 
     row_exact_phrases: dict[str, frozenset[str]] = {}
-    phrases = _turn_phrases(
-        analysis, stopwords, (name for row in rows for name in lexicon_of(row).names),
-    )
     own_covered: dict[str, frozenset[int]] = {}
     covered_positions: set[int] = set()
     consumed_words, half_terms = _consumed_turn_words(
@@ -1918,16 +1906,12 @@ def candidates_for_each(
     if any(keywords.get(name) for name in _WORDLESS_CONTACT_ARGUMENTS):
         return tuple(candidates_for(analysis, rows, **keywords) for analysis in analyses)
     stopwords = keywords.get("stopwords", _STOPWORDS)
-    known = keywords.pop("row_lexicons", None) or {}
-    names = frozenset(
-        name for row in rows for name in (known.get(row.anchor_id) or row_lexicon(row)).names
-    )
     runs = any(_continua_runs(token) for analysis in analyses for token in analysis.tokens)
     reachable = _rows_maybe_named(
         rows,
-        known,
+        keywords.pop("row_lexicons", None) or {},
         frozenset().union(*(_turn_terms_folded(analysis, stopwords) for analysis in analyses)),
-        frozenset().union(*(_turn_phrases(analysis, stopwords, names) for analysis in analyses)),
+        frozenset().union(*(_turn_phrases(analysis, stopwords) for analysis in analyses)),
         runs,
     )
     named = [row for row, _lexicon in reachable]
@@ -1960,12 +1944,8 @@ def entry_named_anchors(
     if not analyses:
         return frozenset()
     min_terms = _min_lexical_terms(config or DEFAULT_RANKING)
-    names = frozenset(
-        name for row in rows
-        for name in ((row_lexicons or {}).get(row.anchor_id) or row_lexicon(row)).names
-    )
     worded = [
-        (_turn_terms_folded(analysis, stopwords), _turn_phrases(analysis, stopwords, names))
+        (_turn_terms_folded(analysis, stopwords), _turn_phrases(analysis, stopwords))
         for analysis in analyses
     ]
     # Only a row whose own name shares a phrase or a term with SOME entry can
@@ -2120,12 +2100,10 @@ def _counted_terms(names: Iterable[str]) -> frozenset[str]:
     return frozenset(fold_plural(term) for term in tokens_of(" ".join(names)))
 
 
-def _audience_cues(
-    analysis: TurnAnalysis, names: Iterable[str],
-) -> tuple[frozenset[str], frozenset[str]]:
+def _audience_cues(analysis: TurnAnalysis) -> tuple[frozenset[str], frozenset[str]]:
     # The same words `candidates_for` reads: an anchor the turn can reach must
     # be decided here, or `audience_view` keeps it undecided.
-    return _turn_phrases(analysis, _STOPWORDS, names), _turn_terms_folded(analysis, _STOPWORDS)
+    return _turn_phrases(analysis, _STOPWORDS), _turn_terms_folded(analysis, _STOPWORDS)
 
 
 def audience_view(
@@ -2155,12 +2133,9 @@ def audience_view(
     request stays within the activation path's filesystem ceilings.
     """
     counts = dict(term_anchor_counts or {})
-    names = frozenset(
-        normalize(name) for row in rows for name in (row.title, *row.aliases, _derived_key(row.title)) if name
-    )
-    phrases, turn_terms = _audience_cues(analysis, names)
+    phrases, turn_terms = _audience_cues(analysis)
     dependency_phrases, dependency_terms = (
-        _audience_cues(dependency_analysis, names)
+        _audience_cues(dependency_analysis)
         if dependency_analysis is not None else (frozenset(), frozenset())
     )
     decided: dict[str, bool] = {}
@@ -2831,9 +2806,10 @@ def resolve(
 ) -> Resolution:
     """Derive anchor statuses and the turn's verdict from categorical evidence.
 
-    `turn_tokens` is the raw turn's own tokens (`TurnAnalysis.tokens`). It
-    witnesses current names for precedence and R1's free-standing-mention
-    exception. Omitting it retains the earlier competition rule.
+    `turn_tokens` is the raw turn's own tokens (`TurnAnalysis.tokens`), used
+    only by R1's position-aware free-standing-mention exception; production
+    callers pass `analysis.tokens`, and omitting it (as most direct unit-test
+    callers do) simply leaves that exception unavailable.
 
     `referential` is `TurnAnalysis.referential`: the turn pointed at recent
     work instead of naming any. It is half of the fifth soundness clause; the
@@ -2899,82 +2875,7 @@ def resolve(
     anchors = _demote_subsumed_same_kind_aliases(anchors, turn_tokens)
     anchors = _narrowed_by_qualifier(anchors)
     resolved = [anchor for anchor in anchors if anchor.status == "resolved"]
-    # An agent choice selects an identity; its maintained competition path
-    # does not depend on whether the turn also spells another identity.
-    chosen_kinds = {anchor.kind for anchor in resolved if "agent_choice" in anchor.evidence}
-    current_positions: dict[str, frozenset[int]] = {}
-    for anchor in resolved:
-        if (
-            anchor.kind in chosen_kinds or "exact_alias" not in anchor.evidence
-            or anchor.name_span_segment != "turn" or anchor.exact_alias_from_focus
-        ):
-            continue
-        positions = frozenset(
-            index for phrase in anchor.exact_alias_phrases
-            for start, end in _phrase_spans(turn_tokens, phrase.split())
-            for index in range(start, end)
-        )
-        if positions:
-            current_positions[anchor.anchor_id] = positions
-    current_names = {
-        anchor_id: frozenset(fold_possessive(turn_tokens[index]) for index in positions)
-        for anchor_id, positions in current_positions.items()
-    }
-    names_at: dict[tuple[str, int], set[str]] = {}
-    names_by_kind: dict[str, set[str]] = {}
-    for anchor in resolved:
-        if anchor.anchor_id not in current_names:
-            continue
-        names_by_kind.setdefault(anchor.kind, set()).add(anchor.anchor_id)
-        for index in current_positions[anchor.anchor_id]:
-            names_at.setdefault((anchor.kind, index), set()).add(anchor.anchor_id)
-    token_positions: dict[str, set[int]] = {}
-    if current_names:
-        for index, token in enumerate(turn_tokens):
-            if (term := _fold_lexical_term(token)) is not None:
-                token_positions.setdefault(term, set()).add(index)
-    name_overlaps: dict[str, frozenset[str]] = {}
-    for anchor in resolved:
-        if (
-            anchor.anchor_id in current_names or anchor.kind not in names_by_kind
-            or anchor.name_span_segment != "turn"
-        ):
-            continue
-        spans = anchor.name_spans
-        if spans is None:
-            spans = (anchor.name_span,) if anchor.name_span is not None else ()
-        if spans:
-            unknown = any(not 0 <= start < end <= len(turn_tokens) for start, end in spans)
-            positions = frozenset(
-                index for start, end in spans if 0 <= start < end <= len(turn_tokens)
-                for index in range(start, end)
-            )
-        else:
-            # Embedded words have no name span. Token-visible contact can
-            # still witness overlap; missing positions never prove separation.
-            unknown = not anchor.name_contact or bool(anchor.name_contact - token_positions.keys())
-            positions = frozenset(
-                index for term in anchor.name_contact for index in token_positions.get(term, ())
-            )
-        overlapping = set(names_by_kind[anchor.kind]) if unknown else set()
-        for index in positions:
-            overlapping.update(names_at.get((anchor.kind, index), ()))
-        if overlapping:
-            name_overlaps[anchor.anchor_id] = frozenset(overlapping)
-    unnamed_ids: set[str] = set()
-    for kind in names_by_kind:
-        for component in _structural_components([anchor for anchor in resolved if anchor.kind == kind]):
-            if not any(anchor.anchor_id in current_names or anchor.anchor_id in name_overlaps for anchor in component):
-                unnamed_ids.update(anchor.anchor_id for anchor in component)
-    if unnamed_ids:
-        # Preserve the evidence as partial leads. Connected weak complements
-        # still carry context, but an unrelated lead cannot block a name.
-        anchors = [
-            replace(anchor, status="partial") if anchor.anchor_id in unnamed_ids else anchor
-            for anchor in anchors
-        ]
-        resolved = [anchor for anchor in anchors if anchor.status == "resolved"]
-    groups = _competing_groups(resolved, current_names=current_names, name_overlaps=name_overlaps)
+    groups = _competing_groups(resolved)
     # R3 (fix/activation-competing-senses): a named anchor carries the
     # packet. Gated on whether SOME resolved anchor anywhere holds a
     # deciding-alone kind (`exact_alias`/`agent_choice`) — with none
@@ -3213,47 +3114,8 @@ def _bare_name_groups(
     return tuple(groups)
 
 
-def _membership_components(
-    group: Sequence[ResolvedAnchor], keys: Sequence[frozenset[str]],
-) -> tuple[tuple[ResolvedAnchor, ...], ...]:
-    """Connected components, visiting each shared membership bucket once."""
-    memberships: dict[str, set[int]] = {}
-    for index, member_keys in enumerate(keys):
-        for key in member_keys:
-            memberships.setdefault(key, set()).add(index)
-    remaining = set(range(len(group)))
-    components: list[tuple[ResolvedAnchor, ...]] = []
-    for first in range(len(group)):
-        if first not in remaining:
-            continue
-        reached = {first}
-        pending = [first]
-        while pending:
-            for key in keys[pending.pop()]:
-                unseen = memberships.pop(key, set()) - reached
-                reached.update(unseen)
-                pending.extend(unseen)
-        components.append(tuple(group[index] for index in sorted(reached)))
-        remaining.difference_update(reached)
-    return tuple(components)
-
-
-def _structural_components(group: Sequence[ResolvedAnchor]) -> tuple[tuple[ResolvedAnchor, ...], ...]:
-    """Same paths, direct links and shared anchor neighbours connect anchors."""
-    empty_neighbour = any("" in anchor.anchor_neighbourhood for anchor in group)
-    return _membership_components(group, [
-        anchor.anchor_neighbourhood | (
-            {anchor.path} if anchor.path or empty_neighbour else set()
-        )
-        for anchor in group
-    ])
-
-
 def _competing_groups(
     resolved: Sequence[ResolvedAnchor],
-    *,
-    current_names: Mapping[str, frozenset[str]] | None = None,
-    name_overlaps: Mapping[str, frozenset[str]] | None = None,
 ) -> tuple[tuple[str, tuple[ResolvedAnchor, ...]], ...]:
     """Disconnected groups of resolved anchors of ONE kind that compete.
 
@@ -3287,11 +3149,6 @@ def _competing_groups(
     trivially disjoint and are reported as competing, which is the right outcome
     for two keys with no structure to judge them by.
 
-    Current-turn names compete only within each overlapping spelling group.
-    Each group checks its own structure: unrelated topics and unnamed
-    complements cannot supply transitive bridges between competing names.
-    Without a witnessed name, the earlier competition rule stays available.
-
     Examines EVERY kind (fix/activation-competing-senses, R3): the original
     returned on the FIRST kind it found a disconnected group in, so a
     demotable weak group of one kind could hide a real ambiguity of another
@@ -3299,27 +3156,31 @@ def _competing_groups(
     returned group, whether it is real ambiguity or an R3 demotion.
     """
     groups: list[tuple[str, tuple[ResolvedAnchor, ...]]] = []
-    current_names = current_names or {}
-    name_overlaps = name_overlaps or {}
     for kind in sorted({anchor.kind for anchor in resolved}):
-        members = [anchor for anchor in resolved if anchor.kind == kind]
-        named = [anchor for anchor in members if anchor.anchor_id in current_names]
-        if named:
-            spelling_groups = _membership_components(
-                named, [current_names[anchor.anchor_id] for anchor in named]
-            )
-        else:
-            spelling_groups = (tuple(_without_named_apart(members)),)
-        for spelling_group in spelling_groups:
-            group = spelling_group
-            if named:
-                named_ids = {anchor.anchor_id for anchor in spelling_group}
-                group = (*spelling_group, *(
-                    anchor for anchor in members if name_overlaps.get(anchor.anchor_id, frozenset()) & named_ids
-                ))
-            # Weak interpretations cannot bridge separate exact-name senses.
-            if len(_structural_components(spelling_group)) > 1 or len(_structural_components(group)) > 1:
-                groups.append((kind, group))
+        group = _without_named_apart(
+            [anchor for anchor in resolved if anchor.kind == kind]
+        )
+        if len(group) < 2:
+            continue
+        # Shared paths and anchor neighbours are the same connectivity edges
+        # as pairwise intersection, visited once per membership bucket.
+        memberships: dict[str, set[int]] = {}
+        empty_neighbour = any("" in anchor.anchor_neighbourhood for anchor in group)
+        for index, anchor in enumerate(group):
+            for path in anchor.anchor_neighbourhood | (
+                {anchor.path} if anchor.path or empty_neighbour else set()
+            ):
+                memberships.setdefault(path, set()).add(index)
+        reached = {0}
+        pending = [0]
+        while pending:
+            anchor = group[pending.pop()]
+            for path in anchor.anchor_neighbourhood | {anchor.path}:
+                unseen = memberships.pop(path, set()) - reached
+                reached.update(unseen)
+                pending.extend(unseen)
+        if len(reached) != len(group):
+            groups.append((kind, tuple(group)))
     return tuple(groups)
 
 
@@ -3333,17 +3194,15 @@ def _spelled_tokens(anchor: ResolvedAnchor) -> frozenset[str]:
 def _without_named_apart(group: Sequence[ResolvedAnchor]) -> list[ResolvedAnchor]:
     """Drop the members of a same-kind group the turn named APART from the rest.
 
-    Fallback when current-turn spelling cannot be witnessed.
-
     Concurrent contexts (activation recall breadth): competing senses are
     anchors the turn's SAME words reach. A member the turn spelled by its own
     name ("book the autumn trip given the course schedule") is a second topic
     the turn also named, not a sense of the others, when every OTHER member
     was spelled too and no two spelled names share a token. The test is about
-    the turn's own spelling and never about the vault. Without witnessed
-    current-turn spelling, a member reached only by shared, retrieved or
-    semantic evidence keeps competing with a spelled one. Two members
-    spelled with a shared word ("tide model
+    the turn's own spelling and never about the vault. A member reached only
+    by shared, retrieved or semantic evidence has no spelling to set it
+    apart, so it keeps competing with a spelled one ("Cargo Sled or cedar"
+    still asks), and two members spelled with a shared word ("tide model
     rollout", "tide model research") still compete.
     """
     spelled = [_spelled_tokens(anchor) for anchor in group]

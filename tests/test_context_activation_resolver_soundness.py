@@ -394,45 +394,6 @@ def test_r3_a_named_project_carries_the_packet_past_two_weak_unrelated_entities(
     assert all(pointer.get("ref") != south_gate for pointer in packet["pointers"])
 
 
-def test_a_named_entity_serves_material_despite_an_unrelated_retrieved_entity(tmp_path: Path) -> None:
-    """Residual task words must not withhold the explicitly named subject's material."""
-    from test_working_set_index import _write
-
-    from exomem import lexstore, working_set, working_set_runtime
-
-    vault = tmp_path / "vault"
-    named = "Knowledge Base/Entities/Groups/maple-assembly.md"
-    weak = "Knowledge Base/Entities/Decisions/workshop-venue.md"
-    _write(
-        vault / named,
-        "---\ntitle: Maple Assembly\ntype: entity\nstatus: active\nupdated: 2026-09-01\n---\n\n"
-        "# Maple Assembly\n\n## Decision\n\nThe assembly holds its annual workshop in June.\n",
-    )
-    _write(
-        vault / weak,
-        "---\ntitle: Workshop venue decision\ntype: entity\nstatus: active\nupdated: 2026-09-01\n---\n\n"
-        "# Workshop venue decision\n\n## Decision\n\nA separate team reserved a warehouse for training.\n",
-    )
-    lexstore.ensure_fresh(vault)
-    working_set_runtime.reset_caches_for_tests()
-    index = working_set_index.WorkingSetIndex(vault)
-    index.rebuild()
-
-    packet = working_set.compile_packet(
-        vault, turn="Will Maple Assembly's workshop tickets cover venue hire?",
-        retrieval_paths=frozenset({weak}), index=index,
-    )
-
-    assert packet["abstained"] is False, packet
-    anchors = {anchor["path"]: anchor for anchor in packet["anchors"]}
-    assert anchors[named]["status"] == "resolved"
-    assert anchors[weak]["status"] == "partial"
-    assert {"lexical_overlap", "retrieval"} <= set(anchors[weak]["evidence"])
-    assert any(unit.get("provenance", {}).get("path") == named for unit in packet["units"])
-    assert all(unit.get("provenance", {}).get("path") != weak for unit in packet["units"])
-    assert all(pointer.get("ref") != weak for pointer in packet["pointers"])
-
-
 # --------------------------------------------------------------------------- #
 # The same turns with a LIVE hot profile (close-memory-loop D2). Every test
 # above resolves without one, which is exactly why they could not see a prior
