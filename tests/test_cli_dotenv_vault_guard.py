@@ -197,6 +197,20 @@ def test_preload_resource_policy_still_reads_a_normal_working_directory_env(
     assert os.environ.get("EXOMEM_CPU_THREADS") == "7"
 
 
+def test_preload_resource_policy_reads_the_evermatter_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import runtime_resources
+
+    (tmp_path / ".env").write_text("EVERMATTER_CPU_THREADS=3\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("EXOMEM_CPU_THREADS", raising=False)
+
+    runtime_resources.preload_local_dotenv_policy()
+
+    assert os.environ.get("EXOMEM_CPU_THREADS") == "3"
+
+
 def test_preload_resource_policy_refuses_a_dotenv_planted_at_the_vault_root(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -305,6 +319,44 @@ def test_session_controls_refuse_a_store_the_dotenv_swaps_in(
     assert cli.main(["auth", "revoke", "--all"]) == 2
 
     assert "EXOMEM_OAUTH_STORAGE_URL" in capsys.readouterr().err
+
+
+def test_a_dotenv_evermatter_value_conflicts_with_a_different_exported_exomem_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The conflict check must see `EVERMATTER_BASE_URL` in the .env and
+    `EXOMEM_BASE_URL` in the shell as one setting, or a credential command acts on
+    the wrong deployment."""
+    from exomem import __main__ as cli
+
+    (tmp_path / ".env").write_text(
+        "EVERMATTER_BASE_URL=https://dotenv.example.com\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EXOMEM_BASE_URL", "https://exported.example.com")
+
+    with pytest.raises(cli._DotenvConflict) as conflict:
+        cli._load_cwd_dotenv(refuse_conflicts=True)
+
+    assert conflict.value.keys == ["EXOMEM_BASE_URL"]
+    assert os.environ["EXOMEM_BASE_URL"] == "https://exported.example.com"
+
+
+def test_a_dotenv_evermatter_value_replaces_the_exported_value_and_the_warning_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from exomem import __main__ as cli
+
+    (tmp_path / ".env").write_text(
+        "EVERMATTER_BASE_URL=https://dotenv.example.com\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EXOMEM_BASE_URL", "https://exported.example.com")
+
+    cli._load_cwd_dotenv()
+
+    assert "replaces exported EXOMEM_BASE_URL" in capsys.readouterr().err
+    assert os.environ["EXOMEM_BASE_URL"] == "https://dotenv.example.com"
 
 
 def test_a_dotenv_that_agrees_with_the_environment_is_no_conflict(

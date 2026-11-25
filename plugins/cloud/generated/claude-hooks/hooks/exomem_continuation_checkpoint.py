@@ -20,7 +20,7 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -4442,6 +4442,26 @@ def _read_metadata_lines(root_handle: _SecureDirectory) -> list[bytes]:
     return lines
 
 
+def _rename_aliases(environ: MutableMapping[str, str]) -> list[str]:
+    """Rename each alias name in `environ` into its EXOMEM_ name and remove the alias names.
+
+    Copy of `exomem.env_compat.rename_settings` for a hook, which cannot import the
+    package; `tests/test_rename_compat.py` keeps the copy in step. EVERMATTER_X then
+    KB_MCP_X fills EXOMEM_X only when it is unset. Returns the EVERMATTER_ names whose
+    value differs from a set EXOMEM_ name: a hook never picks one, it skips the turn.
+    """
+    conflicts: list[str] = []
+    for prefix in ("EVERMATTER_", "KB_MCP_"):  # the product's closed naming history
+        for name in [name for name in environ if name.startswith(prefix)]:
+            value = environ.pop(name)
+            canonical = "EXOMEM_" + name[len(prefix) :]
+            if canonical not in environ:
+                environ[canonical] = value
+            elif prefix == "EVERMATTER_" and environ[canonical] != value:
+                conflicts.append(name)
+    return conflicts
+
+
 def _disabled(environ: Mapping[str, str]) -> bool:
     return environ.get("EXOMEM_CONTINUATION_DISABLE", "").strip().lower() in {
         "1",
@@ -4651,15 +4671,28 @@ def _dispatch_core(
     }
 
 
+def _log_conflict(home: Path, names: list[str]) -> None:
+    """One row naming the variables (never their values), in the capture hook's own log."""
+    try:
+        row = f"{time.strftime('%Y-%m-%d %H:%M:%S')} checkpoint skipped | settings conflict: {', '.join(names)}\n"
+        write_nudge_file(home / "exomem-capture-nudge.log", row.encode("utf-8"), append=True)
+    except Exception:  # noqa: BLE001 - a hook never blocks the client
+        pass
+
+
 def dispatch_event(
     client: str,
     payload: Mapping[str, object],
     *,
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, Any] | None:
-    env = os.environ if environ is None else environ
+    env = dict(os.environ if environ is None else environ)
+    conflicts = _rename_aliases(env)
     event = normalize_event(client, payload)
     if event is None or _disabled(env):
+        return None
+    if conflicts:  # never pick between two values: skip this turn's checkpoint
+        _log_conflict(resolve_home(client, env), conflicts)
         return None
     neutral = _dispatch_core(
         event,

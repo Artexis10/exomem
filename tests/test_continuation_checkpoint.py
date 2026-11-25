@@ -4276,3 +4276,20 @@ def test_trusted_directory_accepts_a_clean_chain(tmp_path: Path) -> None:
         path.chmod(0o755)
 
     assert checkpoint.unsafe_trusted_directory_ancestors(hooks) == []
+
+
+def test_a_settings_conflict_skips_the_event_and_logs_the_variable(monkeypatch, tmp_path: Path) -> None:
+    reached: list[object] = []
+    monkeypatch.setattr(checkpoint, "_dispatch_core", lambda *args, **kwargs: reached.append(args))
+    payload = {"hook_event_name": "PreCompact", "session_id": "s", "trigger": "manual"}
+    environ = {"EXOMEM_HOOK_HOME": str(tmp_path), "EXOMEM_PROMINENCE": "balanced"}
+
+    checkpoint.dispatch_event("claude", payload, environ=environ)
+    assert len(reached) == 1  # without a conflict the event reaches the checkpoint writer
+
+    checkpoint.dispatch_event(
+        "claude", payload, environ={**environ, "EVERMATTER_PROMINENCE": "minimal"}
+    )
+
+    assert len(reached) == 1
+    assert "EVERMATTER_PROMINENCE" in (tmp_path / "exomem-capture-nudge.log").read_text("utf-8")

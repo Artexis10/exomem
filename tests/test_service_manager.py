@@ -1722,6 +1722,29 @@ def test_a_unit_with_two_environment_files_overlays_both_in_order(tmp_path, monk
     assert runtime.environment_warnings == []
 
 
+def test_a_service_environment_files_evermatter_name_beats_an_inherited_exomem_value(
+    tmp_path, monkeypatch
+):
+    """The file overrides the supervisor's inherited environment; that holds under
+    either prefix, and a later file's alias beats an earlier file's explicit name."""
+    module = _manager()
+    first, second = tmp_path / "a.env", tmp_path / "b.env"
+    first.write_text("EXOMEM_SHARED=from-first\n")
+    second.write_text("EVERMATTER_SHARED=from-second\nEVERMATTER_INHERITED=from-file\n")
+    monkeypatch.setenv("EXOMEM_INHERITED", "from-supervisor")
+    runtime = module.WorkerRuntime(
+        tmp_path / "worker.sock",
+        host="127.0.0.1",
+        port=1,
+        environment_files=[first, second],
+    )
+
+    environment = runtime._child_environment()
+
+    assert environment["EXOMEM_INHERITED"] == "from-file"
+    assert environment["EXOMEM_SHARED"] == "from-second"
+
+
 def test_an_unreadable_environment_file_is_surfaced_not_only_logged(tmp_path):
     module = _manager()
     present = tmp_path / "a.env"

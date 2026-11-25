@@ -126,6 +126,26 @@ def test_a_deferred_reminder_arrives_once_on_the_next_prompt(tmp_path, source):
     ]
 
 
+def test_a_settings_conflict_skips_the_turn_in_both_hooks(tmp_path):
+    """The failure: a hook picks one of two different values for the same setting and nudges on a guess."""
+    (tmp_path / "agreed").mkdir()
+    agreed = _env(tmp_path / "agreed", EXOMEM_CAPTURE_NUDGE_DELIVERY="next-turn")
+    assert _stop(tmp_path / "agreed", agreed) == ""
+    assert _pending(tmp_path / "agreed")
+    assert retrieve_hook.REMINDER in _prompt(agreed, PROMPT)
+
+    conflicted = _env(
+        tmp_path,
+        EXOMEM_CAPTURE_NUDGE_DELIVERY="next-turn",
+        EVERMATTER_CAPTURE_NUDGE_DELIVERY="inline",
+    )
+
+    assert _stop(tmp_path, conflicted) == ""
+    assert not _pending(tmp_path)
+    assert _prompt(conflicted, PROMPT) == ""
+    assert "EVERMATTER_CAPTURE_NUDGE_DELIVERY" in _log(tmp_path)
+
+
 def test_the_deferred_reminder_shares_one_reply_with_the_retrieval_reminder(tmp_path):
     """The failure: two JSON objects on stdout, or one block overwriting the other."""
     env = _env(tmp_path, EXOMEM_CAPTURE_NUDGE_DELIVERY="next-turn")

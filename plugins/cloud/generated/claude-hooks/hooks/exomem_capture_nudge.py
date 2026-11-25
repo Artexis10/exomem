@@ -115,6 +115,7 @@ import shlex
 import sys
 import threading
 import time
+from collections.abc import MutableMapping
 from functools import lru_cache
 from pathlib import Path, PureWindowsPath
 
@@ -209,11 +210,36 @@ _ENV_ALIASES = (
 )
 
 
-def _normalize_env_aliases() -> None:
-    """Map any legacy KB_* tunable onto its EXOMEM_* name (new wins if both set)."""
+def _rename_aliases(environ: MutableMapping[str, str]) -> list[str]:
+    """Rename each alias name in `environ` into its EXOMEM_ name and remove the alias names.
+
+    Copy of `exomem.env_compat.rename_settings` for a hook, which cannot import the
+    package; `tests/test_rename_compat.py` keeps the copy in step. EVERMATTER_X then
+    KB_MCP_X fills EXOMEM_X only when it is unset. Returns the EVERMATTER_ names whose
+    value differs from a set EXOMEM_ name: a hook never picks one, it skips the turn.
+    """
+    conflicts: list[str] = []
+    for prefix in ("EVERMATTER_", "KB_MCP_"):  # the product's closed naming history
+        for name in [name for name in environ if name.startswith(prefix)]:
+            value = environ.pop(name)
+            canonical = "EXOMEM_" + name[len(prefix) :]
+            if canonical not in environ:
+                environ[canonical] = value
+            elif prefix == "EVERMATTER_" and environ[canonical] != value:
+                conflicts.append(name)
+    return conflicts
+
+
+def _normalize_env_aliases() -> list[str]:
+    """Rename EVERMATTER_* and KB_MCP_* names, and map any legacy KB_* tunable, onto EXOMEM_* (EXOMEM_* wins if set).
+
+    Returns the names in conflict (see `_rename_aliases`).
+    """
+    conflicts = _rename_aliases(os.environ)
     for new, old in _ENV_ALIASES:
         if new not in os.environ and old in os.environ:
             os.environ[new] = os.environ[old]
+    return conflicts
 
 
 def _env_int(name: str, default: int) -> int:
@@ -1277,6 +1303,16 @@ def _log(text: str, outcome: str = "fired") -> None:
         pass
 
 
+def _log_conflict(names: list[str]) -> None:
+    """One row naming the variables (never their values) when a settings conflict skipped the turn."""
+    try:
+        logp = _hook_home() / "exomem-capture-nudge.log"
+        row = f"{time.strftime('%Y-%m-%d %H:%M:%S')} nudge skipped | settings conflict: {', '.join(names)}\n"
+        _state_core().write_nudge_file(logp, row.encode("utf-8"), append=True)
+    except Exception:  # noqa: BLE001 — logging must never break a stop hook
+        pass
+
+
 def _capture_reason(reason: str) -> str:
     if os.environ.get("EXOMEM_RETRIEVE_INJECT", "").strip().lower() == "mcp":
         return "If Evermatter is not connected or cannot capture, tell the user nothing is saved and to reconnect it in the app's MCP/connector settings. Run read_instructions first if no contract.\n" + reason
@@ -1315,7 +1351,10 @@ def main(argv: list[str] | None = None) -> int:
     ):
         if value is not None:
             os.environ[name] = value
-    _normalize_env_aliases()
+    conflicts = _normalize_env_aliases()
+    if conflicts:  # never pick between two values: skip this turn's nudge
+        _log_conflict(conflicts)
+        return 0
     if os.environ.get("EXOMEM_CAPTURE_NUDGE_DISABLE"):
         return 0
     level = _prominence()
