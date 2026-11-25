@@ -116,13 +116,14 @@ def trusted_full(run: dict, repository: str, workflow_id: int) -> bool:
     )
 
 
-def main_full_due(repository: str, hours: float) -> bool:
+def main_full_due(repository: str, hours: float) -> tuple[bool, str]:
     """A release cut reuses Full evidence on main (release_cuts.py pick-source); keep it recent.
 
     Full on main is due when no Full run on main or on a cut is queued or running, none has
-    tested main's current commit, no cut is open, and main's newest Full started more than
-    `hours` ago. An open cut's reconciliation is not on main yet, and pick-source accepts only
-    sources that contain it, so a Full run during the cut could not serve the next release.
+    tested main's current commit, no release-evidence run is in progress, and main's newest
+    Full started more than `hours` ago. A cut's controller runs until the cut's reconciliation
+    is on main, and pick-source accepts only sources that contain it, so a Full run during
+    the cut could not serve the next release. Returns the decision and its reason.
     """
     workflow_id = api("actions/workflows/ci.yml")["id"]
     latest = [
@@ -138,19 +139,22 @@ def main_full_due(repository: str, hours: float) -> bool:
         and trusted_full(run, repository, workflow_id)
     ]
     if any(run["status"] != "completed" for run in latest):
-        return False
-    if any(run["head_sha"] == api("commits/main")["sha"] for run in latest):
-        return False
-    # The cut controller runs until the cut's reconciliation is on main.
-    cuts = api(f"actions/workflows/{Path(AUTOMATION).name}/runs?per_page=20")["workflow_runs"]
-    if any(run["status"] != "completed" for run in cuts):
-        return False
+        return False, "a Full run on main or on a cut is queued or running"
+    tip = api("commits/main")["sha"]
+    if any(run["head_sha"] == tip for run in latest):
+        return False, f"a Full run already tested main's commit {tip}"
+    # A queued resume run waits behind the controller and changes nothing on main.
+    automation = api(f"actions/workflows/{Path(AUTOMATION).name}/runs?per_page=20")
+    if any(run["status"] == "in_progress" for run in automation["workflow_runs"]):
+        return False, "a release-evidence run, such as an open cut, is in progress"
     on_main = [run for run in latest if run.get("head_branch") == "main"]
     newest = max(on_main, key=lambda run: run["created_at"], default=None)
     if newest is None:
-        return True
+        return True, "no Full run on main has finished"
     started = datetime.fromisoformat(newest["created_at"].replace("Z", "+00:00"))
-    return datetime.now(UTC) - started > timedelta(hours=hours)
+    if datetime.now(UTC) - started > timedelta(hours=hours):
+        return True, f"main's newest Full run started more than {hours:g} h ago"
+    return False, f"main's newest Full run started within {hours:g} h"
 
 
 def legacy_workflow(commit: str) -> bool:
@@ -543,16 +547,20 @@ def main() -> int:
         args.output.write_text(json.dumps(receipt, indent=2) + "\n")
     elif args.command == "main-full":
         hours = float(os.environ.get("FULL_EVIDENCE_HOURS") or 4)
-        if hours <= 0 or not main_full_due(repository, hours):
-            print("Full evidence on main is recent, running or switched off; nothing dispatched")
+        if hours <= 0:
+            print("Full-evidence dispatch is switched off (FULL_EVIDENCE_HOURS <= 0)")
+            return 0
+        due, reason = main_full_due(repository, hours)
+        if not due:
+            print(f"nothing dispatched: {reason}")
             return 0
         command("gh", "workflow", "run", "ci.yml", "--ref", "main")
         # The next check must see this run as in flight, or it would dispatch a second one.
         for _ in range(12):
             time.sleep(5)
-            if not main_full_due(repository, hours):
+            if not main_full_due(repository, hours)[0]:
                 break
-        print(f"dispatched Full on main: no Full run on main in the last {hours:g} h")
+        print(f"dispatched Full on main: {reason}")
     elif args.command == "select":
         if not args.source:
             parser.error("select requires --source")

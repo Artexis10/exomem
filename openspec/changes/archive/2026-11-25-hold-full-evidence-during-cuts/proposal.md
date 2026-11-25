@@ -6,9 +6,9 @@ The Full-evidence dispatch counted a cut's own Full run in its age window. That 
 
 ## What Changes
 
-- The dispatch waits while a cut is open (its controller run is in progress).
+- The dispatch waits while a release-evidence run, such as an open cut's controller, is in progress. A resume run that only waits in its queue does not hold it.
 - The age window counts only Full runs on main. A cut's run still counts as in flight and as evidence for the commit it tested.
-- The landing of a cut's reconciliation therefore usually starts the next Full run on main.
+- The first landing after a cut finishes therefore usually starts the next Full run on main.
 
 ## Capabilities
 

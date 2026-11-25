@@ -529,7 +529,17 @@ def test_full_on_main_is_due_only_when_its_evidence_is_old_and_main_moved(
         "status": status,
         "created_at": created.isoformat().replace("+00:00", "Z"),
     }
-    cut = {"status": "in_progress" if cut_open else "completed"}
+    # An older finished Full on main changes no decision; it makes a per-run lookup visible.
+    older = {
+        **run,
+        "head_branch": "main",
+        "head_sha": "older",
+        "status": "completed",
+        "created_at": (created - evidence.timedelta(hours=10)).isoformat().replace("+00:00", "Z"),
+    }
+    # A resume run queued behind the controller is always there during a cut; only a
+    # controller still in progress holds the dispatch.
+    automation = [{"status": "queued"}] + ([{"status": "in_progress"}] if cut_open else [])
 
     def api(path):
         if path == "actions/workflows/ci.yml":
@@ -537,11 +547,15 @@ def test_full_on_main_is_due_only_when_its_evidence_is_old_and_main_moved(
         if path == "commits/main":
             return {"sha": "tip"}
         if path.startswith("actions/workflows/release-evidence-automation.yml/runs"):
-            return {"workflow_runs": [cut]}
+            return {"workflow_runs": automation}
         listed = branch and "event=workflow_dispatch" in path
-        return {"workflow_runs": [run] if listed else []}
+        return {"workflow_runs": [run, older] if listed else []}
 
-    monkeypatch.setattr(evidence, "api", api)
     monkeypatch.setattr(evidence, "trusted_full", lambda run, repository, workflow: True)
 
-    assert evidence.main_full_due("example/project", 4) is due
+    calls = []
+    monkeypatch.setattr(evidence, "api", lambda path: calls.append(path) or api(path))
+
+    assert evidence.main_full_due("example/project", 4)[0] is due
+    # One tip lookup per check: the check runs on every landing within the token's rate limit.
+    assert calls.count("commits/main") <= 1
