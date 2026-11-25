@@ -50,6 +50,14 @@ account that already connects Evermatter, for example a self-hosted server
 added as a connector. Its hooks then activate that existing connection. The
 hooked edition would add a second server that points at Evermatter Cloud.
 
+The server edition, `claude-server`, is a template that ships inside the Python
+package at `src/exomem/_plugins/claude-server.zip`, outside the marketplace. It
+carries the hooked edition's hooks and skills and a server at the reserved origin
+`https://server.invalid`. A self-hosted server with `EXOMEM_BASE_URL` serves it at
+`/claude-plugin.zip`, with its own origin in place of the placeholder and a plugin
+name derived from its host, so its user installs everything in one upload.
+`scripts/cloud-plugin.py check` compares the packaged template with a fresh build.
+
 The two marketplace editions name themselves in `plugins/cloud/definition.json`
 under `edition_identities`. The hooked edition shows as "Evermatter" and the
 connector edition as "Evermatter (self-hosted)". Each description opens with the

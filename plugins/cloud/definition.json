@@ -7,7 +7,8 @@
     "openai": "Updates the Dot E branding and memory workflow guidance. Connect an existing Evermatter account through OAuth. Includes skills and the remote MCP connection, without lifecycle hooks or local service credentials.",
     "claude": "Ships skills and the remote MCP connection for Claude Chat, Cowork and Claude Code, without command hooks or local scripts. Connect an existing Evermatter account through OAuth. The full Evermatter plugin adds lifecycle hooks.",
     "claude-hooks": "Updates the Dot E branding and memory workflow guidance. Trusted lifecycle hooks support activation, governed capture and local continuation on supported Claude Code and Cowork installations. Claude Chat uses the MCP connection and skills without command hooks.",
-    "claude-connector-hooks": "Adds Evermatter's lifecycle hooks and skills to an Evermatter connection your account already has, such as a self-hosted server or a separately added connector, without bundling a second MCP server. Hooks support activation, governed capture and local continuation on supported Claude Code and Cowork installations."
+    "claude-connector-hooks": "Adds Evermatter's lifecycle hooks and skills to an Evermatter connection your account already has, such as a self-hosted server or a separately added connector, without bundling a second MCP server. Hooks support activation, governed capture and local continuation on supported Claude Code and Cowork installations.",
+    "claude-server": "Served by your own Evermatter server: one upload brings the connection to that server, Evermatter's skills and its lifecycle hooks. Hooks support activation, governed capture and local continuation on supported Claude Code and Cowork installations."
   },
   "default_prompts": [
     "Where did we leave off on this project, and what changed?",
@@ -25,6 +26,15 @@
       "name": "evermatter-self-hosted",
       "display_name": "Evermatter (self-hosted)",
       "lead": "For your own Evermatter server, already connected to Claude as a connector: adds Evermatter's skills and automatic recall and capture to that connection."
+    },
+    "claude-server": {
+      "name": "evermatter-server-invalid",
+      "display_name": "Evermatter",
+      "listed": false,
+      "server_key": "evermatter",
+      "resource": "https://server.invalid/mcp",
+      "lead": "For your own Evermatter server at server.invalid: connects Claude to it and adds automatic recall and capture.",
+      "getting_started": "Upload this file as a plugin in Claude, open the plugin's Connectors tab, connect Evermatter and sign in on the page that your server at server.invalid opens. If you added this server as a custom connector or installed the Evermatter (self-hosted) plugin, remove it first, so Claude does not hold two connections or run each hook twice."
     }
   },
   "author": {

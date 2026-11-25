@@ -4,9 +4,9 @@ A self-hosted Evermatter user on claude.ai has no one-upload install. The hosted
 
 ## What Changes
 
-- A self-hosted server with a public origin (`EXOMEM_BASE_URL`) serves `GET /claude-plugin.zip`: the release's connector edition, renamed for that server, with a `.mcp.json` that connects to the server's `/mcp`.
-- The wheel carries the generated connector edition archive, so an installed server builds the plugin from release bytes.
-- `exomem setup --remote` ends by pointing at the download, upload and connect steps, and keeps the custom-connector path as the alternative.
+- The generator builds a fourth Claude edition, `claude-server`: the hooked edition's hooks and skills with a bundled server at a reserved placeholder origin. It ships inside the Python package at `src/exomem/_plugins/claude-server.zip` and is not listed in the marketplace.
+- A self-hosted server with a public origin (`EXOMEM_BASE_URL`) serves `GET /claude-plugin.zip`: that edition with the placeholder replaced by the server's origin and the plugin named after its host.
+- `exomem setup --remote` and the deployment docs point at the download first and keep the custom connector as the alternative.
 
 ## Capabilities
 
@@ -16,7 +16,7 @@ A self-hosted Evermatter user on claude.ai has no one-upload install. The hosted
 
 ## Impact
 
+- `src/exomem/cloud_plugins.py` and `plugins/cloud/definition.json` gain the `claude-server` edition; `src/exomem/_plugins/claude-server.zip` is generated and checked by `scripts/cloud-plugin.py check`.
 - New `src/exomem/self_hosted_plugin.py`; a route in `src/exomem/server_assets.py`, registered in `src/exomem/server.py`.
-- `pyproject.toml` force-includes `plugins/cloud/generated/claude-connector-hooks.zip` in the wheel and lists it in the sdist.
-- `src/exomem/remote_setup_wizard.py` closing text.
-- No change to the generated editions, their plugin names or the hosted plugin.
+- `src/exomem/remote_setup_wizard.py`, `docs/remote-quickstart.md`, `docs/deployment.md`.
+- No change to the existing editions, their plugin names, the hosted plugin, the package inputs or the container build.

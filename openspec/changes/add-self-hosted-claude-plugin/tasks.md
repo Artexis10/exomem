@@ -1,9 +1,9 @@
 ## 1. Plugin archive
 
-- [x] 1.1 Build the per-server archive from the packaged connector edition in `src/exomem/self_hosted_plugin.py`, validated by `_validate_claude_manifest`
-- [x] 1.2 Force-include the generated connector edition archive in the wheel and list it in the sdist
+- [x] 1.1 Generate the `claude-server` template edition into `src/exomem/_plugins/` and check it in `scripts/cloud-plugin.py check`
+- [x] 1.2 Personalise the template for the server's origin in `src/exomem/self_hosted_plugin.py`, validated by `_validate_claude_manifest`
 - [x] 1.3 Serve `GET /claude-plugin.zip` on a server with a public origin
-- [x] 1.4 Point `exomem setup --remote` at the download
+- [x] 1.4 Point `exomem setup --remote`, `docs/remote-quickstart.md` and `docs/deployment.md` at the download
 - [x] 1.5 Cover the archive, the plugin name and the route in `tests/test_self_hosted_plugin.py`
 
 ## 2. Acceptance

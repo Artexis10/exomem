@@ -3,18 +3,19 @@
 ### Requirement: Self-hosted server serves its own Claude plugin
 A self-hosted server with a configured public origin SHALL serve, at `GET /claude-plugin.zip` and without sign-in, a Claude plugin archive that connects to that origin's `/mcp` endpoint. A server without a public origin SHALL NOT serve the route.
 
-#### Scenario: Server without a public origin
-- **WHEN** a server runs without a public origin
-- **THEN** `/claude-plugin.zip` is not served
+#### Scenario: Server without a usable public origin
+- **WHEN** a server runs without a public origin, or with one that cannot produce a valid plugin
+- **THEN** `/claude-plugin.zip` is not served and the server log names the reason
 
-### Requirement: The served plugin is the release's connector edition
-The served archive SHALL carry the release's connector edition skills, hooks, assets and licence with identical bytes. Its plugin name SHALL derive from the origin's host, its display name SHALL be "Evermatter", and its manifest SHALL pass the same limits as the generated Claude editions.
+### Requirement: The served plugin carries the release's skills and hooks
+The served archive SHALL carry the release's hooked edition skills and hooks with identical bytes, and SHALL name no placeholder origin. Its plugin name SHALL derive from the origin's host, its display name SHALL be "Evermatter", and its manifest SHALL pass the same limits as the generated Claude editions.
 
 #### Scenario: Download from a server with a public origin
 - **WHEN** a client requests `/claude-plugin.zip` from a server whose public origin is `https://kb.example.com`
 - **THEN** the response is a zip attachment named `evermatter-kb-example-com.zip`
 - **AND** its `.mcp.json` declares one HTTP server whose URL is `https://kb.example.com/mcp`
-- **AND** its hook and skill files equal the connector edition's bytes
+- **AND** its hook and skill files equal the hooked edition's bytes
+- **AND** no file names the placeholder origin
 - **AND** its manifest name is at most 64 lowercase letters, digits and hyphens and its description is at most 500 characters
 
 ### Requirement: Remote setup points at the plugin
