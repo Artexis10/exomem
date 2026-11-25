@@ -36,7 +36,7 @@ The deferred entity barrier and paired behaviour measurement retain their existi
 ### New Capabilities
 
 - `referent-promotion`: typed-edge leaves, provenance, surfacing, revert, disclosure, and the rule that the server creates only what the agent asks for.
-- `referent-declarations` (gated): the `referents` argument, its outcomes, pending completion and teaching. Task 5.2 removes it if the gate fails.
+- `referent-declarations` (gated): the `referents` argument, its outcomes, pending completion and teaching. Dropped under task 5.2: the gate never triggered, nothing was built, and the delta left this change before archive.
 
 ### Modified Capabilities
 
@@ -45,7 +45,7 @@ The deferred entity barrier and paired behaviour measurement retain their existi
 - `epistemic-relation-registry`: relation labels, the display formatter, endpoint families and the generic marker. The new-edge census cohort moved to `refuse-generic-relation-authoring`.
 - `semantic-write-contract`: registry-marked generic relations remain connectivity, never typed-specific qualification. The all-generic advisory requirement is already canonical and is modified by `refuse-generic-relation-authoring`.
 - `adoption-compile-planning`: source descriptions, capture guidance, proposals and compact write feedback distinguish citation linkage from unassessed semantic compilation.
-- `graph-traversal-profiles` and `context-activation` (conditional): pack profiles, the `entity` profile and typed expansion of entity anchors.
+- `graph-traversal-profiles` and `context-activation` (conditional): pack profiles, the `entity` profile and typed expansion of entity anchors. Only the pack profiles shipped, through `make-epistemic-language-dynamic`; the delta keeps that sentence. The `entity` profile and `context-activation` delta were dropped under task 8.2 and left this change before archive.
 
 ## Impact
 

@@ -284,7 +284,7 @@ The original 0.116 qualification and image-only deployment remain historical evi
 They establish no current latency percentile, worst warm peak or full-fleet admission qualification.
 Recorded deployment receipts from 2026-10-17 place the three running cells and fleet default on published 0.124.0.
 The rollout left no per-cell pins and did not change the existing resource profile.
-Requests remain `1Gi/250m`, with limits of `3Gi/2CPU`; task 6.11 retains memory and CPU qualification.
+Requests remain `1Gi/250m`, with limits of `3Gi/2CPU`; task 3.9 of `add-cloud-service-resource-policy` retains memory and CPU qualification.
 
 Documents and OCR, plus artifact-broker access for every cell, are enabled in the recorded deployment.
 PDF, English OCR and Japanese OCR ingestion and keyword recall passed through the Cloud MCP connector.
@@ -298,7 +298,7 @@ Alert-delivery receipts cover `cell-unavailable` and `cell-disk-low`; they do no
 That activation remains separate work in `add-hosted-functional-health-jobs`.
 
 A deployed-image B2 scratch restore matched vault and host state, with custody, authentication and cleanup verified.
-It does not close in-place failure recovery or historical rollback. Preserve those boundaries in tasks 6.6–6.9.
+It does not close in-place failure recovery or historical rollback. Preserve those boundaries in `qualify-cloud-recovery-after-launch`.
 The recipient-encrypted export in 6.12 used 0.116; it is not a fresh acceptance run on every later release.
 Tasks 6.0, 6.1 and 6.3 retain their specific unreconciled evidence, without repeating completed deployment or database-cutover stages.
 
@@ -310,25 +310,7 @@ Tasks 6.0, 6.1 and 6.3 retain their specific unreconciled evidence, without repe
   Custody, service authentication and scratch absence checks passed.
   The current top-level wrapper was not invoked; its source wiring, existing tests and maintained-helper recovery establish repeatability.
   This closes repeatable dual-root comparison and deployed-image scratch recovery, without claiming a current-wrapper production run, in-place recovery or historical rollback.
-- [ ] 6.6 Resilience 2: qualify a per-cell historical rollback and return through the existing release API.
-  Use an exclusive writer window for the QA cell, a fresh post-write pre-attempt backup S1 and a copied vault plus host state.
-  Verify old-image route reads/writes, custody and durable debt before any live pin.
-  Schema 8 in 0.114 differs from current schema 10; readiness and manifest compatibility IDs do not prove route compatibility.
-  A synthetic schema-10 negative probe with the cached 0.114 image refused without changing the store on 2026-10-11.
-  It does not prove the restored vault-plus-host copy or successful historical rollback.
-  If the copy is incompatible, prove refusal and current-image recovery, avoid the live pin and leave successful historical rollback open.
-  Never restore pre-upgrade S0 over later committed writes or add a downmigration.
-- [ ] 6.7 Resilience 3: recheck damaged-volume or bad-import recovery through the existing in-place B2 restore helper.
-  The 2026-10-09 QA restore matched 45/45 vault files with 93 seconds of downtime.
-  Host-state comparison was absent from that historical in-place run.
-  The 2026-10-13 deployed-image scratch recovery matched both roots and verified custody, service authentication and cleanup.
-  Scratch recovery does not close the in-place failure path or gateway OAuth acceptance. Keep those scopes open.
-- [ ] 6.8 Resilience 4: prove recovery after actual CSI node loss on approved disposable infrastructure.
-  Verify surviving-volume reattachment or B2 recovery, canonical data, host custody and service readiness.
-  The older local-storage CI node-loss run does not prove the current CSI deployment's failure path.
-  Price any rental before obtaining its authority; no rental is authorized by this task record.
-- [ ] 6.9 Resilience 5: rehearse a server move with the existing backup, stop, volume-release, placement and resume procedures.
-  Compare canonical vault and host state, preserve post-backup writes and report downtime after the replacement node exists.
+- Tasks 6.6–6.9, the post-launch recovery drills, moved to `qualify-cloud-recovery-after-launch`. Task 6.11, memory and CPU admission, is the same work as task 3.9 of `add-cloud-service-resource-policy` and is tracked there.
 - [x] 6.10 Resilience 6: verify control database recovery from pgBackRest and WAL in an isolated environment.
   The 2026-10-08 isolated restore replayed nine WAL segments, matched database lineage and passed `pg_amcheck`.
   Network isolation, no TCP listener, unchanged source processes and scratch removal also passed.
@@ -339,15 +321,6 @@ Tasks 6.0, 6.1 and 6.3 retain their specific unreconciled evidence, without repe
   The comparison ran while recovery was paused. Source process identities matched, and the isolated unit, scratch data, and jail were removed.
   An independent saved-artifact recheck on 2026-10-12 confirmed those comparisons.
   This closes the one-time recovery scope. Catalog ownership/grants, sequence values, view outputs, current-run physical integrity, promotion, and recurring weekly execution remain unclaimed.
-- [ ] 6.11 Resilience 7: qualify memory and CPU admission through the existing shared-worker envelope, default off.
-  Measure the worst supported warm peak per slot and select conservative occupancy and fixed reserves.
-  Charge `max(request, qualified peak)` and retain at least 20% node memory headroom; do not introduce a dynamic estimator or ledger.
-  Use selected-empty atomic zero publication, inventory, stop, completed holds, volume release, selection and resume before all-shared promotion.
-  Verify full-capacity refusal preserves the unconsumed invitation and keeps existing access working.
-  A production request change to `512Mi/125m` requires separate operator restart go.
-  If qualification fails, retain `1Gi/250m` for an image-only roll; do not enable shared-node MemoryQoS.
-  The maintained memory profiler preserves and reports the selected Cloud resource policy instead of silently measuring the legacy profile.
-  Its configuration regression test protects that binding; worst-supported warm-peak qualification remains open.
 - [x] 6.12 Resilience 8: repeat the existing recipient-encrypted operator export on the reviewed current release.
   Restore from the selected B2 snapshot into scratch, encrypt to the tenant's age recipient and verify recipient decryption and canonical content.
   The 2026-09-28 exercise does not close this current-release acceptance.
@@ -365,7 +338,7 @@ Tasks 6.0, 6.1 and 6.3 retain their specific unreconciled evidence, without repe
   A production-shaped Sandbox checkout already proved payment and signed webhooks with a stand-in controller. Production acceptance uses one paid onboarding journey.
   That Sandbox proof does not establish a fresh production cell, connector sign-in or this full journey.
   Public admission stays on the waitlist; operator invitations admit directly when capacity is available.
-  Resilience drills 6.6–6.9 are deferred until after launch; their unchecked boxes remain evidence limits, not newly imposed invitation gates.
+  The recovery drills live in `qualify-cloud-recovery-after-launch`; they remain evidence limits, not invitation gates.
   Keep refresh, restorable backup, recipient export and ordered deletion acceptance explicit. Do not delete a paying tenant merely to complete a checklist.
 
 ## 7. Retirement (R)

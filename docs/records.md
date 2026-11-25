@@ -106,7 +106,7 @@ Use `query_records`, `add_record` and `edit_record`, and the `records` operation
 | `append` | Safely add a new item with a concise reason and current container guard. |
 | `update` | Target one item with its item key, current container and item-version guards, and a concise reason. |
 | `retract` | Take one row of a store-backed summary or log collection out of current state, with a reason and the current container and item-version guards. The row keeps its history. |
-| `history` | Read retained prior payloads for one authorized item, with bounded pagination and explicit missing legacy content. |
+| `history` | Read retained prior payloads for one authorized item, with bounded pagination and explicit missing legacy content. Name the row by exactly one of `item_key`, `item_id` (a stale id still names its row) or `natural_key` (an object of the collection's natural-key values; a retracted row is found by it too). |
 | `revise` | Change a collection declaration with current manifest and container guards. |
 | `rebaseline` | Acknowledge an exact, positively established imported audit gap. |
 | `bulk_upsert` | Import a bounded batch of observations from preserved source references. |

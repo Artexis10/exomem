@@ -27,7 +27,7 @@ and index updates are determined by the operation, not the caller.
 | **link** | Create or update an entity, wire backlinks | `Entities/<type>/` |
 | **preserve** | Capture a **text** factual artifact for an incident scope. Binaries (PDF / image / any file) go out-of-band via upload (see the media transport guidance below), not this tool | `Evidence/<scope>/` |
 | **edit** | In-place edit through one `edit_note` tool. New clients send required nested `operation` with one `kind`: `replace_body`, `replace_tags`, `replace_string`, `batch_replace`, `edit_section`, `patch_frontmatter`, or `fill_row`. See `operations.md` for fields. Bumps `updated:` | the page |
-| **add_observation** | Add, update, remove, or validate one compact observation or rich semantic unit. Update/remove take the unit id. Compact is `- [category] content #tags (context) ^anchor`; typed unit relations require an explicit governed rich `kind` | the compiled page |
+| **add_observation** | Add, update, remove, or validate one compact observation or rich semantic unit. Update/remove take the unit id. Compact is `- [category] content #tags (context) ^anchor`; typed unit relations require an explicit governed rich `kind`, except a provenance link, which is recorded on the page | the compiled page |
 | **find** | Type-aware search across the KB (read-only). Supports compact lookups, packed reasoning context, and diagnostics via `include_timings` / `rerank` when needed | — |
 | **suggest_links** | Surface existing pages a draft or page should link to, hub-aware (read-only) | — |
 | **graph_context** | Return a bounded typed graph neighborhood for a page or query from the derived graph sidecar. Read-only | — |

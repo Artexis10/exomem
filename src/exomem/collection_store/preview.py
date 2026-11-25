@@ -666,12 +666,13 @@ def _prover(vault_root: Path, writer, binding):
     return prove
 
 
-def bind_row(vault_root: Path, collection: str, item_id: str) -> dict[str, str] | None:
+def bind_row(vault_root: Path, collection: str, item_id: str, *, stale_ok: bool = False) -> dict[str, str] | None:
     """The `item_key` and guards a Records row id stands for, bound by one key-and-version read.
 
     It enters as a query of the collection would, so an absent or withheld collection or row
     refuses alike. None where the generic scan of the leaf's own query must answer: no served
-    store, a collection the store does not own, or one the binder cannot read by key.
+    store, a collection the store does not own, or one the binder cannot read by key. `stale_ok`
+    binds an id whose version has moved on, for a reader that guards no write.
     """
     binding = _BOUND.get()
     if binding is None or binding[0] != Path(vault_root).resolve():
@@ -691,7 +692,7 @@ def bind_row(vault_root: Path, collection: str, item_id: str) -> dict[str, str] 
     writer._facade_profile = "records"
     with writer.read_collection(collection, facade_profile="records") as manifest:
         found = readable_matches(writer, manifest, collection_refs.id_head(item_id))
-    return None if found is None else collection_refs.bound_row(item_id, *found, profile="records")
+    return None if found is None else collection_refs.bound_row(item_id, *found, profile="records", stale_ok=stale_ok)
 
 
 def dispatch(

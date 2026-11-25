@@ -25,12 +25,13 @@ S4a starts implementation after `add-lifecycle-status-registry` merges. S4b foll
 - [x] 2A.1 Add the `homes` registry adapter, empty pack and `RegistrySpec`, with folder validation through `compiled_route_exempt` and one home per topic or project key. Check: save, history and restore through `schema_memory(subject="homes")`; a reserved segment and a duplicate key refuse.
 - [x] 2A.2 Let a type folder accept any compiled type and a compiled type sit anywhere under Notes; reword the two findings. Check: an insight in `Notes/Research/<Project>` is accepted; an untyped page in `Notes/Insights` refuses; a compiled page outside Notes refuses.
 - [x] 2A.3 Replace the per-type branches of `note._resolve_path` with the placement order, keeping partitions and stems for the type default, and keep a superseding page in its predecessor's folder. Check: a topic home receives an insight and a failure; with no homes, every destination is unchanged.
-- [ ] 2A.4 Refuse a home whose governance or vocabulary-instance scope differs from the type default's (`HOME_CHANGES_SCOPE`), then run `page_scope` on the final path. Check: the refusal writes nothing.
+- [x] 2A.4 Refuse a home whose governance or vocabulary-instance scope differs from the type default's (`HOME_CHANGES_SCOPE`), then run `page_scope` on the final path. Check: the refusal writes nothing.
+  Evidence: #2122 (merge `ae04ef7716b62508885562490e9f334069dc3bca`, shipped in 0.147.0). `note._require_home_keeps_scope` compares `homes.scope_of` (governance scopes and `instances.page_scope`) at the home's path with the type default's path and raises `HOME_CHANGES_SCOPE` before any write. Tests in `tests/test_vault_homes.py`: `test_a_home_under_a_wider_governance_scope_is_refused_and_writes_nothing`, `test_a_home_that_moves_the_page_into_another_vocabulary_instance_is_refused` (both assert the vault files are unchanged) and `test_a_home_in_the_same_governance_scope_as_the_default_is_accepted`.
 - [x] 2A.5 Report `placement` in the creation draft, with the folder, the basis and the home-making call; route a near-miss topic with a home through the vocabulary decision.
 - [x] 2A.6 Count notes by top-level Notes folder with registry labels and give homes index sections; make the research-folder contradiction demotion a project-key rule. Check: a home's pages appear in `Notes/index.md` and in `index_drift`.
 - [x] 2A.7 Update the authoring contract's role rule and homes text, bump the contract version once, and regenerate the scaffold, plugin and Cloud copies through their producers. Hosted v1 to v4 were retired in #1691, so no frozen carrier remains to verify.
 
-Evidence: PR A implements these tasks in the homes and placement commits; `tests/test_vault_homes.py` passes in the combined integration scope. Carrier checks and the privacy scan pass. The scope-boundary task remains open for independent review; delivery evidence belongs on PR A.
+Evidence: PR A implements these tasks in the homes and placement commits; `tests/test_vault_homes.py` passes in the combined integration scope. Carrier checks and the privacy scan pass. The scope-boundary task 2A.4 was reviewed with the whole batch: the independent review of PR A ([recorded on the PR](https://github.com/Artexis10/exomem/pull/2122#issuecomment-6422153339)) approved head `2881c2ff6ad72ad8fafa27eaa6263116a80f9249`, and its exact-head CI run `40361358063` passed. The review note does not name this boundary separately.
 
 ## 2B. Area names for the root layout (reopened 2026-11-16 by `adopt-root-vault-layout` task 4.8)
 
@@ -46,22 +47,39 @@ The spec, the `semantic-write-contract` delta and the design now say that `folde
 - [x] 2.1 Record the S4b decisions for partition kinds, stem kinds, the `fields` shape, typed-field declaration and index entries in `design.md`. Verify `openspec validate --strict`.
   Recorded in design.md, "S4b decisions (2026-10-26)".
 - [ ] 2.2 Red first: add the programme task 4.3 proof. Promote `meeting-note` under `insight`, create one through `remember` in `Notes/Meetings` with compiled behaviour, then restore it away with page bytes kept.
+  Status 2026-11-25: open; not approved scope after the 2026-11-25 programme close, no owner (PR C, the S4b write side).
 - [ ] 2.3 Add promotion under a parent that supplies role and flags; verify promotion, history and restore through `schema_memory`.
+  Status 2026-11-25: open; not approved scope after the 2026-11-25 programme close, no owner (PR C, the S4b write side).
 - [ ] 2.4 Move folders, partitions, stems, required fields, statuses, sections, claim sections and typed fields onto the registry for the typed writer. Verify that the existing suites pass unchanged.
+  Status 2026-11-25: open; not approved scope after the 2026-11-25 programme close, no owner (PR C, the S4b write side).
 - [ ] 2.5 Create the notes index entry and count for a new compiled folder; verify that a promoted type's pages appear in `Notes/index.md`.
+  Status 2026-11-25: open; not approved scope after the 2026-11-25 programme close, no owner (PR C, the S4b write side).
 - [ ] 2.6 Deferred (2026-10-26) until a vault type declares typed fields; see design.md. Add the generic `fields` parameter to `remember` and `replace_memory` on the current local and Cloud surfaces. Verify the tool budgets and current descriptors.
+  Status 2026-11-25: open; deferred on 2026-10-26 until a vault type declares typed fields, and not approved scope after the 2026-11-25 programme close, no owner (PR C).
 - [ ] 2.7 Replace the sink exemption of `entity` and `production-log` with a declared attribute; verify the episode sink report on both types.
+  Status 2026-11-25: open; not approved scope after the 2026-11-25 programme close, no owner (PR C, the S4b write side).
 - [ ] 2.8 Replace the experiment-only lifecycle in audit, artifact-role state and due state with a declared attribute; verify unfinished-experiment findings and artifact-role origins unchanged.
+  Status 2026-11-25: open; not approved scope after the 2026-11-25 programme close, no owner (PR C, the S4b write side).
 - [ ] 2.9 Move the experiment-owned `outcome` rule onto the registry's typed fields, and add its `note-type-contract` delta; verify every frontmatter write boundary.
+  Status 2026-11-25: open; not approved scope after the 2026-11-25 programme close, no owner (PR C, the S4b write side).
 - [ ] 2.10 Derive the knowledge-pack primitives from the registry; verify that every shipped pack still loads.
+  Status 2026-11-25: open; not approved scope after the 2026-11-25 programme close, no owner (PR C, the S4b write side).
 - [ ] 2.11 Move the singular `project` finding for `pattern` onto the registry's typed fields; verify the frontmatter compliance finding unchanged.
+  Status 2026-11-25: open; not approved scope after the 2026-11-25 programme close, no owner (PR C, the S4b write side).
 - [ ] 2.12 Move each single-key comparison on `entity`, `source`, `evidence` and `collection` to a role or attribute predicate. Verify the affected suites.
+  Status 2026-11-25: open; not approved scope after the 2026-11-25 programme close, no owner (PR C, the S4b write side).
 - [ ] 2.13 Unify type normalisation across every predicate site and add its requirement here; verify the deliberate result for a mixed-case type at each site.
+  Status 2026-11-25: open; not approved scope after the 2026-11-25 programme close, no owner (PR C, the S4b write side).
 - [ ] 2.14 Bind the claim store to the note-type registry's effective digest, and remove the S4a exception from the requirement. Verify that a save and a restore change claim scope at the next claim read, without a page write or rebuild.
+  Status 2026-11-25: open; not approved scope after the 2026-11-25 programme close, no owner (PR C, the S4b write side).
 - [ ] 2.15 Align statuses with the note-type admission rule: a caller who cannot admit the status overlay, and an unbound library call, classify against the shipped pack instead of refusing. Add the `lifecycle-status-registry` delta; verify the denied-caller indistinguishability tests.
+  Status 2026-11-25: open; not approved scope after the 2026-11-25 programme close, no owner (PR C, the S4b write side).
 - [ ] 2.16 Turn the task 4.3 proof green and run the full suite at the completion boundary.
+  Status 2026-11-25: open; not approved scope after the 2026-11-25 programme close, no owner (PR C, the S4b write side).
 - [ ] 2.17 Obtain an exact independent review; pass full CI, merge and verify the ordinary release.
+  Status 2026-11-25: open; not approved scope after the 2026-11-25 programme close, no owner (PR C, the S4b write side).
 
 ## 3. Closure
 
 - [ ] 3.1 After S4b merges and every task above has evidence, synchronize the deltas and archive with `openspec archive`. Run `openspec validate --all --strict` before and after.
+  Status 2026-11-25: open; waits on S4b (tasks 2.2 to 2.17), which is not approved scope after the 2026-11-25 programme close, no owner. Tasks 2B.1 to 2B.4 stay with `adopt-root-vault-layout`.

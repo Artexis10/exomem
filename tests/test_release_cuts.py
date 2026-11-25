@@ -1387,13 +1387,17 @@ def test_a_scheduled_run_waits_while_an_open_cut_runs_its_own_full(monkeypatch):
     not os.environ.get("RELEASE_PLEASE_NODE_MODULES"), reason="pinned Release Please parser"
 )
 def test_changelog_changes_follow_release_pleases_own_parser(tmp_path, monkeypatch):
-    """A breaking footer or a second header in a body is a release, as release-please counts it."""
+    """A breaking footer or a second header in a body is a release, as release-please counts it.
+
+    An unparseable message is skipped without corrupting the JSON the decision reads.
+    """
     repository(tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("NODE_PATH", os.environ["RELEASE_PLEASE_NODE_MODULES"])
     (tmp_path / "start.txt").write_text("start")
     start = commit(tmp_path, "chore: start")
     messages = (
+        "Merge branch 'feature' into main",
         "ci: cache the wheel build",
         "chore: drop the retired key\n\nBREAKING CHANGE: the key is gone",
         "chore: bump a pin\n\nfix(store): keep a save a restart interrupted",

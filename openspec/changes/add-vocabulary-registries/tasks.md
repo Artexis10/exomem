@@ -8,7 +8,7 @@ After S1, the coupled S2/S3 batch, S5 and S10 can run in parallel; other depende
 
 Base `118f377ab04c595db26f13024a682f05aca31fc0` has the foundation merge's exact tree.
 CI run `37762518836` reported success on that exact head.
-The S1 boxes cite their proof below. Task 2.1 is delivered in PR #1630. Task 2.2 stays open. S3 shipped in #1630 (`7b242bfa8`, change archived 2026-10-11), S4a in #1647 (`fb74f8c57`) and S10 in #1640 (`5c38c1f2b`, change archived 2026-10-11).
+The S1 boxes cite their proof below. Tasks 2.1 and 2.2 are delivered in PRs #1630 and #1647. S3 shipped in #1630 (`7b242bfa8`, change archived 2026-10-11), S4a in #1647 (`fb74f8c57`) and S10 in #1640 (`5c38c1f2b`, change archived 2026-10-11).
 
 ## S1. Substrate, revert, generic contract, bootstrap section (shipped foundation)
 
@@ -34,7 +34,8 @@ Task 2.1 is delivered in [PR #1630](https://github.com/Artexis10/exomem/pull/163
 The scaffold holds `references/vocabulary.md`; `SKILL.md` and the capture, ingest, curate and review skills link it.
 
 - [x] 2.1 Add `references/vocabulary.md` and link it from SKILL.md and the capture, ingest, curate and review skills. Teach the loop: read the live set, reuse or alias, promote under a parent only when nothing fits, know it takes effect at once, report the promotion with its revert route.
-- [ ] 2.2 Remove hard-coded vocabulary from the skills: the `COMPILED_TYPES` sentences in `semantic-authoring.md` and nine workflow skills, and the inactive-status list. Proof: skill-contract validation, the no-leak scan and the plugin sync. S4a (`add-note-type-registry`, task 1.10) delivers the `COMPILED_TYPES` sentence removal.
+- [x] 2.2 Remove hard-coded vocabulary from the skills: the `COMPILED_TYPES` sentences in `semantic-authoring.md` and nine workflow skills, and the inactive-status list. Proof: skill-contract validation, the no-leak scan and the plugin sync. S4a (`add-note-type-registry`, task 1.10) delivers the `COMPILED_TYPES` sentence removal.
+  Evidence: #1647 (`fb74f8c57fd808895183a1d7587f2ef7bbeb5de8`, task 1.10 of `add-note-type-registry`) replaced the `COMPILED_TYPES` sentences with the note-type role predicate in `semantic-authoring.md` and the skill copies under `plugins/claude-code/skills`; the generic scaffold now lists the shipped compiled types and defers to the registry. #1630 (`7b242bfa8499d59a130c00b333da12df022740ee`) replaced the inactive-status list with the status-class rule that `bootstrap(section="authoring")` serves. On the current head no file under `src/exomem/_scaffold`, `plugins` or `tests` contains `COMPILED_TYPES`. #1647 lists the plugin-sync and skills suites among its 1,170 passing scoped suites, and #1630 passed required CI (29 checks passed, 13 skipped). No test named for this task checks the removal itself.
 
 ## S3. Lifecycle statuses (`add-lifecycle-status-registry`)
 
@@ -52,27 +53,34 @@ Tasks 1.1 to 1.13 of [`add-note-type-registry`](../add-note-type-registry/tasks.
 Tasks 2.1 to 2.15 of [`add-note-type-registry`](../add-note-type-registry/tasks.md) carry S4b, including the type-key debt that S4a defers.
 
 - [ ] 4.2 Move `folder`, `partition`, `stem`, `required_fields`, `statuses`, typed fields, `sections`, `claim_sections`, `sources` and `time_bounded` into the registry for `note.py`, `create_file`, `indexes`, `adoption_proposals`, `cloud_plugins` and `commands`.
+  Status 2026-11-25: open; `folder`, `time_bounded` and `sources` shipped with S4a in #1647. The other attributes belong to S4b (`add-note-type-registry` tasks 2.2 to 2.17), which is not approved scope after the 2026-11-25 programme close, no owner.
 - [ ] 4.3 Proof: promote `meeting-note` under `insight`; `note()` lands it in `Notes/Meetings` with compiled behaviour; `restore` removes it. Run the full suite at the completion boundary.
+  Status 2026-11-25: open; not approved scope after the 2026-11-25 programme close, no owner. The `restore` half is covered for S4a by `tests/test_note_type_registry.py`; promotion into `Notes/Meetings` through `note()` is the S4b write side and does not exist.
 
 ## S5. Entity, relation and source attributes (after the retire-Other slice)
 
 - [ ] 5.1 Add `claim_sections` and `optional_frontmatter` behaviour for entity types and make `cue_nouns` the only cue-noun source; key relation behaviour on `family`; add `path_label`, `requires_url`, `reserved_path` and `working_context` to source kinds; make semantic-category aliases the source for working-set categories and move the category core into a pack.
+  Status 2026-11-25: open; partly delivered, not all clauses decidable. Relation behaviour keyed on `family` shipped as registry `behaviours` in #2594 (`b75b3a4210ebac59f236713ef2bec03d146dcb90`, `make-epistemic-language-dynamic` tasks 2.2 and 2.4). `path_label` and `requires_url` exist on source kinds. Not delivered: `working_context` and entity-type `claim_sections` do not exist in `src/exomem`, and `referent_resolution.py` still holds `_PERSON_NOUNS` and `_TYPE_NOUNS` beside registry `cue_nouns`. The semantic-category clause was not checked. No owner after the 2026-11-25 programme close.
 
 ## S6. Vault-specific conventions (after S3)
 
 - [ ] 6.1 Replace the four copies of slug suffixes and hub or snapshot tags with `page_classes` in activation conventions, and the research-folder demotion with a project-key rule.
+  Status 2026-11-25: open; `page_classes` does not exist in `src/exomem`. The hub and snapshot tag demotion is in scope of the active change `make-activation-conventions-vault-owned`, which has open tasks; no owner for the slug-suffix and research-folder parts after the 2026-11-25 programme close.
 
 ## S7. Language packs (`add-language-packs`, after the licensing slice)
 
 - [ ] 7.1 Move the nine language-word copies verbatim into the `en` pack, add `_Schema/language.yaml`, then collapse divergent copies only where the benchmarks show no per-case loss. Proof: English benchmarks unchanged and a German fixture resolves "weiter".
+  Status 2026-11-25: open; no `add-language-packs` change exists, and `src/exomem` holds no `en` pack and no `_Schema/language.yaml`. Not approved scope after the 2026-11-25 programme close, no owner.
 
 ## S8. Model-judgement replacements
 
 - [ ] 8.1 One PR each for the word-based find intent, artifact-role cues, contact intent and deadline cues. Proof: a per-case ablation with a confidence interval.
+  Status 2026-11-25: open; no ablation record exists for any of the four replacements, which were not checked one by one. Not approved scope after the 2026-11-25 programme close, no owner.
 
 ## S9. Nudges (after S3 and S4b)
 
 - [ ] 9.1 Use the `activate-agent-led-vocabulary-evolution` work-item queue as the nudge channel: "you used X, the vault calls it Y" in the advisory slot; Dreamer upkeep families for recurring unregistered values, near-duplicate entries and per-registry debt.
+  Status 2026-11-25: open; the work-item queue that the task names belongs to `activate-agent-led-vocabulary-evolution`, which is still open, and S4b is not approved scope after the 2026-11-25 programme close. No owner.
   Complemented by `promote-referents-without-nudges` task 2.7, which adds `specific_options` for a generic edge between entities to the same relation-advisory slot. Variant nudges stay with this task.
 
 ## S10. Planning (`add-planning-value-registry`)
@@ -95,3 +103,4 @@ Evidence: PR A supplies registry tolerance, shadowing, admitted-instance resolut
 ## Closure
 
 - [ ] 11.1 After S10 merges and every non-optional task above is evidenced as shipped, synchronize the deltas and archive this change with `openspec archive`; run `openspec validate --all --strict` before and after.
+  Status 2026-11-25: open; waits on tasks 4.2, 4.3, 5.1, 6.1, 7.1, 8.1 and 9.1. The change stays active.
