@@ -69,11 +69,11 @@ The import package becomes `evermatter`. An `exomem` alias package follows the e
 - `python -m exomem` and `python -m exomem.<submodule>` run like the new names, so installed service units keep working;
 - the deprecation line goes to the log, never to a hook's stdout.
 
-`kb_mcp` re-targets to the new package. The rename is one commit of moved files and rewritten imports. It lands in a freeze window that the Session manager announces to open branches, and it changes no constant (D0).
+`kb_mcp` re-targets to the new package. The same commit moves the internal settings names from `EXOMEM_X` to `EVERMATTER_X`: every reader, and every in-process writer such as test fixtures, the demo and command-line flags. The rename rule in `rename-agent-surfaces-to-evermatter` D3 then runs the other way, renaming `EXOMEM_X` into `EVERMATTER_X`. The rename is one commit of moved files and rewritten imports. It lands in a freeze window that the Session manager announces to open branches, and it changes no constant (D0).
 
 ### D6. Machine-local state moves by rename
 
-An explicit command stops the service and renames `<state home>/exomem` to `<state home>/evermatter` on the same filesystem. The rename is atomic and takes no extra disk. The same command moves the mode config and the import journals. Until the move, every reader falls back to the old path, so a machine that never runs the command keeps working. The undo is the reverse rename. A running service never moves its own state.
+An explicit command stops the service and renames `<state home>/exomem` to `<state home>/evermatter` on the same filesystem. The rename is atomic and takes no extra disk. The same command moves the mode config and the import journals, including their Windows locations under `%LOCALAPPDATA%`, where the application directory and the journal folder both carry the name. Until the move, every reader falls back to the old path, so a machine that never runs the command keeps working. The undo is the reverse rename. A running service never moves its own state.
 
 ### D7. Cloud infrastructure: readers first per family; stateful resources keep their names
 

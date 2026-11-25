@@ -31,15 +31,21 @@ The MCP server key, the serverInfo name, the plugin names, the skill names and t
 
 #### Scenario: Settings use the new prefix and keep the old one as an alias
 
-- **WHEN** a deployment sets `EXOMEM_VAULT_PATH` and no `EVERMATTER_VAULT_PATH`
-- **THEN** the service and the hooks use that value as `EVERMATTER_VAULT_PATH`
+- **WHEN** a deployment sets `EVERMATTER_VAULT_PATH`, or only the older `EXOMEM_VAULT_PATH`
+- **THEN** the service and the hooks use that value
 - **AND** setup and the installers write `EVERMATTER_VAULT_PATH`
 
 #### Scenario: The two prefixes disagree
 
 - **WHEN** one source sets `EVERMATTER_VAULT_PATH` and `EXOMEM_VAULT_PATH` to different values
-- **THEN** the service and every command that writes a credential refuse to start and name both variables, without their values
-- **AND** the hooks skip the run and log the conflict, and the capture queue keeps the work
+- **THEN** the service and every command that reads a placement setting or writes a credential refuse to start and name both variables, without their values
+- **AND** the hooks skip that turn's nudge or checkpoint and log the conflict
+
+#### Scenario: A value written after import wins
+
+- **WHEN** a shell exports `EVERMATTER_STATE_ROOT` and a test fixture or command then sets `EXOMEM_STATE_ROOT` in the same process
+- **THEN** the process uses the value that the fixture or command set
+- **AND** a child process inherits only `EXOMEM_STATE_ROOT`
 
 #### Scenario: A cell on an older image keeps its settings
 
@@ -70,7 +76,7 @@ The Python import package SHALL be `exomem`, and the CLI SHALL be reachable as `
 
 ### Requirement: Legacy `KB_MCP_*` Environment Variables Keep Working
 
-The system SHALL honor legacy `KB_MCP_*` environment variables by filling each `EVERMATTER_*` equivalent at package import when neither `EVERMATTER_*` nor `EXOMEM_*` is set for that setting. An explicitly set `EVERMATTER_*` or `EXOMEM_*` value SHALL take precedence over a conflicting legacy value. The promotion SHALL be re-runnable for environments populated after import, and SHALL log a single advisory line when legacy names were promoted.
+At package import, the system SHALL rename each `EVERMATTER_*` variable, then each legacy `KB_MCP_*` variable, to its `EXOMEM_*` equivalent when that is unset. A set `EXOMEM_*` value, and a later in-process write of one, SHALL win. The promotion SHALL be re-runnable and SHALL log one advisory line when it renamed a legacy name.
 
 #### Scenario: Old .env keeps working unchanged
 

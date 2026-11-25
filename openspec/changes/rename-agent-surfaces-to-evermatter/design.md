@@ -44,17 +44,17 @@ The accepted server names live in `client_config` beside the emitted `SERVER_NAM
 
 ### D3. Settings take the `EVERMATTER_` prefix: readers first, writers a release later
 
-The documented name of every setting becomes `EVERMATTER_X`. `EXOMEM_X` and the legacy `KB_MCP_X` stay working aliases through the compatibility window. A promotion that copies one prefix over another after the fact is wrong: it beats values that our own code forces, that a `.env` file sets or that an isolation recipe exports, and the literal-name conflict checks never see a conflict across prefixes.
+The documented name of every setting becomes `EVERMATTER_X`. `EXOMEM_X` and the legacy `KB_MCP_X` stay working aliases through the compatibility window. Code keeps reading the internal name `EXOMEM_X` until the package rename in `rename-stored-identifiers-to-evermatter`, which moves the readers and every in-process writer together.
 
-Each source therefore resolves the names before its own rules apply:
-- The process environment fills `EVERMATTER_X` from `EXOMEM_X`, and then from `KB_MCP_X`, only when every name earlier in that order is unset.
-- A `.env` load resolves its keys before the conflict check and the override.
-- The standalone hooks resolve the names in their own alias normaliser. One function defines the names for a setting. The hooks keep a copy, because they cannot import the package, and a test keeps that copy in step.
+A copy of one prefix over another after the fact is wrong. It beats values that our own code forces, that a `.env` file sets, that an isolation recipe exports, or that code writes after import, such as a test fixture, the demo or a command-line flag. Each source therefore renames the documented name into the internal one before its own rules apply, and removes the documented name from the process environment:
+- The process environment renames `EVERMATTER_X` to `EXOMEM_X`, and then `KB_MCP_X` to `EXOMEM_X`, only when `EXOMEM_X` is unset. A later in-process write of `EXOMEM_X` therefore wins, and a child process inherits one name, not two.
+- A `.env` load renames its keys before the conflict check and the override.
+- The standalone hooks rename the names in their own alias normaliser. One function defines the names for a setting. The hooks keep a copy, because they cannot import the package, and a test keeps that copy in step.
 
-When one source sets `EVERMATTER_X` and `EXOMEM_X` to different values, the service and every command that writes a credential refuse to start and name both variables, without their values. This control prevents a service from running on the wrong vault, state root or credential. When it fires wrongly, the operator pays one refused start and fixes it by deleting one line. The hooks never pick on a conflict: they skip the run and log the conflict, and the capture queue keeps the work.
+When one source sets `EVERMATTER_X` and `EXOMEM_X` to different values, the service and every command that reads a placement setting (the vault path, the state root) or writes a credential refuse to start. The refusal names both variables, without their values. This control prevents a run on the wrong vault, state root or credential. When it fires wrongly, the operator pays one refused start and fixes it by deleting one line. The hooks never pick on a conflict: they skip that turn's nudge or checkpoint and log the conflict.
 
 The release order prevents version skew:
-1. Settings release S1 teaches every reader both names. No writer changes.
+1. Settings release S1 teaches every source to rename the documented names. No writer outside the process changes.
 2. Settings release S2, at least one release later, makes setup, the installers (shell and PowerShell), the service files, the container images, the Helm chart and the remote setup wizard emit only `EVERMATTER_*`. Scrubs and denylists cover every name.
 3. cellctl renders each cell's manifest with the names that the cell's target image reads. An image older than S1, including the previous image on a refused upgrade, gets `EXOMEM_*`. cellctl emits `EVERMATTER_*` only for an image at S1 or later.
 

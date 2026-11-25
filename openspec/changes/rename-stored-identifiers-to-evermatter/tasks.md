@@ -23,7 +23,7 @@
 
 ## 5. Package and state (D5, D6)
 
-- [ ] 5.1 Rename the import package to `evermatter` in an announced freeze window. Ship the `exomem` alias package with the same module objects and `python -m` entry points, and re-target `kb_mcp`.
+- [ ] 5.1 Rename the import package to `evermatter` in an announced freeze window. Ship the `exomem` alias package with the same module objects and `python -m` entry points, and re-target `kb_mcp`. Move the internal settings names and every in-process writer to `EVERMATTER_X` in the same commit.
 - [ ] 5.2 Add the explicit command that stops the service and renames the state directory, the mode config and the import journals. Make readers fall back to the old paths.
 
 ## 6. Cloud infrastructure (D7)
@@ -34,6 +34,6 @@
 
 ## 7. Compatibility window (optional for archive)
 
-Archive this change after `rename-agent-surfaces-to-evermatter`, because both modify the same requirement.
+Archive this change after `rename-agent-surfaces-to-evermatter`, because both modify the same requirement. At archive, rename the requirement "Exomem Is the Canonical Internal Name" to "Evermatter Is the Canonical Internal Name", and update the spec's Purpose to match.
 
 - [ ] 7.1 On or after 2027-11-23, review use of the alias package and the old state-path fallback, and remove each only with evidence.
