@@ -585,6 +585,18 @@ def test_a_no_file_run_states_the_origin_and_never_asks_the_cell_to_file(rig, tm
     assert series.origin == {"browser_family": "cli"}
 
 
+def test_a_run_that_asks_the_cell_to_file_without_filing_itself_writes_the_request_and_makes_no_file_call(rig, tmp_path):
+    """Catches `--no-wait` that files itself, or leaves out the request: no one would then file the stage."""
+    rig.files(a01__bin=800, n01__md=100)
+
+    rig.run(file=False, ask_cell=True)
+
+    (import_id,) = rig.cloud.completed
+    vault, stage_id = _stage_with(tmp_path, rig.cloud.members[import_id][import_stage.SERIES_FILE])
+    assert import_stage.read_series(vault, stage_id).filing == "cell"
+    assert rig.cell.filed == []
+
+
 def test_each_archive_member_carries_the_modification_time_of_its_source_file(rig):
     """Catches an archive that stamps every member with the upload time, so each Source's file_modified would be wrong."""
     rig.files(a01__bin=800, n01__md=100)

@@ -13,3 +13,12 @@
 
 - **WHEN** the command runs with `--no-file`
 - **THEN** no window's series file asks the cell to file, and the windows stay staged for the assistant
+
+### Requirement: The CLI can ask the cell to file and not wait
+
+`exomem cloud import --no-wait` SHALL write the same series file as the default run, with `"filing": "cell"` and the origin envelope, and SHALL make no `file` call. It SHALL refuse `--no-file` and `--collection` with it.
+
+#### Scenario: A sender files nothing itself
+
+- **WHEN** `exomem cloud import --no-wait` uploads a folder
+- **THEN** each window's series file asks the cell to file, the command makes no `file` call, and the cell files the stage

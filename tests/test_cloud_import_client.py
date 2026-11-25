@@ -468,6 +468,37 @@ def _endpoints_used(monkeypatch, tmp_path, *arguments) -> CloudImportClientConfi
     return seen[0]
 
 
+def test_no_wait_asks_the_cell_to_file_while_no_file_does_not_and_the_two_cannot_go_together(tmp_path, monkeypatch, capsys):
+    """Catches `--no-wait` that still files from this command, or `--no-file` that asks the cell to file."""
+    sent = []
+
+    async def capture(source, config, checkpoint, **kwargs):
+        sent.append((kwargs["file"], kwargs["ask_cell"]))
+        return {"import_id": "e91b0d91-79ab-4c9c-950b-a85e80c3a7ef", "windows": 1}
+
+    class NoCell:
+        def __init__(self, config, oauth):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *error):
+            return None
+
+    monkeypatch.setattr(cloud_import_windows, "McpCell", NoCell)
+    monkeypatch.setattr(cloud_import_windows, "import_folder", capture)
+    base = ["import", str(tmp_path), "--checkpoint", str(tmp_path / "cp")]
+
+    for arguments in ([], ["--no-wait"], ["--no-file"]):
+        assert cloud_import_client.main([*base, *arguments]) == 0
+    with pytest.raises(SystemExit):
+        cloud_import_client.main([*base, "--no-wait", "--no-file"])
+
+    assert sent == [(True, True), (False, True), (False, False)]
+    assert "--no-wait" in capsys.readouterr().err
+
+
 def test_a_label_reaches_the_import_and_one_the_cell_would_drop_is_refused_before_any_upload(tmp_path, monkeypatch, capsys):
     """Catches a label that the cell leaves out unseen: an overlong one would never reach its Sources."""
     sent = []

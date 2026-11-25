@@ -651,7 +651,8 @@ async def _run(args, config: CloudImportClientConfig, checkpoint: Path, progress
             return await import_folder(
                 args.source, config, checkpoint, cell=cell, api=api, uploads=uploads, include_hidden=args.include_hidden,
                 use_gitignore=not args.no_gitignore, progress=progress, resend_residual=args.resend_residual,
-                file=not args.no_file, collection=args.collection, origin_label=args.label)
+                file=not (args.no_file or args.no_wait), collection=args.collection, origin_label=args.label,
+                ask_cell=not args.no_file)
     finally:
         await api.aclose()
         await uploads.aclose()
@@ -674,9 +675,13 @@ def main(argv=None) -> int:
     command.add_argument("--label", help="where these files came from, such as a device or a drive; each filed page records it")
     command.add_argument("--no-file", action="store_true",
                          help="only upload: leave each landed window staged for your assistant to file")
+    command.add_argument("--no-wait", action="store_true",
+                         help="upload, and ask the cell to file the folder itself: this command files nothing and does not wait for it")
     args = parser.parse_args(argv)
     if args.no_file and args.collection:
         parser.error("--collection names the filing, so it cannot go with --no-file")
+    if args.no_wait and (args.no_file or args.collection):
+        parser.error("--no-wait asks the cell to file the folder as it is, so it cannot go with --no-file or --collection")
     if args.label is not None and import_stage.ORIGIN_LABEL not in import_stage.origin_values({import_stage.ORIGIN_LABEL: args.label}):
         # The cell leaves out a label of another shape, so a refusal here keeps the person from losing it unseen.
         parser.error("--label must be printable text of 1 to 200 characters")
