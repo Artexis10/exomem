@@ -79,6 +79,20 @@ class Lifecycle:
     vacated_folders: tuple[str, ...] = ()
 
 
+def names_only_other_files(vault_root: Path, writes: list[vault.PlannedWrite]) -> bool:
+    """Whether a non-empty batch names only files that the store neither holds nor derives rows for.
+
+    A page or a binary is the store's, and so is a Markdown file that it does not own (its rows
+    refresh at the commit). Anything else, such as a curation run's JSON file, gives the store no
+    change: the store refuses an empty one, and the file-mode writer commits these files.
+    """
+    return bool(writes) and not any(
+        rel is not None
+        and (ownership.classify(rel) is not ownership.Ownership.NONE or ownership.is_markdown(rel))
+        for rel in (_relative(vault_root, write.path) for write in writes)
+    )
+
+
 def commit_batch(
     writer: CollectionWriter,
     writes: Iterable[vault.PlannedWrite],
@@ -232,7 +246,7 @@ class _Plan:
             if rel is not None and kind is ownership.Ownership.BINARY:
                 self.binaries.append((rel, write))
             # A Markdown suffix names the format, so it fixes which files carry rows.
-            elif rel is not None and rel.lower().endswith(".md"):
+            elif rel is not None and ownership.is_markdown(rel):
                 self.refresh.append(rel)
         self.disk_guards: list[vault.PathGuard] = []
         self.disk_censuses: list[vault.DirectoryCensusGuard] = []

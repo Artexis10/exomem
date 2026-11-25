@@ -2923,7 +2923,7 @@ def test_committed_derived_failure_is_idempotently_replayed(tmp_path: Path) -> N
     )
 
     assert calls == 1
-    assert replay == first
+    assert replay == {**first, "replayed": True}
 
 
 def test_canonical_handoff_is_non_owned_until_off_boundary_graph_work_completes(
@@ -2980,7 +2980,8 @@ def test_canonical_handoff_is_non_owned_until_off_boundary_graph_work_completes(
     owner.join(_HOLD_SECONDS)
     replay.join(_HOLD_SECONDS)
 
-    assert result == [
+    # Whether the second caller reads a replay or the resumed result depends on when it arrives.
+    assert [{key: value for key, value in item.items() if key != "replayed"} for item in result] == [
         {"state": "committed", "graph_sync": "completed"},
         {"state": "committed", "graph_sync": "completed"},
     ]

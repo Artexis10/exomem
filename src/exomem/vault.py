@@ -6388,8 +6388,12 @@ def batch_atomic_write(
         from .vault_store import availability
         from .vault_store import batch as store_batch
 
+        writes = list(writes)
         writer = availability.page_writer(Path(vault_root))
-        if writer is not None:
+        # A batch with no page, binary or Markdown file has no change for the store, which refuses
+        # an empty one. Such files (a curation run's JSON) are file-mode's, so the native writer
+        # below commits them, as it does in a file-mode vault.
+        if writer is not None and not store_batch.names_only_other_files(Path(vault_root), writes):
             if _payload_custody is not None:
                 # A file-owner contract cannot silently lose its custody in another persistence owner.
                 raise ValueError("file payload custody requires its native writer")

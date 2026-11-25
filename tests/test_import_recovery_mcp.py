@@ -71,7 +71,7 @@ def test_import_reconciliation_cannot_reclaim_an_active_owner(tmp_path):
             release.set()
         assert first.result(timeout=5) == {"applied": 1}
     assert store.run("same-identity", "a" * 64, lambda: pytest.fail("completed leaf executed again"),
-                     reconcile_abandoned=True) == {"applied": 1}
+                     reconcile_abandoned=True) == {"applied": 1, "replayed": True}
 
 
 @pytest.mark.parametrize("cut", ["source", "artifact", "log", "source-no-log"])

@@ -259,7 +259,7 @@ def test_equivalent_nested_and_legacy_calls_share_digest_and_execute_once(
             edits=[{"old_string": "Before", "new_string": "After"}],
         )
 
-    assert nested == legacy
+    assert legacy == {**nested, "replayed": True}
     assert calls == [
         {
             "path": "Knowledge Base/Notes/Insights/example.md",
@@ -715,7 +715,7 @@ def test_identical_pending_retry_waits_outside_mutation_boundary_and_replays(
     assert not first.is_alive()
     assert not retry.is_alive()
     assert errors == []
-    assert results == [{"value": 7}, {"value": 7}]
+    assert sorted(results, key=len) == [{"value": 7}, {"value": 7, "replayed": True}]
     assert calls == 1
 
 
@@ -1042,12 +1042,13 @@ def test_explicit_mcp_keys_are_isolated_by_verified_principal_and_vault(tmp_path
         bound = command_surface.bind_vault(leaf, root, command=command)
         with principal_module.request_scope(principal_module.RequestPrincipal(audience_id=audience, surface="mcp")):
             assert bound(content="Text") == {"content": "Text"}
-            assert bound(content="Text") == {"content": "Text"}
+            assert bound(content="Text") == {"content": "Text", "replayed": True}
     assert len(calls) == 3
 
 
-def test_an_identical_curation_resume_advances_the_run_instead_of_replaying(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("curation_action", ["resume", "relocate"])
+def test_an_identical_continuing_curation_call_advances_the_run_instead_of_replaying(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, curation_action: str
 ) -> None:
     steps = iter(["step-1", "step-2"])
 
@@ -1058,21 +1059,53 @@ def test_an_identical_curation_resume_advances_the_run_instead_of_replaying(
     (tmp_path / "vault" / "Knowledge Base").mkdir(parents=True)
     manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
     monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
-    resume = {
+    call = {
         "mode": "curation",
-        "curation_action": "resume",
+        "curation_action": curation_action,
         "run_id": "cur-example",
         "plan_id": "plan-example",
     }
 
     first = writer_lease.invoke_command(
-        command, tmp_path / "vault", implicit_idempotency_scope="session:test", **resume
+        command, tmp_path / "vault", implicit_idempotency_scope="session:test", **call
     )
     second = writer_lease.invoke_command(
-        command, tmp_path / "vault", implicit_idempotency_scope="session:test", **resume
+        command, tmp_path / "vault", implicit_idempotency_scope="session:test", **call
     )
 
     assert (first["committed_step"], second["committed_step"]) == ("step-1", "step-2")
+
+
+def test_a_retry_of_one_call_replays_its_reply_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A paused preparation is a bare leaf reply, and its replay must not pass for a fresh run."""
+    runs = []
+
+    def leaf(vault: Path, **kwargs) -> dict:  # noqa: ANN003, ARG001
+        runs.append(1)
+        return {"phase": "preparing", "next_action": "relocate"}
+
+    command = SimpleNamespace(name="maintain_memory", leaf=leaf, read_only=False, executor="cell")
+    (tmp_path / "vault" / "Knowledge Base").mkdir(parents=True)
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    call = {"mode": "curation", "curation_action": "relocate", "pages": ["a"], "to_project": "b"}
+
+    first, retry = (
+        writer_lease.invoke_command(
+            command,
+            tmp_path / "vault",
+            implicit_idempotency_scope="session:test",
+            mutation_request_id="one-call",
+            **call,
+        )
+        for _ in range(2)
+    )
+
+    assert len(runs) == 1
+    assert "replayed" not in first
+    assert retry == {**first, "replayed": True}
 
 
 def test_maintain_audit_is_read_only_for_common_invocation_boundary() -> None:
@@ -2169,7 +2202,7 @@ def test_store_filter_refusal_after_a_write_leaf_reports_an_unknown_outcome(
     assert "retry" not in result["error"]
     retried = command_surface.bind_vault(leaf, vault, command=command)(value=7)
     assert runs == 1
-    assert retried == {"value": 7}
+    assert retried == {"value": 7, "replayed": True}
 
 
 def test_stale_history_after_a_write_does_not_reexecute_the_leaf(tmp_path, monkeypatch):
@@ -2210,7 +2243,7 @@ def test_stale_history_after_a_write_does_not_reexecute_the_leaf(tmp_path, monke
     assert result["error"]["message"].endswith("Whether it was saved is not known.")
     assert result["diagnostics"]["error"]["committed"] is None
     assert result["diagnostics"]["error"]["post_leaf_refusal"] == "COLLECTION_NOT_FOUND"
-    assert bound(value=7) == {"value": 7}
+    assert bound(value=7) == {"value": 7, "replayed": True}
     assert runs == 1
 
 

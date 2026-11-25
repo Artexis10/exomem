@@ -488,8 +488,11 @@ def attention(
             )
             found, coverage = [*report.findings, *stored], (report.metadata or {}).get("coverage")
     else:
-        # The held pass ran every triageable queue; its coverage is keyed by queue.
-        found = held.findings
+        # The held pass ran every triageable queue; its coverage is keyed by queue. Its worker
+        # spells each finding's call with no serving surface bound, so a family that a stored row
+        # serves is built here instead, spelled for this caller's surface.
+        audited, stored = _stored_rows(vault_root, resolved)
+        found = [*(finding for finding in held.findings if finding.category in audited), *stored]
         coverage = {k: v for k, v in (held.coverage or {}).items() if k in resolved} or None
     # BEFORE fusion, deliberately. Dropping an excluded family's reasons at the
     # report edge would leave its RRF votes in the scores, so an item flagged

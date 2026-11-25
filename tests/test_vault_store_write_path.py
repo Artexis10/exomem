@@ -16,7 +16,7 @@ from contextlib import closing
 import pytest
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_media_store import selected_store as selected_store
-from test_vault_store_migration import ALPHA, DIAGRAM, DIAGRAM_BYTES, vault  # noqa: F401
+from test_vault_store_migration import ALPHA, BETA, DIAGRAM, DIAGRAM_BYTES, vault  # noqa: F401
 from test_vault_store_read_write import stored, writer  # noqa: F401
 from test_workflow_contracts import _proposal as workflow_contract_proposal
 
@@ -604,6 +604,84 @@ def test_a_batch_that_mixes_a_page_a_binary_and_a_file_the_store_does_not_own(se
         assert view.page(OUTSIDE) is None
     assert store_rows(served, "SELECT 1 FROM pages WHERE path = ?", OUTSIDE)
     assert bm25_paths(served, "harbour") == [GAMMA]
+
+
+def test_a_batch_of_files_the_store_does_not_hold_commits_through_the_file_writer(served):
+    """A curation run's JSON file is no page, binary or Markdown file, so the store has no change
+    for it and refuses an empty one: every curation run failed to seal in a store-mode vault."""
+    run_file = "Knowledge Base/_Governance/curation/runs/run-1/plan.json"
+    vault_module.batch_atomic_write(
+        [planned(served, run_file, '{"version": 1}\n', create_only=True)],
+        vault_root=served,
+        post_commit_fanout=False,
+    )
+    assert (served / run_file).read_text() == '{"version": 1}\n'
+    assert not store_rows(served, "SELECT 1 FROM store_pages WHERE path = ?", run_file)
+
+
+def apply_curation_run(root, proposed):
+    """Approve a sealed run and call again until it is no longer executing."""
+    result = commands.op_maintain_memory(
+        root,
+        mode="curation",
+        curation_action="apply",
+        run_id=proposed["run_id"],
+        plan_id=proposed["plan_id"],
+        expected_plan_fingerprint=proposed["plan_fingerprint"],
+        why="Approved in the test.",
+    )
+    while result["phase"] == "executing":
+        result = commands.op_maintain_memory(
+            root,
+            mode="curation",
+            curation_action="resume",
+            run_id=proposed["run_id"],
+            plan_id=proposed["plan_id"],
+        )
+    return result
+
+
+def test_a_curation_plan_seals_and_completes_in_a_store_mode_vault(served):
+    """Every sealing write of a run failed in store mode, so no plan could be proposed."""
+    plan = {
+        "version": 1,
+        "title": "A plain note",
+        "steps": [
+            {
+                "step_id": "note",
+                "kind": "create-note",
+                "args": {
+                    "title": "Plain note",
+                    "slug": "plain-note",
+                    "content": "## Observations\n\n- [finding] A plain note. ^plain\n",
+                    "relation_disposition": "reviewed_none",
+                    "relation_review_reason": "No honest relation exists for this fixture.",
+                },
+            }
+        ],
+    }
+    proposed = commands.op_maintain_memory(
+        served, mode="curation", curation_action="propose", plan=plan
+    )
+    done = apply_curation_run(served, proposed)
+    assert done["phase"] == "completed"
+    with read.snapshot(served) as view:
+        assert view.page(done["step"]["path"]) is not None
+
+
+def test_a_relocation_of_two_pages_seals_and_completes_in_a_store_mode_vault(served):
+    proposed = commands.op_maintain_memory(
+        served,
+        mode="curation",
+        curation_action="relocate",
+        pages=[ALPHA, BETA],
+        to_project="meadow",
+    )
+    assert proposed["sealed"] is True
+    assert apply_curation_run(served, proposed)["phase"] == "completed"
+    with read.snapshot(served) as view:
+        for rel in (ALPHA, BETA):
+            assert "project: meadow" in view.page(rel).body.decode()
 
 
 def test_a_binary_delete_that_the_disk_already_made_queues_no_removal(stored, writer):  # noqa: F811

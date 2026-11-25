@@ -9463,14 +9463,16 @@ def invoke_command(
         implicit_idempotency_scope is not None
         and command.name == "maintain_memory"
         and kwargs.get("mode") == "curation"
-        and kwargs.get("curation_action") == "resume"
+        and isinstance(kwargs.get("curation_action"), str)
+        and kwargs["curation_action"] in curation_module.CONTINUING_ACTIONS
     ):
-        # Resume advances a run as far as one call's budget allows, and every call carries the
-        # same arguments, so the call's own request id joins the scope: a new call runs the next
-        # steps instead of replaying the last reply for 600 s, while a retry of one call, the busy
-        # and warm-up waits and a vocabulary binding keep a canonical identity.
+        # A continuing action (resume, relocate) advances as far as one call's budget allows, and
+        # every call carries the same arguments, so the call's own request id joins the scope: a
+        # new call runs the next steps instead of replaying the last reply for 600 s, while a
+        # retry of one call, the busy and warm-up waits and a vocabulary binding keep a canonical
+        # identity.
         implicit_idempotency_scope = (
-            f"{implicit_idempotency_scope}\0resume:{mutation_request_id or uuid.uuid4()}"
+            f"{implicit_idempotency_scope}\0continue:{mutation_request_id or uuid.uuid4()}"
         )
     if selector_error is not None:
 

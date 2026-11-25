@@ -123,8 +123,15 @@ def _relocation_vault(vault: Path) -> dict[str, object]:
 
 
 def _maintain(vault: Path, action: str, **arguments: object) -> dict[str, object]:
+    # The MCP door gives a verified caller this stable scope, so an identical repeat is a retry
+    # that the lease replays for 600 s unless the action asks to be repeated.
     return writer_lease.invoke_command(
-        MAINTAIN, vault, mode="curation", curation_action=action, **arguments
+        MAINTAIN,
+        vault,
+        implicit_idempotency_scope="principal:test",
+        mode="curation",
+        curation_action=action,
+        **arguments,
     )
 
 

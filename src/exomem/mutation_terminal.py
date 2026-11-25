@@ -2245,16 +2245,17 @@ def with_leaf_index_observed(
     return source_result_attribution.carry(terminal, changed)
 
 
-def as_replay(terminal: Any) -> Any:
-    """Mark a stored terminal that answers a retry, so the reply says it is the earlier commit's.
+def as_replay(stored: Any) -> Any:
+    """Mark a stored reply that answers a retry, so the reply says it is the earlier call's.
 
     `mutated`, `request_id` and `receipt_id` stay those of the commit it replays: the egress
-    filter binds a unit write's parent on `mutated`, so a replay must not change it. Anything that
-    is not a terminal passes through.
+    filter binds a unit write's parent on `mutated`, so a replay must not change it. A leaf reply
+    that no commit wrapped (a paused preparation) carries the same marker. A value that is not a
+    mapping passes through.
     """
-    if not isinstance(terminal, Mapping) or terminal.get("_terminal") != _TERMINAL_MARKER:
-        return terminal
-    return source_result_attribution.carry(terminal, {**terminal, "replayed": True})
+    if not isinstance(stored, Mapping):
+        return stored
+    return source_result_attribution.carry(stored, {**stored, "replayed": True})
 
 
 def replayed_terminal(
