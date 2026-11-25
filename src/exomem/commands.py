@@ -12492,7 +12492,8 @@ def op_adoption_studio(
 
     file imports a staged folder in one repeatable call: repeat it with the
     `continuation` it returns until `filing` is not `working`. A serving cell also
-    finishes a stage it was asked to file: read it with status `view="filing"`. An archive sent
+    finishes a stage it was asked to file: read it with inspect_memory `imports.status` and `view="filing"`;
+    manage_memory `imports.file` with `wait` false registers a stage and files nothing in the call. An archive sent
     with upload_files (lane import) is filed with `upload`. Other actions are
     the step path. start scans; select chooses; plan previews; apply copies into
     Sources and drafts notes under own-note rules; cancel closes pre-apply; finish
@@ -12695,8 +12696,9 @@ def op_observe_transfer(
     2. status: the latest import (or import_id) and the export; poll until an adopt import
        is `done`.
     3. File it: manage_memory `imports.file` on the `next` path (`_Imports/<id>`), repeated with its
-       `continuation` until `filing` is not `working`. A cell asked to file finishes the stage itself:
-       poll imports.status `view="filing"` on that path until `state` is `done`. An older server refuses it: `imports.start` on
+       `continuation` until `filing` is not `working`. A cell asked to file finishes it: poll
+       inspect_memory `imports.status` (`view="filing"`) until `state` is `done`; `imports.file` with
+       `wait` false only registers it. An older server refuses it: `imports.start` on
        the path, and again with `next_after`; select, plan and apply (at `apply_stop`, stop
        until space is free); finish.
     4. Review the residual with the person; discard with transfer_memory.
