@@ -1477,6 +1477,7 @@ class StoreServer:
             "registry": 0.0,
         }
         self._served_at = 0.0  # when the store thread last finished a request
+        self._slice_ended = 0.0  # when the store thread last finished a slice of derivation
         self._derived_handle = None  # the writer handle whose derived file the last derived tick reconciled
         self._derivation_handle = None  # the writer handle whose start made every derivation intent due
         self._derive_failing = False  # whether the last owed drain raised, so a repeat logs at debug
@@ -1863,6 +1864,11 @@ class StoreServer:
 
         if self.runtime is None or self._idle_released() or not derivation.owed(self.root):
             return
+        # After a slice, every queued request is served before the next one, unless a slice's worth of
+        # serving has passed since it ended: a burst is served in turn, and derivation still gets about
+        # half the thread under steady load.
+        if self._requests and time.monotonic() - self._slice_ended < derivation.SLICE_SECONDS:
+            return
         from ..governance import policy, principal
         from ..vault_store import mode as store_mode
         from .preview import preview_store
@@ -1888,6 +1894,8 @@ class StoreServer:
             derivation.owe_after_failure(self.root, time.monotonic() + DERIVED_RETRY_SECONDS)
         else:
             self._derive_failing = False
+        finally:
+            self._slice_ended = time.monotonic()
 
     def _checkpoint(self):
         """Copy the WAL into the store once it passes ``CHECKPOINT_WAL_PAGES``, holding no boundary.

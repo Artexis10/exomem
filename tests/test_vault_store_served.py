@@ -60,6 +60,7 @@ from exomem import (
     warmup,
     writer_lease,
 )
+from exomem.cli_ops import OpError
 from exomem.collection_store import connection, runtime
 from exomem.governance import lifecycle
 from exomem.governance.principal import owner_principal, request_scope
@@ -571,35 +572,94 @@ def backlog_page(number):
     return f"{NOTES}/Backlog {number}.md", f"# Backlog {number}\n\nThe ferry calls at dusk.\n".encode()
 
 
-def test_a_request_queued_behind_a_derivation_backlog_is_served_before_the_backlog_is_drained(
+def commit_backlog(root, monkeypatch, pages):
+    """``pages`` one-page commits that nothing derives, as a crash leaves them."""
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: derivation.Drained())
+        patch.setattr(derivation, "owe", lambda *_arguments, **_keywords: None)
+        for number in range(pages):
+            rel, body = backlog_page(number)
+            commit(root, puts=(write.PagePut(rel, body),))
+
+
+def test_requests_queued_together_behind_a_derivation_backlog_are_all_served_before_the_backlog_drains(
     stored, monkeypatch
 ):
-    """A start that finds a dozen intents due, each batch slow, and a request that reaches the store
-    thread while it derives them. Derived whole before the thread took anything else, the backlog
-    outlasted the mutation timeout, and the request was refused as busy."""
+    """A start that finds forty intents due, each batch slow, and eight requests that reach the store
+    thread together while it derives them. Derived whole before the thread took anything else, the
+    backlog outlasted the mutation timeout and every request was refused as busy; with one request
+    served per slice, the sixth and later waited out the timeout."""
     with store_thread(stored):
         server = runtime._server(stored.resolve())
         derived(stored)
-        with monkeypatch.context() as patch:  # commits that nothing derives, as a crash leaves them
-            patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: derivation.Drained())
-            patch.setattr(derivation, "owe", lambda *_arguments, **_keywords: None)
-            for number in range(BACKLOG_PAGES):
-                rel, body = backlog_page(number)
-                commit(stored, puts=(write.PagePut(rel, body),))
+        commit_backlog(stored, monkeypatch, 40)
         with slow_batches(monkeypatch) as seconds:
             derivation.owe(stored.resolve())
             server.call(lambda: None)  # wakes the idle thread, which then derives what is owed
             time.sleep(BATCH_SECONDS / 2)  # the thread is inside its first batch
-            began = time.monotonic()
-            served = server.call(time.monotonic, read_only=True)
-            waited = served - began
+            waits = {}
+
+            def send(number):
+                began = time.monotonic()
+                try:
+                    server.call(lambda: None, read_only=True)
+                    waits[number] = ("served", time.monotonic() - began)
+                except OpError as refusal:
+                    waits[number] = (refusal.code, time.monotonic() - began)
+
+            senders = [threading.Thread(target=send, args=(number,)) for number in range(8)]
+            for sender in senders:
+                sender.start()
+            for sender in senders:
+                sender.join()
             left = len(store_rows(stored, "SELECT path FROM store_derivation_queue"))
             seconds[0] = 0.0
             derived(stored)
+        undrained = store_rows(stored, "SELECT path FROM store_derivation_queue")
 
-    print(json.dumps({"served_after_s": round(waited, 3), "intents_left_when_served": left}))
-    assert waited < server.manager._mutation_timeout_seconds / 2, waited
-    assert left > 0, "the request must be served while the backlog stands for this check to mean anything"
+    print(json.dumps({"outcomes": sorted((round(wait, 2), outcome) for outcome, wait in waits.values()),
+                      "intents_left_when_all_served": left}))
+    assert {outcome for outcome, _wait in waits.values()} == {"served"}, waits
+    assert max(wait for _outcome, wait in waits.values()) < server.manager._mutation_timeout_seconds / 2
+    assert left > 0, "the requests must be served while the backlog stands for this check to mean anything"
+    assert undrained == [], "the thread derived the whole backlog after the requests"
+
+
+def test_derivation_finishes_beneath_a_steady_stream_of_requests(stored, monkeypatch):
+    """Four clients that each send the next request as the last one returns, so a request is always
+    waiting, over a backlog of eight slow batches. Serving every queued request before any slice
+    would never derive; the thread must still finish the backlog, and serve every request."""
+    with store_thread(stored):
+        server = runtime._server(stored.resolve())
+        derived(stored)
+        commit_backlog(stored, monkeypatch, 8)
+        stop, refusals = threading.Event(), []
+
+        def stream():
+            while not stop.is_set():
+                try:
+                    server.call(lambda: time.sleep(0.05), read_only=True)
+                except OpError as refusal:
+                    refusals.append(refusal.code)
+
+        clients = [threading.Thread(target=stream, daemon=True) for _ in range(4)]
+        with slow_batches(monkeypatch):
+            began = time.monotonic()
+            derivation.owe(stored.resolve())
+            for client in clients:
+                client.start()
+            try:
+                while store_rows(stored, "SELECT path FROM store_derivation_queue"):
+                    assert time.monotonic() - began < 60, "the backlog finished beneath the stream"
+                    time.sleep(0.05)
+                drained_after = time.monotonic() - began
+            finally:
+                stop.set()
+                for client in clients:
+                    client.join(30)
+
+    print(json.dumps({"backlog_s_of_work": 8 * BATCH_SECONDS, "drained_after_s": round(drained_after, 2)}))
+    assert refusals == []
 
 
 def test_a_request_that_commits_many_pages_acknowledges_after_one_slice_of_their_rows(
