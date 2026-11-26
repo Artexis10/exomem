@@ -14,7 +14,7 @@ import shutil
 import stat
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 import httpx2
@@ -38,6 +38,7 @@ from .cloud_import_client import (
     _Where,
     import_source,
     lands_declared,
+    resumed_choices,
     safe_code,
     server_code,
 )
@@ -1214,11 +1215,18 @@ async def _older_cell(source, config, checkpoint, limits, options, *, cell, api,
     """A cell without a window budget: refuse a folder above its known size, else send one import.
 
     A request to file or a label needs the series file that a window carries, and a cell that offers filing reads it.
-    The result names the request, because the cell, not this command, does the filing.
+    A new import takes its choices from the cell's offer. A rerun takes them from its checkpoint, so it sends the
+    archive of the first run and the result names the request that run made, because the cell, not this command, files.
     """
     maximum = (limits or {}).get("max_storage_gib")
     needs_series_file = ask_cell or origin_label is not None
-    offered = needs_series_file and await cell.offers_file()
+    now = Choices(filing=ask_cell, label=origin_label, collection=collection)
+    choices = resumed_choices(checkpoint, now)
+    if choices is None:
+        offered = needs_series_file and await cell.offers_file()
+        claim = ("asked" if offered else "not_offered") if ask_cell else None
+        choices = replace(now, carried=offered, cell_filing=claim)
+    offered = choices.carried
     selection = None
     if offered or type(maximum) is int:
         selection = import_selection.select(source, include_hidden=options["include_hidden"], use_gitignore=options["use_gitignore"])
@@ -1235,8 +1243,6 @@ async def _older_cell(source, config, checkpoint, limits, options, *, cell, api,
             progress.say("The cell does not file imports itself. Ask your assistant to file this import once it is staged.")
         if origin_label is not None:
             progress.say("The cell cannot record --label, so the files filed from this import will not carry it.")
-    claim = ("asked" if offered else "not_offered") if ask_cell else None
-    choices = Choices(filing=ask_cell, label=origin_label, collection=collection, cell_filing=claim)
     row = await import_source(source, config, checkpoint, api=api, uploads=uploads, poll_seconds=poll_seconds, progress=progress,
                               include_hidden=options["include_hidden"], use_gitignore=options["use_gitignore"],
                               window=window, choices=choices)

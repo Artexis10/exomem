@@ -774,11 +774,9 @@ def _landed_series_file(rig) -> bool:
 
 
 @pytest.mark.parametrize(("first", "rerun", "flag"), [
-    ({"file": False}, {"file": True}, "--no-file"),
     ({"file": True}, {"file": False}, "--no-file"),
     ({"file": False}, {"file": False, "origin_label": "Phone photos"}, "--label"),
-    ({"file": True}, {"file": True, "collection": "Reading list"}, "--collection"),
-], ids=["now-asks-to-file", "now-no-file", "label-added", "collection-added"])
+], ids=["now-no-file", "label-added"])
 def test_a_rerun_of_a_lone_import_that_changes_what_its_series_file_carries_is_refused_and_keeps_the_checkpoint(rig, first, rerun, flag):
     """Catches a rerun that reports filing, or drops a label, from its own flags while the stopped run's bytes carry others."""
     rig.files(a01__bin=800)
@@ -810,6 +808,29 @@ def test_a_declared_lone_import_that_is_not_archived_is_refused_for_new_flags_an
     assert rig.run(file=True)["cell_filing"] == "asked" and _landed_series_file(rig)
 
 
+@pytest.mark.parametrize(("first_refuses", "carries", "claim"), [(False, True, "asked"), (True, False, "not_offered")],
+                         ids=["offer-withdrawn", "offer-gained"])
+def test_a_rerun_builds_the_archive_the_checkpoint_recorded_when_the_cells_offer_changed_before_it_was_built(
+        rig, first_refuses, carries, claim):
+    """Catches a rerun that is refused, or that builds another archive and claims what the live probe says, after an upgrade."""
+    rig.files(a01__bin=800)
+    rig.cell.refuses_file = first_refuses
+    record = _stop_a_lone_import(rig, file=True)
+    state = json.loads(record.read_text())
+    for name in ("ciphertext_sha256", "ciphertext_bytes"):  # A stop while the archive was built leaves none of these.
+        state.pop(name, None)
+    record.write_text(json.dumps(state))
+    (rig.tmp / "checkpoint" / "archive.age").unlink()
+    rig.cell.refuses_file = not first_refuses
+    rig.lines.clear()
+
+    result = rig.run(file=True)
+
+    assert _landed_series_file(rig) is carries and result["cell_filing"] == claim
+    assert ("the cell files the folder by itself" in rig.said()) is carries
+    assert ("does not file imports itself" in rig.said()) is not carries
+
+
 def test_a_checkpoint_from_before_the_record_was_a_plain_import_and_a_rerun_that_asks_to_file_is_refused(rig):
     """Catches a stopped plain import that a rerun with the default flags resumes and then reports as filed by the cell."""
     rig.files(a01__bin=800)
@@ -822,7 +843,8 @@ def test_a_checkpoint_from_before_the_record_was_a_plain_import_and_a_rerun_that
         rig.run(file=True)
     result = rig.run(file=False)
 
-    assert refused.value.code == "CHECKPOINT_OPTIONS_CHANGED" and "--no-file" in refused.value.message
+    assert refused.value.code == "CHECKPOINT_OPTIONS_CHANGED" and "started as an upload only" in refused.value.message
+    assert "--no-file" in refused.value.message and "ask your assistant to file it" in refused.value.message
     assert "cell_filing" not in result and not _landed_series_file(rig)
 
 

@@ -258,7 +258,7 @@ async def run_cli_import(ctx: Context, image: str, source: Path, *, label: str =
     result = results[0]
     import_id = str(uuid.UUID(result["import_id"]))
     if not lone_import_reported(result, import_id, cell_filing):
-        raise StepFailure(f"native CLI did not report the completed C5 import: {result}")
+        raise StepFailure(f"native CLI did not report the expected completed import: {result}")
     return CliRun(name, fixture, checkpoint, import_id, result, egress, log_file)
 
 

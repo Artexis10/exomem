@@ -39,7 +39,7 @@ A cell that reports no window budget gets the folder as one import. The import S
 
 ### Requirement: A resumed one-import run keeps the choices of its first run
 
-The checkpoint of a one-import run SHALL record whether its series file asks the cell to file, its label and its collection. A rerun that gives other values SHALL stop with `CHECKPOINT_OPTIONS_CHANGED`, name the flag that differs and keep the checkpoint. A rerun that matches SHALL report the recorded `cell_filing`. A checkpoint with no record SHALL count as a plain import.
+The checkpoint of a one-import run SHALL record whether its series file asks the cell to file, its label and its collection. A rerun that gives other values SHALL stop with `CHECKPOINT_OPTIONS_CHANGED`, name the flag that differs and keep the checkpoint. A rerun that matches SHALL send the archive that the first run chose, whatever the cell offers then, and report the recorded `cell_filing`.
 
 #### Scenario: A rerun changes what the series file carries
 
@@ -50,3 +50,13 @@ The checkpoint of a one-import run SHALL record whether its series file asks the
 
 - **WHEN** a one-import run that asked the cell to file stops, and the rerun uses the same flags
 - **THEN** the import lands with the series file of the first run, and the result line says `"cell_filing": "asked"`
+
+#### Scenario: The cell's offer changes before the archive is built
+
+- **WHEN** a one-import run stops after it declared its import, the cell then stops or starts offering filing, and the rerun uses the same flags
+- **THEN** the import lands with the archive that the first run chose, and the result line says the recorded `cell_filing`
+
+#### Scenario: A checkpoint from before the record
+
+- **WHEN** a one-import run stopped under a CLI that recorded no choices, and the rerun uses the default flags
+- **THEN** the command stops with `CHECKPOINT_OPTIONS_CHANGED`, says that the import started as an upload only, and says to run it with `--no-file`
