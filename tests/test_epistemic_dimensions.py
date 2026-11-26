@@ -220,6 +220,12 @@ REGULATION = (
     "    description: What is plainly claimed\n    members: {kinds: [claim]}\n"
 )
 PAGE = "---\ntype: insight\n---\n# {title}\n\n{body}\n"
+#: A row dimension: a unit belongs when it carries `credence`, as a `local_estimate` may.
+MEASURED = REGULATION + (
+    "  measured:\n    labels: {en: Measured}\n"
+    "    description: A stated degree of belief\n    members: {keys: [credence]}\n"
+    "kinds:\n  local_estimate:\n    description: A local estimate\n    traits: [credence]\n"
+)
 
 
 def _write(vault: Path, rel: str, body: str) -> None:
@@ -579,13 +585,7 @@ def test_a_served_row_dimension_fills_its_limit_before_each_lane_cap(
     from exomem import embeddings, semantic_index
 
     vault = _outlook_vault(tmp_path)
-    overlay = language_registry.registry_path(vault)
-    overlay.write_text(
-        REGULATION + "  measured:\n    labels: {en: Measured}\n"
-        "    description: A stated degree of belief\n    members: {keys: [credence]}\n"
-        "kinds:\n  local_estimate:\n    description: A local estimate\n    traits: [credence]\n",
-        encoding="utf-8",
-    )
+    language_registry.registry_path(vault).write_text(MEASURED, encoding="utf-8")
     body = "\n".join(
         f"## Claim\n- id: noise-{n}\n\nBeacon.\n" for n in range(24)
     )
@@ -634,12 +634,7 @@ def test_a_hybrid_dimension_search_reads_no_deeper_vector_window_once_the_lexica
     from exomem import embeddings, semantic_index
 
     vault = _outlook_vault(tmp_path)
-    language_registry.registry_path(vault).write_text(
-        REGULATION + "  measured:\n    labels: {en: Measured}\n"
-        "    description: A stated degree of belief\n    members: {keys: [credence]}\n"
-        "kinds:\n  local_estimate:\n    description: A local estimate\n    traits: [credence]\n",
-        encoding="utf-8",
-    )
+    language_registry.registry_path(vault).write_text(MEASURED, encoding="utf-8")
     body = "\n".join(f"## Claim\n- id: noise-{n}\n\nBeacon.\n" for n in range(24))
     for n in range(3):
         body += (
@@ -674,6 +669,31 @@ def test_a_hybrid_dimension_search_reads_no_deeper_vector_window_once_the_lexica
     assert {hit.source_anchor for hit in hits} <= {"member-0", "member-1", "member-2"}
     assert len(hits) == 2
     assert len(vector_reads) == 1, f"the vector lane read windows of {vector_reads}"
+
+
+def test_a_filtered_hybrid_search_ranks_a_strong_member_older_than_its_lexical_window(
+    tmp_path, warm_managed_cell,
+) -> None:
+    """Catches a dimension-filtered lexical window that keeps the newest members, not the best."""
+    vault = _outlook_vault(tmp_path)
+    language_registry.registry_path(vault).write_text(MEASURED, encoding="utf-8")
+    for n in range(60):
+        text = (
+            "Lantern lantern lantern beacon." if n == 0
+            else f"Survey {n} saw a lantern among the many other ordinary notes of that week."
+        )
+        _write(vault, f"Knowledge Base/Notes/Estimate {n:02d}.md", (
+            f"---\ntype: insight\nupdated: 2026-{1 + n // 28:02d}-{1 + n % 28:02d}\n---\n"
+            f"# Estimate {n}\n\n## Local estimate\n- id: member-{n}\n- credence: likely\n\n{text}\n"
+        ))
+    warm_managed_cell(vault)
+
+    hits = find_module.find(
+        vault, query="lantern beacon", scope="kb-only", mode="hybrid", graph=False, rerank=False,
+        result_level="unit", filters={"unit.dimension": {"$eq": "measured"}}, limit=3,
+    )
+
+    assert [hit.source_anchor for hit in hits][:1] == ["member-0"]
 
 
 def test_a_served_row_dimension_preserves_complements_and_registry_edits(

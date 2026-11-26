@@ -13908,7 +13908,8 @@ class LexicalStore:
             )
 
         def query(conn: sqlite3.Connection) -> list[SemanticUnitLexicalHit]:
-            tokens: list[str] = []
+            # A caller's stemmed tokens rank the window; a term budget may replace them below.
+            tokens = list(stemmed_tokens)
             view = _SelectedUnits(
                 self.vault_root, conn, admitted=admitted_parent_paths, released=released_parent_paths,
                 filter_plan=filter_plan,
