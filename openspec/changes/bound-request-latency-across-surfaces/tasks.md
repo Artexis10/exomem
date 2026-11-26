@@ -176,6 +176,8 @@
 - [ ] 3.30 After installation, compare the request-thread CPU of the first recall after a write before and after the change journal, and report the share of `lexical.catalogue_rows` spans that patched (design decision 14).
 - [x] 3.32 Give a store-mode vault migrated before the change journal its journal at its next derivation, recorded for rollback, with no owner pass (design decision 14).
   - Verify: a store migrated without the journal gets every journal object at its next drain, journals that drain's page, keeps its owner schema current, and a rollback drops the journal (`tests/test_vault_store_migration.py`).
+- [x] 3.33 Keep a Source erasure's guarantee across a lexical repair rebuild: the rebuild declines to publish after an erasure, a copied catalogue starts its own change journal, the eraser advances the retirement generation once, before it restarts the journal, and every delete of a page's rows drops the page's unit revision (design decision 14).
+  - Verify: a rebuild whose build an erasure overtakes declines and leaves the live catalogue in place; a rebuild that publishes keeps no unit revision of a page deleted during it and no journal history from before its copy (`tests/test_lexstore_atomic_rebuild.py`).
 
 ## 4. Verify installed behavior and deliver
 
