@@ -14,6 +14,7 @@ import test_single_purpose_tools_mcp as pilot_mcp
 from test_single_purpose_tools_mcp import _call, _session
 
 from exomem import import_filing
+from exomem.cloud_import_windows import McpCell
 
 # Fixtures bound by name: the server over the fixture vault, and the private journal folder that filing needs.
 _private_journal_folder = filing_tests._private_journal_folder
@@ -50,3 +51,13 @@ def test_the_two_public_doors_wake_a_stage_and_read_its_filing_view_until_the_ce
     assert woken["state"] == "working" and woken["mutated"] is False and woken["needs"] == []
     assert view["state"] == "done" and view["progress"]["filed"] == len(filing_tests.FILES)
     assert len(filing_tests._sources(vault)) - sources_before == len(filing_tests.FILES)
+
+
+def test_the_cli_reads_the_current_cell_as_one_that_files_an_import_itself(vault, build) -> None:
+    """Catches a rename of the `file` operation's `wait` field, which the CLI reads as a cell that files nothing on its own."""
+    async def scenario(client):
+        cell = McpCell.__new__(McpCell)
+        cell._client, cell._entered = client, True
+        return await cell.offers_file()
+
+    assert _session(build(), scenario) is True

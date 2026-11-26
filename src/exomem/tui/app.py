@@ -36,9 +36,10 @@ from .screens import (
     ReviewScreen,
     SettingsScreen,
     StatusScreen,
+    VoiceScreen,
 )
 from .screens.base import ExomemScreen
-from .screens.home import DESTINATIONS
+from .screens.home import ACTIONS, DESTINATIONS
 from .widgets import ConfirmModal, HelpModal
 
 GLOBAL_HELP_ROWS: list[tuple[str, str]] = [
@@ -65,11 +66,14 @@ class GotoCommands(Provider):
     async def discover(self) -> Hits:
         for name, _key, title, description in DESTINATIONS:
             yield DiscoveryHit(f"Go to {title}", partial(self.app.goto, name), help=description)
+        for name, _key, title, description in ACTIONS:
+            yield DiscoveryHit(title, partial(self.app.goto, name), help=description)
 
     async def search(self, query: str) -> Hits:
         matcher = self.matcher(query)
-        for name, _key, title, description in DESTINATIONS:
-            label = f"Go to {title}"
+        entries = [(name, f"Go to {title}", description) for name, _key, title, description in DESTINATIONS]
+        entries += [(name, title, description) for name, _key, title, description in ACTIONS]
+        for name, label, description in entries:
             score = matcher.match(label)
             if score > 0:
                 yield Hit(
@@ -104,6 +108,7 @@ class ExomemTuiApp(App):
         "packs": PacksScreen,
         "status": StatusScreen,
         "settings": SettingsScreen,
+        "voice": VoiceScreen,
     }
 
     def __init__(

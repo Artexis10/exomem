@@ -3097,6 +3097,8 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "retry": False,
             "reprocess": False,
             "replicate": False,
+            "attach-speech": False,
+            "rename-speakers": False,
         },
         ("observe_memory", "operation"): {
             "add": False,

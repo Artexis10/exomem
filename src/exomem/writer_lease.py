@@ -5988,7 +5988,17 @@ class LeaseManager:
 
         `reuse_operation_grant` lets a collection-store write keep the grant that its operation's
         outer guard holds. Every other guard acquires.
+
+        A save the write intake can queue refuses at its call's first write guard once the call's
+        deadline has passed, with nothing saved, and the intake queues it so its client hears back.
+        Any other write still commits late: a refusal could not queue it, and a write whose
+        preparation always outlives the budget would then never land. A later guard of the same call
+        belongs to a write already under way.
         """
+        from . import write_intake
+
+        if write_intake.queues_busy_refusal() and not request_budget.commit_may_start():
+            raise mutation_lock.preparation_spent_busy()
         with self._mutation_boundary(
             vault_root,
             request_id=request_id,
@@ -6001,6 +6011,7 @@ class LeaseManager:
             reuse_operation_grant=reuse_operation_grant,
             advance_generation=True,
         ) as mutation:
+            request_budget.note_commit_started()
             yield mutation
 
     @contextmanager
@@ -6033,7 +6044,7 @@ class LeaseManager:
             return
 
         def refused_before_the_body(error: OpError) -> bool:
-            return error.code == "MUTATION_BUSY" and error.details.get("committed") is False
+            return mutation_lock.waits_out(error)
 
         with ExitStack() as held:
 
@@ -7435,22 +7446,25 @@ class LeaseManager:
                         reconcile_abandoned=command.name == "adoption_studio" and kwargs.get("action") in ("apply", "file"),
                 )
 
+            from . import write_intake
             from .command_surface import OPEN_WORLD_OPS
 
-            result = self._run_absorbing_capture_contention(
-                command,
-                run_idempotent,
-                key=key,
-                commit_state=commit_state,
-                request_id=request_id,
-                wait_started=wait_started,
-                wait_deadline=wait_deadline,
-                # A narrow leaf meets the busy only after its own preparation. When
-                # that preparation fetched caller-supplied temporary handles, the
-                # server cannot fetch them again; only the caller can retry.
-                rerun_safe=not (narrow_boundary and command.name in OPEN_WORLD_OPS),
-                absorb_unkeyed=absorb_unkeyed,
-            )
+            # A narrow leaf meets the busy only after its own preparation. When
+            # that preparation fetched caller-supplied temporary handles, the
+            # server cannot fetch them again; only the caller can retry.
+            rerun_safe = not (narrow_boundary and command.name in OPEN_WORLD_OPS)
+            with write_intake.queueing_only_if(rerun_safe):
+                result = self._run_absorbing_capture_contention(
+                    command,
+                    run_idempotent,
+                    key=key,
+                    commit_state=commit_state,
+                    request_id=request_id,
+                    wait_started=wait_started,
+                    wait_deadline=wait_deadline,
+                    rerun_safe=rerun_safe,
+                    absorb_unkeyed=absorb_unkeyed,
+                )
             if (
                 vocabulary_replay_terminal is not None
                 and vocabulary_binding is not None
@@ -7726,7 +7740,7 @@ class LeaseManager:
         def absorbable(error: OpError) -> bool:
             if error.code != "MUTATION_BUSY":
                 return False
-            if commit_state["observed"] or error.details.get("committed") is not False:
+            if commit_state["observed"] or not mutation_lock.waits_out(error):
                 _count_busy_once(error)
                 return False
             return True
@@ -7910,7 +7924,7 @@ class LeaseManager:
         except OpError as error:
             before_commit = not commit_state["observed"]
             if error.code == "MUTATION_BUSY":
-                if before_commit and eligible and error.details.get("committed") is False:
+                if before_commit and eligible and mutation_lock.waits_out(error):
                     attempt.handed_off = error
                 elif eligible:
                     _count_busy_once(error)

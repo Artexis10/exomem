@@ -14,7 +14,7 @@ import shutil
 import stat
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 import httpx2
@@ -30,6 +30,7 @@ from .cloud_import_client import (
     CHECKPOINT_RECORD,
     PREFLIGHT,
     REGISTER,
+    Choices,
     CloudImportClientConfig,
     CloudImportError,
     Window,
@@ -37,6 +38,7 @@ from .cloud_import_client import (
     _Where,
     import_source,
     lands_declared,
+    resumed_choices,
     safe_code,
     server_code,
 )
@@ -67,6 +69,8 @@ _REPEAT_ONCE = frozenset({"MUTATION_OUTCOME_UNKNOWN", "MUTATION_COMMITTED_ACKNOW
 _REPEAT_AFTER_WAIT = "MUTATION_ACKNOWLEDGEMENT_PENDING"
 # The code with which a cell refuses an action that it does not know.
 _UNKNOWN_ACTION = "INVALID_MODE"
+# The `file` operation's field that arrived with the resident filer (a wake that does not wait for the filing).
+_FILER_FIELD = "wait"
 # The code that the CLI gives a tool error, because the transport carries no code of the cell's own.
 _TOOL_ERROR = "TOOL_ERROR"
 
@@ -93,6 +97,10 @@ class Cell:
         """One `file` call on a staged window; a cell that cannot file in one call raises FilingUnavailable."""
         raise FilingUnavailable
 
+    async def offers_file(self) -> bool:
+        """Whether the cell files a registered import itself; the base cell cannot file, as its `file` says."""
+        return False
+
 
 class McpCell(Cell):
     """The cell's tools through the Cloud gateway, signed in with the CLI's OAuth client."""
@@ -109,10 +117,13 @@ class McpCell(Cell):
             self._entered = False
             await self._client.__aexit__(*error)
 
-    async def _call(self, arguments: dict) -> dict:
+    async def _enter(self) -> None:
         if not self._entered:
             await self._client.__aenter__()
             self._entered = True
+
+    async def _call(self, arguments: dict) -> dict:
+        await self._enter()
         # The cell lists the public tools only, so the grouped call goes out as the door call that stands for it.
         result = await self._client.call_tool(*operation_entries.spell_call("adoption_studio", arguments, "public"))
         if isinstance(result.structured_content, dict):
@@ -136,17 +147,49 @@ class McpCell(Cell):
                 raise FilingUnavailable from error
             return {"success": False, "error": {"code": _TOOL_ERROR, "message": str(error)}}
 
+    async def offers_file(self) -> bool:
+        """Whether the cell shows that it files a registered import with no caller, as its resident filer does.
+
+        The filer came with the `wait` field of the `file` operation. A cell that lists the operation's fields without
+        `wait` files only inside a call, and a write door without `imports.file` has no filing at all. The probe shows
+        that the cell's code has the filer, not that the filer is running. A reply that cannot be read proves
+        nothing, so the cell is then taken to offer filing.
+        """
+        await self._enter()
+        if await self._lacks_file():
+            return False
+        fields = await self._file_fields()
+        return fields is None or _FILER_FIELD in fields
+
+    async def _file_fields(self) -> set[str] | None:
+        """The fields that the cell's own help lists for its `file` operation; None when it cannot be read.
+
+        The door's published schema lists no per-operation fields, so `read_instructions` is the cell's answer.
+        """
+        operation = self._file_door()[1]["operation"]
+        try:
+            result = await self._client.call_tool("read_instructions", {"topic": operation})
+            arguments = (result.structured_content or {}).get("arguments")
+            return set(arguments) if isinstance(arguments, dict) and arguments else None
+        except Exception:  # noqa: BLE001 -- help that cannot be read says nothing about the operation
+            return None
+
+    @staticmethod
+    def _file_door() -> tuple[str, dict]:
+        """The write door and the call that stands for `file` on it, as the public surface spells them."""
+        return operation_entries.spell_call("adoption_studio", {"action": "file"}, "public")
+
     async def _lacks_file(self) -> bool:
         """Whether the cell's published write door lists its operations, and `imports.file` is not one of them.
 
         A schema that cannot be read, or that lists no operations, proves nothing, so the caller keeps the error as a stop.
         """
-        door = operation_entries.spell_call("adoption_studio", {"action": "file"}, "public")[0]
+        door, call = self._file_door()
         try:
             for tool in await self._client.list_tools():
                 if tool.name == door:
                     operations = (((tool.input_schema or {}).get("properties") or {}).get("operation") or {}).get("enum") or ()
-                    return bool(operations) and "imports.file" not in operations
+                    return bool(operations) and call["operation"] not in operations
         except Exception:  # noqa: BLE001 -- a listing or a schema that cannot be read says nothing about the operation
             return False
         return False
@@ -1119,7 +1162,8 @@ async def _import_folder(source, config, checkpoint, *, cell, api, uploads, incl
         if series is not None:  # A series exists: sending the folder as one import would send every landed member again.
             raise stopped(series, "NO_WINDOW_BUDGET", "the cell reports no window budget now (its media store may be off or rolled back), "
                                                        "so the series cannot go on")
-        return await _older_cell(source, config, checkpoint, limits, options, **{k: settings[k] for k in ("api", "uploads", "progress", "poll_seconds")})
+        return await _older_cell(source, config, checkpoint, limits, options, ask_cell=ask_cell, origin_label=origin_label,
+                                 **{k: settings[k] for k in ("cell", "api", "uploads", "progress", "poll_seconds", "collection")})
     if series is None:
         series = await _begin(source, config, record, first, options, settings, origin_label, ask_cell)
     if series not in held:
@@ -1130,14 +1174,10 @@ async def _import_folder(source, config, checkpoint, *, cell, api, uploads, incl
 
 async def _begin(source, config, record, first, options, settings, origin_label, ask_cell) -> Series:
     """Select, classify and refuse before any upload; then record the series."""
-    progress = settings["progress"]
     selection = import_selection.select(source, include_hidden=options["include_hidden"], use_gitignore=options["use_gitignore"])
-    for line in selection.report_lines():
-        progress.say(line)
-    if not selection.kept:
-        raise CloudImportError(PREFLIGHT, "NOTHING_TO_IMPORT", "no file is left to import; pass --include-hidden or --no-gitignore to take more")
+    _report(selection, settings["progress"])
     # The preflight needs classes, which need the cell's classification inputs; an unknown input waits.
-    placeholders = [Member(kept.rel, kept.size, kept.mtime_ns, TEXT) for kept in selection.kept]
+    placeholders = _placeholders(selection)
     series = Series(str(source), config.api_base_url, str(uuid.uuid4()), "", placeholders, options=options)
     run = _Run(series, record, source, config, **settings)
     reading, since = first, run.clock()
@@ -1158,16 +1198,57 @@ async def _begin(source, config, record, first, options, settings, origin_label,
     return series
 
 
-async def _older_cell(source, config, checkpoint, limits, options, *, api, uploads, progress, poll_seconds) -> dict:
-    """A cell without a window budget: refuse a folder above its known size, else send one import as before."""
+def _report(selection: import_selection.Selection, progress: Progress) -> None:
+    """Say what the selection leaves behind, and refuse a selection with nothing to send."""
+    for line in selection.report_lines():
+        progress.say(line)
+    if not selection.kept:
+        raise CloudImportError(PREFLIGHT, "NOTHING_TO_IMPORT", "no file is left to import; pass --include-hidden or --no-gitignore to take more")
+
+
+def _placeholders(selection: import_selection.Selection) -> list[Member]:
+    return [Member(kept.rel, kept.size, kept.mtime_ns, TEXT) for kept in selection.kept]
+
+
+async def _older_cell(source, config, checkpoint, limits, options, *, cell, api, uploads, progress, poll_seconds,
+                      ask_cell, origin_label, collection) -> dict:
+    """A cell without a window budget: refuse a folder above its known size, else send one import.
+
+    A request to file or a label needs the series file that a window carries, and a cell that offers filing reads it.
+    A new import takes its choices from the cell's offer. A rerun takes them from its checkpoint, so it sends the
+    archive of the first run and the result names the request that run made, because the cell, not this command, files.
+    """
     maximum = (limits or {}).get("max_storage_gib")
-    if type(maximum) is int:
+    needs_series_file = ask_cell or origin_label is not None
+    now = Choices(filing=ask_cell, label=origin_label, collection=collection)
+    choices = resumed_choices(checkpoint, now)
+    if choices is None:
+        offered = needs_series_file and await cell.offers_file()
+        claim = ("asked" if offered else "not_offered") if ask_cell else None
+        choices = replace(now, carried=offered, cell_filing=claim)
+    offered = choices.carried
+    selection = None
+    if offered or type(maximum) is int:
         selection = import_selection.select(source, include_hidden=options["include_hidden"], use_gitignore=options["use_gitignore"])
-        if selection.kept_bytes > maximum * GIB:
-            raise CloudImportError(PREFLIGHT, "FOLDER_ABOVE_CELL_SIZE", f"the folder declares {selection.kept_bytes} bytes and the "
-                                   f"cell's known size is {maximum * GIB} bytes ({maximum} GiB); nothing is sent", resume=False)
-    return await import_source(source, config, checkpoint, api=api, uploads=uploads, poll_seconds=poll_seconds,
-                               progress=progress, include_hidden=options["include_hidden"], use_gitignore=options["use_gitignore"])
+    if type(maximum) is int and selection.kept_bytes > maximum * GIB:
+        raise CloudImportError(PREFLIGHT, "FOLDER_ABOVE_CELL_SIZE", f"the folder declares {selection.kept_bytes} bytes and the "
+                               f"cell's known size is {maximum * GIB} bytes ({maximum} GiB); nothing is sent", resume=False)
+    window = None
+    if offered:
+        _report(selection, progress)
+        series_file = _series_file(collection or source.name, _placeholders(selection), ask_cell=ask_cell, origin_label=origin_label)
+        window = Window(selection, series_file.encode("utf-8"))
+    elif needs_series_file:
+        if ask_cell:
+            progress.say("The cell does not file imports itself. Ask your assistant to file this import once it is staged.")
+        if origin_label is not None:
+            progress.say("The cell cannot record --label, so the files filed from this import will not carry it.")
+    row = await import_source(source, config, checkpoint, api=api, uploads=uploads, poll_seconds=poll_seconds, progress=progress,
+                              include_hidden=options["include_hidden"], use_gitignore=options["use_gitignore"],
+                              window=window, choices=choices)
+    if row.get("cell_filing") == "asked":
+        progress.say("The upload is done and the cell files the folder by itself.")
+    return row
 
 
 async def _residual(cell: Cell) -> dict[str, tuple[str, int]]:

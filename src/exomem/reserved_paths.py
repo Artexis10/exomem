@@ -745,7 +745,7 @@ _REGISTRY = (
         "app-update-notices",
         "release_notes",
         StatePlacement.EXTERNAL_STATE,
-        exact=(".app-update-notices.json",),
+        exact=(".app-update-notices.json", "..app-update-notices.json.lock"),
         rebuildable=True,
         patterns=(_APP_UPDATE_NOTICES_TEMP_RE,),
     ),

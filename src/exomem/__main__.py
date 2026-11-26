@@ -2159,15 +2159,26 @@ def _enroll_speaker_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem enroll-speaker",
         description=(
-            "Enroll (or extend) a named voice profile from an audio sample for opt-in "
-            "diarization. The sample is embedded into a 192-dim ECAPA voiceprint and stored in "
-            "the per-machine profile store beside the embedding sidecar — desk-side admin, never "
-            "an MCP tool. Re-enrolling the same name running-averages the centroid over samples. "
-            "Example: exomem enroll-speaker --name Alice --self alice-sample.wav"
+            "Enroll (or extend) a named voice profile for opt-in diarization. The voiceprint is a "
+            "192-dim ECAPA embedding stored in the per-machine profile store beside the embedding "
+            "sidecar — desk-side admin, never an MCP tool. Re-enrolling the same name running-averages "
+            "the centroid over samples. From an audio sample: exomem enroll-speaker --name Alice --self "
+            "alice-sample.wav. From a recording's Source: exomem enroll-speaker --name Alice "
+            "--recording 'Knowledge Base/Evidence/Audio/talk.m4a' --label 'Speaker A' shows the "
+            "label's lines and asks before it reads the audio."
         ),
     )
-    parser.add_argument("audio", help="path to an audio sample of the speaker's voice")
+    parser.add_argument("audio", nargs="?", help="path to an audio sample of the speaker's voice")
     parser.add_argument("--name", required=True, help="speaker name to attach to matched clusters")
+    parser.add_argument("--recording", help="vault path of a recording whose Source page labels the speaker")
+    parser.add_argument("--label", help="the speaker label as the recording's page shows it (with --recording)")
+    parser.add_argument("--yes", action="store_true", help="confirm without asking, after the lines are shown")
+    parser.add_argument(
+        "--cloud", action="store_true",
+        help="the recording is in your Cloud: read the original through your signed-in Cloud download "
+             "and delete the copy afterwards. Needs --page-file.",
+    )
+    parser.add_argument("--page-file", type=Path, help="with --cloud: the Source page as saved from your Cloud")
     parser.add_argument(
         "--self",
         dest="is_self",
@@ -2185,27 +2196,70 @@ def _enroll_speaker_main(argv: list[str]) -> int:
         default=os.environ.get("EXOMEM_VAULT_PATH"),
         help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
+    from .cloud_import_client import add_endpoint_arguments
+
+    add_endpoint_arguments(parser)
     args = parser.parse_args(argv)
+    if (args.audio is None) == (args.recording is None):
+        parser.error("give either an audio sample or --recording with --label")
+    if args.recording is not None and args.label is None:
+        parser.error("--recording needs --label")
+    if args.cloud and (args.recording is None or args.page_file is None):
+        parser.error("--cloud needs --recording and --page-file")
 
     from . import enroll_speaker as enroll_module
     from .voice_profiles import DEFAULT_THRESHOLD
 
+    threshold = args.threshold if args.threshold is not None else DEFAULT_THRESHOLD
     try:
-        rec = enroll_module.enroll_speaker(
-            args.audio,
-            args.name,
-            is_self=args.is_self,
-            threshold=args.threshold if args.threshold is not None else DEFAULT_THRESHOLD,
-            vault_root=_speaker_vault(args),
-        )
+        if args.recording is None:
+            rec = enroll_module.enroll_speaker(
+                args.audio, args.name, is_self=args.is_self, threshold=threshold, vault_root=_speaker_vault(args),
+            )
+        else:
+            rec = _enroll_from_recording(args, enroll_module, threshold)
+            if rec is None:
+                print("Not enrolled: nothing was confirmed, and no audio was read.")
+                return 1
     except (enroll_module.EnrollmentError, RuntimeError) as e:
-        print(f"exomem enroll-speaker: {e}", file=sys.stderr)
+        print(f"exomem enroll-speaker: {getattr(e, 'code', 'ENROLLMENT_FAILED')}: {e}", file=sys.stderr)
         return 1
     print(
         f"Enrolled {args.name!r} ({rec['samples']} sample(s), "
         f"threshold {rec['threshold']}, is_self={rec['is_self']})."
     )
     return 0
+
+
+def _enroll_from_recording(args, enroll_module, threshold: float):
+    """The recording form of `enroll-speaker`: show the label's lines, confirm, then embed its spans."""
+    root = _speaker_vault(args)
+    if args.cloud:
+        from .cloud_import_client import CloudImportClientConfig
+
+        text, recorded = enroll_module.saved_page(args.page_file)
+        config = CloudImportClientConfig(args.mcp_url, args.api_base_url, args.oauth_client_id)
+        original = enroll_module.cloud_original(config, args.recording)
+    else:
+        text, recorded = enroll_module.local_page(root, args.recording)
+        original = enroll_module.local_original(root, args.recording)
+
+    def confirm(sample) -> bool:
+        print(f"{sample.label!r} speaks in {len(sample.spans)} span(s) of {args.recording}. Sample lines:")
+        for line in sample.lines:
+            print(f"  {line}")
+        if args.yes:
+            return True
+        try:
+            # nosemgrep: ep-word-set -- the answers of the prompt's own [y/N]: a closed set the prompt states, not a reading of free text.
+            return input(f"Keep this voice as {args.name!r}? [y/N] ").strip().lower() in {"y", "yes"}
+        except EOFError:
+            return False
+
+    return enroll_module.enroll_from_recording(
+        text, recorded, args.label, args.name,
+        original=original, confirm=confirm, is_self=args.is_self, threshold=threshold, vault_root=root,
+    )
 
 
 def _list_speakers_main(argv: list[str]) -> int:
