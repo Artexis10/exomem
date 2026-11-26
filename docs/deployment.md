@@ -1760,7 +1760,13 @@ to CPU on Apple Silicon for cross-machine voiceprint parity), with a
 `EXOMEM_VOICE_DEVICE=cuda`/`mps`/`cpu` override. Enroll voices with
 `exomem enroll-speaker --name <name> [--self] <sample.wav>` (profiles live in a local
 `.voice_profiles.json` beside the embedding sidecar; `list-speakers` / `remove-speaker`
-manage them). With ≥1 profile enrolled and `EXOMEM_DIARIZE` set, matched clusters render
+manage them). To keep a voice from a recording that is already a Source, run
+`exomem enroll-speaker --name <name> --recording <vault path> --label "Speaker A"`: it shows
+the label's lines, asks, and only then reads the audio; `--cloud --page-file <page>` reads the
+original through the signed-in Cloud download and deletes the copy, and reads the part pages of a
+long transcript from beside the saved page. The terminal Home does the
+same from its `v` key. An extraction of merged turns has no times: process the recording again
+with speaker labels first. With ≥1 profile enrolled and `EXOMEM_DIARIZE` set, matched clusters render
 as `[<name>]: …`; unknown voices stay anonymous. The ECAPA checkpoint
 (`speechbrain/spkrec-ecapa-voxceleb`, override `EXOMEM_VOICE_EMBED_MODEL`) is gated like
 pyannote's — set `HUGGINGFACE_TOKEN`. Attribution thresholds are tunable via

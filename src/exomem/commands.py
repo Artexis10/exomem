@@ -158,6 +158,7 @@ from . import semantic_writes as semantic_writes_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
 from . import source_coverage as source_coverage_module
+from . import speech_attach_schema as speech_attach_schema_module
 from . import state_paths as state_paths_module
 from . import structured_files as structured_files_module
 from . import topic_brief as topic_brief_module
@@ -10387,7 +10388,9 @@ def op_transfer_artifact(
     return handoff
 
 
-ProcessMediaOperation = Literal["process", "status", "retry", "reprocess", "replicate"]
+ProcessMediaOperation = Literal[
+    "process", "status", "retry", "reprocess", "replicate", "attach-speech", "rename-speakers"
+]
 
 
 def op_process_media(
@@ -10399,21 +10402,44 @@ def op_process_media(
     multilingual: bool = False,
     store: str | None = None,
     diarize: bool | None = None,
+    binary_sha256: str | None = None,
+    binary_size: StrictInt | None = None,
+    segments: speech_attach_schema_module.Segments | None = None,
+    turns: speech_attach_schema_module.Turns = (),
+    engine: speech_attach_schema_module.Engine | None = None,
+    asr: speech_attach_schema_module.AttachedAsr | None = None,
+    names: speech_attach_schema_module.Names = (),
+    replace_labelled: bool = False,
+    renames: speech_attach_schema_module.Renames | None = None,
 ) -> dict:
-    """Check governed media; retry after remediation; extract again; replicate originals.
+    """Check governed media; retry after remediation; extract again; replicate originals; attach speech.
 
     Status reads; other operations change extraction state. Extraction normally runs
     automatically. Reprocess keeps the old text on a prior page. Replicate (owner
     only) queues an encrypted replica of every original in store `store` and returns
-    the queue counts; a repeat while it runs changes nothing.
+    the queue counts; a repeat while it runs changes nothing. Attach-speech stores a
+    transcript, with speaker turns when it has them, that the caller computed on its own
+    machine for one recording; the page records the engine as attached, unchecked. It
+    needs the original's SHA-256 and size, and a repeat of the same call changes nothing.
+    A merged-turn page is processed again with speaker labels before an attach. Rename-speakers
+    changes the speaker labels of one recording to the names a person gave; it keeps no voice.
 
     Args:
-        path: Governed KB media path; omit for bounded all-media work.
+        path: Governed KB media path; omit for bounded all-media work. Attach-speech and rename-speakers take one recording.
         paths: 1-32 unique governed paths, not for status.
         language: Speech language code; omit to detect.
         multilingual: Detect language per window (slower).
         store: Replicate only: the name of a store the vault declares.
         diarize: Request or skip speaker labels on selected audio or video. Omit to keep the item's preference.
+        binary_sha256: Attach-speech: SHA-256 of the recording's original, as its Source records it.
+        binary_size: Attach-speech: byte size of the recording's original.
+        segments: Attach-speech: the transcribed speech.
+        turns: Attach-speech: who spoke when; omit when the result has no speakers.
+        engine: Attach-speech: the engine and model that produced the result.
+        asr: Attach-speech: facts the engine reported (language and speech seconds).
+        names: Attach-speech: names for labels of `turns`.
+        replace_labelled: Attach-speech: replace a result that has speaker labels or names; the old one stays on a prior page.
+        renames: Rename-speakers: each label as the page shows it, mapped to a person's name.
     """
     from . import due_state as due_state_module
     from . import media_processing
@@ -10421,6 +10447,14 @@ def op_process_media(
     from .cli_ops import OpError
 
     validate_process_media_operation(operation)
+    if operation in {"attach-speech", "rename-speakers"}:
+        if any(value is not None for value in (paths, language, store, diarize)) or multilingual:
+            raise OpError("MEDIA_SPEECH_ARGUMENTS", f"{operation} takes one path and its own fields only")
+        return _speech_media(
+            vault_root, operation, path=path, binary_sha256=binary_sha256, binary_size=binary_size,
+            segments=segments, turns=turns, engine=engine, asr=asr, names=names,
+            replace_labelled=replace_labelled, renames=renames,
+        )
     if path is not None and paths is not None:
         raise OpError("MEDIA_PATH_SELECTOR_CONFLICT", "use either path or paths, not both")
     if diarize is not None:
@@ -10465,6 +10499,69 @@ def op_process_media(
     # `retry` re-enqueues in the machine-local job store and commits nothing, so
     # the commit gate inside the carrier keeps it silent — that is the contract,
     # not an omission.
+    return _carrying_batch_advisories(vault_root, result)
+
+
+def _speech_media(
+    vault_root: Path,
+    operation: str,
+    *,
+    path: str | None,
+    binary_sha256: str | None,
+    binary_size: int | None,
+    segments: Any,
+    turns: Any,
+    engine: str | None,
+    asr: Any,
+    names: Any,
+    replace_labelled: bool,
+    renames: Any,
+) -> dict:
+    """Attach a speech result to one recording's Source, or rename its speaker labels.
+
+    Each commits its page under the mutation guard alone (`speech_attach.commit_under_guard`), so the
+    request holds no wider boundary. Both refuse before the first write, and a repeat writes nothing.
+    """
+    from . import due_state as due_state_module
+    from . import media_processing, speaker_rename, speech_attach
+    from .cli_ops import OpError
+    from .writer_lease import active_manager, active_mutation_request_id
+
+    vault_root = Path(vault_root).resolve()
+    manager = active_manager()
+
+    def commit_guard():
+        return manager.mutation_guard(
+            vault_root,
+            request_id=active_mutation_request_id(),
+            operation=f"process_media_{operation}_commit",
+            holder_kind="command",
+        )
+
+    attaching = operation == speech_attach_schema_module.ATTACH_OPERATION
+    # The door's per-operation row lists the same fields; a direct caller is held to the required ones here.
+    required = (
+        {"binary_sha256": binary_sha256, "binary_size": binary_size, "segments": segments, "engine": engine}
+        if attaching else {"renames": renames}
+    )
+    missing = [name for name, value in {"path": path, **required}.items() if value is None]
+    if missing:
+        raise OpError("MEDIA_SPEECH_ARGUMENTS", f"{operation} needs {', '.join(missing)}")
+    try:
+        with due_state_module.batch_scope(vault_root):
+            if attaching:
+                result = speech_attach.attach(
+                    vault_root, path, binary_sha256=binary_sha256, binary_size=binary_size, segments=segments,
+                    engine=engine, turns=turns or None, names=names or None, asr=asr, replace_labelled=replace_labelled,
+                    commit_guard=commit_guard,
+                )
+            else:
+                result = speaker_rename.rename(vault_root, path, renames, commit_guard=commit_guard)
+    except media_processing.MediaProcessingError as error:
+        raise OpError(error.code, error.reason) from error
+    if result["outcome"] == "unchanged":
+        # A repeat wrote nothing, so it settles as a reuse instead of waiting for a commit that will not come.
+        result = mutation_terminal_module.as_reused(result)
     return _carrying_batch_advisories(vault_root, result)
 
 
@@ -15435,7 +15532,7 @@ def validate_process_media_operation(operation: Any) -> None:
 
         raise OpError(
             "INVALID_MEDIA_OPERATION",
-            "process_media operation must be process, status, retry, reprocess, or replicate",
+            "process_media operation must be process, status, retry, reprocess, replicate, attach-speech, or rename-speakers",
         )
 
 

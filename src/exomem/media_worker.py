@@ -61,7 +61,6 @@ from . import (
     runtime_resources,
     scene_frames,
     semantic_segments,
-    temporal,
 )
 from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, AsrFacts
 from .backfill import iter_kb_files
@@ -89,7 +88,6 @@ from .vault import (
     PlannedWrite,
     batch_atomic_write,
     content_hash,
-    parse_frontmatter,
     post_commit_batch_fanout,
     read_guarded_text,
 )
@@ -1646,16 +1644,14 @@ class MediaWorker:
         capture: CaptureFacts | None,
         reprocessing: bool,
     ) -> tuple[tuple[PlannedWrite, ...], tuple[Path, ...]]:
-        """The writes for a finished extraction, and the part pages to retire once they commit.
-
-        The first write is the sidecar. It holds the first part of the text; the rest is on
-        part pages in the same batch. A reprocess adds the pages for the old extraction, with its
-        parts, so the sidecar always holds one extraction, and a rejected batch leaves the old
-        text where it was.
-        """
-        from . import media_processing
-
-        fields = dict(
+        """The writes for a job's finished extraction (`prior_extraction.extraction_writes`)."""
+        return prior_extraction.extraction_writes(
+            self._vault_root,
+            job.sidecar_path,
+            before,
+            guard,
+            binary_path=job.binary_path,
+            text=text,
             engine=engine,
             speakers=speakers,
             speaker_verification=speaker_verification,
@@ -1664,51 +1660,8 @@ class MediaWorker:
             asr=asr,
             ocr=ocr,
             capture=capture,
-            # Both callers have just revalidated the original; a page stored with it records these.
-            binary_hints=media_processing.read_timestamp_hints(
-                media_processing.held_path(self._vault_root, job.binary_path)
-            ),
+            reprocessing=reprocessing,
         )
-        if not reprocessing:
-            plan, write = preserve.sidecar_extraction_writes(
-                self._vault_root, job.sidecar_path, before, guard, text=text, **fields
-            )
-            return (write, *plan.writes), plan.surplus
-        page, ordinal = prior_extraction.next_page(
-            job.sidecar_path, prior_extraction.links_of(before)
-        )
-        date_iso = temporal.stamp(temporal.now())
-        old_pieces = extraction_parts.split(
-            extraction_parts.text_with_gaps(self._vault_root, job.sidecar_path, before)
-        )
-        old_plan = extraction_parts.plan(
-            self._vault_root, page, old_pieces,
-            inherited=parse_frontmatter(before)[0], date_iso=date_iso,
-        )
-        prior_page = prior_extraction.render(
-            before,
-            artifact_name=job.sidecar_path.name.removesuffix(".md"),
-            sidecar_link=prior_extraction.link_to(self._vault_root, job.sidecar_path),
-            ordinal=ordinal,
-            date_iso=date_iso,
-            text=old_pieces[0],
-            parts=extraction_parts.layout(page, old_pieces),
-        )
-        plan, write = preserve.sidecar_extraction_writes(
-            self._vault_root, job.sidecar_path, before, guard, text=text,
-            prior_extractions=(
-                *prior_extraction.links_of(before),
-                prior_extraction.link_to(self._vault_root, page),
-            ),
-            reset_speakers=True,
-            **fields,
-        )
-        return (
-            write,
-            PlannedWrite(page, prior_page, expected_hash=MISSING_CONTENT_HASH),
-            *old_plan.writes,
-            *plan.writes,
-        ), plan.surplus
 
     def _reprocesses_completed(self, job: _Job) -> bool:
         """Whether this job re-extracts a transcript that is complete, so it must not touch the sidecar."""

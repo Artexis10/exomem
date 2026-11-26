@@ -12,6 +12,7 @@ from .packs import PacksScreen
 from .review import ReviewScreen
 from .settings import SettingsScreen
 from .status import StatusScreen
+from .voice import VoiceScreen
 
 __all__ = [
     "AdoptScreen",
@@ -24,4 +25,5 @@ __all__ = [
     "ReviewScreen",
     "SettingsScreen",
     "StatusScreen",
+    "VoiceScreen",
 ]

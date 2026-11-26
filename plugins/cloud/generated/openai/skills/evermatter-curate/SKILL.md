@@ -2,7 +2,7 @@
 name: evermatter-curate
 description: Improve Evermatter note quality by adding links, clarifying compiled notes, and organizing safely without editing the content of raw Sources or Evidence. Part of Evermatter, formerly Exomem.
 metadata:
-  skill_contract: 39235a41700c709be5684f77064479de5859018d21fd640ff0b39f7c639b174b
+  skill_contract: 83617ff5c332c7b3c6ff14d3d1f341942be25551f1f4605d430e054b08cbfa25
   version: "0.2.0"
 ---
 
