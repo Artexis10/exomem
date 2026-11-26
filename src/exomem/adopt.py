@@ -404,20 +404,22 @@ def _links_section(planned: Mapping[str, Any]) -> list[str]:
 
 
 def _origin_lines(planned: Mapping[str, Any], provenance: Sequence[page_fields.ProvenanceField]) -> list[str]:
-    """The provenance fields of a Source whose stage states an origin: one line for each active entry that has a value.
+    """The provenance fields of a Source that states where it came from: one line for each active entry that has a value.
 
     The entry says where its value comes from. This branches on that closed `source` and never on the field's key,
-    so a vault that retires an entry stops it being written, and a new entry needs no code.
+    so a vault that retires an entry stops it being written, and a new entry needs no code. A planned item holds an
+    origin and a file time only when its stage states an origin, and an item time only when the item came from an app
+    export and stated one, so an entry with no value writes no line.
     """
-    origin = planned.get("origin")
-    if not origin:
-        return []
+    origin = planned.get("origin") or {}
     lines = []
     for entry in provenance:
         if entry.source == page_fields.SOURCE_ENVELOPE:
             value = origin.get(entry.envelope)
         elif entry.source == page_fields.SOURCE_MEMBER_TIME:
             value = planned.get("file_modified")
+        elif entry.source == page_fields.SOURCE_ITEM_TIME:
+            value = planned.get("item_created")
         else:
             value = None
         if value:
@@ -799,8 +801,8 @@ def import_item(
 ) -> ImportItem:
     """Render one plan item. ``text`` is the verified original for a text item."""
     artifact = None
-    # The registry is read only for an item whose stage stated an origin: the other items write no origin field.
-    provenance = page_fields.provenance_fields(root) if planned.get("origin") else ()
+    # The registry is read only for an item with something to state: the other items write no provenance field.
+    provenance = page_fields.provenance_fields(root) if planned.get("origin") or planned.get("item_created") else ()
     if planned["form"] == "artifact":
         content = render_artifact_source(
             planned, date_iso=date_iso, collection=collection, source_id=source_id, provenance=provenance)

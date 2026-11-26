@@ -1,0 +1,26 @@
+schema_version: 1
+registry: source-formats
+# App exports that filing recognises and files one Source per item. Each entry is the facts of one
+# vendor format. A file is that format when its name is `file_name` and the first item of its JSON
+# array carries every key of `item_keys`. `parser` names the reader that code implements, `item_kind`
+# the Source kind that each item files as, and `roles` the vendor's author roles that a transcript
+# shows, each with its display label. A vault may retire an entry or relabel its roles.
+entries:
+  chatgpt-conversations:
+    label: ChatGPT conversations
+    description: The conversations.json of a ChatGPT data export.
+    attributes:
+      file_name: conversations.json
+      item_keys: [mapping, current_node]
+      parser: chatgpt-conversations
+      item_kind: session
+      roles: {user: You, assistant: ChatGPT}
+  claude-conversations:
+    label: Claude conversations
+    description: The conversations.json of a Claude data export.
+    attributes:
+      file_name: conversations.json
+      item_keys: [chat_messages, uuid]
+      parser: claude-conversations
+      item_kind: session
+      roles: {human: You, assistant: Claude}

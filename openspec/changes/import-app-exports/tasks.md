@@ -1,7 +1,7 @@
 ## 1. Registry
 
-- [ ] 1.1 Add `vocabulary/packs/core/source-formats.yaml` with two entries, `chatgpt-conversations` and `claude-conversations`, and `src/exomem/source_formats.py`, which holds its `RegistrySpec` (follow `sync_providers.py`). Refuse an overlay entry whose `parser` the code does not implement. Verify: registry tests load both entries; an overlay retires one; an unknown `parser` is refused.
-- [ ] 1.2 Add `item-created` (`source: item-time`) to `page-fields.yaml` and the closed `item-time` source to `page_fields.py`. Verify: the registry loads it, and `adopt` writes `item_created` only for a planned item that carries one.
+- [x] 1.1 Add `vocabulary/packs/core/source-formats.yaml` with two entries, `chatgpt-conversations` and `claude-conversations`, and `src/exomem/source_formats.py`, which holds its `RegistrySpec` (follow `sync_providers.py`). Refuse an overlay entry whose `parser` the code does not implement. Verify: registry tests load both entries; an overlay retires one; an unknown `parser` is refused.
+- [x] 1.2 Add `item-created` (`source: item-time`) to `page-fields.yaml` and the closed `item-time` source to `page_fields.py`. Verify: the registry loads it, and `adopt` writes `item_created` only for a planned item that carries one.
 
 ## 2. Expansion and filing
 

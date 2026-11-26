@@ -9,10 +9,11 @@ registry: page-fields
 # that `carries: project-key` holds project keys, so a value it gains registers that key and
 # a relocation rewrites it. A field with `shape: list` holds a list of values; any other
 # field holds one. A `provenance` field records where an imported file came from: filing
-# writes it onto each Source of a stage that states an origin. Its `source` is `envelope`
-# (the value is the named `envelope` key of the stage's series file) or `member-time` (the
-# staged member's modification time). This pack is the only source of a role: a vault
-# overlay may retire an entry and nothing else.
+# writes it onto each Source of a stage that states an origin, and `item-time` onto a Source
+# derived from an app export's item. Its `source` is `envelope` (the value is the named
+# `envelope` key of the stage's series file), `member-time` (the staged member's modification
+# time) or `item-time` (the created time that the item states for itself). This pack is the
+# only source of a role: a vault overlay may retire an entry and nothing else.
 entries:
   project:
     label: Project
@@ -50,3 +51,6 @@ entries:
   file-modified:
     label: File modified
     attributes: {field: file_modified, role: provenance, source: member-time}
+  item-created:
+    label: Item created
+    attributes: {field: item_created, role: provenance, source: item-time}

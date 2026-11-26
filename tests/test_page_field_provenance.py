@@ -12,7 +12,7 @@ from exomem import page_fields
 from exomem.vocabulary import registry
 
 
-def test_the_shipped_pack_declares_the_four_origin_fields_with_their_source(vault: Path) -> None:
+def test_the_shipped_pack_declares_the_origin_fields_with_their_source(vault: Path) -> None:
     """A dropped or mis-keyed entry, so filing writes no origin or reads the wrong envelope key."""
     declared = {
         field.field: (field.source, field.envelope) for field in page_fields.provenance_fields(vault)
@@ -23,6 +23,7 @@ def test_the_shipped_pack_declares_the_four_origin_fields_with_their_source(vaul
         "upload_device": ("envelope", "device_family"),
         "upload_browser": ("envelope", "browser_family"),
         "file_modified": ("member-time", None),
+        "item_created": ("item-time", None),
     }
     # An origin field is not a pointer, so the governed pointer write never offers to change it.
     assert not declared.keys() & page_fields.pointer_fields(vault)
@@ -43,7 +44,7 @@ def test_an_overlay_that_adds_a_provenance_field_is_reported_and_ignored(vault: 
     assert [finding["code"] for finding in snapshot.findings] == ["invalid_registry_overlay"]
     assert page_fields.WIDENING_CODE in snapshot.findings[0]["detail"]
     assert "uploader_ip" not in {field.field for field in page_fields.provenance_fields(vault)}
-    assert len(page_fields.provenance_fields(vault)) == 4
+    assert len(page_fields.provenance_fields(vault)) == 5
 
 
 def test_an_overlay_may_retire_one_origin_field(vault: Path) -> None:
@@ -56,4 +57,31 @@ def test_an_overlay_may_retire_one_origin_field(vault: Path) -> None:
     fields = {field.field for field in page_fields.provenance_fields(vault)}
 
     assert list(registry.load(page_fields.SPEC, vault).findings) == []
-    assert fields == {"origin_label", "upload_browser", "file_modified"}
+    assert fields == {"origin_label", "upload_browser", "file_modified", "item_created"}
+
+
+def test_an_overlay_that_retires_the_item_time_field_stops_a_derived_source_from_stating_its_time(vault: Path) -> None:
+    """A retirement that leaves the field written, so an owner could not keep a conversation's own date off its Source."""
+    from exomem import adopt
+
+    page_fields.registry_path(vault).write_text(
+        "schema_version: 1\nentries:\n  item-created:\n    status: deprecated\n", encoding="utf-8"
+    )
+    registry.invalidate(vault)
+
+    lines = adopt._origin_lines({"item_created": "2024-03-05T09:12:00Z"}, page_fields.provenance_fields(vault))
+
+    assert lines == []
+
+
+def test_filing_writes_item_created_only_for_a_planned_item_that_states_one(vault: Path) -> None:
+    """An item time written onto every Source, so an ordinary file would claim a creation time it never stated."""
+    from exomem import adopt
+
+    provenance = page_fields.provenance_fields(vault)
+
+    stated = adopt._origin_lines({"item_created": "2024-03-05T09:12:00Z", "origin": {"label": "Chat export"}}, provenance)
+    ordinary = adopt._origin_lines({"origin": {"label": "Chat export"}}, provenance)
+
+    assert [line for line in stated if line.startswith("item_created")] == ['item_created: "2024-03-05T09:12:00Z"']
+    assert not any(line.startswith("item_created") for line in ordinary)

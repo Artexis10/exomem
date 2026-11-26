@@ -9,7 +9,8 @@ only the closed `role`, `writer`, `carries`, `shape` and `source` values.
 
 A `provenance` field records where an imported file came from. Filing writes it onto each
 Source of a stage whose series file states an origin; `source` says where the value comes
-from, and the filing code branches on that and never on the field's key.
+from, and the filing code branches on that and never on the field's key. `item-time` is the time that an
+item of an app export states for itself, so only a Source derived from such an item carries it.
 """
 
 from __future__ import annotations
@@ -30,12 +31,14 @@ ROLES = frozenset({"pointer", "provenance"})
 POINTER_ROLE = "pointer"
 #: The role of a field that filing writes to say where an imported file came from.
 PROVENANCE_ROLE = "provenance"
-#: The closed `source` values of a provenance field: a key of the series file's origin envelope,
-#: or the modification time of the staged member. An `envelope` entry names its key in `envelope`.
+#: The closed `source` values of a provenance field: a key of the series file's origin envelope, the
+#: modification time of the staged member, or the created time that an item of an app export states for
+#: itself. An `envelope` entry names its key in `envelope`.
 SOURCE_ENVELOPE = "envelope"
 SOURCE_MEMBER_TIME = "member-time"
+SOURCE_ITEM_TIME = "item-time"
 # nosemgrep: ep-word-set -- The closed attribute values that the registry schema fixes, not vocabulary.
-SOURCES = frozenset({SOURCE_ENVELOPE, SOURCE_MEMBER_TIME})
+SOURCES = frozenset({SOURCE_ENVELOPE, SOURCE_MEMBER_TIME, SOURCE_ITEM_TIME})
 #: The closed `writer` values: the operation that alone writes a pointer field on a captured
 #: page, because it checks what a plain correction cannot (a relocation and its classification
 #: history, the raw file's identity, or the citing page's `sources:`).
