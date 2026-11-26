@@ -24,7 +24,8 @@ from .vocabulary import registry
 PARSERS = frozenset(export_transcripts.READERS)
 PACK = "source-formats.yaml"
 #: What an overlay may change on a shipped entry besides its status: the words that a transcript shows.
-_RELABELLED = ("roles", "untitled", "attachment")
+# nosemgrep: ep-word-set -- The registry schema's closed attribute names that an overlay may change, not vocabulary.
+_RELABELLED =("roles", "untitled", "attachment")
 _MAX_LABEL_CHARS = 80
 
 
