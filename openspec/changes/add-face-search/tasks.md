@@ -11,24 +11,26 @@
 - [x] 2.2 Test: a personal backup of a state root with both stores stages the people store and no face-index file. Catches: face vectors in a restic snapshot, or names lost on restore.
 - [x] 2.3 `infra/cellctl`: add the face-index files to the cell backup exclusions. Test: the exclusion mirror equals the registry's rebuildable face family, and the rendered restic command excludes it. Catches: a Cloud cell backup that keeps face vectors.
 - [x] 2.4 Face store modules: face index (faces with model id, settings, consent record, generation) and people store (groups with centroids, people, group-person links, exclusions, threshold overrides); `secure_delete` on, owner-only directory mode, indexes on person and page.
-- [ ] 2.5 Test: a people store restored without a face index re-attaches names after a re-scan, and faces stay off until the owner opts in again. Catches: a restore that turns faces on, or loses names.
-  The schema already supports it: the setting and consent live in the rebuildable face index, and groups and names in the people store. The test needs grouping (section 4).
+- [x] 2.5 Test: a people store restored without a face index re-attaches names after a re-scan, and faces stay off until the owner opts in again. Catches: a restore that turns faces on, or loses names.
+  The setting and consent live in the rebuildable face index, and groups and names in the people store.
 
 ## 3. Detection pipeline
 
-- [ ] 3.1 Face step in `media_worker` after the CLIP step, under the same identity and staleness checks; one decode pass serves CLIP and faces for a video; scene-frame images are skipped; failures soft-fail.
-- [ ] 3.2 Backfill on turn-on: bounded, resumable batches in sorted path order at background priority; progress in `faces.status`, with `unknown` for an unknown total.
-- [ ] 3.3 Test: an image with two fixture faces gets two rows with boxes in `read_media` region form. Catches: boxes in rotated or pixel coordinates that `read_media` would crop wrongly.
-- [ ] 3.4 Test: a video gets face rows at the CLIP index's keyframe times, and its scene-frame images get none. Catches: duplicate faces from scene frames, and keyframe faces that cannot collapse to the video.
-- [ ] 3.5 Test: an embedder that fails its digest check leaves the image's extraction and CLIP vector unchanged and status reports faces unavailable. Catches: a face failure that blocks ordinary media processing.
+- [x] 3.1 Face step in `media_worker` after the CLIP step, under the same identity and staleness checks; one decode pass serves CLIP and faces for a video; scene-frame images are skipped; failures soft-fail.
+- [x] 3.2 Backfill on turn-on: bounded, resumable batches in sorted path order at background priority; progress in `faces.status`, with `unknown` for an unknown total.
+  `face_scan.progress` supplies the count and the total (None when unknown); `faces.status` shows it with 5.1.
+- [x] 3.3 Test: an image with two fixture faces gets two rows with boxes in `read_media` region form. Catches: boxes in rotated or pixel coordinates that `read_media` would crop wrongly.
+- [x] 3.4 Test: a video gets face rows at the CLIP index's keyframe times, and its scene-frame images get none. Catches: duplicate faces from scene frames, and keyframe faces that cannot collapse to the video.
+- [x] 3.5 Test: an embedder that fails its digest check leaves the image's extraction and CLIP vector unchanged and status reports faces unavailable. Catches: a face failure that blocks ordinary media processing.
 
 ## 4. Grouping and naming
 
-- [ ] 4.1 Incremental nearest-centroid assignment with `join_similarity`, `join_margin`, `min_face_side` and `min_detection_score` read from settings; model calibrations from the manifest, policy defaults from one shipped data record, overrides from the face store.
-- [ ] 4.2 Test: a face within `join_margin` of two groups starts a new group. Catches: a doubtful face merged into the wrong person.
-- [ ] 4.3 Test: processing the same embeddings twice in the same order gives identical groups. Catches: non-deterministic grouping that moves names between runs.
+- [x] 4.1 Incremental nearest-centroid assignment with `join_similarity`, `join_margin`, `min_face_side` and `min_detection_score` read from settings; model calibrations from the manifest, policy defaults from one shipped data record, overrides from the face store.
+- [x] 4.2 Test: a face within `join_margin` of two groups starts a new group. Catches: a doubtful face merged into the wrong person.
+- [x] 4.3 Test: processing the same embeddings twice in the same order gives identical groups. Catches: non-deterministic grouping that moves names between runs.
 - [ ] 4.4 `faces.name`: name, rename and clear a group or person; NFKC case-folded comparison; a second group with an existing name joins that person; move one face out, recorded as an exclusion.
-- [ ] 4.5 Test: a face moved out of a group does not rejoin it after further faces arrive. Catches: owner corrections undone by the next backfill.
+  The store operations exist in `face_naming`; the `faces.name` door operation lands with 5.1.
+- [x] 4.5 Test: a face moved out of a group does not rejoin it after further faces arrive. Catches: owner corrections undone by the next backfill.
 
 ## 5. Owner operations
 
