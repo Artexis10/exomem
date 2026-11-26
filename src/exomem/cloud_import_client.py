@@ -71,6 +71,8 @@ class CloudImportError(Exception):
         self.resume = resume
         # True when Cloud reported that the import itself ended (failed, expired or discarded).
         self.ended = False
+        # For an ended import: False when a rerun would meet the same stop, so the folder run says nothing to rerun.
+        self.rerun_helps = True
         # Set when the client abandoned a checkpoint it could not resume; Cloud's import may still be open.
         self.why: str | None = None
 
@@ -85,21 +87,21 @@ class _SourceChanged(Exception):
     """A file or folder changed while it was archived, so the archive would mix two versions."""
 
 
-# The cell's controller fixes these two codes for an import step that left no report of its own. A retry after an
-# out-of-memory stop meets the same archive under the same limit, and a large vault takes hours to upload, so that
-# message asks for a report first.
+# The cell's controller fixes these two codes for an import step that left no report of its own: what each means for
+# the person, and whether running the command again can help. A new run after an out-of-memory stop meets the same
+# archive under the same limit, and a large vault takes hours to upload, so that message asks for a report first.
 _ENDED_WITHOUT_REPORT = {
-    "IMPORT_OUT_OF_MEMORY": "the cell ran out of memory while it unpacked the import, and the checkpoint is removed. "
-                            "Report the import id; a new run on the same archive will likely stop the same way",
-    "IMPORT_KILLED": "the import was stopped on your cell before it could say why, and the checkpoint is removed. "
-                     "Run the command again to start a new import; if it stops the same way, report the import id",
+    "IMPORT_OUT_OF_MEMORY": ("the cell ran out of memory while it imported, and the checkpoint is removed. "
+                             "Report the import id; a new run on the same archive will likely stop the same way", False),
+    "IMPORT_KILLED": ("the import was stopped on your cell before it could say why, and the checkpoint is removed. "
+                      "Run the command again to start a new import; if it stops the same way, report the import id", True),
 }
 
 
-def _ended_message(code: str) -> str:
-    """What happened to an import that Cloud ended, and what the person can do."""
+def _ended_without_finishing(code: str) -> tuple[str, bool]:
+    """What happened to an import that Cloud ended, with what the person can do, and whether a rerun can help."""
     return _ENDED_WITHOUT_REPORT.get(
-        code, "the Cloud import ended without finishing, and the checkpoint is removed; a new run starts a new import")
+        code, ("the Cloud import ended without finishing, and the checkpoint is removed; a new run starts a new import", True))
 
 
 def safe_code(value: object) -> str | None:
@@ -576,8 +578,9 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
                 ciphertext.unlink(missing_ok=True)
                 record.unlink(missing_ok=True)
                 code = safe_code(item.get("error_code")) or "IMPORT_ENDED"
-                ended = CloudImportError(where.phase, code, _ended_message(code), state["import_id"], resume=False)
-                ended.ended = True
+                message, rerun_helps = _ended_without_finishing(code)
+                ended = CloudImportError(where.phase, code, message, state["import_id"], resume=False)
+                ended.ended, ended.rerun_helps = True, rerun_helps
                 raise ended
             if predicate(item):
                 return item

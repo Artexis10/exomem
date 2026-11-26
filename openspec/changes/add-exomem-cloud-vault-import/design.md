@@ -174,7 +174,7 @@ A refused import preserves existing canonical content. Interrupted ZIP preservat
 
 An unexpected exception in the Job keeps `IMPORT_FAILED`. The Job's report then adds a `diagnostic` with the exception class (`type`), the function it came from (`function`), the class of an operating system error behind it (`cause`) and that error's number (`errno`), never the exception text. Before it deletes the Job, cellctl logs the diagnostic with the container's `reason` and `exit_code` and the Job's own failure condition reason (`job_reason`).
 
-Import logs carry counts, sizes, durations and codes only.
+Import logs carry counts, sizes, durations and codes, and for a failed import Job the cause fields named above, never member names, paths, addresses or exception text.
 
 ### D9. The owner restore runs before any of the above exists
 

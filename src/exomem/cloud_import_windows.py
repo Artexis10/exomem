@@ -788,9 +788,10 @@ class _Run:
                     resume = True
                 elif error.ended:
                     # Rule (b): Cloud reported that this import ended and replays its ID; the rerun uses a new one.
+                    # The window is renewed either way, so a later rerun works; the stop says to rerun only when it can help.
                     window.renew()
                     self.series.write(self.record)
-                    resume = True
+                    resume = error.rerun_helps
                 elif error.why:
                     # The client gave up its checkpoint, but Cloud's import may be open: the rerun replays the same ID, and Cloud's state decides.
                     message = (f"{error.why}. The checkpoint is removed. Cloud import {error.import_id} stays as it is, and the next run "
