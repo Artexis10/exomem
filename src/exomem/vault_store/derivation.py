@@ -7,7 +7,7 @@ their own that never take that boundary: the store thread is the store's only wr
 drain before it takes a request, a slice of at most ``SLICE_SECONDS`` a turn. A slice that its deadline
 cut, with intents still due, yields the thread to the requests then queued
 (``StoreServer._derive_owed``). A check that meets a page whose rows still wait reads that page from its
-stored bytes (``underived``).
+stored bytes (``underived_parsed``).
 
 A batch takes whole revisions of intents in ``(revision, path)`` order, derives them with the code that
 file mode uses, re-derives the pages whose links they move, deletes the intents and advances the store
@@ -57,7 +57,7 @@ BATCH_PAGES = 32
 RETRY_SECONDS = 1.0
 MAX_RETRY_SECONDS = 300.0
 
-#: The most pending pages that a check which reads every one of them takes (``underived``): 256 pages
+#: The most pending pages that a check which reads every one of them takes (``underived_parsed``): 256 pages
 #: parse in about 0.15 s, at the 0.6 ms a page measured on the store thread, so a check stays well
 #: inside a request's budget, and a backlog past it refuses the check until the drain shrinks it.
 UNDERIVED_CAP = 256
@@ -424,42 +424,8 @@ def caught_up(still_held_back: Callable[[], bool], seconds: float) -> bool:
             pause = min(pause * 2, _LOOK_MOST_SECONDS)
 
 
-def underived(conn: Connection, paths: Iterable[str] | None = None) -> dict[str, bytes | None]:
-    """The pages whose derived rows trail their stored bytes at ``conn``'s snapshot, with those bytes.
-
-    Each ``derive`` intent, pending or failed, maps its path to the page that the store holds there,
-    or to None when it holds none (a delete, or the source of a move). A check that reads link or
-    identity rows derives these pages' rows from these bytes in their place, by the rule that the
-    drain applies, so a derivation that failed or waits for room never lets a write trust rows that
-    its page no longer gives. A ``refresh`` intent stays out: it names a file that the store does not
-    own, whose rows trail the file until its drain succeeds, as an outside edit's rows trail it until
-    a commit sees the edit.
-
-    With ``paths``, only those pages count, each in a keyed read: the cost follows the caller's own
-    paths, whatever the backlog. A check that asks about those pages alone, or that asks whether the
-    rows it found belong to a pending page, takes this form. Without ``paths``, every page counts,
-    for a check that any pending page could change (a new link, a claimed id): its cost follows the
-    backlog, so more than ``UNDERIVED_CAP`` pending pages refuse it with ``read.backlog_too_large()``
-    before it reads one. The store thread derives the backlog between requests, so the retry finds it
-    smaller. Only an intent that still has attempts left counts toward the cap: one that used up its
-    ``ATTEMPTS`` keeps retrying on a growing backoff and never leaves the queue while it fails, so it
-    would refuse every such check for good. Its bytes are read all the same, and status reports it as failed. An
-    intent that failed fewer times is a backlog still, because a retry that lands removes it.
-
-    Keyed paths that outnumber ``UNDERIVED_CAP`` could name every waiting page, so that call takes
-    this form too.
-
-    A check that parses these bytes asks ``underived_parsed``, which parses a failed page once and not
-    on every call.
-    """
-    pending = _pending_paths(conn, paths)
-    found: dict[str, bytes | None] = dict.fromkeys(pending)
-    found.update(_bodies(conn, pending))
-    return found
-
-
 def _pending_paths(conn: Connection, paths: Iterable[str] | None) -> list[str]:
-    """The paths of the ``derive`` intents that ``underived`` reads, or the refusal that it makes."""
+    """The paths of the ``derive`` intents that ``underived_parsed`` reads, or the refusal that it makes."""
     wanted = None if paths is None else list(dict.fromkeys(paths))
     if wanted is None or len(wanted) > UNDERIVED_CAP:
         waiting = _queue_rows(
@@ -512,13 +478,36 @@ PARSED_CAP = 2048
 def underived_parsed(
     conn: Connection, paths: Iterable[str] | None, kind: str, parse: Callable[[str, bytes], _Parsed],
 ) -> dict[str, _Parsed | None]:
-    """``underived``, with each page's bytes replaced by ``parse(path, bytes)``, or None for a page
-    that the store holds no bytes for.
+    """The pages whose derived rows trail their stored bytes at ``conn``'s snapshot, each with what
+    ``parse(path, bytes)`` makes of its stored bytes.
 
-    ``kind`` names what ``parse`` makes, one name per parse. A page is parsed once while its bytes
-    stay the same, whatever the number of checks that read it: the result is kept by the page's
-    ``sha256``, so a page that changed is parsed anew, and it is dropped when the intent leaves the
-    queue (``_forget``). The bytes of a page that was parsed are not read again.
+    Each ``derive`` intent, pending or failed, maps its path to the page that the store holds there,
+    or to None when it holds none (a delete, or the source of a move). A check that reads link or
+    identity rows derives these pages' rows from their bytes in their place, by the rule that the
+    drain applies, so a derivation that failed or waits for room never lets a write trust rows that
+    its page no longer gives. A ``refresh`` intent stays out: it names a file that the store does not
+    own, whose rows trail the file until its drain succeeds, as an outside edit's rows trail it until
+    a commit sees the edit.
+
+    With ``paths``, only those pages count, each in a keyed read: the cost follows the caller's own
+    paths, whatever the backlog. A check that asks about those pages alone, or that asks whether the
+    rows it found belong to a pending page, takes this form. Without ``paths``, every page counts,
+    for a check that any pending page could change (a new link, a claimed id): its cost follows the
+    backlog, so more than ``UNDERIVED_CAP`` pending pages refuse it with ``read.backlog_too_large()``
+    before it reads one. The store thread derives the backlog between requests, so the retry finds it
+    smaller. Only an intent that still has attempts left counts toward the cap: one that used up its
+    ``ATTEMPTS`` keeps retrying on a growing backoff and never leaves the queue while it fails, so it
+    would refuse every such check for good. Its bytes are read all the same, and status reports it as failed. An
+    intent that failed fewer times is a backlog still, because a retry that lands removes it.
+
+    Keyed paths that outnumber ``UNDERIVED_CAP`` could name every waiting page, so that call takes
+    this form too.
+
+    ``kind`` names what ``parse`` makes, one name per parse. A failed page stays here for as long as
+    it fails, so a page is parsed once while its bytes stay the same, whatever the number of checks
+    that read it: the result is kept by the page's ``sha256``, so a page that changed is parsed anew,
+    and it is dropped when the intent leaves the queue (``_forget``). The bytes of a page that was
+    parsed are not read again.
     """
     pending = _pending_paths(conn, paths)
     found: dict[str, _Parsed | None] = dict.fromkeys(pending)

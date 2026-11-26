@@ -9611,7 +9611,7 @@ def _underived_inbound(
     reach it, or its bytes are not UTF-8), as the drain writes them once it succeeds. No link guard
     or link rewrite then trusts a row that its page no longer gives. With ``paths`` the read covers
     those pages alone; without, it covers every pending page, which any of them could change a link
-    for, and ``derivation.underived`` refuses it when the backlog passes ``UNDERIVED_CAP``.
+    for, and ``derivation.underived_parsed`` refuses it when the backlog passes ``UNDERIVED_CAP``.
     """
     from .vault_store import derivation
     from .vault_store import read as store_read

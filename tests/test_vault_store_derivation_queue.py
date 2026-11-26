@@ -421,6 +421,11 @@ def record_failures(writer, attempts):  # noqa: F811
         )
 
 
+def pending_bytes(conn, paths=None):
+    """What ``derivation.underived_parsed`` gives a check that keeps each page's stored bytes."""
+    return derivation.underived_parsed(conn, paths, "stored bytes", lambda _rel, raw: raw)
+
+
 def test_derivations_that_used_up_their_attempts_never_make_a_link_guarded_write_refuse(
     served, writer, monkeypatch  # noqa: F811
 ):
@@ -433,7 +438,7 @@ def test_derivations_that_used_up_their_attempts_never_make_a_link_guarded_write
     record_failures(writer, derivation.ATTEMPTS)
     commit_pending_pages(served, writer, monkeypatch, 3, "Waiting")
     with read.snapshot(served) as view:
-        found = derivation.underived(view.connection)
+        found = pending_bytes(view.connection)
     assert all(found[f"Knowledge Base/Notes/Failed {number}.md"] for number in range(derivation.UNDERIVED_CAP + 1))
 
     delete_file.delete_file(served, path=HARBOUR, confirm=True)
@@ -449,7 +454,7 @@ def test_derivations_that_failed_once_still_count_toward_the_cap(served, writer,
     record_failures(writer, 1)
 
     with read.snapshot(served) as view, pytest.raises(OpError) as refused:
-        derivation.underived(view.connection)
+        pending_bytes(view.connection)
 
     assert refused.value.code == read.DERIVED_BEHIND
 
@@ -509,9 +514,9 @@ def test_a_keyed_read_of_more_pages_than_the_cap_is_capped_like_a_read_of_every_
     waiting = [f"Knowledge Base/Notes/Backlog {number}.md" for number in range(400)]
 
     with read.snapshot(served) as view:
-        few = derivation.underived(view.connection, waiting[:10])
+        few = pending_bytes(view.connection, waiting[:10])
         with pytest.raises(OpError) as refused:
-            derivation.underived(view.connection, waiting)
+            pending_bytes(view.connection, waiting)
 
     assert sorted(few) == sorted(waiting[:10]) and all(body is not None for body in few.values())
     assert refused.value.code == read.DERIVED_BEHIND

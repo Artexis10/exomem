@@ -719,11 +719,11 @@ class ReferenceIndex:
         of ``_store_identity_owners``, so a read of a page saved a moment ago carries the page's own
         ref and id, not one that names nothing once its rows arrive.
 
-        The check reads the pending state of ``wanted`` alone (``derivation.underived`` with its
+        The check reads the pending state of ``wanted`` alone (``derivation.underived_parsed`` with its
         paths), whatever the backlog, and a write that asks for the ref of its own page after it
         commits is never refused for it: a refusal there would answer an error for a write that
         stands. A batch of more than ``derivation.UNDERIVED_CAP`` paths takes the capped form
-        instead (``derivation.underived`` says why), so beside a backlog past the cap it refuses
+        instead (``derivation.underived_parsed`` says why), so beside a backlog past the cap it refuses
         with ``VAULT_STORE_DERIVED_BEHIND``, and so does the read of the owners of its ids when more
         than that many pages hold them.
 
@@ -1804,7 +1804,7 @@ def _store_identity_owners(
 ) -> dict[str, tuple[str, ...]] | None:
     """Every page that holds each normalized id, from the store; None outside store mode.
 
-    A page whose derivation trails its stored bytes (``derivation.underived``) answers from those
+    A page whose derivation trails its stored bytes (``derivation.underived_parsed``) answers from those
     bytes, by the rule that its drain applies (``identity_row``): a page that a failed delete left
     with its row is not an owner, and one that a failed write gave an id is. Any pending page could
     claim a wanted id, so the check reads them all, and a backlog past ``UNDERIVED_CAP`` refuses it
@@ -1821,7 +1821,7 @@ def _underived_identities(
     conn: sqlite3.Connection, root: Path, paths: Iterable[str] | None = None
 ) -> dict[str, IdentityRow | None]:
     """The identity row of each page whose derivation trails its stored bytes (``identity_row`` of
-    them), or None for a page that gives none; ``derivation.underived`` says which pages count.
+    them), or None for a page that gives none; ``derivation.underived_parsed`` says which pages count.
 
     A page whose derivation failed stays here for as long as it fails, so each page is parsed once
     while its bytes stay the same, not on every check (``derivation.underived_parsed``).
