@@ -32,7 +32,7 @@ The MCP server key, the serverInfo name, the plugin names, the skill names and t
 #### Scenario: Settings use the new prefix and keep the old one as an alias
 
 - **WHEN** a deployment sets `EVERMATTER_VAULT_PATH`, or only the older `EXOMEM_VAULT_PATH`
-- **THEN** the service and the hooks use that value
+- **THEN** the service, the hooks and the service scripts use that value
 - **AND** setup and the installers write `EVERMATTER_VAULT_PATH`
 
 #### Scenario: The two prefixes disagree
@@ -40,6 +40,13 @@ The MCP server key, the serverInfo name, the plugin names, the skill names and t
 - **WHEN** one source sets `EVERMATTER_VAULT_PATH` and `EXOMEM_VAULT_PATH` to different values
 - **THEN** the service and every command that reads a placement setting or writes a credential refuse to start and name both variables, without their values
 - **AND** the hooks skip that turn's nudge or checkpoint and log the conflict
+- **AND** the service scripts that read the setting from a service environment, a `.env` file or the shell refuse and name both variables
+
+#### Scenario: The two prefixes disagree about a setting that picks no data
+
+- **WHEN** one source sets `EVERMATTER_EMBED_BACKEND` and `EXOMEM_EMBED_BACKEND` to different values
+- **THEN** the `EXOMEM_EMBED_BACKEND` value is used
+- **AND** each hook still runs, and logs one line that names both variables, without their values
 
 #### Scenario: A value written after import wins
 

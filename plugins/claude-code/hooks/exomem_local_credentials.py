@@ -34,7 +34,7 @@ import re
 import sys
 import urllib.error
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Iterator, MutableMapping
 from pathlib import Path
 
 # The loopback spellings fixed by the network standards, not a vocabulary a user extends.
@@ -94,6 +94,27 @@ class Lane:
             return error.code, b""
 
 
+def _rename_aliases(environ: MutableMapping[str, str]) -> list[str]:
+    """Rename each alias name in `environ` into its EXOMEM_ name and remove the alias names.
+
+    Copy of `exomem.env_compat.rename_settings` for a hook, which cannot import the
+    package; `tests/test_setting_names_in_step.py` keeps the copy in step. EVERMATTER_X then
+    KB_MCP_X fills EXOMEM_X only when it is unset. Returns the EVERMATTER_ names whose
+    value differs from a set EXOMEM_ name. This hook reads one credential, and a conflict
+    over it is unclear which credential to send, so its caller treats every conflict as a refusal.
+    """
+    conflicts: list[str] = []
+    for prefix in ("EVERMATTER_", "KB_MCP_"):  # the product's closed naming history
+        for name in [name for name in environ if name.startswith(prefix)]:
+            value = environ.pop(name)
+            canonical = "EXOMEM_" + name[len(prefix) :]
+            if canonical not in environ:
+                environ[canonical] = value
+            elif prefix == "EVERMATTER_" and environ[canonical] != value:
+                conflicts.append(name)
+    return conflicts
+
+
 def service_env_path() -> Path | None:
     explicit = os.environ.get("EXOMEM_SERVICE_ENV", "").strip()
     if explicit:
@@ -107,24 +128,36 @@ def service_env_path() -> Path | None:
 
 
 def service_env_value(name: str, path: Path | None) -> str:
-    """Read the first dotenv value, preserving the managed install's quoting."""
+    """Read the first dotenv value, preserving the managed install's quoting.
+
+    The file's EVERMATTER_ and KB_MCP_ names fill an unset EXOMEM_ name. When the file sets
+    EVERMATTER_X and EXOMEM_X to different values it returns nothing: it never picks one.
+    """
     if path is None:
         return ""
     try:
         text = path.read_text(encoding="utf-8").lstrip("\ufeff")
     except Exception:  # noqa: BLE001 — hooks must fail softly
         return ""
-    for line in text.splitlines():
-        match = re.match(rf"^\s*{re.escape(name)}\s*=\s*(.*)$", line)
-        if not match:
-            continue
-        value = match.group(1).strip()
-        if len(value) >= 2 and value[0] == value[-1] == '"':
-            value = value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
-        elif len(value) >= 2 and value[0] == value[-1] == "'":
-            value = value[1:-1]
-        return value.strip()
-    return ""
+    found: dict[str, str] = {}
+    for candidate in (
+        name,
+        *(prefix + name[len("EXOMEM_") :] for prefix in ("EVERMATTER_", "KB_MCP_")),
+    ):
+        for line in text.splitlines():
+            match = re.match(rf"^\s*{re.escape(candidate)}\s*=\s*(.*)$", line)
+            if not match:
+                continue
+            value = match.group(1).strip()
+            if len(value) >= 2 and value[0] == value[-1] == '"':
+                value = value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+            elif len(value) >= 2 and value[0] == value[-1] == "'":
+                value = value[1:-1]
+            found[candidate] = value.strip()
+            break
+    if _rename_aliases(found):
+        return ""
+    return found.get(name, "")
 
 
 def rest_key() -> tuple[str, str]:

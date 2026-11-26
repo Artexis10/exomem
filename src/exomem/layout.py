@@ -15,7 +15,7 @@ that choice and on no other state:
 No area or folder name is spelled here. Areas come from the note-type and home registries,
 the collection profiles and the managed-root helpers in `kbdir`. Nothing in the read or write
 paths calls this module yet: only the read-only relayout plan and `layout_report`, which feeds
-status and doctor, do.
+status and doctor, do, and `declared_folders`, which a write into a folder split reads.
 """
 
 from __future__ import annotations
@@ -225,6 +225,41 @@ def area_folder(note_type: note_types.NoteType, layout: Layout | str) -> str | N
 def home_folder(home: homes.Home, layout: Layout | str) -> str:
     """The folder of a home under `layout`, relative to the managed root."""
     return _compiled_folder(home.folder, Layout(layout))
+
+
+def typed_folders(vault_root: Path) -> list[tuple[str, str, bool]]:
+    """Every folder a registry gives a type or placement: `(folder below the managed root, owner, split by project)`."""
+    from . import entity_recurrence, entity_types
+    from .vocabulary import registry
+
+    out: list[tuple[str, str, bool]] = []
+    # The effective registries, shipped plus overlay: an overlay type owns a folder as well.
+    snapshot = registry.load(note_types.SPEC, vault_root)
+    for note_type in snapshot.typed.types.values():
+        if note_type.folder:
+            out.append((note_type.folder, f"note type {note_type.key}", note_type.partition == "project"))
+    entities = kbdir.managed_relative(entity_recurrence.entities_prefix()).rstrip("/")
+    for definition in entity_types.load_entity_types(vault_root).active_definitions:
+        out.append((str(PurePosixPath(entities, definition.folder)), f"entity type {definition.id}", False))
+    for home in homes.load(vault_root).homes:
+        out.append((home.folder, f"home {home.key}", False))
+    return out
+
+
+def declared_folders(vault_root: Path) -> frozenset[str]:
+    """The exact vault-relative spelling of every folder the layout declares, with its ancestors.
+
+    These are the managed root, the scaffold's folders in it, and each folder a registry gives a
+    type or placement (`typed_folders`). Code reads these folders by their exact spelling, so a
+    write into a folder split converges on a declared spelling first (`vault.canonical_variant`).
+    """
+    from .init import scaffold_folders
+
+    declared: set[str] = set()
+    for folder in (*scaffold_folders(), *(row[0] for row in typed_folders(vault_root))):
+        parts = PurePosixPath(kbdir.managed_join(folder)).parts
+        declared.update("/".join(parts[:index]) for index in range(1, len(parts) + 1))
+    return frozenset(declared)
 
 
 def _area_name(folder: str) -> str:

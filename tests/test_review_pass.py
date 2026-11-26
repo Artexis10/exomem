@@ -11,7 +11,8 @@ from __future__ import annotations
 import json
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ from exomem import (
     commands,
     due_state,
     find,
+    foreground_priority,
     review_pass,
     review_state,
     writer_lease,
@@ -162,6 +164,32 @@ def _from_held(reply: dict) -> bool:
     return '"as_of"' in json.dumps(reply)
 
 
+def _listing_content(reply: dict) -> object:
+    """A listing without the time of the pass it read: two passes state two honest times."""
+    kept = {key: value for key, value in reply.items() if key not in ("as_of", "refreshing")}
+    return without_scan_time(kept)
+
+
+@contextmanager
+def _request_in_flight() -> Iterator[Callable[[], None]]:
+    """Hold a foreground request open on another thread until `release` is called or the block ends."""
+    started, released = threading.Event(), threading.Event()
+
+    def request() -> None:
+        with foreground_priority.foreground():
+            started.set()
+            released.wait()
+
+    thread = threading.Thread(target=request, name="held-request")
+    thread.start()
+    assert started.wait(5)
+    try:
+        yield released.set
+    finally:
+        released.set()
+        thread.join(5)
+
+
 def _wait_for(condition: Callable[[], bool], timeout: float = 30.0) -> None:
     deadline = time.monotonic() + timeout
     while not condition():
@@ -226,16 +254,12 @@ def test_a_held_listing_equals_a_listing_computed_in_the_request(
         review_pass.stop()
         fresh = _list(vault)
 
-    def listing(reply: dict) -> object:
-        # The listing computed now states a later name-drift scan than the held pass.
-        kept = {key: value for key, value in reply.items() if key not in ("as_of", "refreshing")}
-        return without_scan_time(kept)
-
     # Nothing is withheld from the owner, so its listing reads the held pass. The client's
-    # listing runs its own audit, while the owner's pass is held.
+    # listing runs its own audit, while the owner's pass is held. The listing computed now
+    # states a later name-drift scan than the held pass.
     assert _from_held(held) is (caller is OWNER)
     assert not _from_held(fresh)
-    assert listing(held) == listing(fresh)
+    assert _listing_content(held) == _listing_content(fresh)
     assert _paths(fresh).count(f"{NOTES}/forecast.md") == 3
     assert _item(fresh, f"{NOTES}/fact-1.md")["item_id"] == dismissed["item_id"]
     assert _item(fresh, f"{NOTES}/fact-1.md")["state"] == "dismissed"
@@ -602,3 +626,51 @@ def test_an_unknown_id_is_refused_without_an_audit(
 
     assert refused.value.code == "ITEM_NOT_FOUND"
     assert len(passes.runs) == ran
+
+
+def test_a_pass_waits_for_a_request_in_flight_and_finds_what_an_undisturbed_pass_finds(
+    vault: Path, warm_managed_cell, passes: _Passes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _unlinked_notes(vault, 3)
+    _source(vault, "pending")
+    _serve(vault, warm_managed_cell)
+    monkeypatch.setenv("EXOMEM_REVIEW_PASS_QUIET_SECONDS", "0.1")
+    monkeypatch.setenv("EXOMEM_REVIEW_PASS_GAP_FACTOR", "0.05")
+    with _request_in_flight() as end_request:
+        review_pass.start(vault)
+        # The pass is due after 0.1 s. A request may hold it for 2 s at one yield, so it still waits at 0.6 s.
+        time.sleep(0.6)
+        request_ended = time.monotonic()
+        end_request()
+    with request_scope(OWNER):
+        _hold(vault)
+        disturbed = _list(vault), _list(vault, mode="activation")
+    review_pass.stop()
+    with request_scope(OWNER):
+        _hold(vault)
+        undisturbed = _list(vault), _list(vault, mode="activation")
+
+    # The first audit entry is that of the pass that met the request.
+    assert passes.background()[0][1] >= request_ended
+    assert len(disturbed[0]["items"]) >= 4
+    assert [_listing_content(reply) for reply in disturbed] == [
+        _listing_content(reply) for reply in undisturbed
+    ]
+
+
+def test_stopping_the_worker_ends_a_pass_that_waits_for_a_request(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _unlinked_notes(vault, 3)
+    _serve(vault, warm_managed_cell)
+    monkeypatch.setenv("EXOMEM_REVIEW_PASS_QUIET_SECONDS", "0.1")
+    with _request_in_flight():
+        thread = review_pass.start(vault)
+        time.sleep(0.6)
+        stopped = time.monotonic()
+        review_pass.stop()
+        waited = time.monotonic() - stopped
+
+    # A yield may hold a pass for 2 s. The stop ends the wait now, with the request still running.
+    assert thread is not None and not thread.is_alive()
+    assert waited < 1.0

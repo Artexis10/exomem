@@ -18,7 +18,15 @@ from pathlib import Path
 
 import pytest
 
-from exomem import audit, call_spans, entity_evidence, find, markdown_relations
+from exomem import (
+    audit,
+    call_spans,
+    entity_evidence,
+    entity_recurrence,
+    find,
+    markdown_relations,
+    request_budget,
+)
 from exomem import vault as vault_module
 from exomem.governance import egress, membership, policy, raw_protection
 from exomem.governance.principal import RequestPrincipal, library_scope, request_scope
@@ -372,6 +380,38 @@ def test_a_warm_sweep_of_a_large_vault_extracts_no_page_and_stays_cheap(tmp_path
     assert warm_cpu < WARM_TO_COLD_CPU_RATIO_CEILING * cold_cpu, (
         f"warm sweep {warm_cpu:.3f}s at {warm_cpu / cold_cpu:.3f}x the cold sweep's {cold_cpu:.3f}s"
     )
+
+
+def test_a_sweep_its_deadline_stops_keeps_the_pages_it_extracted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A request that the deadline stops mid-sweep must not throw away the pages it read.
+
+    After a release reset the store, each review request re-read the whole vault and lost it all.
+    """
+    vault = _build(tmp_path)
+    _, cold = _stored_sweep(vault, None)
+    entity_evidence.reset(vault)
+    budget = request_budget.RequestBudget(seconds=50)
+    extracted: list[object] = []
+    page_evidence = entity_recurrence.page_evidence
+
+    def stop_after_two(page, **kwargs):
+        extracted.append(page)
+        if len(extracted) == 2:
+            request_budget.current().deadline = 0.0
+        return page_evidence(page, **kwargs)
+
+    monkeypatch.setattr(entity_recurrence, "page_evidence", stop_after_two)
+    _reset_caches()
+    stopped = audit.audit(vault, categories=["entity_recurrence"], budget=budget)
+    monkeypatch.undo()
+
+    assert "audit.entity_recurrence" in budget.truncated
+    assert stopped.findings == []
+    findings, warm = _stored_sweep(vault, None)
+    assert warm["pages_reextracted"] == cold["pages_reextracted"] - 2
+    assert findings == _full_sweep(vault, None)
 
 
 def test_a_stored_row_that_does_not_decode_never_changes_an_answer(tmp_path: Path) -> None:

@@ -160,6 +160,9 @@ def test_indexable_original_needs_room_for_its_search_rows(
         assert preserve.preserve(served, scope="Tests", category="Minutes", filename="catalogue.md",
                                  content=data).path == target
     assert read.owned_bytes(served, target) == data.encode()
+    # The batch that holds this page fails after its request's slice is spent, so the request settles
+    # only the first of its pages: the store thread's next turn derives the rest.
+    derivation.drain(served.resolve(), writer)
     assert queued(writer, target) == [(derivation.NO_ROOM,)] and catalogued() == []
 
     free[0] = 96 * floor

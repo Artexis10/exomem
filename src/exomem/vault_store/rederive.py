@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import functools
 import json
+import logging
+import sqlite3
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +29,8 @@ from sqlite3 import Connection
 from .. import access, lexstore, registry_history, semantic_index, vault
 from ..kbdir import managed_join
 from . import derive, mode
+
+_log = logging.getLogger(__name__)
 
 #: The ``store_meta`` keys: the revision of the last commit that changed an overlay source, the
 #: overlay revision that the derived rows reflect, and the running pass (its target revision and
@@ -320,15 +324,44 @@ def _create_owner_objects(tx: Connection, root: Path) -> None:
     from .migrate import create_owner_schema
 
     created = dict(item for group in create_owner_schema(tx) for item in group.items())
-    tx.executemany(
-        "INSERT OR IGNORE INTO store_mode_objects(name, type) VALUES (?, ?)", list(created.items())
-    )
+    _record_objects(tx, created)
     if "page_admission" in created or "prior_paths" in created:
         # Earlier batches wrote no page facts or prior paths, so an older cursor cannot skip those pages.
         tx.execute("DELETE FROM store_meta WHERE key = ?", (PASS,))
     if "inbound_links" in created:
         held = frozenset(row[0] for row in tx.execute("SELECT path FROM store_pages"))
         vault.derive_inbound_rows(root, tx, include=lambda rel: rel not in held)
+
+
+def _record_objects(tx: Connection, objects: dict[str, str]) -> None:
+    """Record store objects (name -> type) with the ones that migration created, so a rollback drops them too."""
+    tx.executemany("INSERT OR IGNORE INTO store_mode_objects(name, type) VALUES (?, ?)", list(objects.items()))
+
+
+def adopt_change_journal(tx: Connection) -> None:
+    """Give a store that was migrated before the lexical change journal existed its journal, in ``tx``.
+
+    An empty journal is correct the moment it exists, because a reader patches only from a position that
+    the journal holds. So no page is derived again and no owner pass runs. Every journal object is recorded,
+    including any that a partial journal already had, so a rollback drops them all. Each derivation calls it,
+    and the first one after an upgrade creates the journal; until then every recall after a write reads every
+    row. A failure leaves the store as it was and lets the derivation go on, because a missing journal only
+    makes those reads slower, while a failed derivation would leave every later write underived.
+    """
+    if lexstore.change_journal_complete(tx):
+        return
+    from .migrate import schema_objects
+
+    tx.execute("SAVEPOINT adopt_change_journal")
+    try:
+        lexstore.create_change_journal(tx)
+        required, _held = lexstore.change_journal_objects(tx)
+        kinds = schema_objects(tx)
+        _record_objects(tx, {name: kinds[name] for name in sorted(required) if name in kinds})
+    except sqlite3.Error as error:
+        tx.execute("ROLLBACK TO adopt_change_journal")
+        _log.warning("store change journal not adopted (%s); recall reads every row after a write", error)
+    tx.execute("RELEASE adopt_change_journal")
 
 
 def _due(conn: Connection, root: Path) -> tuple[str, Registry]:

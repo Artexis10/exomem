@@ -238,6 +238,8 @@ def _deadline_check() -> None:
 
 #: Every request-budget stage of task discovery is named under this prefix, from the whole lane down to its links.
 DISCOVERY_STAGE_PREFIX = "working_set.task_context"
+#: The final guard's recheck of the served task sources, named when the call's deadline stops it.
+GUARD_STAGE = f"{DISCOVERY_STAGE_PREFIX}_guard"
 
 
 @dataclass
@@ -272,8 +274,17 @@ class Reach:
 _LANE_FAILED = "lane_failed"
 
 
-def _serve_without_deadline() -> None:
-    """The final guard re-reads only leads already served, so a deadline that has passed must not drop them."""
+def _serve_until_the_call_deadline() -> None:
+    """Let the final guard serve leads past the activation's own deadline, and one stage reserve past the call's.
+
+    The guard rechecks only leads already found, so a nearer activation deadline must not drop them. The stages
+    before it may run to the call's deadline, so it gets one stage reserve beyond it, within the time between
+    the request budget and the client's own timeout. On a starved host it once kept rechecking leads 12-32 s
+    past the deadline, and the packet missed a 60 s client timeout. `guarded` withholds the task context when
+    this stops it, as any failed recheck does, and names the stage.
+    """
+    if request_budget.request_overrun() > request_budget.ACTIVATION_STAGE_RESERVE_SECONDS:
+        raise TaskDeadline("the call's deadline arrived while the served task sources were rechecked")
 
 
 def full_source_access(root: Path, caller: Any, *, provider=None) -> bool:
@@ -1023,12 +1034,18 @@ def guarded(root: Path, caller: Any, block: Mapping[str, Any], *, limit: int) ->
                     return empty("partial", reset=True)
                 if path not in sources:
                     sources[path] = project_source(
-                        root, path, caller, expected_hash=expected, check=_serve_without_deadline,
+                        root, path, caller, expected_hash=expected, check=_serve_until_the_call_deadline,
                     )
                 source = sources[path]
                 if (source is None or source.version != item["source_version"]
                         or (method and not _holds_method(source, item["ref"]))):
                     return empty("partial", reset=True)
+            except TaskDeadline:
+                # Named here, where the context is withheld: a stop that a helper swallowed withheld nothing.
+                working_set.note_stopped(GUARD_STAGE)
+                stopped = empty("partial", reset=True)
+                _add_missing(stopped, "budget")
+                return stopped
             except Exception:  # noqa: BLE001 - source races and admission failures release no projection
                 return empty("partial", reset=True)
     return result

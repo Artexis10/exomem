@@ -176,3 +176,42 @@ def test_a_window_whose_artifacts_are_all_filed_reports_no_residual_file_for_its
     residual = adoption_run.finish(vault, run_id=run_id, today=consume.TODAY)["finish"]["residual"]
 
     assert (residual["files"], residual["by_reason"], residual["discard"]) == (0, {}, None)
+
+
+def test_a_series_file_without_filing_or_origin_reads_as_before(vault: Path) -> None:
+    """A series file that an older client wrote, so a cell that reads the new keys breaks every existing stage."""
+    import_id = _window(vault, {"Recordings/a.md": b"# A\n"})
+
+    series = import_stage.read_series(vault, import_id)
+
+    assert (series.label, series.paths) == (LABEL, tuple(SERIES))
+    assert series.filing is None and series.origin == {}
+
+
+def test_a_series_file_states_filing_and_origin(vault: Path) -> None:
+    """The cell must carry what the sender stated, so the Source can say where it came from."""
+    import_id = _window(vault, {"Recordings/a.md": b"# A\n"})
+    document = {"label": LABEL, "paths": SERIES, "filing": "cell",
+                "origin": {"label": "Phone photos", "device_family": "ios", "browser_family": "safari"}}
+    (vault / "_Imports" / import_id / import_stage.SERIES_FILE).write_text(json.dumps(document))
+
+    series = import_stage.read_series(vault, import_id)
+
+    assert series.filing == "cell"
+    assert series.origin == {"label": "Phone photos", "device_family": "ios", "browser_family": "safari"}
+
+
+def test_an_unknown_filing_value_and_a_malformed_origin_value_are_ignored(vault: Path) -> None:
+    """A value of the wrong shape must be dropped, so a hostile or newer sender cannot put markup or a sentence
+    into a Source's frontmatter or ask for a mode that the cell does not know."""
+    import_id = _window(vault, {"Recordings/a.md": b"# A\n"})
+    document = {"label": LABEL, "paths": SERIES, "filing": "elsewhere",
+                "origin": {"label": "line one\nline two", "device_family": "Mac OS X 10.15 (Intel)",
+                           "browser_family": 7, "ip": "203.0.113.5"}}
+    (vault / "_Imports" / import_id / import_stage.SERIES_FILE).write_text(json.dumps(document))
+
+    series = import_stage.read_series(vault, import_id)
+
+    assert series.filing is None
+    assert series.origin == {}
+    assert (series.label, series.paths) == (LABEL, tuple(SERIES))

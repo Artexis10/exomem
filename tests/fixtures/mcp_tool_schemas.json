@@ -743,6 +743,7 @@
             "maintenance.capture_metadata",
             "maintenance.convert_originals",
             "maintenance.reconcile",
+            "maintenance.path_variants",
             "maintenance.job",
             "maintenance.structured_files",
             "maintenance.tag_variants",
@@ -885,6 +886,7 @@
             "maintenance.capture_metadata",
             "maintenance.convert_originals",
             "maintenance.reconcile",
+            "maintenance.path_variants",
             "maintenance.cancel_job",
             "maintenance.held_resolve",
             "maintenance.structured_files",
@@ -1052,7 +1054,7 @@
         },
         "options": {
           "type": "object",
-          "description": "Rare knobs: aggregate, date_from, date_to, view, output_format."
+          "description": "Rare knobs: aggregate, date_from, date_to, view, output_format, query (a typed version-1 query)."
         }
       },
       "type": "object"

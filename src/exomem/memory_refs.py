@@ -1192,9 +1192,6 @@ def _reference_owners_read_only(
     if stored is not None:
         return _ReferenceOwners(root.resolve(), stored, None)
 
-    # Lazy: `semantic_contract` imports this module.
-    from . import semantic_contract
-
     # The source is chosen before any lookup, from vault-wide state alone.
     #
     # A sidecar fast path was tried and removed. Consulting it and scanning
@@ -1228,20 +1225,9 @@ def _reference_owners_read_only(
         resolved: dict[str, tuple[str, ...]] | None = None if wanted else {}
         snapshot = None
         if wanted:
-            snapshot = semantic_contract.current_reference_identity_snapshot(
-                root, declined=measured, tolerate_external_pending=serve_stale
+            resolved, snapshot = _owners_from_projection(
+                root, wanted, declined=measured, serve_stale=serve_stale
             )
-        if snapshot is not None:
-            owners = snapshot.reference_owners
-            answered = {identifier: owners.get(identifier, ()) for identifier in wanted}
-            if semantic_contract.reference_identity_snapshot_is_current(
-                root, snapshot, tolerate_external_pending=serve_stale
-            ):
-                resolved = answered
-            else:
-                snapshot = None
-                if measured is not None:
-                    measured["declined_snapshot_changed"] = 1
         if measured is not None:
             measured["snapshot"] = int(bool(wanted) and resolved is not None)
         if resolved is None:
@@ -1259,6 +1245,70 @@ def _reference_owners_read_only(
         if measured is not None:
             measured["cpu_ms"] = (time.thread_time_ns() - started) // 1_000_000
     return _ReferenceOwners(root.resolve(), resolved, snapshot)
+
+
+def _owners_from_projection(
+    root: Path,
+    wanted: tuple[str, ...],
+    *,
+    declined: dict[str, int] | None = None,
+    serve_stale: bool = False,
+) -> tuple[dict[str, tuple[str, ...]] | None, ReferenceIdentitySnapshot | None]:
+    """Every wanted id's owners from the server's identity projection, or None if it is not current.
+
+    The projection answers only if it is current both before and after the lookup. The read
+    borrows a projection the server already holds: it never builds, fills, or refreshes one.
+    """
+    # Lazy: `semantic_contract` imports this module.
+    from . import semantic_contract
+
+    snapshot = semantic_contract.current_reference_identity_snapshot(
+        root, declined=declined, tolerate_external_pending=serve_stale
+    )
+    if snapshot is None:
+        return None, None
+    owners = snapshot.reference_owners
+    answered = {identifier: owners.get(identifier, ()) for identifier in wanted}
+    if not semantic_contract.reference_identity_snapshot_is_current(
+        root, snapshot, tolerate_external_pending=serve_stale
+    ):
+        if declined is not None:
+            declined["declined_snapshot_changed"] = 1
+        return None, None
+    return answered, snapshot
+
+
+def owner_without_walk(vault_root: Path, value: str) -> str | None:
+    """The one page that a memory ref names, when that is known without walking the vault.
+
+    The store's identity rows or the server's current identity projection answer, as they answer
+    `resolve_identifier_read_only`. None means only that this lookup did not answer: no projection
+    is current, pending custody is unsettled, or the ref names no page or several. A caller uses it
+    to word a reply cheaply, never to decide one; `resolve_identifier_read_only` decides.
+    """
+    memory_id = parse_memory_ref(str(value or "").strip())
+    if memory_id is None:
+        return None
+    root = Path(vault_root)
+    stored = _store_identity_owners(root, [memory_id])
+    if stored is not None:
+        rows = list(stored[memory_id])
+    else:
+        answered, _snapshot = _owners_from_projection(root, (memory_id,))
+        if answered is None:
+            return None
+        from .find import RetrievalIndexWarming
+
+        try:
+            projection = _settled_projection(root, _pending_reference_projection(root))
+        except RetrievalIndexWarming:
+            return None  # pending custody is not readable yet: the lookup did not answer
+        if projection is not None and projection.blocked_paths:
+            return None
+        rows = list(answered[memory_id])
+        if projection is not None:
+            rows = _apply_pending_identity(root, memory_id, rows, projection=projection)
+    return rows[0] if len(rows) == 1 else None
 
 
 def _reference_owner_view_read_only(
@@ -1311,12 +1361,10 @@ def resolve_identifier_read_only(vault_root: Path, value: str) -> str:
         stored = _store_identity_owners(Path(vault_root), [memory_id])
         if stored is not None:
             return _one_owner(memory_id, list(stored[memory_id]))
-        rows = _apply_pending_identity(
-            Path(vault_root),
-            memory_id,
-            ReferenceIndex(vault_root)._scan_paths_for_id(memory_id),
-        )
-        return _one_owner(memory_id, rows)
+        # The identity projection answers when it is current, and the scan only when it is not. Both
+        # apply one membership rule, and pending custody applies to either answer.
+        rows = paths_for_ids_read_only(Path(vault_root), [memory_id]).get(memory_id, ())
+        return _one_owner(memory_id, list(rows))
     for prefix in ("exomem://vault/", "exomem://source/"):
         if raw.lower().startswith(prefix):
             decoded = unquote(raw[len(prefix) :])

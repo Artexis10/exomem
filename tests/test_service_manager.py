@@ -1722,6 +1722,129 @@ def test_a_unit_with_two_environment_files_overlays_both_in_order(tmp_path, monk
     assert runtime.environment_warnings == []
 
 
+def test_a_service_environment_files_evermatter_name_beats_an_inherited_exomem_value(
+    tmp_path, monkeypatch
+):
+    """The file overrides the supervisor's inherited environment; that holds under
+    either prefix, and a later file's alias beats an earlier file's explicit name."""
+    module = _manager()
+    first, second = tmp_path / "a.env", tmp_path / "b.env"
+    first.write_text("EXOMEM_SHARED=from-first\n")
+    second.write_text("EVERMATTER_SHARED=from-second\nEVERMATTER_INHERITED=from-file\n")
+    monkeypatch.setenv("EXOMEM_INHERITED", "from-supervisor")
+    runtime = module.WorkerRuntime(
+        tmp_path / "worker.sock",
+        host="127.0.0.1",
+        port=1,
+        environment_files=[first, second],
+    )
+
+    environment = runtime._child_environment()
+
+    assert environment["EXOMEM_INHERITED"] == "from-file"
+    assert environment["EXOMEM_SHARED"] == "from-second"
+
+
+def test_a_service_environment_file_that_places_the_vault_elsewhere_than_its_supervisor_is_refused(
+    tmp_path, monkeypatch
+):
+    """The failure: the supervisor serves one vault while its worker, reading the file's alias name,
+    serves another, and nothing refuses."""
+    from exomem import env_compat
+
+    module = _manager()
+    service_env = tmp_path / "service.env"
+    service_env.write_text("EVERMATTER_VAULT_PATH=/vault-in-the-file\n")
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", "/vault-of-the-supervisor")
+    runtime = module.WorkerRuntime(
+        tmp_path / "worker.sock", host="127.0.0.1", port=1, environment_files=[service_env]
+    )
+
+    with pytest.raises(env_compat.SettingsConflict) as refused:
+        runtime._child_environment()
+
+    assert "EVERMATTER_VAULT_PATH" in str(refused.value)
+    assert "EXOMEM_VAULT_PATH" in str(refused.value)
+    assert "vault-in-the-file" not in str(refused.value)
+    assert "vault-of-the-supervisor" not in str(refused.value)
+
+
+@pytest.mark.parametrize("spelling", ["EVERMATTER_STATE_ROOT", "EXOMEM_STATE_ROOT"])
+def test_an_edit_of_the_state_root_in_a_service_file_takes_effect_under_either_spelling(
+    tmp_path, monkeypatch, spelling
+):
+    """The failure: the supervisor's own environment, renamed at start, holds only the `EXOMEM_` name, so a
+    file edit under the product-prefix spelling is refused as a conflict while the same edit under the
+    other spelling takes effect."""
+    from exomem import env_compat
+
+    module = _manager()
+    service_env = tmp_path / "service.env"
+    service_env.write_text(f"{spelling}=/root-edited\n")
+    # What the process inherited, and what it holds after the rename at import.
+    monkeypatch.setattr(env_compat, "_inherited", {spelling: "/root-at-start"})
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", "/root-at-start")
+    runtime = module.WorkerRuntime(
+        tmp_path / "worker.sock", host="127.0.0.1", port=1, environment_files=[service_env]
+    )
+
+    environment = runtime._child_environment()
+
+    assert environment is not None
+    assert environment["EXOMEM_STATE_ROOT"] == "/root-edited"
+    assert "EVERMATTER_STATE_ROOT" not in environment
+
+
+def test_two_service_environment_files_that_place_the_state_root_under_two_names_are_refused(
+    tmp_path, monkeypatch
+):
+    from exomem import env_compat
+
+    module = _manager()
+    first, second = tmp_path / "a.env", tmp_path / "b.env"
+    first.write_text("EXOMEM_STATE_ROOT=/root-a\n")
+    second.write_text("EVERMATTER_STATE_ROOT=/root-b\n")
+    monkeypatch.delenv("EXOMEM_STATE_ROOT", raising=False)
+    runtime = module.WorkerRuntime(
+        tmp_path / "worker.sock", host="127.0.0.1", port=1, environment_files=[first, second]
+    )
+
+    with pytest.raises(env_compat.SettingsConflict, match="EVERMATTER_STATE_ROOT"):
+        runtime._child_environment()
+
+
+def _operator_runtime(module, tmp_path: Path, operator_env: str):
+    service_env = tmp_path / "service.env"
+    service_env.write_text("EXOMEM_PRELOAD_MODELS=0\n")
+    operator = tmp_path / module.OPERATOR_ENV_FILE
+    operator.write_text(operator_env)
+    operator.chmod(0o600)
+    return module.WorkerRuntime(
+        tmp_path / "worker.sock", host="127.0.0.1", port=1, environment_files=[service_env]
+    )
+
+
+def test_the_operator_credential_file_may_name_the_credential_with_the_evermatter_prefix(tmp_path):
+    module = _manager()
+    name = module.OPERATOR_TOKEN_ENV.replace("EXOMEM_", "EVERMATTER_", 1)
+    runtime = _operator_runtime(module, tmp_path, f"{name}=synthetic-operator\n")
+
+    assert runtime._operator_credential() == ("synthetic-operator", None)
+
+
+def test_the_operator_credential_file_naming_two_different_credentials_gives_none(tmp_path):
+    module = _manager()
+    name = module.OPERATOR_TOKEN_ENV.replace("EXOMEM_", "EVERMATTER_", 1)
+    runtime = _operator_runtime(
+        module, tmp_path, f"{module.OPERATOR_TOKEN_ENV}=first-secret\n{name}=second-secret\n"
+    )
+
+    token, problem = runtime._operator_credential()
+
+    assert token is None
+    assert problem is not None and "first-secret" not in problem and "second-secret" not in problem
+
+
 def test_an_unreadable_environment_file_is_surfaced_not_only_logged(tmp_path):
     module = _manager()
     present = tmp_path / "a.env"

@@ -1396,8 +1396,12 @@ class WorkerRuntime:
         """
         if not self.environment_files:
             return None
+        from . import env_compat
+
         self.environment_warnings = []
         values: dict[str, str] = {}
+        # The supervisor's environment as inherited, before the rename removed its alias names.
+        sources: list[dict[str, str]] = [env_compat.inherited_environment()]
         for path in self.environment_files:
             try:
                 text = path.read_text(encoding="utf-8")
@@ -1407,7 +1411,19 @@ class WorkerRuntime:
                 self.environment_warnings.append(f"unreadable: {path.name}")
                 log.warning("managed service environment file could not be read")
                 continue
-            values.update(self._parse_environment(text))
+            parsed = self._parse_environment(text)
+            sources.append(parsed)
+            values.update(
+                env_compat.canonical_settings(
+                    parsed, source=f"the service environment file {path.name}"
+                )
+            )
+        # The supervisor keeps its own placement while the worker takes the file's, so the
+        # supervisor and its files are one source: a placement name that an alias spelling
+        # sets differently from the `EXOMEM_` spelling is a conflict, not an override.
+        env_compat.refuse_placement_conflicts_across(
+            sources, source="the supervisor environment and its service environment files"
+        )
         if not values:
             return None
         return {**os.environ, **values}
@@ -1449,7 +1465,13 @@ class WorkerRuntime:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
             return None, "operator credential file unreadable"
-        token = self._parse_environment(text).get(OPERATOR_TOKEN_ENV, "").strip()
+        from . import env_compat
+
+        settings, conflicts = env_compat.rename_settings(self._parse_environment(text))
+        if any(conflict.canonical == OPERATOR_TOKEN_ENV for conflict in conflicts):
+            # A credential: two names that disagree give no operator credential, not a guess.
+            return None, "operator credential file names the credential twice with different values"
+        token = settings.get(OPERATOR_TOKEN_ENV, "").strip()
         if not token:
             return None, "operator credential file holds no operator credential"
         return token, None

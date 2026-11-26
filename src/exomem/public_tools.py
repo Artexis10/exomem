@@ -858,7 +858,7 @@ class QueryRecords(Wire):
     descending: bool | None = None
     limit: int | None = None
     more: str | None = Field(default=None, description="Continuation token.")
-    options: dict[str, Any] | None = Field(default=None, description="Rare knobs: aggregate, date_from, date_to, view, output_format.")
+    options: dict[str, Any] | None = Field(default=None, description="Rare knobs: aggregate, date_from, date_to, view, output_format, query (a typed version-1 query).")
 
 
 def _query_collection(command: str, tool: str, key: str | None):
