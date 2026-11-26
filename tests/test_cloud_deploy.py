@@ -99,8 +99,18 @@ class Recorded:
                 if method == "POST"]
 
 
+def _changed_paths(tag: str, changed: list[str] | None, changed_by_tag: dict[str, list[str] | None] | None) -> list[str]:
+    """The paths a tag changes: one answer for every tag, or `changed_by_tag`'s, where None is a tag that git cannot diff."""
+
+    if changed_by_tag is None:
+        return TESTS_AND_DOCS if changed is None else changed
+    if changed_by_tag[tag] is None:
+        raise cloud_deploy.Stop("PLATFORM_DIFF_FAILED", ok=False)
+    return changed_by_tag[tag]
+
+
 def _run(recorded: Recorded, capsys, *, attested: bool = True, changed: list[str] | None = None,
-         env: dict | None = None, changed_by_tag: dict[str, list[str]] | None = None,
+         env: dict | None = None, changed_by_tag: dict[str, list[str] | None] | None = None,
          images: dict[str, str | None] | None = None, unattested: tuple[str, ...] = ()) -> tuple[int, str, list[float]]:
     slept: list[float] = []
     clock = iter(range(0, 10_000, 15))
@@ -108,8 +118,7 @@ def _run(recorded: Recorded, capsys, *, attested: bool = True, changed: list[str
         transport=recorded,
         image=lambda tag: IMAGE if images is None else images[tag],
         attest=lambda image, tag: attested and tag not in unattested,
-        changed_paths=lambda base, head: (changed_by_tag[head] if changed_by_tag is not None
-                                          else TESTS_AND_DOCS if changed is None else changed),
+        changed_paths=lambda base, head: _changed_paths(head, changed, changed_by_tag),
         sleep=slept.append,
         monotonic=lambda: next(clock),
         now=lambda: NOW,
@@ -621,6 +630,14 @@ def test_a_paused_rollout_leaves_the_failing_alert_to_cellctls_pause_alert(capsy
 # and the release list holds v0.171.0 (the newest) and v0.170.3, v0.170.2, v0.170.1 (the ones the fleet lacks).
 SEVERAL_BEHIND = "github_releases_fleet_several_behind"
 ROLLOUT_THEN_CANARY = ["substrate_rollout_behind", "substrate_rollout_canary_on_target"]
+# One digest per release, so a run that sets another release's image is seen.
+RELEASE_IMAGES = {
+    "v0.171.0": "ghcr.io/substrate-systems/evermatter@sha256:" + "a" * 64,
+    "v0.170.3": "ghcr.io/substrate-systems/evermatter@sha256:" + "b" * 64,
+    "v0.170.2": "ghcr.io/substrate-systems/evermatter@sha256:" + "c" * 64,
+    "v0.170.1": "ghcr.io/substrate-systems/evermatter@sha256:" + "d" * 64,
+}
+PLATFORM_BLOCK_LINE = "cloud-deploy: cloud-release-platform-needed 1 platform input(s) changed"
 
 
 def test_a_newest_release_that_needs_a_platform_upgrade_rolls_out_the_newest_release_the_platform_carries(
@@ -631,12 +648,12 @@ def test_a_newest_release_that_needs_a_platform_upgrade_rolls_out_the_newest_rel
     changed_by_tag = {"v0.171.0": CHART_CHANGE, "v0.170.3": CHART_CHANGE, "v0.170.2": TESTS_AND_DOCS,
                       "v0.170.1": TESTS_AND_DOCS}
 
-    code, log, slept = _run(recorded, capsys, changed_by_tag=changed_by_tag)
+    code, log, slept = _run(recorded, capsys, changed_by_tag=changed_by_tag, images=RELEASE_IMAGES)
 
     assert (code, slept) == (0, [])
-    assert recorded.puts() == [{"cellImage": IMAGE, "release": "v0.170.2"}]
-    assert log.splitlines()[-3:] == ["cloud-deploy: COVERED_RELEASE v0.170.2", "cloud-deploy: CELL_IMAGE_SET",
-                                     "cloud-deploy: CANARY_ON_TARGET"]
+    assert recorded.puts() == [{"cellImage": RELEASE_IMAGES["v0.170.2"], "release": "v0.170.2"}]
+    assert log.splitlines()[-4:] == [PLATFORM_BLOCK_LINE, "cloud-deploy: COVERED_RELEASE v0.170.2",
+                                     "cloud-deploy: CELL_IMAGE_SET", "cloud-deploy: CANARY_ON_TARGET"]
     # The fleet still lacks the newest release: the platform alert and the lag alert stay active.
     assert recorded.alerts() == [(cloud_deploy.RELEASE_BEHIND_ALERT, True), (cloud_deploy.CELL_PINNED_ALERT, False),
                                  (cloud_deploy.PLATFORM_NEEDED_ALERT, True), FAILING_RESOLVED]
@@ -648,12 +665,12 @@ def test_a_newest_release_that_needs_a_platform_upgrade_rolls_out_the_newest_rel
 def test_no_release_between_the_fleet_and_the_newest_that_the_platform_carries_leaves_the_platform_stop(capsys) -> None:
     # Catches a fallback that sets a release the platform lacks the chart for.
     recorded = Recorded(["substrate_rollout_behind"], releases=SEVERAL_BEHIND)
-    changed_by_tag = {tag: CHART_CHANGE for tag in ("v0.171.0", "v0.170.3", "v0.170.2", "v0.170.1")}
+    changed_by_tag = {tag: CHART_CHANGE for tag in RELEASE_IMAGES}
 
-    code, log, _ = _run(recorded, capsys, changed_by_tag=changed_by_tag)
+    code, log, _ = _run(recorded, capsys, changed_by_tag=changed_by_tag, images=RELEASE_IMAGES)
 
     assert (code, recorded.puts()) == (1, [])
-    assert log.splitlines()[-1] == "cloud-deploy: cloud-release-platform-needed 1 platform input(s) changed"
+    assert log.splitlines()[-1] == PLATFORM_BLOCK_LINE
     assert recorded.alerts()[-2:] == [(cloud_deploy.PLATFORM_NEEDED_ALERT, True), FAILING_RESOLVED]
 
 
@@ -667,12 +684,14 @@ def test_a_covered_release_with_an_uncrossed_barrier_is_skipped(
     # changes no build input here, so the barrier alone decides: the newest release is blocked by it too.
     recorded = Recorded(ROLLOUT_THEN_CANARY, releases=SEVERAL_BEHIND)
     monkeypatch.setattr(cloud_deploy, "BARRIER_FILE", _barrier_file(tmp_path, "platform", barrier_version))
-    changed_by_tag = {tag: TESTS_AND_DOCS for tag in ("v0.171.0", "v0.170.3", "v0.170.2", "v0.170.1")}
+    changed_by_tag = {tag: TESTS_AND_DOCS for tag in RELEASE_IMAGES}
 
-    _, log, _ = _run(recorded, capsys, changed_by_tag=changed_by_tag)
+    _, log, _ = _run(recorded, capsys, changed_by_tag=changed_by_tag, images=RELEASE_IMAGES)
 
-    assert recorded.puts() == ([{"cellImage": IMAGE, "release": rolled_out}] if rolled_out else [])
+    assert recorded.puts() == ([{"cellImage": RELEASE_IMAGES[rolled_out], "release": rolled_out}] if rolled_out else [])
     assert log.splitlines()[-1] == last_line
+    # The log names the barrier that stopped the newest release, as the runbook says.
+    assert "cloud-deploy: cloud-release-barrier new-step" in log
     assert (cloud_deploy.BARRIER_ALERT, True) in recorded.alerts()
 
 
@@ -682,10 +701,10 @@ def test_an_unknown_fleet_release_leaves_the_platform_stop_and_sets_nothing(caps
     recorded.rollout[0]["view"]["release"] = None
     changed_by_tag = {"v0.171.0": CHART_CHANGE, "v0.170.2": TESTS_AND_DOCS}
 
-    code, log, _ = _run(recorded, capsys, changed_by_tag=changed_by_tag)
+    code, log, _ = _run(recorded, capsys, changed_by_tag=changed_by_tag, images=RELEASE_IMAGES)
 
     assert (code, recorded.puts()) == (1, [])
-    assert log.splitlines()[-1] == "cloud-deploy: cloud-release-platform-needed 1 platform input(s) changed"
+    assert log.splitlines()[-1] == PLATFORM_BLOCK_LINE
 
 
 def test_a_covered_release_whose_attestation_fails_sets_nothing_and_no_older_release_is_tried(capsys) -> None:
@@ -694,7 +713,8 @@ def test_a_covered_release_whose_attestation_fails_sets_nothing_and_no_older_rel
     changed_by_tag = {"v0.171.0": CHART_CHANGE, "v0.170.3": TESTS_AND_DOCS, "v0.170.2": TESTS_AND_DOCS,
                       "v0.170.1": TESTS_AND_DOCS}
 
-    code, log, _ = _run(recorded, capsys, changed_by_tag=changed_by_tag, unattested=("v0.170.3",))
+    code, log, _ = _run(recorded, capsys, changed_by_tag=changed_by_tag, images=RELEASE_IMAGES,
+                        unattested=("v0.170.3",))
 
     assert (code, recorded.puts()) == (1, [])
     assert log.splitlines()[-1] == "cloud-deploy: ATTESTATION_UNVERIFIED"
@@ -706,25 +726,52 @@ def test_a_covered_release_with_no_published_image_is_skipped_for_the_next_older
     recorded = Recorded(ROLLOUT_THEN_CANARY, releases=SEVERAL_BEHIND)
     changed_by_tag = {"v0.171.0": CHART_CHANGE, "v0.170.3": TESTS_AND_DOCS, "v0.170.2": TESTS_AND_DOCS,
                       "v0.170.1": TESTS_AND_DOCS}
-    images = {"v0.171.0": IMAGE, "v0.170.3": None, "v0.170.2": IMAGE, "v0.170.1": IMAGE}
 
-    code, log, _ = _run(recorded, capsys, changed_by_tag=changed_by_tag, images=images)
+    code, log, _ = _run(recorded, capsys, changed_by_tag=changed_by_tag,
+                        images={**RELEASE_IMAGES, "v0.170.3": None})
 
     assert code == 0
-    assert recorded.puts() == [{"cellImage": IMAGE, "release": "v0.170.2"}]
+    assert recorded.puts() == [{"cellImage": RELEASE_IMAGES["v0.170.2"], "release": "v0.170.2"}]
     assert "cloud-deploy: CELL_IMAGE_NOT_PUBLISHED v0.170.3" in log
 
 
 def test_a_fleet_already_on_the_covered_releases_image_leaves_the_platform_stop(capsys) -> None:
     # Catches a fallback that sets, and then waits on, an image the fleet already runs.
     recorded = Recorded(["substrate_rollout_behind"], releases=SEVERAL_BEHIND)
-    covered_image = "ghcr.io/substrate-systems/evermatter@sha256:" + "5" * 64
-    recorded.rollout[0]["view"]["cell_image"] = covered_image
+    recorded.rollout[0]["view"]["cell_image"] = RELEASE_IMAGES["v0.170.2"]
     changed_by_tag = {"v0.171.0": CHART_CHANGE, "v0.170.3": CHART_CHANGE, "v0.170.2": TESTS_AND_DOCS,
                       "v0.170.1": TESTS_AND_DOCS}
-    images = {"v0.171.0": IMAGE, "v0.170.2": covered_image}
 
-    code, log, _ = _run(recorded, capsys, changed_by_tag=changed_by_tag, images=images)
+    code, log, _ = _run(recorded, capsys, changed_by_tag=changed_by_tag, images=RELEASE_IMAGES)
 
     assert (code, recorded.puts()) == (1, [])
-    assert log.splitlines()[-1] == "cloud-deploy: cloud-release-platform-needed 1 platform input(s) changed"
+    assert log.splitlines()[-1] == PLATFORM_BLOCK_LINE
+
+
+def test_a_covered_release_that_substrate_says_the_fleet_has_passed_ends_the_run_ok_with_the_platform_alert_active(
+        capsys) -> None:
+    # Catches a red run after a withdrawal, and a platform alert that resolves while the newest release still needs the upgrade.
+    recorded = Recorded(["substrate_rollout_behind"], put="substrate_error_release_older", releases=SEVERAL_BEHIND)
+    changed_by_tag = {"v0.171.0": CHART_CHANGE, "v0.170.3": CHART_CHANGE, "v0.170.2": TESTS_AND_DOCS,
+                      "v0.170.1": TESTS_AND_DOCS}
+
+    code, log, _ = _run(recorded, capsys, changed_by_tag=changed_by_tag, images=RELEASE_IMAGES)
+
+    assert code == 0
+    assert log.splitlines()[-1] == "cloud-deploy: CELL_RELEASE_OLDER"
+    assert (cloud_deploy.PLATFORM_NEEDED_ALERT, True) in recorded.alerts()
+    assert (cloud_deploy.PLATFORM_NEEDED_ALERT, False) not in recorded.alerts()
+
+
+def test_a_covered_release_that_git_cannot_diff_fails_the_run_loudly_and_sets_nothing(capsys) -> None:
+    # Catches a candidate skipped in silence when its tag is missing from the checkout, which would
+    # hide a broken fallback behind the platform alert.
+    recorded = Recorded(["substrate_rollout_behind"], releases=SEVERAL_BEHIND)
+    changed_by_tag = {"v0.171.0": CHART_CHANGE, "v0.170.3": None, "v0.170.2": TESTS_AND_DOCS,
+                      "v0.170.1": TESTS_AND_DOCS}
+
+    code, log, _ = _run(recorded, capsys, changed_by_tag=changed_by_tag, images=RELEASE_IMAGES)
+
+    assert (code, recorded.puts()) == (1, [])
+    assert log.splitlines()[-1] == "cloud-deploy: PLATFORM_DIFF_FAILED"
+    assert recorded.alerts()[-1] == (cloud_deploy.FAILING_ALERT, True)

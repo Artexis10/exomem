@@ -486,29 +486,33 @@ def report_run_outcome(settings: Settings, tools: Tools, stop: Stop) -> None:
     send_alert(settings, tools.transport, FAILING_ALERT, failing, tools.now())
 
 
-def gate_release(settings: Settings, tools: Tools, deployment: dict, tag: str, *,
-                 gate: tuple[list[str], list[str]], barriers: dict) -> None:
-    """D2 and D3 for the newest release: send the platform and barrier alerts, and stop on the first that blocks it."""
+def release_block(tools: Tools, deployment: dict, tag: str, *,
+                  gate: tuple[list[str], list[str]], barriers: dict) -> tuple[str, str] | None:
+    """The alert and detail that stop `tag`, the platform gate first and then the barriers, or None when it is clear."""
 
     include, exclude = gate
     changed = platform_inputs(tools.changed_paths(deployment["ref"], tag), include, exclude)
     if changed:
-        send_alert(settings, tools.transport, PLATFORM_NEEDED_ALERT, True, tools.now())
-        raise Stop(PLATFORM_NEEDED_ALERT, ok=False, detail=f"{len(changed)} platform input(s) changed")
-    send_alert(settings, tools.transport, PLATFORM_NEEDED_ALERT, False, tools.now())
-
+        return PLATFORM_NEEDED_ALERT, f"{len(changed)} platform input(s) changed"
     uncrossed = uncrossed_barriers(tag, deployment, barriers)
-    if uncrossed:
-        send_alert(settings, tools.transport, BARRIER_ALERT, True, tools.now())
-        raise Stop(BARRIER_ALERT, ok=False, detail=" ".join(uncrossed))
-    send_alert(settings, tools.transport, BARRIER_ALERT, False, tools.now())
+    return (BARRIER_ALERT, " ".join(uncrossed)) if uncrossed else None
+
+
+def report_release_block(settings: Settings, tools: Tools, block: tuple[str, str] | None) -> None:
+    """Send the platform and barrier alerts for the newest release. A platform block stops the check before the
+    barriers, so it leaves `cloud-release-barrier` unmeasured and unsent."""
+
+    blocked_by = block[0] if block else None
+    send_alert(settings, tools.transport, PLATFORM_NEEDED_ALERT, blocked_by == PLATFORM_NEEDED_ALERT, tools.now())
+    if blocked_by != PLATFORM_NEEDED_ALERT:
+        send_alert(settings, tools.transport, BARRIER_ALERT, blocked_by == BARRIER_ALERT, tools.now())
 
 
 def covered_release(tools: Tools, github: GitHub, view: dict, deployment: dict, newest: str, *,
                     gate: tuple[list[str], list[str]], barriers: dict) -> tuple[str, str] | None:
-    """The newest release between the fleet's and `newest` that the platform carries and that has a
-    published image, as (tag, image). None when the fleet's release is unknown, none qualifies, or
-    the fleet already runs it. A candidate passes the same two gates as the newest release, and sends no alert."""
+    """The newest release between the fleet's and `newest` that no gate blocks and that has a published
+    image, as (tag, image). None when the fleet's release is unknown, none qualifies, or the fleet already
+    runs its image. A candidate sends no alert."""
 
     release = view.get("release")
     fleet = parse_release(release) if isinstance(release, str) else None
@@ -519,11 +523,9 @@ def covered_release(tools: Tools, github: GitHub, view: dict, deployment: dict, 
         candidates = github.releases_between(fleet, target)
     except Stop:
         return None  # The release list only feeds this fallback, so its failure leaves the original stop.
-    include, exclude = gate
     for tag in candidates:
-        if platform_inputs(tools.changed_paths(deployment["ref"], tag), include, exclude):
-            continue
-        if uncrossed_barriers(tag, deployment, barriers):
+        # A diff that fails on a candidate raises PLATFORM_DIFF_FAILED, so the run fails loudly as it does for the newest release.
+        if release_block(tools, deployment, tag, gate=gate, barriers=barriers):
             continue
         image = tools.image(tag)
         if not image:
@@ -568,26 +570,26 @@ def deploy(settings: Settings, tools: Tools, *, gate: tuple[list[str], list[str]
     if deployment is None or not isinstance(ref, str):
         send_alert(settings, tools.transport, PLATFORM_NEEDED_ALERT, True, tools.now())
         raise Stop(PLATFORM_NEEDED_ALERT, ok=False, detail="NO_PLATFORM_DEPLOYMENT")
+    block = release_block(tools, deployment, tag, gate=gate, barriers=barriers)
+    report_release_block(settings, tools, block)
     covered = False
-    try:
-        gate_release(settings, tools, deployment, tag, gate=gate, barriers=barriers)
-    except Stop as blocked:
-        # The block's alert stays active. The fleet still lacks the newest release, so the run
-        # rolls out the newest one that the platform carries, or ends on the block.
-        if blocked.code not in (PLATFORM_NEEDED_ALERT, BARRIER_ALERT):
-            raise
+    if block:
+        # The block's alert stays active. The fleet still lacks the newest release, so the run rolls out
+        # the newest release that the platform carries, or ends on the block.
         found = covered_release(tools, github, view, deployment, tag, gate=gate, barriers=barriers)
         if found is None:
-            raise
+            raise Stop(block[0], ok=False, detail=block[1])
+        print(f"cloud-deploy: {block[0]} {block[1]}")
         tag, image = found
         covered = True
         if not tools.attest(image, tag):
-            raise Stop("ATTESTATION_UNVERIFIED", ok=False) from None
+            raise Stop("ATTESTATION_UNVERIFIED", ok=False)
         print(f"cloud-deploy: COVERED_RELEASE {tag}")
 
     # D1 step 6: set the image with its verified tag, and nothing else.
     refused = substrate.set_image(image, tag)
     if refused in NOT_NEWER:
+        # Also for a covered release: Substrate says the fleet has it or a newer one, so the run ends ok while the platform alert stays active.
         raise Stop(refused, ok=True)
     if refused is not None:
         raise Stop(f"SUBSTRATE_{refused}", ok=False)
