@@ -184,7 +184,7 @@ def test_completed_triage_replays_original_receipt_after_advisory_fingerprint_ch
 
     monkeypatch.setattr(review_state, "last_surfaced_fingerprint", no_read)
     replay = writer_lease.invoke_command(triage, vault, idempotency_key="review-decision", **arguments)
-    assert replay == first
+    assert replay == {**first, "replayed": True}
     assert review_state.ReviewStateStore(vault).decision(review_id, changed) is None
 
 
