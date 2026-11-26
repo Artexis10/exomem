@@ -41,7 +41,7 @@ No Cloud-specific path is designed. A cell runs the same worker step on its own 
 
 Per-picture cost estimate, unverified until task 9.4 measures it: one detection pass at the working resolution (about 15 ms on the benchmark CPU when scaled to 640 px), plus about 5 ms per face. At 3,383 visual rows that is a few CPU-minutes; at 100,000 rows about an hour of one core, spread over the backfill.
 
-Both artifacts join `media_models.json` as `face-detect` and `face-embed`, pinned by revision and digest, with licence sources and calibration values, and are acquired through the served-model lifecycle (`media_models.ensure_media_model`). The pinned detector is the dynamic-shape YuNet export, so ONNX Runtime can run it at each picture's size.
+Both artifacts join `media_models.json` as `face-detect` and `face-embed`, pinned by revision and digest, with licence sources and calibration values, and are acquired through the served-model lifecycle (`media_models.ensure_media_model`). No published YuNet export has dynamic input shapes, so the artifact build makes the 2023mar graph's height and width symbolic with unchanged weights, and ONNX Runtime runs it at each picture's size.
 
 ### D3. ONNX Runtime and numpy, not OpenCV, at run time
 
@@ -57,8 +57,8 @@ Turning faces on queues the existing pictures and videos for a bounded, resumabl
 
 Both stores live in a private directory, `private_state.store(vault_root, "faces")` (owner-only mode 0700), as SQLite databases with `PRAGMA secure_delete=ON`.
 
-- The face index holds detections and embeddings: faces (page, `frame_ts`, box, score, model id, vector, group id) and a generation counter. A re-scan recomputes it in minutes, so its registry family declares itself rebuildable, and backups leave it out as they leave out the CLIP index.
-- The people store holds what only the owner created: groups (centroid sum and count), people (display name, folded name), group-to-person links, face exclusions and settings (on/off, consent record, threshold overrides). Named voiceprints (`.voice_profiles.json`) are the precedent: owner-named biometric centroids, declared not rebuildable, kept by backups.
+- The face index holds detections, embeddings and the account's switch: faces (page, `frame_ts`, box, score, model id, vector, group id), scanned pages, settings (on/off and the consent record) and a generation counter. A re-scan recomputes it in minutes, so its registry family declares itself rebuildable, and backups leave it out as they leave out the CLIP index.
+- The people store holds what only the owner created: groups (centroid sum and count), people (display name, folded name), group-to-person links, face exclusions and threshold overrides. Because on/off and consent live in the face index, a restore leaves faces off until the owner opts in again. Named voiceprints (`.voice_profiles.json`) are the precedent: owner-named biometric centroids, declared not rebuildable, kept by backups.
 
 The owner chose on 26 Nov 2026 that backups keep the people store. It declares itself not rebuildable, so the personal backup stages it and a restore keeps names. A restored people store re-attaches names after the re-scan, because each new face joins the nearest group centroid (D6).
 

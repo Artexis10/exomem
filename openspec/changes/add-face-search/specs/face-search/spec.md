@@ -72,7 +72,7 @@ While faces are on, the media pipeline SHALL detect faces in each image and in e
 
 ### Requirement: Face models are pinned, permissively licensed and CPU-run
 
-The detector and the embedder SHALL be pinned artifacts in the media model manifest, each with revision, digest, licence source, calibration values and input and output shapes. Each SHALL carry a licence that permits commercial use of its weights. Both SHALL run on CPU through ONNX Runtime and SHALL load only while faces are on. A host SHALL acquire them through the served-model lifecycle and never build them.
+The detector and the embedder SHALL be pinned artifacts in the media model manifest, each with revision, digest, licence source, calibration values and input and output shapes. Each SHALL carry a licence that permits commercial use of its weights. Both SHALL run through ONNX Runtime on CPU, SHALL use a GPU provider when the host has one, and SHALL load only while faces are on. A host SHALL acquire them through the served-model lifecycle and never build them.
 
 #### Scenario: A manifest entry without a licence source
 
