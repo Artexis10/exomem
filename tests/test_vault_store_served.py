@@ -399,6 +399,60 @@ def test_a_search_that_outwaits_its_bound_says_the_rows_lag_and_a_lookup_refuses
     assert read.page_exists(stored, archived)
 
 
+@contextmanager
+def backlog_past_the_cap(root):
+    """More pages wait to derive than one check reads, and the store thread derives none of them
+    until the block ends, when it derives them all."""
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: derivation.Drained())
+        commit(root, puts=tuple(
+            write.PagePut(f"{NOTES}/Backlog {number}.md", f"# Backlog {number}\n".encode())
+            for number in range(derivation.UNDERIVED_CAP + 1)
+        ))
+        yield
+    derivation.owe(root.resolve())
+    derived(root)
+
+
+def test_a_delete_served_beside_a_backlog_past_the_cap_refuses_retryably_and_commits_nothing(
+    stored, service
+):
+    """A person's note, deleted through the served door while more pages wait to derive than one
+    link check reads. The check runs on the store thread, which cannot wait for the drain, so the
+    delete refuses with the retryable derived-behind error and the note stays. Once the store
+    thread has derived the backlog, the same delete runs."""
+    saved = call(stored, "remember", **QUOKKA)
+    derived(stored)
+    with backlog_past_the_cap(stored):
+        revision = store_rows(stored, "SELECT revision FROM store_mode")
+        with pytest.raises(OpError) as refused:
+            call(stored, "manage_memory_file", operation="delete", path=saved["path"], confirm=True)
+        unchanged = store_rows(stored, "SELECT revision FROM store_mode")
+    deleted = call(stored, "manage_memory_file", operation="delete", path=saved["path"], confirm=True)
+
+    assert refused.value.code == read.DERIVED_BEHIND
+    assert "Retry shortly" in refused.value.remediation
+    assert unchanged == revision
+    assert deleted["path"] == saved["path"]
+    assert not read.page_exists(stored, saved["path"])
+
+
+def test_a_read_by_reference_beside_a_backlog_past_the_cap_refuses_retryably(stored, service):
+    """A page read by its reference while more pages wait to derive than one check reads: the owner
+    of the id could be any waiting page, so the read refuses, retryably, instead of parsing them all.
+    Once the backlog is derived the same read returns the page."""
+    saved = call(stored, "remember", **QUOKKA, response_detail="full")["diagnostics"]["leaf_result"]
+    derived(stored)
+    with backlog_past_the_cap(stored):
+        with pytest.raises(OpError) as refused:
+            call(stored, "read_memory", path=saved["ref"])
+    page = call(stored, "read_memory", path=saved["ref"])
+
+    assert refused.value.code == read.DERIVED_BEHIND
+    assert "Retry shortly" in refused.value.remediation
+    assert page["path"] == saved["path"]
+
+
 def test_a_recall_that_outwaits_its_bound_says_the_rows_lag(stored, service, monkeypatch):
     """A save whose rows the store thread derives only after the next recall's wait ran out. The
     recall cannot rank the page yet, and without the notice that a search carries it missed the

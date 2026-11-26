@@ -718,10 +718,17 @@ class ReferenceIndex:
         A page whose derivation trails its stored bytes takes its ref from those bytes, by the rule
         of ``_store_identity_owners``, so a read of a page saved a moment ago carries the page's own
         ref and id, not one that names nothing once its rows arrive.
+
+        The check reads the pending state of ``wanted`` alone (``derivation.underived`` with its
+        paths), whatever the backlog, and never refuses it: a write asks for the ref of its own page
+        after it commits, so a refusal there would answer an error for a write that stands. The ref
+        of a derived page already comes from the rows as they stand, and a lagging page's ref
+        differs only in taking the bytes of ``wanted`` (a pending page outside ``wanted`` that
+        claims the same id shows once its rows arrive, as for a derived page).
         """
         from .vault_store import derivation
 
-        underived = derivation.underived(conn)
+        underived = derivation.underived(conn, wanted)
         lagging = [path for path in wanted if path in underived]
         derived = [path for path in wanted if path not in underived]
         refs = self._refs_from_connection(conn, derived)[0] if derived else {}
@@ -1283,14 +1290,23 @@ def owner_without_walk(vault_root: Path, value: str) -> str | None:
 
     The store's identity rows or the server's current identity projection answer, as they answer
     `resolve_identifier_read_only`. None means only that this lookup did not answer: no projection
-    is current, pending custody is unsettled, or the ref names no page or several. A caller uses it
-    to word a reply cheaply, never to decide one; `resolve_identifier_read_only` decides.
+    is current, pending custody is unsettled, too many pages wait to derive, or the ref names no
+    page or several. A caller uses it to word a reply cheaply, never to decide one;
+    `resolve_identifier_read_only` decides.
     """
     memory_id = parse_memory_ref(str(value or "").strip())
     if memory_id is None:
         return None
+    from .cli_ops import OpError
+    from .vault_store import read
+
     root = Path(vault_root)
-    stored = _store_identity_owners(root, [memory_id])
+    try:
+        stored = _store_identity_owners(root, [memory_id])
+    except OpError as error:
+        if error.code != read.DERIVED_BEHIND:
+            raise
+        return None  # the pending pages outnumber what a check reads: the lookup did not answer
     if stored is not None:
         rows = list(stored[memory_id])
     else:
@@ -1788,7 +1804,9 @@ def _store_identity_owners(
 
     A page whose derivation trails its stored bytes (``derivation.underived``) answers from those
     bytes, by the rule that its drain applies (``identity_row``): a page that a failed delete left
-    with its row is not an owner, and one that a failed write gave an id is.
+    with its row is not an owner, and one that a failed write gave an id is. Any pending page could
+    claim a wanted id, so the check reads them all, and a backlog past ``UNDERIVED_CAP`` refuses it
+    (``read.rows_behind()``).
     """
     from .vault_store import derivation
 
@@ -1800,21 +1818,31 @@ def _store_identity_owners(
 
 
 def _owners_at(
-    conn: sqlite3.Connection, root: Path, wanted: list[str], underived: dict[str, bytes | None]
+    conn: sqlite3.Connection, root: Path, wanted: list[str], claimants: dict[str, bytes | None]
 ) -> dict[str, tuple[str, ...]]:
     """Every page at ``conn``'s snapshot that holds each id in ``wanted``, with the rows of the
-    ``underived`` pages taken from their stored bytes (``_store_identity_owners``)."""
+    pending ``claimants`` taken from their stored bytes (``_store_identity_owners``).
+
+    A row of a page that is pending, in ``claimants`` or not, is stale and never counts: the page's
+    bytes decide, and ``claimants`` holds the pages whose bytes the caller reads.
+    """
+    from .vault_store import derivation
+
     found: dict[str, list[str]] = {identifier: [] for identifier in wanted}
+    rows: list[tuple[str, str]] = []
     for start in range(0, len(wanted), REFS_QUERY_CHUNK):
         chunk = wanted[start : start + REFS_QUERY_CHUNK]
-        for exomem_id, path in conn.execute(
+        rows.extend((str(exomem_id), str(path)) for exomem_id, path in conn.execute(
             "SELECT exomem_id, path FROM identities "  # noqa: S608 - placeholders only
             f"WHERE status = 'valid' AND exomem_id IN ({','.join('?' for _ in chunk)})",
             chunk,
-        ):
-            if path not in underived:
-                found[str(exomem_id)].append(str(path))
-    for path, raw in underived.items():
+        ))
+    # The rows name few pages (one per owner of a wanted id), so a keyed read finds the pending ones.
+    pending = derivation.underived(conn, {path for _id, path in rows})
+    for exomem_id, path in rows:
+        if path not in pending:
+            found[exomem_id].append(path)
+    for path, raw in claimants.items():
         row = None if raw is None else identity_row(root, path, raw)
         if row is not None and row[4] == "valid" and row[1] in found:
             found[row[1]].append(path)
@@ -1826,6 +1854,8 @@ def store_owners_by_prefix(vault_root: Path, prefix: str) -> tuple[str, ...] | N
 
     One read through the id index, with the rule of ``_store_identity_owners`` for a page whose
     derivation trails its stored bytes, so a page saved a moment ago is found by its id at once.
+    Any pending page could hold an id under ``prefix``, so a backlog past ``UNDERIVED_CAP`` refuses
+    the read (``read.rows_behind()``).
     """
     from .vault_store import derivation
 

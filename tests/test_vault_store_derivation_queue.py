@@ -295,6 +295,108 @@ def test_a_delete_counts_the_link_of_a_page_whose_derivation_did_not_land(
     assert read.page_exists(served, HARBOUR)
 
 
+def commit_pending_pages(served, writer, monkeypatch, count):  # noqa: F811
+    """Commit ``count`` pages whose derivation does not run: a backlog, as a bulk save leaves one."""
+    puts = tuple(
+        write.PagePut(
+            f"Knowledge Base/Notes/Backlog {number}.md",
+            f"---\ntitle: Backlog {number}\ntype: note\n---\n# Backlog {number}\n\nThe ferry waits.\n".encode(),
+        )
+        for number in range(count)
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: None)
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "bulk save", puts=puts))
+
+
+def drain_all(served, writer):  # noqa: F811
+    while store_rows(served, "SELECT 1 FROM store_derivation_queue LIMIT 1"):
+        derivation.drain(served.resolve(), writer)
+
+
+def test_a_link_guarded_write_refuses_while_more_pages_wait_than_a_check_reads(
+    served, writer, monkeypatch  # noqa: F811
+):
+    """A delete that checks every link, with more pages waiting to derive than one check reads: it
+    refuses, retryably, before it parses a waiting page, and commits nothing. Once the store thread
+    has derived them the same delete runs."""
+    save(served, HARBOUR, SMALL_TEXT.replace("Small", "Harbour"))
+    commit_pending_pages(served, writer, monkeypatch, derivation.UNDERIVED_CAP + 1)
+    parsed = []
+    real = vault_module.inbound_rows
+    monkeypatch.setattr(vault_module, "inbound_rows", lambda *arguments: parsed.append(arguments[0]) or real(*arguments))
+    revision = store_rows(served, "SELECT revision FROM store_mode")
+
+    with pytest.raises(OpError) as refused:
+        delete_file.delete_file(served, path=HARBOUR, confirm=True)
+
+    assert refused.value.code == read.DERIVED_BEHIND
+    assert "Retry shortly" in refused.value.remediation
+    assert parsed == [], "the refused check parsed pages while it could not answer"
+    assert read.page_exists(served, HARBOUR)
+    assert store_rows(served, "SELECT revision FROM store_mode") == revision
+    assert store_rows(served, "SELECT 1 FROM store_derivation_queue WHERE path = ?", HARBOUR) == []
+
+    # The commit's own guard on the linking pages meets the same backlog inside its transaction.
+    with pytest.raises(OpError) as guarded:
+        write.commit(writer, write.StoreChange(
+            write.Origin.GOVERNED, "delete", deletes=(write.PageDelete(HARBOUR),),
+            expect={HARBOUR: write.Expect(linked_from=frozenset())},
+        ))
+
+    assert guarded.value.code == read.DERIVED_BEHIND
+    assert read.page_exists(served, HARBOUR)
+    assert store_rows(served, "SELECT revision FROM store_mode") == revision
+
+    drain_all(served, writer)
+    delete_file.delete_file(served, path=HARBOUR, confirm=True)
+
+    assert not read.page_exists(served, HARBOUR)
+
+
+def test_a_page_read_right_after_a_save_keeps_its_ref_beside_a_backlog_past_the_cap(
+    served, writer, monkeypatch  # noqa: F811
+):
+    """A saved page whose rows wait, among more waiting pages than one check reads: the ref of the
+    page comes from its own stored bytes, and the check parses no other waiting page. A write asks
+    for this ref after it commits, so a refusal here would answer an error for a write that stands."""
+    identifier = "6f1c8e9a-2b4d-4c3e-9a7f-1d2e3f4a5b6c"
+    body = f"---\ntitle: Tide table\nexomem_id: {identifier}\n---\n# Tide table\n".encode()
+    tide = "Knowledge Base/Notes/Tide table.md"
+    commit_pending_pages(served, writer, monkeypatch, derivation.UNDERIVED_CAP + 1)
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: None)
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "save", puts=(write.PagePut(tide, body),)))
+    parsed = []
+    real = memory_refs.identity_row
+    monkeypatch.setattr(memory_refs, "identity_row", lambda root, rel, raw: parsed.append(rel) or real(root, rel, raw))
+
+    ref = memory_refs.ReferenceIndex(served).ref_for_path(tide)
+
+    assert ref == memory_refs.memory_ref(identifier)
+    assert set(parsed) == {tide}, "the check parsed pages besides the one it was asked about"
+
+
+def test_a_moved_page_keeps_its_ref_beside_a_backlog_past_the_cap(
+    served, writer, monkeypatch  # noqa: F811
+):
+    """A move whose rows wait, among more waiting pages than one check reads: the identity row still
+    names the old path, a page outside the question. Counted as an owner, that row would make the id
+    of the moved page ambiguous and its ref empty."""
+    identifier = "6f1c8e9a-2b4d-4c3e-9a7f-1d2e3f4a5b6c"
+    before, after = "Knowledge Base/Notes/Tide table.md", "Knowledge Base/Notes/Archive/Tide table.md"
+    body = f"---\ntitle: Tide table\nexomem_id: {identifier}\n---\n# Tide table\n".encode()
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "file note", puts=(write.PagePut(before, body),)))
+    drain_all(served, writer)
+    commit_pending_pages(served, writer, monkeypatch, derivation.UNDERIVED_CAP + 1)
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: None)
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "move note",
+                                               moves=(write.PageMove(before, after),)))
+
+    assert memory_refs.ReferenceIndex(served).ref_for_path(after) == memory_refs.memory_ref(identifier)
+
+
 def test_a_reference_names_where_a_moved_page_is_when_its_rows_failed_to_follow(
     served, writer, monkeypatch  # noqa: F811
 ):
