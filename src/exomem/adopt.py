@@ -916,6 +916,145 @@ def _top_folder(rel: str) -> str:
     return Path(rel).relative_to(managed_join("Sources")).parts[0]
 
 
+# One filed file, as the indexes and the log record it: its `original_path`, `source_path` and `original_sha256`.
+ImportRecord = Mapping[str, str]
+
+
+def import_chunk_logged(root: Path, token: str) -> bool:
+    """Whether the operation log holds the import entry that `token` names (its `import_chunk` provenance)."""
+    history = read_operation_log(root)
+    # A missing optional live log never blocked import; an unreadable existing log cannot prove deduplication.
+    missing_live_log = not (os.path.lexists(root / managed_join("log.md")) or history["live_log_present"])
+    if history["files_unreadable"] > int(missing_live_log):
+        raise AdoptError("IMPORT_RECOVERY_UNRESOLVED", "the import log cannot establish the chunk's publication state")
+    return any(
+        entry.get("op") == "adopt-copy" and (entry.get("provenance") or {}).get("import_chunk") == token
+        for entry in history["entries"]
+    )
+
+
+def _import_bookkeeping(
+    root: Path,
+    rows: Sequence[ImportRecord],
+    *,
+    date_iso: str,
+    counts: Mapping[str, int],
+    pre_counts: Mapping[str, int],
+    pending_paths: list[str],
+    token: str,
+    provenance: Mapping[str, str] | None,
+    file_lines: bool,
+    log: bool,
+    warnings: list[str],
+) -> list[tuple[str, PlannedWrite]]:
+    """The Sources index, top index and log writes that record `rows` as filed.
+
+    `counts` is the Sources census once the batch lands and `pre_counts` the one before it, without the
+    `pending_paths` the batch adds. `file_lines` adds one log line per row; `log` False plans no log entry.
+    An entry with provenance adds `files`, the number of rows it records, because the entry's text only says it.
+    """
+    from .vault_store import read as store_read
+
+    kb = kb_root(root)
+    sources_dir = kb / "Sources"
+    folders: list[str] = []
+    for row in rows:
+        folder = _top_folder(row["source_path"])
+        if folder not in folders:
+            folders.append(folder)
+    derived: list[tuple[str, PlannedWrite]] = []
+    sources_index = sources_dir / "index.md"
+    if store_read.holds_file(root, relative_posix(sources_index, root)):
+        sources_current, sources_guard = indexes.read_guarded_universal_text(root, sources_index)
+        sources_text = indexes._replace_by_type_section(
+            sources_current,
+            folder_title=folders[0],
+            folder_description="copied legacy-vault material with provenance",
+            counts=dict(counts),
+            vault_root=root,
+        )
+        for row in reversed(rows):
+            sources_text = indexes._prepend_recent_capture(
+                sources_text, date_iso=date_iso, rel_source_path=row["source_path"][:-3]
+            )
+        derived.append(("index", PlannedWrite(path=sources_index, content=sources_text, guard=sources_guard)))
+    else:
+        warnings.append(f"{managed_join('Sources/index.md')} missing; skipped Sources index update")
+
+    where = ", ".join(f"Sources/{folder}/" for folder in folders)
+    top_index = kb / "index.md"
+    if store_read.holds_file(root, relative_posix(top_index, root)):
+        # The gate does not classify this bound index, and folder labels are registry data: keep them inert.
+        summary = escape_wikilinks_for_log(
+            f"{where} (imported sources) - copied "
+            f"{len(rows)} selected file(s) with original path/hash provenance"
+        )
+        top_current, top_guard = indexes.read_guarded_universal_text(root, top_index)
+        top_text, trim_note = indexes._update_top_index(
+            top_current,
+            counts=dict(counts),
+            date_iso=date_iso,
+            activity_summary=summary,
+        )
+        sub_writes, top_text = indexes.compute_subindex_writes(
+            root,
+            top_index_text=top_text,
+            pending_paths=pending_paths,
+            include_sources_index=False,  # The Sources index write above supplies that page.
+            sources_counts=dict(pre_counts),
+        )
+        derived.append(("index", PlannedWrite(path=top_index, content=top_text or top_current, guard=top_guard)))
+        derived.extend(("index", write) for write in sub_writes)
+        if trim_note:
+            warnings.append(trim_note)
+    else:
+        warnings.append(f"{managed_join('index.md')} missing; skipped Recent activity bump")
+
+    if log:
+        body_lines = [f"Copied {len(rows)} selected file(s) into {where}. Originals remain unchanged."]
+        if file_lines:
+            body_lines.append("")
+            body_lines.extend(
+                f"- {row['original_path']} -> {row['source_path']} sha256={row['original_sha256']}" for row in rows
+            )
+        # Planned like any other log write, so a long import rotates the live log instead of growing it.
+        log_plan = plan_log_entries(
+            root,
+            [LogEntry(
+                date_iso, "adopt-copy", managed_join("Sources"), "\n".join(body_lines), token,
+                None if provenance is None else {**provenance, "files": len(rows)},
+            )],
+            operation_token=token,
+        )
+        derived.extend(("operation-log", write) for write in log_plan.writes)
+        if log_plan.warning is not None:
+            warnings.append(log_plan.warning)
+        if log_plan.rotation_note is not None:
+            warnings.append(log_plan.rotation_note)
+    return derived
+
+
+def record_imports(
+    root: Path, rows: Sequence[ImportRecord], *, today: dt.date, token: str,
+    extra_writes: Sequence[PlannedWrite] = (),
+) -> list[str]:
+    """Write the Sources index, top index and one log entry for files that earlier batches filed.
+
+    For the files of an import that no filing batch recorded, such as those of a page whose last
+    chunk filed nothing. The entry carries ``{"import_chunk": token, "files": len(rows)}`` provenance. Returns
+    warnings.
+    """
+    warnings: list[str] = []
+    counts = indexes._count_sources(kb_root(root) / "Sources")
+    derived = _import_bookkeeping(
+        root, rows, date_iso=today.isoformat(), counts=counts, pre_counts=counts, pending_paths=[],
+        # This field identifies a recorded import, not a vault vocabulary entry.
+        token=token, provenance={"import_chunk": token}, file_lines=False, log=True, warnings=warnings,
+    )
+    batch_atomic_write([*(write for _role, write in derived), *extra_writes], vault_root=root)
+    return warnings
+
+
 def commit_import_items(
     root: Path,
     items: list[ImportItem],
@@ -925,6 +1064,7 @@ def commit_import_items(
     source_counts: Mapping[str, int] | None = None,
     reconcile: bool = False,
     operation_token: str | None = None,
+    record: Sequence[ImportRecord] | None = None,
 ) -> dict:
     """Write every planned import plus the Sources/top indexes and log in ONE batch.
 
@@ -934,6 +1074,10 @@ def commit_import_items(
     ``source_counts`` is the Sources census before this batch, for a caller that
     commits many batches and keeps it current from the returned ``source_counts``
     (the census after this batch); without it the Sources tree is walked.
+    ``record`` lets a caller that files many batches write the indexes and the log
+    for several of them at once: None records this batch's items, one log line
+    each; ``[]`` writes neither; rows record those files in one summary entry,
+    which carries ``{"import_chunk": token, "files": len(rows)}`` provenance (see `import_chunk_logged`).
     Returns ``{"copied_sources": [...], "warnings": [...], "source_counts": {...}}``.
     """
     if not items:
@@ -1018,101 +1162,29 @@ def commit_import_items(
             indexes._count_sources(sources_dir) if reconcile or source_counts is None else dict(source_counts)
         )
         post_counts = dict(pre_counts)
-        folders: list[str] = []
         for row in copied:
-            folder = _top_folder(row["source_path"])
             if row["source_path"] not in existing_sources:
+                folder = _top_folder(row["source_path"])
                 post_counts[folder] = post_counts.get(folder, 0) + 1
-            if folder not in folders:
-                folders.append(folder)
 
-        from .vault_store import read as store_read
-
-        sources_index = sources_dir / "index.md"
         warnings: list[str] = []
-        if store_read.holds_file(root, relative_posix(sources_index, root)):
-            sources_current, sources_guard = indexes.read_guarded_universal_text(root, sources_index)
-            sources_text = indexes._replace_by_type_section(
-                sources_current,
-                folder_title=folders[0],
-                folder_description="copied legacy-vault material with provenance",
-                counts=post_counts,
-                vault_root=root,
-            )
-            for row in reversed(copied):
-                sources_text = indexes._prepend_recent_capture(
-                    sources_text, date_iso=date_iso, rel_source_path=row["source_path"][:-3]
-                )
-            derived.append(("index", PlannedWrite(path=sources_index, content=sources_text, guard=sources_guard)))
-        else:
-            warnings.append(f"{managed_join('Sources/index.md')} missing; skipped Sources index update")
-
-        where = ", ".join(f"Sources/{folder}/" for folder in folders)
-        top_index = kb / "index.md"
-        if store_read.holds_file(root, relative_posix(top_index, root)):
-            # The gate does not classify this bound index, and folder labels are registry data: keep them inert.
-            summary = escape_wikilinks_for_log(
-                f"{where} (imported sources) - copied "
-                f"{len(copied)} selected file(s) with original path/hash provenance"
-            )
-            top_current, top_guard = indexes.read_guarded_universal_text(root, top_index)
-            top_text, trim_note = indexes._update_top_index(
-                top_current,
-                counts=post_counts,
-                date_iso=date_iso,
-                activity_summary=summary,
-            )
-            sub_writes, top_text = indexes.compute_subindex_writes(
-                root,
-                top_index_text=top_text,
-                pending_paths=[row["source_path"] for row in copied if row["source_path"] not in existing_sources],
-                include_sources_index=False,  # The Sources index write above supplies that page.
-                sources_counts=pre_counts,
-            )
-            derived.append(("index", PlannedWrite(path=top_index, content=top_text or top_current, guard=top_guard)))
-            derived.extend(("index", write) for write in sub_writes)
-            if trim_note:
-                warnings.append(trim_note)
-        else:
-            warnings.append(f"{managed_join('index.md')} missing; skipped Recent activity bump")
-
-        body_lines = [
-            f"Copied {len(copied)} selected file(s) into {where}. Originals remain unchanged.",
-            "",
-        ]
-        for row in copied:
-            body_lines.append(
-                f"- {row['original_path']} -> {row['source_path']} sha256={row['original_sha256']}"
-            )
-        # Planned like any other log write, so a long import rotates the live log instead of growing it.
-        token = operation_token or hashlib.sha256(
-                "\n".join(row["source_path"] for row in copied).encode("utf-8")
+        if record is None or record:
+            rows = copied if record is None else [dict(row) for row in record]
+            token = operation_token or hashlib.sha256(
+                "\n".join(row["source_path"] for row in rows).encode("utf-8")
             ).hexdigest()
-        # This field identifies a frozen import chunk, not a vault vocabulary entry.
-        provenance = {"import_chunk": token} if operation_token else None
-        logged = False
-        if reconcile and operation_token:
-            history = read_operation_log(root)
-            # A missing optional live log never blocked import; an unreadable existing log cannot prove deduplication.
-            missing_live_log = not (
-                os.path.lexists(root / managed_join("log.md")) or history["live_log_present"]
-            )
-            if history["files_unreadable"] > int(missing_live_log):
-                raise AdoptError("IMPORT_RECOVERY_UNRESOLVED", "the import log cannot establish the chunk's publication state")
-            logged = any(entry.get("op") == "adopt-copy" and
-                         (entry.get("provenance") or {}).get("import_chunk") == token
-                         for entry in history["entries"])
-        if not logged:
-            log_plan = plan_log_entries(
-                root,
-                [LogEntry(date_iso, "adopt-copy", managed_join("Sources"), "\n".join(body_lines), token, provenance)],
-                operation_token=token,
-            )
-            derived.extend(("operation-log", write) for write in log_plan.writes)
-            if log_plan.warning is not None:
-                warnings.append(log_plan.warning)
-            if log_plan.rotation_note is not None:
-                warnings.append(log_plan.rotation_note)
+            if reconcile and operation_token:
+                logged = import_chunk_logged(root, token)
+            else:
+                logged = False
+            derived.extend(_import_bookkeeping(
+                root, rows, date_iso=date_iso, counts=post_counts, pre_counts=pre_counts,
+                pending_paths=[row["source_path"] for row in copied if row["source_path"] not in existing_sources],
+                token=token,
+                # This field identifies a frozen import chunk, not a vault vocabulary entry.
+                provenance={"import_chunk": token} if operation_token or record is not None else None,
+                file_lines=record is None, log=not logged, warnings=warnings,
+            ))
 
         writes.extend(write for _role, write in derived)
         writes.extend(extra_writes)

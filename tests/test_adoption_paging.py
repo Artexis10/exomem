@@ -122,6 +122,9 @@ def test_consuming_a_top_level_file_does_not_change_the_next_page_s_collection(t
 
     assert sorted(_collection_paths(vault, pages)) == ["Anchor.pdf", "Photos/a.pdf", "Photos/b.pdf", "Photos/c.pdf"]
     assert {(page["collection"]["label"], page["collection"]["root"]) for page in pages} == {("Field Notes", stage)}
+    # A later page keeps the summary of the collection that the first page scanned; it does not read every note again.
+    runs = [adoption_run.AdoptionRunStore(vault).load(page["run_id"]) for page in pages]
+    assert [run["scan_summary"]["totals"]["files"] for run in runs] == [4] * len(pages)
 
 
 def test_a_cursor_the_server_did_not_issue_is_refused_and_a_used_one_returns_its_page(tmp_path: Path) -> None:

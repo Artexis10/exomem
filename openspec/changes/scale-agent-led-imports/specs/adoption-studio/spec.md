@@ -133,7 +133,7 @@ The vault-wide scans that build search, recall and their catalogues SHALL skip e
 
 ### Requirement: Deterministic read-only scan and candidate inventory
 
-`adoption_studio(action="start")` SHALL perform a read-only `overview` scan of the target subtree and record, in the run object, a compact `scan_summary`, `pack_suggestions`, and a candidate `inventory` containing every adoption-relevant file outside `Knowledge Base/` with its vault-relative path, byte size, mtime, and import form (`text` for a text-like suffix, `artifact` for any other regular file). `start` SHALL accept an optional `collection` label and SHALL default it to the scanned folder's name, or to the single top-level folder inside an `_Imports/<import_id>/` stage. A skipped hidden folder SHALL be recorded as one inventory row with its file count and reason. Ineligible candidates SHALL be retained in the inventory with a machine-readable `reason` (never silently dropped), the inventory SHALL be capped at a configurable `max_candidates` with an explicit `inventory_truncated` counter, `start` SHALL return an opaque `next_after` cursor while rows remain beyond the cap and SHALL accept it as `after`, recording only the rows that follow it under the collection root and label pinned by the first page, with artifact rows ordered before text rows, and a stat-based `inventory_fingerprint` SHALL be computed over the sorted eligible rows. The scan SHALL write nothing outside the run object. `start` SHALL require `Knowledge Base/` to exist and refuse with `KB_NOT_INITIALIZED` unless `initialize_kb=true`, in which case it initializes the scaffold first; pure pre-init discovery remains `adopt_vault(mode="scan-only")`, unchanged.
+`adoption_studio(action="start")` SHALL perform a read-only `overview` scan of the target subtree, except on a later page, and record, in the run object, a compact `scan_summary`, `pack_suggestions`, and a candidate `inventory` containing every adoption-relevant file outside `Knowledge Base/` with its vault-relative path, byte size, mtime, and import form (`text` for a text-like suffix, `artifact` for any other regular file). `start` SHALL accept an optional `collection` label and SHALL default it to the scanned folder's name, or to the single top-level folder inside an `_Imports/<import_id>/` stage. A skipped hidden folder SHALL be recorded as one inventory row with its file count and reason. Ineligible candidates SHALL be retained in the inventory with a machine-readable `reason` (never silently dropped), the inventory SHALL be capped at a configurable `max_candidates` with an explicit `inventory_truncated` counter, `start` SHALL return an opaque `next_after` cursor while rows remain beyond the cap and SHALL accept it as `after`, recording only the rows that follow it under the collection root and label pinned by the first page, with artifact rows ordered before text rows, and a stat-based `inventory_fingerprint` SHALL be computed over the sorted eligible rows. A later page's `start` SHALL carry the `scan_summary` and `pack_suggestions` of the page before it, which describe the collection as its first page scanned it, and SHALL list only its own rows. The scan SHALL write nothing outside the run object. `start` SHALL require `Knowledge Base/` to exist and refuse with `KB_NOT_INITIALIZED` unless `initialize_kb=true`, in which case it initializes the scaffold first; pure pre-init discovery remains `adopt_vault(mode="scan-only")`, unchanged.
 
 #### Scenario: Scan snapshots an eligible-only inventory deterministically
 
@@ -181,6 +181,86 @@ The vault-wide scans that build search, recall and their catalogues SHALL skip e
 
 - **WHEN** a Cloud cell scans a staged artifact larger than the gateway's client-pull cap and within the adoption ceiling
 - **THEN** the row is eligible with import form `artifact`, as it is on a standalone server
+
+### Requirement: Governed apply with write-time re-validation
+
+`adoption_studio(action="apply")` SHALL process the planned items that have no outcome yet, in plan order, in chunks bounded by item count and bytes. For each item it SHALL re-read the original bytes and re-verify the sha256 against the value captured at `plan` immediately before writing. Before each write it SHALL repeat the collection identity check and the duplicate lookup under its mutation guard. Each chunk SHALL commit its text pages, streamed artifacts and outcomes in one `batch_atomic_write`, and, outside crash recovery, an item planned as `duplicate_of` that falls back to storing its own copy SHALL commit in a `batch_atomic_write` after the chunk's other items. The Sources index, the top index and the log SHALL record a page's applied items once per call, not once per chunk: the first chunk batch of an `apply` call SHALL record the items that earlier calls applied, the batch that completes the page SHALL record the rest, an `apply` call that ends with the page no longer `applying` SHALL record any items still owed, so that a page whose last chunk files nothing still records its items, and `finish` and `cancel` SHALL record any items still owed. An `apply` or a `cancel` whose recording fails SHALL warn in its reply, keep the items owed and finish its own save instead of failing, and `finish` or the next `apply` SHALL record them. Each recording SHALL add one log entry that counts the items it records and does not list them, and the entry's provenance SHALL carry that count as `files`. A stop inside or between these batches SHALL NOT record an applied item twice: a recording SHALL name the items it carries, and settling it SHALL drop exactly those items. When the log cannot be read, the call SHALL stop with `IMPORT_RECOVERY_UNRESOLVED` and keep the items owed. Index and log updates SHALL use the actual destinations. Artifact writes SHALL use the Source artifact seam shared with capture and SHALL keep the original bytes. An extraction request SHALL follow each artifact commit. An item whose bytes changed SHALL be excluded with per-item outcome `SOURCE_CHANGED`; a missing item SHALL be excluded with `NOT_FOUND`; an item whose frozen destination another writer now occupies SHALL fail with `TARGET_OCCUPIED` and SHALL NOT move; an item with `existing_ref`, or one that the identity check finds already committed, SHALL record `already-applied` with that ref and write no Source and no artifact. Where such an item's own `import_collection` and `collection_path` are not yet recorded on that Source, `apply` SHALL add one import mapping to that Source's frontmatter under the mutation guard, guarded by the page's content hash and leaving its captured text and original bytes unchanged, and SHALL mark the outcome `mapped: true`. Where they are recorded, it SHALL write nothing. An item planned as `duplicate_of` another item SHALL do the same against that item's Source once that item has committed, and SHALL record `already-applied` with that Source's ref. For an item planned with an import mapping or as a `duplicate_of`, `apply` SHALL confirm the Source that the plan named, its `existing_ref` or the Source of the item it repeats, by reading that Source's stored bytes again, without the duplicate index. When that Source is missing, no longer holds the bytes or cannot be written by the caller, and the duplicate lookup finds no other Source that holds them and that the caller can write, `apply` SHALL store the item's own bytes as an ordinary item and mark its outcome `stored_own_copy`, and SHALL NOT fail it as `PLAN_STALE`. A re-run item of an unchanged path, which the plan found by its earlier import and planned with no mapping, SHALL still fail `PLAN_STALE` when its earlier Source page or artifact is missing or the page records a different hash for that path, so that a re-plan sees the current vault. Applied Sources SHALL carry `imported_from`, `import_collection`, `collection_path`, and `original_sha256` provenance for the first path that stored them, and one `also_imported_from` entry (`imported_from`, `import_collection`, `collection_path`) for each further path, so that every source path is recorded. A text Source SHALL carry the original text verbatim in its fenced capture, so that the captured text encodes to bytes whose sha256 equals `original_sha256`, and its resolved links in a generated `## Links` section outside that fence. When the remaining request budget falls below its margin, `apply` SHALL stop between commits and return `progress` (`applied`, `remaining`, `total`) and a `continuation`; an `apply` passing that cursor with the same `plan_id` SHALL continue, and an `apply` repeating an earlier cursor SHALL return that call's result again. The phase SHALL become `applied` only when every planned item has an outcome. The result SHALL include `verified_unchanged` and `verified_total` counts from a post-apply re-hash of the originals handled by that call. The result SHALL include `skipped_duplicates`: the count of the run's items that it did not store because a Source already held their bytes, whether an earlier item of the plan or an earlier run stored them. The default reply of `apply` SHALL carry it as `skipped_duplicates`, and `response_detail="full"` SHALL also hold it under `diagnostics.apply_result`. A `plan`/`apply` invalidated by inventory drift SHALL surface `ADOPTION_SOURCE_CHANGED` so the client can re-scan while preserving the still-valid selection.
+
+#### Scenario: Apply copies with provenance and leaves originals byte-identical
+
+- **WHEN** `apply` commits a validated plan
+- **THEN** each imported Source carries `imported_from`, `import_collection`, `collection_path`, and `original_sha256`, the Sources index records every applied item and the log entries count them, with each entry's `files` provenance, once the call that completes the page has ended, and every original file is byte-identical before and after
+- **AND** the result reports `verified_unchanged` equal to `verified_total`
+
+#### Scenario: A call records its chunks in one log entry
+
+- **WHEN** an `apply` call commits several chunks of a page and the page stays incomplete
+- **THEN** the log gains no entry per chunk, and the next `apply` call's first chunk records that call's items in one entry that counts them
+
+#### Scenario: A page whose last chunk files nothing still records its items
+
+- **WHEN** an `apply` call files a page's first chunk and the page's last chunk holds only duplicates or failures
+- **THEN** the page ends `applied` with no item owed, the Sources index records the filed items, and one log entry counts them
+
+#### Scenario: A stop during filing records each item once
+
+- **WHEN** the process stops between two chunks of an `apply` call, or inside the batch that records earlier calls' items, and later calls complete the page and `finish` runs
+- **THEN** the Sources index counts each applied item once, and the log entries count each applied item once
+
+#### Scenario: Attachments and links land together
+
+- **WHEN** `apply` commits a plan holding a note that embeds a planned PDF and links to another planned note
+- **THEN** the PDF is a Source whose artifact bytes equal the original
+- **AND** the note's Source holds the original text verbatim in its fenced capture and a `## Links` section with links to the PDF's Source and the other note's Source
+- **AND** an extraction request exists for the PDF
+
+#### Scenario: A large plan finishes over several calls
+
+- **WHEN** `apply` reaches its request budget with items remaining
+- **THEN** it returns `progress` with a nonzero `remaining` and a `continuation`
+- **AND** calls that pass each returned cursor commit only the remaining items, each item once, until `remaining` is zero and the phase is `applied`
+- **AND** repeating an earlier cursor returns that call's result again and writes nothing
+
+#### Scenario: A source changed after plan is excluded, not fatal
+
+- **WHEN** one selected original is modified between `plan` and `apply` and others are unchanged
+- **THEN** the changed item records outcome `SOURCE_CHANGED`, the unchanged items are applied, and the run phase becomes `partial`
+
+#### Scenario: Identical photos import as one original with both paths
+
+- **WHEN** `apply` commits a plan whose two photos have identical bytes
+- **THEN** one Source and one artifact exist, byte-identical to the photo
+- **AND** the Source records the second photo's path in `also_imported_from`
+- **AND** the second item's outcome is `already-applied` with `mapped: true` and the first item's ref
+- **AND** the `apply` reply reports `skipped_duplicates` of 1
+
+#### Scenario: Apply needs no duplicate index for a Source the plan named
+
+- **WHEN** `apply` commits a plan with two identical photos while the duplicate index is not built
+- **THEN** the second item's outcome is `already-applied` with `mapped: true` and the first item's ref, and the run reaches `applied`
+- **AND** when the first photo changed after the plan, the second item is stored as a Source of its own with `stored_own_copy` in its outcome, not failed as `PLAN_STALE`
+
+#### Scenario: A plan warning reaches the reply's warning count
+
+- **WHEN** a collection that an earlier run imported from one root is planned from another root
+- **THEN** the plan reply and the apply reply each carry that warning in `warnings`
+- **AND** `diagnostics.operational.warnings_count` counts it under `response_detail="full"`
+
+#### Scenario: A second run writes nothing
+
+- **WHEN** the same tree is planned and applied again unchanged
+- **THEN** every item reports `already-applied` and no file in the vault changes
+
+#### Scenario: The staging root moves
+
+- **WHEN** the same collection is staged under a new root and imported again with the same collection label
+- **THEN** every item matches by collection path and the run writes nothing
+
+#### Scenario: A file is renamed inside the collection
+
+- **WHEN** one file of an imported collection is renamed and the collection is imported again
+- **THEN** the renamed item reports `already-applied` and adds one import mapping for its new collection path
+- **AND** the next run writes nothing
 
 ### Requirement: Originals are never modified
 

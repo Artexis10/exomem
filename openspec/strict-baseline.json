@@ -734,6 +734,7 @@
     "too-long change/scale-agent-led-imports/adoption-studio :: A folder outside the vault imports through local staging",
     "too-long change/scale-agent-led-imports/adoption-studio :: Apply bounds space, memory and time per chunk",
     "too-long change/scale-agent-led-imports/adoption-studio :: Deterministic read-only scan and candidate inventory",
+    "too-long change/scale-agent-led-imports/adoption-studio :: Governed apply with write-time re-validation",
     "too-long change/scale-agent-led-imports/adoption-studio :: Originals are never modified",
     "too-long change/scale-agent-led-imports/adoption-studio :: Recorded staged files are consumed after verified filing",
     "too-long change/scale-agent-led-imports/hosted-mutation-safety :: One Process-Safe Mutation Boundary Per Vault",
