@@ -374,32 +374,12 @@ _REPLAY: contextvars.ContextVar[_Replay | None] = contextvars.ContextVar("exomem
 _WAIT_CAP: contextvars.ContextVar[float | None] = contextvars.ContextVar("exomem_intake_wait_cap", default=None)
 
 
-class _Queueable:
-    """Whether a busy refusal of the current intake save may be queued for a later replay."""
-
-    __slots__ = ("ok",)
-
-    def __init__(self, ok: bool) -> None:
-        self.ok = ok
-
-
-_QUEUEABLE: contextvars.ContextVar[_Queueable | None] = contextvars.ContextVar("exomem_intake_queueable", default=None)
+_QUEUEABLE: contextvars.ContextVar[bool] = contextvars.ContextVar("exomem_intake_queueable", default=False)
 
 
 def queues_busy_refusal() -> bool:
     """Whether a busy refusal of this call's write, with nothing committed, is queued and lands later."""
-    cell = _QUEUEABLE.get()
-    return cell is not None and cell.ok
-
-
-def not_rerunnable() -> None:
-    """Mark this save as one the server cannot safely run again, such as one that fetched
-    caller-supplied temporary file links. Its busy refusals then go back to the caller, who alone
-    can retry, and the spent-call-time stop lets it commit late. The mark holds for the rest of the
-    save, on every thread that shares its context."""
-    cell = _QUEUEABLE.get()
-    if cell is not None:
-        cell.ok = False
+    return _QUEUEABLE.get()
 
 
 def busy_wait_cap() -> float | None:
@@ -1184,8 +1164,7 @@ class Admission:
                 log.warning("write intake could not queue a %s save behind its queue", self.command.name,
                             exc_info=True)
         token = _WAIT_CAP.set(deadline)
-        cell = _Queueable(self.refusal is None)
-        queueable = _QUEUEABLE.set(cell)
+        queueable = _QUEUEABLE.set(self.refusal is None)
         try:
             return call()
         except OpError as error:
@@ -1193,8 +1172,6 @@ class Admission:
                 raise
             if self.refusal is not None:
                 raise self.refusal from error
-            if not cell.ok:
-                raise
             try:
                 # The refusal's cause when it names one (a spent call budget, a moved auxiliary), so
                 # the queued row says why it waited and the cause can be counted.
@@ -1394,6 +1371,10 @@ def admission(command: Any, injected: tuple[Any, ...], kwargs: Mapping[str, Any]
     if len(encoded.encode("utf-8")) > MAX_ARGUMENT_BYTES:
         return None
     if not busy_intake_applies(command, jsonable):
+        return None
+    if not writer_lease.rerun_safe(command, jsonable):
+        # A replay would fetch the caller's temporary file links again, or find them expired; such
+        # a save keeps today's busy refusal and full wait, so only its caller retries it.
         return None
     control = {key: kwargs[key] for key in control_names if key in kwargs}
     try:

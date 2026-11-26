@@ -528,6 +528,23 @@ def test_a_file_capture_that_meets_a_busy_vault_goes_back_to_its_caller(
     assert write_intake.read(vault)["items"] == []
 
 
+def test_a_file_capture_waits_out_a_short_busy_boundary_as_if_the_intake_were_off(
+    vault: Path, managers, drainer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never queued, the capture keeps the full capture wait, not the intake's short one."""
+    _writer, holder = managers
+    monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "8")
+    fetched = _fetch_figures(monkeypatch, tmp_path)
+    with _Hold(holder, vault) as hold:
+        threading.Timer(1.5, hold.release.set).start()
+        result = _send(_command("capture_source"), vault, _FIGURES_CAPTURE,
+                       injected=(schema_module.load_source_schema(vault),))
+
+    assert result.get("state") != "queued", result
+    assert fetched == ["file-a"]
+    assert [path.read_bytes() for path in vault.rglob("*.bin")] == [b"quarterly figures"]
+
+
 def test_a_commit_under_way_is_never_refused_when_its_call_time_runs_out(
     vault: Path, managers, monkeypatch: pytest.MonkeyPatch
 ) -> None:

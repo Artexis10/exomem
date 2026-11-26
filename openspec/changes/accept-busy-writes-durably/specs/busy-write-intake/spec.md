@@ -50,7 +50,7 @@ A save SHALL be accepted only when the intake is enabled, a drainer runs in the 
 
 ### Requirement: A save the server cannot run again is not accepted
 
-A save whose run the server cannot safely repeat SHALL NOT be accepted, and SHALL keep the existing `MUTATION_BUSY` contract. The writer lease's rerun-safety rule decides this, as it does for absorbing a busy boundary.
+A save whose run the server cannot safely repeat SHALL NOT be accepted, and SHALL keep the existing `MUTATION_BUSY` contract. The writer lease's rerun-safety rule decides this at admission, as it does for absorbing a busy boundary, so such a save keeps the full capture wait.
 
 #### Scenario: A capture of a caller's file links keeps the busy refusal
 
