@@ -572,12 +572,12 @@ def backlog_page(number):
     return f"{NOTES}/Backlog {number}.md", f"# Backlog {number}\n\nThe ferry calls at dusk.\n".encode()
 
 
-def commit_backlog(root, monkeypatch, pages):
+def commit_backlog(root, monkeypatch, pages, first=0):
     """``pages`` one-page commits that nothing derives, as a crash leaves them."""
     with monkeypatch.context() as patch:
         patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: derivation.Drained())
         patch.setattr(derivation, "owe", lambda *_arguments, **_keywords: None)
-        for number in range(pages):
+        for number in range(first, first + pages):
             rel, body = backlog_page(number)
             commit(root, puts=(write.PagePut(rel, body),))
 
@@ -690,6 +690,86 @@ def test_a_request_that_commits_many_pages_acknowledges_after_one_slice_of_their
     assert acknowledged < derivation.SLICE_SECONDS + 2 * BATCH_SECONDS + 1.0, acknowledged
     assert 0 < pending < BACKLOG_PAGES, "the request must leave some rows pending, and derive some"
     assert {rel for rel, _body in pages} <= set(bm25_paths(stored, "ferry")), "the thread derived the rest"
+
+
+def test_a_save_is_derived_before_the_next_queued_request_when_its_slice_was_small(stored, service):
+    """Two clients whose slow requests queue behind a save, one slice of nothing having just ended.
+    The thread served both before it derived the save, whatever its slice had cost, so a read that
+    began after the save waited out its whole bound for rows that a few milliseconds of work give."""
+    server = runtime._server(stored.resolve())
+    running, release = threading.Event(), threading.Event()
+
+    def occupy():
+        derivation.owe(stored.resolve())  # a turn of derivation, empty, runs as the thread is freed
+        running.set()
+        release.wait(30)
+
+    def queued():
+        return len(server._requests)
+
+    threads = [threading.Thread(target=server.call, args=(occupy,))]
+    threads[0].start()
+    assert running.wait(30)
+    threads.append(threading.Thread(
+        target=call, args=(stored, "remember"), kwargs={**QUOKKA, "title": "Late census"}
+    ))
+    threads[1].start()
+    while queued() < 1:
+        time.sleep(0.01)
+    for _client in range(2):
+        threads.append(threading.Thread(target=server.call, args=(lambda: time.sleep(0.6),),
+                                        kwargs={"read_only": True}))
+        threads[-1].start()
+    while queued() < 3:
+        time.sleep(0.01)
+    release.set()
+    threads[1].join(30)
+
+    began = time.monotonic()
+    with read.request_snapshot(stored, catch_up=True):
+        held_back = read._REQUEST.get().held_back
+    waited = time.monotonic() - began
+    for thread in threads:
+        thread.join(30)
+
+    print(json.dumps({"read_waited_s": round(waited, 3), "held_back": held_back}))
+    assert not held_back
+    assert waited < derivation.READ_WAIT_SECONDS / 2, waited
+
+
+def test_a_governed_trash_and_its_recovery_settle_exactly_behind_a_derivation_backlog(
+    stored, service, monkeypatch
+):
+    """A governed page trashed through the served door, then recovered, each time with three seconds
+    of earlier derivation due ahead of its own rows. The request derived the due rows in order for
+    one slice, never reached its own, and settled not exact for good: the trash left its tombstone
+    pending and the recovery left the page hidden, until a reconcile."""
+    govern(stored, BETA)
+    derived(stored)
+    with slow_batches(monkeypatch) as seconds:
+        commit_backlog(stored, monkeypatch, 6)
+        trash = call(stored, "manage_memory_file", operation="delete", path=BETA, confirm=True,
+                     force_orphan=True)
+        trash_left = len(store_rows(stored, "SELECT path FROM store_derivation_queue"))
+        trash_states = [marker["state"] for marker in tombstones(stored)]
+        [trashed] = tombstones(stored)[0]["manifest"]
+        seconds[0] = 0.0
+        derived(stored)
+        seconds[0] = BATCH_SECONDS
+        commit_backlog(stored, monkeypatch, 6, first=100)
+        recovery = call(stored, "manage_memory_file", operation="recover",
+                        trash_path=trashed["trash_path"])
+        recovery_left = len(store_rows(stored, "SELECT path FROM store_derivation_queue"))
+        seconds[0] = 0.0
+        derived(stored)
+
+    print(json.dumps({"backlog_left_after_trash": trash_left, "backlog_left_after_recovery": recovery_left}))
+    assert trash_left > 0 and recovery_left > 0, "each must settle while its backlog stands"
+    assert lifecycle.TRASH_NOT_EXACT not in trash.get("warnings", ())
+    assert lifecycle.RECOVERY_NOT_EXACT not in recovery.get("warnings", ())
+    assert trash_states == ["committed"]
+    assert "pending" not in [marker["state"] for marker in tombstones(stored)]
+    assert call(stored, "read_memory", path=BETA)["path"] == BETA
 
 
 def test_a_drain_that_keeps_failing_is_retried_no_sooner_than_its_retry_delay(

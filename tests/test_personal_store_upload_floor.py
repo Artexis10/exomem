@@ -139,9 +139,6 @@ def test_indexable_original_needs_room_for_its_search_rows(
     floor = 1024**2
     config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": floor}}}))
     monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
-    # This page's first batch takes seconds to fail; the request must try each page alone before it
-    # acknowledges, which a one-second slice would cut short on a slow host.
-    monkeypatch.setattr(derivation, "SLICE_SECONDS", 60.0)
     free = [floor + 6 * floor]
     monkeypatch.setattr(media_capacity.shutil, "disk_usage",
                         lambda _path: SimpleNamespace(total=128 * floor, free=free[0]))
@@ -163,6 +160,9 @@ def test_indexable_original_needs_room_for_its_search_rows(
         assert preserve.preserve(served, scope="Tests", category="Minutes", filename="catalogue.md",
                                  content=data).path == target
     assert read.owned_bytes(served, target) == data.encode()
+    # The batch that holds this page fails after its request's slice is spent, so the request settles
+    # only the first of its pages: the store thread's next turn derives the rest.
+    derivation.drain(served.resolve(), writer)
     assert queued(writer, target) == [(derivation.NO_ROOM,)] and catalogued() == []
 
     free[0] = 96 * floor
