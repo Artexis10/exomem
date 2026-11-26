@@ -26,6 +26,7 @@ from exomem import (
     operation_entries,
     ownership_review,
     ownership_rotation,
+    request_budget,
     review_ids,
     review_state,
     semantic_authoring,
@@ -455,6 +456,34 @@ def _rows(vault: Path, *categories: str, state: str = "open") -> list[dict]:
         vault, categories=list(categories) or None, state=state, limit=0
     )
     return [item for item in listing["items"] if item["path"] == PAGE]
+
+
+def test_a_decision_whose_audit_the_deadline_cut_asks_for_a_retry(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Before a review pass is held, a decision reads every queue itself, and a starved host ran
+    that read for 23 minutes. A lookup whose audit the deadline cut has not seen every item: it
+    must ask for a retry, never call a listed item missing, even when the rest of it finished."""
+    _put(vault, PAGE, _text())
+    _ask(vault, PAGE)
+    row = next(row for row in _rows(vault) if row["categories"] == ["relation_debt"])
+    check = audit_module._check_relation_debt
+
+    def cut_the_audit(*args, **kwargs):
+        # Only the audit's own deadline passes; the call keeps its time for the rest of the lookup.
+        request_budget.current().deadline = 0.0
+        return check(*args, **kwargs)
+
+    monkeypatch.setattr(audit_module, "_check_relation_debt", cut_the_audit)
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=50))
+    try:
+        with pytest.raises(OpError) as refused:
+            attention.item_by_ref(vault, row["ref"])
+    finally:
+        request_budget.reset_current(token)
+
+    assert refused.value.code == "REVIEW_QUEUES_WARMING"
+    assert refused.value.details["retry_after_ms"] > 0
 
 
 def test_a_page_with_ownership_and_relation_debt_lists_two_rows_whose_refs_resolve(

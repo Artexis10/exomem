@@ -4,7 +4,10 @@ A governed write commits page bytes, audit rows, projection intents and one deri
 in one short transaction under the vault mutation boundary (``write.commit``). The lexical, identity,
 prior-path, page-fact, inbound and graph rows follow here, on the store thread, in transactions of
 their own that never take that boundary: the store thread is the store's only writer, and it runs this
-drain before any other work, so every later write and check sees the rows of every earlier commit.
+drain before it takes a request, a slice of at most ``SLICE_SECONDS`` a turn. A slice that its deadline
+cut, with intents still due, yields the thread to the requests then queued
+(``StoreServer._derive_owed``). A check that meets a page whose rows still wait reads that page from its
+stored bytes (``underived``).
 
 A batch takes whole revisions of intents in ``(revision, path)`` order, derives them with the code that
 file mode uses, re-derives the pages whose links they move, deletes the intents and advances the store
@@ -51,10 +54,13 @@ BATCH_PAGES = 32
 RETRY_SECONDS = 1.0
 MAX_RETRY_SECONDS = 300.0
 
-#: The seconds that a writing request that derives its own intents (``committed``) spends on them
-#: before it acknowledges with its derived state pending; the store thread derives the rest before
-#: its next request.
-OWN_DERIVATION_SECONDS = 30.0
+#: The longest that one stretch of derivation holds the store thread, whether the thread derives what
+#: is owed (``StoreServer._derive_owed``) or a request derives its own intents (``committed``). It
+#: stays well below the mutation timeout (5 s by default), so a queued request is taken in time; a
+#: batch transaction runs whole, so a stretch ends at the first batch boundary after it, and the
+#: first page of a failed batch always runs alone. A request acknowledges with its derived state
+#: pending past it, and the store thread derives the rest in later stretches, between its requests.
+SLICE_SECONDS = 1.0
 #: The longest that a read waits for the derivation of the writes acknowledged before it began
 #: (``caught_up``); its request budget may cut the wait shorter.
 READ_WAIT_SECONDS = 1.0
@@ -66,9 +72,9 @@ _LOOK_FIRST_SECONDS, _LOOK_MOST_SECONDS = 0.01, 0.1
 
 #: The vault whose derived rows this context writes without the vault mutation boundary.
 _SCOPE: ContextVar[Path | None] = ContextVar("vault_store_derivation_scope", default=None)
-#: Whether the commits of this context derive their rows before their request acknowledges
-#: (``own_rows``).
-_OWN_ROWS: ContextVar[bool] = ContextVar("vault_store_derivation_own_rows", default=False)
+#: The ``own_rows`` block of this context, if one is open: its commits derive their rows before their
+#: request acknowledges.
+_OWN_ROWS: ContextVar[_Own | None] = ContextVar("vault_store_derivation_own_rows", default=None)
 #: Signalled after each drain batch commits and after each failure is recorded, so a reader waiting
 #: in this process (``caught_up``) looks again at once. ``_TURNS`` counts the signals, so a reader
 #: that looked just before one does not sleep through it.
@@ -133,14 +139,24 @@ def enqueue(
     )
 
 
+@dataclass(slots=True)
+class _Own:
+    """An ``own_rows`` block: the revision of its first commit, where its request's rows begin."""
+
+    revision: int | None = None
+
+
 @contextmanager
 def own_rows() -> Iterator[None]:
     """Derive the rows of the commits in this block before their request acknowledges.
 
     For a governed trash or recovery, which settles its receipt from those rows after the release
-    (``governed.settle``): its reply then reports the rows that its receipt was settled from.
+    (``governed.settle``): its reply then reports the rows that its receipt was settled from. The
+    request derives its own rows ahead of any older backlog (``drain``'s ``from_revision``): the
+    store thread cannot wait for the rows that it derives itself, and a queue of older intents would
+    otherwise take the whole slice and leave the receipt unsettled.
     """
-    token = _OWN_ROWS.set(True)
+    token = _OWN_ROWS.set(_Own())
     try:
         yield
     finally:
@@ -152,13 +168,18 @@ def committed(writer: CollectionWriter, before: tuple, after: tuple, paths: tupl
 
     The resident catalogue moves to the commit's triple at once, since the commit wrote no catalogue
     row. A request on the store thread acknowledges at the commit: the thread derives the intents,
-    and moves the resolver and corpus contexts, before it takes other work, and a reader waits for
-    them (``caught_up``). Any other request derives them once it has released the vault mutation
-    boundary and before it acknowledges, as do a governed transition (``own_rows``) and an upload,
-    whose rows draw on the room that its session reserved. A caller with no boundary and no request
+    and moves the resolver and corpus contexts, before it takes a request unless its last slice was
+    cut (``StoreServer._derive_owed``), and a reader waits for them (``caught_up``). Any other
+    request derives them once it has released the vault mutation boundary and before it
+    acknowledges, for one slice (``SLICE_SECONDS``); so does an upload, whose rows draw on the room
+    that its session reserved. A governed transition (``own_rows``) derives its own rows the same
+    way, on the store thread, ahead of the older intents. A caller with no boundary and no request
     (a test, an offline route) derives them here.
     """
     root = Path(writer.root)
+    own = _OWN_ROWS.get()
+    if own is not None and own.revision is None:
+        own.revision = after[1]
     # First, so that nothing below can strand the intents: should the request end before its follow
     # runs, the store thread drains before its next work.
     owe(root)
@@ -167,7 +188,7 @@ def committed(writer: CollectionWriter, before: tuple, after: tuple, paths: tupl
         _UNADVANCED.setdefault(root, []).append((before, after, tuple(paths)))
     # An upload's derived rows draw on the room that its session reserved, as its page did.
     credit = media_capacity.held_commit_credit()
-    if credit is None and not _OWN_ROWS.get() and writer_lease.terminal_follows():
+    if credit is None and own is None and writer_lease.terminal_follows():
         from ..collection_store import runtime
 
         if runtime.on_store_thread(root):
@@ -176,7 +197,10 @@ def committed(writer: CollectionWriter, before: tuple, after: tuple, paths: tupl
     def follow() -> list[object]:
         try:
             with media_capacity.commit_credit(credit) if credit is not None else nullcontext():
-                drain(root, writer, deadline=time.monotonic() + OWN_DERIVATION_SECONDS)
+                drain(
+                    root, writer, deadline=time.monotonic() + SLICE_SECONDS,
+                    from_revision=0 if own is None or own.revision is None else own.revision,
+                )
         except Exception:  # noqa: BLE001 - the page is durable; the store thread drains it again
             log.warning("the intents of a commit to %s could not be derived yet", root, exc_info=True)
             owe(root, time.monotonic() + RETRY_SECONDS)
@@ -437,19 +461,27 @@ def figures(conn: Connection) -> dict:
 @dataclass(slots=True)
 class Drained:
     """What one drain call did: the batches it committed, the intents that reached ``ATTEMPTS`` in it,
-    and whether it stopped with intents still due (a refusal, or a failure it could not record)."""
+    whether it stopped with intents still due (a refusal, or a failure it could not record), and
+    whether its deadline ended it while intents were still due (``cut``)."""
 
     batches: int = 0
     failed: int = 0
     stopped: bool = False
+    cut: bool = False
 
 
-def drain(root: Path, writer: CollectionWriter, *, deadline: float | None = None) -> Drained:
+def drain(
+    root: Path, writer: CollectionWriter, *, deadline: float | None = None, from_revision: int = 0
+) -> Drained:
     """Derive every due intent, a batch per transaction, until none is due or ``deadline`` passes.
+
+    ``from_revision`` leaves the intents of older revisions to the store thread: a request derives
+    only the intents that it queued itself (``own_rows``).
 
     A refusal to start a transaction (lease lost, store handed off) stops the drain and leaves every
     intent as it was. A batch that raises is rolled back and its paths run one by one, so a single bad
-    page only delays itself.
+    page only delays itself; the first of them runs whatever the deadline, so that a batch that fails
+    after the deadline still settles an intent, and the next drain takes a smaller one.
     """
     root = Path(root)
     result = Drained()
@@ -459,30 +491,32 @@ def drain(root: Path, writer: CollectionWriter, *, deadline: float | None = None
         _advance(root, writer)
         while not result.stopped and (deadline is None or time.monotonic() < deadline):
             try:
-                batch = _next_batch(writer)
+                batch = _next_batch(writer, from_revision)
                 if not batch:
                     break
                 if _derive(root, writer, batch, result) or len(batch) == 1:
                     continue
-                for intent in batch:
-                    if result.stopped or (deadline is not None and time.monotonic() >= deadline):
+                for position, intent in enumerate(batch):
+                    if result.stopped or (position and deadline is not None and time.monotonic() >= deadline):
                         break
                     _derive(root, writer, [intent], result)
             except connection.CollectionStoreError:
                 result.stopped = True
-    _owe_remaining(root, writer, stopped=result.stopped)
+    due_now = _owe_remaining(root, writer, stopped=result.stopped)
+    result.cut = due_now and deadline is not None and time.monotonic() >= deadline
     return result
 
 
-def _owe_remaining(root: Path, writer: CollectionWriter, *, stopped: bool) -> None:
-    """Owe the next drain: now when an intent is due, else when the first retry falls due.
+def _owe_remaining(root: Path, writer: CollectionWriter, *, stopped: bool) -> bool:
+    """Owe the next drain: now when an intent is due, else when the first retry falls due. Whether
+    an intent is due now.
 
     A drain that a refusal stopped (a handoff, a lost lease) is owed after ``RETRY_SECONDS``, so the
     store thread does not spin on the refusal.
     """
     if stopped:
         owe(root, time.monotonic() + RETRY_SECONDS)
-        return
+        return False
     try:
         due_now, first_retry = writer.connection.execute(
             f"SELECT EXISTS(SELECT 1 FROM store_derivation_queue WHERE {_DUE}), "
@@ -491,12 +525,13 @@ def _owe_remaining(root: Path, writer: CollectionWriter, *, stopped: bool) -> No
         ).fetchone()
     except Exception:  # noqa: BLE001 - a store that cannot be read is retried from its next start
         log.debug("the derivation queue could not be read after a drain", exc_info=True)
-        return
+        return False
     if due_now:
         owe(root)
     elif first_retry is not None:
         wait = datetime.strptime(first_retry, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC) - _now()
         owe(root, time.monotonic() + max(0.0, wait.total_seconds()))
+    return bool(due_now)
 
 
 @dataclass(frozen=True, slots=True)
@@ -508,13 +543,14 @@ class _Intent:
     metered: int
 
 
-def _next_batch(writer: CollectionWriter) -> list[_Intent]:
-    """The next due intents: one that failed before runs alone, so that it never splits a batch of new
-    intents; new ones run in whole revisions of up to ``BATCH_PAGES`` pages."""
+def _next_batch(writer: CollectionWriter, from_revision: int = 0) -> list[_Intent]:
+    """The next due intents at ``from_revision`` or later: one that failed before runs alone, so that
+    it never splits a batch of new intents; new ones run in whole revisions of up to ``BATCH_PAGES``
+    pages."""
     first = writer.connection.execute(
         f"SELECT path, revision, operation, attempts, metered FROM store_derivation_queue WHERE {_DUE} "
-        "ORDER BY revision, path LIMIT 1",
-        (_stamp(_now()),),
+        "AND revision >= ? ORDER BY revision, path LIMIT 1",
+        (_stamp(_now()), from_revision),
     ).fetchone()
     if first is None:
         return []
@@ -522,8 +558,8 @@ def _next_batch(writer: CollectionWriter) -> list[_Intent]:
         return [_Intent(*first)]
     rows = writer.connection.execute(
         f"SELECT path, revision, operation, attempts, metered FROM store_derivation_queue WHERE {_DUE} "
-        "AND attempts = 0 ORDER BY revision, path LIMIT ?",
-        (_stamp(_now()), BATCH_PAGES + 1),
+        "AND revision >= ? AND attempts = 0 ORDER BY revision, path LIMIT ?",
+        (_stamp(_now()), from_revision, BATCH_PAGES + 1),
     ).fetchall()
     intents = [_Intent(*row) for row in rows]
     if len(intents) <= BATCH_PAGES:

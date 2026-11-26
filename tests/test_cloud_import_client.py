@@ -529,6 +529,30 @@ def test_a_label_reaches_the_import_and_one_the_cell_would_drop_is_refused_befor
     assert "--label" in capsys.readouterr().err
 
 
+def test_a_lone_import_prints_whether_the_cell_was_asked_to_file_it(tmp_path, monkeypatch, capsys):
+    """Catches a result line that says only `done` after `--no-wait`, so a person or script cannot tell the cell was never asked."""
+    async def lone_import(source, config, checkpoint, **kwargs):
+        return {"import_id": "e91b0d91-79ab-4c9c-950b-a85e80c3a7ef", "observed_state": "done", "cell_filing": "asked"}
+
+    class NoCell:
+        def __init__(self, config, oauth):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *error):
+            return None
+
+    monkeypatch.setattr(cloud_import_windows, "McpCell", NoCell)
+    monkeypatch.setattr(cloud_import_windows, "import_folder", lone_import)
+
+    assert cloud_import_client.main(["import", str(tmp_path), "--checkpoint", str(tmp_path / "cp"), "--no-wait"]) == 0
+
+    assert json.loads(capsys.readouterr().out.splitlines()[-1]) == {
+        "ok": True, "import_id": "e91b0d91-79ab-4c9c-950b-a85e80c3a7ef", "state": "done", "cell_filing": "asked"}
+
+
 def test_a_folder_resume_connects_mcp_only_when_it_calls_a_cell_tool(tmp_path, monkeypatch):
     """Catches eager MCP entry that prevents REST from releasing an import's hold on the cell."""
     from types import SimpleNamespace

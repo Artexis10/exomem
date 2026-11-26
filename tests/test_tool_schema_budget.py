@@ -98,7 +98,9 @@ TOOL_CEILINGS: dict[str, int] = {
     "list_review_items": 750,
     "manage_memory": 2650,
     "query_plan_items": 1050,
-    "query_records": 1100,
+    # `options` names `query`, the typed version-1 query that a derived collection also answers, added 32 B on
+    # 2026-11-25 (legacy arguments on a derived collection).
+    "query_records": 1150,
     "read_instructions": 750,
     "read_page": 700,
     "recall_context": 2800,

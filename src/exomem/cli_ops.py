@@ -217,6 +217,8 @@ _SERVICE_UNAVAILABLE_CODES = frozenset(
         # A Records or Planning query that selects on a link field while the link index it
         # needs is being published; the same query succeeds on retry.
         "LINK_INDEX_WARMING",
+        # A review decision whose lookup the request's deadline stopped before it saw every queue.
+        "REVIEW_QUEUES_WARMING",
     }
 )
 _NOT_FOUND_CODES = frozenset({"NOT_FOUND", "OLD_NOT_FOUND", "SOURCES_NOT_FOUND", "NOT_IN_TRASH"})
