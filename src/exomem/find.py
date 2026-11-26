@@ -4409,18 +4409,20 @@ def _find_semantic_units(
         # A dimension's members when the vector lane ranks them alone, else its newest members.
         member_refs: set[str] | None = None
         newest_members: list[Any] | None = None
+        bound = window * _DIMENSION_MEMBER_WINDOWS
         if pushed_dimensions:
-            # The store checks each proposed unit exactly, so the vector lane can rank the members alone.
-            bound = window * _DIMENSION_MEMBER_WINDOWS
-            members = dimension_rows("", k=bound + 1)
-            if len(members) <= bound:
-                member_refs = {row.unit_ref for row in members}
-                vector_parent_paths = vector_parent_paths & {row.parent_path for row in members}
-            else:
-                # Too many members to rank alone: rank the proposed parents' units first.
-                newest_members = members
-                _dimension_parents = proposed_parents()
-                vector_parent_paths = vector_parent_paths & _dimension_parents
+            _dimension_parents = proposed_parents()
+            vector_parent_paths = vector_parent_paths & _dimension_parents
+            # With more proposed parents than the bound, an exact member read would follow the dimension's
+            # size, so the lane ranks the parents' units first and reads members only if those fall short.
+            if len(vector_parent_paths) <= bound:
+                # The store checks each proposed unit exactly, so the vector lane can rank the members alone.
+                members = dimension_rows("", k=bound + 1)
+                if len(members) <= bound:
+                    member_refs = {row.unit_ref for row in members}
+                    vector_parent_paths = vector_parent_paths & {row.parent_path for row in members}
+                else:
+                    newest_members = members
         if vector_allowed_refs is not None:
             # Public refs are per-reader meanings; their parents bound the rows read.
             vector_parent_paths = vector_parent_paths & {row.parent_path for row in indexed or ()}
@@ -4444,22 +4446,25 @@ def _find_semantic_units(
             vector_allowed_refs if member_refs is None else member_refs
         )
         vector_capped = False
-        if newest_members is not None and len(vector_hits) > window:
+        if pushed_dimensions and member_refs is None and len(vector_hits) > window:
             fresh = [hit for hit in vector_hits[:window] if hit.unit_ref not in vector_selected]
             vector_records.update(select(fresh, stale_out=vector_stale))
             vector_selected.update(hit.unit_ref for hit in fresh)
             if len(records.keys() | vector_records.keys()) < requested_limit and not vector_stale:
                 # Other units of the proposed parents crowd out the members: rank the newest members.
                 vector_capped = True
+                if newest_members is None:
+                    newest_members = dimension_rows("", k=bound + 1)
                 crowded = vector_hits[:window]
                 vector_parent_paths = vector_parent_paths & {row.parent_path for row in newest_members}
                 vector_hits, vector_profile, _indexed_scope = vector_read({row.unit_ref for row in newest_members})
                 seen = {hit.unit_ref for hit in vector_hits[:window]}
                 vector_hits = [*vector_hits[:window], *(hit for hit in crowded if hit.unit_ref not in seen)]
-                # The lane ranked only the newest members; the result says its candidate window ran out.
-                if failed_out is not None and "semantic_units_candidate_window" not in failed_out:
-                    failed_out.append("semantic_units_candidate_window")
-                _record_degradation("semantic_units_candidate_window")
+                if len(newest_members) > bound:
+                    # The lane ranked only the newest members; the result says its candidate window ran out.
+                    if failed_out is not None and "semantic_units_candidate_window" not in failed_out:
+                        failed_out.append("semantic_units_candidate_window")
+                    _record_degradation("semantic_units_candidate_window")
         if (
             vector_allowed_refs is not None
             and {hit.unit_ref for hit in vector_hits} != vector_allowed_refs

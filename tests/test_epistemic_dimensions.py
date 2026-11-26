@@ -717,6 +717,53 @@ def test_a_dimension_with_more_members_than_the_vector_bound_fills_from_its_newe
     assert "semantic_units_candidate_window" in failed
 
 
+def test_a_dimension_on_more_pages_than_the_vector_bound_reads_no_members_when_its_pages_fill(
+    tmp_path, warm_managed_cell, monkeypatch,
+) -> None:
+    """Catches a broad dimension whose vector lane first reads every member up to the bound, a cost
+    that grows with the dimension's size although the proposed pages' units already fill the limit."""
+    import numpy as np
+    from test_semantic_unit_recall import _vector
+
+    from exomem import embeddings, lexstore, semantic_index
+
+    vault = _outlook_vault(tmp_path)
+    language_registry.registry_path(vault).write_text(MEASURED, encoding="utf-8")
+    index = embeddings.get_embedding_index(vault)
+    for n in range(24):
+        rel = f"Knowledge Base/Notes/Estimate {n:02d}.md"
+        _write(vault, rel, PAGE.format(title=f"Estimate {n}", body=(
+            f"## Local estimate\n- id: member-{n}\n- credence: likely\n\nThe beacon survey gives estimate {n}.\n"
+        )))
+        state = semantic_index.build_parent_index_state(vault, vault / rel)
+        index.upsert_semantic_units(state, np.stack([_vector(1.0, n / 1000)]), 1.0)
+    for path in (RULES, OLD, NEW):
+        other = semantic_index.build_parent_index_state(vault, vault / path)
+        index.upsert_semantic_units(other, np.stack([_vector(0.0, 1.0)] * len(other.occurrences)), 1.0)
+    warm_managed_cell(vault)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(embeddings, "embed_texts", lambda *_a, **_k: np.stack([_vector(1.0)]))
+    # One candidate window of a limit of 2 (20 units) bounds the member read, so 24 pages exceed it.
+    monkeypatch.setattr(find_module, "_DIMENSION_MEMBER_WINDOWS", 1)
+    store_queries: list[str] = []
+    real = lexstore.search_semantic_units_result
+    monkeypatch.setattr(
+        lexstore, "search_semantic_units_result", lambda *a, **k: store_queries.append(a[1]) or real(*a, **k),
+    )
+    failed: list[str] = []
+
+    hits = find_module.find(
+        vault, query="beacon", scope="kb-only", mode="hybrid", graph=False, rerank=False,
+        result_level="unit", filters={"unit.dimension": {"$eq": "measured"}}, limit=2,
+        failed_out=failed,
+    )
+
+    assert len(hits) == 2
+    assert all(hit.source_anchor.startswith("member-") for hit in hits)
+    assert "" not in store_queries, "the vector lane read the dimension's members"
+    assert failed == []
+
+
 def test_a_filtered_hybrid_search_ranks_a_strong_member_older_than_its_lexical_window(
     tmp_path, warm_managed_cell,
 ) -> None:
