@@ -618,9 +618,8 @@ def test_a_failed_batch_that_outlasts_a_slice_still_settles_one_page_of_its_revi
     derivation.drain(served.resolve(), writer, deadline=time.monotonic() + derivation.SLICE_SECONDS)
 
     assert after_one == [(bad,)], "the first drain derived the good page"
-    # Two attempts failed for it: the batch's, which counted against both pages, and its own.
     assert store_rows(served, "SELECT path, attempts, failed_code FROM store_derivation_queue") == [
-        (bad, 2, derivation.FAILED)
+        (bad, 1, derivation.FAILED)
     ]
     assert good in bm25_paths(served, "ferry")
 
@@ -668,7 +667,8 @@ def test_a_failed_batch_is_not_taken_whole_again_on_each_turn_of_the_store_threa
     attempts, code, retry_at = store_rows(
         served, "SELECT attempts, failed_code, retry_at FROM store_derivation_queue"
     )[0]
-    assert attempts >= 1 and code == derivation.FAILED and retry_at is not None
+    assert attempts == 1, "the batch's failure counted as one of the page's own"
+    assert code == derivation.FAILED and retry_at is not None
 
 
 def test_a_check_beside_many_failed_pages_parses_each_of_them_once(served, writer, monkeypatch):  # noqa: F811
@@ -676,7 +676,6 @@ def test_a_check_beside_many_failed_pages_parses_each_of_them_once(served, write
     good while they fail: each check that reads every pending page parsed all of them again. Each
     parses at most once for as long as the page is unchanged, and a page that changed is read anew."""
     save(served, HARBOUR, SMALL_TEXT.replace("Small", "Harbour"))
-    # A name that no other test commits: the parses are kept by path and bytes, across tests.
     failed = [f"Knowledge Base/Notes/Stuck {number}.md" for number in range(derivation.UNDERIVED_CAP + 44)]
     commit_pending_pages(served, writer, monkeypatch, len(failed), "Stuck")
     record_failures(writer, derivation.ATTEMPTS)

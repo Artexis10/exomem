@@ -11,9 +11,9 @@ stored bytes (``underived_parsed``).
 
 A batch takes whole revisions of intents in ``(revision, path)`` order, derives them with the code that
 file mode uses, re-derives the pages whose links they move, deletes the intents and advances the store
-revision. A batch that fails counts an attempt against each of its intents, so that each is taken alone from
-then on. A failed intent keeps its row and its reason code and retries alone, with a growing backoff, so
-it holds back neither the other intents nor any reader; after ``ATTEMPTS`` status counts it as failed.
+revision. A batch that fails marks each of its intents, so that each is taken alone from then on.
+A failed intent keeps its row and its reason code and retries alone, with a growing backoff, so it
+holds back neither the other intents nor any reader; after ``ATTEMPTS`` status counts it as failed.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from sqlite3 import Connection, OperationalError
@@ -57,9 +57,10 @@ BATCH_PAGES = 32
 RETRY_SECONDS = 1.0
 MAX_RETRY_SECONDS = 300.0
 
-#: The most pending pages that a check which reads every one of them takes (``underived_parsed``): 256 pages
-#: parse in about 0.15 s, at the 0.6 ms a page measured on the store thread, so a check stays well
-#: inside a request's budget, and a backlog past it refuses the check until the drain shrinks it.
+#: The most pending pages that a check which reads every one of them takes (``underived_parsed``):
+#: 256 pages parse in about 0.15 s, at the 0.6 ms a page measured on the store thread, so a check
+#: stays well inside a request's budget, and a backlog past it refuses the check until the drain
+#: shrinks it.
 UNDERIVED_CAP = 256
 #: The longest that one stretch of derivation holds the store thread, whether the thread derives what
 #: is owed (``StoreServer._derive_owed``) or a request derives its own intents (``committed``). It
@@ -424,8 +425,9 @@ def caught_up(still_held_back: Callable[[], bool], seconds: float) -> bool:
             pause = min(pause * 2, _LOOK_MOST_SECONDS)
 
 
-def _pending_paths(conn: Connection, paths: Iterable[str] | None) -> list[str]:
-    """The paths of the ``derive`` intents that ``underived_parsed`` reads, or the refusal that it makes."""
+def _pending_paths(conn: Connection, paths: Iterable[str] | None) -> dict[str, int]:
+    """The ``derive`` intents that ``underived_parsed`` reads, each path with its ``attempts``, or
+    the refusal that it makes."""
     wanted = None if paths is None else list(dict.fromkeys(paths))
     if wanted is None or len(wanted) > UNDERIVED_CAP:
         waiting = _queue_rows(
@@ -435,22 +437,24 @@ def _pending_paths(conn: Connection, paths: Iterable[str] | None) -> list[str]:
         )
         if waiting is not None and len(waiting) > UNDERIVED_CAP:
             raise read.backlog_too_large()
-        rows = _queue_rows(conn, "SELECT path FROM store_derivation_queue WHERE operation = ?", (DERIVE,))
-        pending = [path for path, in rows or ()]
+        rows = _queue_rows(
+            conn, "SELECT path, attempts FROM store_derivation_queue WHERE operation = ?", (DERIVE,)
+        )
+        pending = dict(rows or ())
         if wanted is not None:
             keep = set(wanted)
-            pending = [path for path in pending if path in keep]
+            pending = {path: attempts for path, attempts in pending.items() if path in keep}
         return pending
-    pending = []
+    pending = {}
     for start in range(0, len(wanted), read.KEYS_PER_QUERY):
         batch = wanted[start : start + read.KEYS_PER_QUERY]
         rows = _queue_rows(
             conn,
-            "SELECT path FROM store_derivation_queue WHERE operation = ? "
+            "SELECT path, attempts FROM store_derivation_queue WHERE operation = ? "
             f"AND path IN ({', '.join('?' * len(batch))})",
             (DERIVE, *batch),
         )
-        pending.extend(path for path, in rows or ())
+        pending.update(rows or ())
     return pending
 
 
@@ -463,20 +467,26 @@ def _bodies(conn: Connection, paths: list[str]) -> Iterator[tuple[str, bytes]]:
         ))
 
 
-#: The parse of each pending page that a check reads (``underived_parsed``), by the check's kind and
-#: the page's path: the ``sha256`` of the bytes that were parsed, and the result. A failed page stays
-#: queued for as long as it fails, and every such check would parse it again, so a result is kept
-#: while the page's bytes stay the same. Process memory is right for it: a result is a pure function
-#: of the path and the bytes, and a lost entry costs one parse.
+#: The parse of each failed page that a check reads (``underived_parsed``), by the check's kind and
+#: the page's path: the ``sha256`` of the bytes that were parsed, and the result. A failed page
+#: stays queued for as long as it fails, and every such check would parse it again, so a result is
+#: kept while the page's bytes stay the same. A page that has not failed drains within moments, so
+#: its parse is not kept: the memory follows the failed pages, never a backlog or a large page that
+#: a reader that never drains would hold. Process memory is right for it: a result is a pure
+#: function of the path and the bytes, and a lost entry costs one parse.
 _PARSED: dict[str, dict[str, tuple[str, object]]] = {}
 _PARSED_LOCK = threading.Lock()
-#: The most results kept per kind. A failed page is rare and its result small, so this holds a failed
-#: set far past any that a vault has met; a set past it reparses each check, as before the cache.
+#: The most results kept per kind. A failed page is rare and its result small, so this holds a
+#: failed set far past any that a vault has met; a set past it reparses each check, as before the
+#: cache.
 PARSED_CAP = 2048
 
 
 def underived_parsed(
-    conn: Connection, paths: Iterable[str] | None, kind: str, parse: Callable[[str, bytes], _Parsed],
+    conn: Connection,
+    paths: Iterable[str] | None,
+    kind: str,
+    parse: Callable[[str, bytes], _Parsed],
 ) -> dict[str, _Parsed | None]:
     """The pages whose derived rows trail their stored bytes at ``conn``'s snapshot, each with what
     ``parse(path, bytes)`` makes of its stored bytes.
@@ -503,37 +513,42 @@ def underived_parsed(
     Keyed paths that outnumber ``UNDERIVED_CAP`` could name every waiting page, so that call takes
     this form too.
 
-    ``kind`` names what ``parse`` makes, one name per parse. A failed page stays here for as long as
-    it fails, so a page is parsed once while its bytes stay the same, whatever the number of checks
-    that read it: the result is kept by the page's ``sha256``, so a page that changed is parsed anew,
-    and it is dropped when the intent leaves the queue (``_forget``). The bytes of a page that was
-    parsed are not read again.
+    ``kind`` names what ``parse`` makes, one name per parse. A page that failed (its intent has
+    attempts) stays here for as long as it fails, so it is parsed once while its bytes stay the
+    same, whatever the number of checks that read it: the result is kept by the page's ``sha256``,
+    so a page that changed is parsed anew, and it is dropped when the intent leaves the queue
+    (``_forget``). That saves the parse and the copy of its bytes, not the read of its row: SQLite
+    still reads the overflow pages of ``body``, which comes before ``sha256`` in the row. A page
+    that has not failed is parsed on every check, as it drains soon.
     """
     pending = _pending_paths(conn, paths)
     found: dict[str, _Parsed | None] = dict.fromkeys(pending)
+    failed = [path for path, attempts in pending.items() if attempts]
     hashes: dict[str, str] = {}
-    for start in range(0, len(pending), read.KEYS_PER_QUERY):
-        batch = pending[start : start + read.KEYS_PER_QUERY]
-        hashes.update(conn.execute(
-            f"SELECT path, sha256 FROM store_pages WHERE path IN ({', '.join('?' * len(batch))})", batch,
-        ))
+    for start in range(0, len(failed), read.KEYS_PER_QUERY):
+        batch = failed[start : start + read.KEYS_PER_QUERY]
+        marks = ", ".join("?" * len(batch))
+        hashes.update(
+            conn.execute(f"SELECT path, sha256 FROM store_pages WHERE path IN ({marks})", batch)
+        )
+    to_parse = [path for path, attempts in pending.items() if not attempts]
     with _PARSED_LOCK:
         kept = _PARSED.get(kind, {})
-        stale = []
         for path, digest in hashes.items():
             held = kept.get(path)
             if held is not None and held[0] == digest:
                 found[path] = held[1]  # type: ignore[assignment]  # this kind's own parse made it
             else:
-                stale.append(path)
-    for path, body in _bodies(conn, stale):
+                to_parse.append(path)
+    for path, body in _bodies(conn, to_parse):
         found[path] = parsed = parse(path, body)
-        with _PARSED_LOCK:
-            results = _PARSED.setdefault(kind, {})
-            results.pop(path, None)  # a re-parsed page goes last, so the oldest is the one that goes
-            results[path] = (hashes[path], parsed)
-            if len(results) > PARSED_CAP:
-                del results[next(iter(results))]
+        if path in hashes:
+            with _PARSED_LOCK:
+                results = _PARSED.setdefault(kind, {})
+                results.pop(path, None)  # a re-parsed page goes last, so the oldest goes first
+                results[path] = (hashes[path], parsed)
+                if len(results) > PARSED_CAP:
+                    del results[next(iter(results))]
     return found
 
 
@@ -587,10 +602,11 @@ def drain(
     only the intents that it queued itself (``own_rows``).
 
     A refusal to start a transaction (lease lost, store handed off) stops the drain and leaves every
-    intent as it was. A batch that raises is rolled back and each of its intents counts the attempt
-    (``_record_failure``), so that none is taken in a batch again; its paths then run one by one, so a
-    single bad page only delays itself. The first of them runs whatever the deadline, so that a batch
-    that fails after the deadline still settles an intent; the next drain takes the others alone.
+    intent as it was. A batch that raises is rolled back and each of its intents is marked
+    (``_record_failure``), so that none is taken in a batch again; its paths then run one by one, so
+    a single bad page only delays itself. The first of them runs whatever the deadline, so that a
+    batch that fails after the deadline still settles an intent; the next drain takes the others
+    alone.
     """
     root = Path(root)
     result = Drained()
@@ -608,7 +624,7 @@ def drain(
                 for position, intent in enumerate(batch):
                     if result.stopped or (position and deadline is not None and time.monotonic() >= deadline):
                         break
-                    _derive(root, writer, [replace(intent, attempts=intent.attempts + 1)], result)
+                    _derive(root, writer, [intent], result)
             except connection.CollectionStoreError:
                 result.stopped = True
     due_now = _owe_remaining(root, writer, stopped=result.stopped)
@@ -650,6 +666,11 @@ class _Intent:
     operation: str
     attempts: int
     metered: int
+    failed_code: str | None
+
+
+#: The columns that make an ``_Intent``, in the order of its fields.
+_INTENT_COLUMNS = "path, revision, operation, attempts, metered, failed_code"
 
 
 def _next_batch(writer: CollectionWriter, from_revision: int = 0) -> list[_Intent]:
@@ -657,7 +678,7 @@ def _next_batch(writer: CollectionWriter, from_revision: int = 0) -> list[_Inten
     it never splits a batch of new intents; new ones run in whole revisions of up to ``BATCH_PAGES``
     pages."""
     first = writer.connection.execute(
-        f"SELECT path, revision, operation, attempts, metered FROM store_derivation_queue WHERE {_DUE} "
+        f"SELECT {_INTENT_COLUMNS} FROM store_derivation_queue WHERE {_DUE} "
         "AND revision >= ? ORDER BY revision, path LIMIT 1",
         (_stamp(_now()), from_revision),
     ).fetchone()
@@ -666,7 +687,7 @@ def _next_batch(writer: CollectionWriter, from_revision: int = 0) -> list[_Inten
     if first[3] > 0:
         return [_Intent(*first)]
     rows = writer.connection.execute(
-        f"SELECT path, revision, operation, attempts, metered FROM store_derivation_queue WHERE {_DUE} "
+        f"SELECT {_INTENT_COLUMNS} FROM store_derivation_queue WHERE {_DUE} "
         "AND revision >= ? AND attempts = 0 ORDER BY revision, path LIMIT ?",
         (_stamp(_now()), from_revision, BATCH_PAGES + 1),
     ).fetchall()
@@ -680,7 +701,7 @@ def _next_batch(writer: CollectionWriter, from_revision: int = 0) -> list[_Inten
     if whole:
         return whole
     rows = writer.connection.execute(
-        f"SELECT path, revision, operation, attempts, metered FROM store_derivation_queue WHERE {_DUE} "
+        f"SELECT {_INTENT_COLUMNS} FROM store_derivation_queue WHERE {_DUE} "
         "AND attempts = 0 AND revision = ? ORDER BY path",
         (_stamp(_now()), last),
     ).fetchall()
@@ -758,13 +779,14 @@ def _stored(tx: Connection, paths: list[str]) -> set[str]:
 
 
 def _record_failure(writer: CollectionWriter, batch: list[_Intent], error: Exception, result: Drained) -> None:
-    """Count one attempt against each intent of a failed batch.
+    """Record a failure against each intent of a failed batch, or against the one that failed.
 
-    A batch of several intents cannot say which of them failed: each counts the attempt, with no
-    reason code and no retry time, and so stays due and still holds a reader back, but ``_next_batch``
-    takes an intent that has attempts alone from then on. The drain runs them one by one at once, and
-    a later turn takes the rest the same way, so one bad page never fails the batch of the others
-    again. The count survives a restart, as the queue does.
+    A batch of several intents cannot say which of them failed: each is marked (attempts 1, no
+    reason code and no retry time), and so stays due and still holds a reader back, but
+    ``_next_batch`` takes an intent that has attempts alone from then on. The drain runs them one by
+    one at once, and a later turn takes the rest the same way, so one bad page never fails the batch
+    of the others again. The mark counts no attempt: a page's own failures are the ones that make it
+    failed, as before a batch was marked. The mark survives a restart, as the queue does.
     """
     if len(batch) > 1:
         log.info("a derivation batch failed (%s); deriving its paths one by one", type(error).__name__)
@@ -781,7 +803,9 @@ def _record_failure(writer: CollectionWriter, batch: list[_Intent], error: Excep
         return
     [intent] = batch
     code = NO_ROOM if isinstance(error, OpError) and error.code == media_capacity.UPLOAD_SPACE_BUSY else FAILED
-    attempts = intent.attempts + 1
+    # A batch's mark (attempts 1, no code) counted nothing that left a reason, so the first failure
+    # on its own is the page's first.
+    attempts = intent.attempts + 1 if intent.failed_code else 1
     log.warning("a store page's derivation failed (%s, attempt %d)", type(error).__name__, attempts,
                 exc_info=not isinstance(error, OpError))
     wait = min(RETRY_SECONDS * 2 ** (attempts - 1), MAX_RETRY_SECONDS)

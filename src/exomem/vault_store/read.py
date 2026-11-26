@@ -412,10 +412,10 @@ def rows_behind():
 
 
 def backlog_too_large():
-    """The refusal of a check that reads every page whose rows wait (``derivation.underived_parsed``) while
-    more pages wait than one check reads. Unlike ``rows_behind``, it speaks for a write, a delete or
-    a found page: the check cannot yet say that a link or a reference is safe, and nothing was
-    changed."""
+    """The refusal of a check that reads every page whose rows wait
+    (``derivation.underived_parsed``) while more pages wait than one check reads. Unlike
+    ``rows_behind``, it speaks for a write, a delete or a found page: the check cannot yet say that
+    a link or a reference is safe, and nothing was changed."""
     from ..cli_ops import OpError
 
     return OpError(
