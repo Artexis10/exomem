@@ -34,6 +34,7 @@ STAYS: Mapping[str, tuple[bool, str]] = MappingProxyType({  # nosemgrep: ep-word
     "unchecked": (False, "{n} not yet verified against their Source page"),
     "text": (True, "{n} text"),
     "kept": (True, "{n} artifact"),
+    "kept_speech": (True, "{n} transcript kept with its recording"),
 })
 
 
@@ -166,19 +167,28 @@ def _page_classifier(page: dict, filed_statuses: tuple[str, ...]):
     selected = set((page.get("selection") or {}).get("paths") or [])
     outcomes = page.get("outcomes") or {}
     removes_copies = page.get("consume", True)  # a run that opted out never checks or removes a copy
+    # A transcript page that the recording's own Source was written from, and its part pages, have no item of their own.
+    kept_with = {
+        member: item for item in items.values() if item["form"] == "artifact"
+        for member in (item.get("kept") or {}).get("members") or ()
+    }
 
     def classify(path: str) -> str | None:
-        item = items.get(path)
+        item = items.get(path) or kept_with.get(path)
         if item is not None:
-            outcome = outcomes.get(path) or {}
+            outcome = outcomes.get(item["original_path"]) or {}
             status = outcome.get("status")
             if status == "failed":
                 return "over_ceiling" if outcome.get("code") == adoption_plan.OVER_CEILING else "failed"
             if status in filed_statuses:
+                if path != item["original_path"]:  # a transcript page of the recording, not the recording itself
+                    return "failed" if (outcome.get("kept_speech") or {}).get("outcome") == "failed" else "kept_speech"
                 if outcome.get("stays"):
                     return outcome["stays"]  # `finish` recorded why it kept this copy: a result key of `STAYS`
                 if item["form"] == "text" and removes_copies and not outcome.get("consumed"):
                     return "unchecked"  # `finish` did not reach this copy, so no one has compared it with its Source page
+                if item["form"] == "kept":
+                    return "kept_speech"
                 return "text" if item["form"] == "text" else "kept"
             return "pending"
         if path in skipped:

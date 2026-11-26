@@ -35,7 +35,7 @@ import re
 import stat
 import tempfile
 import unicodedata
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO
@@ -2154,9 +2154,7 @@ def render_sidecar_extraction(
         content = _media_processing_module().record_read_hints(
             content, mtime_ns=binary_hints[0], ctime_ns=binary_hints[1]
         )
-    if prior_extractions:
-        links = ", ".join(json.dumps(f"[[{link}]]", ensure_ascii=False) for link in prior_extractions)
-        content = _set_frontmatter_field(content, "prior_extractions", f"[{links}]")
+    content = set_prior_extractions(content, prior_extractions)
     content = _remove_frontmatter_fields(content, lambda key: key in _parts_module().SOURCE_FIELDS)
     for field, value in _part_fields(parts):
         content = _set_frontmatter_field(content, field, value)
@@ -2164,6 +2162,54 @@ def render_sidecar_extraction(
         content, text, _cap_low_confidence_text(ocr.low_confidence_text) if ocr is not None else ""
     )
     return with_newline(content, newline)
+
+
+def set_prior_extractions(content: str, links: Sequence[str]) -> str:
+    """`content` listing `links`, in order, as the pages that hold the extractions it replaced or declined.
+
+    Each link is a vault-relative path with no extension. An empty list leaves the field as it is.
+    """
+    if not links:
+        return content
+    listed = ", ".join(json.dumps(f"[[{link}]]", ensure_ascii=False) for link in links)
+    return _set_frontmatter_field(content, "prior_extractions", f"[{listed}]")
+
+
+def extraction_field_lines(content: str) -> list[str]:
+    """The `key: value` lines of `content`'s frontmatter that describe its extraction, as the page wrote them.
+
+    A prior extraction page and a kept extraction both carry exactly these fields (`is_extraction_field`).
+    """
+    content = with_newline(content, "\n")
+    end = content.find("\n---", 3) if content.startswith("---") else -1
+    return [
+        line for line in (content[:end].split("\n") if end != -1 else [])
+        if line[:1] not in (" ", "-", "\t") and is_extraction_field(line.partition(":")[0])
+    ]
+
+
+def render_kept_extraction(
+    before: str, *, field_lines: Sequence[str], text: str, parts: Layout | None,
+    prior_extractions: Sequence[str] = (),
+) -> str:
+    """`before` with another page's finished extraction in place of its own: the fields, the first part and the part layout.
+
+    `field_lines` are the lines that `extraction_field_lines` read from the page that holds the extraction. Every
+    extraction field of `before` goes first, so none of a pending or earlier extraction survives next to the new one.
+    The recording's own fields (its identity and provenance) stay as `before` has them. `text` is the part that stays
+    on the page and `parts` the layout of the part pages that hold the rest, as `extraction_parts.layout` gives it.
+    """
+    newline = document_newline(before)
+    content = with_newline(before, "\n")
+    content = _remove_frontmatter_fields(content, is_extraction_field)
+    for line in field_lines:
+        key, _colon, value = line.partition(":")
+        content = _set_frontmatter_field(content, key, value.strip())
+    content = set_prior_extractions(content, prior_extractions)
+    content = _remove_frontmatter_fields(content, lambda key: key in _parts_module().SOURCE_FIELDS)
+    for field, value in _part_fields(parts):
+        content = _set_frontmatter_field(content, field, value)
+    return with_newline(_set_extracted_text(content, text), newline)
 
 
 def set_capture_fields(content: str, capture: CaptureFacts) -> str:

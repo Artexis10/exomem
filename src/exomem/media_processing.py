@@ -713,9 +713,7 @@ def reconcile_media(
             store = media_jobs.MediaJobStore(vault)
             durable_job = store.get_by_binary(binary)
             attached = False
-            requested_clip = media_type in media_types.VISUAL_KINDS and not os.environ.get(
-                "EXOMEM_DISABLE_CLIP"
-            )
+            requested_clip = wants_frame_vectors(media_type)
             # A switched-off engine gets no stage, so no job bound to fail; the
             # pending sidecar waits and reconciliation queues it once it is enabled.
             extraction_on = media_engines.stage_enabled(media_type)
@@ -1623,6 +1621,29 @@ def _queue_extraction(
         requeued=1,
         attached=True,
     )
+
+
+def wants_frame_vectors(media_type: str) -> bool:
+    """Whether a recording of this kind gets visual (frame-vector) indexing: a visual kind, unless the operator turned it off."""
+    return media_type in media_types.VISUAL_KINDS and not os.environ.get("EXOMEM_DISABLE_CLIP")
+
+
+def queue_frame_vectors(vault: Path, binary: Path, media_type: str) -> bool:
+    """Queue the frame-vector job alone for a visual original whose extraction is already complete.
+
+    A completed sidecar admits no job, and the worker queues frame vectors for a completed video only when it
+    starts. A video that arrives with its transcript (`kept_speech`) asks for them here instead, with the job
+    shape that scan queues: no extraction stage. True when a job is queued.
+    """
+    if not wants_frame_vectors(media_type):
+        return False
+    media_jobs.MediaJobStore(vault).enqueue(
+        media_jobs.MediaJob(
+            binary_path=binary, sidecar_path=originals.sidecar_path(binary), media_type=media_type,
+            do_ocr=False, do_clip=True,
+        )
+    )
+    return True
 
 
 def _retire_completed_ocr(

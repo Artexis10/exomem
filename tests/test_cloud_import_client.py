@@ -15,7 +15,7 @@ from pathlib import Path
 import httpx2
 import pytest
 
-from exomem import cloud_export_client, cloud_import_client, cloud_import_windows
+from exomem import cloud_export_client, cloud_import_client, cloud_import_windows, extraction_parts
 from exomem.cli_progress import Progress
 from exomem.cloud_import import DEFAULT_RESERVE_BYTES
 from exomem.cloud_import_client import (
@@ -200,6 +200,27 @@ def test_folder_import_skips_links_hidden_and_ignored_files_and_reports_them(tmp
     assert hint.lstrip().startswith("hidden:")
     # The encrypted copy is named as duplicate storage while it exists, and as removed at the end.
     assert "duplicates your data" in report and "Removed the encrypted copy" in report
+
+
+@needs_age
+def test_a_long_transcript_goes_with_its_hidden_part_folder_without_the_hidden_flag(tmp_path):
+    parts = extraction_parts.folder_for(Path("talk.md")).as_posix()
+    folder = tmp_path / "notes"
+    (folder / parts).mkdir(parents=True)
+    (folder / ".other").mkdir()
+    (folder / "talk.md").write_text("first part")
+    (folder / parts / "part-02.md").write_text("second part")
+    (folder / ".other" / "x.txt").write_text("hidden")
+    identity, recipient = _age_keys(tmp_path)
+    cloud = FakeCloud(recipient)
+    lines: list[str] = []
+
+    asyncio.run(cloud.run(folder, tmp_path / "checkpoint", progress=Progress(lines.append)))
+
+    sent = _members(identity, cloud.ciphertext)
+    assert {name: data for name, data in sent.items() if data is not None} == {
+        "talk.md": b"first part", f"{parts}/part-02.md": b"second part"}
+    assert "1 hidden part folder" in "\n".join(lines)
 
 
 def test_a_folder_with_nothing_left_to_import_is_refused_before_anything_is_sent(tmp_path):

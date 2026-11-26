@@ -31,6 +31,7 @@ import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Literal, get_args
 from urllib.parse import urlencode
@@ -48,6 +49,7 @@ from . import (
     held_fs,
     import_rename,
     import_stage,
+    kept_speech,
     knowledge_packs,
     lexstore,
     note_types,
@@ -153,6 +155,9 @@ _INDEX_OWED = "index_owed"
 _RECORD_INTENT = "record_intent"
 # The run-object key that names one full save of `run.json`; a journal holds changes since the save it names.
 _GENERATION = "generation"
+# The run-object fields that every full save stamps with a fresh value, whatever the save changed. A reader that
+# compares a run before and after a step (the tool-selection scorer) leaves these out.
+SAVE_STAMPS = ("updated", _GENERATION)
 _JOURNAL_FILE = "journal.json"
 # Keys that only `start`, `select` and `plan` write, each in a full save: `apply`, `file`, `finish` and `cancel`
 # never change them, so a journal leaves them out. A step that replaces one is caught and saves in full; one
@@ -1969,6 +1974,64 @@ def _whole_scan(root: Path, run: dict) -> list[str] | None:
     ]
 
 
+def _no_kept_speech() -> dict:
+    """The plan's running count of transcript pages: kept with their recording, and not kept by reason."""
+    return {"staged": 0, "stored": 0, "parts": 0, "unpaired": {}, "unpaired_without_parts": 0}
+
+
+def _holds_kept_speech(counts: Mapping[str, object]) -> bool:
+    return bool(counts["staged"] or counts["stored"] or counts["unpaired"])
+
+
+def _pair_kept_page(
+    root: Path, rel: str, recordings: Mapping[str, dict], counts: dict, *, collection_root: str,
+) -> dict | None:
+    """Pair a sidecar-named page with its recording (design D1 of `keep-speech-results-in-cloud`).
+
+    None: the page is no recording's sidecar or did not pair, so it plans as before (an unpaired page is counted by
+    reason). An empty dict: the page pairs with a recording that this plan stores, and the recording's item holds the
+    pairing. Otherwise the plan item of a page whose result settles on a Source that is already stored.
+    """
+    named = kept_speech.candidate(rel)
+    if named is None:
+        return None
+    original, media_type = named
+    recording = recordings.get(original)
+    expect = (recording["original_sha256"], recording["original_bytes"]) if recording is not None else None
+    examined = kept_speech.examine(root, rel, media_type=media_type, expect=expect)
+    target, artifact, why = None, None, kept_speech.MISMATCH
+    if isinstance(examined, kept_speech.Examined):
+        if recording is not None and recording["action"] == "copy-as-source":
+            recording["kept"] = examined.record("staged")
+            counts["staged"] += 1
+            counts["parts"] += examined.parts
+            return {}
+        if recording is not None:
+            target, artifact = recording["target_path"], recording.get("artifact_path")
+        else:
+            try:
+                found = kept_speech.find_recording(root, examined.sha256, examined.size)
+            except kept_speech.LookupUnavailable:
+                found, why = None, kept_speech.LOOKUP_UNAVAILABLE
+            target, artifact = (found + ".md", found) if found is not None else (None, None)
+        if target is None:
+            examined = kept_speech.Unpaired(why, examined.parts - 1)
+    if isinstance(examined, kept_speech.Unpaired):
+        counts["unpaired"][examined.reason] = counts["unpaired"].get(examined.reason, 0) + 1
+        counts["unpaired_without_parts"] += int(examined.parts > 0)
+        return None
+    counts["stored"] += 1
+    counts["parts"] += examined.parts
+    return {
+        "original_path": rel, "original_sha256": examined.page_sha256, "original_bytes": examined.page_bytes,
+        "form": kept_speech.FORM, "action": kept_speech.KEEPS, "classification": None,
+        "collection_path": adoption_plan.collection_path_of(rel, collection_root),
+        "target_path": target, "target_ref": context_refs.source_ref(target), "artifact_path": artifact,
+        "title": Path(rel).stem, "tags": [], "rejected_tags": [], "aliases": [], "rejected_aliases": [],
+        "_refs": [], "kept": examined.record("stored"),
+    }
+
+
 def plan(
     root: Path,
     *,
@@ -2027,6 +2090,7 @@ def plan(
                 "items": [],
                 "skipped": [],
                 "next": 0,
+                "kept_speech": _no_kept_speech(),
                 # Listed before the first index read below, so a page filed in between breaks the
                 # seal at apply instead of hiding from the plan.
                 "sources_seal": adoption_plan.sources_seal(adoption_plan.source_page_paths(root)),
@@ -2046,6 +2110,9 @@ def plan(
         notes = adoption_plan.NoteIndex(root)
         destinations = adoption_plan.Destinations.frozen_by(root, draft["items"])
         seen = adoption_plan.seen_in_plan(draft["items"])
+        kept_counts = draft.setdefault("kept_speech", _no_kept_speech())
+        # Artifacts plan before text, so a recording is planned by the time its sidecar-named page is.
+        recordings = {item["original_path"]: item for item in draft["items"] if item["form"] == "artifact"}
 
         budget = _call_budget()
         handled = 0
@@ -2054,6 +2121,15 @@ def plan(
                 if handled and not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS):
                     break
                 rel = selected[draft["next"]]
+                kept_item = _pair_kept_page(
+                    root, rel, recordings, kept_counts, collection_root=collection["root"],
+                )
+                if kept_item is not None:
+                    draft["next"] += 1
+                    handled += 1
+                    if kept_item:
+                        draft["items"].append(kept_item)
+                    continue
                 result = adoption_plan.plan_item(
                     root, rel,
                     collection=collection["label"], collection_root=collection["root"],
@@ -2070,6 +2146,8 @@ def plan(
                     if origin:
                         _carry_origin(result[0], origin, inventory.get(rel))
                     draft["items"].append(result[0])
+                    if result[0]["form"] == "artifact":
+                        recordings[rel] = result[0]
 
         progress = {
             "planned": draft["next"],
@@ -2126,6 +2204,8 @@ def plan(
                 "previous": sum(1 for i in items if i.get("previous_note")),
             },
         }
+        if _holds_kept_speech(draft["kept_speech"]):
+            run["plan"]["kept_speech"] = draft["kept_speech"]
         run["plan_draft"] = None
         run["sources_seal"] = draft.get("sources_seal")
         run["phase"] = "planned"
@@ -2574,6 +2654,84 @@ def _space_shortfall(root: Path, chunk: list[dict], stage: import_stage.Stage | 
     }
 
 
+def _request_frame_vectors(root: Path, planned: dict, stats: Counter) -> None:
+    """Queue the frame vectors of a recording that arrived with its transcript: its extraction is complete, so no
+    other request would queue the job (`media_processing.queue_frame_vectors`); finish repairs what is missed."""
+    from . import media_processing
+
+    artifact = root / planned["artifact_path"]
+    try:
+        media_processing.queue_frame_vectors(root, artifact, media_processing.classify_media(artifact))
+    except Exception:  # noqa: BLE001 - committed custody is authoritative; the worker scan queues the job at its next start
+        stats["extraction_failed"] += 1
+
+
+def _settle_kept_pages(
+    root: Path, run: dict, chunk: list[dict], pages: list[dict], *, stats: Counter, reads: _CallReads,
+    kept: Mapping[str, kept_speech.Kept],
+) -> None:
+    """Settle each transcript page of the chunk that has a stored recording, by the one replacement rule.
+
+    `pages` are the plan's pages named for a recording that was stored before this plan. A recording of the chunk
+    that the apply found already stored (it settled as `already-applied`) takes its own paired page the same way,
+    because its Source was not written from that page.
+    """
+    outcomes, date_iso = run["outcomes"], run["plan"]["date"]
+    for page in pages:
+        result = _keep_speech(root, date_iso, page["kept"], page.get("artifact_path"), reads=reads)
+        outcomes[page["original_path"]] = result
+        stats["kept_speech_" + (result.get("kept_speech") or {}).get("outcome", kept_speech.FAILED)] += 1
+    for planned in chunk:
+        outcome = outcomes.get(planned["original_path"]) or {}
+        if planned.get("kept") and outcome.get("status") == "already-applied" and outcome.get("artifact_path"):
+            result = _keep_speech(
+                root, date_iso, planned["kept"], outcome["artifact_path"], reads=reads,
+                preloaded=kept.get(planned["original_path"]),
+            )
+            outcome["kept_speech"] = result.get("kept_speech") or {
+                "outcome": kept_speech.FAILED, "code": result["code"], "reason": result["reason"],
+            }
+            stats["kept_speech_" + outcome["kept_speech"]["outcome"]] += 1
+
+
+def _keep_speech(
+    root: Path, date_iso: str, record: dict, recording: str | None, *, reads: _CallReads,
+    preloaded: kept_speech.Kept | None = None,
+) -> dict:
+    """The outcome of settling one transcript page on the stored Source of its recording (see `kept_speech.settle`)."""
+    try:
+        kept = preloaded or kept_speech.load(root, record)
+        found = kept_speech.find_recording(root, kept.sha256, kept.size, prefer=recording)
+        if found is None:
+            return _failed("PLAN_STALE", "no stored Source holds this recording any more; re-plan this import")
+        settled = kept_speech.settle(
+            root, kept, recording=found, date_iso=date_iso,
+            # The apply already holds the mutation guard, as for the extraction request below.
+            commit_guard=contextlib.nullcontext,
+        )
+    except kept_speech.Changed:
+        return _failed("SOURCE_CHANGED", "the transcript page or one of its parts differs from the plan at apply time")
+    except kept_speech.LookupUnavailable:
+        return _failed(
+            kept_speech.LOOKUP_UNAVAILABLE,
+            "the duplicate index cannot say which Source holds this recording; retry this page when it can",
+        )
+    except kept_speech.Refused as refusal:
+        return _failed(refusal.code, refusal.reason)
+    if preloaded is None:
+        reads.warnings.extend(kept.warnings)
+    outcome = _already_applied(settled.source_page, found, record["content_sha256"])
+    if settled.outcome != kept_speech.UNCHANGED:
+        outcome["status"] = "applied"
+        del outcome["existing_ref"]
+    outcome["kept_speech"] = {
+        "outcome": settled.outcome,
+        **({"prior_page": settled.prior_page} if settled.prior_page else {}),
+        **({"speech_job": settled.speech_job} if settled.speech_job != "none" else {}),
+    }
+    return outcome
+
+
 def _request_extraction(root: Path, planned: dict, budget: request_budget.RequestBudget,
                         stats: Counter) -> float | None:
     """Ask for text extraction of a committed media artifact; finish repairs what is missed.
@@ -2629,6 +2787,8 @@ class _CallReads:
     stage_read: bool = False
     #: Whether a batch of this call has filed anything; only the first records what earlier calls owe (`_commit_chunk`).
     filed: bool = False
+    #: What this call removed from a kept transcript (card numbers, credentials), for the reply.
+    warnings: list[str] = dataclass_field(default_factory=list)
 
     def open_sources(self, root: Path, run: dict) -> None:
         """List the Sources once, and read them in full only when the run's seal no longer holds."""
@@ -2905,6 +3065,9 @@ def _apply_chunk(
     settled: list[dict] = []
     # Items that repeat another item of the plan wait for the Source of the item they repeat.
     deferred: list[tuple[dict, str | None]] = []
+    # A transcript page that settles on an already stored recording waits for the chunk's own Sources.
+    deferred_kept: list[dict] = []
+    kept_by_path: dict[str, kept_speech.Kept] = {}
     destinations: adoption_plan.Destinations | None = None
     survivors: list[tuple[dict, adopt_module.ImportItem]] = []
     texts: dict[str, str] = {}
@@ -2916,6 +3079,9 @@ def _apply_chunk(
     with lexstore.shared_reads(root):
         for planned in chunk:
             path = planned["original_path"]
+            if planned["action"] == kept_speech.KEEPS:
+                deferred_kept.append(planned)
+                continue
             frozen = (publication.get("items") or {}).get(path) if publication else None
             if frozen and planned["action"] != "copy-as-source":
                 # Only an item that stored its own bytes in place of a named Source is ever frozen under another action.
@@ -2966,9 +3132,22 @@ def _apply_chunk(
                 texts[path] = text
             if path in outcomes and outcomes[path]["status"] == _SOURCE_ONLY:
                 continue  # an earlier call wrote its Source; only the note is owed
+            kept = None
+            if planned.get("kept"):
+                try:
+                    kept = kept_speech.load(root, planned["kept"])
+                except kept_speech.Changed:
+                    outcomes[path] = _failed(
+                        "SOURCE_CHANGED", "the transcript page or one of its parts differs from the plan at apply time"
+                    )
+                    stats["kept_speech_failed"] += 1
+                    continue
+                kept_by_path[path] = kept
+                reads.warnings.extend(kept.warnings)
             if frozen:
                 item = adopt_module.import_item(
-                    root, planned, text=text, date_iso=plan["date"], collection=label, source_id=frozen.get("source_id"),
+                    root, planned, text=text, date_iso=plan["date"], collection=label,
+                    source_id=frozen.get("source_id"), kept=kept,
                 )
                 if (
                     frozen.get("target_path") != item.target_rel
@@ -3039,7 +3218,9 @@ def _apply_chunk(
                     f"{occupied[0]} already exists and is not an import of this file",
                 )
                 continue
-            item = adopt_module.import_item(root, planned, text=text, date_iso=plan["date"], collection=label)
+            item = adopt_module.import_item(
+                root, planned, text=text, date_iso=plan["date"], collection=label, kept=kept
+            )
             if moved is not None:
                 item.artifact.placed = True
                 placed[path] = moved
@@ -3065,12 +3246,20 @@ def _apply_chunk(
         if failure is not None:
             outcomes[planned["original_path"]] = failure
             continue
-        own_copies.append((own, adopt_module.import_item(root, own, text=text, date_iso=plan["date"], collection=label)))
+        own_copies.append((
+            own,
+            adopt_module.import_item(
+                root, own, text=text, date_iso=plan["date"], collection=label,
+                kept=kept_by_path.get(planned["original_path"]),
+            ),
+        ))
     landed += _file_survivors(
         root, store, run, own_copies, stage=stage, placed=placed, run_date=run_date, ceiling=ceiling, reads=reads,
         page_final=page_final,
     )
     landed_paths = {planned["original_path"] for planned in landed}
+    stats["kept_speech_attached"] += sum(1 for planned in landed if planned["original_path"] in kept_by_path)
+    _settle_kept_pages(root, run, chunk, deferred_kept, stats=stats, reads=reads, kept=kept_by_path)
     with call_spans.span("adoption.settle", {"items": len(settled) + len(landed)}):
         for planned in [*settled, *landed]:
             outcome = outcomes[planned["original_path"]]
@@ -3088,6 +3277,8 @@ def _apply_chunk(
             seconds = _request_extraction(root, planned, budget, stats)
             if seconds is not None:
                 extractions.append(seconds)
+            if planned["original_path"] in kept_by_path:
+                _request_frame_vectors(root, planned, stats)
     written.extend(copied)
     # The Sources are written without the semantic seam, so the chunk counts them in the
     # backlog itself, before any note does. Each draft note's own commit refreshes its Source.
@@ -3871,14 +4062,18 @@ def apply(
             },
             "progress": _progress(run),
         }
+        if run["plan"].get("kept_speech"):
+            reply["apply_result"]["kept_speech"] = {name: stats[f"kept_speech_{name}"] for name in kept_speech.OUTCOMES}
         if stopped:
             reply["continuation"] = _issue_cursor(run, "apply")
         if stop_reason is not None:
             reply["stop_reason"] = stop_reason
+        # In the reply that a repeated cursor returns again, so that replay shows them too.
+        lines = [*reads.warnings]
         if record_failure is not None:
-            # In the reply that a repeated cursor returns again, so that replay shows it too. `finish` or the next
-            # `apply` records the rows.
-            reply["warnings"] = [*_plan_warning_lines(run), f"{record_failure}; `finish` records them."]
+            lines.append(f"{record_failure}; `finish` records them.")  # `finish` or the next `apply` records the rows
+        if lines:
+            reply["warnings"] = [*_plan_warning_lines(run), *lines]
         if entry is not None:
             entry["state"], entry["reply"] = "used", reply
         if reads.sealed:

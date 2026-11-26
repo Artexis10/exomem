@@ -915,8 +915,10 @@ def test_every_declared_guard_module_is_a_test_module_that_exists() -> None:
 @pytest.mark.parametrize(
     "paths,full,core,harness",
     [
-        # A pull request that changes no test module still runs the guard modules, all core ones.
-        (["src/exomem/__init__.py"], False, {("3.11", "changed"), ("3.13", "changed")}, set()),
+        # A pull request that changes no test module still runs the guard modules: core on every runtime, and the
+        # one harness guard (the tool-selection scorer's canonical form, which a change to adoption planning can
+        # break) on the floor only.
+        (["src/exomem/__init__.py"], False, {("3.11", "changed"), ("3.13", "changed")}, {("3.11", "changed")}),
         # Its own modules run too: core on every runtime, harness on the floor only.
         (
             ["src/exomem/__init__.py", _CORE_MODULE, _HARNESS_MODULE],
