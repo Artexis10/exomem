@@ -1,7 +1,7 @@
 # search-lane-relevance Specification
 
 ## Purpose
-Keep the CLIP lane from contributing images that match a question only by chance, and keep a question's leading word from choosing its ranking intent. An image or video keyframe joins the CLIP lane only when its similarity clears a chance level measured from the whole index, and the lane trace reports what that band withheld.
+Keep the CLIP lane from contributing images that match a question only by chance, and keep a question's leading word from choosing its ranking intent. An image or video keyframe joins the CLIP lane only when its similarity clears a chance level measured from the whole index, and the lane trace reports what that band withheld. A search that the caller restricts to pictures with `file_types` ranks the CLIP lane without the band and with its own weight.
 
 ## Requirements
 
@@ -62,7 +62,7 @@ Intent routing SHALL NOT infer an exact lookup from the words a query starts wit
 
 ### Requirement: A Search Restricted To Pictures Ranks By Picture Match
 
-A search SHALL be restricted to pictures when the caller's own filters require `page.file_type` to be `image` or `video`, through `file_types` or an `$eq` or `$in` filter. Such a search SHALL rank the CLIP lane without the chance band and SHALL give it the ranking setting `clip_media_restricted_weight` in place of its intent weight; the other lanes keep their weights. Every other search SHALL rank as it does without this requirement.
+A search SHALL be restricted to pictures when the caller's own filters require `page.file_type` to be `image` or `video`, through `file_types` or a top-level `$eq` or `$in` filter. Such a search SHALL rank the CLIP lane without the chance band and SHALL give it the ranking setting `clip_media_restricted_weight` in place of its intent weight; the other lanes keep their weights. Every other search SHALL rank as it does without this requirement.
 
 #### Scenario: A weak picture match is ranked among pictures
 
