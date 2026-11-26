@@ -3218,7 +3218,6 @@ def _undeclared_referents_block(
         return None
 
 
-@call_spans.timed("post_commit.relation_context")
 def _relation_advisory_context(vault_root: Path, state: Any) -> dict[str, Any]:
     """What the mutation terminal needs to build a write's `relation_advisory`."""
     return {
