@@ -599,14 +599,14 @@ def test_the_copyable_instruction_blocks_have_no_room_for_the_clause() -> None:
 
     `test_personal_baseline_contract.py` caps every copyable instruction block at
     1,500 bytes, because that is the custom-instruction field they are pasted
-    into. The prominent blocks sit at 1,489 and 1,474 — 11 and 26 bytes of
+    into. The prominent blocks sit at 1,480 and 1,465 — 20 and 35 bytes of
     headroom — so no wording of this clause (about 190 bytes) fits, and the only way to make one
     fit is to shorten a capture class that is already there. That is precisely
     the move a KB failure note records as having silently dropped the
     Planning/Records transition rule past seven reviews, so it was not made.
 
     The doctrine still reaches every hookless client: these very blocks open by
-    telling the client to call `bootstrap(profile="compact")` and follow it, and
+    telling the client to call `read_instructions()` and follow it, and
     the compact payload carries both the clause and `capture_sweep_handling`.
 
     This test is here so the next person to look does not re-derive the
@@ -631,7 +631,9 @@ def test_the_copyable_instruction_blocks_have_no_room_for_the_clause() -> None:
     # (+17 bytes), giving 1488/1473. Later that day the route became its own sentence,
     # "Items compared or tracked: Records rows, not a note." (-7 bytes), giving 1481/1466.
     # 2026-11-24: the product rename (Exomem to Evermatter, +4 bytes twice per block), giving 1489/1474.
-    assert sizes == {"maximal": 1489, "balanced": 1474}, sizes
+    # 2026-11-26: the blocks name the public tool, read_instructions(), whose default profile is
+    # compact, instead of bootstrap(profile="compact") (-9 bytes), giving 1480/1465.
+    assert sizes == {"maximal": 1480, "balanced": 1465}, sizes
     # The maximal block keeps real headroom under the cap: the additive
     # entity-creation wording (ruling R1) was folded in, not appended.
     assert 1500 - sizes["maximal"] >= 11, sizes

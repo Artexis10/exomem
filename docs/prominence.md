@@ -199,7 +199,7 @@ Use Evermatter as the memory for my work. Before you start a task, recall what E
 ### Maximal — recommended for web and hosted
 
 ```
-I use Evermatter as my durable Knowledge Base. If no skill is loaded, call bootstrap(profile="compact") once per chat and follow it.
+I use Evermatter as my durable Knowledge Base. If no skill is loaded, call read_instructions() once per chat and follow it.
 
 Evermatter prominence: MAXIMAL.
 - Recall: search before every substantive turn; skip only chit-chat/control. Cite useful hits. An empty result is a scoped miss and reason to capture.
@@ -212,7 +212,7 @@ Evermatter prominence: MAXIMAL.
 ### Balanced — the default where hooks exist
 
 ```
-I use Evermatter as my durable Knowledge Base. If no skill is loaded, call bootstrap(profile="compact") once per chat and follow it.
+I use Evermatter as my durable Knowledge Base. If no skill is loaded, call read_instructions() once per chat and follow it.
 
 Evermatter prominence: BALANCED.
 - Recall: search when a turn concerns my projects, domains, named entities, or prior conclusions, attempts, or decisions. Skip chit-chat, control, and answered follow-ups; cite useful hits.
