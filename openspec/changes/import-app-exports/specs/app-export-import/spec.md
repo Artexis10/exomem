@@ -2,7 +2,7 @@
 
 ### Requirement: A registry declares each recognised export format
 
-The `source-formats` registry SHALL declare each recognised export format as a shipped pack with a vault overlay. Each entry SHALL carry `file_name`, `item_keys`, a closed `parser` value that code implements, `item_kind` and `roles`. A vault overlay MAY retire an entry or relabel its roles. An overlay entry whose `parser` the code does not implement SHALL be refused.
+The `source-formats` registry SHALL declare each recognised export format as a shipped pack with a vault overlay. Each entry SHALL carry `file_name`, `item_keys`, a closed `parser` value that code implements, `item_kind`, `roles` and the transcript words `untitled` and `attachment`. A vault overlay MAY retire an entry or change its `roles` and words. An overlay entry whose `parser` the code does not implement SHALL be refused.
 
 #### Scenario: A vault retires a format
 
@@ -30,7 +30,7 @@ A file SHALL be recognised only when its name equals an entry's `file_name` and 
 
 ### Requirement: Filing files each export item as its own Source
 
-At the start of `file`, before selection, the cell SHALL expand every recognised export in the stage into one Markdown transcript per item, named by the vendor's item id. It SHALL record each with the item's created time, Source kind and export path. Each transcript SHALL then be planned, deduplicated, applied and counted like any staged file. The export file itself SHALL still file once.
+At the start of `file`, before selection, the cell SHALL expand every recognised export in the stage into one Markdown transcript per item, named by the vendor's item id. It SHALL record each with the item's created time, Source kind and export path. Each transcript SHALL then be planned, deduplicated, applied and counted like any staged file. The export file itself SHALL file once, as an artifact Source whatever its size.
 
 #### Scenario: A ChatGPT export becomes one Source per conversation
 
@@ -41,6 +41,15 @@ At the start of `file`, before selection, the cell SHALL expand every recognised
 
 - **WHEN** the same export is imported again unchanged
 - **THEN** every transcript is skipped as already imported, and no duplicate Source is created
+
+### Requirement: A transcript is plain text and never replaces a staged file
+
+A transcript SHALL hold no control character except tab and newline. It SHALL NOT replace a file that the sender staged: when its name is taken it SHALL take the item id with its position, and when that is taken too the item SHALL be counted as failed.
+
+#### Scenario: A sender's file holds the name of a transcript
+
+- **WHEN** a staged file already has the name that an item's transcript would take
+- **THEN** the sender's file keeps its bytes and files as its own Source
 
 ### Requirement: Expansion streams and resumes
 
@@ -53,12 +62,17 @@ Expansion SHALL read an export one item at a time and SHALL NOT hold the whole e
 
 ### Requirement: An unreadable item is counted as failed
 
-An item that cannot be read SHALL be counted as failed in the filing view, with a stated reason. Filing SHALL go on with the next item.
+An item that cannot be read, or whose reading raises, SHALL be counted as failed in the filing view, with a stated reason. Filing SHALL go on with the next item and with every other file of the drop. A field of the wrong type inside an item, such as an author role that is not a string or a time that has no UTC time, SHALL leave that field out of the transcript and SHALL NOT fail the item.
 
 #### Scenario: One conversation has an unreadable message list
 
 - **WHEN** one item of a Claude export has an unreadable message list
 - **THEN** the other items file, and the filing view counts one failed item with its reason
+
+#### Scenario: One conversation has a message whose sender is an object
+
+- **WHEN** one item of a Claude export has a message whose `sender` is an object
+- **THEN** that message is left out, the conversation still files, and nothing is counted as failed
 
 ### Requirement: A partly read export is reported as partial
 
