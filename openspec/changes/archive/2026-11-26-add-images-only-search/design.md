@@ -12,7 +12,7 @@ Sources consulted: Anthropic, "Writing effective tools for agents" (2025), for p
 
 ### D2. The restriction is the caller's own kind filter
 
-A search is restricted to pictures when the caller's compiled filter plan requires `page.file_type` to be `image` or `video`: the `file_types` parameter, or a top-level `$eq` or `$in` predicate on that field. Only an explicit kind restriction counts. A tag or project filter whose pages happen to all be pictures keeps today's ranking, so a search without the option ranks as before. "Image or video" is `media_types.VISUAL_KINDS`, the kinds the CLIP index embeds. That closed set is fixed by the extraction schema, and the CLIP queueing sites read the same set.
+A search is restricted to pictures when the caller's compiled filter plan requires `page.file_type` to be `image` or `video`: the `file_types` parameter, or a top-level `$eq` or `$in` predicate on that field. Only an explicit kind restriction counts. A tag or project filter whose pages happen to all be pictures keeps today's ranking, so a search without the option ranks as before. The check reads only top-level conjuncts: a caller who spells the restriction with `$or` or `$not` keeps today's band and weights, which costs that caller the picture ranking and nothing else. "Image or video" is `media_types.VISUAL_KINDS`, the kinds the CLIP index embeds. That closed set is fixed by the extraction schema, and the CLIP queueing sites read the same set.
 
 The check reads the plan once per search, so it costs nothing per page. Inside the restriction, the CLIP lane skips the per-row sidecar check for rows that come from the indexed eligible pages. At 20,000 pictures that check would cost tens of milliseconds.
 

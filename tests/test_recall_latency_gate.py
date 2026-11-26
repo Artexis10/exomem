@@ -1751,21 +1751,23 @@ def test_failed_shard_replacement_keeps_inherited_success_and_latest_producer(
     assert len(list(tmp_path.rglob("recall-latency-fragment-*.json"))) == len(inputs)
 
 
+# A release base is labelled by its tag; a branch's merge base is labelled by its own commit.
+@pytest.mark.parametrize("label", ["v1.0.0", "b" * 40])
 def test_pinned_label_must_match_its_commit_before_sampling_or_comparison(
-    tmp_path, monkeypatch, paired_fragments
+    tmp_path, monkeypatch, paired_fragments, label
 ):
     profile, cases, base, _calls, _workers = paired_fragments
-    fragments = [gate.paired_run(base=base, tag="v1.0.0", scratch=tmp_path, profile=profile,
+    fragments = [gate.paired_run(base=base, tag=label, scratch=tmp_path, profile=profile,
                                 cases=cases, series="hybrid", shard=shard, shards=4,
                                 base_commit="b" * 40) for shard in range(1, 5)]
     monkeypatch.setattr(gate, "_git_bytes", lambda *args: b"c" * 40)
     monkeypatch.setattr(gate, "paired_run", lambda **kwargs: pytest.fail("sampled an unverified label"))
     output = tmp_path / "refused.json"
-    assert gate.paired_cli(output, series="hybrid", base_tag="v1.0.0", base_commit="b" * 40,
+    assert gate.paired_cli(output, series="hybrid", base_tag=label, base_commit="b" * 40,
                            shard=1, shards=4) == 1
     assert json.loads(output.read_text())["reason"] == "pinned-release-tag-mismatch"
     with pytest.raises(gate.MeasurementRefused, match="pinned-release-tag-mismatch"):
-        gate.aggregate_paired(fragments, series="hybrid", tag="v1.0.0", base_commit="b" * 40, producer_outcome="success")
+        gate.aggregate_paired(fragments, series="hybrid", tag=label, base_commit="b" * 40, producer_outcome="success")
 
 
 @pytest.mark.parametrize("producer_outcome", ["failure", None])

@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.207.0](https://github.com/substrate-systems/evermatter/compare/v0.206.1...v0.207.0) (2026-11-26)
+
+
+### Features
+
+* **media:** attach speech results from the owner's agent and name speakers after the fact ([#3257](https://github.com/substrate-systems/evermatter/issues/3257)) ([5123e56](https://github.com/substrate-systems/evermatter/commit/5123e567fbd909f9341771f85c20cdd52c7fd102))
+
+
+### Bug Fixes
+
+* **cloud-import:** ask the cell to file a folder that goes as one import ([#3277](https://github.com/substrate-systems/evermatter/issues/3277)) ([c958257](https://github.com/substrate-systems/evermatter/commit/c9582575eda5d91f8cd28e1b26453eb25f389c5d))
+* **curation:** run a relocation to the end on the live surface and in store mode ([#3254](https://github.com/substrate-systems/evermatter/issues/3254)) ([091cd78](https://github.com/substrate-systems/evermatter/commit/091cd783d10c4786a9d7c7e2d11d09eac7f2500b))
+* **records:** read a derived collection with query_records' ordinary arguments ([#3252](https://github.com/substrate-systems/evermatter/issues/3252)) ([de84d40](https://github.com/substrate-systems/evermatter/commit/de84d40cce45e24cddedf9dbedaa99deb57a0192))
+* **release-notes:** register the notice lock file and test Home on the cell's transport ([#3279](https://github.com/substrate-systems/evermatter/issues/3279)) ([3b03e87](https://github.com/substrate-systems/evermatter/commit/3b03e87065927f77e8a590ee39d2e01e997c0a34))
+* **review:** keep review reads with no held pass inside the request budget ([#3274](https://github.com/substrate-systems/evermatter/issues/3274)) ([b613d75](https://github.com/substrate-systems/evermatter/commit/b613d75e9a70d9b60d343926b51e0bbbf983052f))
+* **store:** bound how long derivation holds the store thread ([#3272](https://github.com/substrate-systems/evermatter/issues/3272)) ([cae9936](https://github.com/substrate-systems/evermatter/commit/cae993691ae09d68441add1af6b80b700760b142))
+* **writes:** keep a capture of caller file links out of the write intake ([#3283](https://github.com/substrate-systems/evermatter/issues/3283)) ([ab6d669](https://github.com/substrate-systems/evermatter/commit/ab6d6698249addc0f18e50563230f18e047b035b))
+* **writes:** refuse a write's first commit once its call's time is spent ([#3278](https://github.com/substrate-systems/evermatter/issues/3278)) ([c5e04e3](https://github.com/substrate-systems/evermatter/commit/c5e04e3e571a69f478ac904c556309060b91ad7f))
+
 ## [0.206.1](https://github.com/substrate-systems/evermatter/compare/v0.206.0...v0.206.1) (2026-11-26)
 
 

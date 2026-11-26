@@ -1930,9 +1930,10 @@ def read_view(
     continuation for the next page. A view that cannot be served yet answers with its readiness state
     and no items. Raises NOT_FOUND, INVALID_CONTINUATION or CONTINUATION_STALE.
     """
-    # The view decides every entry it reads. Like `find`, it resolves placement and reads the connector
-    # ceiling once for all of them, and the terminal guard reads both again, live.
-    with state_paths.resolution_scope():
+    from .vault_store import read as store_read
+
+    # All readers use the same store revision throughout this view.
+    with state_paths.resolution_scope(), store_read.request_snapshot(Path(vault_root)):
         if purpose is None:
             return _read_view(Path(vault_root), path, continuation, None)
         # The readers under the view (a record's current state) take the purpose from the bound principal.

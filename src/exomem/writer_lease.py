@@ -6855,6 +6855,7 @@ class LeaseManager:
                         pass
             return terminal
 
+        @call_spans.timed("terminal_persist.graph_sync_progress")
         def persist_graph_sync_progress(
             result: Any, attempt: _ExecutionAttempt, canonical_disposition: str = "success"
         ) -> Any:

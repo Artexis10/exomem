@@ -7,7 +7,9 @@ A check never reads the agent's words: those go to the judge. Each returns
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+import json
+from collections import Counter, defaultdict
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -37,6 +39,57 @@ class Evidence:
     # The agent's final message, and the replies recorded from the arm's own code (see `recording.py`).
     answer: str = ""
     shapes: Mapping[str, Any] | None = None
+    rejected_tools: tuple[str, ...] | None = None
+
+
+def unavailable_tools(
+    lines: Iterable[str], served: tuple[str, ...], builtin: tuple[str, ...]
+) -> tuple[str, ...] | None:
+    """One name per rejected unavailable attempt, or None when the evidence is incomplete."""
+    if builtin:
+        return None
+    expected = {f"mcp__{SERVER}__{name}" for name in served}
+    events = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(event, dict):
+            return None
+        events.append(event)
+    initialized = [e for e in events if e.get("type") == "system" and e.get("subtype") == "init"]
+    tools = initialized[0].get("tools") if len(initialized) == 1 else None
+    if not isinstance(tools, list) or any(not isinstance(t, str) for t in tools) or set(tools) != expected:
+        return None
+    uses: dict[str, str] = {}
+    results: dict[str, list[bool | None]] = defaultdict(list)
+    for event in events:
+        if event.get("type") not in ("assistant", "user"):
+            continue
+        message = event.get("message")
+        blocks = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(blocks, list):
+            continue
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            # Claude's stream-json protocol fixes these block types, ids and error flag.
+            if event["type"] == "assistant" and block.get("type") == "tool_use":
+                identity, name = block.get("id"), block.get("name")
+                if not isinstance(identity, str) or not identity or not isinstance(name, str) or identity in uses:
+                    return None
+                uses[identity] = name
+            elif event["type"] == "user" and block.get("type") == "tool_result":
+                identity = block.get("tool_use_id")
+                if isinstance(identity, str):
+                    results[identity].append(block.get("is_error"))
+    outside = {identity: name for identity, name in uses.items() if name not in expected}
+    if any(len(results[i]) != 1 or not isinstance(results[i][0], bool) for i in outside):
+        return None
+    return tuple(name for identity, name in outside.items() if results[identity][0] is True)
 
 
 def matches(actual: Any, wanted: Any) -> bool:
@@ -109,7 +162,9 @@ def only_scripted_tools(
     spec: dict, evidence: Evidence, served: tuple[str, ...], builtin: tuple[str, ...], **_: Any
 ) -> Outcome:
     allowed = {f"mcp__{SERVER}__{name}" for name in served} | set(builtin)
-    invented = sorted(set(evidence.tool_names) - allowed)
+    outside = Counter(name for name in evidence.tool_names if name not in allowed)
+    outside.subtract(evidence.rejected_tools or ())
+    invented = sorted(name for name, count in outside.items() if count > 0)
     return Outcome(
         "only_scripted_tools",
         FAIL if invented else PASS,

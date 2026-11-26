@@ -3222,6 +3222,7 @@ def op_find(
                 grouped = dimension_display_module.group_hits(hits, dimension_groups[0])
             hits = grouped.hits
             group_blocks = grouped.groups
+            egress_module.project_grouped_displays(vault_root, hits, group_blocks, purpose=purpose)
     referents: dict[str, Any] | None = None
     if projection_runtime is None:
         # Referents compose over the released vault hits; the projected (hosted

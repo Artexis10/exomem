@@ -24,6 +24,17 @@ from exomem.vault import (
 )
 
 
+def test_incomplete_single_owner_proof_never_falls_through_to_a_unique_lower_precedence():
+    """A partly admitted path bucket cannot masquerade as missing or unique under a complement."""
+    from exomem.vault import WikilinkCandidate, WikilinkMatches, select_wikilink
+
+    candidate = WikilinkCandidate("Knowledge Base/Notes/Alpha.md", None)
+    selected = select_wikilink("Alpha", lambda axis, key: WikilinkMatches((candidate,), False))
+    assert selected.status == "incomplete"
+    assert selected.candidate is None
+    assert selected.diagnostics["match_count_lower_bound"] == 1
+
+
 def test_resolves_full_vault_rooted_path(vault: Path) -> None:
     canonical, warning = normalize_wikilink(
         "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation",

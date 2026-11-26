@@ -1597,7 +1597,6 @@
     "too-long spec/retrieve-inject-hook :: Working-set mode renders the served capture policy first",
     "too-long spec/retrieve-inject-hook :: Working-set mode supplies a bounded conversation tail from the local transcript",
     "too-long spec/retry-safe-mutations :: Interrupted import applies reconcile under their original identity",
-    "too-long spec/search-lane-relevance :: The CLIP Lane Admits Only Matches Above Chance",
     "too-long spec/semantic-block-schema :: Markdown Semantic Block Parsing",
     "too-long spec/semantic-blocks :: Structural Semantic Block Extraction",
     "too-long spec/semantic-unit-language :: Compact Observation Grammar",

@@ -430,6 +430,35 @@ def test_a_compact_save_with_governed_metadata_behind_the_queue_is_refused_at_on
     assert "as_of" in str(refused.value) and "`kind`" in str(refused.value)
 
 
+def test_a_dated_save_with_relations_behind_a_backlog_is_told_only_the_exit_that_lands(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dropping the date alone would meet the page's relations refusal, so only a rich kind is offered."""
+    _writer, holder = managers
+    observe = _command("observe_memory")
+    page = "Knowledge Base/Notes/Insights/percentage-based-feature-flag-rollout.md"
+    plain = {
+        "path": page, "operation": "add", "category": "operating_constraint",
+        "content": "A busy vault must not lose a save",
+    }
+    paused = threading.Event()
+    real_claim = write_intake._claim_head
+    monkeypatch.setattr(write_intake, "_claim_head", lambda root: 0.05 if not paused.is_set() else real_claim(root))
+    with _Hold(holder, vault):
+        first = _send(observe, vault, plain)
+    with pytest.raises(ValueError, match="COMPACT_METADATA_REQUIRES_RICH_KIND") as refused:
+        _send(observe, vault, {
+            **plain, "content": "Dated constraint", "as_of": "2026-11-25",
+            "relations": [{"kind": "supersedes", "target": "applied-export"}],
+        }, scope="principal:session-b")
+    paused.set()
+    _wait_for_state(vault, first["queued_write"]["ref"], "applied")
+
+    remediation = str(refused.value).partition(" Remediation: ")[2]
+    assert "omit as_of" not in remediation
+    assert "passing a rich kind" in remediation
+
+
 def _send_after_deadline(command, vault: Path, kwargs: dict, **send) -> object:
     """Send a save whose call has used its whole budget by the time it would start saving."""
     budget = request_budget.RequestBudget(seconds=50)

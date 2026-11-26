@@ -761,7 +761,8 @@ def build_packet(
         item: LaneItem, reason: str, *, exact_path: bool = False, source_ref: str | None = None,
     ) -> None:
         nonlocal used, promoted_used
-        if _material_capped(item):
+        # Source-bound qualifications add no candidate; pointer and prose caps still apply.
+        if source_ref is None and _material_capped(item):
             capped_material.setdefault(item.role, None)
             return
         if len(pointers) >= MAX_POINTERS:
@@ -778,7 +779,7 @@ def build_packet(
         pointers.append(pointer)
         if source_ref is not None:
             pointer_sources[id(pointer)] = source_ref
-        if item.role in material_roles:
+        if source_ref is None and item.role in material_roles:
             per_role[item.role] = per_role.get(item.role, 0) + 1
             represented.update(item.request_anchors)
         used += cost
@@ -794,7 +795,7 @@ def build_packet(
             return _charge("pointers", _pointer(item, "unit_too_long"))
         if not text:
             return _charge("pointers", _pointer(item, "budget"))
-        return _charge("units", _served_unit(item))
+        return _charge("units", _served_unit(item, restricted=visible is not None))
 
     def _defer(item: LaneItem, reason: str) -> None:
         if item.role in material_roles:
@@ -872,7 +873,7 @@ def build_packet(
             if len(text) > (MAX_UNIT_CHARS if standing else MAX_UNIT_HARD_CHARS):
                 _defer(item, "unit_too_long")
                 continue
-            unit = _served_unit(item)
+            unit = _served_unit(item, restricted=visible is not None)
             cost = _charge("units", unit)
             role_count = per_role.get(item.role, 0)
             # No class is exempt: a standing unit takes one of its role's slots.
@@ -1101,7 +1102,7 @@ def _budgeted_recent(
     return entries, used
 
 
-def _served_unit(item: LaneItem) -> dict[str, Any]:
+def _served_unit(item: LaneItem, *, restricted: bool = False) -> dict[str, Any]:
     """The `units` entry `item` is served as. A restricted reader's guard
     decides this same entry before any lane caps it (`_reader_admitted`)."""
     return {
@@ -1110,7 +1111,7 @@ def _served_unit(item: LaneItem) -> dict[str, Any]:
         "text": bounded_text(item.text),
         "lifecycle": item.lifecycle,
         "updated": item.updated,
-        "provenance": _provenance(item),
+        "provenance": _provenance(item, restricted=restricted),
     }
 
 
@@ -1129,7 +1130,7 @@ def _reader_admitted(
 
     if not items:
         return ()
-    kept = egress.in_reader_view(visible, [_served_unit(item) for item in items])
+    kept = egress.in_reader_view(visible, [_served_unit(item, restricted=visible is not None) for item in items])
     return tuple(item for item, keep in zip(items, kept, strict=True) if keep)
 
 
@@ -1178,7 +1179,7 @@ def _pointer(item: LaneItem, reason: str) -> dict[str, Any]:
     }
 
 
-def _provenance(item: LaneItem) -> dict[str, Any]:
+def _provenance(item: LaneItem, *, restricted: bool = False) -> dict[str, Any]:
     out = {"path": item.path, "level": item.level, "anchor": item.anchor}
     # A relation target and a page time are the compiler's own inputs: the
     # first can name a page the audience may not see, in a field the egress
@@ -1190,6 +1191,10 @@ def _provenance(item: LaneItem) -> dict[str, Any]:
             if value and key not in working_set_currency.INTERNAL_PROVENANCE
         }
     )
+    if restricted:
+        from .governance import egress
+
+        out = egress.project_holder_provenance(out, restricted=True)
     return out
 
 
@@ -2556,13 +2561,15 @@ def _units_lane(
         return baseline._replace(task_status="unavailable")
 
 
-def _task_query(anchors: Sequence[Any], analysis: Any) -> tuple[list[Any], frozenset[str]]:
-    """Reuse bounded material terms without counting resolved names as task terms."""
+def _task_query(
+    anchors: Sequence[Any], analysis: Any, *, retain_page_title: bool = False,
+) -> tuple[list[Any], frozenset[str]]:
+    """Reuse bounded material terms, retaining names only within their admitted page."""
     from . import bm25, working_set_runtime
 
     if analysis is None or getattr(analysis, "referential", False):
         return [], frozenset()
-    ignored = frozenset(working_set_runtime.content_stems(" ".join(
+    ignored = frozenset() if retain_page_title else frozenset(working_set_runtime.content_stems(" ".join(
         name for anchor in anchors
         for name in (anchor.title, *getattr(anchor, "exact_alias_phrases", ()))
     )))
@@ -2588,7 +2595,7 @@ def hits_in_view(hits: Sequence[Any], visible: Callable[[str], bool] | None) -> 
     if not hits or not _restricted(visible):
         return list(hits)
     kept = egress.in_reader_view(
-        visible, [_served_unit(item) for item in _unit_items(None, hits)]
+        visible, [_served_unit(item, restricted=True) for item in _unit_items(None, hits)]
     )
     return [hit for hit, keep in zip(hits, kept, strict=True) if keep]
 
@@ -2681,7 +2688,14 @@ def _material_lane(
 
     if not neighbourhood or analysis is None or getattr(analysis, "referential", False):
         return LaneResult(())
-    query_units, ignored = _task_query(anchors, analysis)
+    # Closed resolver evidence makes a named title relevant only within that page's own scope.
+    query_units, ignored = _task_query(anchors, analysis, retain_page_title=(
+        len(anchors) == 1
+        and anchors[0].kind == "page"
+        and anchors[0].status == "resolved"
+        and {"lexical_overlap", "retrieval"}.issubset(anchors[0].evidence)
+        and neighbourhood == {anchors[0].path}
+    ))
     if not query_units:
         return LaneResult(())
     snapshot = freshness_snapshot or find.FreshnessSnapshot(Path(vault_root))
@@ -2783,7 +2797,7 @@ def _material_lane(
         index for index in analysis.request_breaks
         if not any(start < index < end for _anchor, spans in named for start, end in spans)
     )})
-    requests: dict[tuple[str, frozenset[tuple[str, ...]]], tuple[frozenset[str], frozenset[str]]] = {}
+    requests: dict[tuple[str, frozenset[Any]], tuple[frozenset[str], frozenset[str]]] = {}
     for start, end in zip(breaks, breaks[1:], strict=False):
         associated = [anchor for anchor, spans in named
             if any(start <= left < right <= end for left, right in spans)]
@@ -2793,13 +2807,69 @@ def _material_lane(
         scope = (material_scopes or {}).get(anchor_ref, frozenset()) & neighbourhood
         local = set(working_set_runtime.content_stems(" ".join(analysis.tokens[start:end]))) - ignored
         retained = frozenset(
-            tuple(stem for stem in unit.stems if stem in local)
+            unit
             for unit in retained_query_units if local.intersection(unit.stems)
         )
         if scope and retained:
             requests[(anchor_ref, retained)] = (scope, frozenset(
-                stem for unit in retained for stem in unit
+                stem for unit in retained for stem in unit.stems if stem in local
             ))
+    title_witnesses: dict[str, set[Any]] = {}
+    title_items: list[LaneItem] = []
+    task_status = None
+    known = {item.ref for item in items}
+    subject_stems = _task_query(anchors, analysis)[1]
+    for request, (scope, _terms) in requests.items():
+        # Keep the original run: a bag of its bigrams would weaken strict-majority title contact.
+        title_units = [unit for unit in retained_query_units
+                       if unit in request[1] and not set(unit.stems) <= subject_stems]
+        if not title_units:
+            continue
+        contacts = store.title_contact_paths_result(
+            title_units, "kb", fresh, scope, visible=visible, status_basis=status_basis,
+            recall_checkpoint=checkpoint,
+        )
+        if not contacts.readiness.complete:
+            task_status = "budget" if contacts.readiness.status == lexstore.DEADLINE_STATUS else "unavailable"
+            if task_status == "budget":
+                break
+            continue
+        if len(contacts.value or ()) != 1:
+            continue
+        path = contacts.value[0]
+        def title_read(size: int, *, path: str = path) -> tuple[list[Any], bool]:
+            with lexstore.stopping_at_budget():
+                fallback = store.search_semantic_units_result(
+                    [], size, (), (), "kb", fresh,
+                    clauses=(structured_filters.IndexCandidateClause(None, None),),
+                    allowed_parent_paths={path}, excluded_categories_by_parent=excluded,
+                    recall_checkpoint=checkpoint, allow_delta=False,
+                )
+            if not fallback.readiness.complete:
+                raise lexstore.CatalogUnavailable(fallback.readiness)
+            return list(fallback.value or ()), False
+
+        try:
+            fallback_rows, title_truncated = _read_in_view(
+                title_read, in_view if restricted else list, UNIT_LANE_LIMIT, restricted=restricted,
+            )
+            truncated |= title_truncated
+            extra = hydrated(fallback_rows)
+            if admit is not None:
+                extra = [hit for hit in extra if admit(hit.parent_path, hit)]
+        except lexstore.CatalogUnavailable as error:
+            task_status = "budget" if error.readiness.status == lexstore.DEADLINE_STATUS else "unavailable"
+            if task_status == "budget":
+                break
+            continue
+        except RuntimeError:
+            task_status = "unavailable"
+            continue
+        for item in _unit_items(role, extra):
+            title_witnesses.setdefault(item.ref, set()).add(request)
+            if item.ref not in known:
+                known.add(item.ref)
+                title_items.append(item)
     content = [frozenset(bm25.tokenize(item.text)) for item in items] if requests else []
     for rank, (path, _score) in enumerate(pointers[:MAX_ITEMS_PER_ROLE]):
         if admit is not None and not admit(path, None):
@@ -2839,19 +2909,23 @@ def _material_lane(
         ))
         if requests:
             content.append(prose_stems)
+    items.extend(title_items)
+    content.extend(frozenset(bm25.tokenize(item.text)) for item in title_items)
     if not requests:
         return LaneResult(tuple(
             replace(item, relevance_order=rank)
             for rank, item in enumerate(items[:MAX_ITEMS_PER_ROLE])
         ), truncated or len(items) > MAX_ITEMS_PER_ROLE)
     coverage = [frozenset(
-        request for request, (scope, terms) in enumerate(requests.values())
-        if item.path in scope and terms.intersection(stems)
+        request for request, (key, (scope, terms)) in enumerate(requests.items())
+        if item.path in scope and (
+            terms.intersection(stems) or key in title_witnesses.get(item.ref, ())
+        )
     ) for item, stems in zip(items, content, strict=False)]
     request_refs = [anchor_ref for anchor_ref, _retained in requests]
     anchor_coverage = [frozenset(request_refs[request] for request in covered) for covered in coverage]
-    # Among equal coverage, compiled units keep their existing preference and
-    # corpus rank. Spare slots use that same order without reserving a pointer.
+    # Among equal coverage, existing body units and prose pointers precede title additions.
+    # Spare slots use that same order without reserving a pointer.
     remaining = list(range(len(items)))
     represented: set[int] = set()
     represented_anchors: set[str] = set()
@@ -2869,7 +2943,7 @@ def _material_lane(
         selected.append(replace(items[chosen], relevance_order=len(selected),
             request_anchors=anchor_coverage[chosen]))
     truncated |= bool(remaining)
-    return LaneResult(tuple(selected), truncated)
+    return LaneResult(tuple(selected), truncated, task_status=task_status)
 
 
 def _records_lane(

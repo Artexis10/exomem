@@ -1,7 +1,8 @@
 # Latency measurements against the latest release, nightly and on demand.
 # They do not gate a pull request or release evidence: the Full run in ci.yml
 # does not wait for them. A regression is fixed forward on main. Dispatch this
-# on a branch to measure that branch.
+# on a branch to measure that branch: its paired recall series compare it with
+# its merge base on the default branch instead of the latest release.
 name: Latency measurements
 
 on:
@@ -101,11 +102,19 @@ jobs:
       - name: Read the series from the reference case file
         id: series
         # The case file defines the series; the paired matrix keeps no second list.
+        # A branch's base is its merge base, so its comparison holds only the branch's own change.
+        # That base has no tag, so the commit labels itself.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag=$(gh release view --json tagName --jq .tagName)
-          commit=$(git rev-parse --verify "refs/tags/$tag^{commit}")
+          default=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)
+          if [ "$GITHUB_REF" = "refs/heads/$default" ]; then
+            tag=$(gh release view --json tagName --jq .tagName)
+            commit=$(git rev-parse --verify "refs/tags/$tag^{commit}")
+          else
+            commit=$(git merge-base HEAD "refs/remotes/origin/$default")
+            tag=$commit
+          fi
           echo "base_tag=$tag" >> "$GITHUB_OUTPUT"
           echo "base_commit=$commit" >> "$GITHUB_OUTPUT"
           echo "series=$(jq -c '[.[].series] | unique' benchmarks/recall-latency/cases.json)" >> "$GITHUB_OUTPUT"
