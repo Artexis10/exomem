@@ -1,0 +1,23 @@
+{
+  "description": "Defaults of the four face grouping settings. A setting with a calibration takes its default from that value of the pinned model's entry in media_models.json; a setting with a default is assignment policy. The owner's overrides in the people store win over both.",
+  "settings": {
+    "join_similarity": {
+      "meaning": "A face joins a group only when the cosine similarity of its vector and the group centroid is at least this.",
+      "calibration": {"model": "face-embed", "name": "same_identity_cosine"}
+    },
+    "join_margin": {
+      "meaning": "A face joins its most similar group only when that similarity beats the next group's by at least this; otherwise it starts a new group.",
+      "default": 0.05,
+      "source": "Initial value. The owner-labelled dev round of the add-face-search change tunes it."
+    },
+    "min_face_side": {
+      "meaning": "A face whose box is shorter than this many pixels of the upright picture on either side is not stored.",
+      "default": 32,
+      "source": "Initial value. The owner-labelled dev round of the add-face-search change tunes it."
+    },
+    "min_detection_score": {
+      "meaning": "A face whose detection score is below this is not stored.",
+      "calibration": {"model": "face-detect", "name": "score_threshold"}
+    }
+  }
+}

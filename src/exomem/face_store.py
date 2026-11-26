@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS face_setting (
     enabled INTEGER NOT NULL DEFAULT 0,
     consent_at TEXT,
     consent_surface TEXT,
+    unavailable TEXT,
     epoch TEXT NOT NULL,
     generation INTEGER NOT NULL DEFAULT 0
 );
@@ -84,6 +85,7 @@ CREATE TABLE IF NOT EXISTS exclusions (
     height REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS exclusions_by_group ON exclusions (group_id, page);
+CREATE INDEX IF NOT EXISTS exclusions_by_page ON exclusions (page);
 CREATE TABLE IF NOT EXISTS threshold_overrides (
     name TEXT PRIMARY KEY,
     value REAL NOT NULL
@@ -100,6 +102,8 @@ class FaceSetting:
     enabled: bool
     consent_at: str | None
     consent_surface: str | None
+    #: Why the face models cannot run on this host, as the face step last found; None when they ran.
+    unavailable: str | None
     #: Changes whenever faces, groups or names change; a new face index never repeats an old value.
     generation: str
 
@@ -162,12 +166,12 @@ def read_setting(vault_root: Path) -> FaceSetting | None:
         return None
     with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=BUSY_TIMEOUT_MS / 1000)) as connection:
         row = connection.execute(
-            "SELECT enabled, consent_at, consent_surface, epoch, generation FROM face_setting WHERE id = 1"
+            "SELECT enabled, consent_at, consent_surface, unavailable, epoch, generation FROM face_setting WHERE id = 1"
         ).fetchone()
     if row is None:
         return None
-    enabled, consent_at, consent_surface, epoch, generation = row
-    return FaceSetting(bool(enabled), consent_at, consent_surface, f"{epoch}:{generation}")
+    enabled, consent_at, consent_surface, unavailable, epoch, generation = row
+    return FaceSetting(bool(enabled), consent_at, consent_surface, unavailable, f"{epoch}:{generation}")
 
 
 def enabled(vault_root: Path) -> bool:
@@ -176,9 +180,34 @@ def enabled(vault_root: Path) -> bool:
     return setting is not None and setting.enabled
 
 
-def advance_generation(index: sqlite3.Connection) -> None:
-    """Record a change to faces, groups or names, inside the caller's transaction on the face index."""
+def advance_generation(index: sqlite3.Connection) -> str:
+    """Record a change to faces, groups or names, inside the caller's transaction on the face index.
+
+    Returns the new generation, in the form `FaceSetting.generation` reports.
+    """
     index.execute("UPDATE face_setting SET generation = generation + 1 WHERE id = 1")
+    return current_generation(index)
+
+
+def current_generation(index: sqlite3.Connection) -> str:
+    """The face index's generation as `FaceSetting.generation` reports it, read on the caller's connection."""
+    epoch, generation = index.execute("SELECT epoch, generation FROM face_setting WHERE id = 1").fetchone()
+    return f"{epoch}:{generation}"
+
+
+def record_opt_in(index: sqlite3.Connection, *, at: str, surface: str) -> None:
+    """Turn faces on with the owner's consent record. The caller has already shown the disclosure."""
+    with index:
+        index.execute(
+            "UPDATE face_setting SET enabled = 1, consent_at = ?, consent_surface = ? WHERE id = 1", (at, surface)
+        )
+        advance_generation(index)
+
+
+def record_availability(index: sqlite3.Connection, reason: str | None) -> None:
+    """Record why the face models cannot run here, or None once they ran, for `faces.status`."""
+    with index:
+        index.execute("UPDATE face_setting SET unavailable = ? WHERE id = 1", (reason,))
 
 
 def fold_name(name: str) -> str:
