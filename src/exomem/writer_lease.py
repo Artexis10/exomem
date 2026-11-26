@@ -7446,22 +7446,25 @@ class LeaseManager:
                         reconcile_abandoned=command.name == "adoption_studio" and kwargs.get("action") in ("apply", "file"),
                 )
 
+            from . import write_intake
             from .command_surface import OPEN_WORLD_OPS
 
-            result = self._run_absorbing_capture_contention(
-                command,
-                run_idempotent,
-                key=key,
-                commit_state=commit_state,
-                request_id=request_id,
-                wait_started=wait_started,
-                wait_deadline=wait_deadline,
-                # A narrow leaf meets the busy only after its own preparation. When
-                # that preparation fetched caller-supplied temporary handles, the
-                # server cannot fetch them again; only the caller can retry.
-                rerun_safe=not (narrow_boundary and command.name in OPEN_WORLD_OPS),
-                absorb_unkeyed=absorb_unkeyed,
-            )
+            # A narrow leaf meets the busy only after its own preparation. When
+            # that preparation fetched caller-supplied temporary handles, the
+            # server cannot fetch them again; only the caller can retry.
+            rerun_safe = not (narrow_boundary and command.name in OPEN_WORLD_OPS)
+            with write_intake.queueing_only_if(rerun_safe):
+                result = self._run_absorbing_capture_contention(
+                    command,
+                    run_idempotent,
+                    key=key,
+                    commit_state=commit_state,
+                    request_id=request_id,
+                    wait_started=wait_started,
+                    wait_deadline=wait_deadline,
+                    rerun_safe=rerun_safe,
+                    absorb_unkeyed=absorb_unkeyed,
+                )
             if (
                 vocabulary_replay_terminal is not None
                 and vocabulary_binding is not None

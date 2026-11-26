@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import hashlib
 import json
 import threading
 import time
@@ -24,6 +25,7 @@ from fastmcp import Client
 from exomem import (
     auth_sessions,
     call_ledger,
+    client_artifacts,
     cloud_cell,
     commands,
     mutation_journal,
@@ -428,13 +430,13 @@ def test_a_compact_save_with_governed_metadata_behind_the_queue_is_refused_at_on
     assert "as_of" in str(refused.value) and "`kind`" in str(refused.value)
 
 
-def _send_after_deadline(command, vault: Path, kwargs: dict) -> object:
+def _send_after_deadline(command, vault: Path, kwargs: dict, **send) -> object:
     """Send a save whose call has used its whole budget by the time it would start saving."""
     budget = request_budget.RequestBudget(seconds=50)
     budget.deadline = time.monotonic() - 1.0
     token = request_budget.set_current(budget)
     try:
-        return _send(command, vault, kwargs)
+        return _send(command, vault, kwargs, **send)
     finally:
         request_budget.reset_current(token)
 
@@ -466,6 +468,36 @@ def test_a_write_the_intake_cannot_queue_still_lands_when_its_call_time_is_spent
     _send_after_deadline(not_a_save, vault, _remember_kwargs(vault, 32))
 
     assert len(_pages_titled(vault, "Queued save 32")) == 1
+
+
+def test_a_file_capture_past_its_call_time_commits_with_the_file_it_fetched(
+    vault: Path, managers, drainer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The server cannot fetch a caller's temporary file link again, so queuing the capture would
+    fetch it a second time or lose it once the link expired."""
+    fetched: list[str] = []
+
+    def stage(file, _budget, **_kwargs):  # noqa: ANN001, ANN202
+        fetched.append(file["file_id"])
+        staged = tmp_path / "staged-figures.bin"
+        staged.write_bytes(b"quarterly figures")
+        return client_artifacts.StagedArtifact(
+            file_id=file["file_id"], path=staged, size=17,
+            sha256=hashlib.sha256(b"quarterly figures").hexdigest(),
+            content_type="application/octet-stream", filename="figures.bin",
+        )
+
+    monkeypatch.setattr(client_artifacts, "stage_artifact", stage)
+    result = _send_after_deadline(
+        _command("capture_source"), vault,
+        {"title": "Fetched figures", "source_type": "research-report",
+         "files": [{"download_url": "https://files.example/a", "file_id": "file-a"}]},
+        injected=(schema_module.load_source_schema(vault),),
+    )
+
+    assert result.get("state") != "queued", result
+    assert fetched == ["file-a"]
+    assert [path.read_bytes() for path in vault.rglob("*.bin")] == [b"quarterly figures"]
 
 
 def test_a_commit_under_way_is_never_refused_when_its_call_time_runs_out(

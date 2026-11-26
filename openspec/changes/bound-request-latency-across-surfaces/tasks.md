@@ -179,8 +179,8 @@
 - [x] 3.33 Keep a Source erasure's guarantee across a lexical repair rebuild: the rebuild declines to publish after an erasure, a copied catalogue starts its own change journal, the eraser advances the retirement generation once, before it restarts the journal, and every delete of a page's rows drops the page's unit revision (design decision 14).
   - Verify: a rebuild whose build an erasure overtakes declines and leaves the live catalogue in place; a rebuild that publishes keeps no unit revision of a page deleted during it and no journal history from before its copy (`tests/test_lexstore_atomic_rebuild.py`).
 - [ ] 3.34 Refuse the first write guard of a save the write intake can queue after the call's deadline, so the intake queues it; let every other write commit late; never refuse a later guard of the same call (design decision 15).
-  - Built: `request_budget.commit_may_start` and `note_commit_started`, `write_intake.queues_busy_refusal`, the check in `writer_lease.mutation_guard`, and `mutation_lock.preparation_spent_busy` and `waits_out`.
-  - Verify: `tests/test_write_intake.py` covers the queued save that lands once, the write the intake cannot queue that still lands, and the second guard that runs.
+  - Built: `request_budget.commit_may_start` and `note_commit_started`, `write_intake.queues_busy_refusal` and `queueing_only_if`, the check in `writer_lease.mutation_guard`, and `mutation_lock.preparation_spent_busy` and `waits_out`.
+  - Verify: `tests/test_write_intake.py` covers the queued save that lands once, the write the intake cannot queue and the file capture that still land, and the second guard that runs.
   - Open: after installation, count mutation journal rows with outcome `queued` and code `request_budget`, and compare write durations past 55 s on the installed request ledger (task 3.16's method).
 
 ## 4. Verify installed behavior and deliver
