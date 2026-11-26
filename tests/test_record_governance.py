@@ -10,7 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from conftest import _drain_background_threads
+from conftest import _drain_background_threads, held_link_index_warm
 from record_fixtures import (
     copy_dataset_fixture,
     copy_vehicle_maintenance_fixture,
@@ -18,7 +18,8 @@ from record_fixtures import (
     ledger_item,
     setup_ledger_collection,
 )
-from record_presentation_fixtures import manifest_text
+from record_presentation_fixtures import ITEM_KEY, manifest_text, setup_collection
+from record_presentation_fixtures import values as observation
 
 from exomem import (
     freshness,
@@ -34,6 +35,7 @@ from exomem import (
 )
 from exomem import note as note_module
 from exomem import structured_collections as collections
+from exomem.cli_ops import OpError
 from exomem.governance import egress, receipts
 from exomem.governance.principal import RequestPrincipal, library_scope, owner_principal, request_scope
 
@@ -1894,6 +1896,211 @@ def test_empty_columns_through_record_memory_still_withholds_link_fields(tmp_pat
     assert "asset" not in row or row["asset"] is None
     assert "receipt" not in row or row["receipt"] is None
     assert row["status"] == "completed"
+
+
+def test_a_query_that_selects_on_a_link_while_the_link_index_is_coming_is_refused_for_a_retry(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """While the warm that publishes the corpus runs, a query goes without the link index and leaves
+    bare titles out. A filter on the link field would then match no row, and its distinct value would
+    be null. Both are refused with a wait instead, and the same queries answer once the warm is done.
+    """
+    manifest = _empty_columns_fixture(tmp_path)
+    (tmp_path / "Knowledge Base" / "Vehicle.md").write_text("# Vehicle\n", encoding="utf-8")
+    freshness.rebaseline(tmp_path)  # the vault's change events are live; no corpus is published yet
+    by_asset = {"collection": manifest.path, "filters": [{"column": "asset", "op": "eq", "value": "[[Vehicle]]"}]}
+    distinct = {"collection": manifest.path, "aggregate": "distinct:asset"}
+
+    refusals = []
+    with held_link_index_warm(monkeypatch):
+        for query in (by_asset, distinct):
+            with pytest.raises(OpError) as raised:
+                record_memory.record_memory(tmp_path, "query", **query)
+            refusals.append(raised.value)
+    matched = record_memory.record_memory(tmp_path, "query", **by_asset)
+    values = record_memory.record_memory(tmp_path, "query", **distinct)
+
+    assert [error.code for error in refusals] == ["LINK_INDEX_WARMING", "LINK_INDEX_WARMING"]
+    assert all(error.details["retry_after_ms"] > 0 for error in refusals)
+    assert [row["asset"] for row in matched["rows"]] == ["[[Vehicle]]"]
+    assert "[[Vehicle]]" in values["aggregate"]["distinct"]
+
+
+def test_a_saved_view_that_filters_on_a_link_while_the_link_index_is_coming_is_refused_for_a_retry(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without the link index a view's link filter value cannot be checked. The view is still
+    available, so it is refused with a wait, and it answers once the warm has published the corpus."""
+    manifest = _empty_columns_fixture(tmp_path)
+    (tmp_path / "Knowledge Base" / "Vehicle.md").write_text("# Vehicle\n", encoding="utf-8")
+    manifest_file = tmp_path / "Knowledge Base" / "Records" / "vehicle-maintenance" / "_collection.md"
+    manifest_file.write_text(
+        manifest_file.read_text(encoding="utf-8").replace(
+            "---\n\nOne ordinary",
+            'views:\n  vehicle:\n    query:\n      filters:\n        - column: asset\n'
+            '          op: eq\n          value: "[[Vehicle]]"\n---\n\nOne ordinary',
+        ),
+        encoding="utf-8",
+    )
+    freshness.rebaseline(tmp_path)  # the vault's change events are live; no corpus is published yet
+
+    with held_link_index_warm(monkeypatch), pytest.raises(OpError) as raised:
+        record_memory.record_memory(tmp_path, "query", collection=manifest.path, view="vehicle")
+    answered = record_memory.record_memory(tmp_path, "query", collection=manifest.path, view="vehicle")
+
+    assert raised.value.code == "LINK_INDEX_WARMING"
+    assert raised.value.details["retry_after_ms"] > 0
+    assert [row["asset"] for row in answered["rows"]] == ["[[Vehicle]]"]
+
+
+def test_a_malformed_query_while_the_link_index_is_coming_gets_its_validation_error_not_a_wait(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retry cannot fix a malformed query, so the wait for the link index must not hide its error."""
+    manifest = _empty_columns_fixture(tmp_path)
+    freshness.rebaseline(tmp_path)  # the vault's change events are live; no corpus is published yet
+
+    with held_link_index_warm(monkeypatch), pytest.raises(OpError) as raised:
+        record_memory.record_memory(
+            tmp_path, "query", collection=manifest.path, filters=[{"op": "eq", "value": "[[Vehicle]]"}]
+        )
+
+    assert raised.value.code == "BAD_FILTER"
+
+
+def test_a_selection_on_no_link_field_while_the_link_index_is_coming_answers_without_a_wait(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only link values are left out while the index is coming. In a collection whose child table carries a
+    link, a sort on the item id and a date bound on the absent default date column select on no link, so
+    they answer at once, and a misspelt column gets its own error, which a retry cannot fix."""
+    manifest = setup_collection(tmp_path)
+    item = observation(child_count=1)
+    item["measurements"][0]["source"] = "[[Observed Source]]"
+    records.append_record(tmp_path, manifest, item=item, item_key=ITEM_KEY, why="seed a child link")
+    freshness.rebaseline(tmp_path)  # the vault's change events are live; no corpus is published yet
+
+    def ask(**query: object) -> str:
+        try:
+            record_memory.record_memory(tmp_path, "query", collection=manifest.path, **query)
+        except OpError as refused:
+            return refused.code
+        return "answered"
+
+    with held_link_index_warm(monkeypatch):
+        outcomes = [
+            ask(sort_by="record_id"),
+            ask(date_from="2026-01-01"),
+            ask(filters=[{"column": "subjcet", "op": "eq", "value": "Sample <A>"}]),
+        ]
+
+    assert outcomes == ["answered", "answered", "INVALID_RECORD_QUERY_FIELD"]
+
+
+def test_a_child_link_column_left_out_while_the_link_index_is_coming_is_named_as_the_reply_names_it(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An expanded child row returns its link column under the column's own name. While the link index is
+    coming, that column's bare title is left out, so the reply names the column unresolved; once the warm
+    is done the same query returns the link."""
+    manifest = setup_collection(tmp_path)
+    item = observation(child_count=1)
+    item["measurements"][0]["source"] = "[[Observed Source]]"
+    records.append_record(tmp_path, manifest, item=item, item_key=ITEM_KEY, why="seed a child link")
+    (tmp_path / "Knowledge Base" / "Observed Source.md").write_text("# Observed Source\n", encoding="utf-8")
+    freshness.rebaseline(tmp_path)  # the vault's change events are live; no corpus is published yet
+    query = {"collection": manifest.path, "expand_child": "measurements", "columns": ["name", "source"]}
+
+    with held_link_index_warm(monkeypatch):
+        coming = record_memory.record_memory(tmp_path, "query", **query)
+    warmed = record_memory.record_memory(tmp_path, "query", **query)
+
+    assert [row.get("source") for row in coming["rows"]] == [None]
+    assert coming["unresolved_links"] == ["source"]
+    assert [row["source"] for row in warmed["rows"]] == ["[[Observed Source]]"]
+    assert "unresolved_links" not in warmed
+
+
+@pytest.mark.parametrize("live_events", [False, True], ids=["no-live-events", "warms-off"])
+def test_a_query_with_no_corpus_coming_walks_for_its_links(
+    tmp_path: Path, corpus_cache_on: None, live_events: bool
+) -> None:
+    """No corpus is coming in a one-shot process, whose vault events are not live, nor where background
+    warms are turned off, which the suite does. Its query walks the vault for the link index as before:
+    a bare title resolves, matches its filter and is counted, and nothing is unresolved."""
+    manifest = _empty_columns_fixture(tmp_path)
+    (tmp_path / "Knowledge Base" / "Vehicle.md").write_text("# Vehicle\n", encoding="utf-8")
+    if live_events:
+        freshness.rebaseline(tmp_path)
+
+    matched = record_memory.record_memory(
+        tmp_path, "query", collection=manifest.path,
+        filters=[{"column": "asset", "op": "eq", "value": "[[Vehicle]]"}],
+    )
+    values = record_memory.record_memory(tmp_path, "query", collection=manifest.path, aggregate="distinct:asset")
+
+    assert [row["asset"] for row in matched["rows"]] == ["[[Vehicle]]"]
+    assert "unresolved_links" not in matched
+    assert "[[Vehicle]]" in values["aggregate"]["distinct"]
+
+
+def test_a_link_filter_after_a_walk_cut_short_by_its_cap_is_refused_instead_of_matching_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A walk that stops at its cap leaves bare titles unresolved. A filter on that link field would match
+    no row and read as an empty answer, so it is refused, and a returned link field is named unresolved."""
+    manifest = _empty_columns_fixture(tmp_path)
+    (tmp_path / "Knowledge Base" / "Vehicle.md").write_text("# Vehicle\n", encoding="utf-8")
+    monkeypatch.setattr(record_governance, "_INTERNAL_LINK_INDEX_RAW_CANDIDATES", 1)
+
+    with request_scope(owner_principal(surface="mcp")):
+        with pytest.raises(OpError) as refused:
+            record_memory.record_memory(
+                tmp_path, "query", collection=manifest.path,
+                filters=[{"column": "asset", "op": "eq", "value": "[[Vehicle]]"}],
+            )
+        rows = record_memory.record_memory(tmp_path, "query", collection=manifest.path)
+
+    assert refused.value.code == "LINK_INDEX_INCOMPLETE"
+    assert "retry_after_ms" not in (refused.value.details or {})  # a retry would meet the same cap
+    assert list(rows["unresolved_links"]) == ["asset", "receipt"]
+
+
+def test_a_walk_cut_short_refuses_a_selection_only_on_a_link_field_that_lost_a_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A walk cut short at its cap leaves only bare titles and memory references unchecked. A field whose
+    links all name a page by path loses no value, so a filter on it answers and it is not named unresolved;
+    a filter on the field whose bare title was left out is refused."""
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Activity\n", encoding="utf-8")
+    (tmp_path / "Knowledge Base" / "Assets").mkdir()
+    (tmp_path / "Knowledge Base" / "Assets" / "Vehicle.md").write_text("# Vehicle\n", encoding="utf-8")
+    (fixture / "Events" / "2026-07-20-bare.md").write_text(
+        "---\ntype: record\n"
+        f"collection_id: {manifest.collection_id}\n"
+        "record_id: 33333333-3333-4333-8333-333333333333\nschema_version: 1\noccurred_on: 2026-07-20\n"
+        'asset: "[[Assets/Vehicle]]"\nreceipt: "[[Missing Receipt]]"\nstatus: completed\n---\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(record_governance, "_INTERNAL_LINK_INDEX_RAW_CANDIDATES", 1)
+
+    with request_scope(owner_principal(surface="mcp")):
+        by_asset = record_memory.record_memory(
+            tmp_path, "query", collection=manifest.path,
+            filters=[{"column": "asset", "op": "eq", "value": "[[Assets/Vehicle]]"}],
+        )
+        with pytest.raises(OpError) as refused:
+            record_memory.record_memory(
+                tmp_path, "query", collection=manifest.path,
+                filters=[{"column": "receipt", "op": "eq", "value": "[[Missing Receipt]]"}],
+            )
+
+    assert "2026-07-20" in [str(row["occurred_on"]) for row in by_asset["rows"]]
+    assert {row["asset"] for row in by_asset["rows"]} == {"[[Assets/Vehicle]]"}
+    assert by_asset["unresolved_links"] == ["receipt"]
+    assert refused.value.code == "LINK_INDEX_INCOMPLETE"
 
 
 def _parts_collection(tmp_path: Path) -> collections.CollectionManifest:

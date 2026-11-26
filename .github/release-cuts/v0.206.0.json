@@ -1,0 +1,42 @@
+{
+  "branch": "release-cuts/2859c1e49ba259cf6c2e06414e4d6f18751cb8ec",
+  "evidence": {
+    "artifact_id": 15072753945,
+    "event": "workflow_dispatch",
+    "package_checks": "release-packages-v1",
+    "repository": "substrate-systems/evermatter",
+    "run_attempt": "1",
+    "run_id": "45721263332",
+    "scope": "full",
+    "source_commit": "2859c1e49ba259cf6c2e06414e4d6f18751cb8ec",
+    "successful_attempt": "1",
+    "tested_commit": "2859c1e49ba259cf6c2e06414e4d6f18751cb8ec",
+    "tested_tree": "8e8be417c31c56923d82513cfec45d4b807629cc",
+    "workflow": ".github/workflows/ci.yml"
+  },
+  "head": "dcf69e900330e263d85a10017aa5c5ac0d72c309",
+  "head_tree": "b7f0dd655691fcb3ac7d5d7cedd064e9f3f1ccaa",
+  "predecessor": {
+    "reconciliation_commit": "c765b5fd9fd2bc7f9726677a777a1d91af9ea067",
+    "source": "b7d5490941ee00f1cc89e51af404c732e79284c1",
+    "tag": "v0.205.0",
+    "version": "0.205.0"
+  },
+  "release": "0c92d94c20f515ea7999069d22a96c239b0a4f78",
+  "release_tree": "b7f0dd655691fcb3ac7d5d7cedd064e9f3f1ccaa",
+  "required_checks": [
+    {
+      "app_id": 15368,
+      "context": "Conventional Commit title"
+    },
+    {
+      "app_id": 15368,
+      "context": "required CI gate"
+    }
+  ],
+  "schema": 1,
+  "source": "2859c1e49ba259cf6c2e06414e4d6f18751cb8ec",
+  "source_tree": "8e8be417c31c56923d82513cfec45d4b807629cc",
+  "tag": "v0.206.0",
+  "version": "0.206.0"
+}

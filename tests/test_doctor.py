@@ -570,26 +570,22 @@ def test_doctor_cli_loads_cwd_dotenv_and_promotes_loaded_legacy_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("EXOMEM_PROFILE", raising=False)
+    # The loader writes the process environment: have monkeypatch remove what it writes.
+    monkeypatch.setenv("EXOMEM_PROFILE", "removed-below")
+    monkeypatch.delenv("EXOMEM_PROFILE")
     monkeypatch.delenv("KB_MCP_PROFILE", raising=False)
-    calls: list[tuple[object, bool]] = []
+    (tmp_path / ".env").write_text("KB_MCP_PROFILE=remote\n", encoding="utf-8")
     seen: dict[str, str | None] = {}
-
-    def load_env(*, dotenv_path=None, override: bool) -> None:
-        calls.append((dotenv_path, override))
-        monkeypatch.setenv("KB_MCP_PROFILE", "remote")
 
     def fake_doctor(**_kwargs):
         seen["profile"] = os.environ.get("EXOMEM_PROFILE")
         return doctor_module.DoctorReport(profile="remote", checks=[])
 
-    monkeypatch.setattr("dotenv.load_dotenv", load_env)
     monkeypatch.setattr(doctor_module, "doctor", fake_doctor)
 
     code, _out, err = _run(["doctor", "--json"], capsys)
 
     assert code == 0, err
-    assert calls == [(tmp_path / ".env", True)]
     assert seen == {"profile": "remote"}
 
 

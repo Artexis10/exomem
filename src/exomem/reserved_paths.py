@@ -63,6 +63,10 @@ _DUE_TEMP_RE = re.compile(
 )
 #: The atomic-replace temp name of the rotation file: a closed file-name format.
 _OWNERSHIP_TEMP_RE = re.compile(r"^\.\.ownership-rotation\.json\.[a-z0-9_]{8}\.tmp$", re.ASCII)
+#: The atomic-replace temp name of the per-app update-notice file: a closed file-name format.
+_APP_UPDATE_NOTICES_TEMP_RE = re.compile(
+    r"^\.\.app-update-notices\.json\.[a-z0-9_]{8}\.tmp$", re.ASCII
+)
 _LEXICAL_REBUILD_RE = re.compile(
     r"^\.lexical\.sqlite\.rebuild-[0-9a-f]{32}\.tmp(?:-(?:wal|shm|journal))?$",
     re.ASCII,
@@ -743,6 +747,7 @@ _REGISTRY = (
         StatePlacement.EXTERNAL_STATE,
         exact=(".app-update-notices.json",),
         rebuildable=True,
+        patterns=(_APP_UPDATE_NOTICES_TEMP_RE,),
     ),
     InternalStateDescriptor(
         "lexical-rebuild",

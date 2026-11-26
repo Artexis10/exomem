@@ -1556,30 +1556,29 @@ class StoreServer:
         """Return one unit's result, failure and commit observation after checkout cleanup finishes."""
         return self.call(work, wake_maintenance=wake_maintenance, _execution="unit")
 
-    def _call(self, work, *, wake_maintenance, read_only, extend, on_refusal, initial, execution="store"):
-        from ..cli_ops import OpError
+    def _deadlines(self, entry, checkpoint, *, record_request=False):
+        """A request's deadlines from ``entry``: whether it is an accepted unit, its completion deadline, and
+        its acceptance deadline (the completion deadline capped at the mutation timeout).
+
+        The explicit read allowance already reserves delivery; mutation acknowledgements reserve it separately.
+        The outer accepted envelope owns its acknowledgement; an internal accepted unit keeps its inputs until done.
+        """
         from ..writer_lease import acknowledgement_budget_deadline
         from .source_dependencies import request_server
 
-        # nosemgrep: ep-word-membership -- These execution modes form the internal request protocol, not caller values.
-        if execution not in ("store", "record", "unit"):
-            raise ValueError("unknown collection request execution mode")
-        record_request = execution == "record"
-
-        checkpoint = request_budget.current_checkpoint() if read_only else None
-        if checkpoint is not None:
-            checkpoint()
-        entry = time.monotonic()
-        # The explicit read allowance already reserves delivery; mutation acknowledgements reserve it separately.
-        # The outer accepted envelope owns its acknowledgement; an internal accepted unit keeps its inputs until done.
+        timeout = self.manager._mutation_timeout_seconds
         accepted_unit = not record_request and request_server() is self
-        completion_deadline = entry + self.manager._mutation_timeout_seconds if accepted_unit else (
+        completion_deadline = entry + timeout if accepted_unit else (
             entry + checkpoint.remaining() if checkpoint is not None else acknowledgement_budget_deadline(entry)
         )
-        deadline = min(completion_deadline, entry + self.manager._mutation_timeout_seconds)
-        # A store handoff, such as an idle release, refuses every checkout until it ends. Wait it out
-        # here, where this thread holds nothing: a waiter at the deep refusals could stall the handoff.
-        # The wait ends at the acceptance deadline, which the queue wait below shares.
+        return accepted_unit, completion_deadline, min(completion_deadline, entry + timeout)
+
+    def _await_admission(self, deadline, checkpoint):
+        """Wait out a store handoff, which refuses every checkout until it ends, up to ``deadline``.
+
+        The caller holds nothing here: a waiter at the deep refusals could stall the handoff. Both the
+        queue (``call``) and a read beside the thread that may queue (``read_beside``) wait here.
+        """
         with foreground_priority.foreground(), foreground_priority.awaiting_bulk(), \
                 call_spans.span("store.admission_wait"):
             try:
@@ -1590,6 +1589,22 @@ class StoreServer:
                 raise
         if checkpoint is not None:
             checkpoint()
+
+    def _call(self, work, *, wake_maintenance, read_only, extend, on_refusal, initial, execution="store"):
+        from ..cli_ops import OpError
+
+        # nosemgrep: ep-word-membership -- These execution modes form the internal request protocol, not caller values.
+        if execution not in ("store", "record", "unit"):
+            raise ValueError("unknown collection request execution mode")
+        record_request = execution == "record"
+
+        checkpoint = request_budget.current_checkpoint() if read_only else None
+        if checkpoint is not None:
+            checkpoint()
+        entry = time.monotonic()
+        accepted_unit, completion_deadline, deadline = self._deadlines(entry, checkpoint, record_request=record_request)
+        # The wait ends at the acceptance deadline, which the queue wait below shares.
+        self._await_admission(deadline, checkpoint)
         def refuse(error):
             if on_refusal is not None:
                 on_refusal(error, time.monotonic() - entry)
@@ -1697,13 +1712,31 @@ class StoreServer:
         open it is refused as busy instead, so it never runs on the store thread or takes back a
         lease the store released.
         """
+        # The span carries the asking site and the counts `call` records, so a read moved beside the queue
+        # stays attributable; a fallback onto the store thread also records its own `store.call` span.
+        fields = {"pages": getattr(work, "pages", 1), "refused": 0, "wake": 0}  # a read beside never wakes maintenance
+        on_path = call_spans.MCP_CALL_TOKEN.get() is not None
+        name = (f"store.read_beside@{_call_site(sys._getframe(1))}"[:call_spans.NAME_MAX_CHARS] if on_path
+                else "store.read_beside")
+        with call_spans.span(name, fields):
+            try:
+                return self._read_beside(work, initial=initial, collection=collection, progress=progress, queue=queue)
+            except BaseException:
+                fields["refused"] = 1
+                raise
+
+    def _read_beside(self, work, *, initial, collection, progress, queue):
         from ..cli_ops import OpError
         from ..governance import policy
         from . import capability, derived_rows, ownership
         from .preview import preview_store
 
         manager, runtime = self.manager, self.runtime
-        with call_spans.span("store.read_beside"), ExitStack() as scope:
+        if queue:
+            # A read that may queue waits out a store handoff as the queue does, to the same deadline.
+            checkpoint = request_budget.current_checkpoint()
+            self._await_admission(self._deadlines(time.monotonic(), checkpoint)[2], checkpoint)
+        with ExitStack() as scope:
             handle = None
             # A service's runtime that is not yet reporting resolves its takeover in a checkout on the store thread.
             if runtime is not None and not (runtime._bootstrap and not runtime.reporting_ready(manager._fencing_token)):

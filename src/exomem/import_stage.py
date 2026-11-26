@@ -41,6 +41,14 @@ WALK_RECORDS = "cloud-import-walks"
 UNREADABLE_CODE = "receipt_unreadable"
 # The file at a window's stage root that lists the whole series; it is never a member to file.
 SERIES_FILE = ".exomem-series.json"
+# The `filing` value of a series file that asks the cell to file the stage itself, a closed value of the file's format.
+FILING_CELL = "cell"
+# The keys of a series file's `origin` envelope, fixed by the file's format: the person's own label is free text, and the
+# two families are short lowercase tokens that the sender derived. The cell stores what it is given and never reads a meaning.
+ORIGIN_LABEL, ORIGIN_DEVICE, ORIGIN_BROWSER = "label", "device_family", "browser_family"
+_ORIGIN_TOKENS = (ORIGIN_DEVICE, ORIGIN_BROWSER)  # nosemgrep: ep-word-set -- the envelope keys that the series file's format fixes.
+_ORIGIN_LABEL_CHARS = 200
+_ORIGIN_TOKEN_CHARS = 32
 # Members that the person cleared from a residual record (D12): the same entry plus the time, kept beside `members`.
 ACKNOWLEDGED_KEY = "acknowledged"
 # What `window_record` finds, and which file holds a residual record; the status protocol's words.
@@ -122,10 +130,16 @@ class Series:
     The file is a JSON object `{"label": ..., "paths": [...]}`. A series file that omits either, or holds the
     wrong type for it, says nothing of it: `label` is None, and `paths` is empty. The paths are names only:
     adoption compares them as strings and never opens one.
+
+    It may also say `"filing": "cell"`, which asks the cell to file the stage itself, and carry an `origin` envelope
+    that states who sent the stage (`ORIGIN_*`). A value of another type, an unknown `filing` value and an origin
+    value of the wrong shape are each ignored, so a series file of another version reads as before.
     """
 
     label: str | None
     paths: tuple[str, ...]
+    filing: str | None = None
+    origin: dict[str, str] = field(default_factory=dict)
 
     def listing(self, members: Iterable[str]) -> tuple[str, ...]:
         """The path list when it names every one of `members` but the series file, else none.
@@ -139,6 +153,24 @@ class Series:
         wanted = [path for path in members if path != SERIES_FILE]
         named = set(self.paths)
         return self.paths if wanted and all(path in named for path in wanted) else ()
+
+
+def origin_values(document: object) -> dict[str, str]:
+    """The envelope's values that have the right shape, by envelope key; a value of another shape is left out, not refused."""
+    if not isinstance(document, dict):
+        return {}
+    values: dict[str, str] = {}
+    label = document.get(ORIGIN_LABEL)
+    if (isinstance(label, str) and label.strip() and len(label.strip()) <= _ORIGIN_LABEL_CHARS
+            and all(character.isprintable() for character in label)):
+        values[ORIGIN_LABEL] = label.strip()
+    for key in _ORIGIN_TOKENS:
+        token = document.get(key)
+        # A format check on a sender-supplied token (short, lowercase, letters, digits and hyphens), never a reading of it.
+        if (isinstance(token, str) and 0 < len(token) <= _ORIGIN_TOKEN_CHARS and token.isascii()
+                and token == token.lower() and token.replace("-", "").isalnum()):
+            values[key] = token
+    return values
 
 
 def is_series_file(path: str) -> bool:
@@ -155,10 +187,12 @@ def read_series(vault_root: Path, import_id: str) -> Series | None:
     document = None if path.is_symlink() else _load(path)
     if document is None:
         return None
-    label, paths = document.get("label"), document.get("paths")
+    label, paths, filing = document.get("label"), document.get("paths"), document.get("filing")
     return Series(
         label.strip() if isinstance(label, str) and label.strip() else None,
         tuple(paths) if isinstance(paths, list) and all(isinstance(path, str) for path in paths) else (),
+        FILING_CELL if filing == FILING_CELL else None,
+        origin_values(document.get("origin")),
     )
 
 
@@ -453,7 +487,7 @@ def read_residual(vault_root: Path, import_id: str) -> list[dict] | None:
     return list(record.members) if record is not None and record.kind == WINDOW_DISCARDED else None
 
 
-def _stems(directory: Path) -> set[str]:
+def stems(directory: Path) -> set[str]:
     """The import IDs that name a record file in `directory`; a missing folder holds none, an unreadable one raises."""
     try:
         with os.scandir(directory) as entries:
@@ -468,7 +502,7 @@ def window_ids(vault_root: Path) -> list[str]:
         state = state_paths.vault_state_dir(vault_root)
     except ValueError:
         return []  # A vault with no state placement has no receipt and no walk file, as `read_receipt` finds.
-    return sorted(_stems(state / CLOUD_RECEIPTS) | _stems(state / WALK_RECORDS))
+    return sorted(stems(state / CLOUD_RECEIPTS) | stems(state / WALK_RECORDS))
 
 
 def clear_residual(vault_root: Path, import_id: str, paths: set[str], at: str) -> list[str] | None:
