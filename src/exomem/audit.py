@@ -130,6 +130,7 @@ from . import (
     capabilities,
     contradiction_stance,
     episode_coverage,
+    foreground_priority,
     homes,
     indexes,
     lifecycle_statuses,
@@ -216,6 +217,8 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "original_fixity",
     "source_pointer_drift",
     "source_identity_conflict",
+    # A folder split blocks a whole-vault export, and nothing else tells the owner it is there.
+    "path_variants",
 )
 # The two exact-duplicate checks (`duplicate_audit`). Selectable through `audit` and `attention`, and out of the default union.
 DUPLICATE_CATEGORIES: tuple[str, ...] = ("duplicate_content", "duplicate_source_url")
@@ -228,7 +231,6 @@ OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "semantic_category_governance",
     "semantic_strict_schema_drift",
     "semantic_relation_disposition",
-    "path_variants",
     # A vault meets its whole duplicate backlog on the first run, so a default audit would bury every other finding under it.
     *DUPLICATE_CATEGORIES,
     # Every past recap with a Decided line is uncited after an upgrade, so a default
@@ -312,18 +314,6 @@ _RELEVANCE_GOLDEN = _REPO_ROOT / "tests" / "golden" / "queries.yaml"
 
 # Matches [[Target]] or [[Target|Alias]]. Target may contain '/' for paths.
 WIKILINK_PATTERN = re.compile(r"\[\[([^\]\|\n]+?)(?:\|[^\]\n]*)?\]\]")
-
-# When walking the full vault to build the wikilink-resolution set, skip these.
-VAULT_WALK_SKIP_DIRS = frozenset(
-    {
-        ".obsidian",
-        ".git",
-        ".trash",
-        "_attachments",
-        "_archive",
-        "_trash",
-    }
-)
 
 # Counts row in index.md. Captures (label, optional-subcategory, count).
 # Matches lines like:
@@ -658,6 +648,8 @@ def audit(
         if "coverage" in metadata:
             previous_metadata["coverage"] = dict(metadata["coverage"])
         try:
+            # Each check is one unit of a review pass: a request in flight holds it here, never inside a check.
+            foreground_priority.yield_in_bulk()
             yield True
             request_budget.checkpoint()
         except request_budget.ReadBudgetExhausted:
@@ -1150,16 +1142,12 @@ def _check_path_variants(vault_root: Path) -> list[AuditFinding]:
     only after NFKC folding and dropping separators are candidates for a human
     to judge. Read-only: nothing is merged.
     """
+    from . import path_variants
+
     findings: list[AuditFinding] = []
-    for directory, subdirs, files in os.walk(vault_root):
-        request_budget.checkpoint()
-        subdirs[:] = sorted(
-            name for name in subdirs
-            if not name.startswith(".") and name not in VAULT_WALK_SKIP_DIRS
-        )
-        names = sorted([*subdirs, *(name for name in files if not name.startswith("."))])
-        parent = Path(directory).relative_to(vault_root).as_posix()
-        prefix = "" if parent == "." else f"{parent}/"
+    # The names an export carries, so a defect here is a collision that blocks an export.
+    for parent, subdirs, names in path_variants.sibling_names(vault_root):
+        prefix = f"{parent}/" if parent else ""
         defects: dict[str, list[str]] = {}
         for name in names:
             request_budget.checkpoint()
@@ -1186,7 +1174,10 @@ def _check_path_variants(vault_root: Path) -> list[AuditFinding]:
                             + ", ".join(repr(name) for name in group)
                         ),
                         proposed_fix=(
-                            "merge by hand with manage_memory_file; nothing is merged automatically"
+                            f"preview the merge with {capabilities.active_call_text('maintain_memory', {'mode': 'path-variants'})}; "
+                            "nothing is merged until its plan is applied"
+                            if set(group) <= set(subdirs)
+                            else "rename one of these by hand; only folders are merged"
                         ),
                         paths=[f"{prefix}{name}" for name in group],
                         meta={"class": "defect"},
@@ -2542,14 +2533,16 @@ def _parse_all(
     from . import find_corpus
 
     pages: list[find_module.ParsedPage] = []
-    for page in find_corpus.corpus_pages(
+    corpus = find_corpus.corpus_pages(
         vault_root, "kb", lambda **walk: find_module._walk_md(kb, **walk),
         lambda path: find_module._parse_page(path, path.stat().st_mtime, vault_root),
         keep=lambda rel, content: (select is None or select(rel, content))
         and (not append_only or in_append_only_tree(rel) is not None)
         and egress.content_permits(vault_root, rel, who, snapshot=content)
         and (admitted is None or admitted(rel)),
-    ):
+    )
+    # One unit per page. A store-mode walk holds a pooled read snapshot here, which no request waits on.
+    for page in foreground_priority.yielding_in_bulk(corpus):
         # A hidden part page is its Source's own text, so no check counts or flags it as a memory.
         if page.part_of is None:
             pages.append(page)
@@ -3407,7 +3400,7 @@ def _check_unprocessed_sources(
             return find_module.writer_resolver_snapshot(vault_root)
 
     rows: list[tuple[int, AuditFinding]] = []  # (age_days for sort, finding)
-    for page in pages:
+    for page in foreground_priority.yielding_in_bulk(pages):
         request_budget.checkpoint()
         if not type_basis.selects(page.page_type, note_types.captured_source):
             continue
@@ -4458,7 +4451,7 @@ def _check_relation_debt(
     findings: list[AuditFinding] = []
     relations = relation_registry.load_registry(vault_root)
     language = semantic_language_registry.load_registry(vault_root)
-    for page in pages:
+    for page in foreground_priority.yielding_in_bulk(pages):
         request_budget.checkpoint()
         if not relation_debt_eligible(
             vault_root,
@@ -6375,7 +6368,7 @@ def _check_collection_candidate(
     language = semantic_language_registry.load_registry(root)
     relations = relation_registry.load_registry(root)
     rows: list[dict[str, Any]] = []
-    for page in pages:
+    for page in foreground_priority.yielding_in_bulk(pages):
         request_budget.checkpoint()
         if not page.rel_path.startswith(managed_join("Notes/")) or not authorize(
             page.rel_path
@@ -6797,7 +6790,7 @@ def _check_note_cohesion(
     type_basis = note_types.Basis(vault_root)
     status_basis = lifecycle_statuses.Basis(vault_root)
     findings: list[AuditFinding] = []
-    for page in pages:
+    for page in foreground_priority.yielding_in_bulk(pages):
         request_budget.checkpoint()
         if not note_cohesion.is_candidate(
             page.rel_path,
@@ -8133,6 +8126,8 @@ def _band_pairs(
     ends = [*row_starts[1:], len(rows)]
     first = 0
     while first < len(row_files):
+        # One block of products per unit. Only arrays are held here, and no lock.
+        foreground_priority.yield_in_bulk()
         base = row_starts[first]
         left, page = (base, first) if square else (0, 0)
         room = max(1, _SWEEP_PRODUCT_CELLS // max(1, len(columns) - left))

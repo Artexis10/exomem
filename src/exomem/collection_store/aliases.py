@@ -63,6 +63,8 @@ def read(vault_root, path):
                     f"This is its stored row, read-only; change it with {profile.tool}."),
         "path": path,
         "store_row": result.rows[0],
+        # A link field the query could not check is named, so a link left out never reads as absent.
+        **({"unresolved_links": list(result.unresolved_links)} if result.unresolved_links else {}),
         **body,
         "collection": manifest.path,
         "collection_id": cid,

@@ -79,6 +79,7 @@ from .vault import (
     LogEntry,
     PlannedWrite,
     WikilinkResolver,
+    _create_parent_dirs_held,
     append_frontmatter_list_item,
     batch_atomic_write,
     canonical_vault_rel,
@@ -1448,12 +1449,14 @@ def _resolve_path(
             vault_root, folder.relative_to(vault_root).as_posix(), f"{stem}.md"
         )
         if inbox is not None:
-            folder = vault_root / inbox
+            # The inbox is another tree, so its folders take their existing spellings too.
+            folder = vault_root / respell_new_path(vault_root, inbox)
         connector_boundary.require_create(vault_root, (folder / f"{stem}.md").relative_to(vault_root).as_posix())
     except ValueError as error:
         raise NoteError("WRITE_REFUSED", [], "target is unavailable") from error
     if create_parents:
-        folder.mkdir(parents=True, exist_ok=True)
+        # The held creator refuses a folder that would sit beside a variant spelling of itself.
+        _create_parent_dirs_held(vault_root, folder, [])
     return unique_path(folder, stem, vault_root=vault_root, title_held=title_held)
 
 

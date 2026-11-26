@@ -9,6 +9,7 @@ from exomem import (
     activation_manifest,
     capabilities,
     commands,
+    freshness,
     index_paths,
     index_sync,
     lexstore,
@@ -16,6 +17,7 @@ from exomem import (
     observe_memory,
     provenance,
     reconcile,
+    semantic_contract,
     semantic_index,
     semantic_language_registry,
     vault,
@@ -1247,6 +1249,64 @@ def test_observe_accepts_parent_memory_reference(tmp_path: Path) -> None:
 
     assert result["path"] == PAGE
     assert result["unit_ref"].startswith(f"exomem://memory/{PAGE_ID}#")
+
+
+def test_a_ref_addressed_add_with_compact_metadata_is_refused_without_a_vault_walk(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A starved serving host spent minutes finding the page of a write its arguments refuse.
+
+    The arguments alone decide this refusal, so the call refuses before it looks the page up.
+    A current identity projection still names the page, so the reply keeps the page's kinds.
+    """
+    _write_page(tmp_path)
+    ref = f"exomem://memory/{uuid.UUID(PAGE_ID)}"
+    arguments = {
+        "operation": "add",
+        "category": "rule",
+        "content": "A dated rule",
+        "as_of": "2026-07-01",
+    }
+    # The refusal as `observe_memory` words it once it has read the page.
+    with pytest.raises(observe_memory.ObserveMemoryError) as after_page_read:
+        observe_memory.observe_memory(tmp_path, path=PAGE, **arguments)
+    expected = str(after_page_read.value.leaf_error())
+    assert expected.startswith("COMPACT_METADATA_REQUIRES_RICH_KIND: ")
+
+    def no_walk(*_args: object) -> list:
+        raise AssertionError("a refusal its arguments decide must not walk the vault")
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", no_walk)
+    monkeypatch.setattr(memory_refs.ReferenceIndex, "_scan_paths_for_id", no_walk)
+
+    # No identity projection is current: the reply names the core kinds instead of the page's.
+    with pytest.raises(ValueError) as without_projection:
+        commands.op_observe_memory(tmp_path, path=ref, **arguments)
+    refusal, _, remediation = str(without_projection.value).partition(" Remediation: ")
+    assert refusal == expected.partition(" Remediation: ")[0]
+    assert "omit as_of" in remediation
+    assert "Pass `kind` with a core rich kind" in remediation
+
+    freshness.rebaseline(tmp_path)
+    semantic_contract.build_corpus_context(tmp_path)
+    with pytest.raises(ValueError) as with_projection:
+        commands.op_observe_memory(tmp_path, path=ref, **arguments)
+    assert str(with_projection.value) == expected
+
+
+def test_an_early_compact_refusal_still_lets_a_malformed_date_win(tmp_path: Path) -> None:
+    """Refusing compact metadata before the page read must not hide an argument error made first."""
+    _write_page(tmp_path)
+    arguments = {"path": PAGE, "operation": "add", "category": "rule", "content": "A dated rule"}
+    with pytest.raises(ValueError) as malformed:
+        commands.op_observe_memory(tmp_path, as_of="July", **arguments)
+    assert str(malformed.value).startswith("INVALID_SEMANTIC_AS_OF")
+    with pytest.raises(ValueError) as reversed_dates:
+        commands.op_observe_memory(tmp_path, as_of="2026-07-02", until="2026-07-01", **arguments)
+    assert str(reversed_dates.value).startswith("INVALID_SEMANTIC_DATE_ORDER")
+    with pytest.raises(ValueError) as bad_tag:
+        commands.op_observe_memory(tmp_path, as_of="2026-07-01", tags=["bad tag!"], **arguments)
+    assert str(bad_tag.value).startswith("INVALID_SEMANTIC_TAG")
 
 
 def test_observe_accepts_legacy_vault_reference_inside_governed_kb(

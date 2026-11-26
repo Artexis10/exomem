@@ -26,6 +26,7 @@ def test_query_loads_release_policy_once_for_a_thousand_authorization_checks(
         semantic_profile="records",
         storage=SimpleNamespace(source="Knowledge Base/Records/Items"),
         schema=SimpleNamespace(fields={}),
+        child_tables=(),
         record_presentation=None,
     )
 
@@ -42,11 +43,14 @@ def test_query_loads_release_policy_once_for_a_thousand_authorization_checks(
         assert policy is expected_policy
         return egress.LEVEL_FULL
 
-    def query(*_args: object, **kwargs: object) -> SimpleNamespace:
+    def query(*_args: object, **kwargs: object) -> record_governance.record_formats.RecordQueryResult:
         authorize = kwargs["authorize_path"]
         for number in range(1000):
             assert authorize(f"Knowledge Base/Records/Items/{number}.md")
-        return SimpleNamespace(rows=())
+        return record_governance.record_formats.RecordQueryResult(
+            collection_id="items", snapshot="", rows=[], returned=0, total_matched=0,
+            truncated=False, continuation=None, derived=False, rendered="",
+        )
 
     expected_policy = policy
     monkeypatch.setattr(egress.policy_module, "load", load)

@@ -15,6 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from conftest import _drain_background_threads
 from test_working_set_carry import _write, seed_ordinary_notes
 from test_working_set_index import _seed_planning, _seed_structure
 
@@ -293,6 +294,8 @@ def test_frequency_cache_miss_does_not_block_a_committing_writer(
     import time
 
     _seed(vault, retired=0)
+    # Leaving WAL needs the only open connection; a background walk the seed started can hold one.
+    _drain_background_threads()
     store = lexstore.get_store(vault)
     connection = store._connect()
     try:

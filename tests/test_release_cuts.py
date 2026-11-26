@@ -1412,3 +1412,31 @@ def test_changelog_changes_follow_release_pleases_own_parser(tmp_path, monkeypat
         ("chore", True),
         ("fix", False),
     ]
+
+
+def test_the_callback_that_starts_a_decision_does_not_hold_the_slot(monkeypatch):
+    """The evidence callback dispatches the decision and ends seconds later; another run still holds."""
+
+    def api(path, pages=False):
+        if path.startswith("actions/workflows/release-evidence-automation.yml/runs"):
+            return {"workflow_runs": [{"id": 7, "status": "in_progress"}, {"id": 8, "status": "queued"}]}
+        if path.startswith("actions/workflows/ci.yml/runs"):
+            return {"workflow_runs": []}
+        assert pages and path.startswith("pulls?")
+        return [[]]
+
+    monkeypatch.setattr(cuts.evidence, "api", api)
+
+    held = cuts.schedule(caller="7")
+
+    assert held == {"cut": False, "reason": "release-evidence run 8 is queued"}
+
+
+def test_a_decision_without_a_caller_waits_for_every_unfinished_controller_run(monkeypatch):
+    def api(path, pages=False):
+        assert path.startswith("actions/workflows/release-evidence-automation.yml/runs")
+        return {"workflow_runs": [{"id": 7, "status": "in_progress"}]}
+
+    monkeypatch.setattr(cuts.evidence, "api", api)
+
+    assert cuts.schedule() == {"cut": False, "reason": "release-evidence run 7 is in_progress"}

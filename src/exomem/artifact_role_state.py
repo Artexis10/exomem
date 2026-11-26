@@ -18,6 +18,7 @@ from typing import Any
 from . import (
     activation,
     find_corpus,
+    foreground_priority,
     lifecycle_statuses,
     note_types,
     relation_registry,
@@ -477,17 +478,18 @@ def build(root: Path, parsed_pages: list[Any]) -> dict[str, Any]:
         "dependencies": {},
     }
     registries = _PageRegistries(root)
-    for parsed in parsed_pages:
+    # `build` is the audit's alone and holds no lock or connection, so each loop waits for a request per page.
+    for parsed in foreground_priority.yielding_in_bulk(parsed_pages):
         request_budget.checkpoint()
         selected = registries.for_page(parsed.rel_path, parsed.frontmatter)
         state = _state(root, parsed, selected[1])
         page = describe(root, state, selected)
         index["pages"][state.path] = page
         _register(index, page)
-    for path in index["pages"]:
+    for path in foreground_priority.yielding_in_bulk(index["pages"]):
         request_budget.checkpoint()
         _edges(index, path)
-    for path, page in index["pages"].items():
+    for path, page in foreground_priority.yielding_in_bulk(index["pages"].items()):
         request_budget.checkpoint()
         if page["type"] == "experiment":
             try:
@@ -695,6 +697,7 @@ def inspect(
     status_basis = status_basis or lifecycle_statuses.Basis(root)
     coverage = dict.fromkeys(sensor.FAMILIES, "complete")
     order = {"complete": 0, "capped": 1, "unknown": 2}
+    # No yield to requests here: `served` runs this with its read connection open.
     for path in index.get("origins", {}):
         _checkpoint(index)
         rows, states = compose(

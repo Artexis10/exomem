@@ -17,8 +17,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any
 
-from . import note_types, tag_variants
-from .kbdir import managed_relative
+from . import tag_variants
 from .vault import kb_root
 from .vocabulary import registry
 
@@ -168,22 +167,9 @@ def _finding(code: str, entry: registry.Entry, detail: str) -> dict[str, str]:
 
 def protected_folders(vault_root: Path) -> list[tuple[tuple[str, ...], str, bool]]:
     """Every folder that groups by type or placement: `(casefolded segments, owner, split by project)`."""
-    from . import entity_recurrence, entity_types, homes
+    from .layout import typed_folders
 
-    out: list[tuple[tuple[str, ...], str, bool]] = []
-    # The effective registries, shipped plus overlay: an overlay type owns a folder as well.
-    snapshot = registry.load(note_types.SPEC, vault_root)
-    for note_type in snapshot.typed.types.values():
-        if note_type.folder:
-            parts = fold_folder(note_type.folder)
-            out.append((parts, f"note type {note_type.key}", note_type.partition == "project"))
-    entities = managed_relative(entity_recurrence.entities_prefix()).rstrip("/")
-    for definition in entity_types.load_entity_types(vault_root).active_definitions:
-        parts = fold_folder(str(PurePosixPath(entities, definition.folder)))
-        out.append((parts, f"entity type {definition.id}", False))
-    for home in homes.load(vault_root).homes:
-        out.append((fold_folder(home.folder), f"home {home.key}", False))
-    return out
+    return [(fold_folder(folder), owner, partitioned) for folder, owner, partitioned in typed_folders(vault_root)]
 
 
 def protection(

@@ -3128,6 +3128,7 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "curation": False,
             # Preview unless `apply=true`, like structured-files.
             "tag-variants": True,
+            "path-variants": True,
             # The migration preflight is read-only and takes no fields.
             "collections-store": True,
             "collections-store-adopt-local": True,

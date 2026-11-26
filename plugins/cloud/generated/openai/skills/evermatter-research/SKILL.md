@@ -2,7 +2,7 @@
 name: evermatter-research
 description: "Run a focused research loop with Evermatter: gather sources, preserve evidence, compile attributed findings, and connect prior notes. Part of Evermatter, formerly Exomem."
 metadata:
-  skill_contract: 4c2687982cc6ea04d24f3d85da126ea96a7514a20c5d3c7616230146eade91eb
+  skill_contract: 39235a41700c709be5684f77064479de5859018d21fd640ff0b39f7c639b174b
   version: "0.1.0"
 ---
 

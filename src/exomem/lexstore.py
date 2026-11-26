@@ -3984,20 +3984,58 @@ class _JournalPosition:
     stamp: bytes
 
 
+def create_change_journal(conn: sqlite3.Connection) -> None:
+    """Create the change journal, its bound and the triggers of each journaled table that `conn` has.
+
+    Only what is missing is created, so a catalogue built before the journal gets it in place. An empty
+    journal is correct the moment it exists: a reader patches only from a position that the journal holds,
+    and the first write after this gives it one.
+    """
+    conn.execute(
+        f"CREATE TABLE IF NOT EXISTS {CHANGE_JOURNAL}("
+        " seq INTEGER PRIMARY KEY, path TEXT NOT NULL, stamp BLOB NOT NULL)"
+    )
+    conn.execute(
+        f"CREATE TRIGGER IF NOT EXISTS {_CHANGE_JOURNAL_BOUND} AFTER INSERT ON {CHANGE_JOURNAL} BEGIN "
+        f"DELETE FROM {CHANGE_JOURNAL} WHERE seq <= NEW.seq - {_CHANGE_JOURNAL_ROWS}; END"
+    )
+    for table in _journaled_tables(conn)[1]:
+        LexicalStore._create_change_triggers(conn, table)
+
+
+def change_journal_objects(conn: sqlite3.Connection) -> tuple[set[str], set[str]]:
+    """The names of the objects that the change journal needs in `conn`, and the ones of them that it holds.
+
+    It needs its table, its bound and every trigger of each journaled table that `conn` has.
+    """
+    held, tables = _journaled_tables(conn)
+    required = {CHANGE_JOURNAL, _CHANGE_JOURNAL_BOUND, *(_change_trigger(t, e) for t in tables for e in _CHANGE_EVENTS)}
+    return required, required & held
+
+
+def change_journal_complete(conn: sqlite3.Connection) -> bool:
+    """Whether `conn` holds every object that the change journal needs (`change_journal_objects`)."""
+    required, held = change_journal_objects(conn)
+    return required == held
+
+
+def _journaled_tables(conn: sqlite3.Connection) -> tuple[set[str], list[str]]:
+    """The journal's objects that `conn` holds, and the journaled tables that it has."""
+    objects = dict(conn.execute(
+        "SELECT name, type FROM sqlite_master WHERE name LIKE 'catalogue\\_change%' ESCAPE '\\' "
+        "OR (type = 'table' AND name IN (SELECT value FROM json_each(?)))",
+        (json.dumps(list(_JOURNALED_PATHS)),),
+    ).fetchall())
+    return set(objects), [table for table in _JOURNALED_PATHS if objects.get(table) == "table"]
+
+
 def _journal_position(conn: sqlite3.Connection) -> _JournalPosition | None:
     """Where the change journal stands in `conn`'s pinned snapshot, or None when it cannot vouch for later writes.
 
     It cannot without its table, one of its triggers or a row. Any DDL changes `PRAGMA schema_version`, so a
     later position under the same version shows that no trigger was dropped and no table replaced since.
     """
-    objects = dict(conn.execute(
-        "SELECT name, type FROM sqlite_master WHERE name LIKE 'catalogue\\_change%' ESCAPE '\\' "
-        "OR (type = 'table' AND name IN (SELECT value FROM json_each(?)))",
-        (json.dumps(list(_JOURNALED_PATHS)),),
-    ).fetchall())
-    tables = [table for table in _JOURNALED_PATHS if objects.get(table) == "table"]
-    required = {CHANGE_JOURNAL, _CHANGE_JOURNAL_BOUND, *(_change_trigger(t, e) for t in tables for e in _CHANGE_EVENTS)}
-    if not required <= objects.keys():
+    if not change_journal_complete(conn):
         return None
     row = conn.execute(f"SELECT seq, stamp FROM {CHANGE_JOURNAL} ORDER BY seq DESC LIMIT 1").fetchone()
     if row is None:
@@ -6479,9 +6517,21 @@ def _delete_unit_rows(conn: sqlite3.Connection, parent_path: str) -> None:
         for (rowid,) in rowids:
             conn.execute("DELETE FROM unit_fts WHERE rowid = ?", (rowid,))
     conn.execute("DELETE FROM semantic_units WHERE parent_path = ?", (parent_path,))
+    # A parent left with no rows keeps no revision (see `_delete_page_rowid`); one with a page row keeps it.
+    conn.execute(
+        "DELETE FROM unit_revisions WHERE parent_path = ? AND NOT EXISTS (SELECT 1 FROM pages WHERE path = ?)",
+        (parent_path, parent_path),
+    )
 
 
 def _delete_page_rowid(conn: sqlite3.Connection, rowid: int) -> None:
+    """Remove one page row with its full-text and unit rows, and the parent's unit revision.
+
+    The delete triggers stamp the parent a fresh revision, which names rows that no longer exist. Every delete
+    path comes here or to `_delete_unit_rows`, so none leaves a revision behind: a reader asks only for the
+    parents it admits, a write that inserts rows again stamps a new one, and a derivation from the files makes
+    none for a page with no rows. A Source erasure relies on it: no row may name the erased page.
+    """
     row = conn.execute("SELECT path FROM pages WHERE rowid = ?", (rowid,)).fetchone()
     if row is not None:
         _delete_unit_rows(conn, row[0])
@@ -6489,17 +6539,16 @@ def _delete_page_rowid(conn: sqlite3.Connection, rowid: int) -> None:
         conn.execute("DELETE FROM fts WHERE rowid = ?", (rowid,))
         conn.execute("DELETE FROM tri WHERE rowid = ?", (rowid,))
     conn.execute("DELETE FROM pages WHERE rowid = ?", (rowid,))
+    if row is not None:
+        conn.execute("DELETE FROM unit_revisions WHERE parent_path = ?", (row[0],))
 
 
 def delete_page_rows(conn: sqlite3.Connection, rel: str) -> None:
-    """Remove one page's rows: page, full-text and unit rows (the caller owns the transaction).
-
-    The delete triggers stamp the parent a fresh revision, which names rows that no longer exist,
-    so it goes too: a reader asks only for the parents it admits, rows that a write inserts again
-    stamp a new one, and a derivation from the files makes none for a page with no rows.
-    """
+    """Remove one page's rows: page, full-text and unit rows, and its unit revision (the caller owns the
+    transaction; see `_delete_page_rowid`)."""
     for (rowid,) in conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchall():
         _delete_page_rowid(conn, rowid)
+    # A revision left with no page row to delete through goes too.
     conn.execute("DELETE FROM unit_revisions WHERE parent_path = ?", (rel,))
 
 
@@ -7661,15 +7710,6 @@ class LexicalStore:
             "INSERT OR IGNORE INTO meta(key, value) "
             "VALUES('frequency_revision', hex(randomblob(16)))"
         )
-        # Each row names a path that one write touched; see `_journal_position`. Its newest rows only.
-        conn.execute(
-            f"CREATE TABLE IF NOT EXISTS {CHANGE_JOURNAL}("
-            " seq INTEGER PRIMARY KEY, path TEXT NOT NULL, stamp BLOB NOT NULL)"
-        )
-        conn.execute(
-            f"CREATE TRIGGER IF NOT EXISTS {_CHANGE_JOURNAL_BOUND} AFTER INSERT ON {CHANGE_JOURNAL} BEGIN "
-            f"DELETE FROM {CHANGE_JOURNAL} WHERE seq <= NEW.seq - {_CHANGE_JOURNAL_ROWS}; END"
-        )
         LexicalStore._create_frequency_revision_triggers(conn, "pages")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS semantic_units("
@@ -7726,8 +7766,7 @@ class LexicalStore:
             (("INSERT", "NEW"), ("UPDATE OF structure_json", "NEW"), ("DELETE", "OLD")),
             lambda row: f"{row}.path",
         )
-        LexicalStore._create_change_triggers(conn, "pages")
-        LexicalStore._create_change_triggers(conn, "unit_revisions")
+        create_change_journal(conn)
 
     @staticmethod
     def _create_change_triggers(conn: sqlite3.Connection, table: str) -> None:
@@ -9136,8 +9175,6 @@ class LexicalStore:
                         self._delete_rowid(conn, row[0])
                     else:
                         self._delete_semantic_units(conn, rel)
-                    # The delete triggers stamped a fresh revision for rows that no longer exist (see delete_page_rows).
-                    conn.execute("DELETE FROM unit_revisions WHERE parent_path = ?", (rel,))
                 for rel in suppressed:
                     row = conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchone()
                     if row is not None:
@@ -9205,9 +9242,11 @@ class LexicalStore:
         """Restart the live catalogue's change journal (`_restart_change_journal`) under the barrier.
 
         The kept catalogue states can no longer patch, so they are dropped with it rather than held until
-        evicted. False when the barrier or the catalogue refused the write.
+        evicted. False when the barrier or the catalogue refused the write. A failed catalogue recovers only
+        through a repair, so its refusal schedules one, as `delete_rel_paths` does; a busy barrier does not.
         """
         if self._failed:
+            _schedule_runtime_catalog_repair(self.vault_root)
             return False
         from .vault import VaultLockError
 
@@ -9219,8 +9258,13 @@ class LexicalStore:
                         _restart_change_journal(conn)
                 finally:
                     conn.close()
-        except (VaultLockError, sqlite3.Error) as e:
+        except VaultLockError as e:
             log.info("lexical change journal restart deferred (%s)", e)
+            return False
+        except sqlite3.Error as e:
+            self._note_query_failure(e, "lexical change journal restart deferred (%s)")
+            if self._failed:
+                _schedule_runtime_catalog_repair(self.vault_root)
             return False
         with self._term_frequency_cache_lock:
             self._catalogue_row_states.clear()
@@ -9730,6 +9774,8 @@ class LexicalStore:
         except Exception:  # noqa: BLE001 - housekeeping never blocks a rebuild
             log.debug("lexical orphan rebuild-temp sweep failed", exc_info=True)
 
+        from . import source_custody
+
         try:
             with self._publication_lock():
                 start_identity = catalog_semantic_identity(self.vault_root)
@@ -9738,11 +9784,17 @@ class LexicalStore:
                     for scope in ("kb", "vault")
                 }
                 start_live_guard = self._live_publication_guard()
+                retired_through = source_custody.retirement_generation(self.vault_root)
         except VaultLockError as e:
             log.warning(
                 "lexical atomic rebuild baseline deferred (%s); live sidecar preserved", e
             )
             return self._decline_rebuild("transient_failure")
+        if retired_through is None:
+            # An unreadable retirement generation cannot rule out a Source erasure, so the build would be declined
+            # at publication anyway (see `_build_and_publish`). Declining before the walk spends nothing. The cost
+            # when it fires wrongly: the catalogue goes unrepaired while vault state stays unreadable.
+            return self._decline_rebuild("source_changed")
         temp_path = self.path.with_name(f"{self.path.name}.rebuild-{uuid.uuid4().hex}.tmp")
         # The build holds an advisory lock on its temp from before the temp
         # exists until after it is cleaned up, so a sweep never takes a live
@@ -9772,6 +9824,7 @@ class LexicalStore:
                             start_identity,
                             start_checkpoints,
                             start_live_guard,
+                            retired_through,
                         )
                     finally:
                         self._last_parked_seconds = foreground_priority.pass_waited() - parked_before
@@ -9812,8 +9865,10 @@ class LexicalStore:
         start_identity: str,
         start_checkpoints: dict,
         start_live_guard: dict,
+        retired_through: int | None,
     ) -> bool:
         from . import freshness as freshness_module
+        from . import source_custody
 
         members, signatures = self._walk_entries()  # the corpus scan
         # The projection identity must not have shifted under the scan.
@@ -10010,6 +10065,12 @@ class LexicalStore:
                             "lexical atomic publish aborted: live catalog advanced past build"
                         )
                         return self._decline_rebuild("publish_conflict")
+                    if source_custody.retired_since(self.vault_root, retired_through):
+                        # A Source erased during the build may still be named by the rows this temp copied
+                        # or replayed. The next pass builds after the erasure. An unreadable generation
+                        # declines too, as a detached adoption does: it cannot rule an erasure out.
+                        log.info("lexical atomic publish aborted: a Source was retired during the build")
+                        return self._decline_rebuild("source_changed")
                     published = self._replace_live_catalog(temp_path)
                     if published:
                         # The whole catalogue replaced the adopted one, so no heal is owed.
@@ -10211,6 +10272,9 @@ class LexicalStore:
             # the replacement its own frequency revision.
             conn.execute("DELETE FROM meta")
             self._create_catalog_tables(conn)
+            # The copied journal is the live catalogue's history, which a Source erasure may restart after
+            # this copy; the replacement starts its own, so no kept state patches across a rebuild.
+            _restart_change_journal(conn)
         return None
 
     @staticmethod
