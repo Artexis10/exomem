@@ -238,5 +238,5 @@ def read(fmt: SourceFormat, stream: BinaryIO, *, start: int = 0) -> Iterator[tup
                 yield index, reader(item, fmt, index)
             else:
                 yield index, Unreadable(f"item-{index + 1:06d}", "it is not an object")
-    except (ijson.JSONError, UnicodeDecodeError) as error:
+    except (ijson.JSONError, UnicodeDecodeError, OSError) as error:
         raise ExportFault(type(error).__name__) from None

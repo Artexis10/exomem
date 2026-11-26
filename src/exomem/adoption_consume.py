@@ -86,9 +86,14 @@ def _member_path(stage: import_stage.Stage, original_path: str) -> str | None:
 
 
 def entry_of(stage: import_stage.Stage, original_path: str) -> tuple[int, str] | None:
-    """The manifest's (size, SHA-256) for a staged file given by its vault-relative path, or None if unlisted."""
+    """The (size, SHA-256) that the manifest, or the cell's own record of a file it derived, gives a staged file by its vault-relative path; None if neither lists it."""
     member_path = _member_path(stage, original_path)
-    return None if member_path is None else stage.members.get(member_path)
+    if member_path is None:
+        return None
+    if (entry := stage.members.get(member_path)) is not None:
+        return entry
+    derived = stage.derived.get(member_path)
+    return None if derived is None else (derived.size, derived.sha256)
 
 
 def identity_of(stage: import_stage.Stage, original_path: str) -> import_stage.Identity | None:
