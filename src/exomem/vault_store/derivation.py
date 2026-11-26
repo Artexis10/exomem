@@ -4,7 +4,8 @@ A governed write commits page bytes, audit rows, projection intents and one deri
 in one short transaction under the vault mutation boundary (``write.commit``). The lexical, identity,
 prior-path, page-fact, inbound and graph rows follow here, on the store thread, in transactions of
 their own that never take that boundary: the store thread is the store's only writer, and it runs this
-drain before any other work, so every later write and check sees the rows of every earlier commit.
+drain before any other work, a stretch of at most ``SLICE_SECONDS`` a turn. A check that meets a page
+whose rows still wait reads that page from its stored bytes (``underived``).
 
 A batch takes whole revisions of intents in ``(revision, path)`` order, derives them with the code that
 file mode uses, re-derives the pages whose links they move, deletes the intents and advances the store
@@ -51,10 +52,13 @@ BATCH_PAGES = 32
 RETRY_SECONDS = 1.0
 MAX_RETRY_SECONDS = 300.0
 
-#: The seconds that a writing request that derives its own intents (``committed``) spends on them
-#: before it acknowledges with its derived state pending; the store thread derives the rest before
-#: its next request.
-OWN_DERIVATION_SECONDS = 30.0
+#: The longest that one stretch of derivation holds the store thread, whether the thread derives what
+#: is owed (``StoreServer._derive_owed``) or a request derives its own intents (``committed``). It
+#: stays well below the mutation timeout (5 s by default), so a queued request is taken in time; a
+#: batch transaction runs whole, so a stretch ends at the first batch boundary after it. A request
+#: acknowledges with its derived state pending past it, and the store thread derives the rest in
+#: later stretches, between its requests.
+SLICE_SECONDS = 1.0
 #: The longest that a read waits for the derivation of the writes acknowledged before it began
 #: (``caught_up``); its request budget may cut the wait shorter.
 READ_WAIT_SECONDS = 1.0
@@ -176,7 +180,7 @@ def committed(writer: CollectionWriter, before: tuple, after: tuple, paths: tupl
     def follow() -> list[object]:
         try:
             with media_capacity.commit_credit(credit) if credit is not None else nullcontext():
-                drain(root, writer, deadline=time.monotonic() + OWN_DERIVATION_SECONDS)
+                drain(root, writer, deadline=time.monotonic() + SLICE_SECONDS)
         except Exception:  # noqa: BLE001 - the page is durable; the store thread drains it again
             log.warning("the intents of a commit to %s could not be derived yet", root, exc_info=True)
             owe(root, time.monotonic() + RETRY_SECONDS)

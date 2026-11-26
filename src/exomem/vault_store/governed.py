@@ -113,7 +113,7 @@ def settle(root: Path, operation: Any, kind: str, paths: list[str], warnings: li
         return rows if purged is None else index_sync.with_component(rows, purged)
 
     # One bound for the request's derivation of these rows: its follow's, and any second pass here.
-    deadline = time.monotonic() + derivation.OWN_DERIVATION_SECONDS
+    deadline = time.monotonic() + derivation.SLICE_SECONDS
     if writer_lease.defer_until_terminal_persisted(
         lambda: _settle_after_release(root, operation, kind, paths, with_purge, deadline)
     ):

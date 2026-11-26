@@ -36,7 +36,7 @@ from test_vault_store_derivation_queue import HOLD_GROWTH_LIMIT_MS, SLOW_DERIVAT
 from test_vault_store_governed_writers import tombstones
 from test_vault_store_media import PICTURE, PICTURE_BYTES
 from test_vault_store_migration import ALPHA, BETA, DIAGRAM, DIAGRAM_BYTES, vault  # noqa: F401
-from test_vault_store_write_path import store_rows
+from test_vault_store_write_path import bm25_paths, store_rows
 
 from exomem import (
     commands,
@@ -544,6 +544,92 @@ def test_a_save_replies_before_the_store_thread_derives_its_rows(stored, service
         f"the save replied in {slow:.2f} s with a {SLOW_DERIVATION_SECONDS:.0f} s derivation, "
         f"against {quick:.2f} s with an instant one"
     )
+
+
+#: One derivation batch this slow, one page per batch, makes a dozen pages cost several slices.
+BATCH_SECONDS = 0.5
+BACKLOG_PAGES = 12
+
+
+@contextmanager
+def slow_batches(monkeypatch):
+    """Each derivation batch takes ``BATCH_SECONDS`` and holds one page; the yielded list's first
+    item sets the seconds, so a test ends its backlog fast by setting it to zero."""
+    seconds = [BATCH_SECONDS]
+    real = derive.derive_paths
+
+    def derive_paths(*arguments, **keywords):
+        time.sleep(seconds[0])
+        return real(*arguments, **keywords)
+
+    monkeypatch.setattr(derivation, "BATCH_PAGES", 1)
+    monkeypatch.setattr(derive, "derive_paths", derive_paths)
+    yield seconds
+
+
+def backlog_page(number):
+    return f"{NOTES}/Backlog {number}.md", f"# Backlog {number}\n\nThe ferry calls at dusk.\n".encode()
+
+
+def test_a_request_queued_behind_a_derivation_backlog_is_served_before_the_backlog_is_drained(
+    stored, monkeypatch
+):
+    """A start that finds a dozen intents due, each batch slow, and a request that reaches the store
+    thread while it derives them. Derived whole before the thread took anything else, the backlog
+    outlasted the mutation timeout, and the request was refused as busy."""
+    with store_thread(stored):
+        server = runtime._server(stored.resolve())
+        derived(stored)
+        with monkeypatch.context() as patch:  # commits that nothing derives, as a crash leaves them
+            patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: derivation.Drained())
+            patch.setattr(derivation, "owe", lambda *_arguments, **_keywords: None)
+            for number in range(BACKLOG_PAGES):
+                rel, body = backlog_page(number)
+                commit(stored, puts=(write.PagePut(rel, body),))
+        with slow_batches(monkeypatch) as seconds:
+            derivation.owe(stored.resolve())
+            server.call(lambda: None)  # wakes the idle thread, which then derives what is owed
+            time.sleep(BATCH_SECONDS / 2)  # the thread is inside its first batch
+            began = time.monotonic()
+            served = server.call(time.monotonic, read_only=True)
+            waited = served - began
+            left = len(store_rows(stored, "SELECT path FROM store_derivation_queue"))
+            seconds[0] = 0.0
+            derived(stored)
+
+    print(json.dumps({"served_after_s": round(waited, 3), "intents_left_when_served": left}))
+    assert waited < server.manager._mutation_timeout_seconds / 2, waited
+    assert left > 0, "the request must be served while the backlog stands for this check to mean anything"
+
+
+def test_a_request_that_commits_many_pages_acknowledges_after_one_slice_of_their_rows(
+    stored, service, monkeypatch
+):
+    """A request that commits a dozen pages and derives its own rows, each batch slow. It spent its
+    whole own-derivation budget on them before it acknowledged; it now acknowledges after one slice
+    with the rest pending, and the store thread derives that rest."""
+    derived(stored)
+    pages = [backlog_page(number) for number in range(BACKLOG_PAGES)]
+
+    def commit_pages(writer):
+        with derivation.own_rows():
+            for rel, body in pages:
+                write.commit(
+                    writer, write.StoreChange(write.Origin.GOVERNED, "served test", puts=(write.PagePut(rel, body),))
+                )
+
+    with slow_batches(monkeypatch) as seconds:
+        began = time.monotonic()
+        projector.store_thread_runner(stored)(commit_pages)
+        acknowledged = time.monotonic() - began
+        pending = len(store_rows(stored, "SELECT path FROM store_derivation_queue"))
+        seconds[0] = 0.0
+        derived(stored)
+
+    print(json.dumps({"acknowledged_after_s": round(acknowledged, 3), "pages_pending_at_ack": pending}))
+    assert acknowledged < derivation.SLICE_SECONDS + 2 * BATCH_SECONDS + 1.0, acknowledged
+    assert 0 < pending < BACKLOG_PAGES, "the request must leave some rows pending, and derive some"
+    assert {rel for rel, _body in pages} <= set(bm25_paths(stored, "ferry")), "the thread derived the rest"
 
 
 def test_a_drain_that_keeps_failing_is_retried_no_sooner_than_its_retry_delay(

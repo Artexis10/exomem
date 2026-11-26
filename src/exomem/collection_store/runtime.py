@@ -1853,10 +1853,11 @@ class StoreServer:
 
         A writing request derives its own intents after it releases the vault boundary; this step
         derives what one left (a deadline, a kill, a failure whose retry fell due) before the thread
-        takes other work. It holds no vault boundary. A new writer handle (a start, a takeover)
-        first makes every intent due, so a start retries each failed one. After an idle release it
-        waits, as every tick does, for a request to take the lease again: the release derived what
-        was due.
+        takes other work, for at most ``derivation.SLICE_SECONDS`` a turn, so a backlog never holds a
+        queued request past its mutation timeout. It holds no vault boundary. A new writer handle (a
+        start, a takeover) first makes every intent due, so a start retries each failed one. After an
+        idle release it waits, as every tick does, for a request to take the lease again: the release
+        derived what was due.
         """
         from ..vault_store import derivation
 
@@ -1876,7 +1877,9 @@ class StoreServer:
                     with derivation.scope(self.root):
                         derivation.started(self.root, writer)
                     self._derivation_handle = writer.handle
-                derivation.drain(self.root, writer)
+                # One bounded stretch: what stays due is owed at once, so the next turn takes a queued
+                # request first and then derives the next stretch.
+                derivation.drain(self.root, writer, deadline=time.monotonic() + derivation.SLICE_SECONDS)
         except Exception:  # noqa: BLE001 - the intents stay queued, and a later turn derives them
             # The first failure of a run warns; its repeats, one per retry, log at debug.
             (logger.debug if self._derive_failing else logger.warning)(

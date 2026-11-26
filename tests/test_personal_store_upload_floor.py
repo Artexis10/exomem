@@ -139,6 +139,9 @@ def test_indexable_original_needs_room_for_its_search_rows(
     floor = 1024**2
     config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": floor}}}))
     monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    # This page's first batch takes seconds to fail; the request must try each page alone before it
+    # acknowledges, which a one-second slice would cut short on a slow host.
+    monkeypatch.setattr(derivation, "SLICE_SECONDS", 60.0)
     free = [floor + 6 * floor]
     monkeypatch.setattr(media_capacity.shutil, "disk_usage",
                         lambda _path: SimpleNamespace(total=128 * floor, free=free[0]))
