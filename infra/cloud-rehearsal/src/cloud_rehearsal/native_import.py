@@ -124,10 +124,9 @@ class CliRun:
     log_file: Path
 
 
-def lone_import_reported(result: Mapping[str, Any], import_id: str) -> bool:
-    """The result of one completed import: nothing else, apart from `cell_filing: asked` when the CLI asked the cell to file."""
-    bare = {key: value for key, value in result.items() if key != "cell_filing"}
-    return bare == {"ok": True, "import_id": import_id, "state": "done"} and result.get("cell_filing") in (None, "asked")
+def lone_import_reported(result: Mapping[str, Any], import_id: str, cell_filing: str | None) -> bool:
+    """The result of one completed import, with nothing else but the claim `cell_filing` that the run expects."""
+    return result == {"ok": True, "import_id": import_id, "state": "done", **({"cell_filing": cell_filing} if cell_filing else {})}
 
 
 def _cli_name(ctx: Context, label: str) -> str:
@@ -170,13 +169,13 @@ def retain_cli_diagnostics(ctx: Context, label: str) -> dict | None:
 async def run_cli_import(ctx: Context, image: str, source: Path, *, label: str = "",
                          include_hidden: bool = False, wait_seconds: int = 900,
                          tenant: Tenant | None = None, cli_args: Sequence[str] = (),
-                         windowed: bool = False) -> CliRun:
+                         cell_filing: str | None = None) -> CliRun:
     """Run the shipped CLI against `source` as a person would, signing in through the headless browser.
 
     `label` keeps a second import's container and files apart from the first one's. `tenant` is the person
     whose cell receives it (default: the owner, A). `cli_args` go to `exomem cloud import` as given.
-    `windowed` is for a cell that has a media store: the CLI then reports its windows (`import_ids`) in place of one
-    import's state. Any other cell gets one import, and a CLI that asked it to file adds `cell_filing: asked`.
+    A rehearsal cell has no media store, so the CLI sends one import. `cell_filing` is the claim that its result
+    must make: `asked` when it asks the cell to file, and None for an upload with `--no-file`.
     """
     tenant = tenant or ctx.a
     if not tenant.cell_id or not tenant.session:
@@ -257,13 +256,8 @@ async def run_cli_import(ctx: Context, image: str, source: Path, *, label: str =
     if exited.stdout.strip() != "0" or len(results) != 1 or not results[0].get("ok"):
         raise StepFailure(f"native CLI did not return success; exit={exited.stdout.strip()}, structured_results={results}")
     result = results[0]
-    if windowed:
-        ids = [str(uuid.UUID(value)) for value in result.get("import_ids") or []]
-        if not ids or result.get("windows") != len(ids):
-            raise StepFailure(f"native CLI did not report its landed windows: {result}")
-        return CliRun(name, fixture, checkpoint, ids[-1], result, egress, log_file)
     import_id = str(uuid.UUID(result["import_id"]))
-    if not lone_import_reported(result, import_id):
+    if not lone_import_reported(result, import_id, cell_filing):
         raise StepFailure(f"native CLI did not report the completed C5 import: {result}")
     return CliRun(name, fixture, checkpoint, import_id, result, egress, log_file)
 

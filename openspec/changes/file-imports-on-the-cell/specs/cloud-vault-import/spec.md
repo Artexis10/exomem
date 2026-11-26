@@ -25,7 +25,7 @@
 
 ### Requirement: A folder with no window budget goes as one import that the cell files
 
-A folder sent as one import, because the cell reports no window budget, SHALL carry the series file that a window carries when the cell offers filing and the command asks the cell to file or states a label. When the command asks the cell to file, the final result line SHALL say `"cell_filing": "asked"`. For a cell that does not offer filing, the import SHALL stay plain, the line SHALL say `"cell_filing": "not_offered"`, and a given `--label` SHALL be reported as one that the cell cannot record.
+A cell that reports no window budget gets the folder as one import. The import SHALL carry the series file of a window when the cell offers filing and the command asks it to file or states a label. When the command asks the cell to file, the result line SHALL say `"cell_filing": "asked"`. A cell that does not offer filing SHALL get a plain import. When the command asks that cell to file, the line SHALL say `"cell_filing": "not_offered"`.
 
 #### Scenario: A cell with no window budget
 
@@ -34,5 +34,19 @@ A folder sent as one import, because the cell reports no window budget, SHALL ca
 
 #### Scenario: A cell that cannot file
 
-- **WHEN** `exomem cloud import` uploads a folder to a cell that reports no window budget and does not offer filing
-- **THEN** the import is plain, the result line says `"cell_filing": "not_offered"`, and the result does not claim that the cell will file it
+- **WHEN** `exomem cloud import --label X` uploads a folder to a cell that reports no window budget and does not offer filing
+- **THEN** the import is plain, the command reports that the cell cannot record the label, the result line says `"cell_filing": "not_offered"`, and the result does not claim that the cell will file it
+
+### Requirement: A resumed one-import run keeps the choices of its first run
+
+The checkpoint of a one-import run SHALL record whether its series file asks the cell to file, its label and its collection. A rerun that gives other values SHALL stop with `CHECKPOINT_OPTIONS_CHANGED`, name the flag that differs and keep the checkpoint. A rerun that matches SHALL report the recorded `cell_filing`. A checkpoint with no record SHALL count as a plain import.
+
+#### Scenario: A rerun changes what the series file carries
+
+- **WHEN** a one-import run stops after it declared its import with `--no-file`, and the rerun uses the default flags
+- **THEN** the command stops with `CHECKPOINT_OPTIONS_CHANGED`, names `--no-file`, and keeps the checkpoint
+
+#### Scenario: A rerun matches the first run
+
+- **WHEN** a one-import run that asked the cell to file stops, and the rerun uses the same flags
+- **THEN** the import lands with the series file of the first run, and the result line says `"cell_filing": "asked"`

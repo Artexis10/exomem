@@ -311,13 +311,6 @@ def check_origin(series: Mapping[str, Any]) -> list[str]:
     return problems
 
 
-def check_cli_asked(result: Mapping[str, Any]) -> list[str]:
-    """The CLI says it asked the cell to file the one import; a CLI that did not leaves nothing to file the stage."""
-    if result.get("cell_filing") == "asked":
-        return []
-    return [f"the CLI's result says cell_filing {result.get('cell_filing')!r}, expected 'asked': {dict(result)}"]
-
-
 def check_no_client_file_call(call_labels: Sequence[str]) -> list[str]:
     """The harness's own MCP client made no `file` call; it only read the cell's status."""
     return [f"the harness client called {label}, which can file" for label in sorted(set(call_labels))
@@ -383,7 +376,7 @@ def left_behind_lines(log: str) -> list[str]:
 async def send_fixture(ctx: Context, plan: HomeImportPlan, folder: Path, out: dict[str, Any]) -> str:
     """The CLI upload through the real import Job, as a person runs it: it asks the cell to file and files nothing itself."""
     try:
-        cli = await run_cli_import(ctx, plan.cli_image, folder, label="home", tenant=ctx.a,
+        cli = await run_cli_import(ctx, plan.cli_image, folder, label="home", tenant=ctx.a, cell_filing="asked",
                                    cli_args=["--no-wait", "--label", ORIGIN_LABEL])
     finally:
         retain_cli_diagnostics(ctx, "home")
@@ -392,9 +385,6 @@ async def send_fixture(ctx: Context, plan: HomeImportPlan, folder: Path, out: di
     out["cli"] = {"result": cli.result, "left_behind_lines": left_behind_lines(log)}
     await ctx.wait_cell(ctx.a.cell_id, lambda cell: bool(cell.get("ready")) and cell.get("observed_state") == "running"
                         and cell.get("hold_kind") is None, timeout=900, description="the imported cell to resume ready")
-    problems = check_cli_asked(cli.result)
-    if problems:
-        raise StepFailure("; ".join(problems))
     return cli.import_id
 
 

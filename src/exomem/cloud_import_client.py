@@ -14,7 +14,7 @@ import tarfile
 import time
 import uuid
 from collections.abc import Callable, Iterable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -139,6 +139,41 @@ class Window:
     series_file: bytes
     # The import ID that the series records before the send, so a rerun finds the window's receipt by it.
     import_id: str | None = None
+
+
+# What a lone import's series file depends on, by the flag that a person gives. This CLI's own arguments fix the set.
+CHOICE_FLAGS = {"filing": "--no-file", "label": "--label", "collection": "--collection"}
+
+
+@dataclass(frozen=True)
+class Choices:
+    """What a lone import's series file carries, and the claim its result makes, as the checkpoint keeps them.
+
+    The archive of the first run holds the series file, so a rerun cannot change it. A rerun whose options differ is
+    refused, and one that matches reports what the checkpoint recorded, not what this run would have decided.
+    """
+
+    filing: bool = False  # the series file asks the cell to file
+    label: str | None = None
+    collection: str | None = None
+    carried: bool = False  # the archive holds a series file at all
+    cell_filing: str | None = None  # the result's claim, decided when the import is declared
+
+
+def _resumed_choices(now: Choices, state: dict, ciphertext: Path) -> Choices:
+    """The choices that the checkpoint recorded, once this run's options are shown to match them."""
+    # A checkpoint from before the record was a plain import: no series file, no claim.
+    recorded = Choices(**state["choices"]) if "choices" in state else Choices()
+    differs = [flag for key, flag in CHOICE_FLAGS.items() if getattr(recorded, key) != getattr(now, key)]
+    # A built archive is uploaded as it is, so only a plan still to be rebuilt depends on what the cell offers now.
+    built = ciphertext.exists() or "ciphertext_sha256" in state
+    if not differs and not built and recorded.carried != now.carried:
+        differs.append("what the cell offers for filing")
+    if differs:
+        raise CloudImportError(PREFLIGHT, "CHECKPOINT_OPTIONS_CHANGED",
+                               f"this run differs from the checkpoint made for this import in {', '.join(differs)}; "
+                               "run the command as it was first run")
+    return recorded
 
 
 @dataclass(frozen=True)
@@ -396,10 +431,12 @@ async def import_source(source: Path, config: CloudImportClientConfig, checkpoin
                         api=None, uploads=None, poll_seconds: float = 2,
                         progress: Progress | None = None,
                         free_bytes: Callable[[Path], int] = _free_bytes,
-                        window: Window | None = None) -> dict:
+                        window: Window | None = None, choices: Choices | None = None) -> dict:
     """Reauthorize on restart and reuse the same private ciphertext and part receipts.
 
-    A `window` sends only its members, with the series file; the source's other files stay behind.
+    A `window` sends only its members, with the series file; the source's other files stay behind. A lone import
+    gives its `choices`, which the checkpoint records when it declares the import, and the result's `cell_filing`
+    comes from them.
 
     Every failure leaves as a `CloudImportError` that names its phase, a content-free code and the import id.
     """
@@ -408,7 +445,7 @@ async def import_source(source: Path, config: CloudImportClientConfig, checkpoin
         return await _import(source, config, checkpoint, where, scope=scope, category=category,
                              include_hidden=include_hidden, use_gitignore=use_gitignore, api=api,
                              uploads=uploads, poll_seconds=poll_seconds, progress=progress or Progress(),
-                             free_bytes=free_bytes, window=window)
+                             free_bytes=free_bytes, window=window, choices=choices)
     except CloudImportError as error:
         error.import_id = error.import_id or where.import_id
         raise
@@ -418,8 +455,10 @@ async def import_source(source: Path, config: CloudImportClientConfig, checkpoin
 
 async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Path, where: _Where, *,
                   scope, category, include_hidden, use_gitignore, api, uploads, poll_seconds,
-                  progress: Progress, free_bytes, window: Window | None = None) -> dict:
+                  progress: Progress, free_bytes, window: Window | None = None, choices: Choices | None = None) -> dict:
     source = source.resolve()
+    if choices is not None:
+        choices = replace(choices, carried=window is not None)
     checkpoint = checkpoint.resolve()
     if source.is_dir() and checkpoint.is_relative_to(source):
         raise CloudImportError(PREFLIGHT, "CHECKPOINT_INSIDE_SOURCE", "the checkpoint folder must be outside the source folder")
@@ -456,6 +495,8 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
             if state.get("selection", options) != options:
                 raise CloudImportError(PREFLIGHT, "CHECKPOINT_OPTIONS_CHANGED",
                                        "the checkpoint was made with other --include-hidden or --no-gitignore options")
+            if choices is not None:
+                choices = _resumed_choices(choices, state, ciphertext)
             where.import_id = state["import_id"]
             progress.say(f"Resuming import {state['import_id']} from {checkpoint}.")
         else:
@@ -474,6 +515,8 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
             state = {"source": str(source), "config": asdict(config), "import_id": (window.import_id if window else None) or str(uuid.uuid4()),
                      "kind": plan.kind, "declared_files": plan.files, "declared_bytes": plan.bytes, "parts": {},
                      "envelope": envelope.model_dump() if envelope else None, "selection": options}
+            if choices is not None:
+                state["choices"] = asdict(choices)
             where.import_id = state["import_id"]
             _private_json(record, state)
         endpoint = base + "/" + state["import_id"]
@@ -519,7 +562,7 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
             progress.say(f"Removed the encrypted copy ({human_bytes(state['ciphertext_bytes'])}) from {checkpoint}.")
         ciphertext.unlink(missing_ok=True)
         record.unlink(missing_ok=True)
-        return result
+        return {**result, "cell_filing": choices.cell_filing} if choices is not None and choices.cell_filing else result
 
     try:
         # A client-supplied UUID makes a dropped initial response safe to replay.

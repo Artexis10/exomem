@@ -201,22 +201,18 @@ def test_a_series_file_that_does_not_ask_the_cell_to_file_or_lacks_the_origin_is
     assert len(home_import.check_origin({**asked, "origin": {"label": "x", "browser_family": "safari"}})) == 2
 
 
-def test_a_cli_that_did_not_ask_the_cell_to_file_is_reported() -> None:
-    """The failure the run hit when `--no-wait` met a cell with no media store: the import was done and nothing filed it."""
-    assert home_import.check_cli_asked({"ok": True, "state": "done", "cell_filing": "asked"}) == []
-    assert len(home_import.check_cli_asked({"ok": True, "state": "done"})) == 1
-    assert len(home_import.check_cli_asked({"ok": True, "state": "done", "cell_filing": "not_offered"})) == 1
-
-
-def test_the_result_of_a_lone_import_is_accepted_with_or_without_the_request_to_file_and_nothing_else() -> None:
-    """The run failed on a lone result that the windowed check read as missing windows; `--no-file` runs keep the exact result."""
+def test_the_result_of_a_lone_import_is_exactly_the_claim_the_run_expects() -> None:
+    """Catches a result that drops the claim the run expects, or invents one: `asked` for the home import, none for `--no-file`."""
     done = {"ok": True, "import_id": "e91b0d91-79ab-4c9c-950b-a85e80c3a7ef", "state": "done"}
     id_ = done["import_id"]
 
-    assert lone_import_reported(done, id_) and lone_import_reported({**done, "cell_filing": "asked"}, id_)
-    assert not lone_import_reported({**done, "cell_filing": "not_offered"}, id_)
-    assert not lone_import_reported({**done, "windows": 1}, id_)
-    assert not lone_import_reported({**done, "state": "importing"}, id_)
+    assert lone_import_reported({**done, "cell_filing": "asked"}, id_, "asked")
+    assert lone_import_reported(done, id_, None)
+    assert not lone_import_reported(done, id_, "asked")
+    assert not lone_import_reported({**done, "cell_filing": "asked"}, id_, None)
+    assert not lone_import_reported({**done, "cell_filing": "not_offered"}, id_, "asked")
+    assert not lone_import_reported({**done, "windows": 1}, id_, None)
+    assert not lone_import_reported({**done, "state": "importing"}, id_, None)
 
 
 def test_a_file_call_from_the_harness_client_is_reported_and_status_reads_are_not() -> None:

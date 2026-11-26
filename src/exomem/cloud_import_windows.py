@@ -30,6 +30,7 @@ from .cloud_import_client import (
     CHECKPOINT_RECORD,
     PREFLIGHT,
     REGISTER,
+    Choices,
     CloudImportClientConfig,
     CloudImportError,
     Window,
@@ -67,6 +68,8 @@ _REPEAT_ONCE = frozenset({"MUTATION_OUTCOME_UNKNOWN", "MUTATION_COMMITTED_ACKNOW
 _REPEAT_AFTER_WAIT = "MUTATION_ACKNOWLEDGEMENT_PENDING"
 # The code with which a cell refuses an action that it does not know.
 _UNKNOWN_ACTION = "INVALID_MODE"
+# The `file` operation's field that arrived with the resident filer (a wake that does not wait for the filing).
+_FILER_FIELD = "wait"
 # The code that the CLI gives a tool error, because the transport carries no code of the cell's own.
 _TOOL_ERROR = "TOOL_ERROR"
 
@@ -94,8 +97,8 @@ class Cell:
         raise FilingUnavailable
 
     async def offers_file(self) -> bool:
-        """Whether the cell takes a request to file; a cell not shown to lack it is taken to offer it."""
-        return True
+        """Whether the cell files a registered import itself; the base cell cannot file, as its `file` says."""
+        return False
 
 
 class McpCell(Cell):
@@ -113,10 +116,13 @@ class McpCell(Cell):
             self._entered = False
             await self._client.__aexit__(*error)
 
-    async def _call(self, arguments: dict) -> dict:
+    async def _enter(self) -> None:
         if not self._entered:
             await self._client.__aenter__()
             self._entered = True
+
+    async def _call(self, arguments: dict) -> dict:
+        await self._enter()
         # The cell lists the public tools only, so the grouped call goes out as the door call that stands for it.
         result = await self._client.call_tool(*operation_entries.spell_call("adoption_studio", arguments, "public"))
         if isinstance(result.structured_content, dict):
@@ -141,19 +147,48 @@ class McpCell(Cell):
             return {"success": False, "error": {"code": _TOOL_ERROR, "message": str(error)}}
 
     async def offers_file(self) -> bool:
-        return not await self._lacks_file()
+        """Whether the cell shows that it files a registered import with no caller, as its resident filer does.
+
+        The filer came with the `wait` field of the `file` operation. A cell that lists the operation's fields without
+        `wait` files only inside a call, and a write door without `imports.file` has no filing at all. The probe shows
+        that the cell's code has the filer, not that the filer is running. A reply that cannot be read proves
+        nothing, so the cell is then taken to offer filing.
+        """
+        await self._enter()
+        if await self._lacks_file():
+            return False
+        fields = await self._file_fields()
+        return fields is None or _FILER_FIELD in fields
+
+    async def _file_fields(self) -> set[str] | None:
+        """The fields that the cell's own help lists for its `file` operation; None when it cannot be read.
+
+        The door's published schema lists no per-operation fields, so `read_instructions` is the cell's answer.
+        """
+        operation = self._file_door()[1]["operation"]
+        try:
+            result = await self._client.call_tool("read_instructions", {"topic": operation})
+            arguments = (result.structured_content or {}).get("arguments")
+            return set(arguments) if isinstance(arguments, dict) and arguments else None
+        except Exception:  # noqa: BLE001 -- help that cannot be read says nothing about the operation
+            return None
+
+    @staticmethod
+    def _file_door() -> tuple[str, dict]:
+        """The write door and the call that stands for `file` on it, as the public surface spells them."""
+        return operation_entries.spell_call("adoption_studio", {"action": "file"}, "public")
 
     async def _lacks_file(self) -> bool:
         """Whether the cell's published write door lists its operations, and `imports.file` is not one of them.
 
         A schema that cannot be read, or that lists no operations, proves nothing, so the caller keeps the error as a stop.
         """
-        door = operation_entries.spell_call("adoption_studio", {"action": "file"}, "public")[0]
+        door, call = self._file_door()
         try:
             for tool in await self._client.list_tools():
                 if tool.name == door:
                     operations = (((tool.input_schema or {}).get("properties") or {}).get("operation") or {}).get("enum") or ()
-                    return bool(operations) and "imports.file" not in operations
+                    return bool(operations) and call["operation"] not in operations
         except Exception:  # noqa: BLE001 -- a listing or a schema that cannot be read says nothing about the operation
             return False
         return False
@@ -1200,11 +1235,14 @@ async def _older_cell(source, config, checkpoint, limits, options, *, cell, api,
             progress.say("The cell does not file imports itself. Ask your assistant to file this import once it is staged.")
         if origin_label is not None:
             progress.say("The cell cannot record --label, so the files filed from this import will not carry it.")
+    claim = ("asked" if offered else "not_offered") if ask_cell else None
+    choices = Choices(filing=ask_cell, label=origin_label, collection=collection, cell_filing=claim)
     row = await import_source(source, config, checkpoint, api=api, uploads=uploads, poll_seconds=poll_seconds, progress=progress,
-                              include_hidden=options["include_hidden"], use_gitignore=options["use_gitignore"], window=window)
-    if not ask_cell:
-        return row
-    return {**row, "cell_filing": "asked" if offered else "not_offered"}
+                              include_hidden=options["include_hidden"], use_gitignore=options["use_gitignore"],
+                              window=window, choices=choices)
+    if row.get("cell_filing") == "asked":
+        progress.say("The upload is done and the cell files the folder by itself.")
+    return row
 
 
 async def _residual(cell: Cell) -> dict[str, tuple[str, int]]:

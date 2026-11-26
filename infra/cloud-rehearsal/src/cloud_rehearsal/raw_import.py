@@ -477,7 +477,7 @@ async def copy_vault(ctx: Context, tenant: Tenant, destination: Path) -> dict[st
 
 
 async def import_collection(ctx: Context, plan: RawImportPlan, tenant: Tenant, collection: Path, name: str) -> tuple[str, dict]:
-    """The CLI import as a person runs it. Returns the staged folder's vault path and the import's row."""
+    """The CLI upload with `--no-file`, so the assistant files it. Returns the staged folder's vault path and the import's row."""
     try:
         cli = await run_cli_import(ctx, plan.cli_image, collection, label=name, tenant=tenant, cli_args=UPLOAD_ONLY)
     finally:

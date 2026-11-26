@@ -547,7 +547,7 @@ async def generate(ctx: Context, plan: LargeImportPlan, name: str) -> Folder:
 
 
 async def upload(ctx: Context, plan: LargeImportPlan, folder: Folder) -> dict:
-    """The CLI import as a person runs it; returns the import's row once the cell has resumed."""
+    """The CLI upload with `--no-file`, so the agent files it; returns the import's row once the cell has resumed."""
     try:
         cli = await run_cli_import(ctx, plan.cli_image, folder.source, label=folder.name, cli_args=UPLOAD_ONLY,
                                    include_hidden=folder.include_hidden, wait_seconds=int(max(300, min(2700, plan.remaining()))))
