@@ -68,6 +68,11 @@ Registry changes SHALL require no corpus rebuild, and an endpoint outside the re
 - **THEN** keyword, hybrid and vector retrieval return the requested number of eligible units without a corpus scan
 - **AND** authored rows with invalid values consume no lane slot
 
+#### Scenario: A broad dimension ranks its newest members within a bound
+- **WHEN** a hybrid or vector request filters by a dimension with more members than eight candidate windows, and other units of their pages outrank every member
+- **THEN** the vector lane ranks the newest members within that bound and the result fills the requested limit
+- **AND** the result reports that one search method may have missed results
+
 #### Scenario: A complement keeps an invalid authored row
 - **WHEN** a served filter negates a governed-key dimension and an authored member row has no valid selected value
 - **THEN** the unit remains eligible through `$not` and `$ne`, as the offline reader decides

@@ -3153,9 +3153,9 @@ _MIXED_UNITS_PER_PARENT_CAP = 3
 _MIXED_PAGE_WEIGHT = 1.0
 _MIXED_UNIT_WEIGHT = 1.0
 _UNIT_EXCERPT_MAX = 320
-#: Doublings of a dimension's vector window. The deepest window, eight times the first, bounds the
-#: members a filtered search reads for its vector lane and that lane's reads at four.
-_DIMENSION_VECTOR_DOUBLINGS = 3
+#: Candidate windows of a dimension's members that its vector lane ranks alone. A dimension with
+#: more members first ranks its proposed parents' units, then its newest members if those fall short.
+_DIMENSION_MEMBER_WINDOWS = 8
 
 
 def _unit_excerpt(content: str) -> str:
@@ -4406,38 +4406,31 @@ def _find_semantic_units(
         vector_parent_paths = snapshot.recall_paths(scope)
         if allowed_parent_paths is not None:
             vector_parent_paths = vector_parent_paths & allowed_parent_paths
-        vector_window = window
-        deepest = window << _DIMENSION_VECTOR_DOUBLINGS
-        # The dimension's members, when the index proposes single units and they fit the deepest window.
-        vector_member_refs: set[str] | None = None
-        # The newest members of a dimension with more members than the deepest window.
+        # A dimension's members when the vector lane ranks them alone, else its newest members.
+        member_refs: set[str] | None = None
         newest_members: list[Any] | None = None
-        deepens = False
-        if pushed_dimensions and not structured_filters.plan_index_eligibility(plan).requires_edge_families:
-            # Kinds and keys propose single units, so the vector lane can rank the members alone.
-            members = dimension_rows("", k=deepest + 1)
-            if len(members) <= deepest:
-                vector_member_refs = {row.unit_ref for row in members}
+        if pushed_dimensions:
+            # The store checks each proposed unit exactly, so the vector lane can rank the members alone.
+            bound = window * _DIMENSION_MEMBER_WINDOWS
+            members = dimension_rows("", k=bound + 1)
+            if len(members) <= bound:
+                member_refs = {row.unit_ref for row in members}
                 vector_parent_paths = vector_parent_paths & {row.parent_path for row in members}
             else:
+                # Too many members to rank alone: rank the proposed parents' units first.
                 newest_members = members
-        if pushed_dimensions and vector_member_refs is None:
-            # Rank the units of the parents the plan can propose, reading deeper within a bound.
-            _dimension_parents = proposed_parents()
-            vector_parent_paths = vector_parent_paths & _dimension_parents
-            deepens = True
+                _dimension_parents = proposed_parents()
+                vector_parent_paths = vector_parent_paths & _dimension_parents
         if vector_allowed_refs is not None:
             # Public refs are per-reader meanings; their parents bound the rows read.
             vector_parent_paths = vector_parent_paths & {row.parent_path for row in indexed or ()}
-        vector_capped = False
-        # Parent-level hits kept when the lane turns to the newest members.
-        crowded: list[Any] = []
-        while True:
-            vector_hits, vector_profile, _indexed_scope = _vector_unit_candidates(
+
+        def vector_read(allowed_refs: set[str] | None):
+            return _vector_unit_candidates(
                 vault_root,
                 query=query,
                 candidate_limit=vector_candidate_limit,
-                allowed_unit_refs=vector_allowed_refs if vector_member_refs is None else vector_member_refs,
+                allowed_unit_refs=allowed_refs,
                 allowed_parent_paths=vector_parent_paths,
                 released_parent_paths=released_parent_paths,
                 degraded_out=degraded_out,
@@ -4446,34 +4439,27 @@ def _find_semantic_units(
                 query_vector_provider=query_vector_provider,
                 prepared_queries=prepared_queries,
             )
-            if not (deepens and len(vector_hits) > vector_window):
-                break
-            fresh = [hit for hit in vector_hits[:vector_window] if hit.unit_ref not in vector_selected]
+
+        vector_hits, vector_profile, _indexed_scope = vector_read(
+            vector_allowed_refs if member_refs is None else member_refs
+        )
+        vector_capped = False
+        if newest_members is not None and len(vector_hits) > window:
+            fresh = [hit for hit in vector_hits[:window] if hit.unit_ref not in vector_selected]
             vector_records.update(select(fresh, stale_out=vector_stale))
             vector_selected.update(hit.unit_ref for hit in fresh)
-            if len(records.keys() | vector_records.keys()) >= requested_limit or vector_stale:
-                break
-            vector_capped = newest_members is not None or vector_window >= deepest
-            if newest_members is not None:
+            if len(records.keys() | vector_records.keys()) < requested_limit and not vector_stale:
                 # Other units of the proposed parents crowd out the members: rank the newest members.
-                crowded = vector_hits[:vector_window]
-                vector_member_refs = {row.unit_ref for row in newest_members}
+                vector_capped = True
+                crowded = vector_hits[:window]
                 vector_parent_paths = vector_parent_paths & {row.parent_path for row in newest_members}
-                newest_members = None
-                deepens = False
-                continue
-            if vector_capped:
-                break
-            # Both lanes hold fewer members than the limit: read the vector lane twice as deep.
-            vector_window *= 2
-            vector_candidate_limit = vector_window + 1
-        if vector_capped:
-            # A bound stopped the lane short of every member; the result says its candidate window ran out.
-            seen = {hit.unit_ref for hit in vector_hits[:vector_window]}
-            vector_hits = [*vector_hits[:vector_window], *(hit for hit in crowded if hit.unit_ref not in seen)]
-            if failed_out is not None and "semantic_units_candidate_window" not in failed_out:
-                failed_out.append("semantic_units_candidate_window")
-            _record_degradation("semantic_units_candidate_window")
+                vector_hits, vector_profile, _indexed_scope = vector_read({row.unit_ref for row in newest_members})
+                seen = {hit.unit_ref for hit in vector_hits[:window]}
+                vector_hits = [*vector_hits[:window], *(hit for hit in crowded if hit.unit_ref not in seen)]
+                # The lane ranked only the newest members; the result says its candidate window ran out.
+                if failed_out is not None and "semantic_units_candidate_window" not in failed_out:
+                    failed_out.append("semantic_units_candidate_window")
+                _record_degradation("semantic_units_candidate_window")
         if (
             vector_allowed_refs is not None
             and {hit.unit_ref for hit in vector_hits} != vector_allowed_refs
@@ -4490,9 +4476,9 @@ def _find_semantic_units(
             _record_degradation("vector")
             if failed_out is not None and "vector" not in failed_out:
                 failed_out.append("vector")
-        elif vector_allowed_refs is None and not vector_capped and len(vector_hits) > vector_window:
+        elif vector_allowed_refs is None and not vector_capped and len(vector_hits) > window:
             candidate_window_exhausted = True
-            vector_hits = vector_hits[:vector_window]
+            vector_hits = vector_hits[:window]
     if vector_hits:
         stale_vector_refs = list(vector_stale)
         vector_records.update(select(

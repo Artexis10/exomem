@@ -1016,11 +1016,11 @@ def test_a_family_dimension_ranks_its_first_hits_the_same_at_any_limit(stored, w
     assert first_hits(3) == first_hits(60)[:3]
 
 
-def test_a_family_dimension_bounds_its_vector_reads_and_says_when_they_stop_short(
+def test_a_family_dimension_finds_members_the_vector_ranks_last_in_one_read(
     stored, writer, encoder, monkeypatch,  # noqa: F811
 ):
-    """Catches vector reads that grow with the units of a proposed page, and a bounded lane that
-    returns fewer hits than its limit without saying so."""
+    """Catches vector reads that grow with the other units of a member's page, and a filtered search
+    that stops short of members that both lanes rank last."""
     body = "# Family source\n\n" + "\n".join(
         f"## Claim\n- id: noise-{index}\n\nSignal number {index}.\n" for index in range(300)
     )
@@ -1046,10 +1046,10 @@ def test_a_family_dimension_bounds_its_vector_reads_and_says_when_they_stop_shor
         filters={"unit.dimension": {"$eq": "provenance"}}, limit=2, graph=False,
     )
 
-    assert len(reads) <= 4, f"the vector lane read windows of {reads}"
-    assert result["hits"] == []
-    # The reply tells the agent that the results may be incomplete.
-    assert result["notice"] == commands._SEARCH_NOTICE_DEGRADED
+    assert len(reads) == 1, f"the vector lane read windows of {reads}"
+    assert len(result["hits"]) == 2
+    assert all("Qualifying source material" in hit["excerpt"] for hit in result["hits"])
+    assert "notice" not in result
 
 
 def test_a_family_dimension_does_no_graph_work_for_unrelated_pages(stored, writer, monkeypatch):  # noqa: F811
