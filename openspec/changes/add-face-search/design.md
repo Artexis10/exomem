@@ -20,7 +20,7 @@ The first plan kept faces on the desktop owner service. The owner ruled on 26 No
 - Faces may run wherever the owner's Evermatter runs, desktop or Cloud cell.
 - Faces stay off per account until its owner opts in explicitly (D9). Biometric data used to identify a person is a special category under GDPR Article 9, which needs explicit consent. A setting in the vault would travel with an import into another account, so the setting lives in the account's state directory.
 - Face data never crosses accounts, tenants or principals, and never enters vault pages or sidecars, where it would travel with the vault.
-- Erasure reaches every live copy at once (D11). Face vectors stay out of every backup and export; whether the names do is D5.
+- Erasure reaches every live copy at once (D11). Face vectors stay out of every backup and export; backups keep the names (D5).
 
 No Cloud-specific path is designed. A cell runs the same worker step on its own CPU; the cost is a named risk.
 
@@ -60,11 +60,11 @@ Both stores live in a private directory, `private_state.store(vault_root, "faces
 - The face index holds detections and embeddings: faces (page, `frame_ts`, box, score, model id, vector, group id) and a generation counter. A re-scan recomputes it in minutes, so its registry family declares itself rebuildable, and backups leave it out as they leave out the CLIP index.
 - The people store holds what only the owner created: groups (centroid sum and count), people (display name, folded name), group-to-person links, face exclusions and settings (on/off, consent record, threshold overrides). Named voiceprints (`.voice_profiles.json`) are the precedent: owner-named biometric centroids, declared not rebuildable, kept by backups.
 
-Whether backups keep the people store is the owner's choice, asked on 26 Nov 2026. The build follows the recommended answer: the people store declares itself not rebuildable, so the personal backup stages it and a restore keeps names. A restored people store re-attaches names after the re-scan, because each new face joins the nearest group centroid (D6). The other answer adds one closed registry attribute, "stays out of every backup", which the people store sets; the personal backup skips it and cellctl mirrors it into its exclusions.
+The owner chose on 26 Nov 2026 that backups keep the people store. It declares itself not rebuildable, so the personal backup stages it and a restore keeps names. A restored people store re-attaches names after the re-scan, because each new face joins the nearest group centroid (D6).
 
 The Cloud cell backup (`infra/cellctl` `BACKUP_PATHS`) takes all of `/data/host`, so cellctl excludes the face index, and a test pins that mirror to the registry, as it pins the lexical staging exclusions today.
 
-Cost of the recommended answer: a delete erases every live copy at once, but older backups keep the people store until retention expires them (about four weeks on a Cloud cell). The delete result and status state that.
+Cost: a delete erases every live copy at once, but older backups keep the people store until retention expires them (about four weeks on a Cloud cell). The delete result and status state that.
 
 ### D6. Grouping: incremental nearest-centroid, people own groups
 
@@ -153,7 +153,7 @@ Removing one picture drops its face rows in the derived cleanup that drops its C
 - A Cloud cell's CPU limit slows the backfill and competes with other media work. The backfill runs at background priority in bounded batches; no Cloud-specific path is planned.
 - Faces of other people appear in the owner's photos. The opt-in is the owner's; the data stays in the owner's account and the delete is complete.
 - Sampled keyframes can miss a face that appears briefly. A video then does not match that person.
-- Older backups keep names and centroids until they expire (D5, recommended answer).
+- Older backups keep names and centroids until they expire (D5).
 
 ## Sources
 
