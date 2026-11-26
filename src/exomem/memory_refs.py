@@ -720,10 +720,15 @@ class ReferenceIndex:
         ref and id, not one that names nothing once its rows arrive.
 
         The check reads the pending state of ``wanted`` alone (``derivation.underived`` with its
-        paths), whatever the backlog, and never refuses it: a write asks for the ref of its own page
-        after it commits, so a refusal there would answer an error for a write that stands. The ref
-        of a derived page already comes from the rows as they stand, and a lagging page's ref
-        differs only in taking the bytes of ``wanted`` (a pending page outside ``wanted`` that
+        paths), whatever the backlog, and a write that asks for the ref of its own page after it
+        commits is never refused for it: a refusal there would answer an error for a write that
+        stands. A batch of more than ``derivation.UNDERIVED_CAP`` paths takes the capped form
+        instead (``derivation.underived`` says why), so beside a backlog past the cap it refuses
+        with ``VAULT_STORE_DERIVED_BEHIND``, and so does the read of the owners of its ids when more
+        than that many pages hold them.
+
+        The ref of a derived page already comes from the rows as they stand, and a lagging page's
+        ref differs only in taking the bytes of ``wanted`` (a pending page outside ``wanted`` that
         claims the same id shows once its rows arrive, as for a derived page).
         """
         from .vault_store import derivation

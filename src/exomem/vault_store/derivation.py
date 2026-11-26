@@ -434,9 +434,10 @@ def underived(conn: Connection, paths: Iterable[str] | None = None) -> dict[str,
     for a check that any pending page could change (a new link, a claimed id): its cost follows the
     backlog, so more than ``UNDERIVED_CAP`` pending pages refuse it with ``read.backlog_too_large()``
     before it reads one. The store thread derives the backlog between requests, so the retry finds it
-    smaller. Only an intent that has not failed counts toward the cap: a failed one retries on a
-    backoff and never leaves the queue, so it would refuse every such check for good. Its bytes are
-    read all the same, and the failed pages are the ones that status reports.
+    smaller. Only an intent that still has attempts left counts toward the cap: one that used up its
+    ``ATTEMPTS`` keeps retrying on a growing backoff and never leaves the queue while it fails, so it
+    would refuse every such check for good. Its bytes are read all the same, and status reports it as failed. An
+    intent that failed fewer times is a backlog still, because a retry that lands removes it.
 
     Keyed paths that outnumber ``UNDERIVED_CAP`` could name every waiting page, so that call takes
     this form too.
@@ -445,8 +446,8 @@ def underived(conn: Connection, paths: Iterable[str] | None = None) -> dict[str,
     if wanted is None or len(wanted) > UNDERIVED_CAP:
         waiting = _queue_rows(
             conn,
-            "SELECT path FROM store_derivation_queue WHERE operation = ? AND failed_code IS NULL LIMIT ?",
-            (DERIVE, UNDERIVED_CAP + 1),
+            "SELECT path FROM store_derivation_queue WHERE operation = ? AND attempts < ? LIMIT ?",
+            (DERIVE, ATTEMPTS, UNDERIVED_CAP + 1),
         )
         if waiting is not None and len(waiting) > UNDERIVED_CAP:
             raise read.backlog_too_large()

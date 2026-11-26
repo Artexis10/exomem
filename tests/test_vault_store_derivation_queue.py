@@ -410,24 +410,48 @@ def test_a_moved_page_keeps_its_ref_beside_a_backlog_past_the_cap(
     assert memory_refs.ReferenceIndex(served).ref_for_path(after) == memory_refs.memory_ref(identifier)
 
 
-def test_permanently_failed_derivations_never_make_a_link_guarded_write_refuse(
+def record_failures(writer, attempts):  # noqa: F811
+    """Give every intent in the queue ``attempts`` recorded failures and a retry far ahead, as the
+    drain leaves it, without running that many failing derivations."""
+    later = derivation._stamp(derivation._now() + timedelta(seconds=derivation.MAX_RETRY_SECONDS))
+    with writer.handle.transaction() as tx:
+        tx.execute(
+            "UPDATE store_derivation_queue SET attempts = ?, failed_code = ?, retry_at = ?",
+            (attempts, derivation.FAILED, later),
+        )
+
+
+def test_derivations_that_used_up_their_attempts_never_make_a_link_guarded_write_refuse(
     served, writer, monkeypatch  # noqa: F811
 ):
-    """More pages whose derivation failed for good than one check reads, and a few that still wait:
-    a failed intent retries forever and never leaves the queue, so counting it toward the cap would
-    refuse every delete for good, the delete that frees room for those rows included. The delete
-    runs, and still reads the failed pages' bytes, not their stale rows."""
+    """More pages whose derivation used up its attempts than one check reads, and a few that still
+    wait: such an intent keeps retrying on a growing backoff and never leaves the queue while it
+    fails, so counting it toward the cap would refuse every delete for good, the delete that frees room for those rows
+    included. The delete runs, and the check still reads the failed pages' bytes, not their rows."""
     save(served, HARBOUR, SMALL_TEXT.replace("Small", "Harbour"))
     commit_pending_pages(served, writer, monkeypatch, derivation.UNDERIVED_CAP + 1, "Failed")
-    fail_derivations(served, writer, monkeypatch, RuntimeError("the derivation broke"), derivation.ATTEMPTS)
-    assert store_rows(
-        served, "SELECT COUNT(*) FROM store_derivation_queue WHERE attempts >= ?", derivation.ATTEMPTS
-    ) == [(derivation.UNDERIVED_CAP + 1,)]
+    record_failures(writer, derivation.ATTEMPTS)
     commit_pending_pages(served, writer, monkeypatch, 3, "Waiting")
+    with read.snapshot(served) as view:
+        found = derivation.underived(view.connection)
+    assert all(found[f"Knowledge Base/Notes/Failed {number}.md"] for number in range(derivation.UNDERIVED_CAP + 1))
 
     delete_file.delete_file(served, path=HARBOUR, confirm=True)
 
     assert not read.page_exists(served, HARBOUR)
+
+
+def test_derivations_that_failed_once_still_count_toward_the_cap(served, writer, monkeypatch):  # noqa: F811
+    """More pages than one check reads, each failed once: they retry within seconds and leave the
+    queue when a retry lands, so they are a backlog still, and a check that reads every one of them
+    refuses. Exempting a page at its first failure let such a backlog be parsed in full."""
+    commit_pending_pages(served, writer, monkeypatch, derivation.UNDERIVED_CAP + 1, "Retrying")
+    record_failures(writer, 1)
+
+    with read.snapshot(served) as view, pytest.raises(OpError) as refused:
+        derivation.underived(view.connection)
+
+    assert refused.value.code == read.DERIVED_BEHIND
 
 
 def test_a_page_with_a_duplicated_id_has_no_ref_while_both_pages_wait_for_their_rows(
