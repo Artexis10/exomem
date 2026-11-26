@@ -118,16 +118,16 @@ def test_rare_word_gets_real_signature_corroboration_without_full_recall(signatu
     )
 
 
-def test_exact_name_keeps_a_disjoint_semantic_lead_partial(signatures):
+def test_exact_alias_does_not_hide_a_semantic_competitor(signatures):
     vault, calls, _background = signatures
     packet = commands.op_activate_context(vault, turn="Cargo Sled or cedar?")
-    assert packet["abstained"] is False
-    anchors = {anchor["title"]: anchor for anchor in packet["anchors"]}
-    assert anchors["Cargo Sled"]["status"] == "resolved"
-    assert anchors["Cedar Carrier"]["status"] == "partial"
-    assert {"rare_term", "vector_band"} <= set(anchors["Cedar Carrier"]["evidence"])
+    assert packet["abstention"]["reason"] == "ambiguous"
+    assert {a["title"] for a in packet["anchors"] if a["status"] == "resolved"} == {
+        "Cargo Sled",
+        "Cedar Carrier",
+    }
     assert calls == []
-    assert packet["units"] or packet["pointers"]
+    assert packet["units"] == []
 
 
 def test_vectors_alone_never_create_resolved_context(signatures):
