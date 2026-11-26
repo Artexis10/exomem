@@ -2,7 +2,7 @@
 
 ### Requirement: A Write Refused For Its Spent Call Time Names That Cause
 
-A write refused because its call's time ran out before its commit SHALL carry `cause: request_budget`. No wait for the boundary SHALL absorb this refusal, on the in-line or the store route. A queued save SHALL record this cause as its wait reason.
+A write refused because its call's time ran out before its commit SHALL carry `cause: request_budget`. No wait for the boundary SHALL absorb this refusal, on the in-line or the store route. A queued save SHALL record its refusal's cause, when there is one, as its wait reason.
 
 #### Scenario: A store-routed write keeps the cause
 

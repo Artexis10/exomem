@@ -448,14 +448,11 @@ def test_a_save_that_used_its_call_time_preparing_is_queued_and_lands_once(
 
     assert receipt["state"] == "queued"
     assert receipt["committed"] is False
-    queued = [
-        json.loads(line)
-        for line in mutation_journal.journal_path().read_text(encoding="utf-8").splitlines()
-        if '"queued"' in line
-    ]
+    intake_id = receipt["queued_write"]["ref"].removeprefix(write_intake.REF_PREFIX)
+    rows = [json.loads(line) for line in mutation_journal.journal_path().read_text(encoding="utf-8").splitlines()]
     # The journal row is how an operator counts saves queued because their call's time ran out.
-    assert queued[-1]["outcome"] == "queued"
-    assert queued[-1]["error_code"] == "request_budget"
+    (row,) = [r for r in rows if r.get("outcome") == "queued" and r.get("receipt_id") == intake_id[:16]]
+    assert row["error_code"] == "request_budget"
     assert _pages_titled(vault, "Queued save 31") == []
     _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
     assert len(_pages_titled(vault, "Queued save 31")) == 1

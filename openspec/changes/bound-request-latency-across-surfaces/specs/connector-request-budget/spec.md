@@ -27,7 +27,7 @@ When the operator sets `EXOMEM_ACTIVATION_BUDGET_SECONDS`, an activation that ru
 ## MODIFIED Requirements
 
 ### Requirement: The Budget Bounds Waits, Never Canonical Commits
-The request budget SHALL bound waiting, optional work and the start of a call's first canonical commit. A canonical mutation that has begun SHALL complete and persist its terminal regardless of the deadline. A write's acknowledgement deadline SHALL end a delivery reserve before the request deadline, with `derived_sync` stating what is still behind.
+The request budget SHALL bound waiting, optional work and the start of a call's first canonical commit. A canonical mutation that has begun SHALL complete and persist its terminal regardless of the deadline. The derived acknowledgement deadline SHALL be the earlier of its entry-based value and the request deadline minus a delivery reserve, with `derived_sync` stating what is still behind.
 
 #### Scenario: A commit under way is never interrupted
 - **WHEN** the request deadline arrives while a canonical commit is executing
