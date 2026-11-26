@@ -374,6 +374,14 @@ _REPLAY: contextvars.ContextVar[_Replay | None] = contextvars.ContextVar("exomem
 _WAIT_CAP: contextvars.ContextVar[float | None] = contextvars.ContextVar("exomem_intake_wait_cap", default=None)
 
 
+_QUEUEABLE: contextvars.ContextVar[bool] = contextvars.ContextVar("exomem_intake_queueable", default=False)
+
+
+def queues_busy_refusal() -> bool:
+    """Whether a busy refusal of this call's write, with nothing committed, is queued and lands later."""
+    return _QUEUEABLE.get()
+
+
 def busy_wait_cap() -> float | None:
     """The deadline (monotonic) by which an eligible save stops waiting and is queued, if any."""
     return _WAIT_CAP.get()
@@ -1156,6 +1164,7 @@ class Admission:
                 log.warning("write intake could not queue a %s save behind its queue", self.command.name,
                             exc_info=True)
         token = _WAIT_CAP.set(deadline)
+        queueable = _QUEUEABLE.set(self.refusal is None)
         try:
             return call()
         except OpError as error:
@@ -1171,6 +1180,7 @@ class Admission:
                 log.warning("write intake could not accept a %s save", self.command.name, exc_info=True)
                 raise error from None
         finally:
+            _QUEUEABLE.reset(queueable)
             _WAIT_CAP.reset(token)
 
     def _known_answer(self, intake_id: str, state: str) -> dict[str, Any] | None:

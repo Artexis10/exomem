@@ -27,7 +27,7 @@ When the operator sets `EXOMEM_ACTIVATION_BUDGET_SECONDS`, an activation that ru
 ## MODIFIED Requirements
 
 ### Requirement: The Budget Bounds Waits, Never Canonical Commits
-The request budget SHALL bound waiting, optional work and the start of a call's first canonical commit. A canonical mutation that has begun SHALL complete and persist its terminal regardless of the deadline. The derived acknowledgement deadline SHALL be the earlier of its entry-based value and the request deadline minus a delivery reserve, with `derived_sync` stating what is still behind.
+The request budget SHALL bound waiting, optional work and the start of the first commit of a save the write intake can queue. A canonical mutation that has begun SHALL complete and persist its terminal regardless of the deadline. The derived acknowledgement deadline SHALL be the earlier of its entry-based value and the request deadline minus a delivery reserve, with `derived_sync` stating what is still behind.
 
 #### Scenario: A commit under way is never interrupted
 - **WHEN** the request deadline arrives while a canonical commit is executing
@@ -37,10 +37,14 @@ The request budget SHALL bound waiting, optional work and the start of a call's 
 - **WHEN** a mutation enters the writer lease with 20 seconds of request budget remaining
 - **THEN** the derived acknowledgement wait ends no later than 15 seconds later and the terminal reports `derived_sync` pending for anything not yet proven
 
-#### Scenario: A write that used its call's time before its commit is refused unsaved
-- **WHEN** a write's preparation ends after its call's deadline and the write reaches its first write guard
+#### Scenario: A save that used its call's time before its commit is queued
+- **WHEN** a save the write intake can queue ends its preparation after its call's deadline and reaches its first write guard
 - **THEN** the guard refuses with `MUTATION_BUSY`, `committed: false` and `cause: request_budget` before it acquires the boundary
-- **AND** a save that the write intake accepts comes back queued and lands once
+- **AND** the save comes back queued and lands once
+
+#### Scenario: A write the intake cannot queue still lands late
+- **WHEN** a write the write intake cannot queue ends its preparation after its call's deadline
+- **THEN** the write commits as before
 
 #### Scenario: A later guard of a commit under way still runs
 - **WHEN** a call has acquired the vault mutation boundary once and its deadline then passes

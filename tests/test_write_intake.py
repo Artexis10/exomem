@@ -458,22 +458,22 @@ def test_a_save_that_used_its_call_time_preparing_is_queued_and_lands_once(
     assert len(_pages_titled(vault, "Queued save 31")) == 1
 
 
-def test_a_write_the_intake_cannot_queue_is_refused_unsaved_once_its_call_time_is_spent(
+def test_a_write_the_intake_cannot_queue_still_lands_when_its_call_time_is_spent(
     vault: Path, managers, drainer
 ) -> None:
+    """A refusal could not queue this write, so refusing it would leave a slow write unable to land."""
     not_a_save = replace(_command("remember"), busy_intake=False)
-    with pytest.raises(OpError) as refused:
-        _send_after_deadline(not_a_save, vault, _remember_kwargs(vault, 32))
+    _send_after_deadline(not_a_save, vault, _remember_kwargs(vault, 32))
 
-    assert refused.value.code == "MUTATION_BUSY"
-    assert refused.value.details["committed"] is False
-    assert refused.value.details["cause"] == "request_budget"
-    assert _pages_titled(vault, "Queued save 32") == []
+    assert len(_pages_titled(vault, "Queued save 32")) == 1
 
 
-def test_a_commit_under_way_is_never_refused_when_its_call_time_runs_out(vault: Path, managers) -> None:
+def test_a_commit_under_way_is_never_refused_when_its_call_time_runs_out(
+    vault: Path, managers, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Only a call's first write guard is refused: a later guard belongs to a commit already started."""
     writer, _holder = managers
+    monkeypatch.setattr(write_intake, "queues_busy_refusal", lambda: True)
     budget = request_budget.RequestBudget(seconds=50)
     token = request_budget.set_current(budget)
     try:

@@ -5989,11 +5989,15 @@ class LeaseManager:
         `reuse_operation_grant` lets a collection-store write keep the grant that its operation's
         outer guard holds. Every other guard acquires.
 
-        A call's first write guard after the call's deadline refuses before it acquires, with nothing
-        saved: the client has stopped listening, and an eligible save is queued instead
-        (`write_intake`). A later guard of the same call belongs to a write already under way.
+        A save the write intake can queue refuses at its call's first write guard once the call's
+        deadline has passed, with nothing saved, and the intake queues it so its client hears back.
+        Any other write still commits late: a refusal could not queue it, and a write whose
+        preparation always outlives the budget would then never land. A later guard of the same call
+        belongs to a write already under way.
         """
-        if not request_budget.commit_may_start():
+        from . import write_intake
+
+        if write_intake.queues_busy_refusal() and not request_budget.commit_may_start():
             raise mutation_lock.preparation_spent_busy()
         with self._mutation_boundary(
             vault_root,

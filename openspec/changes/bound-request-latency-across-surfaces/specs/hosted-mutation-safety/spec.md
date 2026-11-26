@@ -2,12 +2,12 @@
 
 ### Requirement: A Write Refused For Its Spent Call Time Names That Cause
 
-A write refused because its call's time ran out before its commit SHALL carry `cause: request_budget`. No wait for the boundary SHALL absorb this refusal, on the in-line or the store route. A queued save SHALL record its refusal's cause, when there is one, as its wait reason.
+A save refused because its call's time ran out before its commit SHALL carry `cause: request_budget`. No wait for the boundary SHALL absorb this refusal, on the in-line or the store route. A queued save SHALL record its refusal's cause, when there is one, as its wait reason.
 
 #### Scenario: A store-routed write keeps the cause
 
-- **WHEN** a keyed write routed through the store thread reaches its first write guard after its call's deadline
-- **THEN** the caller receives `MUTATION_BUSY` with `cause: request_budget`, not `capture_wait_exhausted`
+- **WHEN** a save routed through the store thread reaches its first write guard after its call's deadline
+- **THEN** the save is queued with `request_budget` as its wait reason, not `capture_wait_exhausted`
 
 #### Scenario: A queued save records why it waited
 
