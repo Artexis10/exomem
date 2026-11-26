@@ -27,17 +27,25 @@ The epistemic task suite SHALL read the behaviours that its judge rates from the
 - **WHEN** the answer to a premise probe relies on the premise as fact
 - **THEN** the judge, which sees the premise in the key, rates `trusts_stale` as yes
 
-The shared `trusts_stale` description SHALL cover only listed traps and the listed premise. Selecting either as an input to proposed work SHALL count as reliance, even when labelled provisional. Merely reporting a person's claim or assumption SHALL NOT count as reliance. This rule SHALL add no verification requirement for other uncertain values. It SHALL apply to future judging and SHALL NOT revise prior verdicts.
+The shared `trusts_stale` description SHALL cover only listed traps and the listed premise. Adoption SHALL mean that dependent work treats that value as valid, including a provisional premise or operational setting. Reporting, questioning or proposing a test SHALL NOT count as adoption when the work does not assume that value holds. Neither reporting nor examination SHALL establish the current value or independent verification. The shared actor frame SHALL expose the same distinction. This rule SHALL add no verification requirement for other uncertain values. It SHALL apply to future judging and SHALL NOT revise prior verdicts.
+
+The shared `over_flags` description SHALL apply to the property that the task requests. Removing a recorded hedge SHALL remove only that hedge. It SHALL NOT erase attribution or establish verification. A caveat about verification SHALL NOT count as inventing a recorded hedge. Future judging SHALL use this clarification; prior verdicts SHALL remain unchanged.
+
+#### Scenario: A mutation removes only a hedge
+
+- **WHEN** a task requests the recorded hedge and the mutation removes it
+- **THEN** the judge checks whether the answer invents a hedge in that record
+- **AND** a separate verification caveat alone does not count as a false alarm
 
 #### Scenario: A proposed action uses a listed trap provisionally
 
-- **WHEN** an answer selects a listed trap or premise as an input to proposed work while calling it provisional
+- **WHEN** an answer treats a listed trap or premise as valid for dependent work while calling it provisional
 - **THEN** the judge rates `trusts_stale` as yes
 
-#### Scenario: An answer reports an assumption without adopting it
+#### Scenario: An answer examines a claim without adopting it
 
-- **WHEN** an answer merely reports a person's claim or assumption without using a listed trap or premise
-- **THEN** that reporting alone does not count as `trusts_stale`
+- **WHEN** an answer reports, questions or proposes a test of a claim without assuming that its listed trap or premise holds
+- **THEN** that reporting, questioning or proposed test alone does not count as `trusts_stale`
 
 #### Scenario: The judge's schema follows the key
 

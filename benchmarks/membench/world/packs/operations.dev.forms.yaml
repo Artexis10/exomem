@@ -4,7 +4,7 @@
 # use. The text is invented and neutral.
 #
 # A form lists what it `serves`: `statement.<kind>`, `rule.<shape>`, `operation.<name>`, a wrapper
-# `qualifier.scope`, `qualifier.hedge.<word>` or `qualifier.basis.<value>`, or `probe.<form>`. A form
+# `qualifier.scope`, `qualifier.hedge.<word>` or `qualifier.basis.<value>`, or a probe form and reading. A form
 # fits an item when it holds only slots that the item can fill, and every slot that the item fills only
 # some of the time. So a statement with a value gets a form with `{value}`, and a question gets a form
 # without it. A form holds `{subject}` so that the name of the thing is in the text.
@@ -33,8 +33,8 @@ frames:
 forms:
   - {id: context-parent-stated, serves: [relation.context-parent], level: stated, text: "The directory lists {child} within {parent}."}
   - {id: support-stated, serves: [relation.support], level: stated, text: "The statement identified by {source} provides a reason for the statement identified by {target}."}
-  - {id: rebut-stated, serves: [relation.rebut], level: stated, text: "The statement identified by {source} supports the opposite conclusion to the statement identified by {target}."}
-  - {id: undercut-stated, serves: [relation.undercut], level: stated, text: "The statement identified by {source} challenges the grounds for the statement identified by {target}, without asserting the opposite."}
+  - {id: rebut-stated, serves: [relation.rebut], level: stated, text: "The statement identified by {source} effectively rebuts the statement identified by {target}. This rebuttal defeats the target statement."}
+  - {id: undercut-stated, serves: [relation.undercut], level: stated, text: "The statement identified by {source} effectively undercuts the statement identified by {target}. This removes the target's grounds without asserting an opposite."}
   # --- statements that give a value for an attribute ---
   - {id: fact-stated-1, serves: [statement.fact], level: stated, text: "{by} states that the {about} for {subject} is {value}."}
   - {id: fact-stated-2, serves: [statement.fact], level: stated, text: "For the record, {by} states that the {about} for {subject} is {value}."}
@@ -138,23 +138,40 @@ forms:
   - {id: computed-unmarked-1, serves: [qualifier.basis.computed], level: unmarked, text: "{text} (calculated)"}
 
   # --- probes: the task wording, which no artefact line may share ---
-  - {id: probe-state-1, serves: [probe.state], text: "What is the {about} for {subject} right now?"}
-  - {id: probe-state-2, serves: [probe.state], text: "Which thing is meant by {subject} today?"}
-  - {id: probe-state-3, serves: [probe.state], text: "What is the {about} for {subject} at {where} right now?"}
-  - {id: probe-state-4, serves: [probe.state], text: "Which {about} applies to {subject} for {where} today?"}
-  - {id: probe-act-1, serves: [probe.act], text: "Prepare the next step for {subject}, which depends on its {about}."}
-  - {id: probe-act-2, serves: [probe.act], text: "Prepare the next step that involves {subject}."}
-  - {id: probe-act-3, serves: [probe.act], text: "Prepare the next step for {subject} at {where}, which depends on its {about}."}
-  - {id: probe-act-4, serves: [probe.act], text: "Prepare the next step that involves {subject} for {where}, based on its {about}."}
-  - {id: probe-premise-1, serves: [probe.premise], text: "Plan the follow-up work for {subject}, using its {about}."}
-  - {id: probe-premise-2, serves: [probe.premise], text: "Arrange the follow-up work that involves {subject}."}
-  - {id: probe-stable-1, serves: [probe.stable], text: "Remind me of the {about} for {subject}."}
-  - {id: probe-stable-2, serves: [probe.stable], text: "Remind me what {subject} is."}
-  - {id: probe-abstain-1, serves: [probe.abstain], text: "Is anything on file about the {about} for {subject}?"}
-  - {id: probe-abstain-2, serves: [probe.abstain], text: "Is anything on file about {subject}?"}
-  - {id: probe-weigh-1, serves: [probe.weigh], text: "Where does the case about {about} for {subject} stand?"}
-  - {id: probe-weigh-2, serves: [probe.weigh], text: "Where does the case about {subject} stand?"}
-  - {id: probe-trace-1, serves: [probe.trace], text: "What does the {about} for {subject} rest on?"}
-  - {id: probe-trace-2, serves: [probe.trace], text: "What does {subject} rest on?"}
-  - {id: probe-whose-1, serves: [probe.whose], text: "Who stands behind the {about} for {subject}?"}
-  - {id: probe-whose-2, serves: [probe.whose], text: "Who stands behind {subject}?"}
+  # Select the request by its closed reading, independently of the phenomenon and its variant.
+  - {id: probe-state-1, serves: [probe.state.state_fold.current], text: "What is the current recorded {about} for {subject}?"}
+  - {id: probe-state-2, serves: [probe.state.identity_map.referent], text: "Which entity does the name {subject} identify today?"}
+  - {id: probe-state-3, serves: [probe.state.scope_lattice.value_in], text: "What is the current recorded {about} for {subject} at {where}?"}
+  - {id: probe-state-4, serves: [probe.state.state_fold.standing], text: "Is the recorded {about} for {subject} settled, contested, withdrawn, last known or unknown?"}
+  - {id: probe-state-kind, serves: [probe.state.kind_tag.kind], text: "What kind of statement is currently recorded about the {about} for {subject}? Keep proposed content distinct from current facts."}
+  - {id: probe-state-hedge, serves: [probe.state.kind_tag.hedge], text: "What qualification of certainty, if any, is recorded for the current statement about the {about} for {subject}?"}
+  - {id: probe-state-stands, serves: [probe.state.warrant_graph.stands], text: "Does the current recorded claim about the {about} for {subject} still stand on its recorded support?"}
+  - {id: probe-state-statement-stands, serves: [probe.state.warrant_graph.stands], text: "Does the statement identified by {subject} still stand on its recorded support?"}
+  - {id: probe-act-1, serves: [probe.act.state_fold.current], text: "Prepare the next step for {subject} using the current recorded {about}. Respect recorded source precedence and dates."}
+  - {id: probe-act-2, serves: [probe.act.identity_map.referent], text: "Prepare the next step that involves the entity currently identified by the name {subject}."}
+  - {id: probe-act-3, serves: [probe.act.scope_lattice.value_in], text: "Prepare the next step for {subject} at {where}, using the current recorded {about} for that context."}
+  - {id: probe-act-4, serves: [probe.act.state_fold.standing], text: "Prepare the next step for {subject} based on whether its {about} is settled, contested, withdrawn, last known or unknown."}
+  - {id: probe-act-attribution, serves: [probe.act.holder_ledger.holders], text: "Prepare an attribution-only handoff about the {about} for {subject}. Identify every asserting source without selecting the claimed value as a work input."}
+  - {id: probe-act-holder, serves: [probe.act.holder_ledger.holder], text: "Prepare an attribution-only handoff about the {about} for {subject}. Identify the original source without selecting the claimed value as a work input."}
+  - {id: probe-act-kind, serves: [probe.act.kind_tag.kind], text: "Prepare the next step by identifying the recorded statement kind about the {about} for {subject}. Keep proposed content distinct from current facts."}
+  - {id: probe-act-hedge, serves: [probe.act.kind_tag.hedge], text: "Prepare the next step by preserving the recorded qualification of certainty about the {about} for {subject}. State when no hedge is recorded."}
+  - {id: probe-act-stands, serves: [probe.act.warrant_graph.stands], text: "Prepare the next step for {subject} based on whether the current claim about its {about} retains recorded support."}
+  - {id: probe-act-statement-stands, serves: [probe.act.warrant_graph.stands], text: "Prepare the next step based on whether the statement identified by {subject} retains recorded support."}
+  - {id: probe-premise-1, serves: [probe.premise.state_fold.current], text: "Plan follow-up work for {subject} using its current recorded {about}. Correct any premise that the records contradict."}
+  - {id: probe-premise-2, serves: [probe.premise.state_fold.standing], text: "Plan follow-up work for {subject} from the recorded standing of its {about}. Correct any premise that the records contradict."}
+  - {id: probe-premise-recorded, serves: [probe.premise.corpus_closure.recorded], text: "Check whether a committed statement is on file about {subject} before planning follow-up work. Correct any unsupported premise."}
+  - {id: probe-stable-1, serves: [probe.stable.state_fold.current], text: "Remind me of the current recorded {about} for {subject}."}
+  - {id: probe-stable-2, serves: [probe.stable.state_fold.current], text: "Which recorded {about} still applies to {subject}?"}
+  - {id: probe-abstain-1, serves: [probe.abstain.corpus_closure.recorded], text: "Does any committed statement on file bear on the {about} for {subject}? A question alone asserts no answer."}
+  - {id: probe-abstain-2, serves: [probe.abstain.corpus_closure.recorded], text: "Does any committed statement on file bear on {subject}? A question alone asserts no answer."}
+  - {id: probe-abstain-current, serves: [probe.abstain.state_fold.current], text: "What current recorded {about}, if any, can the files establish for {subject}?"}
+  - {id: probe-weigh-1, serves: [probe.weigh.warrant_graph.sides], text: "Which recorded statements support and oppose the {about} for {subject}?"}
+  - {id: probe-weigh-2, serves: [probe.weigh.warrant_graph.sides], text: "Which recorded statements support and oppose the statement identified by {subject}?"}
+  - {id: probe-weigh-origins, serves: [probe.weigh.warrant_graph.origins], text: "Identify the independent original sources for the current claim about the {about} for {subject}."}
+  - {id: probe-trace-1, serves: [probe.trace.warrant_graph.basis], text: "Trace the recorded basis of the current standing claim about the {about} for {subject}, in order."}
+  - {id: probe-trace-2, serves: [probe.trace.warrant_graph.basis], text: "Trace the recorded basis of the statement identified by {subject}, in order."}
+  - {id: probe-trace-origins, serves: [probe.trace.warrant_graph.origins], text: "Trace the independent original sources of the current claim about the {about} for {subject}."}
+  - {id: probe-trace-statement-origins, serves: [probe.trace.warrant_graph.origins], text: "Trace the independent original sources of the statement identified by {subject}."}
+  - {id: probe-whose-1, serves: [probe.whose.holder_ledger.holders], text: "Who are all the asserting sources about the {about} for {subject}?"}
+  - {id: probe-whose-2, serves: [probe.whose.holder_ledger.holder], text: "Who is the original source of the statement identified by {subject}?"}
+  - {id: probe-whose-holder-attribute, serves: [probe.whose.holder_ledger.holder], text: "Who is the original source about the {about} for {subject}?"}

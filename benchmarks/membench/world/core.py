@@ -75,6 +75,7 @@ class Vocabulary:
     name_spaces: frozenset[str] = frozenset()
     value_generators: frozenset[str] = frozenset()
     probe_forms: frozenset[str] = frozenset()
+    readings: frozenset[str] = frozenset()
     levels: tuple[
         str, ...
     ] = ()  # the implicitness levels, in the order that the catalogue lists them
@@ -97,6 +98,11 @@ class Vocabulary:
             name_spaces=frozenset(attributes.get("name_spaces", ())),
             value_generators=frozenset(attributes.get("value_generators", ())),
             probe_forms=frozenset(attributes.get("probe_forms", ())),
+            readings=frozenset(
+                f"{mechanism}.{reading}"
+                for mechanism, body in attributes["truth_mechanisms"].items()
+                for reading in body["readings"]
+            ),
             levels=tuple(attributes.get("implicitness_levels", ())),
         )
 

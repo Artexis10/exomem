@@ -158,6 +158,8 @@ class _EdgeIndex:
 def _behaviours_of(relations: RelationRegistry, edge: UnitEdge) -> frozenset[str]:
     """What an edge's relation does: its replacement's behaviours when the key is deprecated, and
     its parent's when this registry does not hold the key, as `DimensionMembership.family_of`."""
+    if edge.behaviours is not None:
+        return edge.behaviours
     key = relations.terminal_replacement(edge.relation) or edge.relation
     found = relations.behaviours_of(key)
     if not found and edge.parent is not None:

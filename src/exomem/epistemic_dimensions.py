@@ -174,6 +174,7 @@ def read_edges(
     admission: Callable[[str], bool] | None = None,
     resolver: Callable[[], WikilinkResolver] | None = None,
     behaviours: Collection[str] = (),
+    check: Callable[[], None] | None = None,
 ) -> DimensionEdges:
     """Read, in one graph read, every edge whose family a dimension of `lookups` has, and every
     edge whose relation has one of the relation `behaviours` that a group's display reads
@@ -198,7 +199,38 @@ def read_edges(
     if not lookups.needs_edges and not behaviours:
         return DimensionEdges("available")
     from . import epistemic_graph
+    from .collection_store.connection import checked_sql
     from .governance import egress
+    from .vault_store import mode as store_mode
+    from .vault_store import read as store_read
+
+    if check is not None:
+        check()
+    if pages is not None and store_mode.store_mode_for_reads(vault_root):
+        import sqlite3
+
+        from .find import RetrievalIndexWarming
+        from .vocabulary.registry import RegistryError
+
+        conn = store_read.lend(vault_root)
+        if conn is None:
+            return DimensionEdges("unavailable")
+        try:
+            with checked_sql(conn, check):
+                view = epistemic_graph.GraphView(
+                    vault_root, conn, keep=egress.edge_view(vault_root, admission),
+                    reads_placeholders=False, check=check,
+                )
+                edges = tuple(epistemic_graph.stored_family_edges(
+                    vault_root, conn, pages, lookups, keep=admission, behaviours=behaviours, view=view,
+                ))
+            return DimensionEdges("available", edges)
+        except (RetrievalIndexWarming, sqlite3.Error):
+            return DimensionEdges("warming")
+        except RegistryError:
+            return DimensionEdges("unavailable")
+        finally:
+            conn.close()
 
     keys = sorted(
         key
@@ -206,12 +238,17 @@ def read_edges(
         if entry.family in lookups.by_family or not entry.behaviours.isdisjoint(behaviours)
     )
     keep = egress.edge_view(vault_root, admission)
-    result = epistemic_graph.EpistemicGraphIndex(vault_root).unit_edges(
+    # Optional file reads share a cold proof instead of spending their request's guard reserve.
+    result = epistemic_graph.EpistemicGraphIndex(
+        vault_root,
+        prove_cold_snapshots=epistemic_graph.SINGLE_FLIGHT if check is not None else True,
+    ).unit_edges(
         keys,
         pages=pages,
         keep=keep,
         resolver=resolver,
         reader=egress.visible_page_filter(vault_root) if keep is not None else None,
+        check=check,
     )
     return DimensionEdges(result.status, result.edges if result.status == "available" else ())
 
@@ -233,18 +270,21 @@ class UnitDimensions:
     unit_pages: frozenset[str]
 
     @classmethod
-    def from_edges(cls, lookups: DimensionMembership, edges: Iterable[UnitEdge]) -> UnitDimensions:
+    def from_edges(cls, lookups: DimensionMembership, edges: Iterable[UnitEdge], *,
+                   paths: Collection[str] | None = None) -> UnitDimensions:
         units: dict[str, set[str]] = {}
         pages: dict[str, set[str]] = {}
         unit_pages: set[str] = set()
         for edge in edges:
-            family = lookups.family_of(edge.relation, edge.parent)
+            family = edge.family if edge.family is not None else lookups.family_of(edge.relation, edge.parent)
             if family not in lookups.by_family:
                 continue
             for path, unit in (
                 (edge.source_path, edge.source_unit),
                 (edge.target_path, edge.target_unit),
             ):
+                if paths is not None and path not in paths:
+                    continue
                 if unit is None:
                     pages.setdefault(path, set()).add(family)
                 else:
@@ -275,6 +315,71 @@ class UnitDimensions:
             row_keys=tuple(unit.get("row_keys") or ()),
             edge_families=families,
         )
+
+
+class StoredUnitDimensions:
+    """Selected family membership of explicitly prepared stored candidates, never ranking statistics."""
+
+    def __init__(self, vault_root: Path, lookups: DimensionMembership, *, keep: Callable[[str], bool] | None,
+                 needs_edges: bool):
+        self.vault_root, self.lookups, self.keep = vault_root, lookups, keep
+        self.needs_edges = needs_edges
+        self.prepared: set[str] = set()
+        self.view: Any = None
+        self.snapshot: Any = None
+        self.value = UnitDimensions.from_edges(lookups, ())
+
+    def prepare(self, paths: Collection[str], *, conn: Any = None, interpretations: Any = None) -> None:
+        if not self.needs_edges:
+            return
+        from . import call_spans, epistemic_graph
+        from .governance import egress
+        from .vault_store import read as store_read
+
+        borrowed = store_read.lend(self.vault_root) if conn is None else None
+        active = conn if conn is not None else borrowed
+        try:
+            identity = store_read.snapshot_for_connection(active)
+            if identity is None or identity is not self.snapshot:
+                self.snapshot = identity
+                self.prepared.clear()
+                self.value = UnitDimensions.from_edges(self.lookups, ())
+                self.view = None
+            missing = set(paths) - self.prepared
+            if not missing:
+                return
+            view = self.view or epistemic_graph.GraphView(
+                self.vault_root, active,
+                keep=egress.edge_view(self.vault_root, self.keep), reads_placeholders=False,
+                interpretations=interpretations,
+            )
+            # A caller-owned connection can be reused only while its pinned snapshot remains live.
+            if conn is not None and store_read.snapshot_active(identity):
+                self.view = view
+            with call_spans.span("dimension.prepare", {"pages": len(missing)}):
+                selected = UnitDimensions.from_edges(self.lookups, epistemic_graph.stored_family_edges(
+                    self.vault_root, active, missing, self.lookups, keep=self.keep, view=view,
+                ), paths=missing)
+            self.value = UnitDimensions(
+                self.lookups,
+                {**self.value.unit_families, **selected.unit_families},
+                {**self.value.page_families, **selected.page_families},
+                self.value.unit_pages | selected.unit_pages,
+            )
+            self.prepared.update(missing)
+        finally:
+            if borrowed is not None:
+                borrowed.close()
+
+    def __call__(self, page: Mapping[str, Any], unit: Mapping[str, Any], *, own_kind: bool = True) -> frozenset[str]:
+        if self.needs_edges:
+            from .vault_store import read as store_read
+            from .vocabulary.registry import RegistryError
+
+            # Reusing facts after their snapshot ends could silently serve stale positive or negative membership.
+            if not store_read.snapshot_active(self.snapshot):
+                raise RegistryError("REGISTRY_UNAVAILABLE: selected dimension snapshot ended")
+        return self.value(page, unit, own_kind=own_kind)
 
 
 def node_key(path: str, unit: Mapping[str, Any]) -> str | None:

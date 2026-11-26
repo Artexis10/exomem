@@ -268,9 +268,9 @@ def test_checkpointless_borrows_reuse_one_topology_hash(
     hashes = []
     real = epistemic_graph._resolver_topology_fingerprint
 
-    def counted(resolver):
+    def counted(resolver, *, check=None):
         hashes.append(1)
-        return real(resolver)
+        return real(resolver, check=check)
 
     monkeypatch.setattr(epistemic_graph, "_resolver_topology_fingerprint", counted)
     results = []
@@ -347,11 +347,11 @@ def test_an_old_hash_finishing_last_cannot_mask_the_new_topology(
     started, finish = threading.Event(), threading.Event()
     real = epistemic_graph._resolver_topology_fingerprint
 
-    def delayed(resolver):
+    def delayed(resolver, *, check=None):
         if resolver is before:
             started.set()
             assert finish.wait(5)
-        return real(resolver)
+        return real(resolver, check=check)
 
     monkeypatch.setattr(epistemic_graph, "_resolver_topology_fingerprint", delayed)
     worker = threading.Thread(target=epistemic_graph._resident_topology_fingerprint,

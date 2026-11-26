@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable
@@ -24,6 +25,7 @@ from import_guidance import (
 )
 from import_guidance.recording import Arm
 from import_guidance.scripted_replies import Scenario, load_scenario
+from test_working_set_carry import seed_ordinary_notes
 
 ROOT = Path(__file__).resolve().parents[1]
 FERRY_PAGE = """---
@@ -224,6 +226,42 @@ def test_a_recording_that_asks_for_the_graph_reports_it_built_and_holds_no_page_
     pages, seed_unchanged = pages_and_seed_bytes(vault, seed)
     baseline_pages, _ = pages_and_seed_bytes(baseline, seed)
     assert pages == baseline_pages and seed_unchanged
+
+
+def test_a_ready_recording_serves_qualified_unit_currency_with_event_indexes(tmp_path: Path) -> None:
+    """A graph built in another process must not leave the serving process unable to resolve a correction."""
+    seed = ferry_seed(tmp_path)
+    page = seed / "Notes/Research/harbour-ferry/timetable.md"
+    page.write_text(FERRY_PAGE + (
+        "\n## Claim\n- id: revised-sailing\n"
+        "- relations: supersedes: [[Notes/Research/harbour-ferry/timetable#first-sailing]]\n\n"
+        "The first sailing leaves the harbour at 07:45 on weekdays.\n"
+    ), encoding="utf-8")
+    corpus = tmp_path / "ordinary"
+    seed_ordinary_notes(corpus)
+    shutil.copytree(corpus / "Knowledge Base", seed, dirs_exist_ok=True)
+    case = session_close.Case("ferry", "t", seed, "balanced", (TURN,), tmp_path / "case.json", None)
+    scenario_path = tmp_path / "ferry.json"
+    scenario_path.write_text(json.dumps(replay_cases.scenario_for(
+        case, {"reference": "", "deterministic": {}}, [],
+    )), encoding="utf-8")
+    target = tmp_path / "shapes.json"
+
+    assert recording.record(
+        load_scenario(scenario_path), Arm("test", ROOT), target, tmp_path / "scratch",
+        activation_packet="anchors",
+    ) == []
+
+    recorded = recording.load_recording(target)
+    assert recorded["ready"]["graph"] == "available"
+    packet = recorded["shapes"]["context"]
+    assert packet["abstained"] is False, packet.get("abstention")
+    units = {unit["ref"].rsplit("#", 1)[1]: unit for unit in packet["units"]}
+    assert set(units) == {"first-sailing", "revised-sailing"}
+    assert units["first-sailing"]["lifecycle"] == "superseded"
+    assert units["first-sailing"]["history"] is True
+    assert units["revised-sailing"]["lifecycle"] == "active"
+    assert "history" not in units["revised-sailing"]
 
 
 def test_waiting_for_the_graph_names_the_state_it_last_saw_when_the_bound_passes(tmp_path: Path) -> None:
@@ -474,6 +512,33 @@ def judge_batch_as(out: Path, holds: Callable[[dict], bool]) -> Path:
 def ten_stage_b_runs(tmp_path: Path) -> Path:
     rows = [stage_b_row(f"c{n}", arm, f"The first ferry sails at 07:15, case {n}.") for n in range(5) for arm in ("base", "cand")]
     return write_rows(tmp_path / "b.jsonl", rows)
+
+
+def test_prepared_workflow_entries_keep_prior_turns_and_unavailable_slots_blind(tmp_path: Path) -> None:
+    """A fresh workflow study must not lose earlier answers or discard an interrupted slot."""
+    completed = "Turn 1: review the schedule. Answer: the ferry leaves at eight.\nTurn 2: check again. Answer: correction, it leaves at seven."
+    unavailable = "Turn 1: review the schedule. No answer: transport interrupted."
+    entries = [
+        ({"case": "complete", "arm": "base"}, tuple(RUBRIC), completed),
+        ({"case": "interrupted", "arm": "cand", "error": "transport_interrupted"}, tuple(RUBRIC), unavailable),
+    ]
+    out = tmp_path / "workflow-batch"
+    schema = {"type": "object", "properties": {"status": {"enum": ["judged", "failed"]}}, "required": ["status"]}
+
+    assert judge_batch.prepare_entries(entries, out=out, seed=42, answer_schema=schema) == 3
+
+    items = judge_batch.read_views(out)
+    mapping = json.loads((out / "private" / "judge-map.json").read_text())
+    originals = [item for item in mapping["items"].values() if item["twin_of"] is None]
+    assert {item["prompt"] for item in items} == {completed, unavailable}
+    assert sorted(item["run"]["case"] for item in originals) == ["complete", "interrupted"]
+    assert all("run" not in item and "arm" not in item for item in items)
+    assert all(item["answer_schema"] == schema for item in items)
+    assert mapping["seed"] == 42
+    twins = {item_id: row["twin_of"] for item_id, row in mapping["items"].items() if row["twin_of"]}
+    prompts = {item["id"]: item["prompt"] for item in items}
+    assert len(twins) == 1
+    assert all(prompts[twin] == prompts[original] for twin, original in twins.items())
 
 
 def test_a_seeded_fifth_of_the_items_appears_twice_and_low_agreement_reads_incomplete(tmp_path: Path) -> None:

@@ -13,7 +13,8 @@ from exomem import epistemic_graph, graph_publication
 
 def _put(conn: sqlite3.Connection, table: str, **values: str | int) -> None:
     fields = list(conn.execute(f'PRAGMA main.table_info("{table}")'))
-    row = {field[1]: values.get(field[1], 0 if field[2] == "INTEGER" else "") for field in fields}
+    row = {field[1]: values.get(field[1], 0 if field[2] == "INTEGER" else "{}" if field[1] == "metadata" else "")
+           for field in fields}
     columns = ", ".join(f'"{name}"' for name in row)
     marks = ", ".join("?" for _ in row)
     conn.execute(
@@ -80,6 +81,39 @@ def graph_db(tmp_path: Path):
         graph_publication.install(writer)
         writer.commit()
         yield writer, path, index
+
+
+def test_graph_upgrade_replaces_old_capture_columns_before_publication(graph_db):
+    """An old saved table and trigger body must not break writes or claim new inputs are complete."""
+    writer, path, _index = graph_db
+    with writer:
+        graph_publication.withdraw(writer)
+        for (name,) in writer.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'graph_dependencies'",
+        ).fetchall():
+            if name.startswith("graph_saved_dependencies_"):
+                writer.execute(f'DROP TRIGGER "{name}"')
+        writer.execute("DROP TABLE graph_saved_dependencies")
+        writer.execute("ALTER TABLE graph_dependencies DROP COLUMN body_link")
+        graph_publication.install(writer)
+        writer.execute("INSERT OR REPLACE INTO graph_meta VALUES ('schema_version', '15')")
+        graph_publication.publish(writer)
+        assert "body_link" not in {row[1] for row in writer.execute("PRAGMA table_info(graph_saved_dependencies)")}
+
+        epistemic_graph.create_row_schema(writer, publication=True)
+        assert dict(writer.execute("SELECT key, value FROM graph_publication_meta")) == {}
+        assert dict(writer.execute("SELECT key, value FROM graph_meta"))["schema_version"] == "15"
+        writer.execute("UPDATE graph_dependencies SET body_link = 1")
+    with closing(_reader(path)) as reader:
+        assert graph_publication.open_view(reader) is None
+    with writer:
+        writer.execute("INSERT OR REPLACE INTO graph_meta VALUES ('schema_version', ?)",
+                       (str(epistemic_graph.SCHEMA_VERSION),))
+        graph_publication.publish(writer)
+        writer.execute("UPDATE graph_dependencies SET body_link = 0")
+    with closing(_reader(path)) as reader:
+        assert graph_publication.open_view(reader)["schema_version"] == str(epistemic_graph.SCHEMA_VERSION)
+        assert reader.execute("SELECT DISTINCT body_link FROM graph_dependencies").fetchall() == [(1,)]
 
 
 def test_unpublished_storage_installs_without_owning_a_transaction(graph_db):

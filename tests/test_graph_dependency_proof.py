@@ -153,7 +153,7 @@ _COPY_A_FILE_ROW = (
             f"DELETE FROM graph_nodes WHERE node_key = 'file:{SOURCE}';", id="file row deleted"
         ),
         pytest.param(
-            f"INSERT INTO graph_dependencies VALUES ('{SOURCE}', 'extra', 'extra');",
+            f"INSERT INTO graph_dependencies(source_path, lookup_key, raw_target) VALUES ('{SOURCE}', 'extra', 'extra');",
             id="dependency inserted",
         ),
         pytest.param(

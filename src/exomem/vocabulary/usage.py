@@ -53,7 +53,7 @@ def restricted(vault_root: Path) -> str | None:
     return None if refusal is None else str(refusal.get("reason") or "audience_restricted")
 
 
-def _graph_rows(vault_root: Path, sql: str) -> list[tuple[Any, ...]] | str:
+def _graph_rows(vault_root: Path, sql: str, *, semantic: bool = False) -> list[tuple[Any, ...]] | str:
     """Rows from one current graph snapshot, or the reason there is none."""
     from ..epistemic_graph import EpistemicGraphIndex
 
@@ -65,6 +65,10 @@ def _graph_rows(vault_root: Path, sql: str) -> list[tuple[Any, ...]] | str:
     if connection is None:
         return refusal[0] if refusal else "graph_unavailable"
     try:
+        if semantic:
+            from ..vault_store import read as store_read
+
+            store_read.require_current_parser(connection)
         return [tuple(row) for row in connection.execute(sql).fetchall()]
     except Exception:  # noqa: BLE001
         return "graph_unavailable"
@@ -73,12 +77,12 @@ def _graph_rows(vault_root: Path, sql: str) -> list[tuple[Any, ...]] | str:
 
 
 def _holders(
-    vault_root: Path, sql: str, resolve: Callable[[str], str | None]
+    vault_root: Path, sql: str, resolve: Callable[[str], str | None], *, semantic: bool = False,
 ) -> Callable[[str, int], tuple[str, ...]]:
     """A reader of the pages behind one key's count, from `(value, path)` rows."""
 
     def read(key: str, limit: int) -> tuple[str, ...]:
-        rows = _graph_rows(vault_root, sql)
+        rows = _graph_rows(vault_root, sql, semantic=semantic)
         if isinstance(rows, str):
             return ()
         pages = {
@@ -173,7 +177,7 @@ def relations(vault_root: Path, snapshot: Snapshot) -> Usage:
             f"WHERE (relation_type IS NOT NULL OR registry_status = '{CANDIDATE_STATUS}') "
             f"AND origin IN ({origins})"
         )
-        rows = _graph_rows(vault_root, f"SELECT {value}, COUNT(*) {source} GROUP BY 1")
+        rows = _graph_rows(vault_root, f"SELECT {value}, COUNT(*) {source} GROUP BY 1", semantic=True)
         if isinstance(rows, str):
             return _unavailable(rows, "graph authored edges")
         resolve = snapshot.typed.resolve
@@ -185,7 +189,7 @@ def relations(vault_root: Path, snapshot: Snapshot) -> Usage:
             True,
             _canonical_counts(rows, snapshot, canonical),
             source="graph authored edges",
-            holders=_holders(vault_root, f"SELECT {value}, source_path {source}", canonical),
+            holders=_holders(vault_root, f"SELECT {value}, source_path {source}", canonical, semantic=True),
         )
 
     return _guarded(vault_root, "graph authored edges", read)
@@ -220,7 +224,7 @@ def categories(vault_root: Path, snapshot: Snapshot) -> Usage:
 
     def read() -> Usage:
         source = "FROM graph_nodes WHERE unit_category IS NOT NULL"
-        rows = _graph_rows(vault_root, f"SELECT unit_category, COUNT(*) {source} GROUP BY 1")
+        rows = _graph_rows(vault_root, f"SELECT unit_category, COUNT(*) {source} GROUP BY 1", semantic=True)
         if isinstance(rows, str):
             return _unavailable(rows, "graph semantic units")
 
@@ -231,7 +235,7 @@ def categories(vault_root: Path, snapshot: Snapshot) -> Usage:
             True,
             _canonical_counts(rows, snapshot, canonical),
             source="graph semantic units",
-            holders=_holders(vault_root, f"SELECT unit_category, path {source}", canonical),
+            holders=_holders(vault_root, f"SELECT unit_category, path {source}", canonical, semantic=True),
         )
 
     return _guarded(vault_root, "graph semantic units", read)

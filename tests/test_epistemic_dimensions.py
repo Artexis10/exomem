@@ -220,6 +220,12 @@ REGULATION = (
     "    description: What is plainly claimed\n    members: {kinds: [claim]}\n"
 )
 PAGE = "---\ntype: insight\n---\n# {title}\n\n{body}\n"
+#: A row dimension: a unit belongs when it carries `credence`, as a `local_estimate` may.
+MEASURED = REGULATION + (
+    "  measured:\n    labels: {en: Measured}\n"
+    "    description: A stated degree of belief\n    members: {keys: [credence]}\n"
+    "kinds:\n  local_estimate:\n    description: A local estimate\n    traits: [credence]\n"
+)
 
 
 def _write(vault: Path, rel: str, body: str) -> None:
@@ -568,6 +574,281 @@ def test_a_served_search_rewrites_a_dimension_the_index_answers_anywhere_in_the_
         assert sentinel.count == 0, f"{name}: {sentinel.report()}"
 
 
+@pytest.mark.parametrize("mode", ["keyword", "hybrid", "vector"])
+def test_a_served_row_dimension_fills_its_limit_before_each_lane_cap(
+    tmp_path, warm_managed_cell, walk_sentinel, monkeypatch, mode,
+) -> None:
+    """Better-ranked nonmembers and invalid rows cannot consume the requested member slots."""
+    import numpy as np
+    from test_semantic_unit_recall import _vector
+
+    from exomem import embeddings, semantic_index
+
+    vault = _outlook_vault(tmp_path)
+    language_registry.registry_path(vault).write_text(MEASURED, encoding="utf-8")
+    body = "\n".join(
+        f"## Claim\n- id: noise-{n}\n\nBeacon.\n" for n in range(24)
+    )
+    body += "\n## Local estimate\n- id: invalid\n- credence: nonsense\n\nBeacon.\n"
+    for n in range(3):
+        body += (
+            f"\n## Local estimate\n- id: member-{n}\n- credence: likely\n"
+            "- credence_holder: Survey team\n\n"
+            f"The beacon survey gives estimate {n} with additional supporting context.\n"
+        )
+    _write(vault, FORECAST, PAGE.format(title="Forecast", body=body))
+    state = semantic_index.build_parent_index_state(vault, vault / FORECAST)
+    index = embeddings.get_embedding_index(vault)
+    vectors = [_vector(1.0, n / 100) for n in range(25)] + [_vector(0.1, 1.0)] * 3
+    index.upsert_semantic_units(state, np.stack(vectors), 1.0)
+    for path in (RULES, OLD, NEW):
+        # A served cell embeds every page's units, so a vector lane proves its coverage from the index.
+        other = semantic_index.build_parent_index_state(vault, vault / path)
+        index.upsert_semantic_units(other, np.stack([_vector(0.0, 1.0)] * len(other.occurrences)), 1.0)
+    warm_managed_cell(vault)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(embeddings, "embed_texts", lambda *_a, **_k: np.stack([_vector(1.0)]))
+    sentinel = walk_sentinel(vault, vault / "Knowledge Base")
+
+    checked = {}
+    hits = find_module.find(
+        vault, query="beacon", scope="kb-only", mode=mode, graph=False, rerank=False,
+        result_level="unit", filters={"unit.dimension": {"$eq": "measured"}}, limit=2,
+        dimension_check_out=checked,
+    )
+
+    assert len(hits) == 2
+    assert {hit.source_anchor for hit in hits} <= {"member-0", "member-1", "member-2"}
+    assert checked == {}, "row dimensions must not run the after-limit edge check"
+    assert sentinel.count == 0, sentinel.report()
+
+
+def test_a_hybrid_dimension_search_finds_members_the_vector_ranks_last_in_one_read(
+    tmp_path, warm_managed_cell, monkeypatch,
+) -> None:
+    """Catches a vector lane whose reads grow with the nonmembers that share the members' page."""
+    import numpy as np
+    from test_semantic_unit_recall import _vector
+
+    from exomem import embeddings, semantic_index
+
+    vault = _outlook_vault(tmp_path)
+    language_registry.registry_path(vault).write_text(MEASURED, encoding="utf-8")
+    body = "\n".join(f"## Claim\n- id: noise-{n}\n\nBeacon.\n" for n in range(100))
+    for n in range(3):
+        # The members carry no query word, so the lexical lane holds none of them.
+        body += (
+            f"\n## Local estimate\n- id: member-{n}\n- credence: likely\n"
+            f"- credence_holder: Survey team\n\nThe survey gives estimate {n}.\n"
+        )
+    _write(vault, FORECAST, PAGE.format(title="Forecast", body=body))
+    state = semantic_index.build_parent_index_state(vault, vault / FORECAST)
+    index = embeddings.get_embedding_index(vault)
+    # The vector lane ranks all 100 nonmembers above the 3 members.
+    vectors = [_vector(1.0, n / 1000) for n in range(100)] + [_vector(-1.0, 1.0)] * 3
+    index.upsert_semantic_units(state, np.stack(vectors), 1.0)
+    for path in (RULES, OLD, NEW):
+        other = semantic_index.build_parent_index_state(vault, vault / path)
+        far = np.stack([_vector(0.0, 1.0)] * len(other.occurrences))
+        index.upsert_semantic_units(other, far, 1.0)
+    warm_managed_cell(vault)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(embeddings, "embed_texts", lambda *_a, **_k: np.stack([_vector(1.0)]))
+    vector_reads = []
+    real = find_module._vector_unit_candidates
+    monkeypatch.setattr(
+        find_module, "_vector_unit_candidates",
+        lambda *a, **k: vector_reads.append(k["candidate_limit"]) or real(*a, **k),
+    )
+    failed: list[str] = []
+
+    hits = find_module.find(
+        vault, query="beacon", scope="kb-only", mode="hybrid", graph=False, rerank=False,
+        result_level="unit", filters={"unit.dimension": {"$eq": "measured"}}, limit=2,
+        failed_out=failed,
+    )
+
+    assert {hit.source_anchor for hit in hits} <= {"member-0", "member-1", "member-2"}
+    assert len(hits) == 2
+    assert len(vector_reads) == 1, f"the vector lane read windows of {vector_reads}"
+    assert failed == []
+
+
+def test_a_dimension_with_more_members_than_the_vector_bound_fills_from_its_newest_members(
+    tmp_path, warm_managed_cell, monkeypatch,
+) -> None:
+    """Catches a broad dimension whose members the page's other units crowd out of the vector lane,
+    leaving the result short of its limit, or full without saying the lane saw only some members."""
+    import numpy as np
+    from test_semantic_unit_recall import _vector
+
+    from exomem import embeddings, semantic_index
+
+    vault = _outlook_vault(tmp_path)
+    language_registry.registry_path(vault).write_text(MEASURED, encoding="utf-8")
+    body = "\n".join(f"## Claim\n- id: noise-{n}\n\nBeacon.\n" for n in range(30))
+    # More members than the deepest vector window of a limit of 2 (160), none with the query word.
+    body += "".join(
+        f"\n## Local estimate\n- id: member-{n}\n- credence: likely\n\nThe survey gives estimate {n}.\n"
+        for n in range(170)
+    )
+    _write(vault, FORECAST, PAGE.format(title="Forecast", body=body))
+    state = semantic_index.build_parent_index_state(vault, vault / FORECAST)
+    index = embeddings.get_embedding_index(vault)
+    vectors = [_vector(1.0, n / 1000) for n in range(30)] + [_vector(-1.0, 1.0)] * 170
+    index.upsert_semantic_units(state, np.stack(vectors), 1.0)
+    for path in (RULES, OLD, NEW):
+        other = semantic_index.build_parent_index_state(vault, vault / path)
+        far = np.stack([_vector(0.0, 1.0)] * len(other.occurrences))
+        index.upsert_semantic_units(other, far, 1.0)
+    warm_managed_cell(vault)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(embeddings, "embed_texts", lambda *_a, **_k: np.stack([_vector(1.0)]))
+    failed: list[str] = []
+
+    hits = find_module.find(
+        vault, query="beacon", scope="kb-only", mode="hybrid", graph=False, rerank=False,
+        result_level="unit", filters={"unit.dimension": {"$eq": "measured"}}, limit=2,
+        failed_out=failed,
+    )
+
+    assert len(hits) == 2
+    assert all(hit.source_anchor.startswith("member-") for hit in hits)
+    assert "semantic_units_candidate_window" in failed
+
+
+def test_a_dimension_on_more_pages_than_the_vector_bound_reads_no_members_when_its_pages_fill(
+    tmp_path, warm_managed_cell, monkeypatch,
+) -> None:
+    """Catches a broad dimension whose vector lane first reads every member up to the bound, a cost
+    that grows with the dimension's size although the proposed pages' units already fill the limit."""
+    import numpy as np
+    from test_semantic_unit_recall import _vector
+
+    from exomem import embeddings, lexstore, semantic_index
+
+    vault = _outlook_vault(tmp_path)
+    language_registry.registry_path(vault).write_text(MEASURED, encoding="utf-8")
+    index = embeddings.get_embedding_index(vault)
+    for n in range(24):
+        rel = f"Knowledge Base/Notes/Estimate {n:02d}.md"
+        _write(vault, rel, PAGE.format(title=f"Estimate {n}", body=(
+            f"## Local estimate\n- id: member-{n}\n- credence: likely\n\nThe beacon survey gives estimate {n}.\n"
+        )))
+        state = semantic_index.build_parent_index_state(vault, vault / rel)
+        index.upsert_semantic_units(state, np.stack([_vector(1.0, n / 1000)]), 1.0)
+    for path in (RULES, OLD, NEW):
+        other = semantic_index.build_parent_index_state(vault, vault / path)
+        index.upsert_semantic_units(other, np.stack([_vector(0.0, 1.0)] * len(other.occurrences)), 1.0)
+    warm_managed_cell(vault)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(embeddings, "embed_texts", lambda *_a, **_k: np.stack([_vector(1.0)]))
+    # One candidate window of a limit of 2 (20 units) bounds the member read, so 24 pages exceed it.
+    monkeypatch.setattr(find_module, "_DIMENSION_MEMBER_WINDOWS", 1)
+    store_queries: list[str] = []
+    real = lexstore.search_semantic_units_result
+    monkeypatch.setattr(
+        lexstore, "search_semantic_units_result", lambda *a, **k: store_queries.append(a[1]) or real(*a, **k),
+    )
+    failed: list[str] = []
+
+    hits = find_module.find(
+        vault, query="beacon", scope="kb-only", mode="hybrid", graph=False, rerank=False,
+        result_level="unit", filters={"unit.dimension": {"$eq": "measured"}}, limit=2,
+        failed_out=failed,
+    )
+
+    assert len(hits) == 2
+    assert all(hit.source_anchor.startswith("member-") for hit in hits)
+    assert "" not in store_queries, "the vector lane read the dimension's members"
+    assert failed == []
+
+
+def test_a_filtered_hybrid_search_ranks_a_strong_member_older_than_its_lexical_window(
+    tmp_path, warm_managed_cell,
+) -> None:
+    """Catches a dimension-filtered lexical window that keeps the newest members, not the best."""
+    vault = _outlook_vault(tmp_path)
+    language_registry.registry_path(vault).write_text(MEASURED, encoding="utf-8")
+    for n in range(60):
+        text = (
+            "Lantern lantern lantern beacon." if n == 0
+            else f"Survey {n} saw a lantern among the many other ordinary notes of that week."
+        )
+        _write(vault, f"Knowledge Base/Notes/Estimate {n:02d}.md", (
+            f"---\ntype: insight\nupdated: 2026-{1 + n // 28:02d}-{1 + n % 28:02d}\n---\n"
+            f"# Estimate {n}\n\n## Local estimate\n- id: member-{n}\n- credence: likely\n\n{text}\n"
+        ))
+    warm_managed_cell(vault)
+
+    hits = find_module.find(
+        vault, query="lantern beacon", scope="kb-only", mode="hybrid", graph=False, rerank=False,
+        result_level="unit", filters={"unit.dimension": {"$eq": "measured"}}, limit=3,
+    )
+
+    assert [hit.source_anchor for hit in hits][:1] == ["member-0"]
+
+
+def test_a_served_row_dimension_preserves_complements_and_registry_edits(
+    tmp_path, warm_managed_cell, walk_sentinel,
+) -> None:
+    """Negating authored presence must keep an invalid row; registry edits need no rebuild."""
+    vault = _outlook_vault(tmp_path)
+    overlay = language_registry.registry_path(vault)
+    text = REGULATION + (
+        "  attributed:\n    labels: {en: Attributed}\n    description: A statement with a holder\n"
+        "    members: {keys: [modality]}\n"
+    )
+    overlay.write_text(text, encoding="utf-8")
+    _write(vault, FORECAST, PAGE.format(title="Forecast", body=(
+        "## Claim\n- id: valid\n- modality: must\n\nThe signal is required.\n\n"
+        "## Claim\n- id: invalid\n- modality: nonsense\n\nThe signal is unqualified.\n\n"
+        "## Decision\n- id: other\n\nKeep the signal.\n"
+    )))
+    expressions = [
+        {"unit.dimension": {"$ne": "attributed"}},
+        {"$not": {"unit.dimension": {"$eq": "attributed"}}},
+        {"$or": [{"unit.dimension": {"$eq": "attributed"}}, {"unit.kind": {"$eq": "decision"}}]},
+    ]
+    expected = [_recall_texts(vault, expression) for expression in expressions]
+    assert ("Forecast", "The signal is unqualified.") in expected[0]
+    assert ("Forecast", "The signal is required.") not in expected[0]
+    warm_managed_cell(vault)
+    # The reader thread's walks are the contract: a lexical repair that an earlier read scheduled walks the
+    # corpus on its own background thread, and may do so while this request runs.
+    sentinel = walk_sentinel(vault, vault / "Knowledge Base", current_thread_only=True)
+
+    for expression, wanted in zip(expressions, expected, strict=True):
+        assert _recall_texts(vault, expression) == wanted
+    overlay.write_text(text.replace("keys: [modality]", "kinds: [decision]"), encoding="utf-8")
+    language_registry.clear_cache()
+    find_module.clear_cache()
+    assert _recall_texts(vault, {"unit.dimension": {"$eq": "attributed"}}) == [
+        ("Forecast", "Keep the signal."),
+    ]
+    assert sentinel.count == 0, sentinel.report()
+
+
+def test_a_served_dimension_reads_selected_verdict_and_calendar_rows(tmp_path, warm_managed_cell):
+    """A selected structural unit must carry legacy governed rows as well as statement rows."""
+    vault = _outlook_vault(tmp_path)
+    language_registry.registry_path(vault).write_text(
+        REGULATION + "  checked:\n    labels: {en: Checked}\n"
+        "    description: A verdict or check date\n    members: {keys: [verdict, check_by]}\n",
+        encoding="utf-8",
+    )
+    _write(vault, FORECAST, PAGE.format(title="Forecast", body=(
+        "## Claim\n- verdict: confirmed\n\nThe signal passed.\n\n"
+        "## Claim\n- check_by: 2026-12-01\n\nCheck the signal.\n\n"
+        "## Claim\n- check_by: invalid\n\nThe signal has no date.\n"
+    )))
+    warm_managed_cell(vault)
+
+    assert set(_recall_texts(vault, {"unit.dimension": {"$eq": "checked"}})) == {
+        ("Forecast", "The signal passed."), ("Forecast", "Check the signal."),
+    }
+
+
 def test_a_served_search_checks_an_edge_dimension_on_its_hits_with_one_graph_read(
     served_vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -702,7 +983,7 @@ def test_a_dimension_that_needs_edges_reports_unknown_and_its_repair_when_the_gr
 
 
 def test_the_report_counts_no_kind_of_another_instance_as_the_filter_does(
-    private_instances, vault: Path
+    private_instances, vault: Path, warm_managed_cell,
 ) -> None:
     """Catches a report row that counts a unit by a kind key that its page's vocabulary instance
     defines, while the filter treats that kind as the other instance's own entry: the row says 2
@@ -733,6 +1014,9 @@ def test_the_report_counts_no_kind_of_another_instance_as_the_filter_does(
 
     assert hits == [("Release rules", "policy")]
     assert (row["unit_count"], row["page_count"]) == (1, 1)
+    warm_managed_cell(vault)
+    with principal.request_scope(private_instances("full")):
+        assert _recall_units(vault, {"unit.dimension": {"$eq": "regulation"}}) == hits
 
 
 # ---------------------------------------------------------------------------
