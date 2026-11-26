@@ -26,6 +26,7 @@ from exomem import (
     operation_entries,
     ownership_review,
     ownership_rotation,
+    request_budget,
     review_ids,
     review_state,
     semantic_authoring,
@@ -455,6 +456,26 @@ def _rows(vault: Path, *categories: str, state: str = "open") -> list[dict]:
         vault, categories=list(categories) or None, state=state, limit=0
     )
     return [item for item in listing["items"] if item["path"] == PAGE]
+
+
+def test_a_decision_whose_lookup_the_deadline_stops_asks_for_a_retry(vault: Path) -> None:
+    """Before a review pass is held, a decision reads every queue itself, and a starved host ran
+    that read for 23 minutes. A read its deadline stops has not seen every item: it must ask for a
+    retry, never call a listed item missing or decide on it."""
+    _put(vault, PAGE, _text())
+    _ask(vault, PAGE)
+    row = next(row for row in _rows(vault) if row["categories"] == ["relation_debt"])
+    budget = request_budget.RequestBudget(seconds=50)
+    budget.deadline = 0.0
+    token = request_budget.set_current(budget)
+    try:
+        with pytest.raises(OpError) as refused:
+            attention.item_by_ref(vault, row["ref"])
+    finally:
+        request_budget.reset_current(token)
+
+    assert refused.value.code == "REVIEW_QUEUES_WARMING"
+    assert refused.value.details["retry_after_ms"] > 0
 
 
 def test_a_page_with_ownership_and_relation_debt_lists_two_rows_whose_refs_resolve(

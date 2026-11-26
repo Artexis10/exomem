@@ -29,10 +29,11 @@ from pathlib import Path
 
 from . import activation as activation_module
 from . import audit as audit_module
-from . import call_spans, fusion, review_pass
+from . import call_spans, fusion, request_budget, review_pass
 from . import contradiction_stance as contradiction_stance_module
 from . import review_state as review_state_module
 from .audit import AuditFinding
+from .cli_ops import OpError
 
 log = logging.getLogger(__name__)
 
@@ -483,8 +484,14 @@ def attention(
         audited, stored = _stored_rows(vault_root, resolved)
         found, coverage = list(stored), None
         if audited:
+            # With no held pass the request audits the vault itself: it stops at its own deadline,
+            # and a check it could not finish reads as coverage "unknown", never as no findings.
             report = audit_module.audit(
-                vault_root, categories=sorted(audited), today=today, now=effective_now
+                vault_root,
+                categories=sorted(audited),
+                today=today,
+                now=effective_now,
+                budget=request_budget.current(),
             )
             found, coverage = [*report.findings, *stored], (report.metadata or {}).get("coverage")
     else:
@@ -894,7 +901,51 @@ def record_refused(vault_root: Path, reference: str, refused: Sequence[Mapping[s
             return
 
 
+#: How long a caller waits before it asks again for an item the request could not finish looking up.
+_QUEUES_WARMING_RETRY_MS = 5000
+
+
 def item_by_ref(
+    vault_root: Path,
+    reference: str,
+    *,
+    expected_fingerprint: str | None = None,
+    today=None,
+) -> AttentionItem:
+    """Resolve one current review item by its stable review reference, within the request budget.
+
+    With no held review pass the lookup reads every queue itself. When the request's deadline
+    stops that read, or a check inside it could not finish, the lookup has not seen every item:
+    it refuses with REVIEW_QUEUES_WARMING, which the caller retries, and never decides on an item
+    it saw only in part or calls a present item missing.
+    """
+    budget = request_budget.current()
+    if budget is None:
+        return _resolve_item_by_ref(
+            vault_root, reference, expected_fingerprint=expected_fingerprint, today=today
+        )
+    stopped_before = (len(budget.skipped), len(budget.truncated))
+    try:
+        with request_budget.checking(request_budget.ReadCheckpoint(budget)):
+            item = _resolve_item_by_ref(
+                vault_root, reference, expected_fingerprint=expected_fingerprint, today=today
+            )
+    except request_budget.ReadBudgetExhausted:
+        raise _queues_warming() from None
+    if (len(budget.skipped), len(budget.truncated)) != stopped_before:
+        raise _queues_warming()
+    return item
+
+
+def _queues_warming() -> OpError:
+    return OpError(
+        "REVIEW_QUEUES_WARMING",
+        "The review queues are still being read. Retry the same decision shortly.",
+        details={"retry_after_ms": _QUEUES_WARMING_RETRY_MS},
+    )
+
+
+def _resolve_item_by_ref(
     vault_root: Path,
     reference: str,
     *,
