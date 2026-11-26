@@ -408,6 +408,23 @@ def test_each_folders_app_log_is_kept_under_its_own_name(monkeypatch, tmp_path):
     assert kept == {"cell-app-notes-exomem.log": b"first pod", "cell-app-media-exomem.log": b"second pod"}
 
 
+def test_a_failed_upload_keeps_the_runners_kernel_log_and_the_failed_jobs_reason(monkeypatch, tmp_path):
+    """Defect: the Job and its pod are gone by the time anyone looks, so an out-of-memory kill is only provable
+    from the kernel log and the line cellctl logged first."""
+    failed = "cellctl: import 1 import Job failed: {\"exit_code\": 137, \"reason\": \"OOMKilled\"}"
+    monkeypatch.setattr(large_import, "run", lambda *_args, **_kwargs: SimpleNamespace(
+        returncode=0, stdout="[Wed] Memory cgroup out of memory: Killed process 7 (python)\n", stderr=""))
+    ctx = SimpleNamespace(stack=SimpleNamespace(workdir=tmp_path),
+                          kubectl=lambda *_args, **_kwargs: SimpleNamespace(stdout=f"reconciled\n{failed}\n", stderr=""))
+
+    kept = large_import.save_import_failure_evidence(ctx)
+
+    diagnostics = tmp_path / "diagnostics"
+    assert "Killed process 7" in (diagnostics / "runner-dmesg.txt").read_text()
+    assert failed in (diagnostics / "cellctl-at-failure.log").read_text()
+    assert kept["import_job_failures"] == [failed] and kept["runner_dmesg"]["returncode"] == 0
+
+
 def test_an_app_log_that_cannot_be_read_is_reported_and_does_not_fail_the_run(monkeypatch, tmp_path):
     def unreachable(*_args, **_kwargs):
         raise StepFailure("the cell's pod did not answer a probe")

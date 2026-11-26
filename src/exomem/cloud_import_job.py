@@ -28,6 +28,7 @@ from . import (
     archive_members,
     cloud_containment,
     cloud_grant,
+    cloud_job_failure,
     import_stage,
     private_state,
     rename_journal,
@@ -530,7 +531,8 @@ def main(argv: list[str] | None = None) -> int:
             result["retry"] = error.retry
     except cli_fence.StoreFenceRefusal as refused:
         result = {"ok": False, "error": refused.code}
-    except Exception:  # noqa: BLE001 -- errors may contain member names or signed URLs
-        result = {"ok": False, "error": "IMPORT_FAILED"}
+    except Exception as error:  # noqa: BLE001 -- the message may contain member names or signed URLs
+        # The diagnostic keeps the class and function names only, so cellctl can log the cause before it deletes the Job.
+        result = {"ok": False, "error": "IMPORT_FAILED", "diagnostic": cloud_job_failure.failure_diagnostic(error)}
     args.termination_log.write_text(json.dumps(result), encoding="ascii")
     return 0 if result["ok"] else 1

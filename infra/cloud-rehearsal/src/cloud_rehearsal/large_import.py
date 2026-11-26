@@ -768,6 +768,29 @@ def save_cell_logs(ctx: Context) -> None:
     (ctx.stack.workdir / "diagnostics" / "cell-pod.log").write_text(logs.stdout + logs.stderr, encoding="utf-8")
 
 
+def save_import_failure_evidence(ctx: Context) -> dict[str, Any]:
+    """Keep what decides an out-of-memory kill of the import Job, before the run is torn down.
+
+    The runner's kernel log names a memory-cgroup kill and the process it chose. The Job's pod is gone by the time
+    anyone looks, so cellctl's whole log is kept too: it records the container's reason and exit code before the
+    controller deletes the Job.
+    """
+    diagnostics = ctx.stack.workdir / "diagnostics"
+    diagnostics.mkdir(exist_ok=True)
+    kernel = run(["sudo", "--non-interactive", "dmesg", "--ctime"], check=False, timeout=60)
+    (diagnostics / "runner-dmesg.txt").write_text(kernel.stdout + kernel.stderr, encoding="utf-8")
+    controller = ctx.kubectl("logs", "--namespace", platform.CLOUD_NAMESPACE, "deployment/cellctl", "--tail=-1", check=False)
+    controller_log = controller.stdout + controller.stderr
+    (diagnostics / "cellctl-at-failure.log").write_text(controller_log, encoding="utf-8")
+    return {
+        "runner_dmesg": {"returncode": kernel.returncode, "bytes": len((kernel.stdout + kernel.stderr).encode()),
+                         "file": "runner-dmesg.txt in the diagnostics artifact"},
+        "cellctl_log_file": "cellctl-at-failure.log in the diagnostics artifact",
+        # cellctl's own fixed phrase for a failed import Job; the line carries the container reason and exit code.
+        "import_job_failures": [line for line in controller_log.splitlines() if " Job failed: " in line][:20],
+    }
+
+
 def save_cell_app_logs(ctx: Context, label: str) -> dict[str, Any]:
     """Keep the tail of each file in the cell's app log folder with the diagnostics, next to the pod log.
 
@@ -1033,6 +1056,8 @@ async def run_large_import(ctx: Context, plan: LargeImportPlan) -> None:
             latest = await ctx.fetchrow("SELECT * FROM exomem_cloud_imports WHERE cell_id = $1 ORDER BY created_at DESC LIMIT 1",
                                         ctx.a.cell_id)
             out["findings"][-1]["latest_import"] = import_summary(latest or {})
+        with contextlib.suppress(Exception):
+            out["import_failure_evidence"] = await asyncio.to_thread(save_import_failure_evidence, ctx)
     finally:
         await sampler.stop(task)
         with contextlib.suppress(Exception):

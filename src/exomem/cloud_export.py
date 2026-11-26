@@ -22,7 +22,7 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from . import cloud_containment, cloud_grant, vault_portability
+from . import cloud_containment, cloud_grant, cloud_job_failure, vault_portability
 from .cloud_import_job import _check_cell
 from .governance.principal import OWNER_AUDIENCE, RequestPrincipal, request_scope
 from .vault_store import cli_fence
@@ -219,13 +219,8 @@ def _portability_code(error: vault_portability.PortabilityError) -> str:
 
 def _failure_diagnostic(error: Exception) -> dict:
     """Keep code identifiers for operators, never exception text or file paths."""
-    detail = {"type": type(error).__name__}
-    frame = error.__traceback__
-    while frame is not None:
-        # The portability raise helper is never the cause; its caller is the check that refused.
-        if frame.tb_frame.f_code is not vault_portability._fail.__code__:
-            detail["function"] = frame.tb_frame.f_code.co_name
-        frame = frame.tb_next
+    # The portability raise helper is never the cause; its caller is the check that refused.
+    detail = cloud_job_failure.failure_diagnostic(error, not_the_cause=frozenset({vault_portability._fail.__code__}))
     if isinstance(error, vault_portability.PortabilityError):
         detail["code"] = error.code
         if error.limit is not None:
@@ -237,17 +232,6 @@ def _failure_diagnostic(error: Exception) -> dict:
         detail["code"] = error.code
     if isinstance(error, ExportRefused):
         detail.update(error.detail)
-    cause = error
-    if not isinstance(error, OSError):
-        # A refusal raised from or while handling an OSError keeps that error's class and number,
-        # unless the raise suppressed its context (`from None`).
-        cause = error.__cause__ if error.__cause__ is not None else (
-            None if error.__suppress_context__ else error.__context__)
-        if isinstance(cause, OSError):
-            detail["cause"] = type(cause).__name__
-    # OSError accepts any first argument; only an integer is an error number, never a path.
-    if isinstance(cause, OSError) and isinstance(cause.errno, int):
-        detail["errno"] = cause.errno
     return detail
 
 

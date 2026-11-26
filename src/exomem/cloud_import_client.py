@@ -85,6 +85,22 @@ class _SourceChanged(Exception):
     """A file or folder changed while it was archived, so the archive would mix two versions."""
 
 
+# The cell's controller fixes these two codes for an import step that left no report of its own.
+_ENDED_WITHOUT_REPORT = {
+    "IMPORT_OUT_OF_MEMORY": "the import ran out of memory on your cell and stopped",
+    "IMPORT_KILLED": "the import was stopped on your cell before it could say why",
+}
+
+
+def _ended_message(code: str) -> str:
+    """What happened to an import that Cloud ended, and what the person can do."""
+    cause = _ENDED_WITHOUT_REPORT.get(code)
+    if cause is None:
+        return "the Cloud import ended without finishing, and the checkpoint is removed; a new run starts a new import"
+    return (f"{cause}, and the checkpoint is removed. Run the command again to start a new import; "
+            "if it stops the same way, report the import id")
+
+
 def safe_code(value: object) -> str | None:
     """A server-sent code, only if it has the shape of one, so a hostile body cannot put free text in the output."""
     # A format check on a protocol field.
@@ -558,9 +574,8 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
             if item["observed_state"] in ("failed", "expired", "discarded"):
                 ciphertext.unlink(missing_ok=True)
                 record.unlink(missing_ok=True)
-                ended = CloudImportError(where.phase, safe_code(item.get("error_code")) or "IMPORT_ENDED",
-                                         "the Cloud import ended without finishing, and the checkpoint is removed; "
-                                         "a new run starts a new import", state["import_id"], resume=False)
+                code = safe_code(item.get("error_code")) or "IMPORT_ENDED"
+                ended = CloudImportError(where.phase, code, _ended_message(code), state["import_id"], resume=False)
                 ended.ended = True
                 raise ended
             if predicate(item):

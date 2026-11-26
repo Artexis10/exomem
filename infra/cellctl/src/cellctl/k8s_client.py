@@ -191,6 +191,31 @@ def _bound_requests(api_client: k8s.ApiClient) -> None:
     api_client.request = request
 
 
+def _identifier(value) -> str | None:
+    """A short ASCII identifier, as a code name or a Kubernetes termination reason is, else None."""
+    if isinstance(value, str) and len(value) <= 80 and value.isascii() and value.isidentifier():
+        return value
+    return None
+
+
+def _safe_diagnostic(detail) -> dict:
+    """A Job's reported diagnostic cut to its closed wire fields, which carry code identifiers and numbers,
+    never free-form error text."""
+    safe = {}
+    if isinstance(detail, dict):
+        for key in ("type", "function", "code", "limit", "cause", "missing"):
+            if (value := _identifier(detail.get(key))) is not None:
+                safe[key] = value
+        errno = detail.get("errno")
+        if type(errno) is int and errno > 0:
+            safe["errno"] = errno
+        # The HTTP status that refused a part upload, or that came without an ETag.
+        status = detail.get("status")
+        if type(status) is int and 100 <= status <= 599:
+            safe["status"] = status
+    return safe
+
+
 def _not_found(error: ApiException) -> bool:
     return error.status == 404
 
@@ -452,12 +477,26 @@ class ClusterClient:
             succeeded = job is not None and bool(job.status.succeeded)
             failed = job is not None and bool(job.status.failed)
             report = {}
+            reason = None
             if succeeded or failed:
+                terminated = self._job_pod_terminated(namespace, name, succeeded=succeeded)
                 try:
-                    report = json.loads(self._job_pod_termination_message(namespace, name, succeeded=succeeded) or "{}")
+                    report = json.loads((terminated.message if terminated else None) or "{}")
                 except ValueError:
                     pass
-            result[phase] = ImportJob(job is not None, active, succeeded, failed, report, bool(pods))
+                if failed:
+                    # A SIGKILL, as from an out-of-memory kill, leaves no message; the container's own reason and
+                    # exit code are then the only cause. The controller removes terminal Jobs, so log them first.
+                    safe = _safe_diagnostic(report.get("diagnostic") if isinstance(report, dict) else None)
+                    if terminated is not None:
+                        reason = _identifier(terminated.reason)
+                        if reason:
+                            safe["reason"] = reason
+                        if type(terminated.exit_code) is int:
+                            safe["exit_code"] = terminated.exit_code
+                    logger.warning("cellctl: import %s %s Job failed: %s", import_id, phase,
+                                   json.dumps(safe, sort_keys=True))
+            result[phase] = ImportJob(job is not None, active, succeeded, failed, report, bool(pods), reason)
         return result
 
     def observe_export_job(self, namespace: str, export_id: str, *, step: str):
@@ -482,21 +521,7 @@ class ClusterClient:
                 parsed = {}
             report = parsed if isinstance(parsed, dict) else {}
         if failed:
-            detail = report.get("diagnostic")
-            safe = {}
-            if isinstance(detail, dict):
-                # The closed diagnostic wire fields carry code identifiers, never free-form error text.
-                for key in ("type", "function", "code", "limit", "cause", "missing"):
-                    value = detail.get(key)
-                    if isinstance(value, str) and len(value) <= 80 and value.isascii() and value.isidentifier():
-                        safe[key] = value
-                errno = detail.get("errno")
-                if type(errno) is int and errno > 0:
-                    safe["errno"] = errno
-                # The HTTP status that refused a part upload, or that came without an ETag.
-                status = detail.get("status")
-                if type(status) is int and 100 <= status <= 599:
-                    safe["status"] = status
+            safe = _safe_diagnostic(report.get("diagnostic"))
             # The controller removes terminal Jobs; retain the private-safe reason before it does.
             logger.warning("cellctl: export %s failed: %s", export_id, json.dumps(safe, sort_keys=True))
         finished_at = _parse_timestamp(job.status.completion_time) if succeeded else None
@@ -1120,15 +1145,23 @@ class ClusterClient:
         `succeeded` False it reads a failed container's message instead, for
         the D5 vault check's code."""
 
+        terminated = self._job_pod_terminated(namespace, job_name, succeeded=succeeded)
+        return terminated.message if terminated and terminated.message else None
+
+    def _job_pod_terminated(self, namespace: str, job_name: str, *, succeeded: bool = True):
+        """The terminated state of this Job's container that ended as asked, one with a message first: a
+        container killed from outside ends with none, and its `reason` and `exit_code` are all that name why."""
+
         pods = self._core.list_namespaced_pod(
             namespace, label_selector=f"batch.kubernetes.io/job-name={job_name}"
         ).items
+        ended = []
         for pod in pods:
             for status in pod.status.container_statuses or []:
                 terminated = status.state.terminated if status.state else None
-                if terminated and (terminated.exit_code == 0) == succeeded and terminated.message:
-                    return terminated.message
-        return None
+                if terminated and (terminated.exit_code == 0) == succeeded:
+                    ended.append(terminated)
+        return next((terminated for terminated in ended if terminated.message), ended[0] if ended else None)
 
     def _get_namespace(self, name: str):
         try:

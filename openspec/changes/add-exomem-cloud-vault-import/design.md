@@ -168,7 +168,11 @@ A refused import preserves existing canonical content. Interrupted ZIP preservat
 - `ARCHIVE_TOO_LARGE`;
 - `STORAGE_ALLOWANCE_EXCEEDED`;
 - `IMPORT_EXPIRED`;
-- `IMPORT_HOLD_EXPIRED`.
+- `IMPORT_HOLD_EXPIRED`;
+- `IMPORT_OUT_OF_MEMORY`, when cellctl finds that the kernel killed the import Job's container for memory and the Job wrote no report;
+- `IMPORT_KILLED`, when the Job's container ended without a report for any other reason.
+
+An unexpected exception in the Job keeps `IMPORT_FAILED`. The Job's report then adds a `diagnostic` with the exception class and function only, and cellctl logs it with the container's `reason` and `exit_code` before it deletes the Job.
 
 Import logs carry counts, sizes, durations and codes only.
 
