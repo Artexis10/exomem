@@ -1408,20 +1408,29 @@ def _rich_kind_remediation(
     return f"{hint}Pass `kind` with one of the admitted kinds: {', '.join(kinds)}."
 
 
-def _compact_metadata_refusal(*, passed: tuple[str, ...], kinds: str) -> ObserveMemoryError:
+def _compact_metadata_refusal(
+    *, passed: tuple[str, ...], kinds: str, with_relations: bool = False
+) -> ObserveMemoryError:
     """Governed metadata sent with a compact unit: name each field and both exits.
 
     The refusal for converting a rich unit to compact names no field, and its exits (convert
     the unit, edit the page to drop its rows) do not apply to a compact unit, which has no
     rows. Both exits here are a retry of the same call; `kinds` says which rich kinds to pass.
+    A call that also passes relations keeps only the rich-kind exit: without its metadata, the
+    page may still refuse its relations for the same reason.
     """
     fields = ", ".join(passed)
+    remediation = (
+        f"Keep {fields} and the relations by passing a rich kind. {kinds}"
+        if with_relations
+        else f"Retry one of two ways: omit {fields} to keep a compact observation, or keep "
+        f"{fields} by passing a rich kind. {kinds}"
+    )
     return ObserveMemoryError(
         "COMPACT_METADATA_REQUIRES_RICH_KIND",
         f"Governed unit metadata ({fields}) needs a rich kind, and a compact observation "
         "carries no metadata",
-        f"Retry one of two ways: omit {fields} to keep a compact observation, or keep "
-        f"{fields} by passing a rich kind. {kinds}",
+        remediation,
     )
 
 
@@ -1436,7 +1445,11 @@ def argument_refusal(arguments: Mapping[str, Any]) -> ObserveMemoryError | None:
     passed = _compact_names_passed(arguments)
     if not passed:
         return None
-    return _compact_metadata_refusal(passed=passed, kinds=_core_kinds_remediation())
+    return _compact_metadata_refusal(
+        passed=passed,
+        kinds=_core_kinds_remediation(),
+        with_relations=bool(arguments.get("relations")),
+    )
 
 
 def _compact_names_passed(arguments: Mapping[str, Any]) -> tuple[str, ...] | None:
