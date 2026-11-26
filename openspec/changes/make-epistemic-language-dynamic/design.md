@@ -118,7 +118,7 @@ A dimension entry has a key, labels, a description, its members and its display 
 
 **Every dimension gets the generic operations:** retrieval filters by it, the context compiler groups by it, and reviews and reports queue by it. No code names a particular dimension.
 
-Two surfaces group by dimension now: unit search results and the context pack. A search asks for groups through its filter alone. When the filter names `unit.dimension` at the top level, alone or under a top-level `$and`, `$eq` returns one group and `$in` returns one group for each named dimension, in the order given. `$ne` asks for no group, and the limit counts distinct units. The automatic working set (`recall_context`) and the retrieve-nudge hook do not group or mark yet. They wait for the real-model check (task 5.4). The per-dimension report row counts each mark that the dimension's display behaviours produce.
+Two surfaces group by dimension now: unit search results and the context pack. A search asks for groups through its filter alone. When the filter names `unit.dimension` at the top level, alone or under a top-level `$and`, `$eq` returns one group and `$in` returns one group for each named dimension, in the order given. `$ne` asks for no group, and the limit counts distinct units. The automatic working set (`recall_context`) and the retrieve-nudge hook do not group or mark yet. They stay off: the owner chose on 2026-11-25 to withhold them after the real-model check could not run (task 5.4). The per-dimension report row counts each mark that the dimension's display behaviours produce.
 
 **A dimension may also name display behaviours** from a closed set:
 
@@ -173,7 +173,7 @@ Readiness uses each projection's introduction generation from the existing owner
 Inbound links require generation 1, so complete inbound rows stay available during the generation 5 row-key pass.
 The same job records the completed parser version separately, using `semantic_index.PARSER_VERSION` as its required value.
 Missing, malformed or different parser records require a full bounded pass without owner DDL when the owner generation is current.
-Each pass records both generations; it resumes only when both match the running build.
+Each pass records the owner, lexical and parser generations; it resumes only when all three match the running build.
 Migration records both generations after fresh verification, and only the final full batch updates them thereafter.
 Ordinary page writes derive their own rows but never qualify the whole corpus.
 Generation repair preserves its pinned target across head writes; a later overlay change remains owed after completion.
@@ -188,7 +188,7 @@ This prevents old parser summaries from becoming falsely authoritative empty ans
 A wrong refusal temporarily delays semantic readers while the existing background pass finishes.
 Raw pages, existence, path lists and complete inbound links remain available; ordinary registry lag retains its notice without a refusal.
 Status exposes the completed and required parser versions.
-The stored candidate now applies indexed proposals and exact selected membership to kinds, keys and families before lane caps.
+The stored candidate now applies indexed proposals and exact selected membership to kinds, keys and families before lane caps. The vector lane reads a dimension's members within eight candidate windows; past that bound it ranks the newest members and the result carries a partial-coverage notice (`semantic_units_candidate_window`).
 Family preparation uses neutral graph inputs and indexed target proofs under the same pinned snapshot.
 The file-mode family fallback retains its existing after-limit caveat until its own indexed path is delivered.
 The managed file runtime keeps its existing freshness and admission contract.
@@ -242,7 +242,7 @@ The load target and budgets above still apply; the programme owner runs that lat
 
 ### Stored family eligibility before ranking
 
-The canonical-store path will propose occurrences through endpoint and dependency indexes, then decide selected family membership before ranking.
+The canonical-store path proposes occurrences through endpoint and dependency indexes, then decides selected family membership before ranking.
 The original filter remains the exact predicate.
 Candidate SQL preserves three-valued logic, so a possible edge cannot become an unsafe exclusion under negation.
 File-mode family limits remain until this stored path has qualified inputs and delivery evidence.
@@ -257,7 +257,7 @@ Explicit candidate batches prepare graph membership immediately before exact fil
 Ranking-statistics transport does not prepare dimensions: it can traverse every admitted parent before a request has query candidates.
 The admitted BM25 branch uses the same candidate preparation operation as other lexical and vector eligibility.
 Endpoint-first adjacency and candidate-name dependency lookups cover links revealed when a competing page is withheld.
-Neither a resolver walk nor a global family-edge list belongs on this path.
+No resolver walk belongs on this path. The delivered family proposal still reads the family's edges once per request, so its cost grows with the family's edge count; the exact checks that follow grow with the proposed rows when members are sparse. The follow-up caps the rows both exact scans examine at a multiple of the window and emits the same partial-coverage notice.
 
 Selected summaries and neutral dependencies supply authored targets without parsing an unreturned page.
 The producer and reader share target resolution, with destination existence and target summaries prefetched in batches.
@@ -287,7 +287,7 @@ The family operation supplies no retired-alias fallback. A retired alias names a
 
 Common page writes, deletion, replay and cold verification maintain the projection. Fold it into the readiness of unshipped lexical schema 20 and owner generation 5. Released-owner writers must tolerate its absence through explicit transaction-cached capabilities. Future key-normalization changes invalidate the existing derived generation; add no separate job or attestation.
 
-Prove full-resolver parity, lower-bound ambiguity diagnostics, hidden collision admission, incomplete negation, legacy-owner writes and cold parity. Prove author-selected private-family membership through public results before caps. Check retired aliases at the real endpoint boundary. Reuse the maintained load instrument for the recorded keyword and hybrid budgets.
+Prove full-resolver parity, lower-bound ambiguity diagnostics, hidden collision admission, incomplete negation, legacy-owner writes and cold parity. Prove author-selected private-family membership through public results before caps. Check retired aliases at the real endpoint boundary. Reuse the maintained load instrument for the recorded keyword and hybrid budgets. Its `dimension_filter` series covers key and kind dimensions in file mode only; the latency proof for stored family eligibility is a store-mode series with a relation family, which the follow-up adds.
 
 This applies the primary-source roster's [context engineering](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents), [tool design](https://www.anthropic.com/engineering/writing-tools-for-agents) and [outcome evaluation](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents) guidance.
 
@@ -310,7 +310,7 @@ Vocabulary items use an explicit semantic page when one exists.
 Import proposals, planning intents and registry overlays have no semantic subject and are not applicable.
 Queue adapters use producer fields, never category names or warning prose, to determine target scope.
 
-The public `list_review_items` tool accepts optional `filters` through its existing reader route.
+Withheld from the dimensions delivery until task 5.6's real-model check; the candidate is commit 7581eb548 on pull request #2763. The public `list_review_items` tool accepts optional `filters` through its existing reader route.
 Compile the shared structured-filter grammar once and reject predicates outside `unit.dimension` and Boolean composition.
 Display may union dimensions across selected units.
 Filtering uses the existing same-unit existential rule: one target unit must satisfy the complete expression.
@@ -508,7 +508,7 @@ Kinds:
 - **A behaviour change hides in a data migration.** For core relations, the shipped pack must reproduce today's sets, except two named widenings. The before-and-after fixture test guards each cutover.
 - **Agents misuse the new words.** Each slice proves on real models that an agent picks the right word for realistic and hostile inputs.
 - **Unsourced numbers creep in.** Validation refuses a probability without a holder and a basis, with an error that names the missing key.
-- **Display annotations add noise.** `flag_open` marks every open question, hypothesis, prediction and assumption without a verdict. Slice 5 checks on real models that the annotations help, and f38's P arm shows their effect on outcomes.
+- **Display annotations add noise.** `flag_open` marks every open question, hypothesis, prediction and assumption without a verdict. Slice 5's real-model check could not run (task 5.4), so the automatic working set withholds them; search and the context pack keep them, and f38's P arm shows their effect on outcomes.
 - **Belief units add authoring weight.** A separate unit costs more than a row on the claim. In return, each belief keeps its holder, and several holders can disagree on record.
 - **Behaviour keys from `core_registry()` alone miss vault extensions in SQL.** A stored key column holds core keys, and an extension is a candidate that each page interprets. Readers ask `exomem_edge_behaves`, or expand the keys through `relation_query_plan` over the admitted instances.
 - **A non-core key means what its authoring page's instance defines.** A behaviour lookup uses that page's registry, as the census does.
@@ -520,10 +520,12 @@ Kinds:
 
 ## Current-turn subject precedence
 
-Automatic display evaluation exposed a shared resolver abstention before annotation. An unrelated weak candidate could block an exact subject name. The accepted repair changes the competition boundary for both evaluation arms. It changes no dimension membership, retrieval evidence or role selection.
+Withheld from the dimensions delivery until task 5.4a's own real-model gate passes; the candidate is commit 7581eb548 on pull request #2763.
+
+Automatic display evaluation exposed a shared resolver abstention before annotation. An unrelated weak candidate could block an exact subject name. The accepted repair changes the competition boundary for both evaluation arms. It changes no dimension membership or role selection, but it changes which subjects the automatic working set resolves.
 
 Use existing categorical candidate facts and the current turn's name spans. A focus alias does not prove that the current turn named a subject. Keep unrelated weak alternatives as partial leads. Preserve structurally complementary context. Check ambiguity within each group of overlapping current-turn names. A separately named topic cannot bridge competing interpretations of another name. Preserve agent identity choices and existing behavior without a current-turn name.
 
 The existing resolver supplies candidate facts, spelling spans and structural membership buckets. No external resolver fits this internal evidence contract without replacing those components. Reuse those components; the added maintenance is one categorical competition rule and its regression boundaries. This adds no catalogue query or model call.
 
-The context-engineering and tool-evaluation guidance supports this bounded boundary change: https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents and https://www.anthropic.com/engineering/writing-tools-for-agents. Deterministic resolver and activation checks establish the rule. The real-model display workflow remains the release acceptance check. A passing resolver check cannot establish an annotation benefit.
+The context-engineering and tool-evaluation guidance supports this bounded boundary change: https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents and https://www.anthropic.com/engineering/writing-tools-for-agents. Deterministic resolver and activation checks establish the rule. Its release acceptance is a real-model run of the automatic working set on current-turn named subjects (task 5.4a), not the display workflow that task 5.4 closed. A passing resolver check cannot establish an annotation benefit.
