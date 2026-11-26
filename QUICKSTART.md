@@ -41,7 +41,7 @@ If you're comfortable in Claude Code, this is ~20–30 minutes.
 > **skill** (step 6) is the *brain* — it tells Claude *when* to save, how to keep
 > raw sources and evidence separate from compiled conclusions, when to suggest
 > links, and how to update knowledge safely. Generic MCP clients that cannot load
-> Skills should call `bootstrap()` once after connecting; that returns the compact
+> Skills should call `read_instructions()` once after connecting; that returns the compact
 > operating contract through MCP. See [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md)
 > for Codex, hosted chat clients, Cursor/Windsurf/Gemini, and generic MCP setup.
 
@@ -87,7 +87,7 @@ Set up Evermatter for my local markdown or Obsidian vault. Use the recommended l
 path unless I explicitly ask for embeddings. Run the setup wizard, explain each
 prompt in plain language before I answer it, and do not move or rewrite my
 existing vault files. After setup, verify with doctor, call
-bootstrap(profile="compact") if you are not using the Evermatter skill, ask one
+read_instructions() if you are not using the Evermatter skill, ask one
 known vault question with `search_memory`, and
 save one harmless test conclusion so I can see where it lands.
 ```
@@ -95,7 +95,7 @@ save one harmless test conclusion so I can see where it lands.
 The expected first-run verification is concrete:
 
 1. `exomem doctor` passes for the selected vault.
-2. The connected assistant can call `bootstrap(profile="compact")`, unless it has
+2. The connected assistant can call `read_instructions()`, unless it has
    already loaded the Evermatter skill.
 3. A known question about your vault triggers `search_memory` before the answer.
 4. A safe test such as "remember that setup succeeded today" writes a compiled
@@ -460,7 +460,7 @@ own — or just start writing; the writer auto-registers new keys as you use the
 > requires confirmed `restructure_execution`.
 >
 > **Other MCP clients.** ChatGPT, Codex, Cursor, Gemini, Windsurf, or any client
-> without Skill support should call `bootstrap()` once after connecting. It returns
+> without Skill support should call `read_instructions()` once after connecting. It returns
 > Evermatter's search/save/upload defaults, the compiled-note write loop, and
 > performance guidance in a structured MCP response. The copyable standing instruction lives in
 > [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md).
@@ -650,7 +650,7 @@ but a new session or a compaction starts clean. This mode injects far more per
 prompt than the stub block does, which is the trade it exists to let you make.
 
 (Hooks are local-client only — claude.ai web/mobile can't run them, so there the
-skill or `bootstrap()` contract stays best-effort: nudge it with *"save that to
+skill or `read_instructions()` contract stays best-effort: nudge it with *"save that to
 kb"* or *"check the kb."*)
 
 ---
@@ -713,7 +713,7 @@ inline example; paste it into the Claude app at **Settings → Profile → "What
 personal preferences should Claude consider in responses?"**:
 
 ```
-I keep a personal Knowledge Base served by the Evermatter MCP. If no Evermatter skill is loaded, call bootstrap(profile="compact") once at the start of a new chat and follow it. Evermatter prominence: BALANCED. Use Evermatter proactively: search first when a turn touches my projects, notes, decisions, or domains (cite what you find; an empty search is a gap, not a dead end). Do not search on unrelated chit-chat, small control prompts, or follow-ups where the current conversation already has the needed KB evidence. Capture durable conclusions on your own — a decision, solved problem, diagnosed failure, recognized pattern, or stable preference, recurring routine, historical baseline, or durable affiliation when stability or recurrence and reusable comparison, interpretation, or decision value are clear. Route a uniquely resolved Entity facet there; otherwise write one concise compiled observation. Items compared or tracked: Records rows, not a note. Fleeting preferences, one-off activity, incidental associations, and trivial metrics get no note. A concise observation, narrow Entity facet, new Entity or own edge follows `proactive_capture`; a queued relation requires `link_acceptance`; merge or structural change requires confirmed `restructure_execution`. Save a short compiled note, not a transcript, then report one line: "Saved -> <title>". Ask before saving only if type/scope is genuinely ambiguous. Stay quiet on chit-chat; don't narrate empty searches.
+I keep a personal Knowledge Base served by the Evermatter MCP. If no Evermatter skill is loaded, call read_instructions() once at the start of a new chat and follow it. Evermatter prominence: BALANCED. Use Evermatter proactively: search first when a turn touches my projects, notes, decisions, or domains (cite what you find; an empty search is a gap, not a dead end). Do not search on unrelated chit-chat, small control prompts, or follow-ups where the current conversation already has the needed KB evidence. Capture durable conclusions on your own — a decision, solved problem, diagnosed failure, recognized pattern, or stable preference, recurring routine, historical baseline, or durable affiliation when stability or recurrence and reusable comparison, interpretation, or decision value are clear. Route a uniquely resolved Entity facet there; otherwise write one concise compiled observation. Items compared or tracked: Records rows, not a note. Fleeting preferences, one-off activity, incidental associations, and trivial metrics get no note. A concise observation, narrow Entity facet, new Entity or own edge follows `proactive_capture`; a queued relation requires `link_acceptance`; merge or structural change requires confirmed `restructure_execution`. Save a short compiled note, not a transcript, then report one line: "Saved -> <title>". Ask before saving only if type/scope is genuinely ambiguous. Stay quiet on chit-chat; don't narrate empty searches.
 ```
 
 Optionally paste this separate response-style block too (or trim it to taste):

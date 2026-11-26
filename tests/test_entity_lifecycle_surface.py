@@ -939,7 +939,7 @@ def test_hookless_custom_instruction_blocks_name_the_ordinary_entity_boundary() 
         # so it defers the decision order to the bootstrap payload it already
         # instructs the agent to follow. That deferral is only honest if the
         # instruction to follow bootstrap is actually present.
-        assert 'bootstrap(profile="compact")' in block
+        assert 'read_instructions()' in block
         assert "follow it" in folded
         for restated in ("stop ambiguity", "hydrate before create", "resolve first"):
             assert restated not in folded, restated
