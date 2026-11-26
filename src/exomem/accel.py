@@ -6,7 +6,8 @@ same rules. Torch is imported lazily inside `select_device` — keyword-mode and
 lean install without the `[embeddings]` extra must never pay the import cost.
 
 Scope — this governs **torch** models only: the bge text embedder, bge reranker,
-CLIP, ECAPA voiceprints, and the optional caption pipeline. The ASR engine is
+CLIP, ECAPA voiceprints, and the optional caption pipeline. An ONNX Runtime model
+takes the same device and maps it to execution providers with `onnx_providers`. The ASR engine is
 faster-whisper (CTranslate2), which has **no Metal backend** and owns its own
 cuda/cpu choice in `extract`; it does NOT route through here. On Apple Silicon,
 transcription therefore still runs on CPU until a Metal-capable backend (e.g.
@@ -255,6 +256,26 @@ def bulk_device(explicit: str | None = None) -> str | None:
     if mode_module.resolve_mode() != "quiet" and gpu_usable():
         return "gpu"
     return None
+
+
+def onnx_providers(device: str) -> list[str]:
+    """Map a device from `select_device` onto ONNX Runtime execution providers.
+
+    Providers are not torch devices: the list is an ordered preference and the
+    runtime silently uses the first one it can construct. CPU is always appended
+    so an unavailable accelerator degrades rather than raising — the same
+    politeness `gpu_usable` applies on the torch side.
+    """
+    import onnxruntime as ort
+
+    available = set(ort.get_available_providers())
+    preferred: list[str] = []
+    if device.startswith("cuda") and "CUDAExecutionProvider" in available:
+        preferred.append("CUDAExecutionProvider")
+    elif device == "mps" and "CoreMLExecutionProvider" in available:
+        preferred.append("CoreMLExecutionProvider")
+    preferred.append("CPUExecutionProvider")
+    return preferred
 
 
 def empty_cache() -> None:
