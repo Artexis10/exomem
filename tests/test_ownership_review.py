@@ -458,16 +458,24 @@ def _rows(vault: Path, *categories: str, state: str = "open") -> list[dict]:
     return [item for item in listing["items"] if item["path"] == PAGE]
 
 
-def test_a_decision_whose_lookup_the_deadline_stops_asks_for_a_retry(vault: Path) -> None:
+def test_a_decision_whose_audit_the_deadline_cut_asks_for_a_retry(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Before a review pass is held, a decision reads every queue itself, and a starved host ran
-    that read for 23 minutes. A read its deadline stops has not seen every item: it must ask for a
-    retry, never call a listed item missing or decide on it."""
+    that read for 23 minutes. A lookup whose audit the deadline cut has not seen every item: it
+    must ask for a retry, never call a listed item missing, even when the rest of it finished."""
     _put(vault, PAGE, _text())
     _ask(vault, PAGE)
     row = next(row for row in _rows(vault) if row["categories"] == ["relation_debt"])
-    budget = request_budget.RequestBudget(seconds=50)
-    budget.deadline = 0.0
-    token = request_budget.set_current(budget)
+    check = audit_module._check_relation_debt
+
+    def cut_the_audit(*args, **kwargs):
+        # Only the audit's own deadline passes; the call keeps its time for the rest of the lookup.
+        request_budget.current().deadline = 0.0
+        return check(*args, **kwargs)
+
+    monkeypatch.setattr(audit_module, "_check_relation_debt", cut_the_audit)
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=50))
     try:
         with pytest.raises(OpError) as refused:
             attention.item_by_ref(vault, row["ref"])

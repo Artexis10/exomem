@@ -493,7 +493,10 @@ def attention(
                 now=effective_now,
                 budget=request_budget.current(),
             )
-            found, coverage = [*report.findings, *stored], (report.metadata or {}).get("coverage")
+            # Keyed by queue, as the held pass's is, so a budget that was not hit changes nothing.
+            raw = (report.metadata or {}).get("coverage") or {}
+            found = [*report.findings, *stored]
+            coverage = {k: v for k, v in raw.items() if k in resolved} or None
     else:
         # The held pass ran every triageable queue; its coverage is keyed by queue.
         found = held.findings
@@ -844,6 +847,13 @@ def entity_candidate_by_ref(
     state/fingerprint machinery.
     """
     wanted = review_state_module.parse_review_ref(reference)
+    with _whole_lookup():
+        return _entity_candidate(vault_root, wanted, reference, expected_fingerprint, today)
+
+
+def _entity_candidate(
+    vault_root: Path, wanted: str, reference: str, expected_fingerprint: str | None, today
+) -> AttentionItem:
     report = attention(
         vault_root,
         categories=["entity_recurrence"],
@@ -912,35 +922,47 @@ def item_by_ref(
     expected_fingerprint: str | None = None,
     today=None,
 ) -> AttentionItem:
-    """Resolve one current review item by its stable review reference, within the request budget.
-
-    With no held review pass the lookup reads every queue itself. When the request's deadline
-    stops that read, or a check inside it could not finish, the lookup has not seen every item:
-    it refuses with REVIEW_QUEUES_WARMING, which the caller retries, and never decides on an item
-    it saw only in part or calls a present item missing.
-    """
-    budget = request_budget.current()
-    if budget is None:
+    """Resolve one current review item by its stable review reference, within the request budget."""
+    with _whole_lookup():
         return _resolve_item_by_ref(
             vault_root, reference, expected_fingerprint=expected_fingerprint, today=today
         )
-    stopped_before = (len(budget.skipped), len(budget.truncated))
-    try:
-        with request_budget.checking(request_budget.ReadCheckpoint(budget)):
-            item = _resolve_item_by_ref(
-                vault_root, reference, expected_fingerprint=expected_fingerprint, today=today
-            )
-    except request_budget.ReadBudgetExhausted:
-        raise _queues_warming() from None
-    if (len(budget.skipped), len(budget.truncated)) != stopped_before:
-        raise _queues_warming()
-    return item
+
+
+@contextmanager
+def _whole_lookup() -> Iterator[None]:
+    """Run a lookup of one item over the review queues inside the request budget, or refuse it.
+
+    With no held review pass a lookup reads every queue itself. A lookup whose read the deadline
+    stopped, or whose audit could not finish a check, has not seen every item. Whatever it then
+    found, missed or refused, it refuses with the retryable REVIEW_QUEUES_WARMING instead, so it
+    never calls a present item missing or decides on one it saw in part. The lookup runs under its
+    own child budget, ending a delivery reserve before the call's, so only its own stops count.
+    """
+    if request_budget.current() is None:
+        yield
+        return
+    with request_budget.leaving(request_budget.DELIVERY_RESERVE_SECONDS):
+        lookup = request_budget.current()
+        assert lookup is not None
+        try:
+            with request_budget.checking(request_budget.ReadCheckpoint(lookup)):
+                yield
+        except request_budget.ReadBudgetExhausted:
+            raise _queues_warming() from None
+        except ValueError:
+            if lookup.yielded():
+                raise _queues_warming() from None
+            raise
+        if lookup.yielded():
+            raise _queues_warming()
 
 
 def _queues_warming() -> OpError:
     return OpError(
         "REVIEW_QUEUES_WARMING",
-        "The review queues are still being read. Retry the same decision shortly.",
+        "This call could not read every review queue in its time, so it decided nothing.",
+        "Retry the same call shortly with the same arguments.",
         details={"retry_after_ms": _QUEUES_WARMING_RETRY_MS},
     )
 
