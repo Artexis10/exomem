@@ -4118,7 +4118,8 @@ def _file_step(
         if stage_id is not None:
             held = budget or _call_budget()
             export_expansion.expand(
-                root, stage_id, keep_going=lambda: held.can_afford(request_budget.DELIVERY_RESERVE_SECONDS))
+                root, stage_id, keep_going=lambda: held.can_afford(request_budget.DELIVERY_RESERVE_SECONDS),
+                rewalk=step == "rescan")
     if step == "start":
         if run is None:
             # Read here, not as a default argument, so a test or an operator can change the page size.
@@ -4320,6 +4321,7 @@ def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict 
     remaining = _page_remaining(run) + int(run.get("inventory_truncated") or 0)
     if _next_filing_step(run) == "done":
         remaining += _unscanned(root, store, run)  # staged files that came after the scan, which a new scan files
+        remaining += len(expansion.held) if expansion else 0  # an export still being read stays unfiled until its last item
     pages_done = sum(1 for page in scans if page["phase"] in _FINISHED_PHASES)
     person: list[dict] = []
     if stop is None and filing == _STOPPED and run.get("apply_stop"):

@@ -95,15 +95,16 @@ def read(root: Path, import_id: str) -> Reading:
         files=len(record["rows"]), unfiled=tuple(unfiled))
 
 
-def expand(root: Path, import_id: str, *, keep_going: Callable[[], bool]) -> None:
+def expand(root: Path, import_id: str, *, keep_going: Callable[[], bool], rewalk: bool = False) -> None:
     """Derive transcripts from the stage's recognised exports until each is read or `keep_going` says the call is out of budget.
 
-    The first call walks the stage once to find its exports. Each later call resumes the export that is `working` at
-    its recorded position, and always handles one item, so a call that starts with no budget left still moves on.
+    The first call walks the stage once to find its exports, and `rewalk` walks it again for an export that came
+    after, such as one that a rerun of a local import copied. Each call resumes the export that is `working` at its
+    recorded position, and always handles one item, so a call that starts with no budget left still moves on.
     An export that cannot be read to its end is `partial`, and the transcripts read before the fault stay.
     """
     record = _record(root, import_id)
-    if not record["walked"]:
+    if rewalk or not record["walked"]:
         _walk(root, import_id, record)
     for export, state in record["exports"].items():
         if state.get("state") != WORKING:
@@ -113,11 +114,14 @@ def expand(root: Path, import_id: str, *, keep_going: Callable[[], bool]) -> Non
 
 
 def _walk(root: Path, import_id: str, record: dict) -> None:
-    """Find the stage's recognised exports once and record them as `working`."""
+    """Find the stage's recognised exports that the record does not hold yet, and record them as `working`."""
     names = {candidate.file_name for candidate in source_formats.formats(root)}
     base = root / import_stage.STAGE_DIR / import_id
     for path, _size in sorted(import_stage.staged_files(root, import_id)):
-        if PurePosixPath(path).name not in names or any(part.startswith(".") for part in PurePosixPath(path).parts):
+        if (
+            path in record["exports"] or PurePosixPath(path).name not in names
+            or any(part.startswith(".") for part in PurePosixPath(path).parts)
+        ):
             continue
         fmt = source_formats.recognise(root, base / path)
         if fmt is not None:

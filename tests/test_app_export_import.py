@@ -189,10 +189,10 @@ def test_an_expansion_that_outlasts_one_call_resumes_and_files_each_item_once(va
     expand = export_expansion.expand
     calls_that_expanded: list[int] = []
 
-    def one_item_a_call(root, import_id, *, keep_going):
+    def one_item_a_call(root, import_id, *, keep_going, rewalk=False):
         """The call's budget is spent after its first item, so every call yields."""
         calls_that_expanded.append(1)
-        expand(root, import_id, keep_going=lambda: False)
+        expand(root, import_id, keep_going=lambda: False, rewalk=rewalk)
 
     monkeypatch.setattr(export_expansion, "expand", one_item_a_call)
     import_id = stage_export(vault, [claude_conversation(number) for number in range(6)])
@@ -295,3 +295,18 @@ def test_a_conversation_that_quotes_an_instruction_is_stored_as_text_and_changes
     assert attack in stored[1] and "rm -rf /" in stored[1]
     assert note.read_bytes() == kept and sorted(path.name for path in (vault / "Knowledge Base" / "Notes").iterdir()) == ["keep.md"]
     assert len(pages) == 2 and view["progress"]["failed"] == 0 and view["left_out"]["by_reason"] == {}
+
+
+def test_an_export_that_lands_in_the_stage_after_the_first_walk_is_expanded_by_the_next_scan(vault: Path) -> None:
+    """Catches an export that a rerun of a local import copied in later and that then files as one blob."""
+    import_id = stage_export(vault, [claude_conversation(number) for number in range(2)])
+    export_expansion.expand(vault, import_id, keep_going=lambda: True)
+    later = vault / "_Imports" / import_id / "more" / "conversations.json"
+    later.parent.mkdir()
+    later.write_text(json.dumps([claude_conversation(number) for number in range(10, 13)]), encoding="utf-8")
+
+    export_expansion.expand(vault, import_id, keep_going=lambda: True, rewalk=True)
+
+    record = import_stage.read_expansion(vault, import_id)
+    assert sorted(record["exports"]) == ["conversations.json", "more/conversations.json"]
+    assert sorted(row["path"].split("/")[0] for row in record["rows"]) == ["conversations items"] * 2 + ["more"] * 3
