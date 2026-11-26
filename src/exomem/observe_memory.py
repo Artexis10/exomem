@@ -1490,7 +1490,8 @@ def refusal_before_page(
     the arguments, so the caller refuses before it looks the page up. Only an add qualifies: an
     update keeps the unit's own kind and form, which only the page knows. Every refusal that
     `observe_memory` decides from the arguments before this one (category, tags, context, relations,
-    dates and date order) is left to it, so it still wins. A refusal decided by the page (a missing
+    dates and date order) is left to it, so it still wins. A call that passes relations is left to
+    the page, which decides whether they refuse first. A refusal decided by the page (a missing
     path, an unknown reference, a stale hash, the page's verdict vocabulary, relations the page
     cannot lift) comes after this one.
 
@@ -1510,7 +1511,9 @@ def refusal_before_page(
         "operation": op, "kind": kind,
         **dict(zip(_GOVERNED_ARGUMENT_KEYS, (verdict, check_by, as_of, until), strict=True)),
     })
-    if not passed:
+    if not passed or relations:
+        # Relations on a compact unit are refused before its metadata unless every one can move to
+        # a page field, which only the page's relation registry and their targets decide.
         return None
     try:
         origin_bindings.extract_origin_metadata(str(content))

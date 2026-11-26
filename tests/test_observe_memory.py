@@ -1294,6 +1294,30 @@ def test_a_ref_addressed_add_with_compact_metadata_is_refused_without_a_vault_wa
     assert str(with_projection.value) == expected
 
 
+def test_a_dated_add_whose_relations_need_a_rich_kind_gets_the_relations_refusal(tmp_path: Path) -> None:
+    """The early compact refusal must not answer for relations that only the page can judge.
+
+    A relation that cannot move to a page field is refused before the dates are read, so the reply
+    names the relations; advice to drop the date would lead straight into that refusal.
+    """
+    _write_source_page(tmp_path)
+    page = _write_page(tmp_path)
+    before = page.read_bytes()
+
+    with pytest.raises(ValueError, match="^COMPACT_RELATIONS_REQUIRE_RICH_KIND"):
+        commands.op_observe_memory(
+            tmp_path,
+            path=PAGE,
+            operation="add",
+            category="config",
+            content="Typed relation needs rich form",
+            relations=[{"kind": "supersedes", "target": "applied-export"}],
+            as_of="2026-07-01",
+        )
+
+    assert page.read_bytes() == before
+
+
 def test_an_early_compact_refusal_still_lets_a_malformed_date_win(tmp_path: Path) -> None:
     """Refusing compact metadata before the page read must not hide an argument error made first."""
     _write_page(tmp_path)
