@@ -1,17 +1,18 @@
 ## 1. Models and manifest
 
-- [ ] 1.1 Add `face-detect` (YuNet, dynamic-shape export, MIT) and `face-embed` (SFace, Apache-2.0) to `media_models.json`: Hugging Face revision, digest, licence sources, calibration values (score 0.9, NMS 0.3, cosine 0.363, each with its upstream source) and the input and output shapes the build records.
-- [ ] 1.2 Extend `scripts/build-media-artifacts.py` with both entries. At build time only, compare the numpy decode, NMS and alignment with OpenCV's `FaceDetectorYN` and `FaceRecognizerSF` on fixture images.
-- [ ] 1.3 Test: the manifest check refuses a face model entry with no licence source. Catches: a model swap that drops its licence evidence.
-- [ ] 1.4 Test: with faces off, processing an image acquires and loads no face model. Catches: faces off still downloading or loading biometric models.
+- [x] 1.1 Add `face-detect` (YuNet, dynamic-shape export, MIT) and `face-embed` (SFace, Apache-2.0) to `media_models.json`: Hugging Face revision, digest, licence sources, calibration values (score 0.9, NMS 0.3, cosine 0.363, each with its upstream source) and the input and output shapes the build records.
+- [x] 1.2 Extend `scripts/build-media-artifacts.py` with both entries. At build time only, compare the numpy decode, NMS and alignment with OpenCV's `FaceDetectorYN` and `FaceRecognizerSF` on fixture images.
+- [x] 1.3 Test: the manifest check refuses a face model entry with no licence source. Catches: a model swap that drops its licence evidence.
+- [x] 1.4 Test: with faces off, processing an image acquires and loads no face model. Catches: faces off still downloading or loading biometric models.
 
 ## 2. Face store and state registry
 
-- [ ] 2.1 Register two external families under `private_state.store(vault_root, "faces")`: `face-index` (rebuildable) and `face-people` (not rebuildable).
-- [ ] 2.2 Test: a personal backup of a state root with both stores stages the people store and no face-index file. Catches: face vectors in a restic snapshot, or names lost on restore.
-- [ ] 2.3 `infra/cellctl`: add the face-index files to the cell backup exclusions. Test: the exclusion mirror equals the registry's rebuildable face family, and the rendered restic command excludes it. Catches: a Cloud cell backup that keeps face vectors.
-- [ ] 2.4 Face store modules: face index (faces with model id, settings, consent record, generation) and people store (groups with centroids, people, group-person links, exclusions, threshold overrides); `secure_delete` on, owner-only directory mode, indexes on person and page.
+- [x] 2.1 Register two external families under `private_state.store(vault_root, "faces")`: `face-index` (rebuildable) and `face-people` (not rebuildable).
+- [x] 2.2 Test: a personal backup of a state root with both stores stages the people store and no face-index file. Catches: face vectors in a restic snapshot, or names lost on restore.
+- [x] 2.3 `infra/cellctl`: add the face-index files to the cell backup exclusions. Test: the exclusion mirror equals the registry's rebuildable face family, and the rendered restic command excludes it. Catches: a Cloud cell backup that keeps face vectors.
+- [x] 2.4 Face store modules: face index (faces with model id, settings, consent record, generation) and people store (groups with centroids, people, group-person links, exclusions, threshold overrides); `secure_delete` on, owner-only directory mode, indexes on person and page.
 - [ ] 2.5 Test: a people store restored without a face index re-attaches names after a re-scan, and faces stay off until the owner opts in again. Catches: a restore that turns faces on, or loses names.
+  The schema already supports it: the setting and consent live in the rebuildable face index, and groups and names in the people store. The test needs grouping (section 4).
 
 ## 3. Detection pipeline
 
