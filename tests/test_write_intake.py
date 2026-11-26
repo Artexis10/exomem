@@ -20,7 +20,15 @@ from _public_call import public_call
 from conftest import _drain_background_threads
 from fastmcp import Client
 
-from exomem import auth_sessions, call_ledger, cloud_cell, commands, write_intake, writer_lease
+from exomem import (
+    auth_sessions,
+    call_ledger,
+    cloud_cell,
+    commands,
+    request_budget,
+    write_intake,
+    writer_lease,
+)
 from exomem import schema as schema_module
 from exomem import server as server_module
 from exomem.cli_ops import OpError
@@ -416,6 +424,58 @@ def test_a_compact_save_with_governed_metadata_behind_the_queue_is_refused_at_on
     paused.set()
     _wait_for_state(vault, first["queued_write"]["ref"], "applied")
     assert "as_of" in str(refused.value) and "`kind`" in str(refused.value)
+
+
+def _send_after_deadline(command, vault: Path, kwargs: dict) -> object:
+    """Send a save whose call has used its whole budget by the time it would start saving."""
+    budget = request_budget.RequestBudget(seconds=50)
+    budget.deadline = time.monotonic() - 1.0
+    token = request_budget.set_current(budget)
+    try:
+        return _send(command, vault, kwargs)
+    finally:
+        request_budget.reset_current(token)
+
+
+def test_a_save_that_used_its_call_time_preparing_is_queued_and_lands_once(
+    vault: Path, managers, drainer
+) -> None:
+    """A starved host once spent 13 minutes preparing a save whose client gave up at 60 s. The save
+    must come back queued while the client still listens, then land once, never be lost."""
+    receipt = _send_after_deadline(_command("remember"), vault, _remember_kwargs(vault, 31))
+
+    assert receipt["state"] == "queued"
+    assert receipt["committed"] is False
+    assert _pages_titled(vault, "Queued save 31") == []
+    _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
+    assert len(_pages_titled(vault, "Queued save 31")) == 1
+
+
+def test_a_write_the_intake_cannot_queue_is_refused_unsaved_once_its_call_time_is_spent(
+    vault: Path, managers, drainer
+) -> None:
+    not_a_save = replace(_command("remember"), busy_intake=False)
+    with pytest.raises(OpError) as refused:
+        _send_after_deadline(not_a_save, vault, _remember_kwargs(vault, 32))
+
+    assert refused.value.code == "MUTATION_BUSY"
+    assert refused.value.details["committed"] is False
+    assert refused.value.details["cause"] == "request_budget"
+    assert _pages_titled(vault, "Queued save 32") == []
+
+
+def test_a_commit_under_way_is_never_refused_when_its_call_time_runs_out(vault: Path, managers) -> None:
+    """Only a call's first write guard is refused: a later guard belongs to a commit already started."""
+    writer, _holder = managers
+    budget = request_budget.RequestBudget(seconds=50)
+    token = request_budget.set_current(budget)
+    try:
+        with writer.mutation_guard(vault, operation="first step"):
+            budget.deadline = time.monotonic() - 1.0
+        with writer.mutation_guard(vault, operation="second step"):
+            pass
+    finally:
+        request_budget.reset_current(token)
 
 
 def test_a_write_the_intake_does_not_accept_keeps_the_busy_refusal(

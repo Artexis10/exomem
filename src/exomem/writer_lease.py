@@ -5988,7 +5988,13 @@ class LeaseManager:
 
         `reuse_operation_grant` lets a collection-store write keep the grant that its operation's
         outer guard holds. Every other guard acquires.
+
+        A call's first write guard after the call's deadline refuses before it acquires, with nothing
+        saved: the client has stopped listening, and an eligible save is queued instead
+        (`write_intake`). A later guard of the same call belongs to a write already under way.
         """
+        if not request_budget.commit_may_start():
+            raise mutation_lock.preparation_spent_busy()
         with self._mutation_boundary(
             vault_root,
             request_id=request_id,
@@ -6001,6 +6007,7 @@ class LeaseManager:
             reuse_operation_grant=reuse_operation_grant,
             advance_generation=True,
         ) as mutation:
+            request_budget.note_commit_started()
             yield mutation
 
     @contextmanager
@@ -6033,7 +6040,7 @@ class LeaseManager:
             return
 
         def refused_before_the_body(error: OpError) -> bool:
-            return error.code == "MUTATION_BUSY" and error.details.get("committed") is False
+            return mutation_lock.waits_out(error)
 
         with ExitStack() as held:
 
@@ -7726,7 +7733,7 @@ class LeaseManager:
         def absorbable(error: OpError) -> bool:
             if error.code != "MUTATION_BUSY":
                 return False
-            if commit_state["observed"] or error.details.get("committed") is not False:
+            if commit_state["observed"] or not mutation_lock.waits_out(error):
                 _count_busy_once(error)
                 return False
             return True

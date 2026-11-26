@@ -535,6 +535,16 @@ Measured on the synthetic 15,600-page corpus of decision 11, two runs an arm, ei
 
 The second run of each arm shared the host with other work, and in three of the four runs a write's rebuild sometimes reached the following activation. So the activation medians are noisy. The function times show where the saving lies.
 
+### 15. A write that used its call's time does not start its commit
+
+A write prepares before it commits: it resolves its page and builds the corpus context that its checks read. On a starved serving host on 2026-11-25, preparation once took 13 minutes, and refusals took up to 240 s, while clients give up after 60 s (an agent harness) or 240 s (a web client). The write then landed, or failed, with nobody listening. The operator chose, on 2026-11-26, to stop such a write before its commit with the existing retryable busy outcome.
+
+A call's first write guard (`writer_lease.mutation_guard`) now refuses before it acquires the vault mutation boundary when the call's own deadline has passed (`request_budget.commit_may_start`). The refusal is `MUTATION_BUSY` with `committed: false` and `cause: request_budget`, so the write intake queues an eligible save and its drainer applies it, and any other write gets the retryable busy reply with its idempotency key. Nothing is stopped mid-way: preparation runs to the guard as before, and once a call has taken the boundary, every later guard of the same call runs, because it belongs to a commit already under way. The read-only `consistency_guard`, background holders and the intake's replay, which runs with no call budget, are never refused. A wait for the boundary cannot help this refusal, so the waits that absorb an ordinary busy boundary pass it on at once (`mutation_lock.waits_out`).
+
+The gate binds no read checkpoint over preparation. Several readers degrade quietly under a checkpoint (a lexical catalogue read reports itself not ready, optional receipt prose is dropped), and a write must never commit on such a read.
+
+Proof: `tests/test_write_intake.py` sends a save whose call time is spent and shows that it comes back queued and lands once, that a write the intake cannot queue is refused unsaved with that cause, and that a second guard of a call whose first guard ran is not refused.
+
 ## Risks / Trade-offs
 
 - Retention or observation failure can bias percentiles → Expose partial coverage and forbid complete-population claims.
