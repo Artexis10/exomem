@@ -9,4 +9,4 @@
 ## 2. Companion change and first run
 
 - [x] 2.1 Substrate (separate repository): count the pinned cells in the rollout view, and re-send an active alert after 23 hours. Verify with the repository's tests.
-- [ ] 2.2 Observe the first scheduled `cloud-deploy` run in production. Verify in the Actions log that the run prints its codes, and that the alert receiver holds the matching alert state. This catches a schedule that GitHub never fires.
+- [x] 2.2 Observe the first scheduled `cloud-deploy` run in production. Verify in the Actions log that the run prints its codes, and that the alert receiver holds the matching alert state. This catches a schedule that GitHub never fires. Observed 2026-11-26: the scheduled run 45864892760 logged `cloud-release-platform-needed`, and the receiver recorded the matching transitions.
