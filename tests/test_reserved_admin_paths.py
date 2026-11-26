@@ -465,6 +465,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         ),
         (review_state.state_path(root), "review-state"),
         (release_notes.state_path(root), "app-update-notices"),
+        (release_notes.lock_path(root), "app-update-notices"),
         (served_context.sidecar_path(root), "served-context"),
         (brief_watermarks.sidecar_path(root), "brief-watermarks"),
         (
