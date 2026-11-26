@@ -9292,6 +9292,41 @@ def op_observe_memory(
         raise ValueError(
             "INVALID_PATH: observe_memory requires a governed KB-relative path or reference"
         )
+
+    def page_without_walk() -> str | None:
+        # The page this call names when finding it reads no more than the page: a vault path, a
+        # vault or source ref, or a memory ref that the current identity projection answers. A
+        # title would need the title index. A caller whose pages are filtered gets no page-specific
+        # wording, so the reply cannot tell it whether a page it cannot see exists.
+        if egress_module.caller_restricted(vault_root):
+            return None
+        if not raw_path.lower().startswith("exomem://"):
+            return raw_path
+        if raw_path.lower().startswith(memory_refs_module.REF_PREFIX):
+            return memory_refs_module.owner_without_walk(vault_root, raw_path)
+        decoded = memory_refs_module.resolve_identifier_read_only(vault_root, raw_path)
+        return decoded if is_in_managed_root(decoded) else None
+
+    early = observe_memory_module.refusal_before_page(
+        vault_root,
+        page=page_without_walk,
+        operation=operation,
+        category=category,
+        content=content,
+        kind=kind,
+        unit=unit,
+        unit_ref=unit_ref,
+        verdict=verdict,
+        check_by=check_by,
+        as_of=as_of,
+        until=until,
+        tags=tags,
+        context=context,
+        relations=relations,
+        validate_only=validate_only,
+    )
+    if early is not None:
+        raise early.leaf_error()
     if not raw_path.lower().startswith("exomem://"):
         path = page_names_module.resolve_page(
             vault_root, path, prefer=page_names_module.prefer_editable, field="path"
@@ -12756,6 +12791,7 @@ def op_maintain_memory(
         "structured-files",
         "curation",
         "tag-variants",
+        "path-variants",
         "maintenance-job",
         "maintenance-job-cancel",
         "collections-store",
@@ -13112,6 +13148,33 @@ def op_maintain_memory(
                 vault_root, plan_id=plan_id, why=why, exclude=exclude_groups
             )
         return _carrying_batch_advisories(vault_root, reconciled)
+    if mode == "path-variants":
+        from . import path_variants as path_variants_module
+
+        if (
+            categories is not None
+            or apply is not None
+            or rebuild_embeddings
+            or rebuild_graph
+            or detail != "actionable"
+            or legacy_sample_limit != audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT
+            or collection is not None
+            or source_snapshot is not None
+        ):
+            raise ValueError("INVALID_ARGUMENTS: path-variants accepts only dry_run, plan_id and why")
+        # Merging moves files across the whole vault, protected captures included: it is the owner's.
+        refusal = egress_module.owner_only_aggregate(vault_root)
+        if refusal is not None:
+            return refusal
+        if dry_run is not False:
+            if plan_id is not None or why is not None:
+                raise ValueError("INVALID_ARGUMENTS: a path-variants preview takes no plan_id or why")
+            return path_variants_module.preview(vault_root)
+        if plan_id is None or why is None:
+            raise ValueError(
+                "INVALID_ARGUMENTS: a path-variants merge needs dry_run=false with the preview's plan_id and a why"
+            )
+        return path_variants_module.apply(vault_root, plan_id=plan_id, why=why)
     if mode == "maintenance-job" or mode == "maintenance-job-cancel":
         from . import maintenance_jobs as maintenance_jobs_module
 
@@ -13289,7 +13352,7 @@ def op_maintain_memory(
         return original_conversion.convert(vault_root, dry_run=True if dry_run is None else dry_run, plan_id=plan_id)
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
-        "backfill-ids, capture-metadata, convert-originals, structured-files, curation, tag-variants, maintenance-job, "
+        "backfill-ids, capture-metadata, convert-originals, structured-files, curation, tag-variants, path-variants, maintenance-job, "
         "maintenance-job-cancel, collections-store, collections-store-adopt-local, "
         "collections-store-export, collections-cutover, or held-resolve"
     )

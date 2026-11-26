@@ -1011,6 +1011,14 @@ def background_call(principal: Any, descriptor: Any) -> Iterator[None]:
         yield
 
 
+def invoke_in_background(principal: Any, descriptor: Any, command: Any, *args: Any, **kwargs: Any) -> Any:
+    """Run one command for a stored principal from a background thread, bound as `background_call` binds it."""
+    from . import writer_lease
+
+    with background_call(principal, descriptor):
+        return writer_lease.invoke_command(command, *args, **kwargs)
+
+
 def _requeue(vault_root: Path, claim: _Claim, code: str) -> None:
     delay = min(MAX_BACKOFF_SECONDS, FIRST_BACKOFF_SECONDS * 2 ** max(0, claim.attempts - 1))
     now = time.time()

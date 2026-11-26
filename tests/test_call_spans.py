@@ -494,6 +494,7 @@ _DOCUMENTED_SPAN_NAMES = frozenset(
         "embeddings.matrix_load",
         "embeddings.matrix_catch_up",
         "embeddings.unit_matrix_load",
+        "embeddings.unit_matrix_catch_up",
         "delivery.vocabulary_after_commit",
         "derived.fanout",
         "commit_tail.mutation_committed",

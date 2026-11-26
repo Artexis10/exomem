@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, assert_never, get_args
@@ -295,11 +295,7 @@ def observe_memory(
     current = semantic_index.selected_parent_index_state(
         vault_root, editable.rel_path, source=editable.original_text
     )
-    language = (
-        current.definitions.snapshots["categories"].typed
-        if current.definitions is not None
-        else semantic_language_registry.core_registry()
-    )
+    language = _page_language(current)
     current_unit = None
     if unit is not None:
         if op in {"supersede", "assess"}:
@@ -356,9 +352,7 @@ def observe_memory(
         removed_unit = current_unit
     elif op in {"supersede", "assess"}:
         page_projects = _page_projects(frontmatter)
-        page_type = (
-            str(frontmatter["type"]) if frontmatter.get("type") is not None else None
-        )
+        page_type = _page_type(frontmatter)
         existing_anchors: set[str | None] = {
             unit.anchor
             for unit in current.document.units
@@ -571,9 +565,7 @@ def observe_memory(
     else:
         assert content is not None
         page_projects = _page_projects(frontmatter)
-        page_type = (
-            str(frontmatter["type"]) if frontmatter.get("type") is not None else None
-        )
+        page_type = _page_type(frontmatter)
         selected_kind = _select_kind(
             language,
             kind=kind,
@@ -753,6 +745,21 @@ def observe_memory(
                 else _append_rich(body, rendered)
             )
 
+    # What the governed parser must read back for the rendered unit; a remove renders none.
+    expected_unit: dict[str, Any] | None = None if proposal_mode == "remove" else {
+        "kind": selected_kind,
+        "category": normalized_category,
+        "content": normalized_content,
+        "tags": normalized_tags,
+        "context": normalized_context,
+        "relations": normalized_relations,
+        "anchor": target_anchor,
+        "verdict": normalized_verdict,
+        "check_by": normalized_check_by,
+        "as_of": normalized_as_of,
+        "until": normalized_until,
+        "preserved": preserved_metadata,
+    }
     if origin_block is not None:
         after_body = origin_block + "\n\n" + after_body
     # Validation and its commit render the same authored day, including across midnight.
@@ -783,203 +790,187 @@ def observe_memory(
     # commits, so it stays entirely uninstrumented and byte-identical.
     timings = MutationTimings() if not previewing else None
     try:
-        with semantic_contract.call_context("write"):
-            preflight = semantic_writes.preflight_existing(
-                vault_root,
-                path=editable.rel_path,
-                after_source=after_source,
-                operation="observe",
-                # The semantic seam is keyed on the newline-normalized logical
-                # source, so hand it that hash instead of forwarding the
-                # caller's `expected_hash`, which is over the file's raw bytes.
-                # `load_editable` has already enforced the caller's guard
-                # against those bytes; forwarding it again made one parameter
-                # carry two conventions, which no single value satisfies on a
-                # CRLF page. Matches what `edit` passes at the same seam.
-                expected_before_hash=editable.raw_hash,
-                transition_token=transition_token,
-                relation_disposition=relation_disposition,
-                relation_review_hash=relation_review_hash,
-                relation_review_reason=relation_review_reason,
-                validate_only=previewing,
-                stamp=temporal.stamp(authored_day),
-                timings=timings,
-            )
-    except semantic_writes.SemanticWriteError as error:
-        raise ObserveMemoryError(error.code, error.reason) from error
+        try:
+            with semantic_contract.call_context("write"):
+                preflight = semantic_writes.preflight_existing(
+                    vault_root,
+                    path=editable.rel_path,
+                    after_source=after_source,
+                    operation="observe",
+                    # The semantic seam is keyed on the newline-normalized logical
+                    # source, so hand it that hash instead of forwarding the
+                    # caller's `expected_hash`, which is over the file's raw bytes.
+                    # `load_editable` has already enforced the caller's guard
+                    # against those bytes; forwarding it again made one parameter
+                    # carry two conventions, which no single value satisfies on a
+                    # CRLF page. Matches what `edit` passes at the same seam.
+                    expected_before_hash=editable.raw_hash,
+                    transition_token=transition_token,
+                    relation_disposition=relation_disposition,
+                    relation_review_hash=relation_review_hash,
+                    relation_review_reason=relation_review_reason,
+                    validate_only=previewing,
+                    stamp=temporal.stamp(authored_day),
+                    timings=timings,
+                )
+        except semantic_writes.SemanticWriteError as error:
+            raise ObserveMemoryError(error.code, error.reason) from error
 
-    access_tier = access.access_tier(vault_root, editable.rel_path)
-    if access_tier != access.TIER_READ_WRITE:
-        # Same refusal code as an untyped page (compatibility), but a caller
-        # cannot act on this one the way it can act on schema history: the
-        # tier itself forbids the write, whatever the page's compiled type,
-        # so no `resolution` is offered here.
-        tools = capabilities.active_tools_text("observe_memory")
-        raise ObserveMemoryError(
-            "OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE",
-            f"{tools} only mutates writable compiled pages",
-            f"This page's access tier is {access_tier!r}, which is "
-            f"policy-protected; {tools} has no override for it, "
-            "regardless of the page's compiled type.",
-        )
-    # The authored type is looked up as written; a withheld definition refuses.
-    note_type = note_types.Basis(vault_root).resolve(preflight.before.page_type).require()
-    if note_type is None or not note_types.accepts_unit_writes(note_type):
-        resolution = _legacy_edit_resolution(editable.rel_path)
-        raise ObserveMemoryError(
-            "OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE",
-            f"{capabilities.active_tools_text('observe_memory')} only mutates "
-            "writable compiled and entity pages",
-            _legacy_routing_remediation(resolution),
-            resolution=resolution,
-        )
-
-    proposed_unit = _unit_by_anchor(preflight.after.document, target_anchor)
-    if proposal_mode != "remove" and proposed_unit is None:
-        diagnostics = [item.code for item in preflight.after.document.errors]
-        raise ObserveMemoryError(
-            "INVALID_SEMANTIC_UNIT",
-            "rendered unit did not round-trip through the governed parser"
-            + (f" ({', '.join(diagnostics)})" if diagnostics else ""),
-        )
-    if proposal_mode != "remove":
-        assert proposed_unit is not None
-        _assert_round_trip(
-            proposed_unit,
-            kind=selected_kind,
-            category=normalized_category,
-            content=normalized_content,
-            tags=normalized_tags,
-            context=normalized_context,
-            relations=normalized_relations,
-            anchor=target_anchor,
-            verdict=normalized_verdict,
-            check_by=normalized_check_by,
-            as_of=normalized_as_of,
-            until=normalized_until,
-            preserved=preserved_metadata,
-        )
-
-    if target_fingerprints is not None:
-        # An episode correction must not change a different claim after target drift.
-        # A refusal costs this leaf a re-read; ordinary page/heading edits keep their route.
-        if not isinstance(target_fingerprints, dict):
+        access_tier = access.access_tier(vault_root, editable.rel_path)
+        if access_tier != access.TIER_READ_WRITE:
+            # Same refusal code as an untyped page (compatibility), but a caller
+            # cannot act on this one the way it can act on schema history: the
+            # tier itself forbids the write, whatever the page's compiled type,
+            # so no `resolution` is offered here.
+            tools = capabilities.active_tools_text("observe_memory")
             raise ObserveMemoryError(
-                "INVALID_UNIT_TARGETS", "target_fingerprints must be an object"
+                "OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE",
+                f"{tools} only mutates writable compiled pages",
+                f"This page's access tier is {access_tier!r}, which is "
+                f"policy-protected; {tools} has no override for it, "
+                "regardless of the page's compiled type.",
             )
-        guards = []
-        targets = {}
-        for fact in semantic_contract.writer_authored_facts(
-            preflight.after, preflight.after_corpus
-        ):
-            if fact.logical_source_ref != getattr(proposed_unit, "unit_ref", None):
-                continue
-            if not semantic_contract.page_relation_has(
-                preflight.after, preflight.after_corpus, fact.canonical_relation, "corrects"
+        # The authored type is looked up as written; a withheld definition refuses.
+        note_type = note_types.Basis(vault_root).resolve(preflight.before.page_type).require()
+        if note_type is None or not note_types.accepts_unit_writes(note_type):
+            resolution = _legacy_edit_resolution(editable.rel_path)
+            raise ObserveMemoryError(
+                "OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE",
+                f"{capabilities.active_tools_text('observe_memory')} only mutates "
+                "writable compiled and entity pages",
+                _legacy_routing_remediation(resolution),
+                resolution=resolution,
+            )
+
+        proposed_unit = (
+            _unit_by_anchor(preflight.after.document, target_anchor)
+            if expected_unit is None
+            else _round_tripped_unit(preflight.after.document, expected_unit)
+        )
+
+        if target_fingerprints is not None:
+            # An episode correction must not change a different claim after target drift.
+            # A refusal costs this leaf a re-read; ordinary page/heading edits keep their route.
+            if not isinstance(target_fingerprints, dict):
+                raise ObserveMemoryError(
+                    "INVALID_UNIT_TARGETS", "target_fingerprints must be an object"
+                )
+            guards = []
+            targets = {}
+            for fact in semantic_contract.writer_authored_facts(
+                preflight.after, preflight.after_corpus
             ):
-                continue
-            if fact.target_unit_status != "found" or fact.logical_target_ref is None:
+                if fact.logical_source_ref != getattr(proposed_unit, "unit_ref", None):
+                    continue
+                if not semantic_contract.page_relation_has(
+                    preflight.after, preflight.after_corpus, fact.canonical_relation, "corrects"
+                ):
+                    continue
+                if fact.target_unit_status != "found" or fact.logical_target_ref is None:
+                    raise ObserveMemoryError(
+                        "EXACT_UNIT_TARGET_REQUIRED",
+                        "a corrective target must name one current unit",
+                    )
+                targets[fact.logical_target_ref] = fact.target_unit_fingerprint
+                state = preflight.after_corpus.pages[fact.logical_target_path]
+                source, guard = vault.read_guarded_text(vault_root, Path(vault_root) / state.path)
+                before_hash = preflight.before_corpus.pages[state.path].source_hash
+                if vault.content_hash(source) != before_hash:
+                    raise ObserveMemoryError(
+                        "STALE_UNIT_TARGET", "a corrective target changed; read it again"
+                    )
+                if state.path != preflight.path:
+                    guards.append(guard)
+            if targets != target_fingerprints:
                 raise ObserveMemoryError(
-                    "EXACT_UNIT_TARGET_REQUIRED", "a corrective target must name one current unit"
+                    "STALE_UNIT_TARGET", "exact corrective target fingerprints do not match"
                 )
-            targets[fact.logical_target_ref] = fact.target_unit_fingerprint
-            state = preflight.after_corpus.pages[fact.logical_target_path]
-            source, guard = vault.read_guarded_text(vault_root, Path(vault_root) / state.path)
-            if vault.content_hash(source) != preflight.before_corpus.pages[state.path].source_hash:
-                raise ObserveMemoryError(
-                    "STALE_UNIT_TARGET", "a corrective target changed; read it again"
-                )
-            if state.path != preflight.path:
-                guards.append(guard)
-        if targets != target_fingerprints:
-            raise ObserveMemoryError(
-                "STALE_UNIT_TARGET", "exact corrective target fingerprints do not match"
-            )
-        preflight = replace(preflight, read_dependency_guards=tuple(guards))
+            preflight = replace(preflight, read_dependency_guards=tuple(guards))
 
-    if previewing:
+        if previewing:
+            return _result(
+                operation=op,
+                path=editable.rel_path,
+                before_hash=editable.raw_hash,
+                after_hash=vault.content_hash(preflight.after_source),
+                mutated=False,
+                unit=proposed_unit,
+                removed_unit=removed_unit,
+                semantic=preflight.as_dict(),
+                dropped_relations=dropped_relations,
+                dropped_outcome=dropped_outcome,
+                lifted_cited=lifted_cited,
+                lifted_outcome=lifted_outcome,
+                warnings=link_warnings,
+            )
+
+        try:
+            log_plan = vault.plan_log_writes(
+                vault_root,
+                date_iso=temporal.stamp(today or temporal.now()),
+                op="observe",
+                rel_path_no_ext=editable.rel_path.removesuffix(".md"),
+                body=f"Structured semantic-unit {op} via observe_memory.",
+                operation_token=(
+                    "observe:"
+                    + hashlib.sha256(
+                        f"{op}\0{editable.rel_path}\0{preflight.before.source_hash}"
+                        f"\0{preflight.after.source_hash}".encode()
+                    ).hexdigest()
+                ),
+            )
+        except (OSError, UnicodeError, ValueError) as error:
+            raise ObserveMemoryError(
+                "LOG_PLAN_CONFLICT", "observe log update could not be planned safely"
+            ) from error
+        try:
+            with semantic_contract.call_context("write"):
+                committed = semantic_writes.commit_existing(
+                    vault_root,
+                    preflight=preflight,
+                    history_reason=reason,
+                    auxiliary_writes=log_plan.writes,
+                    derived_auxiliary_writes=tuple(
+                        ("operation-log", write) for write in log_plan.writes
+                    ),
+                    timings=timings,
+                )
+        except semantic_writes.SemanticWriteError as error:
+            raise ObserveMemoryError(error.code, error.reason) from error
+
+        final = semantic_index.selected_parent_index_state(vault_root, editable.rel_path)
+        final_unit = _unit_by_anchor(final.document, target_anchor)
         return _result(
             operation=op,
             path=editable.rel_path,
+            # Both hashes are the whole-file `content_hash` the caller is told to
+            # echo back as the next `expected_hash` -- the same convention `get`
+            # emits and `load_editable` compares. `final.parent_source_hash` is the
+            # semantic index's hash of the *normalized* logical source, so reporting
+            # it here handed the caller a value its own guard would then refuse on
+            # any CRLF page. The preflight's authoritative source includes origin
+            # normalization and is written verbatim by `commit_existing`.
             before_hash=editable.raw_hash,
             after_hash=vault.content_hash(preflight.after_source),
-            mutated=False,
-            unit=proposed_unit,
+            mutated=committed.mutated,
+            unit=final_unit,
             removed_unit=removed_unit,
-            semantic=preflight.as_dict(),
+            semantic=committed.as_dict(),
             dropped_relations=dropped_relations,
             dropped_outcome=dropped_outcome,
             lifted_cited=lifted_cited,
             lifted_outcome=lifted_outcome,
+            timings=(
+                timings.as_dict() if timings is not None and write_timings_enabled() else None
+            ),
             warnings=link_warnings,
         )
 
-    try:
-        log_plan = vault.plan_log_writes(
-            vault_root,
-            date_iso=temporal.stamp(today or temporal.now()),
-            op="observe",
-            rel_path_no_ext=editable.rel_path.removesuffix(".md"),
-            body=f"Structured semantic-unit {op} via observe_memory.",
-            operation_token=(
-                "observe:"
-                + hashlib.sha256(
-                    f"{op}\0{editable.rel_path}\0{preflight.before.source_hash}"
-                    f"\0{preflight.after.source_hash}".encode()
-                ).hexdigest()
-            ),
-        )
-    except (OSError, UnicodeError, ValueError) as error:
-        raise ObserveMemoryError(
-            "LOG_PLAN_CONFLICT", "observe log update could not be planned safely"
-        ) from error
-    try:
-        with semantic_contract.call_context("write"):
-            committed = semantic_writes.commit_existing(
-                vault_root,
-                preflight=preflight,
-                history_reason=reason,
-                auxiliary_writes=log_plan.writes,
-                derived_auxiliary_writes=tuple(
-                    ("operation-log", write) for write in log_plan.writes
-                ),
-                timings=timings,
-            )
-    except semantic_writes.SemanticWriteError as error:
-        raise ObserveMemoryError(error.code, error.reason) from error
-
-    final = semantic_index.selected_parent_index_state(vault_root, editable.rel_path)
-    final_unit = _unit_by_anchor(final.document, target_anchor)
-    if timings is not None:
-        # The ledger gets the stages whatever the envelope flag says; see
-        # `MutationTimings.emit_call_spans`.
-        timings.emit_call_spans()
-    return _result(
-        operation=op,
-        path=editable.rel_path,
-        # Both hashes are the whole-file `content_hash` the caller is told to
-        # echo back as the next `expected_hash` -- the same convention `get`
-        # emits and `load_editable` compares. `final.parent_source_hash` is the
-        # semantic index's hash of the *normalized* logical source, so reporting
-        # it here handed the caller a value its own guard would then refuse on
-        # any CRLF page. The preflight's authoritative source includes origin
-        # normalization and is written verbatim by `commit_existing`.
-        before_hash=editable.raw_hash,
-        after_hash=vault.content_hash(preflight.after_source),
-        mutated=committed.mutated,
-        unit=final_unit,
-        removed_unit=removed_unit,
-        semantic=committed.as_dict(),
-        dropped_relations=dropped_relations,
-        dropped_outcome=dropped_outcome,
-        lifted_cited=lifted_cited,
-        lifted_outcome=lifted_outcome,
-        timings=(
-            timings.as_dict() if timings is not None and write_timings_enabled() else None
-        ),
-        warnings=link_warnings,
-    )
-
+    finally:
+        if timings is not None:
+            # The ledger gets the stages whatever the envelope flag says, and of a refused write
+            # as well as of a committed one; see `MutationTimings.emit_call_spans`.
+            timings.emit_call_spans()
 
 def unit_id(unit: Any) -> str:
     """The short id that names one unit and its current version."""
@@ -1442,6 +1433,17 @@ def argument_refusal(arguments: Mapping[str, Any]) -> ObserveMemoryError | None:
     reads no page. A unit reference without `kind` keeps the unit's own kind, which only the
     page knows, so that call is left to the replay.
     """
+    passed = _compact_names_passed(arguments)
+    if not passed:
+        return None
+    return _compact_metadata_refusal(passed=passed, kinds=_core_kinds_remediation())
+
+
+def _compact_names_passed(arguments: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """The governed names a compact unit would carry, when the arguments alone pick compact.
+
+    The one rule that both the busy intake and the direct path apply before reading a page.
+    """
     mode = _proposal_mode(
         str(arguments.get("operation") or "").strip().lower(),
         unit_ref=arguments.get("unit_ref"),
@@ -1454,20 +1456,111 @@ def argument_refusal(arguments: Mapping[str, Any]) -> ObserveMemoryError | None:
         compact_kind = semantic_language_registry.normalize_label(kind) == _COMPACT_KIND
     if not compact_kind:
         return None
-    passed = _governed_names(**{
+    # A blank value is no value, as `_resolve_governed_value` reads it on an add.
+    return _governed_names(**{
         key: arguments[key]
         for key in _GOVERNED_ARGUMENT_KEYS
         if str(arguments.get(key) or "").strip()
     })
+
+
+def refusal_before_page(
+    vault_root: Path,
+    *,
+    page: Callable[[], str | None],
+    operation: str,
+    category: str | None,
+    content: str | None,
+    kind: str | None,
+    unit: str | None,
+    unit_ref: str | None,
+    verdict: str | None,
+    check_by: str | None,
+    as_of: str | None,
+    until: str | None,
+    tags: list[str] | None,
+    context: str | None,
+    relations: list[dict[str, Any]] | None,
+    validate_only: bool,
+) -> ObserveMemoryError | None:
+    """The compact-metadata refusal that an add's own arguments decide, or None.
+
+    `observe_memory` reaches this refusal only after it has found and read the page, and finding a
+    page by memory ref can walk the whole vault. A new unit's kind and governed fields are all in
+    the arguments, so the caller refuses before it looks the page up. Only an add qualifies: an
+    update keeps the unit's own kind and form, which only the page knows. Every refusal that
+    `observe_memory` decides from the arguments before this one (category, tags, context, relations,
+    dates and date order) is left to it, so it still wins. A refusal decided by the page (a missing
+    path, an unknown reference, a stale hash, the page's verdict vocabulary, relations the page
+    cannot lift) comes after this one.
+
+    `page` names the page when it can do so without walking the vault, else None. Only the
+    remediation reads the page, to list the rich kinds it admits; a page that `page` cannot name,
+    or that cannot be read, gets the core kinds instead.
+    """
+    op = str(operation or "").strip().lower()
+    # The two operations that write a new unit, as `observe_memory` handles them: without a unit
+    # reference, `validate` previews an add.
+    # nosemgrep: ep-word-membership -- operation names, fixed by the `ObserveOperation` tool schema
+    if op not in ("add", "validate") or validate_only or unit is not None or unit_ref:
+        return None
+    if category is None or not str(category).strip() or content is None:
+        return None
+    passed = _compact_names_passed({
+        "operation": op, "kind": kind,
+        **dict(zip(_GOVERNED_ARGUMENT_KEYS, (verdict, check_by, as_of, until), strict=True)),
+    })
     if not passed:
         return None
+    try:
+        origin_bindings.extract_origin_metadata(str(content))
+    except provenance.OriginError:
+        return None
+    try:
+        # The argument checks that `observe_memory` makes before this refusal, in its order.
+        _canonical_category(str(category))
+        _canonical_tags(tags or [])
+        _canonical_context(context)
+        _canonical_relations(relations or [])
+        dates = {
+            key: _canonical_date(str(value), key)
+            for key, value in (("as_of", as_of), ("until", until), ("check_by", check_by))
+            if value is not None and str(value).strip()
+        }
+    except (ObserveMemoryError, ValueError):
+        return None
+    if "as_of" in dates and "until" in dates and dates["until"] < dates["as_of"]:
+        return None  # INVALID_SEMANTIC_DATE_ORDER wins, as `observe_memory` checks order first
+    rel_path = page()
+    kinds = None if rel_path is None else _page_kinds_remediation(vault_root, rel_path, category)
+    return _compact_metadata_refusal(passed=passed, kinds=kinds or _core_kinds_remediation())
+
+
+def _page_kinds_remediation(vault_root: Path, rel_path: str, category: str) -> str | None:
+    """The rich-kind step that `observe_memory` names for this page, or None if it is unreadable."""
+    try:
+        editable = edit.load_editable(vault_root, rel_path)
+        current = semantic_index.selected_parent_index_state(
+            vault_root, editable.rel_path, source=editable.original_text
+        )
+        normalized_category = _canonical_category(str(category))
+    except (edit.EditError, ObserveMemoryError, OSError, ValueError):
+        return None
+    frontmatter, _body, _ = vault.parse_frontmatter(editable.original_text)
+    return _rich_kind_remediation(
+        _page_language(current),
+        category=normalized_category,
+        projects=_page_projects(frontmatter),
+        page_type=_page_type(frontmatter),
+    )
+
+
+def _core_kinds_remediation() -> str:
+    """The rich-kind step without a page: the core kinds, and the vault's own by reference."""
     kinds = _admitted_kind_keys(
         semantic_language_registry.core_registry(), projects=(), page_type=None
     )
-    return _compact_metadata_refusal(
-        passed=passed,
-        kinds=f"Pass `kind` with a core rich kind ({', '.join(kinds)}) or one this vault defines.",
-    )
+    return f"Pass `kind` with a core rich kind ({', '.join(kinds)}) or one this vault defines."
 
 
 def _proposal_mode(op: str, *, unit_ref: str | None, unit: str | None) -> str:
@@ -1478,6 +1571,19 @@ def _proposal_mode(op: str, *, unit_ref: str | None, unit: str | None) -> str:
 def _governed_names(**values: Any) -> tuple[str, ...]:
     """The governed arguments that carry a value, named in `_GOVERNED_ARGUMENT_KEYS` order."""
     return tuple(key for key in _GOVERNED_ARGUMENT_KEYS if values.get(key) is not None)
+
+
+def _page_type(frontmatter: dict[Any, Any]) -> str | None:
+    return str(frontmatter["type"]) if frontmatter.get("type") is not None else None
+
+
+def _page_language(current: Any) -> semantic_language_registry.SemanticLanguageRegistry:
+    """The category language that a parent's selected definitions give, else the core one."""
+    return (
+        current.definitions.snapshots["categories"].typed
+        if current.definitions is not None
+        else semantic_language_registry.core_registry()
+    )
 
 
 def _page_projects(frontmatter: dict[Any, Any]) -> tuple[str, ...]:
@@ -1969,6 +2075,20 @@ def _unit_by_anchor(document: Any, anchor: str | None) -> Any | None:
         return None
     matches = [unit for unit in document.units if unit.anchor == anchor]
     return matches[0] if len(matches) == 1 else None
+
+
+def _round_tripped_unit(document: Any, expected: Mapping[str, Any]) -> Any:
+    """The rendered unit as the governed parser reads it back, refused unless it matches."""
+    unit = _unit_by_anchor(document, expected["anchor"])
+    if unit is None:
+        diagnostics = [item.code for item in document.errors]
+        raise ObserveMemoryError(
+            "INVALID_SEMANTIC_UNIT",
+            "rendered unit did not round-trip through the governed parser"
+            + (f" ({', '.join(diagnostics)})" if diagnostics else ""),
+        )
+    _assert_round_trip(unit, **expected)
+    return unit
 
 
 def _assert_round_trip(

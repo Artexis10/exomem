@@ -428,7 +428,7 @@ def _visible_targets(session, root: Path, keys: dict[str, str | None]) -> set[st
     `reference_resolution` owns.
     """
     operation = session._authorization
-    projector = _LinkProjector.create(root, None, policy=operation.policy, allow_cold_index=False,
+    projector = _LinkProjector.create(root, None, policy=operation.policy, cold_index="never",
                                       authorize_path=operation.allows_file)
     if not projector.index_available():
         return None

@@ -222,11 +222,14 @@ def plan_memory(
     except CollectionError as error:
         code = _public_error_code(error)
         # The parser knows which manifest the caller should have named; this
-        # surface drops the rest of `details` but must not drop that.
+        # surface drops the rest of `details` but must not drop that, nor the wait
+        # after which a retry can succeed.
+        wait = error.details.get("retry_after_ms")
         raise OpError(
             code,
             _public_error_message(error, code),
             collection_remediation(error),
+            details={"retry_after_ms": wait} if wait else None,
         ) from error
 
 
