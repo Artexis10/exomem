@@ -2,7 +2,7 @@
   "name": "exomem-cloud",
   "displayName": "Evermatter",
   "description": "Evermatter is a living knowledge base for your AI assistants. It keeps decisions, sources, evidence and conclusions as organised knowledge, brings the relevant context forward as you work, and preserves what matters, with answers that point back to their evidence.",
-  "version": "0.204.0",
+  "version": "0.206.1",
   "author": {
     "name": "Substrate Systems OÜ",
     "url": "https://substratesystems.io"

@@ -124,7 +124,224 @@ def test_an_existing_split_warns_and_does_not_block(vault: Path) -> None:
 
     assert target.read_text() == "x"
     warnings = vault_module.folder_split_warnings(vault, target.parent)
-    assert len(warnings) == 1 and "'Garden'" in warnings[0] and "path_variants" in warnings[0]
+    assert len(warnings) == 1 and "'Garden'" in warnings[0] and "path-variants" in warnings[0]
+
+
+def test_a_capture_into_an_existing_split_lands_in_the_fuller_spelling(vault: Path) -> None:
+    """Defect: scope `garden` keeps filling `Evidence/garden/` beside a fuller `Evidence/Garden/`."""
+    evidence = vault / "Knowledge Base" / "Evidence"
+    for name in ("a", "b", "c"):
+        _page(evidence / "Garden" / "shared" / f"{name}.md")
+    _page(evidence / "garden" / "shared" / "d.md")
+
+    result = preserve_module.preserve(
+        vault, scope="garden", category="shared", filename="seed.txt", content="tomato"
+    )
+
+    assert result.path.startswith("Knowledge Base/Evidence/Garden/shared/")
+    assert sorted(p.name for p in (evidence / "garden" / "shared").iterdir()) == ["d.md"]
+
+
+def test_a_registered_folder_wins_a_split(vault: Path) -> None:
+    """Defect: the registry names `Garden`, yet writes pick the side that happens to be fuller."""
+    notes = vault / "Knowledge Base" / "Notes" / "Research"
+    _page(notes / "Garden" / "a.md")
+    for name in ("b", "c"):
+        _page(notes / "garden" / f"{name}.md")
+    project_keys.register_project_key(vault, "garden")
+    assert project_keys.load_project_registry(vault).folder_for("garden") == "Garden"
+
+    assert vault_module.respell_new_path(vault, "Knowledge Base/Notes/Research/garden/new/plan.md") == (
+        "Knowledge Base/Notes/Research/Garden/new/plan.md"
+    )
+
+
+def test_an_existing_path_in_a_split_keeps_its_spelling(vault: Path) -> None:
+    """Defect: a write to a file that exists under the smaller side forks it into the fuller side."""
+    notes = vault / "Knowledge Base" / "Notes"
+    for name in ("a", "b"):
+        _page(notes / "Garden" / f"{name}.md")
+    _page(notes / "garden" / "beds" / "plan.md")
+
+    assert vault_module.respell_new_path(vault, "Knowledge Base/Notes/garden/beds/plan.md") == (
+        "Knowledge Base/Notes/garden/beds/plan.md"
+    )
+    assert vault_module.respell_new_path(vault, "Knowledge Base/Notes/garden/beds/new.md") == (
+        "Knowledge Base/Notes/Garden/beds/new.md"
+    )
+
+
+def test_a_split_is_merged_into_its_canonical_spelling_and_exports(vault: Path) -> None:
+    """Defect: a split can only be merged file by file, its links break, and its folders stay behind."""
+    from exomem.commands import op_maintain_memory
+
+    kb = vault / "Knowledge Base"
+    captured = preserve_module.preserve(
+        vault, scope="garden", category="shared", filename="seed.txt", content="tomato"
+    ).path
+    for name in ("a", "b", "c"):
+        _page(kb / "Evidence" / "Garden" / f"{name}.md")
+    (kb / "Evidence" / "garden" / "old" / "empty").mkdir(parents=True)
+    linking = create_file(
+        vault, path="Knowledge Base/Notes/plan.md",
+        content=f"---\ntype: note\n---\n\nSee [[{captured.removeprefix('Knowledge Base/')}]].\n",
+    ).path
+
+    preview = op_maintain_memory(vault, mode="path-variants")
+    assert [split["canonical"] for split in preview["splits"]] == ["Garden"]
+    assert preview["blocked"] == [] and preview["move_count"] >= 1
+    assert preview["folders"] == ["Knowledge Base/Evidence/garden"]
+    removed = op_maintain_memory(
+        vault, mode="path-variants", dry_run=False, plan_id=preview["plan_id"], why="merge the garden split"
+    )
+    assert removed["outcome"] == "committed" and removed["skipped_count"] == 0
+
+    assert "Knowledge Base/Evidence/garden" in removed["removed_folders"]
+    assert not (kb / "Evidence" / "garden").exists()
+    assert (vault / captured.replace("/garden/", "/Garden/", 1)).read_text() == "tomato"
+    assert "Evidence/Garden/shared/seed.txt" in (vault / linking).read_text()
+    assert op_maintain_memory(vault, mode="path-variants")["split_count"] == 0
+    vault_portability.check_path_collisions(
+        path.relative_to(vault).as_posix() for path in vault.rglob("*") if path.is_file()
+    )
+
+
+def test_one_apply_moves_files_that_share_a_linking_page(vault: Path) -> None:
+    """Defect: the first move rewrites a page that the next move also rewrites, so each apply stops after one file."""
+    from exomem import path_variants
+
+    evidence = vault / "Knowledge Base" / "Evidence"
+    for name in ("a", "b", "c"):
+        _page(evidence / "Garden" / f"{name}.md")
+    for name in ("d", "e"):
+        _page(evidence / "garden" / f"{name}.md")
+    linking = create_file(
+        vault, path="Knowledge Base/Notes/beds.md",
+        content="---\ntype: note\n---\n\n[[Evidence/garden/d]] and [[Evidence/garden/e]].\n",
+    ).path
+
+    preview = path_variants.preview(vault)
+    result = path_variants.apply(vault, plan_id=preview["plan_id"], why="merge the garden split")
+
+    assert result["outcome"] == "committed" and len(result["moved"]) == 2
+    text = (vault / linking).read_text()
+    assert "Evidence/Garden/d" in text and "Evidence/Garden/e" in text
+
+
+def test_a_merge_receipt_names_where_each_file_landed(vault: Path) -> None:
+    """Defect: the receipt names the planned path, though a nested split sent the file elsewhere."""
+    from exomem import path_variants
+
+    notes = vault / "Knowledge Base" / "Notes"
+    for name in ("a", "b", "c"):
+        _page(notes / "Garden" / f"{name}.md")
+    _page(notes / "garden" / "Beds" / "x.md")
+    _page(notes / "garden" / "beds" / "y.md")
+
+    preview = path_variants.preview(vault)
+    result = path_variants.apply(vault, plan_id=preview["plan_id"], why="merge the garden split")
+
+    assert result["moved"]
+    for move in result["moved"]:
+        assert (vault / move["to"]).is_file(), move
+
+
+def test_a_stray_folder_does_not_take_the_writes_of_a_declared_one(vault: Path) -> None:
+    """Defect: a stray `notes/` with more direct entries than `Notes/` takes every structured write."""
+    kb = vault / "Knowledge Base"
+    for index in range(len(list((kb / "Notes").iterdir())) + 3):
+        _page(kb / "notes" / f"stray-{index}.md")
+
+    assert vault_module.respell_new_path(vault, "Knowledge Base/Notes/Research/new-idea.md") == (
+        "Knowledge Base/Notes/Research/new-idea.md"
+    )
+    assert vault_module.respell_new_path(vault, "Knowledge Base/notes/Research/new-idea.md") == (
+        "Knowledge Base/Notes/Research/new-idea.md"
+    )
+
+
+def test_a_stray_top_level_folder_never_takes_an_undeclared_tree(vault: Path) -> None:
+    """Defect: a stray `evidence/` with more entries takes the Evidence tree, and the merge moves it there one-way."""
+    from exomem import path_variants
+
+    kb = vault / "Knowledge Base"
+    preserve_module.preserve(vault, scope="garden", category="shared", filename="seed.txt", content="tomato")
+    for name in ("a", "b", "c"):
+        _page(kb / "evidence" / f"{name}.md")
+
+    later = preserve_module.preserve(vault, scope="garden", category="shared", filename="later.txt", content="x")
+    preview = path_variants.preview(vault)
+
+    assert later.path.startswith("Knowledge Base/Evidence/garden/shared/")
+    [split] = [row for row in preview["splits"] if row["parent"] == "Knowledge Base"]
+    assert split["mergeable"] is False and preview["move_count"] == 0 and preview["folders"] == []
+
+
+def test_the_nfc_spelling_of_a_unicode_split_wins(vault: Path) -> None:
+    """Defect: the NFD side wins a split, so writes land where an export refuses every path."""
+    composed, decomposed = unicodedata.normalize("NFC", "Café"), unicodedata.normalize("NFD", "Café")
+    notes = vault / "Knowledge Base" / "Notes" / "Research"
+    _page(notes / composed / "a.md")
+    for name in ("b", "c"):
+        _page(notes / decomposed / f"{name}.md")
+
+    assert vault_module.respell_new_path(vault, f"Knowledge Base/Notes/Research/{decomposed}/new.md") == (
+        f"Knowledge Base/Notes/Research/{composed}/new.md"
+    )
+
+
+def test_a_capture_into_a_split_category_folder_lands_in_the_fuller_spelling(vault: Path) -> None:
+    """Defect: a split at the destination's own folder is not steered, so the capture deepens it."""
+    evidence = vault / "Knowledge Base" / "Evidence" / "Garden"
+    for name in ("a", "b", "c"):
+        _page(evidence / "Shared" / f"{name}.md")
+    _page(evidence / "shared" / "d.md")
+
+    result = preserve_module.preserve(
+        vault, scope="Garden", category="shared", filename="seed.txt", content="tomato"
+    )
+
+    assert result.path.startswith("Knowledge Base/Evidence/Garden/Shared/")
+    assert sorted(p.name for p in (evidence / "shared").iterdir()) == ["d.md"]
+
+
+def test_a_split_among_files_the_export_drops_is_left_alone(vault: Path) -> None:
+    """Defect: the merge renames a repository branch folder that no export carries, one-way."""
+    from exomem import path_variants
+
+    refs = vault / ".git" / "refs" / "heads"
+    for folder, name in (("Foo", "a"), ("foo", "b")):
+        (refs / folder).mkdir(parents=True)
+        (refs / folder / name).write_text("0" * 40)
+    vault_portability.check_path_collisions(
+        member.path for member in vault_portability.iter_archive_members(vault)
+    )
+
+    preview = path_variants.preview(vault)
+    findings = audit_module.audit(vault, categories=["path_variants"]).findings
+
+    assert preview["split_count"] == 0 and preview["move_count"] == 0
+    assert not [finding for finding in findings if finding.path.startswith(".git/")]
+    assert (refs / "foo" / "b").is_file()
+
+
+def test_a_file_that_arrives_after_the_preview_stops_the_merge(vault: Path) -> None:
+    """Defect: a folder that gained a file after the preview is merged or removed without the owner seeing it."""
+    from exomem import path_variants
+    from exomem.cli_ops import OpError
+
+    evidence = vault / "Knowledge Base" / "Evidence"
+    for name in ("a", "b"):
+        _page(evidence / "Garden" / f"{name}.md")
+    _page(evidence / "garden" / "c.md")
+    preview = path_variants.preview(vault)
+    assert preview["folders"] == ["Knowledge Base/Evidence/garden"] and preview["move_count"] == 1
+    (evidence / "garden" / "late.txt").write_text("late")
+
+    with pytest.raises(OpError) as refused:
+        path_variants.apply(vault, plan_id=preview["plan_id"], why="merge the garden split")
+    assert refused.value.code == "STALE_MAINTENANCE_PLAN"
+    assert sorted(p.name for p in (evidence / "garden").iterdir()) == ["c.md", "late.txt"]
 
 
 def test_deleting_one_side_of_a_split_keeps_the_other_page_reference(vault: Path) -> None:

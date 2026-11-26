@@ -182,6 +182,11 @@ def _commit_offline(vault_root: Path, operation: str, change_of, then=None) -> N
     admission.store_mode_route(Path(vault_root).resolve(), operation, step)
 
 
+def scaffold_folders() -> tuple[str, ...]:
+    """Every folder of the shipped scaffold, relative to the managed root: the layout a new vault starts with."""
+    return tuple(sorted(path.relative_to(_SCAFFOLD).as_posix() for path in _SCAFFOLD.rglob("*") if path.is_dir()))
+
+
 def _scaffold_plan(vault_root: Path) -> tuple[list[Path], list[tuple[Path, Path]]]:
     """The folders an overlay creates, and each scaffold file with where an overlay puts it.
 

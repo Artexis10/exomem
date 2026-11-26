@@ -126,6 +126,59 @@ def test_a_deferred_reminder_arrives_once_on_the_next_prompt(tmp_path, source):
     ]
 
 
+def test_a_placement_conflict_skips_the_turn_in_both_hooks(tmp_path):
+    """The failure: a hook picks one of two different vaults and nudges on a guess."""
+    (tmp_path / "agreed").mkdir()
+    agreed = _env(tmp_path / "agreed", EXOMEM_CAPTURE_NUDGE_DELIVERY="next-turn")
+    assert _stop(tmp_path / "agreed", agreed) == ""
+    assert _pending(tmp_path / "agreed")
+    assert retrieve_hook.REMINDER in _prompt(agreed, PROMPT)
+
+    conflicted = _env(
+        tmp_path,
+        EXOMEM_CAPTURE_NUDGE_DELIVERY="next-turn",
+        EXOMEM_VAULT_PATH=str(tmp_path / "vault-a"),
+        EVERMATTER_VAULT_PATH=str(tmp_path / "vault-b"),
+    )
+
+    assert _stop(tmp_path, conflicted) == ""
+    assert not _pending(tmp_path)
+    assert _prompt(conflicted, PROMPT) == ""
+    assert "EVERMATTER_VAULT_PATH and EXOMEM_VAULT_PATH" in _log(tmp_path)
+
+
+def test_a_conflict_in_a_setting_that_picks_no_data_lets_both_hooks_run(tmp_path):
+    """The failure: one stray setting that the hook never reads silences every nudge, every turn."""
+    conflicted = _env(
+        tmp_path,
+        EXOMEM_CAPTURE_NUDGE_DELIVERY="next-turn",
+        EVERMATTER_CAPTURE_NUDGE_DELIVERY="inline",
+    )
+
+    assert _stop(tmp_path, conflicted) == ""
+    assert _pending(tmp_path)  # EXOMEM_CAPTURE_NUDGE_DELIVERY won: the reminder waits for the next prompt
+    assert retrieve_hook.REMINDER in _prompt(conflicted, PROMPT)
+    log = _log(tmp_path)
+    assert "EVERMATTER_CAPTURE_NUDGE_DELIVERY and EXOMEM_CAPTURE_NUDGE_DELIVERY" in log
+    assert "inline" not in log and "next-turn" not in log  # the log names variables, never values
+
+
+def test_a_hook_flag_wins_over_an_inherited_product_prefix_name_in_both_hooks(tmp_path):
+    """The failure: the flag's value disagrees with the inherited EVERMATTER_ name, so the hook skips every turn."""
+    env = _env(
+        tmp_path,
+        EXOMEM_CAPTURE_NUDGE_DELIVERY="next-turn",
+        EVERMATTER_HOOK_HOME=str(tmp_path / "inherited-home"),
+    )
+    del env["EXOMEM_HOOK_HOME"]
+    flag = ("--hook-home", str(tmp_path / "state"))
+
+    assert _stop(tmp_path, env, *flag) == ""
+    assert _pending(tmp_path)  # the capture hook ran in the flag's home
+    assert MARKER in _prompt(env, "yes", *flag)  # and so did the retrieval hook
+    assert "settings conflict" not in _log(tmp_path)
+
+
 def test_the_deferred_reminder_shares_one_reply_with_the_retrieval_reminder(tmp_path):
     """The failure: two JSON objects on stdout, or one block overwriting the other."""
     env = _env(tmp_path, EXOMEM_CAPTURE_NUDGE_DELIVERY="next-turn")

@@ -11,6 +11,7 @@ import hashlib
 import io
 import os
 import sqlite3
+import sys
 from contextlib import closing
 
 import pytest
@@ -751,6 +752,53 @@ def test_a_folder_and_a_name_that_only_the_store_holds_are_taken_not_new(served)
         vault_module.respell_new_path(served, "Knowledge Base/stored only/Delta.md")
         == "Knowledge Base/Stored Only/Delta.md"
     )
+
+
+@pytest.mark.skipif(sys.platform in {"win32", "darwin"}, reason="needs a case-sensitive volume")
+def test_a_page_written_into_a_split_lands_in_the_fuller_stored_spelling(served):
+    """Defect: the store walk accepts an exact folder and keeps filling the smaller side of a split."""
+    for stem in ("Gamma", "Delta"):
+        vault_module.batch_atomic_write(
+            [planned(served, f"Knowledge Base/Notes/Stored Only/{stem}.md", GAMMA_TEXT, create_only=True)],
+            vault_root=served,
+            post_commit_fanout=False,
+        )
+    loose = served / "Knowledge Base/Notes/stored only"
+    loose.mkdir(parents=True)
+    (loose / "chart.png").write_bytes(b"png")
+
+    assert (
+        vault_module.respell_new_path(served, "Knowledge Base/Notes/stored only/notes/Epsilon.md")
+        == "Knowledge Base/Notes/Stored Only/notes/Epsilon.md"
+    )
+
+
+@pytest.mark.skipif(sys.platform in {"win32", "darwin"}, reason="needs a case-sensitive volume")
+def test_a_stored_split_is_merged_into_its_canonical_spelling(served):
+    """Defect: the merge reads only the disk and misses pages that only the store holds."""
+    from exomem import path_variants
+
+    for stem in ("Gamma", "Delta"):
+        vault_module.batch_atomic_write(
+            [planned(served, f"Knowledge Base/Notes/Stored Only/{stem}.md", GAMMA_TEXT, create_only=True)],
+            vault_root=served,
+            post_commit_fanout=False,
+        )
+    vault_module.batch_atomic_write(
+        [planned(served, "Knowledge Base/Notes/stored only/Epsilon.md", GAMMA_TEXT, create_only=True)],
+        vault_root=served,
+        post_commit_fanout=False,
+    )
+
+    preview = path_variants.preview(served)
+    assert [unit["from"] for unit in preview["moves"]] == ["Knowledge Base/Notes/stored only/Epsilon.md"]
+    result = path_variants.apply(served, plan_id=preview["plan_id"], why="merge the stored split")
+
+    assert result["moved"] == [
+        {"from": "Knowledge Base/Notes/stored only/Epsilon.md", "to": "Knowledge Base/Notes/Stored Only/Epsilon.md"}
+    ]
+    rows = store_rows(served, "SELECT path FROM store_pages WHERE path LIKE ?", "Knowledge Base/Notes/%Epsilon.md")
+    assert rows == [("Knowledge Base/Notes/Stored Only/Epsilon.md",)]
 
 
 def test_the_rows_that_governed_commands_commit_equal_a_cold_derivation_from_the_files(

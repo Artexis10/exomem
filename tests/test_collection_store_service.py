@@ -27,6 +27,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from conftest import held_link_index_warm
 from test_collection_row_references import DIARY, SITE_FIELD, SITES, diary_text, sites_text
 from test_collection_store_importer import ndjson, write_source
 from test_collection_store_s1_gate import (
@@ -52,9 +53,12 @@ from exomem import __main__ as cli
 from exomem import (
     capabilities,
     commands,
+    find,
+    memory_refs,
     record_governance,
     records,
     reserved_paths,
+    semantic_contract,
     state_migration,
     vault,
     writer_lease,
@@ -3151,3 +3155,192 @@ def test_a_cold_manifest_registry_offers_and_publishes_the_store_collections(ser
     published = working_set_index.published_collection_manifests(service.root, 1)
     assert CID in {manifest.collection_id for manifest in found}
     assert published is not None and CID in {manifest.collection_id for manifest in published}
+
+
+def _walks_inside_queries(monkeypatch) -> list[Path]:
+    """Record each vault walk made inside a Records query from now on.
+
+    The service runs a query on its store thread, beside a graph rebuild and warms that walk on their own.
+    """
+    querying, walks = threading.local(), []
+    real_query, real_walk = record_governance.query_collection, vault.walk_vault_md
+
+    def query(*args, **kwargs):
+        querying.active = True
+        try:
+            return real_query(*args, **kwargs)
+        finally:
+            querying.active = False
+
+    def walk(root):
+        if getattr(querying, "active", False):
+            walks.append(root)
+        return real_walk(root)
+
+    monkeypatch.setattr(record_governance, "query_collection", query)
+    monkeypatch.setattr(vault, "walk_vault_md", walk)
+    return walks
+
+
+def test_a_records_query_answers_from_its_rows_without_walking_the_vault_for_links(service, monkeypatch):
+    """While a published link index is coming, a query goes without it; it never walks the vault for one.
+
+    No link index is published here, as on a service whose corpus warm is still running. A walk
+    on the query's thread took most of the Records budget on a large vault, for every page and
+    aggregate, even one that returns no link field. A link field the query returns is named in
+    `unresolved_links`, so a reference left out is never mistaken for an empty field. A filter on
+    that field would match no row, so it is refused with a wait instead.
+    """
+    linked = "77777777-7777-4777-8777-777777777777"
+    text = sqlite_text(manifest_text().replace(CID, linked).replace("title: Work", "title: Linked").replace(
+        "    count: {type: integer}\n", "    status: {type: string}\n    related: {type: array, items: {type: link}}\n"))
+    assert call(service.root, "record_memory", action="create", manifest_path=manifest_path().replace("Work", "Linked"),
+                manifest_text=text, why="rows with links")
+    reference = memory_refs.memory_ref(memory_refs.new_id())
+    assert call(service.root, "record_memory", action="append", collection=linked,
+                item={"title": "Lead", "status": "open", "related": [reference]}, why="row with a link")["outcome"] == "committed"
+    # The cache is on and holds no corpus yet; the warm that publishes one runs, held, through every query.
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    semantic_contract.reset_corpus_context_cache()
+    walks_inside_a_query = _walks_inside_queries(monkeypatch)
+
+    with held_link_index_warm(monkeypatch):
+        status = call(service.root, "record_memory", action="query", collection=linked, columns=["status"])
+        default = call(service.root, "record_memory", action="query", collection=linked)
+        distinct = call(service.root, "record_memory", action="query", collection=linked, aggregate="distinct:status")
+        with pytest.raises(OpError) as refused:
+            call(service.root, "record_memory", action="query", collection=linked,
+                 filters=[{"column": "related", "op": "contains", "value": reference}])
+
+    assert walks_inside_a_query == []
+    assert refused.value.code == "LINK_INDEX_WARMING"
+    assert refused.value.details["retry_after_ms"] > 0
+    assert [row["status"] for row in status["rows"]] == ["open"]
+    assert "unresolved_links" not in status
+    assert distinct["aggregate"]["distinct"] == ["open"]
+    assert "unresolved_links" not in distinct
+    assert [row["title"] for row in default["rows"]] == ["Lead"]
+    assert "related" not in default["rows"][0]
+    assert default["unresolved_links"] == ["related"]
+
+
+def test_a_link_filter_after_a_page_write_answers_once_the_warm_its_refusal_started_is_done(service, monkeypatch):
+    """A page write leaves the published link index behind the vault, and nothing else may catch it up.
+
+    A link filter refused then starts the warm that does, so the same query answers on its retry,
+    without walking the vault. A refusal that started no warm was repeated for good.
+    """
+    linked = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    text = sqlite_text(manifest_text().replace(CID, linked).replace("title: Work", "title: Current").replace(
+        "    count: {type: integer}\n", "    related: {type: array, items: {type: link}}\n"))
+    assert call(service.root, "record_memory", action="create", manifest_path=manifest_path().replace("Work", "Current"),
+                manifest_text=text, why="rows with links")
+    page = call(service.root, "remember", title="Lead source", slug="lead-source", suggestions=False,
+                content="# Lead source\n\n- [operating constraint] Leads arrive weekly.\n")["path"]
+    reference = call(service.root, "read_memory", path=page)["ref"]
+    assert call(service.root, "record_memory", action="append", collection=linked,
+                item={"title": "Lead", "related": [reference]}, why="row with a link")["outcome"] == "committed"
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM", raising=False)
+    semantic_contract.reset_corpus_context_cache()
+    walks_inside_a_query = _walks_inside_queries(monkeypatch)
+    by_link = {"action": "query", "collection": linked,
+               "filters": [{"column": "related", "op": "contains", "value": reference}]}
+    call(service.root, "record_memory", action="query", collection=linked)
+    assert find.await_recall_resolver_warm()
+    before = call(service.root, "record_memory", **by_link)
+
+    call(service.root, "remember", title="Later note", slug="later-note", suggestions=False,
+         content="# Later note\n\n- [operating constraint] Notes arrive monthly.\n",
+         relation_disposition="reviewed_none", relation_review_reason="an unrelated fixture page")
+
+    # The watcher may deliver the write's event late, or miss it until the next reconcile, so the
+    # test drives the decline itself: one that finds the corpus behind must start the warm that ends it.
+    scheduled = []
+    schedule = find.schedule_link_index_warm
+    monkeypatch.setattr(find, "schedule_link_index_warm", lambda root: scheduled.append(root) or schedule(root))
+    assert semantic_contract.link_corpus_coming(service.root, semantic_contract.CHECKPOINT_DIFFERS)
+    assert scheduled == [service.root]
+    assert find.await_recall_resolver_warm()
+    try:
+        answered = call(service.root, "record_memory", **by_link)
+    except OpError as refused:
+        assert refused.code == "LINK_INDEX_WARMING"
+        assert find.await_recall_resolver_warm()
+        answered = call(service.root, "record_memory", **by_link)
+
+    assert [row["title"] for row in before["rows"]] == ["Lead"]
+    assert [row["title"] for row in answered["rows"]] == ["Lead"]
+    assert walks_inside_a_query == []
+
+
+def test_a_records_query_that_finds_no_link_index_warms_it_for_the_next_one(service, monkeypatch):
+    """A query that finds no published link index answers without it and starts the background warm that
+    publishes one, so the next query resolves the link; or no warm, and the link stays unresolved."""
+    linked = "88888888-8888-4888-8888-888888888888"
+    text = sqlite_text(manifest_text().replace(CID, linked).replace("title: Work", "title: Warmed").replace(
+        "    count: {type: integer}\n", "    related: {type: array, items: {type: link}}\n"))
+    assert call(service.root, "record_memory", action="create", manifest_path=manifest_path().replace("Work", "Warmed"),
+                manifest_text=text, why="rows with links")
+    page = call(service.root, "remember", title="Lead source", slug="lead-source", suggestions=False,
+                content="# Lead source\n\n- [operating constraint] Leads arrive weekly.\n")["path"]
+    reference = call(service.root, "read_memory", path=page)["ref"]
+    assert call(service.root, "record_memory", action="append", collection=linked,
+                item={"title": "Lead", "related": [reference]}, why="row with a link")["outcome"] == "committed"
+    # As on a service whose corpus was never built or was dropped: the cache is on, empty, and may warm.
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM", raising=False)
+    semantic_contract.reset_corpus_context_cache()
+
+    cold = call(service.root, "record_memory", action="query", collection=linked)
+    assert find.await_recall_resolver_warm()
+    warm = call(service.root, "record_memory", action="query", collection=linked)
+
+    assert "related" not in cold["rows"][0]
+    assert cold["unresolved_links"] == ["related"]
+    assert warm["rows"][0]["related"] == [reference]
+    assert "unresolved_links" not in warm
+
+
+def test_a_write_that_records_source_dependencies_waits_for_a_read_beside_the_store_thread(original_service, monkeypatch):
+    """A read beside the store thread borrows the store while it reads; a Source write waits for it to return.
+
+    Release decisions read beside the thread on most turns that touch store pages. A write that records
+    Source dependencies refused as busy whenever one was still reading.
+    """
+    from exomem import provenance
+    from exomem.collection_store import preview
+
+    service, reference, _original, expected, _source_path = original_service
+    root, server = service.root, runtime._server(service.root)
+    at_metadata, reading = threading.Event(), threading.Event()
+    real_metadata = preview._PreviewPhase.source_metadata
+
+    asked = []
+
+    def observed(self):
+        asked.append(threading.current_thread() is not reader)
+        at_metadata.set()
+        return real_metadata(self)
+
+    def read():
+        reading.set()
+        assert at_metadata.wait(60), "the write never reached its Source metadata"
+        time.sleep(0.3)  # still reading when the write asks for the store
+
+    monkeypatch.setattr(preview._PreviewPhase, "source_metadata", observed)
+    reader = threading.Thread(target=lambda: server.read_beside(read, initial=None, progress=False))
+    reader.start()
+    assert reading.wait(20)
+    body = provenance.encode_origin({"inputs": {"original": {"representation": "original",
+        "reference": reference, "version": hashlib.sha256(expected).hexdigest(), "size": len(expected)}},
+        "assessments": [], "bindings": []}) + "\nRetain the observation.\n"
+    try:
+        result = call(root, "record_memory", action="append", collection=CID, item={"title": "Acquired"}, body=body,
+                      why="retain the acquired observation", response_detail="full")
+    finally:
+        at_metadata.set()
+        reader.join(60)
+
+    assert asked and all(asked), "the write never asked for its Source metadata"
+    assert result["outcome"] == "committed"

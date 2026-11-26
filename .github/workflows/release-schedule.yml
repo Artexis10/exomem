@@ -1,6 +1,7 @@
 name: release schedule
 
-# Starts a release cut on a schedule, so no session waits on a release. It never starts one
+# Starts a release cut when the evidence callback reports a successful Full run on main, and on a
+# schedule as a backstop, so no session waits on a release. It never starts one
 # while a controller run is unfinished, resumes an open cut that no run is working on, and
 # otherwise cuts from the newest main commit with reusable Full evidence (pick-source) when a
 # change since the last release would appear in its changelog.
@@ -11,7 +12,13 @@ on:
   schedule:
     # Four times a day; main's Full evidence is at most FULL_EVIDENCE_HOURS old (merge-queue.yml).
     - cron: "20 4,10,16,22 * * *"
+  # The evidence callback dispatches this run once a Full run on main has succeeded.
   workflow_dispatch:
+    inputs:
+      caller_run:
+        description: The evidence callback run that dispatched this run; it does not hold the slot
+        required: false
+        type: string
 
 permissions:
   actions: write
@@ -42,9 +49,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           NODE_PATH: ${{ runner.temp }}/release-please/node_modules
+          CALLER: ${{ inputs.caller_run }}
         run: |
           set -euo pipefail
-          decision=$(python3 scripts/release_cuts.py schedule)
+          decision=$(python3 scripts/release_cuts.py schedule --caller "$CALLER")
           echo "$decision" | jq .
           {
             echo "### Release schedule"

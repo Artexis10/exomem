@@ -153,6 +153,15 @@ It copies each vault out with one streamed read-only `tar` of the pod's volume, 
 It runs the same journey locally with `drive.py --profile personal`, then compares each key item between the two arms: a loss is an item that local kept and Cloud did not.
 The exit code is 0 only on a pass, which means no loss on the first pass, no unknown read or measurement gap, and no changed, missing or copied pre-existing source page; run it with `--raw-import-python <interpreter with fastmcp and the server installed>`.
 
+## Home import
+
+`--home-import` proves that the cell files a sent folder by itself, with no client call to `file`, and runs only on demand as the `home-import` mode of the `Cloud rehearsal` workflow.
+The run writes a fixture tree and its manifest: loose files, a nested folder, the members of an expanded zip, a non-UTF-8 text file, a zero-byte file and a hidden file, each with its own file time.
+It sends the tree with `exomem cloud import --no-wait --label`: the CLI writes `filing: cell` and the origin into the stage's series file and makes no `file` call. The run reads the series file back in the pod, then deletes the pod so that the cell's start finds the file and registers the stage.
+It deletes the pod a second time once the filing view shows the stage is being filed, polls `imports.status` with `view="filing"` until `done`, and copies the vault out with one read-only `tar`.
+It checks the copy and the cell's own reports against the manifest: one Source for each eligible file with its `collection_path`, `file_modified` and origin fields, the left files listed with their reasons in the filing view's `left_out`, and counts that add up to the tree.
+The exit code is 0 only on a pass. A stage that was `done` before the second pod deletion gives `incomplete`: every check held, and the restart proved nothing. The live run is not part of the unit tests; `tests/test_home_import.py` covers the fixture and every check.
+
 ## Owner export
 
 The optional owner-export stage connects the real Substrate owner endpoints to C6,

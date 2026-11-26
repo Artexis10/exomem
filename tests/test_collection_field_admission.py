@@ -4,12 +4,13 @@ from dataclasses import replace
 
 import pytest
 import yaml
-from conftest import initialize_vault_state_offline
+from conftest import held_link_index_warm, initialize_vault_state_offline
 from test_collection_store_summary import summary_text
 from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
 from test_collection_store_writer import store as store
 
-from exomem import commands, vault
+from exomem import commands, freshness, vault
+from exomem.cli_ops import OpError
 from exomem.collection_store.preview import preview_store
 from exomem.collection_store.reader import StoreAdapter
 from exomem.governance.principal import (
@@ -948,6 +949,33 @@ def test_a_saved_view_that_names_a_withheld_field_is_not_found_like_a_missing_on
     # The owner runs the view the guest is refused.
     owner = tool(store, "record_memory", who=OWNER, action="query", collection=CID, view="located")
     assert [row["place"]["label"] for row in owner["rows"]] == ["invented-place", "invented-place"]
+
+
+def test_a_profile_view_refused_while_the_link_index_is_coming_names_only_link_fields_the_caller_reads(
+    store, corpus_cache_on, monkeypatch
+):
+    """A profile reads every link field the caller may read, so its refusal names those, and never one withheld."""
+    front, body, _ = vault.parse_frontmatter(summary_text(manifest_text()), strict=True)
+    front["item_schema"]["fields"].update({
+        "related": {"type": "array", "items": {"type": "link"}},
+        "origin": {"type": "link", "classification": "location"},
+    })
+    front["views"] = {"profiled": {"query": {"aggregate": "profile"}}}
+    text = "---\n" + yaml.safe_dump(front, sort_keys=False) + "---\n" + body
+    store.create_collection(manifest_path(), text, why="declare link fields", scaffold=False)
+    freshness.rebaseline(store.root)  # the vault's change events are live; no corpus is published yet
+
+    refusals = {}
+    with held_link_index_warm(monkeypatch):
+        for who in (GUEST, OWNER):
+            with pytest.raises(OpError) as raised:
+                tool(store, "record_memory", who=who, action="query", collection=CID, view="profiled")
+            refusals[who] = raised.value
+
+    assert [error.code for error in refusals.values()] == ["LINK_INDEX_WARMING", "LINK_INDEX_WARMING"]
+    assert "related" in str(refusals[GUEST])
+    assert "origin" not in str(refusals[GUEST])
+    assert "origin" in str(refusals[OWNER])
 
 
 def governed(store):

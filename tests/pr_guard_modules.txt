@@ -5,4 +5,5 @@
 tests/test_ci_reliability_contract.py
 tests/test_repository_docs_reads.py
 tests/test_scaffold_no_leak.py
+tests/test_setting_names_in_step.py
 tests/test_uv_lock_policy.py

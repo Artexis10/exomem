@@ -6080,10 +6080,10 @@ def folder_split_warnings(vault_root: Path, directory: Path) -> list[str]:
     for part in relative.parts:
         variants = sibling_name_variants(current, part)
         if variants and (current / part).is_dir():
-            audit_call = active_call_text("maintain_memory", {"mode": "audit", "categories": ["path_variants"]})
+            preview_call = active_call_text("maintain_memory", {"mode": "path-variants"})
             warnings.append(
                 f"folder '{part}' also exists as {', '.join(repr(v) for v in variants)}; "
-                f"run {audit_call} to see the split"
+                f"preview a merge with {preview_call}"
             )
         current = current / part
     return warnings
@@ -7779,23 +7779,27 @@ def respell_new_path(vault_root: Path, rel: str, *, replacing: str | None = None
 
     A component that does not exist as spelled, but matches an existing sibling
     by `vault_name_key`, takes that sibling's spelling: `Notes/garden/x.md`
-    lands in an existing `Notes/Garden/`. An exact component always wins, and
-    the first component that matches nothing ends the walk, because the rest is
-    new. Only destinations come here. A recorded identity (a read, a delete, an
-    index key) keeps the host's spelling, so a split that already exists on a
+    lands in an existing `Notes/Garden/`. A folder on the way that already has
+    a variant sibling (a split) takes the split's canonical spelling
+    (`canonical_variant`), whichever spelling the caller named, unless the
+    destination is a file that already exists under the requested one. The first component
+    that matches nothing ends the walk, because the rest is new. Only
+    destinations come here. A recorded identity (a read, a delete, an index
+    key) keeps the host's spelling, so a split that already exists on a
     case-sensitive volume keeps two identities.
 
     `replacing` is the path that a move vacates. It is not a sibling to land
     on, so a move that changes only the case or Unicode form of a name still
-    renames it. Each component costs one `lstat`; a folder is listed only when
-    the component is missing. Fails open to `rel` when a component cannot be
-    read.
+    renames it. Each component costs one `lstat`, and each folder on the way
+    one listing; the destination's own folder is not listed when the leaf is an
+    existing file. Fails open to `rel` when a component cannot be read.
     """
     parts = [part for part in str(rel).replace("\\", "/").split("/") if part]
     stored = _respell_in_store(Path(vault_root), parts, replacing)
     if stored is not None:
         return stored
-    current = Path(vault_root)
+    root = Path(vault_root)
+    current = root
     spelled: list[str] = []
     for index, part in enumerate(parts):
         try:
@@ -7805,20 +7809,115 @@ def respell_new_path(vault_root: Path, rel: str, *, replacing: str | None = None
         except OSError:
             return rel
         else:
+            rest = parts[index + 1 :]
+            # A leaf that is a file keeps its spelling, so its folder needs no listing.
+            if rest or not _existing_file(current / part):
+                part = _split_spelling(
+                    root, _listed(current), part, "/".join(spelled), replacing,
+                    exists=lambda name, base=current, rest=rest: _existing_file(base.joinpath(name, *rest)),
+                    entries=lambda name, base=current: _disk_entries(base / name),
+                )
             spelled.append(part)
             current = current / part
             continue
-        try:
-            names = os.listdir(current)
-        except OSError:
-            names = []
-        variant = _sibling_spelling(names, part, "/".join(spelled), replacing)
+        variant = _sibling_spelling(_listed(current), part, "/".join(spelled), replacing)
         if variant is None:
             spelled.extend(parts[index:])
             break
         spelled.append(variant)
         current = current / variant
     return "/".join(spelled)
+
+
+def _listed(directory: Path) -> list[str]:
+    try:
+        return os.listdir(directory)
+    except OSError:
+        return []
+
+
+def _existing_file(path: Path) -> bool:
+    return os.path.lexists(path) and not path.is_dir()
+
+
+def _disk_entries(directory: Path) -> set[str] | None:
+    """The names in a folder, or None when it is not a folder."""
+    if not directory.is_dir() or directory.is_symlink():
+        return None
+    return set(_listed(directory))
+
+
+def canonical_variant(
+    vault_root: Path,
+    parent: str,
+    spellings: Iterable[str],
+    entries: Callable[[str], set[str] | None],
+) -> str | None:
+    """The spelling of a folder split under `parent` that writes and merges converge on.
+
+    None when no spelling is a folder. `entries` gives a spelling's folder entries, or None for a
+    spelling that is not a folder. The spelling in NFC wins first, because an export refuses any
+    other form. Next comes a spelling that the layout declares (`layout.declared_folders`) or that
+    the project registry names, because code reads those folders by their exact spelling. Then the
+    folder with the most entries, which a merge into it only grows, and last code-point order.
+
+    At the top of the vault or of the managed root, code reads folders that no registry declares
+    (such as the Evidence tree), so a split there with no declared spelling has no canonical one:
+    a count could send a whole tree into a spelling that code never reads.
+    """
+    counts = {name: len(found) for name in spellings if (found := entries(name)) is not None}
+    if not counts:
+        return None
+    from . import layout, project_keys
+
+    declared = layout.declared_folders(vault_root)
+    registered = set(project_keys.load_project_registry(vault_root).project_to_folder.values())
+    if parent in {"", managed_root_rel()} and not any(
+        (f"{parent}/{name}" if parent else name) in declared for name in counts
+    ):
+        return None
+
+    def rank(name: str) -> tuple[bool, bool, int, str]:
+        path = f"{parent}/{name}" if parent else name
+        return (
+            unicodedata.normalize("NFC", name) != name,
+            path not in declared and name not in registered,
+            -counts[name],
+            name,
+        )
+
+    return min(counts, key=rank)
+
+
+def _split_spelling(
+    vault_root: Path,
+    names: Iterable[str],
+    part: str,
+    prefix: str,
+    replacing: str | None,
+    *,
+    exists: Callable[[str], bool],
+    entries: Callable[[str], set[str] | None],
+) -> str:
+    """The spelling an existing folder `part` on a destination's way takes.
+
+    Without a listed variant sibling it is `part`. With one it is the split's canonical spelling,
+    unless the destination is a file that already exists under `part` (`exists`): a write to it
+    must not fork it into the other spelling. A destination folder that exists is steered, so a
+    caller that respells only a folder lands in the canonical one.
+    """
+    listed = set(names)
+    if part not in listed:
+        # A folding volume answered for a spelling it does not list: no split here.
+        return part
+    variants = [
+        name
+        for name in held_fs.name_variants(listed, part)
+        if (f"{prefix}/{name}" if prefix else name) != replacing
+    ]
+    if not variants or exists(part):
+        return part
+    return canonical_variant(vault_root, prefix, [part, *variants], entries) or part
 
 
 def _sibling_spelling(
@@ -7849,14 +7948,26 @@ def _respell_in_store(vault_root: Path, parts: list[str], replacing: str | None)
         return None
     spelled: list[str] = []
     with read.snapshot(vault_root) as view:
+
+        def names_in(prefix: str) -> set[str]:
+            names = {child.name for child in view.children(prefix)}
+            names.update(_listed(vault_root / prefix if prefix else vault_root))
+            return names
+
         for index, part in enumerate(parts):
             prefix = "/".join(spelled)
-            names = {child.name for child in view.children(prefix)}
-            try:
-                names.update(os.listdir(vault_root / prefix if prefix else vault_root))
-            except OSError:
-                pass  # a folder that only the store knows has no directory yet
+            names = names_in(prefix)
             if part in names:
+                rest = parts[index + 1 :]
+                part = _split_spelling(
+                    vault_root, names, part, prefix, replacing,
+                    exists=lambda name, prefix=prefix, rest=rest: _stored_or_on_disk(
+                        vault_root, view, "/".join(filter(None, (prefix, name, *rest)))
+                    ),
+                    entries=lambda name, prefix=prefix: folder_entries(
+                        vault_root, view, f"{prefix}/{name}" if prefix else name
+                    ),
+                )
                 spelled.append(part)
                 continue
             variant = _sibling_spelling(names, part, prefix, replacing)
@@ -7865,6 +7976,23 @@ def _respell_in_store(vault_root: Path, parts: list[str], replacing: str | None)
                 break
             spelled.append(variant)
     return "/".join(spelled)
+
+
+def folder_entries(vault_root: Path, view: Any, rel: str) -> set[str] | None:
+    """The names in folder `rel`, from the store view (or None in file mode) and the disk.
+
+    None when neither holds a folder there.
+    """
+    stored = {child.name for child in view.children(rel)} if view is not None else set()
+    on_disk = _disk_entries(vault_root / rel)
+    if on_disk is None and not stored:
+        return None
+    return stored | (on_disk or set())
+
+
+def _stored_or_on_disk(vault_root: Path, view: Any, rel: str) -> bool:
+    """Whether `rel` is a page the store holds or a file on disk."""
+    return bool(view.held_pages((rel,))) or _existing_file(vault_root / rel)
 
 
 # Probing the filesystem costs a couple of syscalls; the answer is a property
