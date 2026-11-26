@@ -69,9 +69,9 @@ def test_an_overlay_entry_with_a_parser_that_code_lacks_is_refused_and_the_other
     root = _vault(tmp_path)
     _overlay(root, "schema_version: 1\nentries:\n"
                    "  odd-notes:\n    label: Odd notes\n    attributes: {file_name: notes.json, item_keys: [body], "
-                   "parser: odd-notes, item_kind: session, roles: {me: Me}}\n"
+                   "parser: odd-notes, item_kind: session, roles: {me: Me}, untitled: Odd, attachment: File}\n"
                    "  kite-chats:\n    label: Kite chats\n    attributes: {file_name: kite.json, item_keys: [chat_messages, uuid], "
-                   "parser: claude-conversations, item_kind: session, roles: {human: Me}}\n")
+                   "parser: claude-conversations, item_kind: session, roles: {human: Me}, untitled: Untitled, attachment: File}\n")
 
     snapshot = registry.load(source_formats.SPEC, root)
 
@@ -80,11 +80,12 @@ def test_an_overlay_entry_with_a_parser_that_code_lacks_is_refused_and_the_other
     assert {entry.key for entry in snapshot.active} == {"chatgpt-conversations", "claude-conversations", "kite-chats"}
 
 
-def test_an_overlay_may_relabel_a_role_but_not_change_what_a_shipped_format_is(tmp_path):
+def test_an_overlay_may_relabel_the_words_of_a_transcript_but_not_change_what_a_shipped_format_is(tmp_path):
     root = _vault(tmp_path)
-    _overlay(root, "schema_version: 1\nentries:\n  claude-conversations:\n    attributes:\n      roles: {human: Me, assistant: Claude}\n")
-    labels = {entry.key: entry.roles for entry in source_formats.formats(root)}
-    assert labels["claude-conversations"] == {"human": "Me", "assistant": "Claude"}
+    _overlay(root, "schema_version: 1\nentries:\n  claude-conversations:\n    attributes:\n"
+                   "      roles: {human: Me, assistant: Claude}\n      untitled: Sans titre\n      attachment: Pièce jointe\n")
+    shown = {entry.key: entry for entry in source_formats.formats(root)}["claude-conversations"]
+    assert (shown.roles, shown.untitled, shown.attachment) == ({"human": "Me", "assistant": "Claude"}, "Sans titre", "Pièce jointe")
 
     _overlay(root, "schema_version: 1\nentries:\n  claude-conversations:\n    attributes: {item_keys: [uuid]}\n")
     snapshot = registry.load(source_formats.SPEC, root)

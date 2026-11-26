@@ -104,10 +104,15 @@ def claude_conversation(number: int) -> dict:
     }
 
 
-def stage_export(vault: Path, conversations: list[dict] | bytes, *, name: str = "conversations.json") -> str:
-    """A stage as the Cloud import Job leaves it, whose series file asks the cell to file it; bytes are staged as they are."""
+def stage_export(
+    vault: Path, conversations: list[dict] | bytes, *, name: str = "conversations.json", beside: dict[str, bytes] | None = None,
+) -> str:
+    """A stage as the Cloud import Job leaves it, whose series file asks the cell to file it; bytes are staged as they are.
+
+    `beside` are other members of the same drop, by their path in the stage.
+    """
     data = conversations if isinstance(conversations, bytes) else json.dumps(conversations, indent=1).encode()
-    import_id = _window(vault, {name: data}, series=[name])
+    import_id = _window(vault, {name: data, **(beside or {})}, series=[name])
     (vault / "_Imports" / import_id / import_stage.SERIES_FILE).write_text(json.dumps(
         {"label": "Chat export", "paths": [name], "filing": "cell", "origin": {"browser_family": "cli"}}))
     return import_id
@@ -151,7 +156,8 @@ def test_an_export_files_one_session_source_per_conversation_with_its_own_time_a
 ) -> None:
     """Catches an export that files as one blob: no searchable conversations and every date the day of the upload."""
     build, count = EXPORTS[vendor]
-    import_id = stage_export(vault, [build(number) for number in range(count)])
+    conversations = [build(number) for number in range(count)]
+    import_id = stage_export(vault, conversations)
 
     view = file_to_done(vault, import_id)
 
@@ -165,6 +171,10 @@ def test_an_export_files_one_session_source_per_conversation_with_its_own_time_a
         assert marker_of(number) in text  # searchable text, not an artifact
     (export,) = (page for path, page in pages.items() if path not in sessions)
     assert export[0]["imported_from"].endswith("conversations.json") and "item_created" not in export[0]
+    # The export keeps its bytes as an artifact and holds no inline text, so no conversation is indexed twice.
+    assert marker_of(0) not in export[1]
+    (kept,) = (vault / "Knowledge Base" / "Sources").rglob("*.json")
+    assert kept.read_bytes() == json.dumps(conversations, indent=1).encode()
     assert view["state"] == "done" and view["left_out"]["by_reason"] == {}
     assert view["progress"] == {"total": count + 1, "filed": count + 1, "skipped_duplicates": 0, "failed": 0,
                                 "left_out": 0, "remaining": 0}
@@ -310,3 +320,117 @@ def test_an_export_that_lands_in_the_stage_after_the_first_walk_is_expanded_by_t
     record = import_stage.read_expansion(vault, import_id)
     assert sorted(record["exports"]) == ["conversations.json", "more/conversations.json"]
     assert sorted(row["path"].split("/")[0] for row in record["rows"]) == ["conversations items"] * 2 + ["more"] * 3
+
+
+def _degrade_claude_sender(item: dict) -> None:
+    item["chat_messages"][0]["sender"] = {"role": "human"}
+
+
+def _degrade_chatgpt_role(item: dict) -> None:
+    item["mapping"][f"{item['conversation_id']}-q"]["message"]["author"]["role"] = ["user"]
+
+
+def _degrade_claude_time(item: dict) -> None:
+    item["created_at"] = "9999-12-31T23:00:00-05:00"
+    item["chat_messages"][1]["created_at"] = "9999-12-31T23:00:00-05:00"
+
+
+@pytest.mark.parametrize(
+    ("build", "degrade", "lost"),
+    [
+        (claude_conversation, _degrade_claude_sender, "What do I need to know"),
+        (chatgpt_conversation, _degrade_chatgpt_role, "What do I need to know"),
+        (claude_conversation, _degrade_claude_time, None),
+    ],
+    ids=["claude-sender-is-an-object", "chatgpt-role-is-a-list", "claude-time-overflows-utc"],
+)
+def test_a_field_of_the_wrong_type_in_one_item_never_parks_the_import(vault: Path, build, degrade, lost) -> None:
+    """Catches one malformed conversation that stops the whole import with an internal error and files nothing."""
+    export = [build(number) for number in range(4)]
+    degrade(export[2])
+
+    view = file_to_done(vault, stage_export(vault, export))
+
+    pages = source_pages(vault)
+    sessions = {path: page for path, page in pages.items() if page[0]["source_type"] == "session"}
+    assert len(sessions) == 4 and len(pages) == 5  # the damaged conversation files too, without the field it cannot read
+    (frontmatter, text), = (page for page in sessions.values() if page[0]["title"] == title_of(2))
+    assert marker_of(2) in text and (lost is None or lost not in text)
+    assert ("item_created" in frontmatter) is (lost is not None)
+    assert view["state"] == "done" and view["progress"]["failed"] == 0 and view["progress"]["remaining"] == 0
+
+
+def test_an_item_that_fails_in_a_way_no_reader_foresaw_is_counted_failed_and_the_rest_file(vault: Path, monkeypatch) -> None:
+    """Catches an unforeseen fault in one item that parks the import, with the export and its other files unfiled."""
+    from exomem import export_transcripts
+
+    reader = export_transcripts.READERS["claude-conversations"]
+
+    def reads_all_but_one(item, fmt, index):
+        if index == 2:
+            raise RuntimeError("a shape that no reader foresaw")
+        return reader(item, fmt, index)
+
+    monkeypatch.setitem(export_transcripts.READERS, "claude-conversations", reads_all_but_one)
+
+    view = file_to_done(vault, stage_export(vault, [claude_conversation(number) for number in range(4)], beside={"notes.txt": b"kept"}))
+
+    pages = source_pages(vault)
+    assert len(pages) == 5 and not any(page[0]["title"] == title_of(2) for page in pages.values())  # 3 items, the export, notes.txt
+    assert view["state"] == "done" and view["left_out"]["by_reason"] == {"IMPORT_ITEM_UNREADABLE": 1}
+    assert view["progress"]["failed"] == 1 and view["progress"]["remaining"] == 0
+
+
+def test_a_staged_file_at_a_name_the_expansion_would_use_is_never_overwritten(vault: Path) -> None:
+    """Catches a transcript that replaces a file that the sender staged beside the export."""
+    export = [claude_conversation(number) for number in range(3)]
+    item_id = export[1]["uuid"]
+    folder = "conversations items"
+    sender = {f"{folder}/{item_id}.md": b"The sender's own note, first.\n", f"{folder}/{item_id}-2.md": b"The sender's own note, second.\n"}
+
+    view = file_to_done(vault, stage_export(vault, export, beside=sender))
+
+    pages = source_pages(vault).values()
+    texts = [text for _frontmatter, text in pages]
+    assert any("The sender's own note, first." in text for text in texts)
+    assert any("The sender's own note, second." in text for text in texts)
+    assert not any(frontmatter["title"] == title_of(1) for frontmatter, _text in pages)  # the clashing item is counted, not written over
+    assert view["state"] == "done" and view["progress"]["failed"] == 1 and view["progress"]["remaining"] == 0
+
+
+def test_a_control_character_in_a_conversation_does_not_turn_its_transcript_into_an_artifact(vault: Path) -> None:
+    """Catches a NUL byte that makes a transcript read as binary, so the conversation files with no searchable text."""
+    export = [claude_conversation(number) for number in range(3)]
+    export[1]["name"] = "Notes on \u0000 a \u0007 kite"
+    export[1]["chat_messages"][1]["text"] = f"Start small:\u0000 {marker_of(1)}.\u001b"
+
+    file_to_done(vault, stage_export(vault, export))
+
+    pages = source_pages(vault)
+    (frontmatter, text), = (page for page in pages.values() if page[0]["source_type"] == "session" and "kite" in page[0]["title"])
+    assert frontmatter["title"] == "Notes on a kite" and f"Start small: {marker_of(1)}." in text
+    assert "\x00" not in text and "\x1b" not in text
+
+
+def test_a_lone_surrogate_in_a_conversation_is_written_as_a_replacement_character(vault: Path, monkeypatch) -> None:
+    """Catches an item that stops the expansion with an encoding error when the JSON reader hands back a lone surrogate."""
+    from exomem import export_transcripts
+
+    monkeypatch.setattr(export_transcripts, "read", lambda fmt, stream, *, start=0: iter([
+        (0, export_transcripts.Transcript("one", "A title", None, None, "# A title\n\nhalf a pair: \ud83d\n"))]))
+    import_id = stage_export(vault, [claude_conversation(0)])
+
+    export_expansion.expand(vault, import_id, keep_going=lambda: True)
+
+    assert (vault / "_Imports" / import_id / "conversations items" / "one.md").read_text(encoding="utf-8") == "# A title\n\nhalf a pair: ?\n"
+    assert import_stage.read_expansion(vault, import_id)["failed"] == []
+
+
+def test_a_stage_with_no_recognised_export_leaves_no_expansion_record(vault: Path) -> None:
+    """Catches a record written for every ordinary import, which no export asked for."""
+    import_id = stage_export(vault, json.dumps([{"id": 1}]).encode())  # a conversations.json of some other app
+
+    export_expansion.expand(vault, import_id, keep_going=lambda: True)
+    export_expansion.expand(vault, import_id, keep_going=lambda: True, rewalk=True)
+
+    assert import_stage.read_expansion(vault, import_id) is None

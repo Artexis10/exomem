@@ -2060,6 +2060,9 @@ def plan(
         stage = adoption_consume.recorded(root, run) if run.get("consume", True) else None
         stage_id = _stage_id_of(run["source_root"])
         derived = import_stage.derived_files(root, stage_id) if stage_id is not None else {}
+        # A recognised export files as an artifact, so its conversations are indexed once, as the transcripts derived from it.
+        exports = set(export_expansion.read(root, stage_id).exports) if stage_id is not None else set()
+        stage_prefix = f"{IMPORT_STAGE_DIR}/{stage_id}/"
         index = adoption_plan.read_import_index(root)
         notes = adoption_plan.NoteIndex(root)
         destinations = adoption_plan.Destinations.frozen_by(root, draft["items"])
@@ -2076,7 +2079,8 @@ def plan(
                     root, rel,
                     collection=collection["label"], collection_root=collection["root"],
                     classification=classification.get(rel), taxonomy=taxonomy,
-                    text_hint=(inventory.get(rel) or {}).get("form", "text") == "text",
+                    text_hint=(inventory.get(rel) or {}).get("form", "text") == "text"
+                    and rel.removeprefix(stage_prefix) not in exports,
                     date_iso=draft["date"], destinations=destinations, index=index, notes=notes,
                     ceiling=ceiling, vouched=adoption_consume.vouched(stage, rel), seen=seen,
                 )
@@ -2087,7 +2091,7 @@ def plan(
                 else:
                     if origin:
                         _carry_origin(result[0], origin, inventory.get(rel))
-                    if (item_time := derived.get(rel.removeprefix(f"{IMPORT_STAGE_DIR}/{stage_id}/"))) is not None:
+                    if (item_time := derived.get(rel.removeprefix(stage_prefix))) is not None:
                         _carry_item_time(result[0], item_time)
                     draft["items"].append(result[0])
 

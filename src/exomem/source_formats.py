@@ -23,8 +23,8 @@ from .vocabulary import registry
 #: The closed `parser` values that `export_transcripts` implements; a registry entry may name only these.
 PARSERS = frozenset(export_transcripts.READERS)
 PACK = "source-formats.yaml"
-#: What an overlay may change on a shipped entry besides its status: how the transcript labels each author role.
-_RELABELLED = "roles"
+#: What an overlay may change on a shipped entry besides its status: the words that a transcript shows.
+_RELABELLED = ("roles", "untitled", "attachment")
 _MAX_LABEL_CHARS = 80
 
 
@@ -51,7 +51,10 @@ def _check(entry: registry.Entry, entries: Mapping[str, registry.Entry]) -> None
         raise registry.RegistryError("INVALID_SOURCE_FORMAT: item_keys must list the JSON keys that every item carries")
     if not _one_line(attributes.get("item_kind"), 64):
         raise registry.RegistryError("INVALID_SOURCE_FORMAT: item_kind must name the Source kind of each item")
-    roles = attributes.get(_RELABELLED)
+    for name in ("untitled", "attachment"):
+        if not _one_line(attributes.get(name), _MAX_LABEL_CHARS):
+            raise registry.RegistryError(f"INVALID_SOURCE_FORMAT: {name} must be one short phrase that a transcript shows")
+    roles = attributes.get("roles")
     if (
         not isinstance(roles, Mapping) or not roles
         or not all(_one_line(role, 64) and _one_line(label, _MAX_LABEL_CHARS) for role, label in roles.items())
@@ -60,14 +63,14 @@ def _check(entry: registry.Entry, entries: Mapping[str, registry.Entry]) -> None
 
 
 def _narrowed(entry: registry.Entry, base: registry.Entry) -> None:
-    """A shipped entry changes only by retirement or by new role labels: what a vendor's export is stays shipped data."""
+    """A shipped entry changes only by retirement or by the words it shows: what a vendor's export is stays shipped data."""
     fixed = lambda held: {  # noqa: E731
         "label": held.label, "description": held.description,
-        "attributes": {name: registry._plain(value) for name, value in held.attributes.items() if name != _RELABELLED},  # noqa: SLF001
+        "attributes": {name: registry._plain(value) for name, value in held.attributes.items() if name not in _RELABELLED},  # noqa: SLF001
     }
     if fixed(entry) != fixed(base):
         raise registry.RegistryError(
-            f"PACK_ENTRY_FIXED: a vault may only retire shipped source format {entry.key} or relabel its roles")
+            f"PACK_ENTRY_FIXED: a vault may only retire shipped source format {entry.key} or change its roles, untitled and attachment words")
     _check(entry, {})
 
 
@@ -107,7 +110,8 @@ class _Adapter(registry.FixedPackAdapter):
             return
         _narrowed(entry, base)
         document["entries"][key] = {
-            "status": entry.status, "attributes": {_RELABELLED: registry._plain(entry.attributes[_RELABELLED])},  # noqa: SLF001
+            "status": entry.status,
+            "attributes": {name: registry._plain(entry.attributes[name]) for name in _RELABELLED},  # noqa: SLF001
         }
 
 
@@ -117,7 +121,7 @@ SPEC = registry.RegistrySpec(
     overlay=registry_path,
     adapter=_Adapter(PACK, lambda: SPEC, _check),
     fields=frozenset({"label", "description", "status", "attributes"}),
-    attributes=frozenset({"file_name", "item_keys", "parser", "item_kind", _RELABELLED}),
+    attributes=frozenset({"file_name", "item_keys", "parser", "item_kind", *_RELABELLED}),
     immutable=frozenset({"attributes.file_name", "attributes.item_keys", "attributes.parser", "attributes.item_kind"}),
     # Agents meet export formats only through a filing view, not the bootstrap.
     summarize_keys=False,
@@ -134,6 +138,8 @@ class SourceFormat:
     parser: str
     item_kind: str
     roles: Mapping[str, str]
+    untitled: str  # the title of a conversation that has none; its date follows when it has one
+    attachment: str  # the word that heads a quoted attachment
 
 
 def formats(vault_root: Path) -> tuple[SourceFormat, ...]:
@@ -145,7 +151,8 @@ def formats(vault_root: Path) -> tuple[SourceFormat, ...]:
     return tuple(
         SourceFormat(
             entry.key, entry.attributes["file_name"], tuple(entry.attributes["item_keys"]), entry.attributes["parser"],
-            entry.attributes["item_kind"], dict(entry.attributes[_RELABELLED]))
+            entry.attributes["item_kind"], dict(entry.attributes["roles"]), entry.attributes["untitled"],
+            entry.attributes["attachment"])
         for entry in registry.load(SPEC, vault_root).active
     )
 

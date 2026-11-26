@@ -16,10 +16,10 @@ from exomem.source_formats import SourceFormat
 
 CHATGPT = SourceFormat(
     "chatgpt-conversations", "conversations.json", ("mapping", "current_node"), "chatgpt-conversations", "session",
-    {"user": "You", "assistant": "ChatGPT"})
+    {"user": "You", "assistant": "ChatGPT"}, "Untitled conversation", "Attachment")
 CLAUDE = SourceFormat(
     "claude-conversations", "conversations.json", ("chat_messages", "uuid"), "claude-conversations", "session",
-    {"human": "You", "assistant": "Claude"})
+    {"human": "You", "assistant": "Claude"}, "Untitled conversation", "Attachment")
 START = 1_709_630_000.0  # 2024-03-05T09:13:20Z
 
 
@@ -118,6 +118,18 @@ def test_claude_keeps_message_order_and_quotes_an_attachments_extracted_text_und
     assert (result.item_id, result.created) == ("u-1", "2024-03-05T09:13:20Z")
 
 
+def test_the_words_of_a_transcript_that_are_not_the_conversations_come_from_its_format() -> None:
+    """Catches a hard-coded English phrase in a transcript of a format that brings its own words."""
+    french = dataclasses.replace(CLAUDE, roles={"human": "Moi", "assistant": "Claude"}, untitled="Conversation sans titre", attachment="Pièce jointe")
+    item = {"uuid": "u-5", "created_at": "2024-03-05T09:13:20Z", "chat_messages": [
+        {"sender": "human", "text": "Voici.", "attachments": [{"file_name": "marees.txt", "extracted_content": "Marée haute."}]}]}
+
+    result = _only(french, item)
+
+    assert result.title == "Conversation sans titre 2024-03-05"
+    assert "**Moi**" in result.text and "> Pièce jointe: marees.txt" in result.text
+
+
 def test_claude_message_with_no_time_and_a_conversation_with_no_messages_still_read() -> None:
     quiet = _only(CLAUDE, {"uuid": "u-2", "chat_messages": []})
     untimed = _only(CLAUDE, {"uuid": "u-3", "name": "No times", "chat_messages": [{"sender": "human", "text": "Hello."}]})
@@ -155,3 +167,36 @@ def test_a_vendor_id_becomes_one_plain_file_name() -> None:
     result = _only(CLAUDE, {"uuid": "../../etc/passwd", "chat_messages": []})
 
     assert "/" not in result.item_id and ".." not in result.item_id and result.item_id
+
+
+@pytest.mark.parametrize(("fmt", "item"), [
+    (CLAUDE, {"uuid": "u-6", "name": "Kite", "chat_messages": [
+        {"sender": {"role": "human"}, "text": "Hello."}, {"sender": "assistant", "text": "Hi."}]}),
+    (CHATGPT, {"id": "c-6", "title": "Kite", "mapping": {"a": _node("a", None, [], role=["user"], text="Hello.")}, "current_node": "a"}),
+])
+def test_a_role_that_is_not_a_string_is_left_out_of_the_transcript_and_does_not_fail_the_item(fmt, item) -> None:
+    """Catches an unhashable role that raises in the label lookup and loses the whole item."""
+    result = _only(fmt, item)
+
+    assert isinstance(result, export_transcripts.Transcript) and "Hello." not in result.text
+
+
+def test_a_time_that_has_no_utc_time_is_dropped_and_the_item_still_reads() -> None:
+    """Catches an offset time at the end of the calendar that overflows when converted to UTC."""
+    item = {"uuid": "u-7", "name": "Late", "created_at": "9999-12-31T23:00:00-05:00", "updated_at": "0001-01-01T00:00:00+05:00",
+            "chat_messages": [{"sender": "human", "text": "Hello.", "created_at": "9999-12-31T23:00:00-05:00"}]}
+
+    result = _only(CLAUDE, item)
+
+    assert (result.created, result.updated) == (None, None) and result.text == "# Late\n\n**You**\n\nHello.\n"
+
+
+def test_control_characters_other_than_tab_and_newline_are_dropped_from_titles_and_text() -> None:
+    """Catches a NUL in a title or message that makes the filed transcript read as binary."""
+    item = {"uuid": "u-8", "name": "Kite\u0000 frame\u0007", "chat_messages": [
+        {"sender": "human", "text": "One\u0000\ttwo\nthree\u001f", "attachments": [{"file_name": "a\u0000.txt", "extracted_content": "Body\u0000"}]}]}
+
+    result = _only(CLAUDE, item)
+
+    assert result.title == "Kite frame" and "One\ttwo\nthree" in result.text and "> Attachment: a.txt" in result.text
+    assert not any(ord(char) < 0x20 and char not in "\t\n" for char in result.text)
