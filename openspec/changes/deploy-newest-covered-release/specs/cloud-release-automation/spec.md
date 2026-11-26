@@ -2,7 +2,7 @@
 
 ### Requirement: The release automation rolls out the newest release the platform carries
 
-When the newest release fails the platform gate or has an uncrossed barrier, the `cloud-deploy` run SHALL send that alert as active and print its code and detail. It SHALL then roll out the newest older release that the fleet lacks and the platform carries, and print `COVERED_RELEASE <tag>`. It SHALL NOT resolve `cloud-release-behind`. It SHALL set nothing and stop with the block when no release qualifies, the fleet's release is unknown, or no platform Deployment exists.
+When the newest release fails the platform gate or has an uncrossed barrier, the workflow SHALL send that alert as active and print its code and detail. It SHALL then roll out the newest older release that the fleet lacks and the platform carries, and print `COVERED_RELEASE <tag>`. It SHALL NOT resolve `cloud-release-behind`. It SHALL set nothing and stop with the block when no release qualifies, the release list is unreadable, the fleet's release is unknown, or no platform Deployment exists.
 
 #### Scenario: An older release matches the deployed platform
 
@@ -18,6 +18,11 @@ When the newest release fails the platform gate or has an uncrossed barrier, the
 
 - **WHEN** a candidate has a barrier entry at or below it that the platform Deployment does not list
 - **THEN** the run skips that candidate and picks the next older one that qualifies, or sets nothing and stops with the barrier code when none does
+
+#### Scenario: The release list cannot be read
+
+- **WHEN** the one read of the release list fails or answers with no JSON
+- **THEN** the run looks for no fallback, sets nothing and stops with the original platform or barrier code
 
 #### Scenario: The fleet's release is unknown
 

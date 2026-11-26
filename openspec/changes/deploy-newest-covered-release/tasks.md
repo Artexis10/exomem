@@ -6,6 +6,7 @@
 - [x] 1.4 Skip a candidate with an uncrossed barrier or no published image, and never skip a failed attestation. Verify with `tests/test_cloud_deploy.py`. This catches a release set past a one-way change, and an unverified image set for an older release.
 - [x] 1.5 Check each release once, through one predicate that both the newest release and the candidates use, and print the newest release's block before the fallback. Verify with `tests/test_cloud_deploy.py`: the log names the barrier ID, and each candidate's own image reaches the PUT body. This catches a gate that drifts between the two paths, and an image set for the wrong release.
 - [x] 1.6 Name the fallback in the `cloud-release-platform-needed` and `cloud-release-barrier` rows of `docs/runbooks/cloud-platform-deploy.md`, in the header of `.github/workflows/cloud-deploy.yml`, and in the active `automate-cloud-releases` and `alert-cloud-release-lag` deltas. Verify with `test_every_release_and_rollout_alert_has_a_runbook_step` and the OpenSpec strict gate.
+- [x] 1.7 End an image lookup that fails with `REGISTRY_LOOKUP_FAILED` and send `cloud-deploy-failing`, and keep a 404 as "not published". Verify with `tests/test_cloud_deploy.py`: a failed lookup prints the tag and the error class, and no URL. This catches a registry outage that ends in a traceback with no alert.
 
 ## 2. First run
 

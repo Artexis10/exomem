@@ -8,10 +8,14 @@ Substrate answers, and reads what the public Actions log would show.
 from __future__ import annotations
 
 import copy
+import http.client
 import importlib.util
 import json
 import re
 import sys
+import types
+import urllib.error
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -111,12 +115,13 @@ def _changed_paths(tag: str, changed: list[str] | None, changed_by_tag: dict[str
 
 def _run(recorded: Recorded, capsys, *, attested: bool = True, changed: list[str] | None = None,
          env: dict | None = None, changed_by_tag: dict[str, list[str] | None] | None = None,
-         images: dict[str, str | None] | None = None, unattested: tuple[str, ...] = ()) -> tuple[int, str, list[float]]:
+         images: dict[str, str | None] | None = None, unattested: tuple[str, ...] = (),
+         image_lookup: Callable[[str], str | None] | None = None) -> tuple[int, str, list[float]]:
     slept: list[float] = []
     clock = iter(range(0, 10_000, 15))
     tools = cloud_deploy.Tools(
         transport=recorded,
-        image=lambda tag: IMAGE if images is None else images[tag],
+        image=image_lookup or (lambda tag: IMAGE if images is None else images[tag]),
         attest=lambda image, tag: attested and tag not in unattested,
         changed_paths=lambda base, head: _changed_paths(head, changed, changed_by_tag),
         sleep=slept.append,
@@ -763,15 +768,63 @@ def test_a_covered_release_that_substrate_says_the_fleet_has_passed_ends_the_run
     assert (cloud_deploy.PLATFORM_NEEDED_ALERT, False) not in recorded.alerts()
 
 
-def test_a_covered_release_that_git_cannot_diff_fails_the_run_loudly_and_sets_nothing(capsys) -> None:
-    # Catches a candidate skipped in silence when its tag is missing from the checkout, which would
-    # hide a broken fallback behind the platform alert.
+def test_a_covered_release_that_git_cannot_diff_fails_the_run_loudly_and_the_log_names_the_barrier(
+        capsys, monkeypatch, tmp_path: Path) -> None:
+    # Catches a candidate skipped in silence when its tag is missing from the checkout, which would hide a
+    # broken fallback, and a log that fails without saying which barrier stopped the newest release.
     recorded = Recorded(["substrate_rollout_behind"], releases=SEVERAL_BEHIND)
-    changed_by_tag = {"v0.171.0": CHART_CHANGE, "v0.170.3": None, "v0.170.2": TESTS_AND_DOCS,
+    monkeypatch.setattr(cloud_deploy, "BARRIER_FILE", _barrier_file(tmp_path, "platform", "0.170.3"))
+    changed_by_tag = {"v0.171.0": TESTS_AND_DOCS, "v0.170.3": None, "v0.170.2": TESTS_AND_DOCS,
                       "v0.170.1": TESTS_AND_DOCS}
 
     code, log, _ = _run(recorded, capsys, changed_by_tag=changed_by_tag, images=RELEASE_IMAGES)
 
     assert (code, recorded.puts()) == (1, [])
-    assert log.splitlines()[-1] == "cloud-deploy: PLATFORM_DIFF_FAILED"
+    assert log.splitlines() == ["cloud-deploy: RELEASE_BEHIND hours=49", "cloud-deploy: cloud-release-barrier new-step",
+                                "cloud-deploy: PLATFORM_DIFF_FAILED"]
     assert recorded.alerts()[-1] == (cloud_deploy.FAILING_ALERT, True)
+
+
+@pytest.mark.parametrize("releases", ["unavailable", "garbled"])
+def test_a_release_list_that_cannot_be_read_leaves_the_platform_stop(capsys, releases: str) -> None:
+    # Catches a failed list read that ends the blocked run on a GitHub error instead of the platform stop.
+    recorded = Recorded(["substrate_rollout_behind"], releases=releases)
+
+    code, log, _ = _run(recorded, capsys, changed=CHART_CHANGE)
+
+    assert (code, recorded.puts()) == (1, [])
+    assert log.splitlines()[-1] == PLATFORM_BLOCK_LINE
+
+
+@pytest.mark.parametrize("failure", [
+    pytest.param(urllib.error.HTTPError("https://ghcr.io/v2/secret-path", 503, "unavailable", {}, None), id="http status"),
+    pytest.param(urllib.error.URLError("https://ghcr.io/token?scope=secret"), id="unreachable"),
+    pytest.param(http.client.IncompleteRead(b""), id="truncated answer"),
+    pytest.param(ValueError("registry manifest digest must be a sha256 digest"), id="no digest"),
+])
+def test_a_registry_that_fails_ends_the_run_on_a_failing_stop_that_alerts_and_prints_no_url(
+        capsys, monkeypatch, failure: Exception) -> None:
+    # Catches a registry outage that crashes the run with a traceback, so that no alert says it failed,
+    # and a log that carries the registry's URL.
+    def lookup(reference: str) -> str | None:
+        raise failure
+
+    monkeypatch.setitem(sys.modules, "release_recovery", types.SimpleNamespace(image_digest=lookup))
+    recorded = Recorded(["substrate_rollout_behind"])
+
+    code, log, _ = _run(recorded, capsys, image_lookup=cloud_deploy.registry_image)
+
+    assert (code, recorded.puts()) == (1, [])
+    assert log.splitlines()[-1] == f"cloud-deploy: REGISTRY_LOOKUP_FAILED v0.171.0 {type(failure).__name__}"
+    assert "ghcr.io" not in log
+    assert recorded.alerts()[-1] == (cloud_deploy.FAILING_ALERT, True)
+
+
+def test_a_registry_that_has_no_manifest_for_a_release_means_not_published(capsys, monkeypatch) -> None:
+    # Catches a 404 read as a failed lookup, which would turn a release with no image into a registry alert.
+    monkeypatch.setitem(sys.modules, "release_recovery", types.SimpleNamespace(image_digest=lambda reference: None))
+
+    code, log, _ = _run(Recorded(["substrate_rollout_behind"]), capsys, image_lookup=cloud_deploy.registry_image)
+
+    assert code == 1
+    assert log.splitlines()[-1] == "cloud-deploy: CELL_IMAGE_NOT_PUBLISHED"

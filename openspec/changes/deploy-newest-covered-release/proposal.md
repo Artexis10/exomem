@@ -1,6 +1,6 @@
 ## Why
 
-On 2026-11-26 the Cloud fleet ran v0.201.0 and the platform was deployed at v0.204.0. Releases v0.205.0, v0.206.0 and v0.206.1 each changed the chart or controller build inputs. Each run of `cloud-deploy` targeted only the newest release, stopped at the platform gate and set nothing. Releases ship several times a day and often change these inputs, so the fleet stayed on an old release even though the releases from v0.201.1 to v0.204.0 matched the deployed platform and passed every other gate.
+On 2026-11-26 the Cloud fleet ran v0.201.0 and the platform was deployed at v0.204.0. Releases v0.205.0, v0.206.0 and v0.206.1 each changed the chart or controller build inputs. Each run of `cloud-deploy` targeted only the newest release, stopped at the platform gate and set nothing. Releases ship several times a day and often change these inputs, so the fleet stayed on an old release even though the releases from v0.202.0 to v0.204.0 matched the deployed platform and passed every other gate.
 
 ## What Changes
 
@@ -9,6 +9,7 @@ On 2026-11-26 the Cloud fleet ran v0.201.0 and the platform was deployed at v0.2
 - **No fallback** when the fleet's release is unknown or unreadable, when no platform Deployment exists, when no candidate qualifies, or when the fleet already runs the covered release's image. These runs stop as before.
 - **Two stops stay.** When Substrate answers `CELL_IMAGE_SEEN` or `CELL_RELEASE_OLDER` to the covered release, the run ends ok and the platform alert stays active. When git cannot diff a candidate, the run fails with `PLATFORM_DIFF_FAILED`, as it does for the newest release.
 - **Alerts.** The platform or barrier alert stays active, and `cloud-release-behind` stays unresolved, because the fleet still lacks the newest release. The next run measures again. The run's final stop comes from the canary wait.
+- **A registry failure stops the run visibly.** A network error or an HTTP error other than 404 on an image lookup ends the run with `REGISTRY_LOOKUP_FAILED`, the tag and the error class, and sends `cloud-deploy-failing`. A 404 still means the image is not published. The fallback adds lookups, so a failure there must not end in a traceback with no alert.
 - **One list read.** The lag alert and the fallback share the single bounded read of the release list. A run adds no second GitHub list call.
 - **Runbook.** The `cloud-release-platform-needed` and `cloud-release-barrier` rows tell the reader that the run may have rolled out the newest release that the platform carries.
 

@@ -530,7 +530,7 @@ If the upgrade failed, record nothing: the newest successful Deployment keeps na
 Each release that succeeds on its tag starts the `cloud-deploy` workflow
 (`.github/workflows/cloud-deploy.yml`). The workflow verifies the cell image's attestation and sets it as
 Substrate's `cell_image` with the deploy token. cellctl then rolls the canary at once, and every other cell in its
-own upgrade window. The workflow never clears a pause and never sends an older release. Its log prints codes only.
+own upgrade window. The workflow never clears a pause and never sends a release older than the fleet's. Its log prints codes only.
 
 ### Build a catalogue before the cell stops
 
@@ -716,7 +716,7 @@ is for a stopped self-hosted server; this runbook has no Cloud procedure for it.
 | `cloud-release-barrier` | A barrier entry at or below the release is not crossed. The workflow log names its ID. The run may have rolled out the newest release below the barrier that the platform carries (log `COVERED_RELEASE <tag>`) | Do the entry's runbook step (`runbook` in `infra/contracts/upgrade-barriers-v1.json`), upgrade the platform, and record the Deployment with the ID in `CROSSED` |
 | `cloud-release-behind` | The fleet has run an older release for longer than `CLOUD_DEPLOY_RELEASE_BEHIND_HOURS` (default 48), counted from the oldest release that it lacks. The daily workflow log shows `RELEASE_BEHIND hours=<n>` | Resolve the alert that names the cause: `cloud-release-platform-needed`, `cloud-release-barrier` or `cloud-rollout-paused`. With none active, read the code that the newest `cloud-deploy` run prints. The next run resolves the alert. A run that prints `RELEASE_BEHIND_UNKNOWN` sends no transition: the rollout view had no fleet release, or the release list could not be read |
 | `cloud-cell-pinned` | A running or read-only cell has its own image, and it differs from the fleet's `cell_image`. The log shows `CELLS_PINNED <count>` | "Find the cells pinned off the fleet image", then clear each cell's own image. The next run resolves the alert |
-| `cloud-deploy-failing` | The newest `cloud-deploy` run ended on a failing code that has no alert of its own, such as `ATTESTATION_UNVERIFIED`, `CELL_IMAGE_NOT_PUBLISHED`, `GITHUB_API_FAILED` or a `SUBSTRATE_` code. The run's log shows the code | Read the code in the newest `cloud-deploy` run's log and fix its cause. The next run resolves the alert |
+| `cloud-deploy-failing` | The newest `cloud-deploy` run ended on a failing code that has no alert of its own, such as `ATTESTATION_UNVERIFIED`, `CELL_IMAGE_NOT_PUBLISHED`, `GITHUB_API_FAILED`, `REGISTRY_LOOKUP_FAILED` or a `SUBSTRATE_` code. The run's log shows the code | Read the code in the newest `cloud-deploy` run's log and fix its cause. The next run resolves the alert |
 | `cloud-rollout-paused` | The rollout is paused, for any error code | "Read and clear a paused rollout". For `UPGRADE_FORWARD_ONLY`, "End a forward-only hold" |
 | `cloud-rollout-held` | A cell's upgrade or restore hold is older than `alerts.rollout_held_warn_seconds` | Find the cell in cellctl's log (`grep cloud-rollout-held`). Check its pod and its backup or restore Job with `kubectl -n exo-cell-<cell id> get pods,jobs` |
 | `cloud-rollout-stalled` | A cell has stayed behind its target for longer than `alerts.rollout_stalled_warn_seconds` | Find the cell in cellctl's log. A busy cell rolls only in the last `cellctl.upgradeWindow.forceMinutes` of its window: raise that value, or set `cellctl.upgradeWindow.enabled: false` for one platform upgrade |

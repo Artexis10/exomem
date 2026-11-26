@@ -400,13 +400,19 @@ def verify_attestation(image: str, tag: str) -> bool:
 
 def registry_image(tag: str) -> str | None:
     """The cell image index (`<repository>@<digest>`) that the release published as `<version>-cloud`,
-    under the newest repository that holds it; a release cut before the move is in the old one."""
+    under the newest repository that holds it; a release cut before the move is in the old one. A 404 means
+    not published (None). Any other failed lookup is a failing stop that names the tag and the error class."""
 
     sys.path.insert(0, str(Path(__file__).parent))
+    # Imported here so that loading this module needs no `packaging`, which the workflow installs in its own step.
     from release_recovery import image_digest
 
     for repository in CELL_IMAGE_BUILDERS:
-        digest = image_digest(f"{repository}:{tag.removeprefix('v')}-cloud")
+        try:
+            digest = image_digest(f"{repository}:{tag.removeprefix('v')}-cloud")
+        except (OSError, http.client.HTTPException, ValueError, KeyError) as error:
+            # The class alone: an error's message can carry the registry's URL.
+            raise Stop("REGISTRY_LOOKUP_FAILED", ok=False, detail=f"{tag} {type(error).__name__}") from error
         if digest:
             return f"{repository}@{digest}"
     return None
@@ -576,10 +582,15 @@ def deploy(settings: Settings, tools: Tools, *, gate: tuple[list[str], list[str]
     if block:
         # The block's alert stays active. The fleet still lacks the newest release, so the run rolls out
         # the newest release that the platform carries, or ends on the block.
-        found = covered_release(tools, github, view, deployment, tag, gate=gate, barriers=barriers)
+        block_line = f"cloud-deploy: {block[0]} {block[1]}"
+        try:
+            found = covered_release(tools, github, view, deployment, tag, gate=gate, barriers=barriers)
+        except Stop:
+            print(block_line)  # A failure in the search must not hide why the search began.
+            raise
         if found is None:
-            raise Stop(block[0], ok=False, detail=block[1])
-        print(f"cloud-deploy: {block[0]} {block[1]}")
+            raise Stop(block[0], ok=False, detail=block[1])  # The stop prints the block line, so print it once.
+        print(block_line)
         tag, image = found
         covered = True
         if not tools.attest(image, tag):
