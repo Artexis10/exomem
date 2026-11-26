@@ -312,6 +312,24 @@ def _create_owner_objects(tx: Connection, root: Path) -> None:
         vault.derive_inbound_rows(root, tx, include=lambda rel: rel not in held)
 
 
+def adopt_change_journal(tx: Connection) -> None:
+    """Give a store that was migrated before the lexical change journal existed its journal, in ``tx``.
+
+    An empty journal is correct the moment it exists, because a reader patches only from a position that
+    the journal holds. So no page is derived again and no owner pass runs. The objects are recorded with
+    the ones that migration created, so a rollback drops them too. Each derivation calls it, and the first
+    one after an upgrade creates the journal; until then every recall after a write reads every row.
+    """
+    if lexstore.change_journal_complete(tx):
+        return
+    from .migrate import schema_objects
+
+    before = schema_objects(tx)
+    lexstore.create_change_journal(tx)
+    created = [(name, kind) for name, kind in schema_objects(tx).items() if name not in before]
+    tx.executemany("INSERT OR IGNORE INTO store_mode_objects(name, type) VALUES (?, ?)", created)
+
+
 def _due(conn: Connection, root: Path) -> tuple[str, Registry]:
     registry = read(conn)
     if registry.state == CURRENT or registry.target is None:

@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 from .. import find, foreground_priority, media_capacity, writer_lease
 from ..cli_ops import OpError
 from ..collection_store import connection
-from . import derive, mode, read, resident_catalogue
+from . import derive, mode, read, rederive, resident_catalogue
 
 if TYPE_CHECKING:
     from ..collection_store.writer import CollectionWriter
@@ -557,6 +557,7 @@ def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: 
                 # A rollback empties the queue; until it commits, nothing here is derived.
                 result.stopped = True
                 return True
+            rederive.adopt_change_journal(tx)
             stored = _stored(tx, [intent.path for intent in batch if intent.operation == DERIVE])
             written = [intent.path for intent in batch if intent.path in stored]
             removed = [intent.path for intent in batch

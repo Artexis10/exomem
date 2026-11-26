@@ -174,6 +174,8 @@
 - [x] 3.29 Read only the rows that a write changed: add the catalogue change journal, and patch the kept page rows, page identities and unit revisions from it (design decision 14).
   - Verify: a patched state equals a whole read after seeded writes, and a gap that the journal cannot vouch for reads every row (`tests/test_catalogue_change_journal.py`); the request-thread CPU that a write adds to the next activation falls on the synthetic 15,600-page corpus (bench).
 - [ ] 3.30 After installation, compare the request-thread CPU of the first recall after a write before and after the change journal, and report the share of `lexical.catalogue_rows` spans that patched (design decision 14).
+- [x] 3.32 Give a store-mode vault migrated before the change journal its journal at its next derivation, recorded for rollback, with no owner pass (design decision 14).
+  - Verify: a store migrated without the journal gets every journal object at its next drain, journals that drain's page, keeps its owner schema current, and a rollback drops the journal (`tests/test_vault_store_migration.py`).
 
 ## 4. Verify installed behavior and deliver
 

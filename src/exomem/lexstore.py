@@ -3984,20 +3984,49 @@ class _JournalPosition:
     stamp: bytes
 
 
+def create_change_journal(conn: sqlite3.Connection) -> None:
+    """Create the change journal, its bound and the triggers of each journaled table that `conn` has.
+
+    Only what is missing is created, so a catalogue built before the journal gets it in place. An empty
+    journal is correct the moment it exists: a reader patches only from a position that the journal holds,
+    and the first write after this gives it one.
+    """
+    conn.execute(
+        f"CREATE TABLE IF NOT EXISTS {CHANGE_JOURNAL}("
+        " seq INTEGER PRIMARY KEY, path TEXT NOT NULL, stamp BLOB NOT NULL)"
+    )
+    conn.execute(
+        f"CREATE TRIGGER IF NOT EXISTS {_CHANGE_JOURNAL_BOUND} AFTER INSERT ON {CHANGE_JOURNAL} BEGIN "
+        f"DELETE FROM {CHANGE_JOURNAL} WHERE seq <= NEW.seq - {_CHANGE_JOURNAL_ROWS}; END"
+    )
+    for table in _journaled_tables(conn)[1]:
+        LexicalStore._create_change_triggers(conn, table)
+
+
+def change_journal_complete(conn: sqlite3.Connection) -> bool:
+    """Whether `conn` holds the change journal, its bound and every trigger of each journaled table it has."""
+    objects, tables = _journaled_tables(conn)
+    required = {CHANGE_JOURNAL, _CHANGE_JOURNAL_BOUND, *(_change_trigger(t, e) for t in tables for e in _CHANGE_EVENTS)}
+    return required <= objects
+
+
+def _journaled_tables(conn: sqlite3.Connection) -> tuple[set[str], list[str]]:
+    """The journal's objects that `conn` holds, and the journaled tables that it has."""
+    objects = dict(conn.execute(
+        "SELECT name, type FROM sqlite_master WHERE name LIKE 'catalogue\\_change%' ESCAPE '\\' "
+        "OR (type = 'table' AND name IN (SELECT value FROM json_each(?)))",
+        (json.dumps(list(_JOURNALED_PATHS)),),
+    ).fetchall())
+    return set(objects), [table for table in _JOURNALED_PATHS if objects.get(table) == "table"]
+
+
 def _journal_position(conn: sqlite3.Connection) -> _JournalPosition | None:
     """Where the change journal stands in `conn`'s pinned snapshot, or None when it cannot vouch for later writes.
 
     It cannot without its table, one of its triggers or a row. Any DDL changes `PRAGMA schema_version`, so a
     later position under the same version shows that no trigger was dropped and no table replaced since.
     """
-    objects = dict(conn.execute(
-        "SELECT name, type FROM sqlite_master WHERE name LIKE 'catalogue\\_change%' ESCAPE '\\' "
-        "OR (type = 'table' AND name IN (SELECT value FROM json_each(?)))",
-        (json.dumps(list(_JOURNALED_PATHS)),),
-    ).fetchall())
-    tables = [table for table in _JOURNALED_PATHS if objects.get(table) == "table"]
-    required = {CHANGE_JOURNAL, _CHANGE_JOURNAL_BOUND, *(_change_trigger(t, e) for t in tables for e in _CHANGE_EVENTS)}
-    if not required <= objects.keys():
+    if not change_journal_complete(conn):
         return None
     row = conn.execute(f"SELECT seq, stamp FROM {CHANGE_JOURNAL} ORDER BY seq DESC LIMIT 1").fetchone()
     if row is None:
@@ -7661,15 +7690,6 @@ class LexicalStore:
             "INSERT OR IGNORE INTO meta(key, value) "
             "VALUES('frequency_revision', hex(randomblob(16)))"
         )
-        # Each row names a path that one write touched; see `_journal_position`. Its newest rows only.
-        conn.execute(
-            f"CREATE TABLE IF NOT EXISTS {CHANGE_JOURNAL}("
-            " seq INTEGER PRIMARY KEY, path TEXT NOT NULL, stamp BLOB NOT NULL)"
-        )
-        conn.execute(
-            f"CREATE TRIGGER IF NOT EXISTS {_CHANGE_JOURNAL_BOUND} AFTER INSERT ON {CHANGE_JOURNAL} BEGIN "
-            f"DELETE FROM {CHANGE_JOURNAL} WHERE seq <= NEW.seq - {_CHANGE_JOURNAL_ROWS}; END"
-        )
         LexicalStore._create_frequency_revision_triggers(conn, "pages")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS semantic_units("
@@ -7726,8 +7746,7 @@ class LexicalStore:
             (("INSERT", "NEW"), ("UPDATE OF structure_json", "NEW"), ("DELETE", "OLD")),
             lambda row: f"{row}.path",
         )
-        LexicalStore._create_change_triggers(conn, "pages")
-        LexicalStore._create_change_triggers(conn, "unit_revisions")
+        create_change_journal(conn)
 
     @staticmethod
     def _create_change_triggers(conn: sqlite3.Connection, table: str) -> None:
