@@ -11,6 +11,7 @@ import os
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -25,7 +26,7 @@ PARSERS = frozenset(export_transcripts.READERS)
 PACK = "source-formats.yaml"
 #: What an overlay may change on a shipped entry besides its status: the words that a transcript shows.
 # nosemgrep: ep-word-set -- The registry schema's closed attribute names that an overlay may change, not vocabulary.
-_RELABELLED =("roles", "untitled", "attachment")
+_RELABELLED = ("roles", "untitled", "attachment")
 _MAX_LABEL_CHARS = 80
 
 
@@ -43,10 +44,10 @@ def _check(entry: registry.Entry, entries: Mapping[str, registry.Entry]) -> None
         raise registry.RegistryError(
             "INVALID_SOURCE_FORMAT: parser must be one of " + ", ".join(sorted(PARSERS))
             + "; a new vendor format needs a parser in code first")
-    name = attributes.get("file_name")
-    # The export's member name: a bare name, so a recognised file is one that a stage lists by its own name.
-    if not _one_line(name, 255) or "/" in name or "\\" in name or name.startswith("."):
-        raise registry.RegistryError("INVALID_SOURCE_FORMAT: file_name must be one plain file name")
+    pattern = attributes.get("file_glob")
+    # A pattern over a member's own name, so it holds no path; it must keep a literal character, or it would match every file.
+    if not _one_line(pattern, 255) or "/" in pattern or "\\" in pattern or pattern.startswith(".") or not pattern.strip("*?"):
+        raise registry.RegistryError("INVALID_SOURCE_FORMAT: file_glob must be one file name pattern, such as conversations*.json")
     keys = attributes.get("item_keys")
     if not isinstance(keys, list) or not keys or not all(_one_line(key, 128) for key in keys):
         raise registry.RegistryError("INVALID_SOURCE_FORMAT: item_keys must list the JSON keys that every item carries")
@@ -122,8 +123,8 @@ SPEC = registry.RegistrySpec(
     overlay=registry_path,
     adapter=_Adapter(PACK, lambda: SPEC, _check),
     fields=frozenset({"label", "description", "status", "attributes"}),
-    attributes=frozenset({"file_name", "item_keys", "parser", "item_kind", *_RELABELLED}),
-    immutable=frozenset({"attributes.file_name", "attributes.item_keys", "attributes.parser", "attributes.item_kind"}),
+    attributes=frozenset({"file_glob", "item_keys", "parser", "item_kind", *_RELABELLED}),
+    immutable=frozenset({"attributes.file_glob", "attributes.item_keys", "attributes.parser", "attributes.item_kind"}),
     # Agents meet export formats only through a filing view, not the bootstrap.
     summarize_keys=False,
 )
@@ -134,13 +135,17 @@ class SourceFormat:
     """One active entry: the facts that recognise a vendor's export and say how to read and show its items."""
 
     key: str
-    file_name: str
+    file_glob: str
     item_keys: tuple[str, ...]
     parser: str
     item_kind: str
     roles: Mapping[str, str]
     untitled: str  # the title of a conversation that has none; its date follows when it has one
     attachment: str  # the word that heads a quoted attachment
+
+    def names(self, member: str) -> bool:
+        """Whether a member's own name matches the entry's `file_glob`, as a provider's conflict-copy patterns match: without regard to case."""
+        return fnmatchcase(member.lower(), self.file_glob.lower())
 
 
 def formats(vault_root: Path) -> tuple[SourceFormat, ...]:
@@ -151,7 +156,7 @@ def formats(vault_root: Path) -> tuple[SourceFormat, ...]:
     """
     return tuple(
         SourceFormat(
-            entry.key, entry.attributes["file_name"], tuple(entry.attributes["item_keys"]), entry.attributes["parser"],
+            entry.key, entry.attributes["file_glob"], tuple(entry.attributes["item_keys"]), entry.attributes["parser"],
             entry.attributes["item_kind"], dict(entry.attributes["roles"]), entry.attributes["untitled"],
             entry.attributes["attachment"])
         for entry in registry.load(SPEC, vault_root).active
@@ -171,12 +176,12 @@ def open_export(path: Path) -> BinaryIO:
 
 
 def recognise(vault_root: Path, path: Path) -> SourceFormat | None:
-    """The format of the staged file `path`, or None: its name is an entry's `file_name` and its first item carries the entry's keys.
+    """The format of the staged file `path`, or None: its name matches an entry's `file_glob` and its first item carries the entry's keys.
 
     Only the first item of the top-level array is read. A file that is not JSON, not an array, or whose first item
     is cut off is not recognised, and files as an ordinary file.
     """
-    named = [candidate for candidate in formats(vault_root) if candidate.file_name == path.name]
+    named = [candidate for candidate in formats(vault_root) if candidate.names(path.name)]
     if not named:
         return None
     try:

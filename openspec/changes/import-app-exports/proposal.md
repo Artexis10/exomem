@@ -8,7 +8,7 @@ No filing path turns one file into several Sources today. No registry recognises
 
 ## What changes
 
-- **A `source-formats` registry recognises app exports.** Each entry names one vendor export format: the file name, the JSON keys that a vendor's items always carry, the parser that reads it and the Source kind of each item. The set is closed per vendor format and lives in a shipped pack with a vault overlay, like `sync-providers`.
+- **A `source-formats` registry recognises app exports.** Each entry names one vendor export format: the file name pattern, the JSON keys that a vendor's items always carry, the parser that reads it and the Source kind of each item. The set is closed per vendor format and lives in a shipped pack with a vault overlay, like `sync-providers`.
 - **Filing expands a recognised export before it selects files.** At the start of `file`, the cell streams each recognised export and writes one Markdown transcript per item into the stage, named by the vendor's item id. The step is resumable within the call budget. Each derived file then flows through the normal plan, dedup, apply and left-out accounting.
 - **Each item keeps its own time.** A new provenance page field records when the item was created, from the export. `captured` stays the filing time.
 - **The export itself is kept.** The original export file is still filed once, so its exact bytes stay in the vault. Each derived Source names the export it came from.

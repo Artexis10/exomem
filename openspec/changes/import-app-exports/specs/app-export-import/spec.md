@@ -2,7 +2,7 @@
 
 ### Requirement: A registry declares each recognised export format
 
-The `source-formats` registry SHALL declare each recognised export format as a shipped pack with a vault overlay. Each entry SHALL carry `file_name`, `item_keys`, a closed `parser` value that code implements, `item_kind`, `roles` and the transcript words `untitled` and `attachment`. A vault overlay MAY retire an entry or change its `roles` and words. An overlay entry whose `parser` the code does not implement SHALL be refused.
+The `source-formats` registry SHALL declare each recognised export format as a shipped pack with a vault overlay. Each entry SHALL carry a file name pattern `file_glob`, `item_keys`, a closed `parser` value that code implements, `item_kind`, `roles` and the transcript words `untitled` and `attachment`. A vault overlay MAY retire an entry or change its `roles` and words. An overlay entry whose `parser` the code does not implement SHALL be refused.
 
 #### Scenario: A vault retires a format
 
@@ -14,9 +14,9 @@ The `source-formats` registry SHALL declare each recognised export format as a s
 - **WHEN** a vault overlay adds an entry whose `parser` is not implemented
 - **THEN** the registry refuses that entry and keeps the others
 
-### Requirement: An export is recognised by its name and its items' keys
+### Requirement: An export is recognised by its name pattern and its items' keys
 
-A file SHALL be recognised only when its name equals an entry's `file_name` and the first item of its top-level JSON array carries every key in that entry's `item_keys`. Code SHALL branch only on the `parser` value, never on an entry key, a file name or a vendor name.
+A file SHALL be recognised only when its name matches an entry's file name pattern `file_glob` and the first item of its top-level JSON array carries every key in that entry's `item_keys`. Code SHALL branch only on the `parser` value, never on an entry key, a file name or a vendor name.
 
 #### Scenario: Two vendors share a file name
 
@@ -27,6 +27,11 @@ A file SHALL be recognised only when its name equals an entry's `file_name` and 
 
 - **WHEN** a stage holds a `conversations.json` whose items match no entry's `item_keys`
 - **THEN** it is not recognised and files as an ordinary staged file
+
+#### Scenario: A ChatGPT export in numbered shards
+
+- **WHEN** a stage holds `conversations-000.json` and `conversations-001.json`, each with ChatGPT items
+- **THEN** both are recognised, each expands into its own transcripts, and each files once as an artifact Source
 
 ### Requirement: Filing files each export item as its own Source
 

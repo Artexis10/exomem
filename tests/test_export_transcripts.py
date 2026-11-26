@@ -200,3 +200,35 @@ def test_control_characters_other_than_tab_and_newline_are_dropped_from_titles_a
 
     assert result.title == "Kite frame" and "One\ttwo\nthree" in result.text and "> Attachment: a.txt" in result.text
     assert not any(ord(char) < 0x20 and char not in "\t\n" for char in result.text)
+
+
+def _timed_chatgpt(conversation_time, message_time, updated=None) -> export_transcripts.Transcript:
+    item = {"conversation_id": "c-9", "title": "Kite", "create_time": conversation_time, "update_time": updated, "mapping": {
+        "a": {"id": "a", "parent": None, "children": [], "message": {
+            "author": {"role": "user"}, "create_time": message_time, "content": {"content_type": "text", "parts": ["Hello."]}}}},
+        "current_node": "a"}
+    return _only(CHATGPT, item)
+
+
+def test_chatgpt_reads_times_given_as_epoch_seconds() -> None:
+    """Catches a numeric time that is dropped or misread, whether the export writes it as an integer or a decimal."""
+    result = _timed_chatgpt(1_709_630_000, 1_709_630_060.5, updated=1_709_630_600)
+
+    assert result.created == "2024-03-05T09:13:20Z" and result.updated == 1_709_630_600.0
+    assert "**You** · 2024-03-05 09:14 UTC" in result.text
+
+
+def test_chatgpt_reads_times_given_as_iso_8601_strings() -> None:
+    """Catches a sharded export whose times are strings: every conversation would lose its own date."""
+    result = _timed_chatgpt("2024-03-05T09:13:20.123456Z", "2024-03-05T10:14:00+01:00", updated="2024-03-05T09:23:20Z")
+
+    assert result.created == "2024-03-05T09:13:20Z" and result.updated == 1_709_630_600.0
+    assert "**You** · 2024-03-05 09:14 UTC" in result.text
+
+
+@pytest.mark.parametrize("stated", [None, True, ["2024-03-05"], {"at": 1}, "yesterday", "", 1e30])
+def test_chatgpt_times_of_any_other_form_leave_the_item_without_a_time_and_still_read(stated) -> None:
+    result = _timed_chatgpt(stated, stated, updated=stated)
+
+    assert isinstance(result, export_transcripts.Transcript)
+    assert (result.created, result.updated) == (None, None) and "**You**\n\nHello." in result.text

@@ -119,12 +119,12 @@ def expand(root: Path, import_id: str, *, keep_going: Callable[[], bool], rewalk
 
 def _walk(root: Path, import_id: str, record: dict) -> bool:
     """Add the stage's recognised exports that the record does not hold yet to it as `working`; True when it added one."""
-    names = {candidate.file_name for candidate in source_formats.formats(root)}
+    known = source_formats.formats(root)
     base = root / import_stage.STAGE_DIR / import_id
     found = False
     for path, _size in sorted(import_stage.staged_files(root, import_id)):
         if (
-            path in record["exports"] or PurePosixPath(path).name not in names
+            path in record["exports"] or not any(candidate.names(PurePosixPath(path).name) for candidate in known)
             or any(part.startswith(".") for part in PurePosixPath(path).parts)
         ):
             continue

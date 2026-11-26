@@ -89,6 +89,11 @@ def _from_iso(value: object) -> dt.datetime | None:
         return None
 
 
+def _moment(value: object) -> dt.datetime | None:
+    """A time as ChatGPT writes it: epoch seconds, or an ISO 8601 string in the sharded exports; anything else has no time."""
+    return _from_iso(value) if isinstance(value, str) else _from_epoch(value)
+
+
 def _shown_time(moment: dt.datetime | None) -> str:
     return f" · {moment:%Y-%m-%d %H:%M} UTC" if moment is not None else ""
 
@@ -166,7 +171,7 @@ def _chatgpt(item: Mapping[str, Any], fmt: SourceFormat, index: int) -> Transcri
     mapping = item.get("mapping")
     if not isinstance(mapping, Mapping):
         return Unreadable(item_id, "its message tree is not an object")
-    created = _from_epoch(item.get("create_time"))
+    created = _moment(item.get("create_time"))
     shown = []
     for node in _branch(mapping, item.get("current_node")):
         message = node.get("message")
@@ -178,8 +183,8 @@ def _chatgpt(item: Mapping[str, Any], fmt: SourceFormat, index: int) -> Transcri
         hidden = isinstance(metadata, Mapping) and metadata.get("is_visually_hidden_from_conversation") is True
         body = _chatgpt_text(message.get("content"))
         if label is not None and not hidden and body:
-            shown.append((label, _from_epoch(message.get("create_time")), body))
-    updated = _from_epoch(item.get("update_time"))
+            shown.append((label, _moment(message.get("create_time")), body))
+    updated = _moment(item.get("update_time"))
     title = _title(item.get("title"), created, fmt)
     return Transcript(
         item_id, title, _stamp(created) if created else None, updated.timestamp() if updated else None,

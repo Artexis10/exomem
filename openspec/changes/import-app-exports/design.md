@@ -43,15 +43,16 @@ Expansion at `file` reuses the whole filing path. Its cost is a small record of 
 ## Decision 2: a `source-formats` registry, closed vendor facts only
 
 Each entry has these attributes:
-- `file_name`: the export's member name, for example `conversations.json`.
+- `file_glob`: a file name pattern over the export's member name, for example `conversations*.json`. It is a closed fact of the vendor format, like `conflict-copy-glob` in `sync-providers`.
 - `item_keys`: the JSON keys that every item of that vendor format carries.
 - `parser`: a closed value that code implements (`chatgpt-conversations` or `claude-conversations`).
 - `item_kind`: the source kind each item files as (`session`).
 - `roles`: the vendor's author roles that the transcript shows, each with its display label.
+- `untitled` and `attachment`: the words a transcript uses for a conversation with no title and for the heading of a quoted attachment, so a format brings its own language.
 
-ChatGPT and Claude both name the file `conversations.json`. The first item's keys tell them apart: ChatGPT items carry `mapping` and `current_node`, and Claude items carry `chat_messages` and `uuid`.
+Since February 2026 a ChatGPT export is several files, `conversations-000.json`, `conversations-001.json` and so on, beside `export_manifest.json` and `user.json`; a Claude export is one `conversations.json`. The pattern `conversations*.json` therefore also matches the Claude file name, and the first item's keys tell the vendors apart: ChatGPT items carry `mapping` and `current_node`, and Claude items carry `chat_messages` and `uuid`.
 
-This is sound under registry rule C6, because each value is a vendor-defined format fact, not a guess at meaning. Code branches only on the closed `parser` value. A vault may disable an entry or relabel roles through its overlay. A new format needs a parser in code and an entry in the pack.
+This is sound under registry rule C6, because each value is a vendor-defined format fact, not a guess at meaning. Code branches only on the closed `parser` value. A vault may disable an entry or change `roles`, `untitled` and `attachment` through its overlay; the recognition facts of a shipped entry stay fixed. A new format needs a parser in code and an entry in the pack.
 
 ## Decision 3: the item's own time is a provenance field
 
@@ -78,13 +79,13 @@ A heavy export of 5,000 conversations at the measured 441.8 files a minute (rehe
 ## Accounting
 
 - `_stage_total` counts manifest members plus derived rows.
-- The export file itself is a member and files as before.
+- The export file itself is a member and files once, as an artifact Source whatever its size, so no conversation is indexed twice. Each shard of a split export files once the same way, and its transcripts go in a folder named for it (`conversations-001 items`).
 - An item that cannot be read gets no file, and the record keeps it as `failed` with its reason. The filing view adds the failed items to its `failed` count and to `left_out.by_reason`.
 - An export whose stream ends early or is malformed gets state `partial`, with reason `IMPORT_EXPORT_PARTIAL`. The view shows it under `left_out` by the export's path.
 
 ## Format evidence
 
-No vendor documents these JSON schemas. The parsers follow the shapes that the vendors' exports carried in 2026. Fixtures are invented and anonymised. A parser treats every field as optional, except the item keys that the registry declares. A missing field degrades the transcript (no time, no title) and never fails the item. A real export from each vendor is checked once before the release note goes out (task 4.2).
+No vendor documents these JSON schemas. The parsers follow the shapes that the vendors' exports carried in 2026. Fixtures are invented and anonymised. A parser treats every field as optional, except the item keys that the registry declares. A missing field degrades the transcript (no time, no title) and never fails the item. ChatGPT times may be epoch seconds or ISO 8601 strings, and a time of any other form is left out. A real export from each vendor is checked once before the release note goes out (task 4.2).
 
 ## Risks
 

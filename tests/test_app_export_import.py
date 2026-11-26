@@ -106,15 +106,17 @@ def claude_conversation(number: int) -> dict:
 
 def stage_export(
     vault: Path, conversations: list[dict] | bytes, *, name: str = "conversations.json", beside: dict[str, bytes] | None = None,
+    listed: list[str] | None = None,
 ) -> str:
     """A stage as the Cloud import Job leaves it, whose series file asks the cell to file it; bytes are staged as they are.
 
-    `beside` are other members of the same drop, by their path in the stage.
+    `beside` are other members of the same drop, by their path in the stage. The series file lists `listed`, else the export.
     """
     data = conversations if isinstance(conversations, bytes) else json.dumps(conversations, indent=1).encode()
-    import_id = _window(vault, {name: data, **(beside or {})}, series=[name])
+    paths = listed or [name]
+    import_id = _window(vault, {name: data, **(beside or {})}, series=paths)
     (vault / "_Imports" / import_id / import_stage.SERIES_FILE).write_text(json.dumps(
-        {"label": "Chat export", "paths": [name], "filing": "cell", "origin": {"browser_family": "cli"}}))
+        {"label": "Chat export", "paths": paths, "filing": "cell", "origin": {"browser_family": "cli"}}))
     return import_id
 
 
@@ -434,3 +436,26 @@ def test_a_stage_with_no_recognised_export_leaves_no_expansion_record(vault: Pat
     export_expansion.expand(vault, import_id, keep_going=lambda: True, rewalk=True)
 
     assert import_stage.read_expansion(vault, import_id) is None
+
+
+def test_a_chatgpt_export_split_into_shards_files_every_conversation_and_each_shard_once(vault: Path) -> None:
+    """Catches a current ChatGPT export, split into numbered files, that no registry name recognises and files as three blobs."""
+    shards = {f"conversations-{shard:03d}.json": [chatgpt_conversation(shard * 5 + number) for number in range(5)] for shard in range(3)}
+    backup = json.dumps([{"id": 1, "note": "a file of some other app"}]).encode()
+    beside = {name: json.dumps(items, indent=1).encode() for name, items in list(shards.items())[1:]}
+    beside["conversations-backup.json"] = backup
+    first = next(iter(shards))
+
+    view = file_to_done(vault, stage_export(
+        vault, shards[first], name=first, beside=beside, listed=[first, *beside]))
+
+    pages = source_pages(vault)
+    sessions = [page for page in pages.values() if page[0]["source_type"] == "session"]
+    artifacts = [page for page in pages.values() if "evidence_file" in page[0]]
+    assert len(sessions) == 15 and len({page[0]["title"] for page in sessions}) == 15
+    assert sorted(page[0]["imported_from"].rsplit("/", 1)[1] for page in artifacts) == sorted(shards)
+    (ordinary,) = (page for page in pages.values() if page[0]["imported_from"].endswith("conversations-backup.json"))
+    assert "evidence_file" not in ordinary[0] and "a file of some other app" in ordinary[1]  # its items match no keys: a plain file
+    assert len(pages) == 15 + 3 + 1
+    assert view["state"] == "done" and view["progress"]["failed"] == 0 and view["progress"]["remaining"] == 0
+    assert view["progress"]["filed"] == view["progress"]["total"] == 19 and view["left_out"]["by_reason"] == {}

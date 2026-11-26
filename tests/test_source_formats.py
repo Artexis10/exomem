@@ -55,6 +55,18 @@ def test_a_file_of_the_same_name_with_other_items_is_not_recognised(tmp_path):
     assert source_formats.recognise(root, tmp_path / "stage" / "conversations.json") is None
 
 
+def test_a_file_name_pattern_recognises_every_numbered_shard_and_still_leaves_the_items_keys_to_decide(tmp_path):
+    """Catches an exact name that leaves a current ChatGPT export, split into numbered files, unrecognised."""
+    root = _vault(tmp_path)
+    for name in ("conversations-000.json", "conversations-017.json", "Conversations-001.JSON", "conversations.json"):
+        found = source_formats.recognise(root, _staged(tmp_path, [CHATGPT_ITEM], name=name))
+        assert found is not None and found.parser == "chatgpt-conversations", name
+
+    assert source_formats.recognise(root, _staged(tmp_path, [CLAUDE_ITEM], name="conversations-000.json")) is None  # Claude's is one file
+    assert source_formats.recognise(root, _staged(tmp_path, [{"id": 1}], name="conversations-backup.json")) is None
+    assert source_formats.recognise(root, _staged(tmp_path, [CHATGPT_ITEM], name="user.json")) is None
+
+
 def test_a_vault_that_retires_a_format_files_its_export_as_an_ordinary_file(tmp_path):
     root = _vault(tmp_path)
     export = _staged(tmp_path, [CHATGPT_ITEM])
@@ -68,9 +80,9 @@ def test_an_overlay_entry_with_a_parser_that_code_lacks_is_refused_and_the_other
     """Catches an entry that is accepted and then fails every item at filing time, or one that drops the shipped formats."""
     root = _vault(tmp_path)
     _overlay(root, "schema_version: 1\nentries:\n"
-                   "  odd-notes:\n    label: Odd notes\n    attributes: {file_name: notes.json, item_keys: [body], "
+                   "  odd-notes:\n    label: Odd notes\n    attributes: {file_glob: notes.json, item_keys: [body], "
                    "parser: odd-notes, item_kind: session, roles: {me: Me}, untitled: Odd, attachment: File}\n"
-                   "  kite-chats:\n    label: Kite chats\n    attributes: {file_name: kite.json, item_keys: [chat_messages, uuid], "
+                   "  kite-chats:\n    label: Kite chats\n    attributes: {file_glob: kite.json, item_keys: [chat_messages, uuid], "
                    "parser: claude-conversations, item_kind: session, roles: {human: Me}, untitled: Untitled, attachment: File}\n")
 
     snapshot = registry.load(source_formats.SPEC, root)
@@ -80,12 +92,30 @@ def test_an_overlay_entry_with_a_parser_that_code_lacks_is_refused_and_the_other
     assert {entry.key for entry in snapshot.active} == {"chatgpt-conversations", "claude-conversations", "kite-chats"}
 
 
+def test_an_overlay_entry_whose_file_name_pattern_matches_every_file_or_names_a_folder_is_refused(tmp_path):
+    """Catches a pattern that opens every staged file to look for items, or one that no staged member name can match."""
+    root = _vault(tmp_path)
+    shared = "item_keys: [body], parser: claude-conversations, item_kind: session, roles: {me: Me}, untitled: U, attachment: A"
+    _overlay(root, "schema_version: 1\nentries:\n"
+                   f"  any-file:\n    label: Any\n    attributes: {{file_glob: '*', {shared}}}\n"
+                   f"  in-folder:\n    label: Folder\n    attributes: {{file_glob: 'chats/*.json', {shared}}}\n"
+                   f"  fine:\n    label: Fine\n    attributes: {{file_glob: 'chats-*.json', {shared}}}\n")
+
+    snapshot = registry.load(source_formats.SPEC, root)
+
+    assert sorted(finding["path"] for finding in snapshot.findings) == ["entries.any-file", "entries.in-folder"]
+    assert "fine" in {entry.key for entry in snapshot.active}
+
+
 def test_an_overlay_may_relabel_the_words_of_a_transcript_but_not_change_what_a_shipped_format_is(tmp_path):
     root = _vault(tmp_path)
     _overlay(root, "schema_version: 1\nentries:\n  claude-conversations:\n    attributes:\n"
                    "      roles: {human: Me, assistant: Claude}\n      untitled: Sans titre\n      attachment: Pièce jointe\n")
     shown = {entry.key: entry for entry in source_formats.formats(root)}["claude-conversations"]
     assert (shown.roles, shown.untitled, shown.attachment) == ({"human": "Me", "assistant": "Claude"}, "Sans titre", "Pièce jointe")
+
+    _overlay(root, "schema_version: 1\nentries:\n  claude-conversations:\n    attributes: {file_glob: '*.json'}\n")
+    assert "PACK_ENTRY_FIXED" in registry.load(source_formats.SPEC, root).findings[0]["detail"]
 
     _overlay(root, "schema_version: 1\nentries:\n  claude-conversations:\n    attributes: {item_keys: [uuid]}\n")
     snapshot = registry.load(source_formats.SPEC, root)
