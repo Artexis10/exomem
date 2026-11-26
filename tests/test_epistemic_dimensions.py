@@ -623,6 +623,58 @@ def test_a_served_row_dimension_fills_its_limit_before_each_lane_cap(
     assert sentinel.count == 0, sentinel.report()
 
 
+def test_a_hybrid_dimension_search_reads_no_deeper_vector_window_once_the_lexical_lane_fills(
+    tmp_path, warm_managed_cell, monkeypatch,
+) -> None:
+    """Catches a vector lane that reads ever deeper windows for members that the vector ranks
+    last, while the lexical lane already holds enough members to fill the limit."""
+    import numpy as np
+    from test_semantic_unit_recall import _vector
+
+    from exomem import embeddings, semantic_index
+
+    vault = _outlook_vault(tmp_path)
+    language_registry.registry_path(vault).write_text(
+        REGULATION + "  measured:\n    labels: {en: Measured}\n"
+        "    description: A stated degree of belief\n    members: {keys: [credence]}\n"
+        "kinds:\n  local_estimate:\n    description: A local estimate\n    traits: [credence]\n",
+        encoding="utf-8",
+    )
+    body = "\n".join(f"## Claim\n- id: noise-{n}\n\nBeacon.\n" for n in range(24))
+    for n in range(3):
+        body += (
+            f"\n## Local estimate\n- id: member-{n}\n- credence: likely\n"
+            f"- credence_holder: Survey team\n\nThe beacon survey gives estimate {n}.\n"
+        )
+    _write(vault, FORECAST, PAGE.format(title="Forecast", body=body))
+    state = semantic_index.build_parent_index_state(vault, vault / FORECAST)
+    index = embeddings.get_embedding_index(vault)
+    # The vector lane ranks all 24 nonmembers above the 3 members.
+    vectors = [_vector(1.0, n / 100) for n in range(24)] + [_vector(-1.0, 1.0)] * 3
+    index.upsert_semantic_units(state, np.stack(vectors), 1.0)
+    for path in (RULES, OLD, NEW):
+        other = semantic_index.build_parent_index_state(vault, vault / path)
+        index.upsert_semantic_units(other, np.stack([_vector(0.0, 1.0)] * len(other.occurrences)), 1.0)
+    warm_managed_cell(vault)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(embeddings, "embed_texts", lambda *_a, **_k: np.stack([_vector(1.0)]))
+    vector_reads = []
+    real = find_module._vector_unit_candidates
+    monkeypatch.setattr(
+        find_module, "_vector_unit_candidates",
+        lambda *a, **k: vector_reads.append(k["candidate_limit"]) or real(*a, **k),
+    )
+
+    hits = find_module.find(
+        vault, query="beacon", scope="kb-only", mode="hybrid", graph=False, rerank=False,
+        result_level="unit", filters={"unit.dimension": {"$eq": "measured"}}, limit=2,
+    )
+
+    assert {hit.source_anchor for hit in hits} <= {"member-0", "member-1", "member-2"}
+    assert len(hits) == 2
+    assert len(vector_reads) == 1, f"the vector lane read windows of {vector_reads}"
+
+
 def test_a_served_row_dimension_preserves_complements_and_registry_edits(
     tmp_path, warm_managed_cell, walk_sentinel,
 ) -> None:

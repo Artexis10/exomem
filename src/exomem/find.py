@@ -4424,9 +4424,9 @@ def _find_semantic_units(
             fresh = [hit for hit in vector_hits[:vector_window] if hit.unit_ref not in vector_selected]
             vector_records.update(select(fresh, stale_out=vector_stale))
             vector_selected.update(hit.unit_ref for hit in fresh)
-            if len(vector_records) >= requested_limit or vector_stale:
+            if len(records.keys() | vector_records.keys()) >= requested_limit or vector_stale:
                 break
-            # Fewer members than the limit among the proposed parents' units: read twice as deep.
+            # Both lanes hold fewer members than the limit: read the vector lane twice as deep.
             vector_window *= 2
             vector_candidate_limit = vector_window + 1
         if (
