@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -54,6 +54,10 @@ BATCH_PAGES = 32
 RETRY_SECONDS = 1.0
 MAX_RETRY_SECONDS = 300.0
 
+#: The most pending pages that a check which reads every one of them takes (``underived``): 256 pages
+#: parse in about 0.15 s, at the 0.6 ms a page measured on the store thread, so a check stays well
+#: inside a request's budget, and a backlog past it refuses the check until the drain shrinks it.
+UNDERIVED_CAP = 256
 #: The longest that one stretch of derivation holds the store thread, whether the thread derives what
 #: is owed (``StoreServer._derive_owed``) or a request derives its own intents (``committed``). It
 #: stays well below the mutation timeout (5 s by default), so a queued request is taken in time; a
@@ -413,7 +417,7 @@ def caught_up(still_held_back: Callable[[], bool], seconds: float) -> bool:
             pause = min(pause * 2, _LOOK_MOST_SECONDS)
 
 
-def underived(conn: Connection) -> dict[str, bytes | None]:
+def underived(conn: Connection, paths: Iterable[str] | None = None) -> dict[str, bytes | None]:
     """The pages whose derived rows trail their stored bytes at ``conn``'s snapshot, with those bytes.
 
     Each ``derive`` intent, pending or failed, maps its path to the page that the store holds there,
@@ -422,15 +426,50 @@ def underived(conn: Connection) -> dict[str, bytes | None]:
     drain applies, so a derivation that failed or waits for room never lets a write trust rows that
     its page no longer gives. A ``refresh`` intent stays out: it names a file that the store does not
     own, whose rows trail the file until its drain succeeds, as an outside edit's rows trail it until
-    a commit sees the edit. The cost follows the lag.
+    a commit sees the edit.
+
+    With ``paths``, only those pages count, each in a keyed read: the cost follows the caller's own
+    paths, whatever the backlog. A check that asks about those pages alone, or that asks whether the
+    rows it found belong to a pending page, takes this form. Without ``paths``, every page counts,
+    for a check that any pending page could change (a new link, a claimed id): its cost follows the
+    backlog, so more than ``UNDERIVED_CAP`` pending pages refuse it with ``read.backlog_too_large()``
+    before it reads one. The store thread derives the backlog between requests, so the retry finds it
+    smaller. Only an intent that still has attempts left counts toward the cap: one that used up its
+    ``ATTEMPTS`` keeps retrying on a growing backoff and never leaves the queue while it fails, so it
+    would refuse every such check for good. Its bytes are read all the same, and status reports it as failed. An
+    intent that failed fewer times is a backlog still, because a retry that lands removes it.
+
+    Keyed paths that outnumber ``UNDERIVED_CAP`` could name every waiting page, so that call takes
+    this form too.
     """
-    rows = _queue_rows(conn, "SELECT path FROM store_derivation_queue WHERE operation = ?", (DERIVE,))
-    if not rows:
-        return {}
-    paths = [path for path, in rows]
-    found: dict[str, bytes | None] = dict.fromkeys(paths)
-    for start in range(0, len(paths), read.KEYS_PER_QUERY):
-        batch = paths[start : start + read.KEYS_PER_QUERY]
+    wanted = None if paths is None else list(dict.fromkeys(paths))
+    if wanted is None or len(wanted) > UNDERIVED_CAP:
+        waiting = _queue_rows(
+            conn,
+            "SELECT path FROM store_derivation_queue WHERE operation = ? AND attempts < ? LIMIT ?",
+            (DERIVE, ATTEMPTS, UNDERIVED_CAP + 1),
+        )
+        if waiting is not None and len(waiting) > UNDERIVED_CAP:
+            raise read.backlog_too_large()
+        rows = _queue_rows(conn, "SELECT path FROM store_derivation_queue WHERE operation = ?", (DERIVE,))
+        pending = [path for path, in rows or ()]
+        if wanted is not None:
+            keep = set(wanted)
+            pending = [path for path in pending if path in keep]
+    else:
+        pending = []
+        for start in range(0, len(wanted), read.KEYS_PER_QUERY):
+            batch = wanted[start : start + read.KEYS_PER_QUERY]
+            rows = _queue_rows(
+                conn,
+                "SELECT path FROM store_derivation_queue WHERE operation = ? "
+                f"AND path IN ({', '.join('?' * len(batch))})",
+                (DERIVE, *batch),
+            )
+            pending.extend(path for path, in rows or ())
+    found: dict[str, bytes | None] = dict.fromkeys(pending)
+    for start in range(0, len(pending), read.KEYS_PER_QUERY):
+        batch = pending[start : start + read.KEYS_PER_QUERY]
         found.update((path, bytes(body)) for path, body in conn.execute(
             f"SELECT path, body FROM store_pages WHERE path IN ({', '.join('?' * len(batch))})", batch,
         ))

@@ -237,3 +237,19 @@ def test_a_refusal_carries_diagnostics_when_the_commands_own_default_is_full() -
 
     assert by_default["diagnostics"]["error"]["code"] == "CLOUD_GATEWAY_REQUIRED"
     assert "diagnostics" not in by_cell_default
+
+
+def test_a_refused_write_whose_message_says_nothing_was_saved_does_not_say_it_twice() -> None:
+    """The refusal of a check that cannot yet answer says in its own words that nothing was saved
+    or changed, and a refused write adds that sentence by default: an agent read it twice."""
+    from exomem import command_surface
+    from exomem.vault_store import read
+
+    error = read.backlog_too_large()
+
+    refused = command_surface.agent_refusal_result(
+        error.as_public_dict(), error, "manage_memory_file", {}, (), write=True
+    )["error"]
+
+    assert refused["code"] == read.DERIVED_BEHIND
+    assert refused["message"].casefold().count("nothing was saved") == 1
