@@ -1356,8 +1356,8 @@ def _server(root):
 
 
 def on_store_thread(vault_root) -> bool:
-    """Whether this thread is the store thread of ``vault_root``, which drains its derivation queue
-    before it takes any other work (``StoreServer._derive_owed``). A plain dict read."""
+    """Whether this thread is the store thread of ``vault_root``, which derives what its commits owe
+    before it takes a request, one slice at a time (``StoreServer._derive_owed``). A plain dict read."""
     server = _SERVERS.get(Path(vault_root).resolve())
     return server is not None and server.thread is threading.current_thread()
 
@@ -1477,6 +1477,8 @@ class StoreServer:
             "registry": 0.0,
         }
         self._served_at = 0.0  # when the store thread last finished a request
+        self._slice_ended = 0.0  # when the store thread last finished a slice of derivation
+        self._slice_cut = False  # whether that slice ended at its deadline with intents still due
         self._derived_handle = None  # the writer handle whose derived file the last derived tick reconciled
         self._derivation_handle = None  # the writer handle whose start made every derivation intent due
         self._derive_failing = False  # whether the last owed drain raised, so a repeat logs at debug
@@ -1815,7 +1817,8 @@ class StoreServer:
                 now = time.monotonic()
                 if self.runtime is None and now >= self._retry_at:
                     self._open()
-                # Derived rows first: every request and tick below reads the rows of every earlier commit.
+                # Derived rows first, a slice a turn: a request and a tick below read the rows of every
+                # earlier commit, except while a cut slice yields to the requests that are queued.
                 self._derive_owed()
                 if self._view_work_due(now):
                     self._ticks["views"] = min(self._ticks["views"], now)
@@ -1852,15 +1855,23 @@ class StoreServer:
         """Derive the rows that committed store pages still owe (``vault_store.derivation``).
 
         A writing request derives its own intents after it releases the vault boundary; this step
-        derives what one left (a deadline, a kill, a failure whose retry fell due) before the thread
-        takes other work. It holds no vault boundary. A new writer handle (a start, a takeover)
-        first makes every intent due, so a start retries each failed one. After an idle release it
-        waits, as every tick does, for a request to take the lease again: the release derived what
-        was due.
+        derives what one left (a deadline, a kill, a failure whose retry fell due) and what a plain
+        write on this thread queued, before the thread takes other work, for at most
+        ``derivation.SLICE_SECONDS`` a turn, so a backlog never holds a queued request past its
+        mutation timeout. A slice that its deadline cut leaves the queued requests to be served before
+        the next one. It holds no vault boundary. A new writer handle (a start, a takeover) first makes
+        every intent due, so a start retries each failed one. After an idle release it waits, as every
+        tick does, for a request to take the lease again: the release derived what was due.
         """
         from ..vault_store import derivation
 
         if self.runtime is None or self._idle_released() or not derivation.owed(self.root):
+            return
+        # After a slice that its deadline cut, every queued request is served before the next slice,
+        # unless a slice's worth of serving has passed since it ended: a burst is served in turn, and
+        # derivation still gets about half the thread under steady load. A slice that finished the queue
+        # yields to nothing: the next request reads the rows of the write before it.
+        if self._requests and self._slice_cut and time.monotonic() - self._slice_ended < derivation.SLICE_SECONDS:
             return
         from ..governance import policy, principal
         from ..vault_store import mode as store_mode
@@ -1876,7 +1887,12 @@ class StoreServer:
                     with derivation.scope(self.root):
                         derivation.started(self.root, writer)
                     self._derivation_handle = writer.handle
-                derivation.drain(self.root, writer)
+                # One bounded stretch: what stays due is owed at once, so the next turn takes a queued
+                # request first and then derives the next stretch.
+                self._slice_cut = False
+                self._slice_cut = derivation.drain(
+                    self.root, writer, deadline=time.monotonic() + derivation.SLICE_SECONDS
+                ).cut
         except Exception:  # noqa: BLE001 - the intents stay queued, and a later turn derives them
             # The first failure of a run warns; its repeats, one per retry, log at debug.
             (logger.debug if self._derive_failing else logger.warning)(
@@ -1885,6 +1901,8 @@ class StoreServer:
             derivation.owe_after_failure(self.root, time.monotonic() + DERIVED_RETRY_SECONDS)
         else:
             self._derive_failing = False
+        finally:
+            self._slice_ended = time.monotonic()
 
     def _checkpoint(self):
         """Copy the WAL into the store once it passes ``CHECKPOINT_WAL_PAGES``, holding no boundary.

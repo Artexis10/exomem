@@ -23,7 +23,6 @@ The crash windows are file mode's, with the commit where the rename was:
 from __future__ import annotations
 
 import logging
-import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
@@ -97,12 +96,14 @@ def settle(root: Path, operation: Any, kind: str, paths: list[str], warnings: li
     stays tombstoned and the writer warns, as file mode does.
 
     The commit queued the transition's rows, and its request derives them after it releases the
-    boundary (``derivation``). So in a request the settling runs after that derivation, in a hold
-    of its own (``_settle_after_release``), and the acknowledgement carries its report and warning.
-    A caller with no request settles here, from the rows as they stand.
+    boundary (``derivation``), ahead of any older backlog and within one slice. So in a request the
+    settling runs after that derivation, in a hold of its own (``_settle_after_release``), and the
+    acknowledgement carries its report and warning. A transition whose own rows take more than a
+    slice settles not exact, as does one whose derivation fails, and reconcile settles it. A caller
+    with no request settles here, from the rows as they stand.
     """
     from .. import index_sync, writer_lease
-    from . import batch, derivation
+    from . import batch
 
     report = batch.row_report(kind, paths, root=root)
     if operation is None:
@@ -112,51 +113,30 @@ def settle(root: Path, operation: Any, kind: str, paths: list[str], warnings: li
     def with_purge(rows: Any) -> Any:
         return rows if purged is None else index_sync.with_component(rows, purged)
 
-    # One bound for the request's derivation of these rows: its follow's, and any second pass here.
-    deadline = time.monotonic() + derivation.OWN_DERIVATION_SECONDS
     if writer_lease.defer_until_terminal_persisted(
-        lambda: _settle_after_release(root, operation, kind, paths, with_purge, deadline)
+        lambda: _settle_after_release(root, operation, kind, paths, with_purge)
     ):
         return with_purge(report).as_dict()
     return _finish(operation, with_purge(report), warnings)
 
 
 def _settle_after_release(
-    root: Path,
-    operation: Any,
-    kind: str,
-    paths: list[str],
-    with_purge: Callable[[Any], Any],
-    deadline: float,
+    root: Path, operation: Any, kind: str, paths: list[str], with_purge: Callable[[Any], Any]
 ) -> list[object]:
     """Settle the transition once its request has derived its rows, in a boundary hold that reads
     their state and records the receipt; the derivation itself never runs under the boundary.
 
-    Should a row still be pending (a write between the derivation and this hold queued it again),
-    the rows are derived once more outside the boundary, within the request's bound, and the hold
-    runs once more. Its report, and the not-exact warning when it leaves the content tombstoned, go
-    to the acknowledgement. A settling that fails leaves the content tombstoned for reconcile, and
-    the acknowledgement says that too.
+    This runs on the store thread, after the request's own derivation (``derivation.own_rows``): a
+    second derivation here would add nothing, and a wait for the thread to derive would stall the
+    thread that it waits for. Its report, and the not-exact warning when it leaves the content
+    tombstoned, go to the acknowledgement. A settling that fails leaves the content tombstoned for
+    reconcile, and the acknowledgement says that too.
     """
     from .. import writer_lease
-    from ..collection_store.preview import bound_writer
-    from . import batch, derivation
+    from . import batch
 
     try:
-        guard = writer_lease.active_manager().mutation_guard
-        with guard(root, operation="governed_settle"):
-            report = with_purge(batch.row_report(kind, paths, root=root))
-            if not _pending(report):
-                return _settled(operation, report)
-        writer = bound_writer(Path(root).resolve())
-        try:
-            if writer is not None:
-                derivation.drain(Path(writer.root), writer, deadline=deadline)
-        except Exception:  # noqa: BLE001 - the hold below then finds the rows pending and says so
-            log.warning(
-                "the rows of a governed transition could not be derived again", exc_info=True
-            )
-        with guard(root, operation="governed_settle"):
+        with writer_lease.active_manager().mutation_guard(root, operation="governed_settle"):
             return _settled(operation, with_purge(batch.row_report(kind, paths, root=root)))
     except Exception:  # noqa: BLE001 - the commit is durable; reconcile settles the receipt
         from ..mutation_terminal import LeafWarning
@@ -172,11 +152,6 @@ def _settled(operation: Any, report: Any) -> list[object]:
     warnings: list[str] = []
     _finish(operation, report, warnings)
     return [report, *(LeafWarning(warning) for warning in warnings)]
-
-
-def _pending(report: Any) -> bool:
-    """Whether a row of the report waits on its derivation, so that a second pass could settle it."""
-    return any(item.outcome == "deferred" for item in report.components)
 
 
 def _finish(operation: Any, report: Any, warnings: list[str]) -> dict:
