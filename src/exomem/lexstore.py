@@ -215,7 +215,8 @@ def shared_reads(vault_root: Path):
 
     A plan or a chunk asks the duplicate index about every file, and each answer opened two
     connections. Each statement still reads the newest commit: the connection holds no transaction.
-    A sidecar that a rebuild replaced gets a fresh connection.
+    A sidecar that a rebuild replaced gets a fresh connection, and while a whole-catalogue rebuild runs the
+    loop reads on connections of their own, so the rebuild can fold the sidecar and publish.
     """
     held = _HeldRead(Path(vault_root).resolve())
     token = _HELD_READ.set(held)
@@ -6876,6 +6877,12 @@ class LexicalStore:
         """The `shared_reads` connection for this sidecar, opened on first use, or None outside one."""
         held = _HELD_READ.get()
         if held is None or held.owner_thread != threading.get_ident() or held.root != self.vault_root.resolve():
+            return None
+        if held.root in _FULL_REBUILDS_IN_FLIGHT:
+            # A rebuild folds the live sidecar out of WAL mode only when no other connection is open, and a
+            # declined publication queues the whole build again. Membership is a single atomic set lookup, so
+            # it takes no lock on this hot path; a stale answer costs one more statement on the held connection.
+            held.drop()
             return None
         try:
             status = os.stat(self.path)

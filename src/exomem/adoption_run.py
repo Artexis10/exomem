@@ -1139,16 +1139,19 @@ def _materialize_selection(
 _INTERNAL_KEYS = frozenset({"plan_draft", "cursors", "inflight", "scope", "apply_invocations", _NOTE_PRICE, "sources_seal", _APPLY_PACE, _INDEX_OWED, _RECORD_INTENT, _GENERATION})  # nosemgrep: ep-word-set -- run-object keys that this module writes, not a vocabulary
 
 
+def _plan_warning_lines(run: dict) -> list[str]:
+    """The plan keeps each warning as a record; the top-level list is what a caller's warning count reads."""
+    return [f"{warning['code']}: {warning['reason']}" for warning in (run.get("plan") or {}).get("warnings") or ()]
+
+
 def _present(root: Path, run: dict, **extra) -> dict:
     out = {key: value for key, value in run.items() if key not in _INTERNAL_KEYS}
     if "pack_suggestions" in run:
         # The run stores the spelling of the surface that started it; serve this surface's.
         out["pack_suggestions"] = knowledge_packs.rendered_suggestions(run["pack_suggestions"] or [])
     out["next_actions"] = _next_actions(run)
-    # The plan keeps each warning as a record; the top-level list is what a caller's warning count reads.
-    plan = run.get("plan") or {}
-    if plan.get("warnings"):
-        out["warnings"] = [f"{warning['code']}: {warning['reason']}" for warning in plan["warnings"]]
+    if plan_warnings := _plan_warning_lines(run):
+        out["warnings"] = plan_warnings
     cursor = _open_cursor(run, "after")
     if cursor:
         out["next_after"] = f"{run['run_id']}:{cursor}"
@@ -2713,6 +2716,19 @@ def _record_owed(root: Path, store: AdoptionRunStore, run: dict, *, today: dt.da
     run.pop(_INDEX_OWED, None)
 
 
+def _record_owed_or_report(root: Path, store: AdoptionRunStore, run: dict, *, today: dt.date) -> str | None:
+    """`_record_owed` for a caller that must finish its own work: a failure keeps the rows owed and is returned."""
+    try:
+        _record_owed(root, store, run, today=today)
+    except Exception as error:  # noqa: BLE001 - the filing is done: a failed record is reported, never raised, and the rows stay owed
+        return (
+            f"The Sources index and the log could not record the {len(run.get(_INDEX_OWED) or ())} files that "
+            f"this page filed ({getattr(error, 'code', type(error).__name__)}); the files are filed, "
+            "and the run keeps the rows it still owes"
+        )
+    return None
+
+
 def _freeze_import_chunk(
     store: AdoptionRunStore, run: dict, survivors: list[tuple[dict, adopt_module.ImportItem]],
     *, run_date: dt.date, record: list[str] | None,
@@ -3816,10 +3832,11 @@ def apply(
 
         run["phase"] = _recompute_phase(outcomes, plan_items, stopped)
         run["inflight"] = False
+        record_failure = None
         if run["phase"] != "applying":
             # A page whose last chunk filed nothing (only duplicates or failures) has no batch left to record the
             # rows that earlier chunks owe. Without this they wait for `finish`, which a caller may never make.
-            _record_owed(root, store, run, today=run_date)
+            record_failure = _record_owed_or_report(root, store, run, today=run_date)
         # The run keeps the cumulative counts; this call reports those of the originals it handled.
         unchanged, checked = _verify_counts(outcomes)
         run["verify"] = {
@@ -3858,6 +3875,10 @@ def apply(
             reply["continuation"] = _issue_cursor(run, "apply")
         if stop_reason is not None:
             reply["stop_reason"] = stop_reason
+        if record_failure is not None:
+            # In the reply that a repeated cursor returns again, so that replay shows it too. `finish` or the next
+            # `apply` records the rows.
+            reply["warnings"] = [*_plan_warning_lines(run), f"{record_failure}; `finish` records them."]
         if entry is not None:
             entry["state"], entry["reply"] = "used", reply
         if reads.sealed:
@@ -3892,21 +3913,13 @@ def cancel(root: Path, *, run_id: str, why: str | None) -> dict:
             raise AdoptionRunError("INVALID_PHASE", f"cancel is not allowed from phase {phase!r}")
         _refuse_pending_renames(root, "cancel", run_id=run_id)
         # The Sources this page filed stay, so the indexes and the log record them.
-        warning = None
-        try:
-            _record_owed(root, store, run, today=_today(None))
-        except Exception as error:  # noqa: BLE001 - cancel is the way out of a stuck page: a failed record is reported, never raised
-            warning = (
-                f"The Sources index and the log could not record the {len(run.get(_INDEX_OWED) or ())} files that "
-                f"this page filed ({getattr(error, 'code', type(error).__name__)}); the files are filed, "
-                "and the run keeps the rows it still owes."
-            )
+        warning = _record_owed_or_report(root, store, run, today=_today(None))
         run["cancel"] = {"at": _now_iso(), "why": (why or "").strip() or None}
         run["phase"] = "cancelled"
         store.save(run)
     reply = _present(root, run)
     if warning is not None:
-        reply["warnings"] = [*reply.get("warnings", ()), warning]
+        reply["warnings"] = [*reply.get("warnings", ()), f"{warning}."]
     return reply
 
 

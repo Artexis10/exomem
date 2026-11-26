@@ -842,6 +842,36 @@ def test_a_page_whose_last_chunk_files_nothing_records_what_the_page_filed_when_
     assert "- Sources: 2" in (root / "Knowledge Base/index.md").read_text(encoding="utf-8")
 
 
+def test_an_apply_whose_closing_record_fails_reports_it_keeps_the_rows_owed_and_still_saves_its_outcomes(
+    tmp_path, monkeypatch,
+):
+    """The files are filed when the page's apply ends, so a failed record must not turn the call into an error with
+    no reply: the call warns, the run keeps the rows owed, and `finish` records them once."""
+    monkeypatch.setattr(adoption_run, "APPLY_CHUNK_ITEMS", 2)
+    root = _vault(tmp_path, {
+        "Coll/a/IMG_1.png": PHOTO, "Coll/b/note.md": "# Note\n\nBody.\n", "Coll/c/IMG_1 copy.png": PHOTO,
+    })
+    run_id, planned = _import(root, path="Coll", include=["Coll"])
+
+    def fail(*arguments, **keywords):
+        raise OSError("the Sources index cannot be read")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(adoption_run.adopt_module, "record_imports", fail)
+        reply = adoption_run.apply(root, run_id=run_id, plan_id=planned["plan"]["plan_id"], today=TODAY)
+
+    assert reply["phase"] == "applied"
+    assert any("could not record the 2 files" in warning for warning in reply["warnings"])
+    stored = adoption_run.AdoptionRunStore(root).load(run_id)
+    assert stored["phase"] == "applied" and len(stored["outcomes"]) == 3
+    assert len(stored[adoption_run._INDEX_OWED]) == 2 and _adopt_copy_entries(root) == []
+
+    adoption_run.finish(root, run_id=run_id, today=TODAY)
+
+    assert [entry["provenance"]["files"] for entry in _adopt_copy_entries(root)] == [2]
+    assert not adoption_run.AdoptionRunStore(root).load(run_id).get(adoption_run._INDEX_OWED)
+
+
 def _row(name: str) -> dict[str, str]:
     return {"original_path": f"Coll/{name}.md", "source_path": f"Knowledge Base/Sources/Imported/{name}.md",
             "original_sha256": name * 16}

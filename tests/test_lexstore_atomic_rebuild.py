@@ -3067,3 +3067,26 @@ def test_a_shared_read_opens_the_replaced_sidecar_and_never_answers_from_the_one
         after = store.page_content_hashes([rel])[rel]
 
     assert before not in (None, "replaced") and after == "replaced"
+
+
+def test_a_shared_read_lets_a_whole_catalogue_rebuild_publish_instead_of_declining_it(tmp_path: Path) -> None:
+    """A rebuild folds the live sidecar out of WAL mode only when no other connection is open. A plan loop's
+    held connection would make every publication decline, and a declined pass queues the whole build again."""
+    page = _kb_file(tmp_path, "a.md", "searchable committed payload")
+    _seed(tmp_path, [page])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    rel = "Knowledge Base/a.md"
+    key = tmp_path.resolve()
+
+    with lexstore.shared_reads(tmp_path):
+        assert store.page_content_hashes([rel])[rel]  # the loop holds its connection
+        lexstore._FULL_REBUILDS_IN_FLIGHT.add(key)  # the repair worker marks a whole pass this way
+        try:
+            assert store.page_content_hashes([rel])[rel]  # the loop's next read yields the connection
+            published = store.rebuild_atomic()
+        finally:
+            lexstore._FULL_REBUILDS_IN_FLIGHT.discard(key)
+        assert store.page_content_hashes([rel])[rel]  # the loop reads on from the published sidecar
+
+    assert published, "the held connection made the rebuild decline its publication"
