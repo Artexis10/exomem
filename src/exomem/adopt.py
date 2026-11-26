@@ -25,7 +25,6 @@ from . import (
     context_refs,
     held_fs,
     indexes,
-    kept_speech,
     knowledge_packs,
     page_fields,
     reserved_paths,
@@ -787,8 +786,6 @@ class ImportItem:
     content: str  # fully rendered imported-Source markdown
     slug_warning: str | None = None
     artifact: ImportArtifact | None = None  # set for an artifact original
-    #: Writes that ride in this item's batch and only with its page: the part pages of a kept extraction.
-    extra_writes: tuple[PlannedWrite, ...] = ()
 
 
 def import_item(
@@ -799,15 +796,9 @@ def import_item(
     date_iso: str,
     collection: str | None,
     source_id: str | None = None,
-    kept: kept_speech.Kept | None = None,
 ) -> ImportItem:
-    """Render one plan item. ``text`` is the verified original for a text item.
-
-    ``kept`` is the finished transcript of an audio or video original (`kept_speech`): its Source page is written
-    holding that extraction, and the part pages ride with the page.
-    """
+    """Render one plan item. ``text`` is the verified original for a text item."""
     artifact = None
-    extra: tuple[PlannedWrite, ...] = ()
     # The registry is read only for an item whose stage stated an origin: the other items write no origin field.
     provenance = page_fields.provenance_fields(root) if planned.get("origin") else ()
     if planned["form"] == "artifact":
@@ -818,8 +809,6 @@ def import_item(
             digest=planned["original_sha256"],
             size=planned["original_bytes"],
         )
-        if kept is not None:
-            content, extra = kept_speech.attach(root, kept, root / planned["target_path"], content, date_iso=date_iso)
     else:
         assert text is not None
         content = render_text_source(
@@ -834,7 +823,6 @@ def import_item(
         content=content,
         slug_warning=planned.get("slug_warning"),
         artifact=artifact,
-        extra_writes=extra,
     )
 
 
@@ -1141,7 +1129,6 @@ def commit_import_items(
                     create_only=True, expected_hash=MISSING_CONTENT_HASH,
                 )
                 writes.append(page)
-                writes.extend(item.extra_writes)
                 pages.append((page, []))
             if existing_artifact:
                 completion_guards.append(PathGuard.capture(

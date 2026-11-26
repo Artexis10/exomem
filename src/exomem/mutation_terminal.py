@@ -501,7 +501,7 @@ def _adoption_control_projection(leaf: Mapping[str, Any]) -> dict[str, Any]:
     Without them the reply that must stop (`apply_stop`), that has a next page (`next_after`),
     that yielded the boundary to a waiting write (`stop_reason`) or that leaves staged files with
     the person (`finish.residual`) has the shape of ordinary progress. Each field is built by
-    `adoption_run` and is small: `stop_reason` is one token, `apply_stop` has five keys,
+    `adoption_run` and is small: `stop_reason` is one token, `apply_stop` has at most five keys,
     `next_actions` holds at most five entries of three strings, and `residual` counts files by a
     closed set of reasons. The inventory and the plan items are not copied. `residual` stays under
     `finish` because the next actions name it as `finish.residual`.

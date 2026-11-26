@@ -2176,16 +2176,28 @@ def set_prior_extractions(content: str, links: Sequence[str]) -> str:
 
 
 def extraction_field_lines(content: str) -> list[str]:
-    """The `key: value` lines of `content`'s frontmatter that describe its extraction, as the page wrote them.
+    """The one-line `key: value` forms of the extraction fields (`is_extraction_field`) in `content`'s frontmatter.
 
-    A prior extraction page and a kept extraction both carry exactly these fields (`is_extraction_field`).
+    The frontmatter is parsed, and each field is written as the extraction writers above write it (a list of strings
+    in flow style, other structure as JSON). A list that an editor's property panel wrote as a block is not lost to its style.
     """
-    content = with_newline(content, "\n")
-    end = content.find("\n---", 3) if content.startswith("---") else -1
-    return [
-        line for line in (content[:end].split("\n") if end != -1 else [])
-        if line[:1] not in (" ", "-", "\t") and is_extraction_field(line.partition(":")[0])
-    ]
+    fields = parse_frontmatter(with_newline(content, "\n"))[0]
+    return [f"{key}: {_one_line(value)}".rstrip() for key, value in fields.items() if is_extraction_field(str(key))]
+
+
+def _one_line(value: object) -> str:
+    """A parsed frontmatter value as one line, as the extraction writers above write it."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return ""
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return yaml_flow_list(value)
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, default=str)
+    return yaml_scalar(value)
 
 
 def render_kept_extraction(
@@ -2194,7 +2206,7 @@ def render_kept_extraction(
 ) -> str:
     """`before` with another page's finished extraction in place of its own: the fields, the first part and the part layout.
 
-    `field_lines` are the lines that `extraction_field_lines` read from the page that holds the extraction. Every
+    `field_lines` are the lines that `extraction_field_lines` gives for the page that holds the extraction. Every
     extraction field of `before` goes first, so none of a pending or earlier extraction survives next to the new one.
     The recording's own fields (its identity and provenance) stay as `before` has them. `text` is the part that stays
     on the page and `parts` the layout of the part pages that hold the rest, as `extraction_parts.layout` gives it.

@@ -43,6 +43,15 @@ def _stay(reason: str) -> tuple[bool, str]:
     return STAYS.get(reason, (False, "{n} " + reason))
 
 
+#: The reasons that a staged file stays only because adoption has not reached it yet. Every other reason needs the person.
+_NOT_REACHED = ("pending", OUTSIDE_RUN)  # nosemgrep: ep-word-set -- two of the closed result keys of `STAYS`, not vocabulary.
+
+
+def to_come(reason: str) -> bool:
+    """Whether a member that stays for this reason is still to be filed by a run that carries on."""
+    return reason in _NOT_REACHED  # nosemgrep: ep-word-membership -- a closed result key of `STAYS`.
+
+
 def is_filed(reason: str) -> bool:
     """Whether a member that stays for this reason is in the Knowledge Base."""
     return _stay(reason)[0]
@@ -167,10 +176,10 @@ def _page_classifier(page: dict, filed_statuses: tuple[str, ...]):
     selected = set((page.get("selection") or {}).get("paths") or [])
     outcomes = page.get("outcomes") or {}
     removes_copies = page.get("consume", True)  # a run that opted out never checks or removes a copy
-    # A transcript page that the recording's own Source was written from, and its part pages, have no item of their own.
+    # The part pages of a kept transcript are no plan items: they follow their page.
     kept_with = {
-        member: item for item in items.values() if item["form"] == "artifact"
-        for member in (item.get("kept") or {}).get("members") or ()
+        member: item for item in items.values()
+        for member in (item.get("kept") or {}).get("members") or () if member != item["original_path"]
     }
 
     def classify(path: str) -> str | None:
@@ -181,14 +190,17 @@ def _page_classifier(page: dict, filed_statuses: tuple[str, ...]):
             if status == "failed":
                 return "over_ceiling" if outcome.get("code") == adoption_plan.OVER_CEILING else "failed"
             if status in filed_statuses:
-                if path != item["original_path"]:  # a transcript page of the recording, not the recording itself
-                    return "failed" if (outcome.get("kept_speech") or {}).get("outcome") == "failed" else "kept_speech"
+                settled = outcome.get("kept_speech")  # the page's result went to its recording's Source
+                if path != item["original_path"]:  # a part page of a transcript
+                    if settled is None:
+                        return "ineligible"  # its page filed as a text Source, so no part is kept
+                    return "failed" if settled.get("outcome") == "failed" else "kept_speech"
+                if settled is not None:
+                    return "kept_speech"
                 if outcome.get("stays"):
                     return outcome["stays"]  # `finish` recorded why it kept this copy: a result key of `STAYS`
                 if item["form"] == "text" and removes_copies and not outcome.get("consumed"):
                     return "unchecked"  # `finish` did not reach this copy, so no one has compared it with its Source page
-                if item["form"] == "kept":
-                    return "kept_speech"
                 return "text" if item["form"] == "text" else "kept"
             return "pending"
         if path in skipped:

@@ -5,11 +5,11 @@ video original `X` pairs with that recording when it holds a finished extraction
 the page's own `binary_sha256` and `binary_size`, never by its other fields or its path, so a page that carries
 provenance fields of its own still pairs.
 
-A page reaches its recording by one of two routes:
-- staged: the recording is stored by this adoption, so its new Source page is written from the page and its parts
-  (`attach`);
-- stored: a Source already holds the recording, so the page's result settles on that Source (`settle`).
-Both read the page and its part pages through `load`, which hashes what the plan hashed.
+A page settles on the Source of its recording (`settle`) after that Source is stored: a recording that this
+adoption stores is stored first, and one that an earlier window or run stored is found through the duplicate
+index. A page whose recording is not stored yet but waits in another window of the same import series is held until
+that recording is stored, and files as a text Source only when none is coming (`adoption_run._await_recording`).
+`load` reads the page and its part pages and hashes what the plan hashed.
 """
 
 from __future__ import annotations
@@ -39,16 +39,21 @@ from .vault import PlannedWrite, content_hash, parse_frontmatter, read_guarded_t
 
 log = logging.getLogger(__name__)
 
-#: The plan action of a page whose result settles on a Source that is already stored.
+#: The plan action of a page whose result settles on the Source of its recording.
 KEEPS = "keeps-extraction"
 #: The plan form of that page: it is neither a text Source nor an artifact.
 FORM = "kept"
 
-#: Why a page was not paired (the plan's counts), and why one failed to settle (an apply outcome's code). These are this change's own codes.
+#: Why a page was not paired (the plan's counts), why it waits, and why one failed to settle (an apply outcome's
+#: code). These are this change's own codes.
 MISMATCH = "KEPT_EXTRACTION_MISMATCH"
 INCOMPLETE = "KEPT_EXTRACTION_INCOMPLETE"
 PARTS_MISSING = "KEPT_EXTRACTION_PARTS_MISSING"
+NO_RECORDING = "KEPT_EXTRACTION_NO_RECORDING"
 LOOKUP_UNAVAILABLE = "KEPT_EXTRACTION_LOOKUP_UNAVAILABLE"
+RECORDING_PENDING = "KEPT_EXTRACTION_RECORDING_PENDING"
+#: The codes of an `apply_stop` that holds pages for their recordings: a later call pairs them, and no person acts.
+HOLD_CODES = (RECORDING_PENDING, LOOKUP_UNAVAILABLE)  # nosemgrep: ep-word-set -- two of this module's own protocol codes, not vocabulary.
 
 #: A page and each of its parts are read whole, up to the bound that adoption reads any text to.
 _READ_CAP = 4 * 1024 * 1024
@@ -113,7 +118,7 @@ class Unpaired:
     """A sidecar-named page that did not pair: the reason, and how many part pages it names (they are not kept either)."""
 
     reason: str
-    parts: int
+    part_pages: int
 
 
 @dataclass(frozen=True)
@@ -124,20 +129,30 @@ class Examined:
     media_type: str
     sha256: str
     size: int
-    parts: int
+    #: The pages of the extraction, the page itself included (`extraction_parts.count_of`).
+    pages: int
     content_sha256: str
     page_sha256: str
     page_bytes: int
 
-    def record(self, route: str) -> dict[str, Any]:
-        """What the plan keeps about the pairing; `load` finds the page again from it."""
+    @property
+    def part_pages(self) -> int:
+        """The further pages that hold the rest of the extraction."""
+        return self.pages - 1
+
+    def record(self, *, recording: str | None = None, awaiting: bool = False) -> dict[str, Any]:
+        """What the plan keeps about the pairing; `load` finds the page again from it.
+
+        `recording` is the plan's own item for the recording, when this plan stores it. `awaiting` marks a page whose
+        recording is stored nowhere yet: its plan item is a text Source that apply files only when no recording comes.
+        """
         folder = Path(self.page)
         return {
-            "page": self.page, "parts": self.parts,
+            "page": self.page, "pages": self.pages,
             # The page and each further part page, as the stage holds them: the consume report reads this list.
-            "members": [self.page, *(extraction_parts.part_path(folder, n).as_posix() for n in range(2, self.parts + 1))],
+            "members": [self.page, *(extraction_parts.part_path(folder, n).as_posix() for n in range(2, self.pages + 1))],
             "content_sha256": self.content_sha256, "recording_sha256": self.sha256,
-            "recording_bytes": self.size, "media_type": self.media_type, "route": route,
+            "recording_bytes": self.size, "media_type": self.media_type, "recording": recording, "awaiting": awaiting,
         }
 
 
@@ -273,7 +288,7 @@ def load(root: Path, record: Mapping[str, Any]) -> Kept:
     """
     page_rel = record["page"]
     data = _read(root, page_rel)
-    reading = None if data is None else _reading(root, page_rel, data, int(record["parts"]))
+    reading = None if data is None else _reading(root, page_rel, data, int(record["pages"]))
     if reading is None or reading.digest != record["content_sha256"]:
         raise Changed("the page or one of its parts changed after the plan")
     first = preserve.extracted_text(reading.text)
@@ -290,25 +305,11 @@ def load(root: Path, record: Mapping[str, Any]) -> Kept:
     )
 
 
-def attach(root: Path, kept: Kept, page: Path, before: str, *, date_iso: str) -> tuple[str, tuple[PlannedWrite, ...]]:
-    """`before`, the new Source page of the recording at `page`, holding the kept extraction, and the writes for its parts."""
-    parts = extraction_parts.plan(
-        root, page, list(kept.pieces), inherited=parse_frontmatter(before)[0], date_iso=date_iso
-    )
-    content = preserve.render_kept_extraction(
-        before, field_lines=kept.field_lines, text=kept.pieces[0],
-        parts=extraction_parts.layout(page, list(kept.pieces)),
-    )
-    return content, parts.writes
-
-
-#: What a transcript page did, as the apply result counts it: written into the new Source of its recording, filled a
-#: Source whose extraction was pending, replaced an unlabelled one, was kept off a Source that holds labels or names,
-#: left a Source that already held it as it was, or did not settle.
-ATTACHED, FILLED, REPLACED, KEPT_OUT, UNCHANGED, FAILED = (
-    "attached", "filled", "replaced", "kept-out", "unchanged", "failed",
-)
-OUTCOMES = (ATTACHED, FILLED, REPLACED, KEPT_OUT, UNCHANGED, FAILED)
+#: What a transcript page did, as the apply result counts it: filled a Source whose extraction was pending, replaced an
+#: unlabelled one, was kept off a Source that holds labels or names, left a Source that already held it as it was,
+#: or did not settle.
+FILLED, REPLACED, KEPT_OUT, UNCHANGED, FAILED = "filled", "replaced", "kept-out", "unchanged", "failed"  # nosemgrep: ep-word-set -- the closed outcomes of this module's settle step.
+OUTCOMES = (FILLED, REPLACED, KEPT_OUT, UNCHANGED, FAILED)  # nosemgrep: ep-word-set -- the closed outcomes of this module's settle step.
 
 
 @dataclass(frozen=True)

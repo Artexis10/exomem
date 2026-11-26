@@ -86,6 +86,8 @@ APPLY_CHUNK_BYTES = 64 * 1024 * 1024
 APPLY_CHUNK_BUDGET_SHARE = 0.1
 # The `stop_reason` of a call that ended after a chunk because a write waited for the boundary.
 STOP_FOR_WAITING_WRITE = "interactive_write_waiting"
+# The `apply_stop` code of a chunk that the vault's volume has no room for; the person frees space.
+_SPACE_STOP = "INSUFFICIENT_SPACE"
 # What a call assumes before it has timed a chunk: seconds per item, and per media
 # artifact for its extraction request (both pessimistic starts).
 INITIAL_ITEM_SECONDS = 0.5
@@ -1975,61 +1977,112 @@ def _whole_scan(root: Path, run: dict) -> list[str] | None:
 
 
 def _no_kept_speech() -> dict:
-    """The plan's running count of transcript pages: kept with their recording, and not kept by reason."""
-    return {"staged": 0, "stored": 0, "parts": 0, "unpaired": {}, "unpaired_without_parts": 0}
+    """The plan's running count of transcript pages.
+
+    `staged` pages settle on a recording that this plan stores, `stored` ones on a recording the vault holds, and
+    `awaiting` ones wait for a recording that no Source holds yet. `part_pages` counts the further pages of the
+    extractions that settle, and `unpaired` counts the pages that stay text by reason, with their part pages
+    under `unpaired_part_pages`.
+    """
+    return {"staged": 0, "stored": 0, "awaiting": 0, "part_pages": 0, "unpaired": {}, "unpaired_part_pages": 0}
 
 
 def _holds_kept_speech(counts: Mapping[str, object]) -> bool:
-    return bool(counts["staged"] or counts["stored"] or counts["unpaired"])
+    return bool(counts["staged"] or counts["stored"] or counts["awaiting"] or counts["unpaired"])
+
+
+class _Arrivals:
+    """The recordings that other windows of an import's series have yet to file, read once for each window.
+
+    A transcript page waits for its recording only while some window of its own series still holds it (`expects`).
+    A window that the person discarded sends none, and a file that failed or went over the limit stays with the person.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self._root = root
+        self._by_window: dict[str, frozenset[str]] = {}
+
+    def expects(self, page_rel: str) -> bool:
+        """Whether the recording that the staged page `page_rel` is named for is still to be filed by another window of its series."""
+        parts = PurePosixPath(page_rel).parts
+        if len(parts) < 3 or parts[0] != IMPORT_STAGE_DIR or not page_rel.lower().endswith(".md"):
+            return False
+        window = parts[1]
+        if window not in self._by_window:
+            self._by_window[window] = self._read(window)
+        return "/".join(parts[2:])[: -len(".md")] in self._by_window[window]
+
+    def _read(self, window: str) -> frozenset[str]:
+        root = self._root
+        mine = import_stage.read_series(root, window)
+        try:
+            others = [other for other in import_stage.window_ids(root) if other != window]
+        except OSError:
+            return frozenset()
+        if mine is None or not others:
+            return frozenset()
+        runs = AdoptionRunStore(root).runs_by_stage()
+        coming: set[str] = set()
+        for other in others:
+            series = import_stage.read_series(root, other)
+            if series is None or (series.label, series.paths) != (mine.label, mine.paths):
+                continue
+            coming.update(
+                member["path"] for member in unfiled_members(root, other, runs.get(other, ()))
+                if adoption_consume.to_come(member["code"])
+            )
+        return frozenset(coming)
 
 
 def _pair_kept_page(
-    root: Path, rel: str, recordings: Mapping[str, dict], counts: dict, *, collection_root: str,
-) -> dict | None:
+    root: Path, rel: str, recordings: Mapping[str, dict], counts: dict, arrivals: _Arrivals, *, collection_root: str,
+) -> tuple[dict | None, dict | None]:
     """Pair a sidecar-named page with its recording (design D1 of `keep-speech-results-in-cloud`).
 
-    None: the page is no recording's sidecar or did not pair, so it plans as before (an unpaired page is counted by
-    reason). An empty dict: the page pairs with a recording that this plan stores, and the recording's item holds the
-    pairing. Otherwise the plan item of a page whose result settles on a Source that is already stored.
+    Returns `(item, awaiting)`. `item` is the plan item of a page whose result settles on the Source of its
+    recording after apply stores that Source (a recording of this plan) or finds it (one stored before the plan).
+    `awaiting` is the pairing record of a page that is complete but whose recording is stored nowhere yet while
+    another window of its series still holds it, or while the index cannot say: the page plans as a text Source
+    too, and apply files that Source only when no recording is coming. With neither, the page plans as before
+    (an unpaired page is counted by reason).
     """
     named = kept_speech.candidate(rel)
     if named is None:
-        return None
+        return None, None
     original, media_type = named
     recording = recordings.get(original)
     expect = (recording["original_sha256"], recording["original_bytes"]) if recording is not None else None
     examined = kept_speech.examine(root, rel, media_type=media_type, expect=expect)
-    target, artifact, why = None, None, kept_speech.MISMATCH
-    if isinstance(examined, kept_speech.Examined):
-        if recording is not None and recording["action"] == "copy-as-source":
-            recording["kept"] = examined.record("staged")
-            counts["staged"] += 1
-            counts["parts"] += examined.parts
-            return {}
-        if recording is not None:
-            target, artifact = recording["target_path"], recording.get("artifact_path")
-        else:
-            try:
-                found = kept_speech.find_recording(root, examined.sha256, examined.size)
-            except kept_speech.LookupUnavailable:
-                found, why = None, kept_speech.LOOKUP_UNAVAILABLE
-            target, artifact = (found + ".md", found) if found is not None else (None, None)
-        if target is None:
-            examined = kept_speech.Unpaired(why, examined.parts - 1)
     if isinstance(examined, kept_speech.Unpaired):
         counts["unpaired"][examined.reason] = counts["unpaired"].get(examined.reason, 0) + 1
-        counts["unpaired_without_parts"] += int(examined.parts > 0)
-        return None
-    counts["stored"] += 1
-    counts["parts"] += examined.parts
+        counts["unpaired_part_pages"] += examined.part_pages
+        return None, None
+    if recording is not None:
+        target, artifact, planned_as = recording["target_path"], recording.get("artifact_path"), recording["original_path"]
+    else:
+        try:
+            found = kept_speech.find_recording(root, examined.sha256, examined.size)
+        except kept_speech.LookupUnavailable:
+            counts["awaiting"] += 1  # the index will answer later: the page waits, it is not text for good
+            return None, examined.record(awaiting=True)
+        if found is None:
+            if arrivals.expects(rel):
+                counts["awaiting"] += 1
+                return None, examined.record(awaiting=True)
+            counts["unpaired"][kept_speech.NO_RECORDING] = counts["unpaired"].get(kept_speech.NO_RECORDING, 0) + 1
+            counts["unpaired_part_pages"] += examined.part_pages
+            return None, None
+        target, artifact, planned_as = found + ".md", found, None
+    counts["staged" if recording is not None else "stored"] += 1
+    counts["part_pages"] += examined.part_pages
     return {
         "original_path": rel, "original_sha256": examined.page_sha256, "original_bytes": examined.page_bytes,
         "form": kept_speech.FORM, "action": kept_speech.KEEPS, "classification": None,
         "collection_path": adoption_plan.collection_path_of(rel, collection_root),
         "target_path": target, "target_ref": context_refs.source_ref(target), "artifact_path": artifact,
         "title": Path(rel).stem, "tags": [], "rejected_tags": [], "aliases": [], "rejected_aliases": [],
-        "_refs": [], "kept": examined.record("stored"),
-    }
+        "_refs": [], "kept": examined.record(recording=planned_as),
+    }, None
 
 
 def plan(
@@ -2111,6 +2164,7 @@ def plan(
         destinations = adoption_plan.Destinations.frozen_by(root, draft["items"])
         seen = adoption_plan.seen_in_plan(draft["items"])
         kept_counts = draft.setdefault("kept_speech", _no_kept_speech())
+        arrivals = _Arrivals(root)
         # Artifacts plan before text, so a recording is planned by the time its sidecar-named page is.
         recordings = {item["original_path"]: item for item in draft["items"] if item["form"] == "artifact"}
 
@@ -2121,14 +2175,13 @@ def plan(
                 if handled and not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS):
                     break
                 rel = selected[draft["next"]]
-                kept_item = _pair_kept_page(
-                    root, rel, recordings, kept_counts, collection_root=collection["root"],
+                kept_item, awaiting = _pair_kept_page(
+                    root, rel, recordings, kept_counts, arrivals, collection_root=collection["root"],
                 )
                 if kept_item is not None:
                     draft["next"] += 1
                     handled += 1
-                    if kept_item:
-                        draft["items"].append(kept_item)
+                    draft["items"].append(kept_item)
                     continue
                 result = adoption_plan.plan_item(
                     root, rel,
@@ -2145,6 +2198,8 @@ def plan(
                 else:
                     if origin:
                         _carry_origin(result[0], origin, inventory.get(rel))
+                    if awaiting is not None:
+                        result[0]["kept"] = awaiting
                     draft["items"].append(result[0])
                     if result[0]["form"] == "artifact":
                         recordings[rel] = result[0]
@@ -2648,7 +2703,7 @@ def _space_shortfall(root: Path, chunk: list[dict], stage: import_stage.Stage | 
     if needed + reserve <= free:
         return None
     return {
-        "code": "INSUFFICIENT_SPACE", "chunk_bytes": needed, "reserve_bytes": reserve, "free_bytes": free,
+        "code": _SPACE_STOP, "chunk_bytes": needed, "reserve_bytes": reserve, "free_bytes": free,
         "next": "Stop. The continuation stops at this chunk again until the vault's volume has this chunk's bytes "
                 "plus the reserve free. Free space and tell the person, then repeat the call with its continuation: it resumes at this chunk.",
     }
@@ -2667,43 +2722,38 @@ def _request_frame_vectors(root: Path, planned: dict, stats: Counter) -> None:
 
 
 def _settle_kept_pages(
-    root: Path, run: dict, chunk: list[dict], pages: list[dict], *, stats: Counter, reads: _CallReads,
-    kept: Mapping[str, kept_speech.Kept],
-) -> None:
-    """Settle each transcript page of the chunk that has a stored recording, by the one replacement rule.
+    root: Path, run: dict, pages: list[tuple[dict, str | None]], *, stats: Counter, reads: _CallReads,
+) -> set[str]:
+    """Settle each transcript page of the chunk on the stored Source of its recording, by the one replacement rule.
 
-    `pages` are the plan's pages named for a recording that was stored before this plan. A recording of the chunk
-    that the apply found already stored (it settled as `already-applied`) takes its own paired page the same way,
-    because its Source was not written from that page.
+    Every Source of the chunk is stored by now, so a page whose recording this plan stores finds it through that
+    recording's outcome (an index that has not seen a Source written a moment ago cannot). `pages` pair each page with
+    the recording it found at apply, when it waited for one. Returns the recordings of this plan whose page settled.
     """
     outcomes, date_iso = run["outcomes"], run["plan"]["date"]
-    for page in pages:
-        result = _keep_speech(root, date_iso, page["kept"], page.get("artifact_path"), reads=reads)
+    settled: set[str] = set()
+    for page, found in pages:
+        record = page["kept"]
+        recording = found or ((outcomes.get(record["recording"]) or {}).get("artifact_path") if record["recording"] else None)
+        result = _keep_speech(root, date_iso, record, recording or page.get("artifact_path"), reads=reads)
         outcomes[page["original_path"]] = result
-        stats["kept_speech_" + (result.get("kept_speech") or {}).get("outcome", kept_speech.FAILED)] += 1
-    for planned in chunk:
-        outcome = outcomes.get(planned["original_path"]) or {}
-        if planned.get("kept") and outcome.get("status") == "already-applied" and outcome.get("artifact_path"):
-            result = _keep_speech(
-                root, date_iso, planned["kept"], outcome["artifact_path"], reads=reads,
-                preloaded=kept.get(planned["original_path"]),
-            )
-            outcome["kept_speech"] = result.get("kept_speech") or {
-                "outcome": kept_speech.FAILED, "code": result["code"], "reason": result["reason"],
-            }
-            stats["kept_speech_" + outcome["kept_speech"]["outcome"]] += 1
+        outcome = (result.get("kept_speech") or {}).get("outcome", kept_speech.FAILED)
+        stats["kept_speech_" + outcome] += 1
+        if outcome != kept_speech.FAILED and record["recording"]:
+            settled.add(record["recording"])
+    return settled
 
 
-def _keep_speech(
-    root: Path, date_iso: str, record: dict, recording: str | None, *, reads: _CallReads,
-    preloaded: kept_speech.Kept | None = None,
-) -> dict:
+def _keep_speech(root: Path, date_iso: str, record: dict, recording: str | None, *, reads: _CallReads) -> dict:
     """The outcome of settling one transcript page on the stored Source of its recording (see `kept_speech.settle`)."""
     try:
-        kept = preloaded or kept_speech.load(root, record)
+        kept = kept_speech.load(root, record)
         found = kept_speech.find_recording(root, kept.sha256, kept.size, prefer=recording)
         if found is None:
-            return _failed("PLAN_STALE", "no stored Source holds this recording any more; re-plan this import")
+            return _failed(
+                kept_speech.NO_RECORDING,
+                "no stored Source holds the recording of this transcript page; its recording files first, so retry this page then",
+            )
         settled = kept_speech.settle(
             root, kept, recording=found, date_iso=date_iso,
             # The apply already holds the mutation guard, as for the extraction request below.
@@ -2718,8 +2768,7 @@ def _keep_speech(
         )
     except kept_speech.Refused as refusal:
         return _failed(refusal.code, refusal.reason)
-    if preloaded is None:
-        reads.warnings.extend(kept.warnings)
+    reads.warnings.extend(kept.warnings)
     outcome = _already_applied(settled.source_page, found, record["content_sha256"])
     if settled.outcome != kept_speech.UNCHANGED:
         outcome["status"] = "applied"
@@ -2730,6 +2779,50 @@ def _keep_speech(
         **({"speech_job": settled.speech_job} if settled.speech_job != "none" else {}),
     }
     return outcome
+
+
+#: What an apply does with a page that waits for its recording (`_await_recording`).
+_PAIRED = "paired"
+_HELD = "held"
+_FILED_AS_TEXT = "text"
+
+
+def _await_recording(root: Path, planned: dict, reads: _CallReads) -> tuple[str, str | None]:
+    """What a page that waited for its recording does now, as (result, recording or hold code).
+
+    The recording is stored now: the page pairs with it. It is not, and the index cannot say or another window of
+    the series still holds it: the page is held, so a later call pairs it. Nothing is coming: the page files as the
+    text Source that it also planned as.
+    """
+    record = planned["kept"]
+    try:
+        found = kept_speech.find_recording(root, record["recording_sha256"], record["recording_bytes"])
+    except kept_speech.LookupUnavailable:
+        return _HELD, kept_speech.LOOKUP_UNAVAILABLE
+    if found is not None:
+        return _PAIRED, found
+    if reads.arrivals(root).expects(planned["original_path"]):
+        return _HELD, kept_speech.RECORDING_PENDING
+    return _FILED_AS_TEXT, None
+
+
+def _hold_stop(held: Mapping[str, str]) -> dict:
+    """The `apply_stop` of a call that held transcript pages: what waits, and what the caller does."""
+    pending = kept_speech.RECORDING_PENDING in held.values()
+    count = len(held)
+    pages = "transcript page waits" if count == 1 else "transcript pages wait"
+    if pending:
+        return {
+            "code": kept_speech.RECORDING_PENDING,
+            "reason": f"{count} {pages} for a recording that another window of this import has yet to file.",
+            "next": "Stop. File the other windows of this import first, then repeat the call with its continuation: it pairs "
+                    "each held page with its recording once that is stored.",
+        }
+    return {
+        "code": kept_speech.LOOKUP_UNAVAILABLE,
+        "reason": f"{count} {pages} while the duplicate index cannot say which Source holds its recording.",
+        "next": "Stop. Repeat the call with its continuation later: it pairs each held page once the duplicate index can answer.",
+    }
 
 
 def _request_extraction(root: Path, planned: dict, budget: request_budget.RequestBudget,
@@ -2789,6 +2882,15 @@ class _CallReads:
     filed: bool = False
     #: What this call removed from a kept transcript (card numbers, credentials), for the reply.
     warnings: list[str] = dataclass_field(default_factory=list)
+    #: The transcript pages this call held for their recording, by path, with why (`_await_recording`).
+    held: dict[str, str] = dataclass_field(default_factory=dict)
+    _arrivals: _Arrivals | None = None
+
+    def arrivals(self, root: Path) -> _Arrivals:
+        """The recordings that other windows have yet to file, read once for each window of this call."""
+        if self._arrivals is None:
+            self._arrivals = _Arrivals(root)
+        return self._arrivals
 
     def open_sources(self, root: Path, run: dict) -> None:
         """List the Sources once, and read them in full only when the run's seal no longer holds."""
@@ -3065,9 +3167,9 @@ def _apply_chunk(
     settled: list[dict] = []
     # Items that repeat another item of the plan wait for the Source of the item they repeat.
     deferred: list[tuple[dict, str | None]] = []
-    # A transcript page that settles on an already stored recording waits for the chunk's own Sources.
-    deferred_kept: list[dict] = []
-    kept_by_path: dict[str, kept_speech.Kept] = {}
+    # A transcript page settles on its recording's Source, so it waits for the chunk's own Sources. A page that
+    # waited for its recording is paired with the recording it found.
+    deferred_kept: list[tuple[dict, str | None]] = []
     destinations: adoption_plan.Destinations | None = None
     survivors: list[tuple[dict, adopt_module.ImportItem]] = []
     texts: dict[str, str] = {}
@@ -3080,8 +3182,17 @@ def _apply_chunk(
         for planned in chunk:
             path = planned["original_path"]
             if planned["action"] == kept_speech.KEEPS:
-                deferred_kept.append(planned)
+                deferred_kept.append((planned, None))
                 continue
+            if planned.get("kept"):
+                verdict, found = _await_recording(root, planned, reads)
+                if verdict == _PAIRED:
+                    deferred_kept.append((planned, found))
+                    continue
+                if verdict == _HELD:
+                    reads.held[path] = found
+                    continue
+                stats["kept_unpaired"] += 1  # nothing is coming: the page files as the text Source it also planned as
             frozen = (publication.get("items") or {}).get(path) if publication else None
             if frozen and planned["action"] != "copy-as-source":
                 # Only an item that stored its own bytes in place of a named Source is ever frozen under another action.
@@ -3132,22 +3243,9 @@ def _apply_chunk(
                 texts[path] = text
             if path in outcomes and outcomes[path]["status"] == _SOURCE_ONLY:
                 continue  # an earlier call wrote its Source; only the note is owed
-            kept = None
-            if planned.get("kept"):
-                try:
-                    kept = kept_speech.load(root, planned["kept"])
-                except kept_speech.Changed:
-                    outcomes[path] = _failed(
-                        "SOURCE_CHANGED", "the transcript page or one of its parts differs from the plan at apply time"
-                    )
-                    stats["kept_speech_failed"] += 1
-                    continue
-                kept_by_path[path] = kept
-                reads.warnings.extend(kept.warnings)
             if frozen:
                 item = adopt_module.import_item(
-                    root, planned, text=text, date_iso=plan["date"], collection=label,
-                    source_id=frozen.get("source_id"), kept=kept,
+                    root, planned, text=text, date_iso=plan["date"], collection=label, source_id=frozen.get("source_id"),
                 )
                 if (
                     frozen.get("target_path") != item.target_rel
@@ -3218,9 +3316,7 @@ def _apply_chunk(
                     f"{occupied[0]} already exists and is not an import of this file",
                 )
                 continue
-            item = adopt_module.import_item(
-                root, planned, text=text, date_iso=plan["date"], collection=label, kept=kept
-            )
+            item = adopt_module.import_item(root, planned, text=text, date_iso=plan["date"], collection=label)
             if moved is not None:
                 item.artifact.placed = True
                 placed[path] = moved
@@ -3246,20 +3342,13 @@ def _apply_chunk(
         if failure is not None:
             outcomes[planned["original_path"]] = failure
             continue
-        own_copies.append((
-            own,
-            adopt_module.import_item(
-                root, own, text=text, date_iso=plan["date"], collection=label,
-                kept=kept_by_path.get(planned["original_path"]),
-            ),
-        ))
+        own_copies.append((own, adopt_module.import_item(root, own, text=text, date_iso=plan["date"], collection=label)))
     landed += _file_survivors(
         root, store, run, own_copies, stage=stage, placed=placed, run_date=run_date, ceiling=ceiling, reads=reads,
         page_final=page_final,
     )
     landed_paths = {planned["original_path"] for planned in landed}
-    stats["kept_speech_attached"] += sum(1 for planned in landed if planned["original_path"] in kept_by_path)
-    _settle_kept_pages(root, run, chunk, deferred_kept, stats=stats, reads=reads, kept=kept_by_path)
+    with_page = _settle_kept_pages(root, run, deferred_kept, stats=stats, reads=reads)
     with call_spans.span("adoption.settle", {"items": len(settled) + len(landed)}):
         for planned in [*settled, *landed]:
             outcome = outcomes[planned["original_path"]]
@@ -3277,7 +3366,7 @@ def _apply_chunk(
             seconds = _request_extraction(root, planned, budget, stats)
             if seconds is not None:
                 extractions.append(seconds)
-            if planned["original_path"] in kept_by_path:
+            if planned["original_path"] in with_page:
                 _request_frame_vectors(root, planned, stats)
     written.extend(copied)
     # The Sources are written without the semantic seam, so the chunk counts them in the
@@ -3998,6 +4087,10 @@ def apply(
                 stopped = True
                 break
 
+        if reads.held and "apply_stop" not in run:
+            # A held page has no outcome: the continuation comes back to it once its recording is stored.
+            run["apply_stop"] = _hold_stop(reads.held)
+            stopped = True
         outcomes = run["outcomes"]
         # Every requested source drifted or vanished, and nothing was ever imported: refuse
         # before the run reports a result, so the still-valid selection survives a re-plan.
@@ -4063,7 +4156,12 @@ def apply(
             "progress": _progress(run),
         }
         if run["plan"].get("kept_speech"):
-            reply["apply_result"]["kept_speech"] = {name: stats[f"kept_speech_{name}"] for name in kept_speech.OUTCOMES}
+            reply["apply_result"]["kept_speech"] = {
+                **{name: stats[f"kept_speech_{name}"] for name in kept_speech.OUTCOMES},
+                "held": len(reads.held),
+                # Pages that filed as text Sources because no recording was coming, under the code that says so.
+                "unpaired": {kept_speech.NO_RECORDING: stats["kept_unpaired"]} if stats["kept_unpaired"] else {},
+            }
         if stopped:
             reply["continuation"] = _issue_cursor(run, "apply")
         if stop_reason is not None:
@@ -4323,7 +4421,9 @@ def _coverage(root: Path, run: dict, budget: request_budget.RequestBudget) -> di
     )
     notes = Counter((o["note"] or {}).get("status") for o in outcomes.values() if o.get("note"))
     folders = [row for row in run.get("inventory") or [] if row.get("kind") == "folder"]
-    applied_text = [item for item, _outcome in _applied_items(run) if item["form"] == "text"]
+    applied_text = [
+        item for item, outcome in _applied_items(run) if item["form"] == "text" and not outcome.get("kept_speech")
+    ]
     return {
         "selected": len(selection.get("paths") or []),
         "outcomes": {"by_status": dict(by_status), "by_code": dict(by_code)},
@@ -4376,6 +4476,7 @@ def _consume_filed_text(root: Path, run: dict, budget: request_budget.RequestBud
         if (
             planned["form"] != "text" or outcome is None or outcome.get("consumed")
             or outcome.get("status") not in _APPLIED_STATUSES
+            or outcome.get("kept_speech")  # a page whose result went to its recording's Source has no text Source to check
         ):
             continue
         if not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS):
@@ -4813,11 +4914,12 @@ def _filing_state(root: Path, store: AdoptionRunStore, run: dict) -> tuple[str, 
         return _DONE, None
     stop = run.get("apply_stop")
     if stop:
-        free = stop["free_bytes"]
         return _STOPPED, {
             "code": stop["code"],
-            "reason": f"The next chunk needs {stop['chunk_bytes']} bytes and a reserve of {stop['reserve_bytes']} bytes; "
-                      f"{free} bytes are free.",
+            "reason": stop.get("reason") or (
+                f"The next chunk needs {stop['chunk_bytes']} bytes and a reserve of {stop['reserve_bytes']} bytes; "
+                f"{stop['free_bytes']} bytes are free."
+            ),
         }
     return _WORKING, None
 
@@ -4889,7 +4991,7 @@ def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict 
         remaining += _unscanned(root, store, run)  # staged files that came after the scan, which a new scan files
     pages_done = sum(1 for tally in scans if tally.phase in _FINISHED_PHASES)
     person: list[dict] = []
-    if stop is None and filing == _STOPPED and run.get("apply_stop"):
+    if stop is None and filing == _STOPPED and (run.get("apply_stop") or {}).get("code") == _SPACE_STOP:
         person.append({"need": "free_space", "text": run["apply_stop"]["next"]})
     if stop is not None and stop["code"] == "IMPORT_RECOVERY_UNRESOLVED":
         person.append({"need": "report_to_operator", "text": stop["reason"]})

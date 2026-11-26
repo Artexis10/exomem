@@ -7,27 +7,37 @@ folder is then staged in another vault and adopted through the staged route, in 
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 import shutil
 from pathlib import Path
 
 import numpy as np
 import pytest
+import test_adoption_consume as consume
 from conftest import FIXTURE_VAULT, initialize_vault_state_offline
+from test_adoption_series import _window
 
 from exomem import (
     adoption_run,
+    cloud_import_job,
     commands,
     embeddings,
     extract,
     extraction_parts,
+    import_filing,
+    import_stage,
     kept_speech,
+    lexstore,
     media_jobs,
     media_processing,
     media_worker,
     preserve,
     speech_attach,
+    write_intake,
+    writer_lease,
 )
+from exomem.governance import principal as principal_module
 from exomem.vault import parse_frontmatter
 
 TODAY = dt.date(2026, 11, 26)
@@ -130,6 +140,7 @@ def test_a_transcribed_recording_keeps_its_transcript_and_parts_when_its_folder_
     binary, old_page = _transcribed(owner, monkeypatch, "interview.m4a", lines=40)
     assert extraction_parts.count_of(_fields(old_page)) > 2
     _stage(vault, binary, old_page)
+    pages = _stored_pages(vault)
 
     planned, applied = _adopt(vault)
 
@@ -142,9 +153,12 @@ def test_a_transcribed_recording_keeps_its_transcript_and_parts_when_its_folder_
     assert _fields(page)["speakers"] == old["speakers"] and _fields(page)["extracted_by"] == "whisper-test"
     assert extraction_parts.count_of(_fields(page)) == extraction_parts.count_of(old)
     assert all(extraction_parts.part_path(page, n).is_file() for n in range(2, extraction_parts.count_of(old) + 1))
-    assert set(applied["outcomes"]) == {f"{STAGE}/{binary.name}"}  # no text Source holds the old page
-    assert planned["plan"]["kept_speech"]["staged"] == 1 and planned["plan"]["kept_speech"]["parts"] == extraction_parts.count_of(old)
-    assert applied["apply_result"]["kept_speech"]["attached"] == 1
+    kept = applied["outcomes"][f"{STAGE}/{old_page.name}"]
+    assert kept["target_path"] == outcome["target_path"] and kept["kept_speech"]["outcome"] == "filled"
+    assert [stored for stored in _stored_pages(vault) if stored not in pages] == [page]  # no text Source holds the old page
+    assert planned["plan"]["kept_speech"]["staged"] == 1
+    assert planned["plan"]["kept_speech"]["part_pages"] == extraction_parts.count_of(old) - 1
+    assert applied["apply_result"]["kept_speech"]["filled"] == 1
 
 
 def _stored_pages(vault: Path) -> list[Path]:
@@ -192,7 +206,7 @@ def test_a_page_that_is_not_a_finished_transcript_of_its_recording_files_as_text
 
     counts = planned["plan"]["kept_speech"]
     assert counts["unpaired"] == {code: 1} and counts["staged"] == 0
-    assert counts["unpaired_without_parts"] == 1
+    assert counts["unpaired_part_pages"] == extraction_parts.count_of(_fields(old_page)) - 1  # part pages only, not the page
     assert applied["outcomes"][staged["page"]]["status"] == "applied"  # the page files as a text Source, as before
     recording = vault / applied["outcomes"][staged["binary"]]["target_path"]
     assert _fields(recording)["extracted_by"] == "pending"  # the recording keeps no transcript
@@ -209,11 +223,32 @@ def test_a_page_that_changed_after_the_plan_is_not_kept_and_its_recording_files_
 
     applied = adoption_run.apply(vault, run_id=run_id, plan_id=planned["plan"]["plan_id"], today=TODAY)
 
-    outcome = applied["outcomes"][staged["binary"]]
+    outcome = applied["outcomes"][staged["page"]]
     assert outcome["status"] == "failed" and outcome["code"] == "SOURCE_CHANGED"
+    assert applied["outcomes"][staged["binary"]]["status"] == "applied"  # the recording files, with no transcript
     assert applied["outcomes"][f"{STAGE}/other.m4a"]["status"] == "applied"
     assert applied["apply_result"]["kept_speech"]["failed"] == 1
-    assert not [page for page in _stored_pages(vault) if "interview" in page.name]
+    recording = vault / applied["outcomes"][staged["binary"]]["target_path"]
+    assert _fields(recording)["extracted_by"] == "pending"
+    assert [page for page in _stored_pages(vault) if "interview" in page.name] == [recording]  # no text Source holds the page
+
+
+def test_a_page_whose_lists_an_editor_wrote_as_blocks_keeps_every_item_of_them(
+    vault: Path, owner: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    binary, old_page = _transcribed(owner, monkeypatch, "interview.m4a")
+    _edit(
+        old_page, "speakers: [Speaker A, Speaker B]",
+        'speaker_names:\n  - label: "Speaker A"\n    name: "Ana"\nspeakers:\n  - Speaker A\n  - Speaker B',
+    )
+    assert _fields(old_page)["speaker_names"] == [{"label": "Speaker A", "name": "Ana"}]
+    _stage(vault, binary, old_page)
+
+    _, applied = _adopt(vault)
+
+    kept = _fields(vault / applied["outcomes"][f"{STAGE}/{binary.name}"]["target_path"])
+    assert kept["speakers"] == ["Speaker A", "Speaker B"]
+    assert kept["speaker_names"] == [{"label": "Speaker A", "name": "Ana"}]
 
 
 def test_a_card_number_in_a_kept_transcript_is_removed_and_the_reply_warns(
@@ -396,17 +431,33 @@ def test_the_result_of_a_job_that_was_running_while_a_later_window_kept_the_tran
     assert media_jobs.MediaJobStore(vault).counts()["pending"] == 0
 
 
-def test_a_page_is_not_kept_and_files_as_text_with_its_reason_when_the_duplicate_index_cannot_answer(
-    vault: Path, owner: Path, monkeypatch: pytest.MonkeyPatch
+def test_a_page_is_held_not_filed_as_text_while_the_duplicate_index_cannot_answer_and_pairs_when_it_can(
+    duplicate_index: Path, owner: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    vault = duplicate_index
     binary, old_page = _transcribed(owner, monkeypatch, "interview.m4a")
-    _window_one(vault, binary, old_page)  # the vault has no built index: the lookup cannot answer
+    source = _window_one(vault, binary, old_page)
     _stage(vault, binary, old_page, folder=LATER, carry=("page", "parts"))
+    pages = _stored_pages(vault)
+    with monkeypatch.context() as outage:
+        outage.setattr(lexstore, "payload_candidates", lambda *_a, **_k: None)  # the index cannot answer
+        run_id, planned = _plan(vault, LATER)
+        plan_id = planned["plan"]["plan_id"]
 
-    planned, applied = _adopt(vault, LATER)
+        held = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=TODAY)
 
-    assert planned["plan"]["kept_speech"]["unpaired"] == {kept_speech.LOOKUP_UNAVAILABLE: 1}
-    assert applied["outcomes"][f"{LATER}/{old_page.name}"]["status"] == "applied"  # filed as a text Source, as before
+    assert planned["plan"]["kept_speech"]["awaiting"] == 1 and not planned["plan"]["kept_speech"]["unpaired"]
+    assert held["phase"] == "applying" and "continuation" in held
+    assert f"{LATER}/{old_page.name}" not in held["outcomes"]  # nothing is filed for the page
+    assert _stored_pages(vault) == pages  # and no text Source holds it
+    assert held["apply_result"]["kept_speech"]["held"] == 1
+    assert _fields(source)["extracted_by"] == "pending"
+
+    applied = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, continuation=held["continuation"], today=TODAY)
+
+    assert applied["phase"] == "applied" and applied["outcomes"][f"{LATER}/{old_page.name}"]["kept_speech"]["outcome"] == "filled"
+    assert _whole(vault, source) == _whole(owner, old_page)
+    assert _stored_pages(vault) == pages
 
 
 def test_with_the_speech_engine_on_a_kept_recording_queues_no_speech_job_and_a_kept_video_is_indexed_by_frame(
@@ -438,36 +489,6 @@ def test_with_the_speech_engine_on_a_kept_recording_queues_no_speech_job_and_a_k
     assert ledger.counts()["pending"] == 0
 
 
-def test_a_folder_with_a_transcribed_recording_and_a_transcribed_video_is_adopted_in_two_windows_with_no_speech_job(
-    duplicate_index: Path, owner: Path, monkeypatch: pytest.MonkeyPatch, long_transcripts: None
-) -> None:
-    vault = duplicate_index
-    audio, audio_page = _transcribed(owner, monkeypatch, "interview.m4a", lines=40)
-    video, video_page = _transcribed(owner, monkeypatch, "clip.mp4", media="video")
-    before = _stored_pages(vault)
-    _stage(vault, audio, audio_page)  # first window: the audio with its transcript, and the video alone
-    _stage(vault, video, video_page, carry=("binary",))
-    _adopt(vault, STAGE)
-    _stage(vault, video, video_page, folder=LATER, carry=("page", "parts"))  # second window: the video's transcript
-    _adopt(vault, LATER)
-    sources = {name: next(page for page in _stored_pages(vault) if page.name.endswith(f"{name}.md")) for name in (audio.name, video.name)}
-
-    monkeypatch.setattr(extract, "extract_text", lambda *_a, **_k: pytest.fail("the speech engine ran"))
-    media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1)
-    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
-
-    assert media_jobs.MediaJobStore(vault).counts()["pending"] == 0  # no speech job, with the worker's speech engine on
-    for original, old_page in ((audio, audio_page), (video, video_page)):
-        source = sources[original.name]
-        assert _whole(vault, source) == _whole(owner, old_page)
-        assert _fields(source)["speakers"] == _fields(old_page)["speakers"] == ["Speaker A", "Speaker B"]
-        assert extraction_parts.count_of(_fields(source)) == extraction_parts.count_of(_fields(old_page))
-    assert extraction_parts.count_of(_fields(sources[audio.name])) > 2
-    assert set(_stored_pages(vault)) - set(before) == set(sources.values())  # no text Source holds an old page
-    found = commands.op_find(vault, "Line 7 of the talk", speakers=["Speaker A"])
-    assert sources[audio.name].relative_to(vault).as_posix() in {hit["path"] for hit in found}
-
-
 def test_a_restored_vault_with_complete_audio_and_video_pages_queues_no_speech_job_and_keeps_its_pages(
     owner: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, long_transcripts: None
 ) -> None:
@@ -486,3 +507,160 @@ def test_a_restored_vault_with_complete_audio_and_video_pages_queues_no_speech_j
     assert queued == 1 and media_jobs.MediaJobStore(restored).get_by_binary(restored / waiting.path).do_ocr  # only the page that waits
     assert media_jobs.MediaJobStore(restored).counts()["pending"] == 1
     assert _tree(restored) == before
+
+
+def _members(path: Path) -> dict[str, bytes]:
+    """The files that a Cloud import stages for one original of the owner's vault: the file, and a page's part folder."""
+    members = {path.name: path.read_bytes()}
+    parts = extraction_parts.folder_for(path)
+    if path.suffix == ".md" and parts.is_dir():
+        members.update({f"{parts.name}/{part.name}": part.read_bytes() for part in sorted(parts.iterdir())})
+    return members
+
+
+def _series_window(vault: Path, *files: Path, series: tuple[Path, ...], filing: str | None = None) -> str:
+    """A window of a series as the Cloud import Job leaves it: its files, a receipt and the series file of the whole series."""
+    paths = [path for original in series for path in _members(original)]
+    import_id = _window(vault, {path: data for original in files for path, data in _members(original).items()}, series=paths)
+    if filing is not None:  # the series file that asks the cell to file the stage itself
+        (vault / "_Imports" / import_id / import_stage.SERIES_FILE).write_text(
+            json.dumps({"label": "Field Notes", "paths": paths, "filing": filing})
+        )
+    return import_id
+
+
+def test_a_page_whose_recording_is_in_an_earlier_window_that_is_not_applied_yet_waits_and_pairs_after_it_files(
+    duplicate_index: Path, owner: Path, monkeypatch: pytest.MonkeyPatch, long_transcripts: None
+) -> None:
+    vault = duplicate_index
+    audio, audio_page = _transcribed(owner, monkeypatch, "interview.m4a", lines=40)
+    recording_window = _series_window(vault, audio, series=(audio, audio_page))
+    page_window = _series_window(vault, audio_page, series=(audio, audio_page))
+    pages = _stored_pages(vault)
+    recording_run, recording_plan = consume._plan(vault, f"_Imports/{recording_window}")  # planned, not applied
+    page_run, page_plan = consume._plan(vault, f"_Imports/{page_window}")
+
+    held = adoption_run.apply(vault, run_id=page_run, plan_id=page_plan, today=TODAY)
+
+    assert held["phase"] == "applying" and "continuation" in held and not held["outcomes"]
+    assert _stored_pages(vault) == pages  # no text Source holds the page, and the recording is not transcribed again
+    assert held["apply_result"]["kept_speech"]["held"] == 1
+    consume._apply(vault, recording_run, recording_plan)
+    [source] = [page for page in _stored_pages(vault) if page not in pages]
+    assert _fields(source)["extracted_by"] == "pending"
+
+    applied = adoption_run.apply(vault, run_id=page_run, plan_id=page_plan, continuation=held["continuation"], today=TODAY)
+
+    assert applied["phase"] == "applied"
+    assert applied["outcomes"][f"_Imports/{page_window}/{audio_page.name}"]["kept_speech"]["outcome"] == "filled"
+    assert _whole(vault, source) == _whole(owner, audio_page)
+    assert [page for page in _stored_pages(vault) if page not in pages] == [source]
+    assert media_jobs.MediaJobStore(vault).counts()["pending"] == 0
+
+
+def test_a_page_with_no_recording_in_its_series_files_as_text_and_the_plan_counts_the_reason(
+    duplicate_index: Path, owner: Path, monkeypatch: pytest.MonkeyPatch, long_transcripts: None
+) -> None:
+    vault = duplicate_index
+    audio, audio_page = _transcribed(owner, monkeypatch, "interview.m4a", lines=40)
+    page_window = _series_window(vault, audio_page, series=(audio_page,))  # no window of the series holds the recording
+    pages = _stored_pages(vault)
+
+    run_id, plan_id = consume._plan(vault, f"_Imports/{page_window}")
+    plan = adoption_run.AdoptionRunStore(vault).load(run_id)["plan"]
+    applied = consume._apply(vault, run_id, plan_id)
+
+    assert plan["kept_speech"]["unpaired"] == {kept_speech.NO_RECORDING: 1}  # not a mismatch: the recording is simply not stored
+    assert applied["phase"] == "applied"
+    [text] = [page for page in _stored_pages(vault) if page not in pages]
+    assert _fields(text)["type"] == "source" and "Line 7 of the talk." in text.read_text(encoding="utf-8")
+
+
+def test_a_held_page_files_as_text_when_the_window_that_held_its_recording_is_discarded(
+    duplicate_index: Path, owner: Path, monkeypatch: pytest.MonkeyPatch, long_transcripts: None
+) -> None:
+    vault = duplicate_index
+    audio, audio_page = _transcribed(owner, monkeypatch, "interview.m4a", lines=40)
+    recording_window = _series_window(vault, audio, series=(audio, audio_page))
+    page_window = _series_window(vault, audio_page, series=(audio, audio_page))
+    pages = _stored_pages(vault)
+    consume._plan(vault, f"_Imports/{recording_window}")
+    run_id, plan_id = consume._plan(vault, f"_Imports/{page_window}")
+    held = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=TODAY)
+    assert held["phase"] == "applying" and _stored_pages(vault) == pages
+    cloud_import_job.discard(vault, recording_window)  # the person discards the window that held the recording
+
+    applied = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, continuation=held["continuation"], today=TODAY)
+
+    assert applied["phase"] == "applied"
+    assert applied["apply_result"]["kept_speech"]["unpaired"] == {kept_speech.NO_RECORDING: 1}
+    [text] = [page for page in _stored_pages(vault) if page not in pages]
+    assert "Line 7 of the talk." in text.read_text(encoding="utf-8")
+
+
+@pytest.fixture
+def filer_cell():
+    yield
+    writer_lease.reset_managers_for_tests()
+
+
+def _owner() -> dict:
+    return write_intake.principal_record(principal_module.owner_principal(surface="library"))
+
+
+def _run_until_due(filer: import_filing.Filer, import_id: str) -> float | None:
+    """Make the filer's calls on one stage in turn, as its thread does, until it is due later or leaves the list."""
+    for _ in range(60):
+        delay = filer.run_once(import_id)
+        if delay != 0.0:
+            return delay
+    raise AssertionError("the stage was still working after the calls")
+
+
+def test_a_cloud_import_in_two_windows_keeps_each_transcript_with_no_speech_job_when_the_page_window_files_first(
+    duplicate_index: Path, owner: Path, monkeypatch: pytest.MonkeyPatch, long_transcripts: None, filer_cell: None
+) -> None:
+    vault = duplicate_index
+    audio, audio_page = _transcribed(owner, monkeypatch, "interview.m4a", lines=40)
+    video, video_page = _transcribed(owner, monkeypatch, "clip.mp4", media="video")
+    everything = (audio, audio_page, video, video_page)
+    pages_window = _series_window(vault, audio_page, video_page, series=everything, filing="cell")
+    recordings_window = _series_window(vault, audio, video, series=everything, filing="cell")
+    before = _stored_pages(vault)
+    filer = import_filing.Filer(vault)
+    filer.register(pages_window, principal=_owner(), surface=None)
+    filer.register(recordings_window, principal=_owner(), surface=None)
+
+    delay = _run_until_due(filer, pages_window)  # the filer meets the pages first
+
+    held = import_filing.read_view(vault, pages_window)
+    assert delay == import_filing.HOLD_CHECK_SECONDS
+    assert held["state"] == "parked" and held["stop"]["code"] == kept_speech.RECORDING_PENDING and held["needs"] == []
+    assert _stored_pages(vault) == before  # no text Source holds a page, and no recording is transcribed again
+    assert _run_until_due(filer, recordings_window) is None
+    assert _run_until_due(filer, pages_window) is None
+
+    sources = {name: next(page for page in _stored_pages(vault) if page.name.endswith(f"{name}.md")) for name in (audio.name, video.name)}
+    assert set(_stored_pages(vault)) - set(before) == set(sources.values())
+    for original, old_page in ((audio, audio_page), (video, video_page)):
+        assert _whole(vault, sources[original.name]) == _whole(owner, old_page)
+        assert _fields(sources[original.name])["speakers"] == ["Speaker A", "Speaker B"]
+    pages_view = import_filing.read_view(vault, pages_window)
+    assert pages_view["state"] == "done" and not pages_view["left_out"]["by_reason"]
+    residual = adoption_run.file(vault, path=f"_Imports/{pages_window}")["filed"]["residual"]
+    held_back = extraction_parts.count_of(_fields(audio_page)) + extraction_parts.count_of(_fields(video_page))
+    # Each page and each of its part pages stays staged as a transcript kept with its recording, and none is of a kind
+    # that adoption does not import.
+    assert set(residual["by_reason"]) == {"kept_speech"} and residual["by_reason"]["kept_speech"]["files"] == held_back
+    recordings_view = import_filing.read_view(vault, recordings_window)
+    assert recordings_view["state"] == "done" and not recordings_view["left_out"]["by_reason"]
+    assert adoption_run.file(vault, path=f"_Imports/{recordings_window}")["filed"]["residual"]["files"] == 0
+
+    monkeypatch.setattr(extract, "extract_text", lambda *_a, **_k: pytest.fail("the speech engine ran"))
+    media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1)
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
+    assert media_jobs.MediaJobStore(vault).counts()["pending"] == 0  # no speech job, with the worker's speech engine on
+    assert extraction_parts.count_of(_fields(sources[audio.name])) > 2
+    found = commands.op_find(vault, "Line 7 of the talk", speakers=["Speaker A"])
+    hits = found["hits"] if isinstance(found, dict) else found  # a find answers a list, or an envelope that carries one
+    assert sources[audio.name].relative_to(vault).as_posix() in {hit["path"] for hit in hits}
