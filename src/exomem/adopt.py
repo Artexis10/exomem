@@ -951,6 +951,7 @@ def _import_bookkeeping(
 
     `counts` is the Sources census once the batch lands and `pre_counts` the one before it, without the
     `pending_paths` the batch adds. `file_lines` adds one log line per row; `log` False plans no log entry.
+    An entry with provenance adds `files`, the number of rows it records, because the entry's text only says it.
     """
     from .vault_store import read as store_read
 
@@ -1019,7 +1020,10 @@ def _import_bookkeeping(
         # Planned like any other log write, so a long import rotates the live log instead of growing it.
         log_plan = plan_log_entries(
             root,
-            [LogEntry(date_iso, "adopt-copy", managed_join("Sources"), "\n".join(body_lines), token, provenance)],
+            [LogEntry(
+                date_iso, "adopt-copy", managed_join("Sources"), "\n".join(body_lines), token,
+                None if provenance is None else {**provenance, "files": len(rows)},
+            )],
             operation_token=token,
         )
         derived.extend(("operation-log", write) for write in log_plan.writes)
@@ -1037,7 +1041,8 @@ def record_imports(
     """Write the Sources index, top index and one log entry for files that earlier batches filed.
 
     For the files of an import that no filing batch recorded, such as those of a page whose last
-    chunk filed nothing. The entry carries ``{"import_chunk": token}`` provenance. Returns warnings.
+    chunk filed nothing. The entry carries ``{"import_chunk": token, "files": len(rows)}`` provenance. Returns
+    warnings.
     """
     warnings: list[str] = []
     counts = indexes._count_sources(kb_root(root) / "Sources")
@@ -1072,7 +1077,7 @@ def commit_import_items(
     ``record`` lets a caller that files many batches write the indexes and the log
     for several of them at once: None records this batch's items, one log line
     each; ``[]`` writes neither; rows record those files in one summary entry,
-    which carries ``{"import_chunk": token}`` provenance (see `import_chunk_logged`).
+    which carries ``{"import_chunk": token, "files": len(rows)}`` provenance (see `import_chunk_logged`).
     Returns ``{"copied_sources": [...], "warnings": [...], "source_counts": {...}}``.
     """
     if not items:

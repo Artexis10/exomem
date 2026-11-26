@@ -140,20 +140,23 @@ _NOTE_PRICE_FRESH_SECONDS = 300.0
 # A carried price sizes a call's first batch at this share of the room, so notes that cost
 # up to twice the carried price still fit; the call re-prices from that batch.
 _CARRIED_PRICE_ROOM_SHARE = 0.5
-# The run-object key for the chunk timings and rates of the run's last call that filed, with the wall-clock
-# time they were recorded. The next call starts from them while they are as fresh as a carried note price.
+# The run-object key for the item-chunk timings of the run's last call that filed, with the wall-clock time
+# they were recorded. The next call starts from them while they are as fresh as a carried note price.
 _APPLY_PACE = "apply_pace"
 # The newest timed chunks a call carries to the next: enough for the fit, few enough to follow a slowing vault.
 _CARRIED_CHUNKS = 8
 # The run-object keys for the filed files that no batch has written to the Sources index and the log yet, as
-# [original, Source, sha256] rows in filing order, and for a batch that set out to write them and may not have.
+# a list of {original_path, source_path, original_sha256} dicts in filing order, and for a batch that set out to
+# write them and may not have: its log token and the `source_path` of each row it carries, so a settled batch
+# drops exactly those rows and no others.
 _INDEX_OWED = "index_owed"
 _RECORD_INTENT = "record_intent"
 # The run-object key that names one full save of `run.json`; a journal holds changes since the save it names.
 _GENERATION = "generation"
 _JOURNAL_FILE = "journal.json"
 # Keys that only `start`, `select` and `plan` write, each in a full save: `apply`, `file`, `finish` and `cancel`
-# never change them, so a journal leaves them out. A step that replaces one is caught and saves in full.
+# never change them, so a journal leaves them out. A step that replaces one is caught and saves in full; one
+# that changes `plan` or `selection` in place, as `apply` must never do, would be lost until the closing save.
 _FIXED_KEYS = ("inventory", "plan", "selection", "scan_summary", "pack_suggestions", "plan_draft")  # nosemgrep: ep-word-set -- run-object keys that this module writes, not a vocabulary
 _ABSENT = object()
 # The values of a rule's `adopt_as` are fixed by the rule schema, not by the vault.
@@ -2351,12 +2354,13 @@ class _ApplyPacer:
     A call never starts a chunk whose predicted cost does not fit in the time left
     before the delivery reserve, after the fan-out the call already owes past the
     loop. A chunk costs its items, its bytes and its media requests. Costs are those
-    this call has measured, and the byte and media rates are the dearest seen so far:
-    chunk cost swings several-fold with media artifacts and a contended index, so the
-    last chunk is a poor guide to the next. A call starts from the newest chunks and
-    rates that the run's last call recorded while they are fresh (`carried`), so it does
-    not spend its first chunks timing small probes again. `_create_notes` likewise
-    sizes a call's first batch of notes on the price that the run's last call recorded.
+    this call has measured, not a past call's, and the byte and media rates are the
+    dearest seen so far: chunk cost swings several-fold with media artifacts and a
+    contended index, so the last chunk is a poor guide to the next. A slow stretch shrinks
+    the rest of this call's chunks and nothing after it. There are two exceptions. A call starts
+    from the item chunks that the run's last call timed while they are fresh (`carried`), so it
+    does not spend its first chunks timing small probes again. `_create_notes` sizes a call's
+    first batch of notes on the price that the run's last call recorded.
 
     A commit also costs a fixed part that does not depend on its size, and that part grows
     with the vault. Once two chunks of different sizes are timed, an item is priced at the
@@ -2389,27 +2393,25 @@ class _ApplyPacer:
         try:
             age = dt.datetime.now(dt.UTC).timestamp() - float(carried["at"])
             chunks = [(int(size), float(seconds)) for size, seconds in carried.get("item_chunks") or ()]
-            mib = carried.get("mib_seconds")
-            extraction = carried.get("extraction_seconds")
-            mib = None if mib is None else float(mib)
-            extraction = None if extraction is None else float(extraction)
         except (KeyError, TypeError, ValueError):
             return
         if not 0 <= age <= _NOTE_PRICE_FRESH_SECONDS or any(size < 1 or seconds < 0 for size, seconds in chunks):
             return
         self._item_chunks = chunks[-_CARRIED_CHUNKS:]
-        self._mib_seconds, self._extraction_seconds = mib, extraction
         if self._item_chunks:
             self._price_items()
 
     def carried(self) -> dict | None:
-        """What the next call starts from: the newest timed chunks and the dearest rates, with when they were taken."""
-        if not self._item_chunks and self._mib_seconds is None and self._extraction_seconds is None:
+        """What the next call starts from: the newest timed item chunks, with when they were taken.
+
+        The byte and media rates stay with the call that measured them: they are the dearest seen, so carrying
+        one would price every later call of the page at one slow or failed request.
+        """
+        if not self._item_chunks:
             return None
         return {
             "at": dt.datetime.now(dt.UTC).timestamp(),
             "item_chunks": [list(chunk) for chunk in self._item_chunks[-_CARRIED_CHUNKS:]],
-            "mib_seconds": self._mib_seconds, "extraction_seconds": self._extraction_seconds,
         }
 
     @staticmethod
@@ -2674,17 +2676,27 @@ def _record_row(item: adopt_module.ImportItem) -> dict[str, str]:
 
 
 def _settle_record_intent(root: Path, run: dict) -> None:
-    """Resolve a batch that set out to record owed rows and may have stopped: drop the rows if its entry landed."""
-    intent = run.pop(_RECORD_INTENT, None)
-    if not isinstance(intent, dict):
-        return
-    try:
-        landed = adopt_module.import_chunk_logged(root, intent["token"])
-    except adopt_module.AdoptError:
-        # An unreadable log cannot say; recording the rows again costs at most one repeated summary entry.
-        landed = False
-    if landed:
-        run[_INDEX_OWED] = (run.get(_INDEX_OWED) or [])[intent["rows"]:]
+    """Resolve a batch that set out to record owed rows and may have stopped: drop its rows if its entry landed.
+
+    The rows go by their Source paths, never by their place in the list, because a later batch may have added
+    rows since. A log that cannot be read cannot say whether the entry landed, and recording the rows again could
+    log them twice, so the rows stay owed with their intent and the call stops with the log's own code.
+    """
+    intent = run.get(_RECORD_INTENT)
+    if isinstance(intent, dict):
+        try:
+            landed = adopt_module.import_chunk_logged(root, intent["token"])
+        except adopt_module.AdoptError as error:
+            raise AdoptionRunError(error.code, error.reason) from error
+        if landed:
+            recorded = set(intent["sources"])
+            run[_INDEX_OWED] = [row for row in run.get(_INDEX_OWED) or () if row["source_path"] not in recorded]
+    run.pop(_RECORD_INTENT, None)
+
+
+def _sources_of(rows: Iterable[Mapping[str, str]]) -> list[str]:
+    """The Source path of each row: what names a row when a batch settles."""
+    return [row["source_path"] for row in rows]
 
 
 def _record_owed(root: Path, store: AdoptionRunStore, run: dict, *, today: dt.date) -> None:
@@ -2693,7 +2705,7 @@ def _record_owed(root: Path, store: AdoptionRunStore, run: dict, *, today: dt.da
     owed = run.get(_INDEX_OWED) or []
     if owed:
         token = hashlib.sha256(json.dumps([run["run_id"], owed], sort_keys=True).encode("utf-8")).hexdigest()
-        run[_RECORD_INTENT] = {"token": token, "rows": len(owed)}
+        run[_RECORD_INTENT] = {"token": token, "sources": _sources_of(owed)}
         store.save_intent(run)
         with call_spans.span("adoption.bookkeeping", {"rows": len(owed)}):
             adopt_module.record_imports(root, owed, today=today, token=token)
@@ -2703,11 +2715,11 @@ def _record_owed(root: Path, store: AdoptionRunStore, run: dict, *, today: dt.da
 
 def _freeze_import_chunk(
     store: AdoptionRunStore, run: dict, survivors: list[tuple[dict, adopt_module.ImportItem]],
-    *, run_date: dt.date, record: int | None,
+    *, run_date: dt.date, record: list[str] | None,
 ) -> tuple[dict | None, bool]:
     """Retain exact post-images before a rename or any destination is published.
 
-    `record` is how many owed rows the batch records with its own (see `_commit_chunk`), or None.
+    `record` is the Source paths of the owed rows the batch records with its own (see `_commit_chunk`), or None.
     """
     invocation = _apply_invocation(run)
     if invocation is None:
@@ -2730,8 +2742,8 @@ def _freeze_import_chunk(
         ).encode("utf-8")).hexdigest(),
     }
     publication["record"] = record
-    if record is not None:
-        run[_RECORD_INTENT] = {"token": publication["operation_token"], "rows": record}
+    if record:
+        run[_RECORD_INTENT] = {"token": publication["operation_token"], "sources": record}
     invocation["publication"] = publication
     with call_spans.span("adoption.save_intent"):
         store.save_intent(run)
@@ -2744,7 +2756,7 @@ def _commit_chunk(
     run_date: dt.date, label: str | None, reads: _CallReads,
     placed: Mapping[str, import_rename.Placed],
     publication: dict | None = None, reconciling: bool = False,
-    record: int | None = None, token: str | None = None,
+    record: list[str] | None = None, token: str | None = None,
 ) -> list[dict]:
     """Commit one chunk's pages, artifacts and the run's changes in one batch.
 
@@ -2755,9 +2767,9 @@ def _commit_chunk(
     call renamed goes back to its stage; one that an earlier call renamed stays where it is.
 
     The Sources index, the top index and the log are rewritten whole for any entry, so a batch
-    records its files there only when `record` says so: then the first `record` rows the run
-    owes and this batch's files, in one log entry named `token` (the frozen chunk's own token
-    when it has one). Otherwise the batch adds its files to the rows the run owes.
+    records its files there only when `record` says so: then the owed rows that `record` names
+    by Source path and this batch's files, in one log entry named `token` (the frozen chunk's
+    own token when it has one). Otherwise the batch adds its files to the rows the run owes.
     """
     outcomes = run["outcomes"]
     for planned, _item in survivors:
@@ -2773,12 +2785,13 @@ def _commit_chunk(
     if recorded is _ABSENT:
         # A chunk frozen before filings deferred their bookkeeping records its own files, as it would have then.
         rows = None
-    elif not isinstance(recorded, int):
+    elif recorded is None:
         rows = []
         run[_INDEX_OWED] = owed + own
     else:
-        rows = owed[:recorded] + own
-        run[_INDEX_OWED] = owed[recorded:]
+        named = set(recorded)
+        rows = [row for row in owed if row["source_path"] in named] + own
+        run[_INDEX_OWED] = [row for row in owed if row["source_path"] not in named]
         run.pop(_RECORD_INTENT, None)
     try:
         invocation = _apply_invocation(run)
@@ -2822,7 +2835,7 @@ def _commit_chunk(
         ]
         run[_INDEX_OWED] = owed
         if rows:
-            run[_RECORD_INTENT] = {"token": token, "rows": len(owed)}
+            run[_RECORD_INTENT] = {"token": token, "sources": _sources_of(rows)}
         if getattr(error, "code", None) == "PATH_GUARD_CONTENT":
             # The batch hashes each artifact as it copies it and names none when one differs from the
             # plan. Only now are the artifacts re-hashed, to fail the one that drifted and commit the rest.
@@ -3086,21 +3099,22 @@ def _file_survivors(
         return []
     outcomes = run["outcomes"]
     label = (run.get("collection") or {}).get("label")
-    record, token = None, None
+    record: list[str] | None = None
+    token = None
     held = _apply_invocation(run)
     first, reads.filed = not reads.filed, True
     if (page_final or first and run.get(_INDEX_OWED)) and not (held and held.get("publication")):
         # The call's first batch records what earlier calls filed, and a page's last batch records the rest.
         _settle_record_intent(root, run)
-        record = len(run.get(_INDEX_OWED) or ())
+        owed = run.get(_INDEX_OWED) or []
+        record = _sources_of(owed)
         if held is None:
             token = hashlib.sha256(json.dumps(
-                [run["run_id"], (run.get(_INDEX_OWED) or [])[:record], [_record_row(item) for _p, item in survivors]],
-                sort_keys=True,
+                [run["run_id"], owed, [_record_row(item) for _p, item in survivors]], sort_keys=True,
             ).encode("utf-8")).hexdigest()
             if record:
                 # Only rows that earlier calls saved need the intent; this batch's own rows are lost with it.
-                run[_RECORD_INTENT] = {"token": token, "rows": record}
+                run[_RECORD_INTENT] = {"token": token, "sources": record}
                 with call_spans.span("adoption.save_intent"):
                     store.save_intent(run)
     publication, reconciling = _freeze_import_chunk(store, run, survivors, run_date=run_date, record=record)
@@ -3802,6 +3816,10 @@ def apply(
 
         run["phase"] = _recompute_phase(outcomes, plan_items, stopped)
         run["inflight"] = False
+        if run["phase"] != "applying":
+            # A page whose last chunk filed nothing (only duplicates or failures) has no batch left to record the
+            # rows that earlier chunks owe. Without this they wait for `finish`, which a caller may never make.
+            _record_owed(root, store, run, today=run_date)
         # The run keeps the cumulative counts; this call reports those of the originals it handled.
         unchanged, checked = _verify_counts(outcomes)
         run["verify"] = {
@@ -3874,11 +3892,22 @@ def cancel(root: Path, *, run_id: str, why: str | None) -> dict:
             raise AdoptionRunError("INVALID_PHASE", f"cancel is not allowed from phase {phase!r}")
         _refuse_pending_renames(root, "cancel", run_id=run_id)
         # The Sources this page filed stay, so the indexes and the log record them.
-        _record_owed(root, store, run, today=_today(None))
+        warning = None
+        try:
+            _record_owed(root, store, run, today=_today(None))
+        except Exception as error:  # noqa: BLE001 - cancel is the way out of a stuck page: a failed record is reported, never raised
+            warning = (
+                f"The Sources index and the log could not record the {len(run.get(_INDEX_OWED) or ())} files that "
+                f"this page filed ({getattr(error, 'code', type(error).__name__)}); the files are filed, "
+                "and the run keeps the rows it still owes."
+            )
         run["cancel"] = {"at": _now_iso(), "why": (why or "").strip() or None}
         run["phase"] = "cancelled"
         store.save(run)
-    return _present(root, run)
+    reply = _present(root, run)
+    if warning is not None:
+        reply["warnings"] = [*reply.get("warnings", ()), warning]
+    return reply
 
 
 def _skipped_duplicates(outcomes: dict) -> int:

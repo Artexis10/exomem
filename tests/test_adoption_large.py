@@ -5,7 +5,6 @@ import collections
 import datetime as dt
 import hashlib
 import json
-import re
 import shutil
 import tracemalloc
 import uuid
@@ -274,6 +273,6 @@ def test_an_import_rotates_the_live_log_instead_of_growing_it(tmp_path: Path, mo
     kb = vault / "Knowledge Base"
     live = (kb / "log.md").read_text(encoding="utf-8")
     assert live.count("adopt-copy") <= 3 + 1
-    archived = "".join(path.read_text(encoding="utf-8") for path in (kb / "_archive" / "logs").glob("log-*.md"))
-    assert archived
-    assert sum(int(count) for count in re.findall(r"Copied (\d+) selected file", archived + live)) == 60
+    assert list((kb / "_archive" / "logs").glob("log-*.md"))
+    entries = [entry for entry in vault_module.read_operation_log(vault)["entries"] if entry["op"] == "adopt-copy"]
+    assert sum(entry["provenance"]["files"] for entry in entries) == 60

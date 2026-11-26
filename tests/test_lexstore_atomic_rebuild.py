@@ -3036,3 +3036,34 @@ def test_a_census_refuses_when_the_registry_holds_two_spellings_of_one_page(
         lexstore.LexicalStore._census_agrees_outside_replay(start, replayed, after_walk, view)
         is None
     )
+
+
+def test_a_shared_read_opens_the_replaced_sidecar_and_never_answers_from_the_one_it_replaced(
+    tmp_path: Path,
+) -> None:
+    """A plan loop shares one connection for many lookups. A sidecar that a rebuild replaces in the middle of
+    the loop leaves that connection on the unlinked file, so every later lookup would answer from the old one."""
+    page = _kb_file(tmp_path, "a.md", "- [config] before ^u1")
+    _seed(tmp_path, [page])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    rel = "Knowledge Base/a.md"
+    # The replacement is a copy of the live sidecar that stores another hash for the page, as a rebuild's would.
+    replacement = store.path.with_name("replacement.sqlite")
+    live, copy = sqlite3.connect(store.path), sqlite3.connect(replacement)
+    try:
+        live.backup(copy)
+        copy.execute("UPDATE pages SET content_hash = 'replaced' WHERE path = ?", (rel,))
+        copy.commit()
+    finally:
+        copy.close()
+        live.close()
+
+    with lexstore.shared_reads(tmp_path):
+        before = store.page_content_hashes([rel])[rel]
+        for sibling in (store.path.with_name(store.path.name + suffix) for suffix in ("-wal", "-shm")):
+            sibling.unlink(missing_ok=True)  # a published sidecar is one folded file
+        os.replace(replacement, store.path)
+        after = store.page_content_hashes([rel])[rel]
+
+    assert before not in (None, "replaced") and after == "replaced"

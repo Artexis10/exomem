@@ -1225,6 +1225,37 @@ def test_a_commit_cost_that_does_not_depend_on_chunk_size_does_not_shrink_a_call
     assert filed >= at_least
 
 
+def test_a_slow_media_request_prices_media_for_its_own_call_and_not_for_the_calls_that_follow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Carrying the dearest media rate from call to call, and restamping it, let one slow or failed extraction
+    price every later call of the page at that request while calls arrive within the carry window. Each call then
+    trimmed its photo chunks to one item, so a photo page filed a few items per call."""
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(request_budget, "time", types.SimpleNamespace(monotonic=lambda: clock["now"]))
+    monkeypatch.setattr(writer_lease, "active_derived_batch_custody", lambda root: True)
+    monkeypatch.setattr(
+        writer_lease, "owed_custody_handoff_seconds",
+        lambda root, more_batches: adoption_run.CUSTODY_RESERVE_FLOOR_SECONDS,
+    )
+    photos = [{"form": "artifact", "artifact_path": f"p{n}.jpg", "original_bytes": 1500} for n in range(40)]
+
+    def pacer(carried: object = None) -> adoption_run._ApplyPacer:
+        budget = request_budget.RequestBudget(seconds=50.0, entry=clock["now"])
+        return adoption_run._ApplyPacer(tmp_path, budget, carried=carried)
+
+    slow = pacer()
+    slow.record(photos[:2], 61.0, [30.0, 30.0])  # a slow stretch: each of two requests took 30 s
+    resumed = pacer(slow.carried())
+    resumed.record(photos[:2], 3.0, [1.0, 1.0])  # the next call measures 1 s requests
+    measured_alone = pacer()
+    measured_alone.record(photos[:2], 3.0, [1.0, 1.0])
+
+    admitted = len(resumed.next_chunk(photos[2:], first=False))
+
+    assert admitted == len(measured_alone.next_chunk(photos[2:], first=False)) > 1
+
+
 def test_a_chunk_that_ran_slower_than_its_size_does_not_let_the_pacer_start_a_chunk_past_the_deadline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

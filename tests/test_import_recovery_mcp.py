@@ -7,7 +7,6 @@ import contextlib
 import copy
 import hashlib
 import json
-import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -816,6 +815,93 @@ def test_stops_between_chunks_and_inside_the_recording_batch_file_and_log_each_i
 
     assert sum(indexes._count_sources(root / "Knowledge Base/Sources").values()) == 6
     assert "- Sources: 6" in (root / "Knowledge Base/index.md").read_text(encoding="utf-8")
-    assert sum(int(count) for count in re.findall(r"Copied (\d+) selected file", log.read_text(encoding="utf-8"))) == 6
     entries = [entry for entry in vault_module.read_operation_log(root)["entries"] if entry["op"] == "adopt-copy"]
+    assert sum(entry["provenance"]["files"] for entry in entries) == 6
     assert len({entry["provenance"]["import_chunk"] for entry in entries}) == len(entries)
+
+
+def _adopt_copy_entries(root) -> list[dict]:
+    return [entry for entry in vault_module.read_operation_log(root)["entries"] if entry["op"] == "adopt-copy"]
+
+
+def test_a_page_whose_last_chunk_files_nothing_records_what_the_page_filed_when_its_apply_ends(tmp_path, monkeypatch):
+    """The last chunk held only a duplicate, so no batch was left to record the first chunk's two files. The page
+    ended `applied` with both out of the log and the Sources index until a `finish` that a caller may never make."""
+    monkeypatch.setattr(adoption_run, "APPLY_CHUNK_ITEMS", 2)
+    root = _vault(tmp_path, {
+        "Coll/a/IMG_1.png": PHOTO, "Coll/b/note.md": "# Note\n\nBody.\n", "Coll/c/IMG_1 copy.png": PHOTO,
+    })
+    run_id, planned = _import(root, path="Coll", include=["Coll"])
+
+    reply = adoption_run.apply(root, run_id=run_id, plan_id=planned["plan"]["plan_id"], today=TODAY)
+
+    assert reply["phase"] == "applied"
+    assert reply["apply_result"]["skipped_duplicates"] == 1
+    assert not adoption_run.AdoptionRunStore(root).load(run_id).get(adoption_run._INDEX_OWED)
+    assert [entry["provenance"]["files"] for entry in _adopt_copy_entries(root)] == [2]
+    assert "- Sources: 2" in (root / "Knowledge Base/index.md").read_text(encoding="utf-8")
+
+
+def _row(name: str) -> dict[str, str]:
+    return {"original_path": f"Coll/{name}.md", "source_path": f"Knowledge Base/Sources/Imported/{name}.md",
+            "original_sha256": name * 16}
+
+
+def test_a_settled_batch_drops_the_rows_it_named_and_not_the_rows_that_now_stand_first(tmp_path):
+    """Another identity's apply, over a disjoint scope, can owe rows between a batch's frozen recording and its
+    replay. Dropping the first rows by count then logs the wrong files as recorded and records the others twice."""
+    root = _vault(tmp_path, {}, indexed=False)
+    recorded, later = _row("a"), _row("b")
+    adoption_run.adopt_module.record_imports(root, [recorded], today=TODAY, token="t" * 64)
+    run = {
+        adoption_run._INDEX_OWED: [later, recorded],
+        adoption_run._RECORD_INTENT: {"token": "t" * 64, "sources": [recorded["source_path"]]},
+    }
+
+    adoption_run._settle_record_intent(root, run)
+
+    assert run[adoption_run._INDEX_OWED] == [later]
+    assert adoption_run._RECORD_INTENT not in run
+
+
+def test_a_log_that_cannot_be_read_keeps_the_owed_rows_and_the_intent_instead_of_recording_them_again(tmp_path):
+    """Whether the earlier entry landed is unknown while the log is unreadable, and recording the rows could log
+    them twice. The call stops with the log's code, and the next call settles the same intent."""
+    root = _vault(tmp_path, {}, indexed=False)
+    rows = [_row("a")]
+    intent = {"token": "t" * 64, "sources": [rows[0]["source_path"]]}
+    run = {adoption_run._INDEX_OWED: list(rows), adoption_run._RECORD_INTENT: dict(intent)}
+    (root / "Knowledge Base/log.md").write_bytes(b"\xff\xfe not text")
+
+    with pytest.raises(adoption_run.AdoptionRunError) as refused:
+        adoption_run._settle_record_intent(root, run)
+
+    assert refused.value.code == "IMPORT_RECOVERY_UNRESOLVED"
+    assert run[adoption_run._INDEX_OWED] == rows and run[adoption_run._RECORD_INTENT] == intent
+
+
+def test_cancel_reports_a_failed_bookkeeping_batch_and_keeps_the_rows_owed_instead_of_failing(tmp_path, monkeypatch):
+    """A persistent index read error must not take the escape hatch away from a page that filed some files."""
+    monkeypatch.setattr(adoption_run, "APPLY_CHUNK_ITEMS", 2)
+    root = _vault(tmp_path, {f"Coll/note-{n}.md": f"# Note {n}\n\nBody {n}.\n" for n in range(6)})
+    run_id, planned = _import(root, path="Coll", include=["Coll"])
+    real_next, calls = adoption_run._ApplyPacer.next_chunk, []
+
+    def stop_after_the_first_chunk(self, pending, *, first):
+        calls.append(1)
+        return real_next(self, pending, first=first) if len(calls) == 1 else []
+
+    with monkeypatch.context() as patch:
+        patch.setattr(adoption_run._ApplyPacer, "next_chunk", stop_after_the_first_chunk)
+        stopped = adoption_run.apply(root, run_id=run_id, plan_id=planned["plan"]["plan_id"], today=TODAY)
+    assert stopped["phase"] == "applying" and len(adoption_run.AdoptionRunStore(root).load(run_id)["index_owed"]) == 2
+
+    def fail(*arguments, **keywords):
+        raise OSError("the Sources index cannot be read")
+
+    monkeypatch.setattr(adoption_run.adopt_module, "record_imports", fail)
+    cancelled = adoption_run.cancel(root, run_id=run_id, why="test")
+
+    assert cancelled["phase"] == "cancelled"
+    assert any("could not record the 2 files" in warning for warning in cancelled["warnings"])
+    assert len(adoption_run.AdoptionRunStore(root).load(run_id)["index_owed"]) == 2
