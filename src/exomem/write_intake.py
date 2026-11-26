@@ -374,26 +374,32 @@ _REPLAY: contextvars.ContextVar[_Replay | None] = contextvars.ContextVar("exomem
 _WAIT_CAP: contextvars.ContextVar[float | None] = contextvars.ContextVar("exomem_intake_wait_cap", default=None)
 
 
-_QUEUEABLE: contextvars.ContextVar[bool] = contextvars.ContextVar("exomem_intake_queueable", default=False)
+class _Queueable:
+    """Whether a busy refusal of the current intake save may be queued for a later replay."""
+
+    __slots__ = ("ok",)
+
+    def __init__(self, ok: bool) -> None:
+        self.ok = ok
+
+
+_QUEUEABLE: contextvars.ContextVar[_Queueable | None] = contextvars.ContextVar("exomem_intake_queueable", default=None)
 
 
 def queues_busy_refusal() -> bool:
     """Whether a busy refusal of this call's write, with nothing committed, is queued and lands later."""
-    return _QUEUEABLE.get()
+    cell = _QUEUEABLE.get()
+    return cell is not None and cell.ok
 
 
-@contextmanager
-def queueing_only_if(rerun_safe: bool) -> Iterator[None]:
-    """Keep a write the server cannot safely run again, such as one that fetched caller-supplied
-    temporary handles, out of the spent-call-time stop, so it commits late instead of refetching."""
-    if rerun_safe:
-        yield
-        return
-    token = _QUEUEABLE.set(False)
-    try:
-        yield
-    finally:
-        _QUEUEABLE.reset(token)
+def not_rerunnable() -> None:
+    """Mark this save as one the server cannot safely run again, such as one that fetched
+    caller-supplied temporary file links. Its busy refusals then go back to the caller, who alone
+    can retry, and the spent-call-time stop lets it commit late. The mark holds for the rest of the
+    save, on every thread that shares its context."""
+    cell = _QUEUEABLE.get()
+    if cell is not None:
+        cell.ok = False
 
 
 def busy_wait_cap() -> float | None:
@@ -1178,7 +1184,8 @@ class Admission:
                 log.warning("write intake could not queue a %s save behind its queue", self.command.name,
                             exc_info=True)
         token = _WAIT_CAP.set(deadline)
-        queueable = _QUEUEABLE.set(self.refusal is None)
+        cell = _Queueable(self.refusal is None)
+        queueable = _QUEUEABLE.set(cell)
         try:
             return call()
         except OpError as error:
@@ -1186,6 +1193,8 @@ class Admission:
                 raise
             if self.refusal is not None:
                 raise self.refusal from error
+            if not cell.ok:
+                raise
             try:
                 # The refusal's cause when it names one (a spent call budget, a moved auxiliary), so
                 # the queued row says why it waited and the cause can be counted.

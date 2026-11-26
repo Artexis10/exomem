@@ -470,11 +470,15 @@ def test_a_write_the_intake_cannot_queue_still_lands_when_its_call_time_is_spent
     assert len(_pages_titled(vault, "Queued save 32")) == 1
 
 
-def test_a_file_capture_past_its_call_time_commits_with_the_file_it_fetched(
-    vault: Path, managers, drainer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The server cannot fetch a caller's temporary file link again, so queuing the capture would
-    fetch it a second time or lose it once the link expired."""
+_FIGURES_CAPTURE = {
+    "title": "Fetched figures",
+    "source_type": "research-report",
+    "files": [{"download_url": "https://files.example/a", "file_id": "file-a"}],
+}
+
+
+def _fetch_figures(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
+    """Stand in for the download of a caller's file link; returns the file ids fetched."""
     fetched: list[str] = []
 
     def stage(file, _budget, **_kwargs):  # noqa: ANN001, ANN202
@@ -488,16 +492,40 @@ def test_a_file_capture_past_its_call_time_commits_with_the_file_it_fetched(
         )
 
     monkeypatch.setattr(client_artifacts, "stage_artifact", stage)
+    return fetched
+
+
+def test_a_file_capture_past_its_call_time_commits_with_the_file_it_fetched(
+    vault: Path, managers, drainer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The server cannot fetch a caller's temporary file link again, so queuing the capture would
+    fetch it a second time or lose it once the link expired."""
+    fetched = _fetch_figures(monkeypatch, tmp_path)
     result = _send_after_deadline(
-        _command("capture_source"), vault,
-        {"title": "Fetched figures", "source_type": "research-report",
-         "files": [{"download_url": "https://files.example/a", "file_id": "file-a"}]},
-        injected=(schema_module.load_source_schema(vault),),
+        _command("capture_source"), vault, _FIGURES_CAPTURE, injected=(schema_module.load_source_schema(vault),)
     )
 
     assert result.get("state") != "queued", result
     assert fetched == ["file-a"]
     assert [path.read_bytes() for path in vault.rglob("*.bin")] == [b"quarterly figures"]
+
+
+def test_a_file_capture_that_meets_a_busy_vault_goes_back_to_its_caller(
+    vault: Path, managers, drainer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A queued replay would fetch the caller's temporary file link again, or find it expired; only
+    the caller can send the capture again."""
+    _writer, holder = managers
+    monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "1")
+    fetched = _fetch_figures(monkeypatch, tmp_path)
+    with _Hold(holder, vault), pytest.raises(OpError) as refused:
+        _send(_command("capture_source"), vault, _FIGURES_CAPTURE,
+              injected=(schema_module.load_source_schema(vault),))
+
+    assert refused.value.code == "MUTATION_BUSY"
+    assert refused.value.details["committed"] is False
+    assert fetched == ["file-a"]
+    assert write_intake.read(vault)["items"] == []
 
 
 def test_a_commit_under_way_is_never_refused_when_its_call_time_runs_out(
