@@ -1294,7 +1294,9 @@ def test_a_ref_addressed_add_with_compact_metadata_is_refused_without_a_vault_wa
     assert str(with_projection.value) == expected
 
 
-def test_a_dated_add_whose_relations_need_a_rich_kind_gets_the_relations_refusal(tmp_path: Path) -> None:
+def test_a_dated_add_whose_relations_need_a_rich_kind_gets_the_relations_refusal(
+    tmp_path: Path,
+) -> None:
     """The early compact refusal must not answer for relations that only the page can judge.
 
     A relation that cannot move to a page field is refused before the dates are read, so the reply
