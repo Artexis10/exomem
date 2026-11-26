@@ -279,7 +279,7 @@ def test_idempotency_claim_is_visible_without_repeating_the_write(tmp_path, toke
     assert store.run("capture", "digest", lambda: result) == result
     assert store.run(
         "capture", "digest", lambda: pytest.fail("a replay repeated the write")
-    ) == result
+    ) == {**result, "replayed": True}
 
     stages = {item["name"]: item for item in call_spans.pop_call_spans(token)}
     claim = stages["mutation.idempotency_claim"]

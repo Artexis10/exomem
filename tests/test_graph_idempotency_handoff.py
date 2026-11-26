@@ -201,7 +201,7 @@ def test_exact_receipt_recovers_same_process_canonical_persistence_failure(
         ),
     )
 
-    assert recovered == {"canonical": "resumed"}
+    assert recovered == {"canonical": "resumed", "replayed": True}
     assert calls == 1
 
 
@@ -1066,7 +1066,7 @@ def test_legacy_graph_pending_migrates_only_with_an_exact_coherent_checkpoint(
             if key != "_graph_sync_checkpoint"
         },
         legacy_graph_pending_proof=_legacy_graph_pending_proof(vault),
-    ) == {"canonical": "committed", "graph_sync": "completed"}
+    ) == {"canonical": "committed", "graph_sync": "completed", "replayed": True}
 
 
 @pytest.mark.parametrize(
