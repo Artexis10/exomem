@@ -118,7 +118,9 @@ class HomeImportPlan:
     run_id: str
     workdir: Path
     cli_image: str
-    bulk: int = 30  # enough notes that filing lasts long enough to restart the cell inside it
+    # Enough notes that filing outlasts the cell start and the first poll that sees it working, so the restart lands inside
+    # it. The run 45869658005 filed 40 files before its first read; this many take minutes at the rate that run implies.
+    bulk: int = 1000
 
     @property
     def root(self) -> Path:
@@ -427,7 +429,8 @@ async def run_home_import(ctx: Context, plan: HomeImportPlan) -> None:
             break
         if view.get("state") == "unknown" and time.monotonic() - started > REGISTER_TIMEOUT_S:
             break
-        if not interrupted and view.get("state") in ("working", "parked"):
+        # Only a `working` view proves the cell is filing; a `parked` one waits on a need that a restart does not meet.
+        if not interrupted and view.get("state") == "working":
             out["restarts"].append({"why": "the cell restarts while it files", "state_seen_before": view.get("state"),
                                     "pod": await restart_cell(ctx)})
             interrupted = True
