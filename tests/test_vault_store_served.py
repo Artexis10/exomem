@@ -431,7 +431,7 @@ def test_a_delete_served_beside_a_backlog_past_the_cap_refuses_retryably_and_com
     deleted = call(stored, "manage_memory_file", operation="delete", path=saved["path"], confirm=True)
 
     assert refused.value.code == read.DERIVED_BEHIND
-    assert "Retry shortly" in refused.value.remediation
+    assert "still being indexed" in str(refused.value) and "Nothing was saved" in str(refused.value)
     assert unchanged == revision
     assert deleted["path"] == saved["path"]
     assert not read.page_exists(stored, saved["path"])
@@ -449,8 +449,26 @@ def test_a_read_by_reference_beside_a_backlog_past_the_cap_refuses_retryably(sto
     page = call(stored, "read_memory", path=saved["ref"])
 
     assert refused.value.code == read.DERIVED_BEHIND
-    assert "Retry shortly" in refused.value.remediation
+    assert "Retry in a few seconds" in refused.value.remediation
     assert page["path"] == saved["path"]
+
+
+def test_a_read_with_links_beside_a_backlog_past_the_cap_returns_the_page_without_inbound_links(
+    stored, service
+):
+    """A page read by its path with its links while more pages wait to derive than one link check
+    reads: the inbound links are unknown, so they come back null, as for a cold index, and the page
+    that was found is not withheld for them. The same read after the drain lists the links."""
+    saved = call(stored, "remember", **QUOKKA)
+    derived(stored)
+    with backlog_past_the_cap(stored):
+        page = call(stored, "read_memory", path=saved["path"], links=True)
+    drained = call(stored, "read_memory", path=saved["path"], links=True)
+
+    assert page["path"] == saved["path"] and "quokka population" in page["body"]
+    assert page["links"]["inbound"] is None
+    assert page["links"]["outbound"] == [ALPHA.removesuffix(".md")]
+    assert drained["links"]["inbound"] is not None
 
 
 def test_a_recall_that_outwaits_its_bound_says_the_rows_lag(stored, service, monkeypatch):

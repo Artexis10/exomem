@@ -1806,7 +1806,7 @@ def _store_identity_owners(
     bytes, by the rule that its drain applies (``identity_row``): a page that a failed delete left
     with its row is not an owner, and one that a failed write gave an id is. Any pending page could
     claim a wanted id, so the check reads them all, and a backlog past ``UNDERIVED_CAP`` refuses it
-    (``read.rows_behind()``).
+    (``read.backlog_too_large()``).
     """
     from .vault_store import derivation
 
@@ -1823,8 +1823,10 @@ def _owners_at(
     """Every page at ``conn``'s snapshot that holds each id in ``wanted``, with the rows of the
     pending ``claimants`` taken from their stored bytes (``_store_identity_owners``).
 
-    A row of a page that is pending, in ``claimants`` or not, is stale and never counts: the page's
-    bytes decide, and ``claimants`` holds the pages whose bytes the caller reads.
+    A row of a page that is pending, in ``claimants`` or not, is stale and never counts: the
+    page's bytes decide. The bytes of a pending page that holds a row for a wanted id count as a
+    claim too, so two pages that share an id stay ambiguous while both of them wait, as they are
+    once their rows arrive. A moved or deleted page has no bytes and claims nothing.
     """
     from .vault_store import derivation
 
@@ -1837,12 +1839,12 @@ def _owners_at(
             f"WHERE status = 'valid' AND exomem_id IN ({','.join('?' for _ in chunk)})",
             chunk,
         ))
-    # The rows name few pages (one per owner of a wanted id), so a keyed read finds the pending ones.
+    # The rows name few pages (one per owner of a wanted id): a keyed read finds the pending ones.
     pending = derivation.underived(conn, {path for _id, path in rows})
     for exomem_id, path in rows:
         if path not in pending:
             found[exomem_id].append(path)
-    for path, raw in claimants.items():
+    for path, raw in {**pending, **claimants}.items():
         row = None if raw is None else identity_row(root, path, raw)
         if row is not None and row[4] == "valid" and row[1] in found:
             found[row[1]].append(path)
@@ -1855,7 +1857,7 @@ def store_owners_by_prefix(vault_root: Path, prefix: str) -> tuple[str, ...] | N
     One read through the id index, with the rule of ``_store_identity_owners`` for a page whose
     derivation trails its stored bytes, so a page saved a moment ago is found by its id at once.
     Any pending page could hold an id under ``prefix``, so a backlog past ``UNDERIVED_CAP`` refuses
-    the read (``read.rows_behind()``).
+    the read (``read.backlog_too_large()``).
     """
     from .vault_store import derivation
 

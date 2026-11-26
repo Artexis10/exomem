@@ -430,23 +430,32 @@ def underived(conn: Connection, paths: Iterable[str] | None = None) -> dict[str,
 
     With ``paths``, only those pages count, each in a keyed read: the cost follows the caller's own
     paths, whatever the backlog. A check that asks about those pages alone, or that asks whether the
-    rows it found belong to a pending page, takes this form. Without ``paths``, every pending page
-    counts, for a check that any pending page could change (a new link, a claimed id): its cost
-    follows the backlog, so more than ``UNDERIVED_CAP`` pending pages refuse it with
-    ``read.rows_behind()`` before it reads one. The store thread derives the backlog between
-    requests, so the retry finds it smaller.
+    rows it found belong to a pending page, takes this form. Without ``paths``, every page counts,
+    for a check that any pending page could change (a new link, a claimed id): its cost follows the
+    backlog, so more than ``UNDERIVED_CAP`` pending pages refuse it with ``read.backlog_too_large()``
+    before it reads one. The store thread derives the backlog between requests, so the retry finds it
+    smaller. Only an intent that has not failed counts toward the cap: a failed one retries on a
+    backoff and never leaves the queue, so it would refuse every such check for good. Its bytes are
+    read all the same, and the failed pages are the ones that status reports.
+
+    Keyed paths that outnumber ``UNDERIVED_CAP`` could name every waiting page, so that call takes
+    this form too.
     """
-    if paths is None:
-        rows = _queue_rows(
+    wanted = None if paths is None else list(dict.fromkeys(paths))
+    if wanted is None or len(wanted) > UNDERIVED_CAP:
+        waiting = _queue_rows(
             conn,
-            "SELECT path FROM store_derivation_queue WHERE operation = ? LIMIT ?",
+            "SELECT path FROM store_derivation_queue WHERE operation = ? AND failed_code IS NULL LIMIT ?",
             (DERIVE, UNDERIVED_CAP + 1),
         )
-        if rows is not None and len(rows) > UNDERIVED_CAP:
-            raise read.rows_behind()
+        if waiting is not None and len(waiting) > UNDERIVED_CAP:
+            raise read.backlog_too_large()
+        rows = _queue_rows(conn, "SELECT path FROM store_derivation_queue WHERE operation = ?", (DERIVE,))
         pending = [path for path, in rows or ()]
+        if wanted is not None:
+            keep = set(wanted)
+            pending = [path for path in pending if path in keep]
     else:
-        wanted = list(dict.fromkeys(paths))
         pending = []
         for start in range(0, len(wanted), read.KEYS_PER_QUERY):
             batch = wanted[start : start + read.KEYS_PER_QUERY]
