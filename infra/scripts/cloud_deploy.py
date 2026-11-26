@@ -12,6 +12,10 @@ After a release, set its cell image as Substrate's `cell_image`, but only when:
 
 Then poll Substrate's bounded rollout view until the canary runs the target.
 
+When the newest release fails the platform gate or has an uncrossed barrier, the run still
+reports that alert. It then rolls out the newest older release that the fleet lacks and the
+deployed platform carries, which passes the same two gates, and the next run measures again.
+
 Once it has read the release and the rollout view, and before any later stop, every run
 also reports two alerts: the fleet has run an older release for too long, and cells are
 pinned to an image other than the fleet's. A run that ends on a failing stop with no alert
@@ -167,6 +171,7 @@ class Settings:
 class GitHub:
     def __init__(self, settings: Settings, transport: Transport) -> None:
         self.settings, self.transport = settings, transport
+        self._releases: list[tuple[tuple[int, int, int], dict]] | Stop | None = None
 
     def _get(self, path: str) -> Any:
         try:
@@ -190,24 +195,47 @@ class GitHub:
             raise Stop("RELEASE_NOT_FOUND", ok=False)
         return tag
 
-    def first_release_after(self, fleet: tuple[int, int, int]) -> Release | None:
-        """The oldest published release newer than `fleet`, or None when the newest releases
-        hold none. One read, newest first. When the fleet is older than every release on the
-        page, the oldest one on it stands in, so the age it gives is a lower bound."""
+    def published_releases(self) -> list[tuple[tuple[int, int, int], dict]]:
+        """The (version, release) of each published release on the newest page. One read per run:
+        a later call reuses the answer, and a failed read stays failed."""
 
+        if self._releases is None:
+            try:
+                self._releases = self._read_releases()
+            except Stop as stop:
+                self._releases = stop
+        if isinstance(self._releases, Stop):
+            raise self._releases
+        return self._releases
+
+    def _read_releases(self) -> list[tuple[tuple[int, int, int], dict]]:
         releases = self._get(f"/repos/{self.settings.repository}/releases?per_page={RELEASE_SCAN_LIMIT}")
-        newer = []
+        found = []
         for release in releases if isinstance(releases, list) else []:
             if not isinstance(release, dict) or release.get("draft") or release.get("prerelease"):
                 continue  # `releases/latest` skips both, so the fleet is never behind one
             tag = release.get("tag_name")
             version = parse_release(tag) if isinstance(tag, str) else None
-            if version is not None and version > fleet:
-                newer.append((version, release))
+            if version is not None:
+                found.append((version, release))
+        return found
+
+    def first_release_after(self, fleet: tuple[int, int, int]) -> Release | None:
+        """The oldest published release newer than `fleet`, or None when the newest releases
+        hold none. When the fleet is older than every release on the page, the oldest one on it
+        stands in, so the age it gives is a lower bound."""
+
+        newer = [found for found in self.published_releases() if found[0] > fleet]
         if not newer:
             return None
         _, oldest = min(newer, key=lambda found: found[0])
         return Release(oldest["tag_name"], self._published_at(oldest.get("published_at")))
+
+    def releases_between(self, fleet: tuple[int, int, int], newest: tuple[int, int, int]) -> list[str]:
+        """The tags of the published releases newer than `fleet` and older than `newest`, newest first."""
+
+        between = [found for found in self.published_releases() if fleet < found[0] < newest]
+        return [release["tag_name"] for _, release in sorted(between, key=lambda found: found[0], reverse=True)]
 
     @staticmethod
     def _published_at(value: object) -> datetime | None:
@@ -458,6 +486,53 @@ def report_run_outcome(settings: Settings, tools: Tools, stop: Stop) -> None:
     send_alert(settings, tools.transport, FAILING_ALERT, failing, tools.now())
 
 
+def gate_release(settings: Settings, tools: Tools, deployment: dict, tag: str, *,
+                 gate: tuple[list[str], list[str]], barriers: dict) -> None:
+    """D2 and D3 for the newest release: send the platform and barrier alerts, and stop on the first that blocks it."""
+
+    include, exclude = gate
+    changed = platform_inputs(tools.changed_paths(deployment["ref"], tag), include, exclude)
+    if changed:
+        send_alert(settings, tools.transport, PLATFORM_NEEDED_ALERT, True, tools.now())
+        raise Stop(PLATFORM_NEEDED_ALERT, ok=False, detail=f"{len(changed)} platform input(s) changed")
+    send_alert(settings, tools.transport, PLATFORM_NEEDED_ALERT, False, tools.now())
+
+    uncrossed = uncrossed_barriers(tag, deployment, barriers)
+    if uncrossed:
+        send_alert(settings, tools.transport, BARRIER_ALERT, True, tools.now())
+        raise Stop(BARRIER_ALERT, ok=False, detail=" ".join(uncrossed))
+    send_alert(settings, tools.transport, BARRIER_ALERT, False, tools.now())
+
+
+def covered_release(tools: Tools, github: GitHub, view: dict, deployment: dict, newest: str, *,
+                    gate: tuple[list[str], list[str]], barriers: dict) -> tuple[str, str] | None:
+    """The newest release between the fleet's and `newest` that the platform carries and that has a
+    published image, as (tag, image). None when the fleet's release is unknown, none qualifies, or
+    the fleet already runs it. A candidate passes the same two gates as the newest release, and sends no alert."""
+
+    release = view.get("release")
+    fleet = parse_release(release) if isinstance(release, str) else None
+    target = parse_release(newest)
+    if fleet is None or target is None:
+        return None
+    try:
+        candidates = github.releases_between(fleet, target)
+    except Stop:
+        return None  # The release list only feeds this fallback, so its failure leaves the original stop.
+    include, exclude = gate
+    for tag in candidates:
+        if platform_inputs(tools.changed_paths(deployment["ref"], tag), include, exclude):
+            continue
+        if uncrossed_barriers(tag, deployment, barriers):
+            continue
+        image = tools.image(tag)
+        if not image:
+            print(f"cloud-deploy: CELL_IMAGE_NOT_PUBLISHED {tag}")
+            continue
+        return None if view.get("cell_image") == image else (tag, image)
+    return None
+
+
 def deploy(settings: Settings, tools: Tools, *, gate: tuple[list[str], list[str]], barriers: dict) -> None:
     if not settings.deploy_token or not settings.substrate_url:
         raise Stop(NOT_CONFIGURED, ok=True)
@@ -487,25 +562,28 @@ def deploy(settings: Settings, tools: Tools, *, gate: tuple[list[str], list[str]
     if view.get("cell_image") == image or view.get("release") == tag:
         raise Stop("CELL_IMAGE_CURRENT", ok=True)
 
-    # D2: the platform gate.
+    # D2 and D3: the platform gate, then the barriers.
     deployment = github.newest_platform_deployment()
-    include, exclude = gate
     ref = deployment["ref"] if deployment else None
     if deployment is None or not isinstance(ref, str):
         send_alert(settings, tools.transport, PLATFORM_NEEDED_ALERT, True, tools.now())
         raise Stop(PLATFORM_NEEDED_ALERT, ok=False, detail="NO_PLATFORM_DEPLOYMENT")
-    changed = platform_inputs(tools.changed_paths(ref, tag), include, exclude)
-    if changed:
-        send_alert(settings, tools.transport, PLATFORM_NEEDED_ALERT, True, tools.now())
-        raise Stop(PLATFORM_NEEDED_ALERT, ok=False, detail=f"{len(changed)} platform input(s) changed")
-    send_alert(settings, tools.transport, PLATFORM_NEEDED_ALERT, False, tools.now())
-
-    # D3: every barrier entry at or below the release must be crossed.
-    uncrossed = uncrossed_barriers(tag, deployment, barriers)
-    if uncrossed:
-        send_alert(settings, tools.transport, BARRIER_ALERT, True, tools.now())
-        raise Stop(BARRIER_ALERT, ok=False, detail=" ".join(uncrossed))
-    send_alert(settings, tools.transport, BARRIER_ALERT, False, tools.now())
+    covered = False
+    try:
+        gate_release(settings, tools, deployment, tag, gate=gate, barriers=barriers)
+    except Stop as blocked:
+        # The block's alert stays active. The fleet still lacks the newest release, so the run
+        # rolls out the newest one that the platform carries, or ends on the block.
+        if blocked.code not in (PLATFORM_NEEDED_ALERT, BARRIER_ALERT):
+            raise
+        found = covered_release(tools, github, view, deployment, tag, gate=gate, barriers=barriers)
+        if found is None:
+            raise
+        tag, image = found
+        covered = True
+        if not tools.attest(image, tag):
+            raise Stop("ATTESTATION_UNVERIFIED", ok=False) from None
+        print(f"cloud-deploy: COVERED_RELEASE {tag}")
 
     # D1 step 6: set the image with its verified tag, and nothing else.
     refused = substrate.set_image(image, tag)
@@ -514,8 +592,9 @@ def deploy(settings: Settings, tools: Tools, *, gate: tuple[list[str], list[str]
     if refused is not None:
         raise Stop(f"SUBSTRATE_{refused}", ok=False)
     print("cloud-deploy: CELL_IMAGE_SET")
-    # The fleet now targets the newest release, so the lag this run reported is over.
-    if reported_behind:
+    # The fleet now targets the newest release, so the lag this run reported is over. A covered
+    # release leaves the newest one missing, so the next run measures the lag again.
+    if reported_behind and not covered:
         send_alert(settings, tools.transport, RELEASE_BEHIND_ALERT, False, tools.now())
 
     # D1 step 7: wait until the canary runs the target and is Ready.
