@@ -51,6 +51,11 @@ MEDIA_PREVIEWS_DIRNAME = ".media-previews"
 # Closed portable security artifact; its contents carry no connector authority.
 CONNECTOR_BOUNDARY_DESCRIPTOR_ID = "connector-boundary"
 CONNECTOR_BOUNDARY_REQUIREMENT_NAME = ".connector-boundary.json"
+# Face search keeps two databases in one owner-only store: the index is rebuilt by a re-scan, the people store
+# holds the owner's names and corrections, which nothing else records.
+FACES_DIRNAME = "faces"
+FACE_INDEX_PATH = f"{FACES_DIRNAME}/index.sqlite"
+FACE_PEOPLE_PATH = f"{FACES_DIRNAME}/people.sqlite"
 
 _SQLITE_SUFFIXES = ("", "-wal", "-shm", "-journal")
 #: A recall sidecar named for the vector space it holds (`index_paths.space_sidecar_name`).
@@ -497,6 +502,16 @@ _REGISTRY = (
         "source-import-intents", "source_imports", StatePlacement.EXTERNAL_STATE,
         rebuildable=False,
         trees=("source-import-intents",),
+    ),
+    InternalStateDescriptor(
+        "face-index", "face_store", StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
+        exact=_sqlite_family(FACE_INDEX_PATH),
+    ),
+    InternalStateDescriptor(
+        "face-people", "face_store", StatePlacement.EXTERNAL_STATE,
+        rebuildable=False,
+        exact=_sqlite_family(FACE_PEOPLE_PATH),
     ),
     InternalStateDescriptor(
         "source-custody", "source_custody", StatePlacement.VAULT_CANONICAL,

@@ -338,6 +338,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         deferred_index,
         due_state,
         epistemic_graph,
+        face_store,
         graph_sync,
         index_paths,
         lexstore,
@@ -397,6 +398,8 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "lexical-store",
         "lexical-staged",
         "lexical-staged-lock",
+        "face-index",
+        "face-people",
         "maintenance-jobs-store",
         "media-jobs-store",
         "media-previews",
@@ -450,6 +453,8 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         (media_jobs.worker_lock_path(root), "media-jobs-store"),
         (state_paths.vault_state_dir(root) / media_previews.STORE / "aa" / ("a" * 64 + ".json"), "media-previews"),
         (voice_profiles.voice_profiles_path(root), "voice-profile-store"),
+        (face_store.index_path(root), "face-index"),
+        (face_store.people_path(root), "face-people"),
         (procedure_approval.key_path(root), "procedure-approval-key"),
         (
             procedure_approval.entry_path(

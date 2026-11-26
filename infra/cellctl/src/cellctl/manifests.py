@@ -1327,6 +1327,13 @@ CATALOGUE_BACKUP_EXCLUDES = tuple(
     for name in (".lexical-staged-*.sqlite", ".lexical.sqlite.rebuild-*.tmp")
     for suffix in ("", "-wal", "-shm", "-journal")
 )
+# The face index holds face vectors, which a re-scan rebuilds and no backup may keep. Mirrors the rebuildable
+# `face-index` family; tests/test_face_store.py pins this mirror to the registry.
+FACE_INDEX_BACKUP_EXCLUDES = tuple(
+    f"/data/host/.local/state/exomem/state/*/faces/index.sqlite{suffix}"
+    for suffix in ("", "-wal", "-shm", "-journal")
+)
+STATE_BACKUP_EXCLUDES = (*CATALOGUE_BACKUP_EXCLUDES, *FACE_INDEX_BACKUP_EXCLUDES)
 
 
 # move-cloud-cells-to-local-storage D10: the backed-up filesystem's used and
@@ -1714,7 +1721,7 @@ def render_backup_job(
         "restic snapshots || restic init",
         # Without --host restic records the Job pod's random hostname.
         f"restic backup --json --host {shlex.quote(spec.cell_id)}"
-        f"{''.join(' --exclude ' + shlex.quote(pattern) for pattern in CATALOGUE_BACKUP_EXCLUDES)} {' '.join(backed_up)} "
+        f"{''.join(' --exclude ' + shlex.quote(pattern) for pattern in STATE_BACKUP_EXCLUDES)} {' '.join(backed_up)} "
         "> /tmp/backup.json || exit 1",
         (
             "SNAPSHOT_ID=$(grep -o '\"snapshot_id\":\"[a-f0-9]\\{64\\}\"' /tmp/backup.json "
