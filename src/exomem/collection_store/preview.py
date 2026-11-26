@@ -7,6 +7,7 @@ Nothing else, and no environment flag, changes file-mode routing.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext, suppress
 from contextvars import ContextVar
@@ -106,7 +107,12 @@ class _PreviewPhase:
             raise CollectionStoreError("COLLECTION_STORE_BOUNDARY_REQUIRED", "Source metadata requires the actual writer boundary")
         handle = self.depart()
         try:
-            with manager._lock:
+            # Reads beside the store thread borrow the store for one short snapshot read and take no
+            # boundary, so wait for them to return, up to the mutation timeout, before refusing.
+            deadline = time.monotonic() + manager._mutation_timeout_seconds
+            with manager._store_condition:
+                while manager._store_borrowers and (remaining := deadline - time.monotonic()) > 0:
+                    manager._store_condition.wait(min(0.05, remaining))
                 if manager._store_borrowers:
                     raise CollectionStoreError("COLLECTION_STORE_BUSY", "another checkout still borrows the store")
             handle.require_write_authority()
@@ -433,11 +439,17 @@ class _Decide:
 
 
 def _request(server, decisions, work):
-    """One request to the store thread. A request refused whole is held against the store for the command."""
+    """One read-only request to the store. A request refused whole is held against the store for the command.
+
+    The decisions read the store's last commit beside the store thread (``StoreServer.read_beside``),
+    so a write or view pass that holds the thread does not make them wait out the mutation timeout.
+    The snapshot writer refuses every write, and the work reads no import progress. Where this
+    process holds no admitted writer, the request queues on the store thread as before.
+    """
     from ..cli_ops import OpError
 
     try:
-        return server.call(work, read_only=True, wake_maintenance=False)
+        return server.read_beside(work, initial=None, progress=False)
     except (CollectionStoreError, OpError) as error:
         if decisions is not None:
             decisions.refusals.setdefault(server, error)
