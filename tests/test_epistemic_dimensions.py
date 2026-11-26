@@ -623,11 +623,10 @@ def test_a_served_row_dimension_fills_its_limit_before_each_lane_cap(
     assert sentinel.count == 0, sentinel.report()
 
 
-def test_a_hybrid_dimension_search_reads_no_deeper_vector_window_once_the_lexical_lane_fills(
+def test_a_hybrid_dimension_search_finds_members_the_vector_ranks_last_in_one_read(
     tmp_path, warm_managed_cell, monkeypatch,
 ) -> None:
-    """Catches a vector lane that reads ever deeper windows for members that the vector ranks
-    last, while the lexical lane already holds enough members to fill the limit."""
+    """Catches a vector lane whose reads grow with the nonmembers that share the members' page."""
     import numpy as np
     from test_semantic_unit_recall import _vector
 
@@ -635,17 +634,18 @@ def test_a_hybrid_dimension_search_reads_no_deeper_vector_window_once_the_lexica
 
     vault = _outlook_vault(tmp_path)
     language_registry.registry_path(vault).write_text(MEASURED, encoding="utf-8")
-    body = "\n".join(f"## Claim\n- id: noise-{n}\n\nBeacon.\n" for n in range(24))
+    body = "\n".join(f"## Claim\n- id: noise-{n}\n\nBeacon.\n" for n in range(100))
     for n in range(3):
+        # The members carry no query word, so the lexical lane holds none of them.
         body += (
             f"\n## Local estimate\n- id: member-{n}\n- credence: likely\n"
-            f"- credence_holder: Survey team\n\nThe beacon survey gives estimate {n}.\n"
+            f"- credence_holder: Survey team\n\nThe survey gives estimate {n}.\n"
         )
     _write(vault, FORECAST, PAGE.format(title="Forecast", body=body))
     state = semantic_index.build_parent_index_state(vault, vault / FORECAST)
     index = embeddings.get_embedding_index(vault)
-    # The vector lane ranks all 24 nonmembers above the 3 members.
-    vectors = [_vector(1.0, n / 100) for n in range(24)] + [_vector(-1.0, 1.0)] * 3
+    # The vector lane ranks all 100 nonmembers above the 3 members.
+    vectors = [_vector(1.0, n / 1000) for n in range(100)] + [_vector(-1.0, 1.0)] * 3
     index.upsert_semantic_units(state, np.stack(vectors), 1.0)
     for path in (RULES, OLD, NEW):
         other = semantic_index.build_parent_index_state(vault, vault / path)
@@ -660,15 +660,61 @@ def test_a_hybrid_dimension_search_reads_no_deeper_vector_window_once_the_lexica
         find_module, "_vector_unit_candidates",
         lambda *a, **k: vector_reads.append(k["candidate_limit"]) or real(*a, **k),
     )
+    failed: list[str] = []
 
     hits = find_module.find(
         vault, query="beacon", scope="kb-only", mode="hybrid", graph=False, rerank=False,
         result_level="unit", filters={"unit.dimension": {"$eq": "measured"}}, limit=2,
+        failed_out=failed,
     )
 
     assert {hit.source_anchor for hit in hits} <= {"member-0", "member-1", "member-2"}
     assert len(hits) == 2
     assert len(vector_reads) == 1, f"the vector lane read windows of {vector_reads}"
+    assert failed == []
+
+
+def test_a_dimension_with_more_members_than_the_vector_bound_fills_from_its_newest_members(
+    tmp_path, warm_managed_cell, monkeypatch,
+) -> None:
+    """Catches a broad dimension whose members the page's other units crowd out of the vector lane,
+    leaving the result short of its limit, or full without saying the lane saw only some members."""
+    import numpy as np
+    from test_semantic_unit_recall import _vector
+
+    from exomem import embeddings, semantic_index
+
+    vault = _outlook_vault(tmp_path)
+    language_registry.registry_path(vault).write_text(MEASURED, encoding="utf-8")
+    body = "\n".join(f"## Claim\n- id: noise-{n}\n\nBeacon.\n" for n in range(30))
+    # More members than the deepest vector window of a limit of 2 (160), none with the query word.
+    body += "".join(
+        f"\n## Local estimate\n- id: member-{n}\n- credence: likely\n\nThe survey gives estimate {n}.\n"
+        for n in range(170)
+    )
+    _write(vault, FORECAST, PAGE.format(title="Forecast", body=body))
+    state = semantic_index.build_parent_index_state(vault, vault / FORECAST)
+    index = embeddings.get_embedding_index(vault)
+    vectors = [_vector(1.0, n / 1000) for n in range(30)] + [_vector(-1.0, 1.0)] * 170
+    index.upsert_semantic_units(state, np.stack(vectors), 1.0)
+    for path in (RULES, OLD, NEW):
+        other = semantic_index.build_parent_index_state(vault, vault / path)
+        far = np.stack([_vector(0.0, 1.0)] * len(other.occurrences))
+        index.upsert_semantic_units(other, far, 1.0)
+    warm_managed_cell(vault)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(embeddings, "embed_texts", lambda *_a, **_k: np.stack([_vector(1.0)]))
+    failed: list[str] = []
+
+    hits = find_module.find(
+        vault, query="beacon", scope="kb-only", mode="hybrid", graph=False, rerank=False,
+        result_level="unit", filters={"unit.dimension": {"$eq": "measured"}}, limit=2,
+        failed_out=failed,
+    )
+
+    assert len(hits) == 2
+    assert all(hit.source_anchor.startswith("member-") for hit in hits)
+    assert "semantic_units_candidate_window" in failed
 
 
 def test_a_filtered_hybrid_search_ranks_a_strong_member_older_than_its_lexical_window(

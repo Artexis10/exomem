@@ -1016,6 +1016,42 @@ def test_a_family_dimension_ranks_its_first_hits_the_same_at_any_limit(stored, w
     assert first_hits(3) == first_hits(60)[:3]
 
 
+def test_a_family_dimension_bounds_its_vector_reads_and_says_when_they_stop_short(
+    stored, writer, encoder, monkeypatch,  # noqa: F811
+):
+    """Catches vector reads that grow with the units of a proposed page, and a bounded lane that
+    returns fewer hits than its limit without saying so."""
+    body = "# Family source\n\n" + "\n".join(
+        f"## Claim\n- id: noise-{index}\n\nSignal number {index}.\n" for index in range(300)
+    )
+    # The members carry no query word: both lanes rank all 300 nonmembers above them.
+    body += "\n".join(
+        f"## Claim\n- id: member-{index}\n- relations: derived_from: [[Family target]]\n\n"
+        f"Qualifying source material for outcome {index}.\n"
+        for index in range(3)
+    )
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=(
+        write.PagePut("Knowledge Base/Notes/Family source.md", body.encode()),
+        write.PagePut("Knowledge Base/Notes/Family target.md", b"# Family target\n\nSurvey material.\n"),
+    )))
+    catch_up(stored)
+    reads = []
+    real = find._vector_unit_candidates
+    monkeypatch.setattr(
+        find, "_vector_unit_candidates", lambda *a, **k: reads.append(k["candidate_limit"]) or real(*a, **k),
+    )
+
+    result = commands.op_ask_memory(
+        stored, query="signal", scope="kb-only", mode="hybrid", result_level="unit",
+        filters={"unit.dimension": {"$eq": "provenance"}}, limit=2, graph=False,
+    )
+
+    assert len(reads) <= 4, f"the vector lane read windows of {reads}"
+    assert result["hits"] == []
+    # The reply tells the agent that the results may be incomplete.
+    assert result["notice"] == commands._SEARCH_NOTICE_DEGRADED
+
+
 def test_a_family_dimension_does_no_graph_work_for_unrelated_pages(stored, writer, monkeypatch):  # noqa: F811
     """Pages that no family edge touches add no per-unit membership work to a filtered search."""
     source = "Knowledge Base/Notes/Family source.md"

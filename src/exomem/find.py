@@ -3153,6 +3153,9 @@ _MIXED_UNITS_PER_PARENT_CAP = 3
 _MIXED_PAGE_WEIGHT = 1.0
 _MIXED_UNIT_WEIGHT = 1.0
 _UNIT_EXCERPT_MAX = 320
+#: Doublings of a dimension's vector window. The deepest window, eight times the first, bounds the
+#: members a filtered search reads for its vector lane and that lane's reads at four.
+_DIMENSION_VECTOR_DOUBLINGS = 3
 
 
 def _unit_excerpt(content: str) -> str:
@@ -4086,6 +4089,32 @@ def _find_semantic_units(
             stale_out=stale_out, parent_reads=parent_reads, recall_checkpoint=recall_checkpoint,
         )
 
+    def dimension_rows(text: str, *, k: int, rank_query: bool = False, literal_all: bool = False):
+        # Rows the store checked exactly against the dimension filter.
+        result = lexstore.search_semantic_units_result(
+            vault_root,
+            text,
+            k=k,
+            filter_plan=plan,
+            rank_query=rank_query,
+            literal_all=literal_all,
+            scope=scope,
+            freshness=snapshot.for_scope(scope),
+            recall_checkpoint=recall_checkpoint,
+            allowed_parent_paths=allowed_parent_paths,
+            admitted_parent_paths=allowed_parent_paths,
+            released_parent_paths=released_parent_paths,
+            _repair_stale=True,
+            repair=_bounded_lexical_repair_allowed(snapshot.for_scope(scope)) if repair is None else repair,
+            allow_delta=True if repair is None else repair,
+            validated=parent_reads.validated if parent_reads else None,
+            _validate_current=False,
+        )
+        _set_catalog_timing_profile(timings, result.readiness)
+        if not result.readiness.complete:
+            _raise_catalog_outcome(result.readiness)
+        return list(result.value or [])
+
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     # Empty queries carry no vector signal. Match the page lane's contract and
     # treat them as filter-only keyword recall before deciding whether exact
@@ -4238,29 +4267,9 @@ def _find_semantic_units(
                 )
     elif pushed_dimensions:
         # The store checks each proposed row's dimensions exactly and stops after `window + 1`.
-        pushed = lexstore.search_semantic_units_result(
-            vault_root,
-            query,
-            k=window + 1,
-            filter_plan=plan,
-            rank_query=mode != "keyword",
-            literal_all=mode == "keyword",
-            scope=scope,
-            freshness=snapshot.for_scope(scope),
-            recall_checkpoint=recall_checkpoint,
-            allowed_parent_paths=allowed_parent_paths,
-            admitted_parent_paths=allowed_parent_paths,
-            released_parent_paths=released_parent_paths,
-            _repair_stale=True,
-            repair=_bounded_lexical_repair_allowed(snapshot.for_scope(scope)) if repair is None else repair,
-            allow_delta=True if repair is None else repair,
-            validated=parent_reads.validated if parent_reads else None,
-            _validate_current=False,
+        indexed = dimension_rows(
+            query, k=window + 1, rank_query=mode != "keyword", literal_all=mode == "keyword",
         )
-        _set_catalog_timing_profile(timings, pushed.readiness)
-        if not pushed.readiness.complete:
-            _raise_catalog_outcome(pushed.readiness)
-        indexed = list(pushed.value or [])
     else:
         indexed = lexstore.search_semantic_units(
             vault_root,
@@ -4397,20 +4406,38 @@ def _find_semantic_units(
         vector_parent_paths = snapshot.recall_paths(scope)
         if allowed_parent_paths is not None:
             vector_parent_paths = vector_parent_paths & allowed_parent_paths
-        if pushed_dimensions:
-            # The vector lane ranks only the units of parents the plan can propose.
+        vector_window = window
+        deepest = window << _DIMENSION_VECTOR_DOUBLINGS
+        # The dimension's members, when the index proposes single units and they fit the deepest window.
+        vector_member_refs: set[str] | None = None
+        # The newest members of a dimension with more members than the deepest window.
+        newest_members: list[Any] | None = None
+        deepens = False
+        if pushed_dimensions and not structured_filters.plan_index_eligibility(plan).requires_edge_families:
+            # Kinds and keys propose single units, so the vector lane can rank the members alone.
+            members = dimension_rows("", k=deepest + 1)
+            if len(members) <= deepest:
+                vector_member_refs = {row.unit_ref for row in members}
+                vector_parent_paths = vector_parent_paths & {row.parent_path for row in members}
+            else:
+                newest_members = members
+        if pushed_dimensions and vector_member_refs is None:
+            # Rank the units of the parents the plan can propose, reading deeper within a bound.
             _dimension_parents = proposed_parents()
             vector_parent_paths = vector_parent_paths & _dimension_parents
+            deepens = True
         if vector_allowed_refs is not None:
             # Public refs are per-reader meanings; their parents bound the rows read.
             vector_parent_paths = vector_parent_paths & {row.parent_path for row in indexed or ()}
-        vector_window = window
+        vector_capped = False
+        # Parent-level hits kept when the lane turns to the newest members.
+        crowded: list[Any] = []
         while True:
             vector_hits, vector_profile, _indexed_scope = _vector_unit_candidates(
                 vault_root,
                 query=query,
                 candidate_limit=vector_candidate_limit,
-                allowed_unit_refs=vector_allowed_refs,
+                allowed_unit_refs=vector_allowed_refs if vector_member_refs is None else vector_member_refs,
                 allowed_parent_paths=vector_parent_paths,
                 released_parent_paths=released_parent_paths,
                 degraded_out=degraded_out,
@@ -4419,16 +4446,34 @@ def _find_semantic_units(
                 query_vector_provider=query_vector_provider,
                 prepared_queries=prepared_queries,
             )
-            if not (pushed_dimensions and len(vector_hits) > vector_window):
+            if not (deepens and len(vector_hits) > vector_window):
                 break
             fresh = [hit for hit in vector_hits[:vector_window] if hit.unit_ref not in vector_selected]
             vector_records.update(select(fresh, stale_out=vector_stale))
             vector_selected.update(hit.unit_ref for hit in fresh)
             if len(records.keys() | vector_records.keys()) >= requested_limit or vector_stale:
                 break
+            vector_capped = newest_members is not None or vector_window >= deepest
+            if newest_members is not None:
+                # Other units of the proposed parents crowd out the members: rank the newest members.
+                crowded = vector_hits[:vector_window]
+                vector_member_refs = {row.unit_ref for row in newest_members}
+                vector_parent_paths = vector_parent_paths & {row.parent_path for row in newest_members}
+                newest_members = None
+                deepens = False
+                continue
+            if vector_capped:
+                break
             # Both lanes hold fewer members than the limit: read the vector lane twice as deep.
             vector_window *= 2
             vector_candidate_limit = vector_window + 1
+        if vector_capped:
+            # A bound stopped the lane short of every member; the result says its candidate window ran out.
+            seen = {hit.unit_ref for hit in vector_hits[:vector_window]}
+            vector_hits = [*vector_hits[:vector_window], *(hit for hit in crowded if hit.unit_ref not in seen)]
+            if failed_out is not None and "semantic_units_candidate_window" not in failed_out:
+                failed_out.append("semantic_units_candidate_window")
+            _record_degradation("semantic_units_candidate_window")
         if (
             vector_allowed_refs is not None
             and {hit.unit_ref for hit in vector_hits} != vector_allowed_refs
@@ -4445,7 +4490,7 @@ def _find_semantic_units(
             _record_degradation("vector")
             if failed_out is not None and "vector" not in failed_out:
                 failed_out.append("vector")
-        elif vector_allowed_refs is None and len(vector_hits) > vector_window:
+        elif vector_allowed_refs is None and not vector_capped and len(vector_hits) > vector_window:
             candidate_window_exhausted = True
             vector_hits = vector_hits[:vector_window]
     if vector_hits:
