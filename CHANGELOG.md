@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.206.1](https://github.com/substrate-systems/evermatter/compare/v0.206.0...v0.206.1) (2026-11-26)
+
+
+### Bug Fixes
+
+* **lexstore:** keep a Source erasure across a repair rebuild ([#3258](https://github.com/substrate-systems/evermatter/issues/3258)) ([472a295](https://github.com/substrate-systems/evermatter/commit/472a2953ae1f4b8db102eea6565f91602860d732))
+* **store:** decide store-owned pages beside the store thread ([#3246](https://github.com/substrate-systems/evermatter/issues/3246)) ([54fc32b](https://github.com/substrate-systems/evermatter/commit/54fc32bead692da1f5ef9f5c0ede2d0594353f78))
+
+
+### Performance
+
+* **store:** give an existing store the catalogue change journal at its next derivation ([#3251](https://github.com/substrate-systems/evermatter/issues/3251)) ([62ee89b](https://github.com/substrate-systems/evermatter/commit/62ee89bbcede71d94cf9c6b427145c5892bec39d))
+
 ## [0.206.0](https://github.com/substrate-systems/evermatter/compare/v0.205.0...v0.206.0) (2026-11-25)
 
 
