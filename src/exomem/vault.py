@@ -9602,7 +9602,7 @@ def store_inbound_sources(conn, rels: Iterable[str]) -> frozenset[str]:
 
 def _underived_inbound(
     conn, paths: Iterable[str] | None = None
-) -> dict[str, tuple[str, list[tuple[int, str, str, str]]] | None]:
+) -> dict[str, tuple[str, tuple[tuple[int, str, str, str], ...]] | None]:
     """The rows that each page whose derivation trails its stored bytes will hold, from those bytes.
 
     A failed or waiting derivation leaves a page's inbound rows describing bytes that the store no
@@ -9611,19 +9611,23 @@ def _underived_inbound(
     reach it, or its bytes are not UTF-8), as the drain writes them once it succeeds. No link guard
     or link rewrite then trusts a row that its page no longer gives. With ``paths`` the read covers
     those pages alone; without, it covers every pending page, which any of them could change a link
-    for, and ``derivation.underived`` refuses it when the backlog passes ``UNDERIVED_CAP``.
+    for, and ``derivation.underived_parsed`` refuses it when the backlog passes ``UNDERIVED_CAP``.
     """
     from .vault_store import derivation
     from .vault_store import read as store_read
 
-    given: dict[str, tuple[str, list[tuple[int, str, str, str]]] | None] = {}
-    for rel, raw in derivation.underived(conn, paths).items():
+    def rows(rel: str, raw: bytes) -> tuple[str, tuple[tuple[int, str, str, str], ...]] | None:
         try:
-            given[rel] = (None if raw is None or not store_read.walk_member(rel)
-                          else inbound_rows(rel, raw.decode("utf-8")))
+            if not store_read.walk_member(rel):
+                return None
+            stem, links = inbound_rows(rel, raw.decode("utf-8"))
         except UnicodeDecodeError:
-            given[rel] = None
-    return given
+            return None
+        return stem, tuple(links)  # every check that reads this page shares the result
+
+    # A failed page stays pending for as long as it fails: each page is parsed once while its bytes
+    # stay the same, not on every check (``derivation.underived_parsed``).
+    return derivation.underived_parsed(conn, paths, "inbound", rows)
 
 
 def _store_inbound(
