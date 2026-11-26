@@ -1222,7 +1222,7 @@ async def _older_cell(source, config, checkpoint, limits, options, *, cell, api,
     maximum = (limits or {}).get("max_storage_gib")
     needs_series_file = ask_cell or origin_label is not None
     now = Choices(filing=ask_cell, label=origin_label, collection=collection)
-    choices = resumed_choices(checkpoint, now)
+    choices = resumed_choices(checkpoint, now, source)
     if choices is None:
         offered = needs_series_file and await cell.offers_file()
         claim = ("asked" if offered else "not_offered") if ask_cell else None

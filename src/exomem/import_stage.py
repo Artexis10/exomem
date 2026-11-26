@@ -37,6 +37,7 @@ RESIDUAL_VERSION = 1
 RENAMES_PENDING_KEY = "renames_pending"
 # Where a discard that walked the stage writes its record, when the receipt could not be read.
 WALK_RECORDS = "cloud-import-walks"
+EXPANSION_RECORDS = "import-expansion"
 # The code of a walked member: the receipt that would have said why it stayed was unreadable.
 UNREADABLE_CODE = "receipt_unreadable"
 # The file at a window's stage root that lists the whole series; it is never a member to file.
@@ -114,13 +115,30 @@ class Stage:
     """A stage with a manifest: `members` maps each listed path to its (size, SHA-256).
 
     `identities` holds the identity of each member that has a well-formed one; a member without
-    one is hashed before adoption trusts it.
+    one is hashed before adoption trusts it. `derived` holds the files that the cell wrote into the stage from
+    an app export (see `export_expansion`), which are no members: the manifest stays what the sender staged.
     """
 
     import_id: str
     proof: str
     members: dict[str, tuple[int, str]]
     identities: dict[str, Identity] = field(default_factory=dict)
+    derived: dict[str, Derived] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class Derived:
+    """A file that the cell wrote into a stage from one item of an app export, with the bytes it wrote.
+
+    `created` is the time that the item states for itself, as an ISO 8601 UTC string, or None when it states none.
+    `timed` says the item stated its last update, which is then the file's modified time; an untimed file has the
+    time that it was written, which says nothing about the item.
+    """
+
+    size: int
+    sha256: str
+    created: str | None
+    timed: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,8 +275,16 @@ def read(vault_root: Path, import_id: str) -> Stage | None:
     """The stage's manifest and what vouches for it, or None when it has none.
 
     Nothing here raises: a missing, unreadable or malformed manifest leaves the stage unrecorded,
-    which only means adoption keeps its staged copies.
+    which only means adoption keeps its staged copies. The stage carries what the cell derived from its
+    app exports, read from the expansion record.
     """
+    stage = _manifest_stage(vault_root, import_id)
+    if stage is None:
+        return None
+    return dataclasses.replace(stage, derived=derived_files(vault_root, import_id))
+
+
+def _manifest_stage(vault_root: Path, import_id: str) -> Stage | None:
     if not vault.is_import_id(import_id):
         return None
     receipt = read_receipt(vault_root, import_id)
@@ -273,6 +299,47 @@ def read(vault_root: Path, import_id: str) -> Stage | None:
         if manifest is not None:
             return Stage(import_id, LOCAL_PROOF, *manifest)
     return None
+
+
+def expansion_path(vault_root: Path, import_id: str) -> Path:
+    """Where the cell keeps what it derived from the stage's app exports; raises ValueError when the vault has no state placement."""
+    return state_paths.vault_state_dir(vault_root) / EXPANSION_RECORDS / f"{import_id}.json"
+
+
+def read_expansion(vault_root: Path, import_id: str) -> dict | None:
+    """The stage's expansion record (see `export_expansion`), or None when it has none or cannot be read."""
+    try:
+        return _load(expansion_path(vault_root, import_id))
+    except ValueError:
+        return None
+
+
+def write_expansion(vault_root: Path, import_id: str, record: dict) -> None:
+    """Replace the expansion record whole and durably, as the Job writes a receipt."""
+    _store_record(vault_root, EXPANSION_RECORDS, import_id, record)
+
+
+def derived_files(vault_root: Path, import_id: str) -> dict[str, Derived]:
+    """What the cell derived into the stage from its app exports, by path in the stage; empty when it derived nothing."""
+    return _derived_of(read_expansion(vault_root, import_id))
+
+
+def _derived_of(record: dict | None) -> dict[str, Derived]:
+    """The derived files of an expansion record by their path in the stage; a row that is not well-formed is left out.
+
+    A file that no row vouches for is never consumed, so a damaged row only keeps its staged copy.
+    """
+    derived: dict[str, Derived] = {}
+    for row in (record or {}).get("rows") or ():
+        if not isinstance(row, dict):
+            continue
+        path, size, digest, created = row.get("path"), row.get("size"), row.get("sha256"), row.get("created")
+        if (
+            isinstance(path, str) and isinstance(size, int) and not isinstance(size, bool)
+            and isinstance(digest, str) and (created is None or isinstance(created, str))
+        ):
+            derived[path] = Derived(size, digest, created, row.get("timed") is True)
+    return derived
 
 
 def write_local_record(vault_root: Path, import_id: str, members: list[dict]) -> bool:

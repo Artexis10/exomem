@@ -25,4 +25,4 @@
 ## 5. Proof
 
 - [x] 5.1 Add a `home-import` scenario to the Cloud rehearsal. Build a fixture tree with loose files, a nested folder, the members of an expanded zip, a zero-byte file, a hidden file and a non-UTF-8 text file. Send the tree with `exomem cloud import --no-wait`, which writes `filing: cell` and the origin. Make no MCP `file` call. Restart the cell once during filing, and poll the filing view until `done`. Verify against the fixture manifest: each eligible file has one Source with its `collection_path`, `file_modified` and origin fields, junk and hidden files are listed with reasons, and the counts add up. The scenario is built and its fixture and checks are unit-tested; its first live run is the `home-import` mode of the `Cloud rehearsal` workflow.
-- [ ] 5.2 Run the full corpus at the batch boundary, run the independent review, merge and release to cells.
+- [x] 5.2 Run the full corpus at the batch boundary, run the independent review, merge and release to cells.

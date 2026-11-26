@@ -44,6 +44,7 @@ from . import (
     context_refs,
     due_state,
     duplicates,
+    export_expansion,
     frontmatter_update,
     held_fs,
     import_rename,
@@ -1432,6 +1433,18 @@ def _carry_origin(item: dict, origin: Mapping[str, str], row: Mapping | None) ->
     item["file_modified"] = stamp
 
 
+def _carry_item_time(item: dict, derived: import_stage.Derived) -> None:
+    """Put the time that an exported item states for itself on the planned item of its transcript.
+
+    A transcript of an item that stated no last update has the time it was written as its modified time, which says
+    nothing of the item, so it carries no `file_modified`.
+    """
+    if derived.created:
+        item["item_created"] = derived.created
+    if not derived.timed:
+        item.pop("file_modified", None)
+
+
 def _recorded_stage(stage: import_stage.Stage | None) -> dict | None:
     """`{"stage": id, "proof": ...}` for the stage a run starts in, or None when it has no member manifest.
 
@@ -1906,7 +1919,8 @@ def unfiled_members(root: Path, import_id: str, runs: tuple[dict, ...] | None = 
     """The members of an import that adoption did not file or `finish` did not verify, as a residual record lists them.
 
     Each entry has the path relative to the stage, its bytes and why it stays (see `adoption_consume.residual`).
-    The members are the stage manifest's, plus any staged file that the manifest does not list. A member that
+    The members are the stage manifest's, plus any staged file that the manifest does not list, plus the items and
+    exports that expansion could not read in full. A member that
     left the stage, by rename or by hand, keeps the bytes the manifest gives it; the runs that started in the
     stage classify every member, the most recent first, and one that no run scanned is `outside_run`. A member
     that adoption filed, and the series file, are left out: filed is what a run's outcome says, not what the
@@ -1918,11 +1932,13 @@ def unfiled_members(root: Path, import_id: str, runs: tuple[dict, ...] | None = 
     files = dict(import_stage.staged_files(root, import_id))
     for path, (size, _digest) in (stage.members if stage is not None else {}).items():
         files.setdefault(path, size)
-    return [
+    unfiled = [
         import_stage.residual_member(path, size, reason)
         for path, size, reason in adoption_consume.stage_reasons(import_id, list(files.items()), pages, _APPLIED_STATUSES)
         if not adoption_consume.is_filed(reason) and path != import_stage.SERIES_FILE
     ]
+    # An item that could not be read and an export that was read in part have no staged file: the expansion record lists them.
+    return [*unfiled, *export_expansion.read(root, import_id).unfiled]
 
 
 def _earlier_page_unapplied(store: AdoptionRunStore, run: dict) -> str | None:
@@ -2042,6 +2058,11 @@ def plan(
         origin = run.get("origin") or {}
         ceiling = client_artifacts.adoption_ceiling()
         stage = adoption_consume.recorded(root, run) if run.get("consume", True) else None
+        stage_id = _stage_id_of(run["source_root"])
+        derived = import_stage.derived_files(root, stage_id) if stage_id is not None else {}
+        # A recognised export files as an artifact, so its conversations are indexed once, as the transcripts derived from it.
+        exports = set(export_expansion.read(root, stage_id).exports) if stage_id is not None else set()
+        stage_prefix = f"{IMPORT_STAGE_DIR}/{stage_id}/"
         index = adoption_plan.read_import_index(root)
         notes = adoption_plan.NoteIndex(root)
         destinations = adoption_plan.Destinations.frozen_by(root, draft["items"])
@@ -2058,7 +2079,8 @@ def plan(
                     root, rel,
                     collection=collection["label"], collection_root=collection["root"],
                     classification=classification.get(rel), taxonomy=taxonomy,
-                    text_hint=(inventory.get(rel) or {}).get("form", "text") == "text",
+                    text_hint=(inventory.get(rel) or {}).get("form", "text") == "text"
+                    and rel.removeprefix(stage_prefix) not in exports,
                     date_iso=draft["date"], destinations=destinations, index=index, notes=notes,
                     ceiling=ceiling, vouched=adoption_consume.vouched(stage, rel), seen=seen,
                 )
@@ -2069,6 +2091,8 @@ def plan(
                 else:
                     if origin:
                         _carry_origin(result[0], origin, inventory.get(rel))
+                    if (item_time := derived.get(rel.removeprefix(stage_prefix))) is not None:
+                        _carry_item_time(result[0], item_time)
                     draft["items"].append(result[0])
 
         progress = {
@@ -4472,13 +4496,19 @@ def _unscanned(root: Path, store: AdoptionRunStore, page: dict) -> int:
     return sum(1 for _path, _size, reason in reasons if reason == adoption_consume.OUTSIDE_RUN)
 
 
+def _reading_exports(root: Path, run: dict) -> bool:
+    """Whether an app export of the run's stage is still being read, so a new scan must meet what the next slice derives."""
+    stage_id = _stage_id_of(run["source_root"])
+    return stage_id is not None and bool(export_expansion.read(root, stage_id).held)
+
+
 def _filing_step(root: Path, store: AdoptionRunStore, run: dict) -> str:
     """The step that moves the import on: the page's own step, or `rescan` when its scan is done and missed staged files.
 
     `done` ends the import only when no staged file came after the scan; else a new scan of the folder files them.
     """
     step = _next_filing_step(run)
-    return "rescan" if step == "done" and _unscanned(root, store, run) else step
+    return "rescan" if step == "done" and (_unscanned(root, store, run) or _reading_exports(root, run)) else step
 
 
 def _held_apply(store: AdoptionRunStore, run: dict, identity_digest: str) -> tuple[str, dict] | None:
@@ -4493,11 +4523,53 @@ def _held_apply(store: AdoptionRunStore, run: dict, identity_digest: str) -> tup
     return None
 
 
+def _stage_id_of(source_root: str) -> str | None:
+    """The import ID of a staged folder `_Imports/<id>[/...]`, or None for any other path."""
+    parts = _clean(source_root).split("/")
+    return parts[1] if len(parts) >= 2 and parts[0] == IMPORT_STAGE_DIR and is_import_id(parts[1]) else None
+
+
+def _export_rules(root: Path, run: dict) -> tuple[list[str | dict], list[str]]:
+    """The `select` rules of a stage that holds app exports: transcripts file as the registry's Source kind, and an export still being read waits.
+
+    An export that expansion has not finished is left out of this selection, because filing consumes it and the next
+    call still reads it; the call that finishes it selects it. A Source kind that the vault's taxonomy lacks leaves its
+    transcripts unclassified rather than stopping the filing.
+    """
+    source_root = run["source_root"]
+    stage_id = _stage_id_of(source_root)
+    include: list[str | dict] = [source_root]
+    if stage_id is None:
+        return include, []
+    reading = export_expansion.read(root, stage_id)
+    prefix = f"{IMPORT_STAGE_DIR}/{stage_id}/"
+    scanned = [row["path"] for row in run.get("inventory") or [] if row.get("kind") != "folder"]
+    taxonomy = source_taxonomy.load_taxonomy(root) if reading.kinds else None
+    for folder, kind in sorted(reading.kinds.items()):
+        if not any(path.startswith(f"{prefix}{folder}/") for path in scanned):
+            continue
+        try:
+            _resolve_classification(taxonomy, kind, None)
+        except AdoptionRunError:
+            continue
+        include.append({"path": f"{prefix}{folder}", "source_kind": kind})
+    return include, [f"{prefix}{export}" for export in reading.held]
+
+
 def _file_step(
     root: Path, store: AdoptionRunStore, run: dict | None, step: str, *,
-    path: str, collection: str | None, today: dt.date | None,
+    path: str, collection: str | None, today: dt.date | None, budget: request_budget.RequestBudget | None = None,
 ) -> dict:
     """Run one lifecycle step through its own function and return the page it leaves."""
+    if step == "rescan" or (step == "start" and run is None):
+        # A scan lists the stage as it is, so the exports are expanded first and the scan meets their transcripts.
+        # A scan that continues a paged one does not expand: new files would move the pages under it.
+        stage_id = _stage_id_of(run["source_root"] if run is not None else path)
+        if stage_id is not None:
+            held = budget or _call_budget()
+            export_expansion.expand(
+                root, stage_id, keep_going=lambda: held.can_afford(request_budget.DELIVERY_RESERVE_SECONDS),
+                rewalk=step == "rescan")
     if step == "start":
         if run is None:
             # Read here, not as a default argument, so a test or an operator can change the page size.
@@ -4517,7 +4589,8 @@ def _file_step(
         return store.load(opened["run_id"])
     run_id = run["run_id"]
     if step == "select":
-        select(root, run_id=run_id, include=[run["source_root"]])
+        include, exclude = _export_rules(root, run)
+        select(root, run_id=run_id, include=include, exclude=exclude)
         page = store.load(run_id)
         if not page["selection"]["paths"]:
             # Nothing on this page can import, so no plan can exist; closing it lets the scan move to the next page.
@@ -4592,7 +4665,7 @@ def file(
             if step in _APPLY_STEPS and reconciling:
                 # Only the identity's own held apply may run under reconciliation; this attempt published nothing.
                 break
-            run = _file_step(root, store, run, step, path=path, collection=collection, today=today)
+            run = _file_step(root, store, run, step, path=path, collection=collection, today=today, budget=budget)
             steps += 1
             if step in _APPLY_STEPS or step == "finish" or (step == "plan" and run["phase"] == "selecting"):
                 break
@@ -4655,13 +4728,16 @@ def _files(count: int) -> str:
     return f"{count} file" if count == 1 else f"{count} files"
 
 
-def _filing_summary(filing: str, filed: int, skipped: int, failed: int, remaining: int) -> str:
+def _filing_summary(filing: str, filed: int, skipped: int, failed: int, remaining: int, partial: int = 0) -> str:
     """One sentence built from the counts and nothing else: it claims no more than the outcomes record.
 
-    It names the skipped duplicates only when there are some, so an import without any reads as before.
+    It names the skipped duplicates only when there are some, so an import without any reads as before. It names an
+    app export that was read in part, so a `done` import never reads as one with every item filed.
     """
     duplicates = f"{skipped} duplicate{'' if skipped == 1 else 's'} skipped, " if skipped else ""
     counts = f"{_files(filed)} filed, {duplicates}{failed} failed, {remaining} left"
+    if partial:
+        counts += f"; {partial} export{' was' if partial == 1 else 's were'} read in part"
     if filing == _DONE:
         return f"Filing is done: {counts}."
     return f"Filing is {filing}: {counts}."
@@ -4688,10 +4764,14 @@ def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict 
     stored = {path for tally in scans for path, marks in tally.outcomes.items() if marks & _STORED}
     skipped = sum(1 for path, marks in newest.items() if path not in stored and marks & _SKIPPED)
     filed = sum(1 for marks in newest.values() if marks & _FILED) - skipped
-    failed = sum(1 for marks in newest.values() if marks & _FAILED)
+    stage_id = _stage_id_of(run["source_root"])
+    expansion = export_expansion.read(root, stage_id) if stage_id is not None else None
+    # An item that expansion could not read has no staged file and no outcome, so it is counted here.
+    failed = sum(1 for marks in newest.values() if marks & _FAILED) + (expansion.failed if expansion else 0)
     remaining = _page_remaining(run) + int(run.get("inventory_truncated") or 0)
     if _next_filing_step(run) == "done":
         remaining += _unscanned(root, store, run)  # staged files that came after the scan, which a new scan files
+        remaining += len(expansion.held) if expansion else 0  # an export still being read stays unfiled until its last item
     pages_done = sum(1 for tally in scans if tally.phase in _FINISHED_PHASES)
     person: list[dict] = []
     if stop is None and filing == _STOPPED and run.get("apply_stop"):
@@ -4706,7 +4786,7 @@ def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict 
             **dict(zip(FILING_COUNTS, (filed, skipped, failed, remaining, pages_done), strict=True)),
             "page": _page_position(run),
         },
-        "summary": _filing_summary(filing, filed, skipped, failed, remaining),
+        "summary": _filing_summary(filing, filed, skipped, failed, remaining, expansion.partial if expansion else 0),
     }
     if derived is not None:
         reply["stop"] = derived

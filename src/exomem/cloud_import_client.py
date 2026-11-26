@@ -196,15 +196,18 @@ def _resumed_choices(now: Choices, state: dict) -> Choices:
     return plain
 
 
-def resumed_choices(checkpoint: Path, now: Choices) -> Choices | None:
+def resumed_choices(checkpoint: Path, now: Choices, source: Path) -> Choices | None:
     """The choices of the import that `checkpoint` holds, once this run's flags match them; None for a new import.
 
     A caller asks before it probes the cell, so a rerun builds the archive the first run chose. A record that
-    cannot be read gives None here, and the import reads it again and stops on it as it always did.
+    cannot be read, or that belongs to another source, gives None here, and the import reads it again and
+    stops on it as it always did.
     """
     try:
         state = json.loads((checkpoint / CHECKPOINT_RECORD).read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        return None
+    if state.get("source") != str(source):
         return None
     return _resumed_choices(now, state)
 

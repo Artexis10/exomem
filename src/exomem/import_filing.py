@@ -199,11 +199,19 @@ def _counts(progress: object) -> dict[str, int] | None:
 
 
 def _stage_total(vault_root: Path, import_id: str) -> int | None:
-    """The members that the stage's receipt or record lists, but the series file; None when it lists none."""
+    """The members that the stage's receipt or record lists, but the series file, and what filing has derived from app exports; None when it lists none.
+
+    A derived transcript, an item that could not be read and an export read in part each count as one member, so the
+    total grows while an export is being read. The export file is a member that stays unfiled until it is read, so
+    `remaining` is not zero before then.
+    """
+    from . import export_expansion
+
     stage = import_stage.read(vault_root, import_id)
     if stage is None:
         return None
-    return sum(1 for path in stage.members if path != import_stage.SERIES_FILE)
+    reading = export_expansion.read(vault_root, import_id)
+    return sum(1 for path in stage.members if path != import_stage.SERIES_FILE) + reading.files + len(reading.unfiled)
 
 
 def _left_out(vault_root: Path, import_id: str) -> dict:
@@ -490,9 +498,12 @@ class Filer:
         # Both are read before the record changes: a fault here leaves the call stored, and its repeat reads them again.
         left_out = _left_out(self.vault_root, import_id) if filing == _REPLY_DONE else None
         needs = _stopped_needs(self.vault_root, reply, person) if filing == _REPLY_STOPPED else []
+        total = _stage_total(self.vault_root, import_id)  # filing derives members from an app export, so the total grows
 
         def change(record: dict) -> None:
             record.update(call=None, progress=counts, left_out=left_out, needs=needs, person=person, busy=[])
+            if total is not None:
+                record["total"] = total
             record["state"] = {_REPLY_WORKING: WORKING, _REPLY_STOPPED: PARKED, _REPLY_DONE: DONE}[filing]
             record["continuation"] = None if filing == _REPLY_DONE else continuation
             record["stop"] = stop if filing == _REPLY_STOPPED else None
