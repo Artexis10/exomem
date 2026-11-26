@@ -613,10 +613,123 @@ def test_a_failed_batch_that_outlasts_a_slice_still_settles_one_page_of_its_revi
     derivation.drain(served.resolve(), writer, deadline=time.monotonic() + derivation.SLICE_SECONDS)
 
     assert after_one == [(bad,)], "the first drain derived the good page"
+    # Two attempts failed for it: the batch's, which counted against both pages, and its own.
     assert store_rows(served, "SELECT path, attempts, failed_code FROM store_derivation_queue") == [
-        (bad, 1, derivation.FAILED)
+        (bad, 2, derivation.FAILED)
     ]
     assert good in bm25_paths(served, "ferry")
+
+
+def test_a_failed_batch_is_not_taken_whole_again_on_each_turn_of_the_store_thread(
+    served, writer, monkeypatch  # noqa: F811
+):
+    """A save of six pages, the last one bad, whose batch fails only after more than a slice. Each
+    turn of the store thread then derived one page alone and took the rest as a batch again, which
+    failed again: five failing batches for one bad page, with every read waiting meanwhile."""
+    bad = "Knowledge Base/Notes/Zzz Bad.md"
+    good = [f"Knowledge Base/Notes/Good {number}.md" for number in range(5)]
+    monkeypatch.setattr(derivation, "SLICE_SECONDS", 0.05)
+    real = derive.derive_paths
+    batches = []
+
+    def derive_paths(tx, root, *, written, **keywords):
+        batches.append(sorted(written))
+        if bad in written:
+            if len(written) > 1:
+                time.sleep(derivation.SLICE_SECONDS * 2)
+            raise RuntimeError("the derivation broke")
+        return real(tx, root, written=written, **keywords)
+
+    monkeypatch.setattr(derive, "derive_paths", derive_paths)
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: None)
+        with writer_lease.get_manager().mutation_guard(served, operation="note_save"):
+            vault_module.batch_atomic_write(
+                [planned(served, rel, SMALL_TEXT.replace("Small", rel.split("/")[-1][:-3]), create_only=True)
+                 for rel in (*good, bad)],
+                vault_root=served,
+                post_commit_fanout=False,
+            )
+
+    turns = 0
+    while turns < 2 * len(good) and store_rows(served, "SELECT 1 FROM store_derivation_queue WHERE path != ?", bad):
+        derivation.drain(served.resolve(), writer, deadline=time.monotonic() + derivation.SLICE_SECONDS)
+        turns += 1
+
+    whole = [batch for batch in batches if len(batch) > 1]
+    assert len(whole) == 1, f"the failed batch was taken {len(whole)} times"
+    assert store_rows(served, "SELECT path FROM store_derivation_queue") == [(bad,)], "a good page waits"
+    assert set(good) <= set(bm25_paths(served, "ferry"))
+    attempts, code, retry_at = store_rows(
+        served, "SELECT attempts, failed_code, retry_at FROM store_derivation_queue"
+    )[0]
+    assert attempts >= 1 and code == derivation.FAILED and retry_at is not None
+
+
+def test_a_check_beside_many_failed_pages_parses_each_of_them_once(served, writer, monkeypatch):  # noqa: F811
+    """More pages whose derivation used up its attempts than one check reads, which stay queued for
+    good while they fail: each check that reads every pending page parsed all of them again. Each
+    parses at most once for as long as the page is unchanged, and a page that changed is read anew."""
+    save(served, HARBOUR, SMALL_TEXT.replace("Small", "Harbour"))
+    # A name that no other test commits: the parses are kept by path and bytes, across tests.
+    failed = [f"Knowledge Base/Notes/Stuck {number}.md" for number in range(derivation.UNDERIVED_CAP + 44)]
+    commit_pending_pages(served, writer, monkeypatch, len(failed), "Stuck")
+    record_failures(writer, derivation.ATTEMPTS)
+    links, identities = [], []
+    real_links, real_identity = vault_module.inbound_rows, memory_refs._identity_from_bytes
+    monkeypatch.setattr(vault_module, "inbound_rows", lambda *arguments: links.append(arguments[0]) or real_links(*arguments))
+    monkeypatch.setattr(memory_refs, "_identity_from_bytes", lambda *arguments: identities.append(arguments[0]) or real_identity(*arguments))
+
+    for _check in range(2):
+        vault_module.store_pages_named(served, "Stuck 0")
+        memory_refs.store_owners_by_prefix(served, "a")
+
+    assert sorted(links) == sorted(failed), "a check parsed a failed page's links more than once"
+    assert sorted(identities) == sorted(failed), "a check parsed a failed page's identity more than once"
+
+    # A save to one of them changes its bytes: a check that served the old parse would miss its link.
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: None)
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "relink", puts=(
+            write.PagePut(failed[0], SMALL_TEXT.replace("dawn", "dawn from [[Harbour]]").encode()),
+        )))
+    links.clear()
+
+    with pytest.raises(delete_file.DeleteFileError) as refused:
+        delete_file.delete_file(served, path=HARBOUR, confirm=True)
+
+    assert refused.value.code == "INBOUND_LINKS" and f"{failed[0]}:" in refused.value.reason
+    assert links == [failed[0]], "the check parsed pages that had not changed"
+
+
+def test_an_upload_behind_a_backlog_derives_its_own_rows_while_it_holds_its_credit(
+    served, writer, monkeypatch  # noqa: F811
+):
+    """An upload commits its page under the credit that reserves the room for its rows, behind a
+    backlog that takes the whole slice. Its rows were derived from the oldest intent on, so the
+    backlog took the slice and the upload's rows waited until its credit had ended: a retry for room
+    that its reservation had covered."""
+    upload = "Knowledge Base/Notes/Upload.md"
+    for number in range(6):
+        commit_pending_pages(served, writer, monkeypatch, 1, f"Older {number}")
+    monkeypatch.setattr(derivation, "SLICE_SECONDS", 0.2)
+    monkeypatch.setattr(derivation, "BATCH_PAGES", 1)  # a batch a revision, each as long as a slice
+    real = derive.derive_paths
+
+    def derive_paths(*arguments, **keywords):
+        time.sleep(0.15)
+        return real(*arguments, **keywords)
+
+    monkeypatch.setattr(derive, "derive_paths", derive_paths)
+
+    with media_capacity.commit_credit("upload-session"):
+        write.commit(writer, write.StoreChange(
+            write.Origin.GOVERNED, "upload", puts=(write.PagePut(upload, SMALL_TEXT.encode()),)
+        ))
+        waiting = store_rows(served, "SELECT path FROM store_derivation_queue")
+
+    assert upload not in {path for (path,) in waiting}, "the upload's rows waited for the backlog"
+    assert waiting, "the older intents must still be queued for this check to mean anything"
 
 
 def test_a_page_whose_derivation_failed_holds_no_reader_back(served, writer, monkeypatch):  # noqa: F811

@@ -11,7 +11,8 @@ stored bytes (``underived``).
 
 A batch takes whole revisions of intents in ``(revision, path)`` order, derives them with the code that
 file mode uses, re-derives the pages whose links they move, deletes the intents and advances the store
-revision. A failed intent keeps its row and its reason code and retries alone, with a growing backoff, so
+revision. A batch that fails counts an attempt against each of its intents, so that each is taken alone from
+then on. A failed intent keeps its row and its reason code and retries alone, with a growing backoff, so
 it holds back neither the other intents nor any reader; after ``ATTEMPTS`` status counts it as failed.
 """
 
@@ -23,11 +24,11 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from sqlite3 import Connection, OperationalError
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 from .. import find, foreground_priority, media_capacity, writer_lease
 from ..cli_ops import OpError
@@ -38,6 +39,8 @@ if TYPE_CHECKING:
     from ..collection_store.writer import CollectionWriter
 
 log = logging.getLogger(__name__)
+
+_Parsed = TypeVar("_Parsed")
 
 #: The queue's operations, a closed set that collection schema 20 fixes: derive the rows of a path
 #: from its stored page (or drop them when the store holds no page there), or refresh a file that the
@@ -177,11 +180,17 @@ def committed(writer: CollectionWriter, before: tuple, after: tuple, paths: tupl
     request derives them once it has released the vault mutation boundary and before it
     acknowledges, for one slice (``SLICE_SECONDS``); so does an upload, whose rows draw on the room
     that its session reserved. A governed transition (``own_rows``) derives its own rows the same
-    way, on the store thread, ahead of the older intents. A caller with no boundary and no request
-    (a test, an offline route) derives them here.
+    way, on the store thread, and an upload derives its own too: both ahead of the older intents. A
+    caller with no boundary and no request (a test, an offline route) derives them here.
     """
     root = Path(writer.root)
+    # An upload's derived rows draw on the room that its session reserved, as its page did.
+    credit = media_capacity.held_commit_credit()
     own = _OWN_ROWS.get()
+    if own is None and credit is not None:
+        # The reservation ends with the commit's request, so its rows derive ahead of any older
+        # backlog, as a governed transition's do: they begin at this commit's revision.
+        own = _Own()
     if own is not None and own.revision is None:
         own.revision = after[1]
     # First, so that nothing below can strand the intents: should the request end before its follow
@@ -190,8 +199,6 @@ def committed(writer: CollectionWriter, before: tuple, after: tuple, paths: tupl
     resident_catalogue.advance(root, before, after)
     with _UNADVANCED_LOCK:
         _UNADVANCED.setdefault(root, []).append((before, after, tuple(paths)))
-    # An upload's derived rows draw on the room that its session reserved, as its page did.
-    credit = media_capacity.held_commit_credit()
     if credit is None and own is None and writer_lease.terminal_follows():
         from ..collection_store import runtime
 
@@ -441,7 +448,18 @@ def underived(conn: Connection, paths: Iterable[str] | None = None) -> dict[str,
 
     Keyed paths that outnumber ``UNDERIVED_CAP`` could name every waiting page, so that call takes
     this form too.
+
+    A check that parses these bytes asks ``underived_parsed``, which parses a failed page once and not
+    on every call.
     """
+    pending = _pending_paths(conn, paths)
+    found: dict[str, bytes | None] = dict.fromkeys(pending)
+    found.update(_bodies(conn, pending))
+    return found
+
+
+def _pending_paths(conn: Connection, paths: Iterable[str] | None) -> list[str]:
+    """The paths of the ``derive`` intents that ``underived`` reads, or the refusal that it makes."""
     wanted = None if paths is None else list(dict.fromkeys(paths))
     if wanted is None or len(wanted) > UNDERIVED_CAP:
         waiting = _queue_rows(
@@ -456,24 +474,86 @@ def underived(conn: Connection, paths: Iterable[str] | None = None) -> dict[str,
         if wanted is not None:
             keep = set(wanted)
             pending = [path for path in pending if path in keep]
-    else:
-        pending = []
-        for start in range(0, len(wanted), read.KEYS_PER_QUERY):
-            batch = wanted[start : start + read.KEYS_PER_QUERY]
-            rows = _queue_rows(
-                conn,
-                "SELECT path FROM store_derivation_queue WHERE operation = ? "
-                f"AND path IN ({', '.join('?' * len(batch))})",
-                (DERIVE, *batch),
-            )
-            pending.extend(path for path, in rows or ())
-    found: dict[str, bytes | None] = dict.fromkeys(pending)
-    for start in range(0, len(pending), read.KEYS_PER_QUERY):
-        batch = pending[start : start + read.KEYS_PER_QUERY]
-        found.update((path, bytes(body)) for path, body in conn.execute(
+        return pending
+    pending = []
+    for start in range(0, len(wanted), read.KEYS_PER_QUERY):
+        batch = wanted[start : start + read.KEYS_PER_QUERY]
+        rows = _queue_rows(
+            conn,
+            "SELECT path FROM store_derivation_queue WHERE operation = ? "
+            f"AND path IN ({', '.join('?' * len(batch))})",
+            (DERIVE, *batch),
+        )
+        pending.extend(path for path, in rows or ())
+    return pending
+
+
+def _bodies(conn: Connection, paths: list[str]) -> Iterator[tuple[str, bytes]]:
+    """The stored bytes of each of ``paths`` that the store holds a page at, in keyed reads."""
+    for start in range(0, len(paths), read.KEYS_PER_QUERY):
+        batch = paths[start : start + read.KEYS_PER_QUERY]
+        yield from ((path, bytes(body)) for path, body in conn.execute(
             f"SELECT path, body FROM store_pages WHERE path IN ({', '.join('?' * len(batch))})", batch,
         ))
+
+
+#: The parse of each pending page that a check reads (``underived_parsed``), by the check's kind and
+#: the page's path: the ``sha256`` of the bytes that were parsed, and the result. A failed page stays
+#: queued for as long as it fails, and every such check would parse it again, so a result is kept
+#: while the page's bytes stay the same. Process memory is right for it: a result is a pure function
+#: of the path and the bytes, and a lost entry costs one parse.
+_PARSED: dict[str, dict[str, tuple[str, object]]] = {}
+_PARSED_LOCK = threading.Lock()
+#: The most results kept per kind. A failed page is rare and its result small, so this holds a failed
+#: set far past any that a vault has met; a set past it reparses each check, as before the cache.
+PARSED_CAP = 2048
+
+
+def underived_parsed(
+    conn: Connection, paths: Iterable[str] | None, kind: str, parse: Callable[[str, bytes], _Parsed],
+) -> dict[str, _Parsed | None]:
+    """``underived``, with each page's bytes replaced by ``parse(path, bytes)``, or None for a page
+    that the store holds no bytes for.
+
+    ``kind`` names what ``parse`` makes, one name per parse. A page is parsed once while its bytes
+    stay the same, whatever the number of checks that read it: the result is kept by the page's
+    ``sha256``, so a page that changed is parsed anew, and it is dropped when the intent leaves the
+    queue (``_forget``). The bytes of a page that was parsed are not read again.
+    """
+    pending = _pending_paths(conn, paths)
+    found: dict[str, _Parsed | None] = dict.fromkeys(pending)
+    hashes: dict[str, str] = {}
+    for start in range(0, len(pending), read.KEYS_PER_QUERY):
+        batch = pending[start : start + read.KEYS_PER_QUERY]
+        hashes.update(conn.execute(
+            f"SELECT path, sha256 FROM store_pages WHERE path IN ({', '.join('?' * len(batch))})", batch,
+        ))
+    with _PARSED_LOCK:
+        kept = _PARSED.get(kind, {})
+        stale = []
+        for path, digest in hashes.items():
+            held = kept.get(path)
+            if held is not None and held[0] == digest:
+                found[path] = held[1]  # type: ignore[assignment]  # this kind's own parse made it
+            else:
+                stale.append(path)
+    for path, body in _bodies(conn, stale):
+        found[path] = parsed = parse(path, body)
+        with _PARSED_LOCK:
+            results = _PARSED.setdefault(kind, {})
+            results.pop(path, None)  # a re-parsed page goes last, so the oldest is the one that goes
+            results[path] = (hashes[path], parsed)
+            if len(results) > PARSED_CAP:
+                del results[next(iter(results))]
     return found
+
+
+def _forget(paths: list[str]) -> None:
+    """Drop the parsed results of ``paths``, whose intents left the queue."""
+    with _PARSED_LOCK:
+        for results in _PARSED.values():
+            for path in paths:
+                results.pop(path, None)
 
 
 def figures(conn: Connection) -> dict:
@@ -518,9 +598,10 @@ def drain(
     only the intents that it queued itself (``own_rows``).
 
     A refusal to start a transaction (lease lost, store handed off) stops the drain and leaves every
-    intent as it was. A batch that raises is rolled back and its paths run one by one, so a single bad
-    page only delays itself; the first of them runs whatever the deadline, so that a batch that fails
-    after the deadline still settles an intent, and the next drain takes a smaller one.
+    intent as it was. A batch that raises is rolled back and each of its intents counts the attempt
+    (``_record_failure``), so that none is taken in a batch again; its paths then run one by one, so a
+    single bad page only delays itself. The first of them runs whatever the deadline, so that a batch
+    that fails after the deadline still settles an intent; the next drain takes the others alone.
     """
     root = Path(root)
     result = Drained()
@@ -538,7 +619,7 @@ def drain(
                 for position, intent in enumerate(batch):
                     if result.stopped or (position and deadline is not None and time.monotonic() >= deadline):
                         break
-                    _derive(root, writer, [intent], result)
+                    _derive(root, writer, [replace(intent, attempts=intent.attempts + 1)], result)
             except connection.CollectionStoreError:
                 result.stopped = True
     due_now = _owe_remaining(root, writer, stopped=result.stopped)
@@ -662,6 +743,7 @@ def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: 
         _record_failure(writer, batch, error, result)
         return False
     result.batches += 1
+    _forget([intent.path for intent in batch])
     # After the transaction: a reader that meets the advanced catalogue must see this revision.
     resident_catalogue.remember(root, after, delta.catalogue)
     find.on_store_commit(root, before, after, delta.entries, delta.deleted, ())
@@ -687,9 +769,26 @@ def _stored(tx: Connection, paths: list[str]) -> set[str]:
 
 
 def _record_failure(writer: CollectionWriter, batch: list[_Intent], error: Exception, result: Drained) -> None:
-    """Count one attempt against each intent of a failed single-path batch; a larger batch is split first."""
+    """Count one attempt against each intent of a failed batch.
+
+    A batch of several intents cannot say which of them failed: each counts the attempt, with no
+    reason code and no retry time, and so stays due and still holds a reader back, but ``_next_batch``
+    takes an intent that has attempts alone from then on. The drain runs them one by one at once, and
+    a later turn takes the rest the same way, so one bad page never fails the batch of the others
+    again. The count survives a restart, as the queue does.
+    """
     if len(batch) > 1:
         log.info("a derivation batch failed (%s); deriving its paths one by one", type(error).__name__)
+        try:
+            with writer.handle.transaction() as tx:
+                # Only the intents that failed: a newer write to a path reset its row meanwhile.
+                tx.executemany(
+                    "UPDATE store_derivation_queue SET attempts = 1 "
+                    "WHERE path = ? AND revision = ? AND attempts = 0",
+                    [(intent.path, intent.revision) for intent in batch],
+                )
+        except Exception:  # noqa: BLE001 - the batch then fails again, as it did before the count
+            log.warning("a failed derivation batch could not be recorded", exc_info=True)
         return
     [intent] = batch
     code = NO_ROOM if isinstance(error, OpError) and error.code == media_capacity.UPLOAD_SPACE_BUSY else FAILED

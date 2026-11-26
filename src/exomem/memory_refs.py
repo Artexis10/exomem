@@ -731,9 +731,7 @@ class ReferenceIndex:
         ref differs only in taking the bytes of ``wanted`` (a pending page outside ``wanted`` that
         claims the same id shows once its rows arrive, as for a derived page).
         """
-        from .vault_store import derivation
-
-        underived = derivation.underived(conn, wanted)
+        underived = _underived_identities(conn, self.vault_root, wanted)
         lagging = [path for path in wanted if path in underived]
         derived = [path for path in wanted if path not in underived]
         refs = self._refs_from_connection(conn, derived)[0] if derived else {}
@@ -741,8 +739,7 @@ class ReferenceIndex:
             return refs
         ids: dict[str, str] = {}
         for path in lagging:
-            raw = underived[path]
-            row = None if raw is None else identity_row(self.vault_root, path, raw)
+            row = underived[path]
             identifier = None if row is None or row[4] != "valid" else row[1]
             if identifier is not None:
                 ids[path] = identifier
@@ -1813,17 +1810,31 @@ def _store_identity_owners(
     claim a wanted id, so the check reads them all, and a backlog past ``UNDERIVED_CAP`` refuses it
     (``read.backlog_too_large()``).
     """
-    from .vault_store import derivation
-
     wanted = list(dict.fromkeys(ids))
     root = Path(vault_root)
     return _from_store_identities(
-        vault_root, lambda conn: _owners_at(conn, root, wanted, derivation.underived(conn))
+        vault_root, lambda conn: _owners_at(conn, root, wanted, _underived_identities(conn, root))
+    )
+
+
+def _underived_identities(
+    conn: sqlite3.Connection, root: Path, paths: Iterable[str] | None = None
+) -> dict[str, IdentityRow | None]:
+    """The identity row of each page whose derivation trails its stored bytes (``identity_row`` of
+    them), or None for a page that gives none; ``derivation.underived`` says which pages count.
+
+    A page whose derivation failed stays here for as long as it fails, so each page is parsed once
+    while its bytes stay the same, not on every check (``derivation.underived_parsed``).
+    """
+    from .vault_store import derivation
+
+    return derivation.underived_parsed(
+        conn, paths, "identity", lambda rel, raw: identity_row(root, rel, raw)
     )
 
 
 def _owners_at(
-    conn: sqlite3.Connection, root: Path, wanted: list[str], claimants: dict[str, bytes | None]
+    conn: sqlite3.Connection, root: Path, wanted: list[str], claimants: dict[str, IdentityRow | None]
 ) -> dict[str, tuple[str, ...]]:
     """Every page at ``conn``'s snapshot that holds each id in ``wanted``, with the rows of the
     pending ``claimants`` taken from their stored bytes (``_store_identity_owners``).
@@ -1833,8 +1844,6 @@ def _owners_at(
     claim too, so two pages that share an id stay ambiguous while both of them wait, as they are
     once their rows arrive. A moved or deleted page has no bytes and claims nothing.
     """
-    from .vault_store import derivation
-
     found: dict[str, list[str]] = {identifier: [] for identifier in wanted}
     rows: list[tuple[str, str]] = []
     for start in range(0, len(wanted), REFS_QUERY_CHUNK):
@@ -1845,12 +1854,11 @@ def _owners_at(
             chunk,
         ))
     # The rows name few pages (one per owner of a wanted id): a keyed read finds the pending ones.
-    pending = derivation.underived(conn, {path for _id, path in rows})
+    pending = _underived_identities(conn, root, {path for _id, path in rows})
     for exomem_id, path in rows:
         if path not in pending:
             found[exomem_id].append(path)
-    for path, raw in {**pending, **claimants}.items():
-        row = None if raw is None else identity_row(root, path, raw)
+    for path, row in {**pending, **claimants}.items():
         if row is not None and row[4] == "valid" and row[1] in found:
             found[row[1]].append(path)
     return {identifier: tuple(sorted(paths)) for identifier, paths in found.items()}
@@ -1864,14 +1872,12 @@ def store_owners_by_prefix(vault_root: Path, prefix: str) -> tuple[str, ...] | N
     Any pending page could hold an id under ``prefix``, so a backlog past ``UNDERIVED_CAP`` refuses
     the read (``read.backlog_too_large()``).
     """
-    from .vault_store import derivation
-
     root = Path(vault_root)
     # The first string after every one that starts with ``prefix``, for an index range.
     end = prefix[:-1] + chr(ord(prefix[-1]) + 1)
 
     def owners(conn: sqlite3.Connection) -> tuple[str, ...]:
-        underived = derivation.underived(conn)
+        underived = _underived_identities(conn, root)
         found = {
             str(exomem_id)
             for exomem_id, path in conn.execute(
@@ -1881,8 +1887,7 @@ def store_owners_by_prefix(vault_root: Path, prefix: str) -> tuple[str, ...] | N
             )
             if path not in underived
         }
-        for path, raw in underived.items():
-            row = None if raw is None else identity_row(root, path, raw)
+        for row in underived.values():
             identifier = None if row is None or row[4] != "valid" else row[1]
             if identifier is not None and identifier.startswith(prefix):
                 found.add(identifier)
@@ -2037,6 +2042,8 @@ def replace_prior_rows(conn: sqlite3.Connection, rel: str, rows: Iterable[PriorR
 
 #: Row status for a page the scan would read whose bytes could not be observed.
 _UNREADABLE = "unreadable"
+#: One identity row: path, normalized id, raw id, source hash, status.
+IdentityRow = tuple[str, str | None, str, str, str]
 
 
 def _read_identity(vault_root: Path, path: Path) -> tuple[str, str | None, str, str, str] | None:
@@ -2089,9 +2096,7 @@ def _identity_from_bytes(rel: str, raw: bytes) -> tuple[str, str | None, str, st
     return rel, normalized, raw_id, vault_module.content_hash(text), status
 
 
-def identity_row(
-    vault_root: Path, rel: str, raw: bytes
-) -> tuple[str, str | None, str, str, str] | None:
+def identity_row(vault_root: Path, rel: str, raw: bytes) -> IdentityRow | None:
     """The row that the reference sidecar holds for one page, read from bytes instead of a file.
 
     It returns what ``_read_identity`` returns for the same file: None when the scan does not
