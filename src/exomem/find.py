@@ -3153,8 +3153,9 @@ _MIXED_UNITS_PER_PARENT_CAP = 3
 _MIXED_PAGE_WEIGHT = 1.0
 _MIXED_UNIT_WEIGHT = 1.0
 _UNIT_EXCERPT_MAX = 320
-#: Candidate windows of a dimension's members that its vector lane ranks alone. A dimension with
-#: more members first ranks its proposed parents' units, then its newest members if those fall short.
+#: Candidate windows of members that the vector lane ranks alone, and of rejected rows after which an
+#: exact dimension scan stops. Eight windows fill a window while one proposed row in nine is a member,
+#: and keep a sparse dimension's exact checks to a fixed multiple of the limit, not of the corpus.
 _DIMENSION_MEMBER_WINDOWS = 8
 
 
@@ -4077,6 +4078,11 @@ def _find_semantic_units(
         )
 
     def finish(hits):
+        if partial and (failed_out is None or "semantic_units_candidate_window" not in failed_out):
+            # An exact scan stopped at its bound, so one search method may have missed results.
+            if failed_out is not None:
+                failed_out.append("semantic_units_candidate_window")
+            _record_degradation("semantic_units_candidate_window")
         if _candidate_window is not None:
             _candidate_window.exhausted = candidate_window_exhausted
         return hits if _defer_hydration else _finish_unit_candidates(
@@ -4090,7 +4096,9 @@ def _find_semantic_units(
         )
 
     def dimension_rows(text: str, *, k: int, rank_query: bool = False, literal_all: bool = False):
-        # Rows the store checked exactly against the dimension filter.
+        # Rows the store checked exactly against the dimension filter, and whether it stopped after
+        # `bound` rejected rows.
+        stopped: list[bool] = []
         result = lexstore.search_semantic_units_result(
             vault_root,
             text,
@@ -4109,11 +4117,18 @@ def _find_semantic_units(
             allow_delta=True if repair is None else repair,
             validated=parent_reads.validated if parent_reads else None,
             _validate_current=False,
+            scan_limit=bound,
+            scan_stopped=stopped,
         )
         _set_catalog_timing_profile(timings, result.readiness)
         if not result.readiness.complete:
             _raise_catalog_outcome(result.readiness)
-        return list(result.value or [])
+        return list(result.value or []), bool(stopped)
+
+    def newest_members_read():
+        # The newest members within the bound, and whether more may exist past it.
+        members, stopped = dimension_rows("", k=bound + 1)
+        return members, stopped or len(members) > bound
 
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     # Empty queries carry no vector signal. Match the page lane's contract and
@@ -4124,6 +4139,9 @@ def _find_semantic_units(
 
     indexed: list[Any] | None = None
     candidate_window_exhausted = False
+    # Set when an exact dimension scan stopped at its bound and the result may lack members past it.
+    partial = False
+    lexical_capped = False
     # The unit lane consumes the same branch-preserving DNF the page lane uses:
     # an exact category/kind plan seeds candidates through `algebra.clauses`
     # (same-row `(category... AND kind...) OR ...`), never the flattened
@@ -4161,6 +4179,7 @@ def _find_semantic_units(
     window = _dimension_window or (
         max(8, requested_limit) if mode == "keyword" and limit is not None else candidate_limit
     )
+    bound = window * _DIMENSION_MEMBER_WINDOWS
     exact_eligibility = dnf_clauses is not None or (indexed_dimensions and not pushed_dimensions)
     if exact_eligibility:
         # Exact eligibility is normal-table metadata only. Hybrid/vector
@@ -4266,10 +4285,13 @@ def _find_semantic_units(
                     else select(indexed)
                 )
     elif pushed_dimensions:
-        # The store checks each proposed row's dimensions exactly and stops after `window + 1`.
-        indexed = dimension_rows(
+        # The store checks each proposed row's dimensions exactly and stops after `window + 1` members
+        # or `bound` rejected rows.
+        indexed, lexical_capped = dimension_rows(
             query, k=window + 1, rank_query=mode != "keyword", literal_all=mode == "keyword",
         )
+        # Keyword order is the scan's own order, so its stop matters only when it shortens the result.
+        partial = lexical_capped and mode == "hybrid"
     else:
         indexed = lexstore.search_semantic_units(
             vault_root,
@@ -4341,7 +4363,10 @@ def _find_semantic_units(
 
     if mode == "keyword":
         if not records:
-            return widen() if candidate_window_exhausted and pushed_dimensions and limit is not None else finish([])
+            if candidate_window_exhausted and pushed_dimensions and limit is not None:
+                return widen()
+            partial = lexical_capped
+            return finish([])
         tokens = query.lower().split()
         ordered = sorted(
             (
@@ -4366,12 +4391,11 @@ def _find_semantic_units(
         }
         if prefer_active:
             ordered.sort(key=lambda record: superseded[id(record)])
-        if (
-            candidate_window_exhausted and pushed_dimensions and limit is not None
-            and sum(not superseded[id(record)] for record in ordered[:limit]) < limit
-        ):
+        short = limit is None or sum(not superseded[id(record)] for record in ordered[:limit]) < limit
+        if candidate_window_exhausted and pushed_dimensions and limit is not None and short:
             # Recency is the final order, so only a short or superseded prefix needs more rows.
             return widen()
+        partial = lexical_capped and short
         selected = ordered if limit is None else ordered[:limit]
         hits = [
             _semantic_unit_hit(page, unit, bm25_rank=None, bm25_score=None)
@@ -4409,7 +4433,7 @@ def _find_semantic_units(
         # A dimension's members when the vector lane ranks them alone, else its newest members.
         member_refs: set[str] | None = None
         newest_members: list[Any] | None = None
-        bound = window * _DIMENSION_MEMBER_WINDOWS
+        members_capped = False
         if pushed_dimensions:
             _dimension_parents = proposed_parents()
             vector_parent_paths = vector_parent_paths & _dimension_parents
@@ -4417,8 +4441,8 @@ def _find_semantic_units(
             # size, so the lane ranks the parents' units first and reads members only if those fall short.
             if len(vector_parent_paths) <= bound:
                 # The store checks each proposed unit exactly, so the vector lane can rank the members alone.
-                members = dimension_rows("", k=bound + 1)
-                if len(members) <= bound:
+                members, members_capped = newest_members_read()
+                if not members_capped:
                     member_refs = {row.unit_ref for row in members}
                     vector_parent_paths = vector_parent_paths & {row.parent_path for row in members}
                 else:
@@ -4454,17 +4478,14 @@ def _find_semantic_units(
                 # Other units of the proposed parents crowd out the members: rank the newest members.
                 vector_capped = True
                 if newest_members is None:
-                    newest_members = dimension_rows("", k=bound + 1)
+                    newest_members, members_capped = newest_members_read()
                 crowded = vector_hits[:window]
                 vector_parent_paths = vector_parent_paths & {row.parent_path for row in newest_members}
                 vector_hits, vector_profile, _indexed_scope = vector_read({row.unit_ref for row in newest_members})
                 seen = {hit.unit_ref for hit in vector_hits[:window]}
                 vector_hits = [*vector_hits[:window], *(hit for hit in crowded if hit.unit_ref not in seen)]
-                if len(newest_members) > bound:
-                    # The lane ranked only the newest members; the result says its candidate window ran out.
-                    if failed_out is not None and "semantic_units_candidate_window" not in failed_out:
-                        failed_out.append("semantic_units_candidate_window")
-                    _record_degradation("semantic_units_candidate_window")
+                # The lane ranked only the members among the newest proposed rows.
+                partial = partial or members_capped
         if (
             vector_allowed_refs is not None
             and {hit.unit_ref for hit in vector_hits} != vector_allowed_refs
@@ -4504,10 +4525,11 @@ def _find_semantic_units(
     # Pure vector mode keeps lexical rows cold unless the vector lane could not
     # produce a trustworthy ranking. This avoids reparsing the same candidate
     # parents twice while preserving the deterministic lexical fallback.
-    if mode == "vector" and not vector_hits and indexed:
-        records.update(
-            select(indexed)
-        )
+    if mode == "vector" and not vector_hits:
+        # The lexical rows stand in for the vector lane, with their scan's bound.
+        partial = partial or lexical_capped
+        if indexed:
+            records.update(select(indexed))
 
     if not records:
         if candidate_window_exhausted and pushed_dimensions and limit is not None:

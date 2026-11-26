@@ -1022,9 +1022,10 @@ def test_a_family_dimension_finds_members_the_vector_ranks_last_in_one_read(
     """Catches vector reads that grow with the other units of a member's page, and a filtered search
     that stops short of members that both lanes rank last."""
     body = "# Family source\n\n" + "\n".join(
-        f"## Claim\n- id: noise-{index}\n\nSignal number {index}.\n" for index in range(300)
+        f"## Claim\n- id: noise-{index}\n\nSignal number {index}.\n" for index in range(100)
     )
-    # The members carry no query word: both lanes rank all 300 nonmembers above them.
+    # The members carry no query word: both lanes rank all 100 nonmembers above them, which stay
+    # within the rows that an exact scan may reject before it stops.
     body += "\n".join(
         f"## Claim\n- id: member-{index}\n- relations: derived_from: [[Family target]]\n\n"
         f"Qualifying source material for outcome {index}.\n"
@@ -1050,6 +1051,63 @@ def test_a_family_dimension_finds_members_the_vector_ranks_last_in_one_read(
     assert len(result["hits"]) == 2
     assert all("Qualifying source material" in hit["excerpt"] for hit in result["hits"])
     assert "notice" not in result
+
+
+@pytest.mark.parametrize(
+    ("mode", "restricted"), [("keyword", False), ("hybrid", False), ("hybrid", True)],
+    ids=["keyword", "hybrid", "hybrid-restricted"],
+)
+def test_a_sparse_family_dimension_checks_no_more_rows_as_the_corpus_grows(
+    stored, writer, encoder, monkeypatch, mode, restricted,  # noqa: F811
+):
+    """Catches exact checks that grow with the corpus when a family's members are one unit in nine
+    and lack the query word, and a stopped scan whose result does not say it may be incomplete.
+    A restricted caller ranks its lexical lane by admitted statistics, a separate branch."""
+    def sources(first):
+        return tuple(
+            write.PagePut(f"Knowledge Base/Notes/Source {index:02d}.md", (
+                f"# Source {index}\n\n"
+                + "\n".join(f"## Claim\n- id: noise-{unit}\n\nSignal note {unit}.\n" for unit in range(8))
+                + f"\n## Claim\n- id: member-{index}\n- relations: derived_from: [[Family target]]\n\n"
+                f"Qualifying source material {index}.\n"
+            ).encode())
+            for index in range(first, first + 8)
+        )
+
+    # One window of rejected rows stops a scan, so eight pages already pass the bound.
+    monkeypatch.setattr(find, "_DIMENSION_MEMBER_WINDOWS", 1)
+    if restricted:
+        restrict_external(stored, 'tags: ["secret"]')
+    checks: list[str] = []
+    real = lexstore._SelectedUnits.matches_filter
+    monkeypatch.setattr(
+        lexstore._SelectedUnits, "matches_filter", lambda self, row, unit: checks.append(row[1]) or real(self, row, unit),
+    )
+
+    def search(*puts):
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=puts))
+        if mode != "keyword":
+            catch_up(stored)
+        find.clear_cache()
+        checks.clear()
+        with request_scope(EXTERNAL) if restricted else contextlib.nullcontext():
+            result = commands.op_ask_memory(
+                stored, query="signal", scope="kb-only", mode=mode, result_level="unit",
+                filters={"unit.dimension": {"$eq": "provenance"}}, limit=2, graph=False, include_timings=True,
+            )
+        return result, len(checks)
+
+    smaller, smaller_checks = search(
+        *sources(0), write.PagePut("Knowledge Base/Notes/Family target.md", b"# Family target\n\nSurvey material.\n"),
+    )
+    larger, larger_checks = search(*sources(8), *sources(16))
+
+    assert larger_checks == smaller_checks
+    for result in (smaller, larger):
+        assert "semantic_units_candidate_window" in result.get("degraded", [])
+        # Keyword search needs the query word, which no member holds; the vector lane ranks members.
+        assert len(result["hits"]) == (0 if mode == "keyword" else 2)
+        assert all("Qualifying source material" in hit["excerpt"] for hit in result["hits"])
 
 
 def test_a_family_dimension_does_no_graph_work_for_unrelated_pages(stored, writer, monkeypatch):  # noqa: F811
