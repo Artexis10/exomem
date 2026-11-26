@@ -61,6 +61,9 @@ class FakeCell(Cell):
         self.file_replies: list[dict] = []
         self.room_after_filing = BIG
 
+    async def offers_file(self) -> bool:
+        return not self.refuses_file
+
     async def file(self, path, *, collection=None, continuation=None) -> dict:
         if self.refuses_file:
             raise FilingUnavailable
@@ -683,16 +686,177 @@ def test_a_window_that_the_job_refuses_for_space_is_planned_again_smaller(rig):
 # -- Older cells
 
 
-def test_an_older_cell_gets_one_import_with_no_series_file(rig):
+def test_an_older_cell_gets_one_import_with_no_series_file_when_nothing_asks_it_to_file_or_labels_it(rig):
     """Catches windows against a cell that reports no budget, which could not size them."""
     nine(rig)
     rig.cell.older = True
 
-    rig.run()
+    result = rig.run()
 
     assert len(rig.cloud.completed) == 1
     assert import_stage.SERIES_FILE not in rig.cloud.members[rig.cloud.completed[0]]
     assert len(rig.cloud.sent(rig.cloud.completed[0])) == 9
+    assert "cell_filing" not in result
+
+
+def _lone_series(rig, tmp_path: Path):
+    """The series file of the one import that an older cell received, as the cell reads it."""
+    (import_id,) = rig.cloud.completed
+    vault, stage_id = _stage_with(tmp_path, rig.cloud.members[import_id][import_stage.SERIES_FILE])
+    return import_stage.read_series(vault, stage_id)
+
+
+@pytest.mark.parametrize("ask", [{"file": True}, {"file": False, "ask_cell": True}], ids=["default", "no-wait"])
+def test_a_cell_with_no_window_budget_is_asked_to_file_its_one_import_and_the_result_says_so(rig, tmp_path, ask):
+    """Catches `--no-wait` on a cell without a media store: the import lands, nothing asks the cell to file, and the CLI says done."""
+    rig.files(a01__bin=800, n01__md=100)
+    rig.cell.older = True
+
+    result = rig.run(origin_label="Phone photos", **ask)
+
+    series = _lone_series(rig, tmp_path)
+    assert (series.filing, series.label) == ("cell", "Field Notes")
+    assert series.origin == {"browser_family": "cli", "label": "Phone photos"}
+    assert rig.cloud.all_sent() == ["a01.bin", "n01.md"]
+    assert result["cell_filing"] == "asked" and rig.cell.filed == []
+    assert "The upload is done and the cell files the folder by itself." in rig.said()
+
+
+def test_a_collection_name_becomes_the_label_the_cell_files_a_lone_import_under(rig, tmp_path):
+    """Catches `--collection` that a lone import drops, so the cell files under the folder name."""
+    rig.files(a01__bin=800)
+    rig.cell.older = True
+
+    rig.run(file=True, collection="Reading list")
+
+    assert _lone_series(rig, tmp_path).label == "Reading list"
+
+
+def test_a_no_file_run_on_a_cell_with_no_window_budget_records_the_label_and_does_not_ask_the_cell_to_file(rig, tmp_path):
+    """Catches `--no-file --label` that drops the label, which the assistant's later filing would have recorded."""
+    rig.files(a01__bin=800)
+    rig.cell.older = True
+
+    result = rig.run(file=False, origin_label="Phone photos")
+
+    series = _lone_series(rig, tmp_path)
+    assert series.filing is None and series.origin == {"browser_family": "cli", "label": "Phone photos"}
+    assert "cell_filing" not in result
+
+
+def test_a_cell_that_cannot_file_gets_a_plain_import_and_the_result_does_not_claim_filing(rig):
+    """Catches a result that says the cell will file an import that it ignores, and a label that vanishes unseen."""
+    rig.files(a01__bin=800)
+    rig.cell.older = True
+    rig.cell.refuses_file = True
+
+    result = rig.run(file=True, origin_label="Phone photos")
+
+    (import_id,) = rig.cloud.completed
+    assert import_stage.SERIES_FILE not in rig.cloud.members[import_id]
+    assert result["cell_filing"] == "not_offered"
+    assert "does not file imports itself" in rig.said() and "cannot record --label" in rig.said()
+    assert "the cell files the folder by itself" not in rig.said()
+
+
+def _stop_a_lone_import(rig, **flags) -> Path:
+    """Run the command until the upload fails once, so the checkpoint holds the import; returns its record."""
+    rig.cell.older = True
+    rig.cloud.fail_prepare_once = True
+    with pytest.raises(CloudImportError):
+        rig.run(**flags)
+    return rig.tmp / "checkpoint" / "checkpoint.json"
+
+
+def _landed_series_file(rig) -> bool:
+    (import_id,) = rig.cloud.completed
+    return import_stage.SERIES_FILE in rig.cloud.members[import_id]
+
+
+@pytest.mark.parametrize(("first", "rerun", "flag"), [
+    ({"file": True}, {"file": False}, "--no-file"),
+    ({"file": False}, {"file": False, "origin_label": "Phone photos"}, "--label"),
+], ids=["now-no-file", "label-added"])
+def test_a_rerun_of_a_lone_import_that_changes_what_its_series_file_carries_is_refused_and_keeps_the_checkpoint(rig, first, rerun, flag):
+    """Catches a rerun that reports filing, or drops a label, from its own flags while the stopped run's bytes carry others."""
+    rig.files(a01__bin=800)
+    record = _stop_a_lone_import(rig, **first)
+
+    with pytest.raises(CloudImportError) as refused:
+        rig.run(**rerun)
+
+    assert refused.value.code == "CHECKPOINT_OPTIONS_CHANGED" and flag in refused.value.message
+    assert record.exists() and not rig.cloud.completed
+    result = rig.run(**first)  # The command as it was first run lands the import the checkpoint holds.
+    assert _landed_series_file(rig) is first["file"] and result.get("cell_filing") == ("asked" if first["file"] else None)
+
+
+def test_a_declared_lone_import_that_is_not_archived_is_refused_for_new_flags_and_not_blamed_on_the_source(rig):
+    """Catches a rerun that builds a different archive from the declared counts and stops with SOURCE_CHANGED."""
+    rig.files(a01__bin=800)
+    record = _stop_a_lone_import(rig, file=True)
+    state = json.loads(record.read_text())
+    for name in ("ciphertext_sha256", "ciphertext_bytes"):  # A stop while the archive was built leaves none of these.
+        state.pop(name, None)
+    record.write_text(json.dumps(state))
+    (rig.tmp / "checkpoint" / "archive.age").unlink()
+
+    with pytest.raises(CloudImportError) as refused:
+        rig.run(file=False)
+
+    assert refused.value.code == "CHECKPOINT_OPTIONS_CHANGED" and record.exists()
+    assert rig.run(file=True)["cell_filing"] == "asked" and _landed_series_file(rig)
+
+
+@pytest.mark.parametrize(("first_refuses", "carries", "claim"), [(False, True, "asked"), (True, False, "not_offered")],
+                         ids=["offer-withdrawn", "offer-gained"])
+def test_a_rerun_builds_the_archive_the_checkpoint_recorded_when_the_cells_offer_changed_before_it_was_built(
+        rig, first_refuses, carries, claim):
+    """Catches a rerun that is refused, or that builds another archive and claims what the live probe says, after an upgrade."""
+    rig.files(a01__bin=800)
+    rig.cell.refuses_file = first_refuses
+    record = _stop_a_lone_import(rig, file=True)
+    state = json.loads(record.read_text())
+    for name in ("ciphertext_sha256", "ciphertext_bytes"):  # A stop while the archive was built leaves none of these.
+        state.pop(name, None)
+    record.write_text(json.dumps(state))
+    (rig.tmp / "checkpoint" / "archive.age").unlink()
+    rig.cell.refuses_file = not first_refuses
+    rig.lines.clear()
+
+    result = rig.run(file=True)
+
+    assert _landed_series_file(rig) is carries and result["cell_filing"] == claim
+    assert ("the cell files the folder by itself" in rig.said()) is carries
+    assert ("does not file imports itself" in rig.said()) is not carries
+
+
+def test_a_checkpoint_from_before_the_record_was_a_plain_import_and_a_rerun_that_asks_to_file_is_refused(rig):
+    """Catches a stopped plain import that a rerun with the default flags resumes and then reports as filed by the cell."""
+    rig.files(a01__bin=800)
+    record = _stop_a_lone_import(rig, file=False)
+    state = json.loads(record.read_text())
+    del state["choices"]
+    record.write_text(json.dumps(state))
+
+    with pytest.raises(CloudImportError) as refused:
+        rig.run(file=True)
+    result = rig.run(file=False)
+
+    assert refused.value.code == "CHECKPOINT_OPTIONS_CHANGED" and "started as an upload only" in refused.value.message
+    assert "--no-file" in refused.value.message and "ask your assistant to file it" in refused.value.message
+    assert "cell_filing" not in result and not _landed_series_file(rig)
+
+
+def test_a_folder_with_nothing_to_send_is_refused_before_a_series_file_alone_is_uploaded(rig):
+    """Catches a stage that holds only the series file, which the empty selection would otherwise still declare."""
+    (rig.source / ".hidden").write_text("x")
+    rig.cell.older = True
+
+    with pytest.raises(CloudImportError) as refused:
+        rig.run(file=True)
+
+    assert refused.value.code == "NOTHING_TO_IMPORT" and not rig.cloud.registered_at
 
 
 def test_an_older_cell_refuses_a_folder_above_its_known_size_before_any_upload(rig):
