@@ -5,6 +5,7 @@ The structured-filter field registry SHALL accept `unit.dimension` as a closed f
 
 Canonical-store catalogue plans SHALL propose family candidates through indexed neutral endpoints and authored target dependencies.
 They SHALL decide exact membership before every lexical or vector candidate cap and the final limit, including Boolean composition.
+Each exact scan SHALL stop after eight candidate windows of nonmember rows, and a stop that can shorten the result SHALL make it report that one search method may have missed results.
 The author's admitted registry SHALL determine terminal replacement, family and display behaviour before folding unit or page endpoints.
 The original filter SHALL remain authoritative, and the same eligible identities SHALL reach both lanes.
 Selected target resolution SHALL use complete zero/one-owner proofs or two admitted ambiguity witnesses, without claiming an exact ambiguity count.
@@ -14,7 +15,7 @@ The normalizer keys and ordinary-body witnesses SHALL remain neutral, maintained
 Registry changes SHALL require no corpus rebuild, and an endpoint outside the result's page filter SHALL still count when readable.
 
 #### Scenario: Stored family members fill the requested limit before ranking
-- **WHEN** better-ranked nonmembers precede enough admitted family members in a canonical-store catalogue request
+- **WHEN** fewer better-ranked nonmembers than eight candidate windows precede enough admitted family members in a canonical-store catalogue request
 - **THEN** keyword, hybrid and vector results fill the requested limit with exact members
 - **AND** nested `$or`, `$not` and `$ne` keep the original predicate before candidate caps
 
@@ -72,6 +73,11 @@ Registry changes SHALL require no corpus rebuild, and an endpoint outside the re
 - **WHEN** a hybrid or vector request filters by a dimension with more members than eight candidate windows, and other units of their pages outrank every member
 - **THEN** the vector lane ranks the newest members within that bound and the result fills the requested limit
 - **AND** the result reports that one search method may have missed results
+
+#### Scenario: A sparse family bounds its exact checks
+- **WHEN** a canonical-store request filters by a relation family whose members are a small share of the proposed units and carry no query word
+- **THEN** each exact scan stops after eight candidate windows of nonmember rows, whatever the corpus size
+- **AND** a hybrid result, or a keyword result shorter than the limit, reports that one search method may have missed results
 
 #### Scenario: A complement keeps an invalid authored row
 - **WHEN** a served filter negates a governed-key dimension and an authored member row has no valid selected value
