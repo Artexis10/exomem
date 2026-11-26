@@ -85,20 +85,21 @@ class _SourceChanged(Exception):
     """A file or folder changed while it was archived, so the archive would mix two versions."""
 
 
-# The cell's controller fixes these two codes for an import step that left no report of its own.
+# The cell's controller fixes these two codes for an import step that left no report of its own. A retry after an
+# out-of-memory stop meets the same archive under the same limit, and a large vault takes hours to upload, so that
+# message asks for a report first.
 _ENDED_WITHOUT_REPORT = {
-    "IMPORT_OUT_OF_MEMORY": "the import ran out of memory on your cell and stopped",
-    "IMPORT_KILLED": "the import was stopped on your cell before it could say why",
+    "IMPORT_OUT_OF_MEMORY": "the cell ran out of memory while it unpacked the import, and the checkpoint is removed. "
+                            "Report the import id; a new run on the same archive will likely stop the same way",
+    "IMPORT_KILLED": "the import was stopped on your cell before it could say why, and the checkpoint is removed. "
+                     "Run the command again to start a new import; if it stops the same way, report the import id",
 }
 
 
 def _ended_message(code: str) -> str:
     """What happened to an import that Cloud ended, and what the person can do."""
-    cause = _ENDED_WITHOUT_REPORT.get(code)
-    if cause is None:
-        return "the Cloud import ended without finishing, and the checkpoint is removed; a new run starts a new import"
-    return (f"{cause}, and the checkpoint is removed. Run the command again to start a new import; "
-            "if it stops the same way, report the import id")
+    return _ENDED_WITHOUT_REPORT.get(
+        code, "the Cloud import ended without finishing, and the checkpoint is removed; a new run starts a new import")
 
 
 def safe_code(value: object) -> str | None:

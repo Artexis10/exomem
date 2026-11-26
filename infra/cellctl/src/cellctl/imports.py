@@ -103,6 +103,8 @@ OUT_OF_MEMORY = "IMPORT_OUT_OF_MEMORY"
 KILLED = "IMPORT_KILLED"
 # Kubernetes' own reason for a container that the kernel's memory limit stopped; a closed value of its API.
 OOM_KILLED_REASON = "OOMKilled"
+# The words cellctl logs between an import Job's name and its diagnostic. The rehearsal finds those lines by them.
+JOB_FAILED_LOG_PHRASE = " Job failed: "
 
 
 def _report_error(job: ImportJob) -> str:

@@ -462,7 +462,7 @@ class ClusterClient:
     def observe_import_jobs(self, namespace: str, import_id: str):
         import json
 
-        from .imports import PHASES, ImportJob, job_name
+        from .imports import JOB_FAILED_LOG_PHRASE, PHASES, ImportJob, job_name
 
         result = {}
         for phase in PHASES:
@@ -494,7 +494,13 @@ class ClusterClient:
                             safe["reason"] = reason
                         if type(terminated.exit_code) is int:
                             safe["exit_code"] = terminated.exit_code
-                    logger.warning("cellctl: import %s %s Job failed: %s", import_id, phase,
+                    # With its pod already gone, the Job's own Failed condition (for example DeadlineExceeded or
+                    # BackoffLimitExceeded) is the only cause left. "Failed" and "True" are Kubernetes API values.
+                    job_reason = next((_identifier(condition.reason) for condition in job.status.conditions or []
+                                       if condition.type == "Failed" and condition.status == "True"), None)
+                    if job_reason:
+                        safe["job_reason"] = job_reason
+                    logger.warning("cellctl: import %s %s%s%s", import_id, phase, JOB_FAILED_LOG_PHRASE,
                                    json.dumps(safe, sort_keys=True))
             result[phase] = ImportJob(job is not None, active, succeeded, failed, report, bool(pods), reason)
         return result

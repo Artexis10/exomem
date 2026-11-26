@@ -25,6 +25,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from cellctl.imports import JOB_FAILED_LOG_PHRASE
 from cellctl.manifests import namespace_name
 from kubernetes.utils.quantity import parse_quantity
 
@@ -772,8 +773,8 @@ def save_import_failure_evidence(ctx: Context) -> dict[str, Any]:
     """Keep what decides an out-of-memory kill of the import Job, before the run is torn down.
 
     The runner's kernel log names a memory-cgroup kill and the process it chose. The Job's pod is gone by the time
-    anyone looks, so cellctl's whole log is kept too: it records the container's reason and exit code before the
-    controller deletes the Job.
+    anyone looks, so the log of cellctl's pod is kept too: it records the container's reason and exit code before the
+    controller deletes the Job. A read that failed says so by its return code, and its line list is null, never empty.
     """
     diagnostics = ctx.stack.workdir / "diagnostics"
     diagnostics.mkdir(exist_ok=True)
@@ -782,12 +783,16 @@ def save_import_failure_evidence(ctx: Context) -> dict[str, Any]:
     controller = ctx.kubectl("logs", "--namespace", platform.CLOUD_NAMESPACE, "deployment/cellctl", "--tail=-1", check=False)
     controller_log = controller.stdout + controller.stderr
     (diagnostics / "cellctl-at-failure.log").write_text(controller_log, encoding="utf-8")
+    failures = ([line for line in controller_log.splitlines() if JOB_FAILED_LOG_PHRASE in line]
+                if controller.returncode == 0 else None)
     return {
         "runner_dmesg": {"returncode": kernel.returncode, "bytes": len((kernel.stdout + kernel.stderr).encode()),
                          "file": "runner-dmesg.txt in the diagnostics artifact"},
-        "cellctl_log_file": "cellctl-at-failure.log in the diagnostics artifact",
-        # cellctl's own fixed phrase for a failed import Job; the line carries the container reason and exit code.
-        "import_job_failures": [line for line in controller_log.splitlines() if " Job failed: " in line][:20],
+        "cellctl_log": {"returncode": controller.returncode, "bytes": len(controller_log.encode()),
+                        "file": "cellctl-at-failure.log in the diagnostics artifact"},
+        # The first 20 lines that name a failed import Job, and how many there were; both null when the read failed.
+        "import_job_failures": failures[:20] if failures is not None else None,
+        "import_job_failures_total": len(failures) if failures is not None else None,
     }
 
 

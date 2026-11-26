@@ -106,10 +106,12 @@ def _matches(labels: dict[str, str], selector: str | None) -> bool:
     return True
 
 
-def _job(*, succeeded: bool = False, failed: bool = False, active: bool = False, created: datetime | None = None):
+def _job(*, succeeded: bool = False, failed: bool = False, active: bool = False, created: datetime | None = None,
+         failed_reason: str | None = None):
+    conditions = [NS(type="Failed", status="True", reason=failed_reason)] if failed_reason else None
     return NS(metadata=NS(creation_timestamp=created),
               status=NS(succeeded=1 if succeeded else None, failed=1 if failed else None,
-                        active=1 if active else None, start_time=None))
+                        active=1 if active else None, start_time=None, conditions=conditions))
 
 
 def _job_pod(job_name: str, *, snapshot_id: str, running_since: datetime | None = None):
@@ -453,6 +455,17 @@ def test_a_failed_import_logs_its_diagnostic_without_private_text(caplog):
     assert '"type": "PermissionError"' in caplog.text and '"function": "unwritable_member"' in caplog.text
     assert '"errno": 13' in caplog.text
     assert "private-record" not in caplog.text
+
+
+def test_a_failed_import_whose_pod_is_gone_logs_the_jobs_own_failure_reason(caplog):
+    """Defect: with its pod gone, a failed import Job logged an empty diagnostic, so nothing named why it ended."""
+    import_id = "00000000-0000-4000-8000-000000000002"
+    name = import_job_name(import_id, "import")
+    client = _client(hold_started_at=None, jobs={name: _job(failed=True, failed_reason="DeadlineExceeded")}, pods=[])
+
+    client.observe_import_jobs(NAMESPACE, import_id)
+
+    assert '"job_reason": "DeadlineExceeded"' in caplog.text
 
 
 @pytest.mark.parametrize("remaining", ["job", "pod"])

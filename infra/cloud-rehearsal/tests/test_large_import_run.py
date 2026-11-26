@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
+from cellctl.imports import JOB_FAILED_LOG_PHRASE
 
 from cloud_rehearsal import large_import, platform
 from cloud_rehearsal.mcp_client import ToolResult
@@ -408,21 +409,37 @@ def test_each_folders_app_log_is_kept_under_its_own_name(monkeypatch, tmp_path):
     assert kept == {"cell-app-notes-exomem.log": b"first pod", "cell-app-media-exomem.log": b"second pod"}
 
 
+def _failure_ctx(tmp_path, *, log_returncode: int, log: str):
+    return SimpleNamespace(stack=SimpleNamespace(workdir=tmp_path),
+                           kubectl=lambda *_args, **_kwargs: SimpleNamespace(returncode=log_returncode, stdout=log, stderr=""))
+
+
 def test_a_failed_upload_keeps_the_runners_kernel_log_and_the_failed_jobs_reason(monkeypatch, tmp_path):
     """Defect: the Job and its pod are gone by the time anyone looks, so an out-of-memory kill is only provable
     from the kernel log and the line cellctl logged first."""
-    failed = "cellctl: import 1 import Job failed: {\"exit_code\": 137, \"reason\": \"OOMKilled\"}"
+    failed = f"cellctl: import 1 import{JOB_FAILED_LOG_PHRASE}{{\"exit_code\": 137, \"reason\": \"OOMKilled\"}}"
     monkeypatch.setattr(large_import, "run", lambda *_args, **_kwargs: SimpleNamespace(
         returncode=0, stdout="[Wed] Memory cgroup out of memory: Killed process 7 (python)\n", stderr=""))
-    ctx = SimpleNamespace(stack=SimpleNamespace(workdir=tmp_path),
-                          kubectl=lambda *_args, **_kwargs: SimpleNamespace(stdout=f"reconciled\n{failed}\n", stderr=""))
+    ctx = _failure_ctx(tmp_path, log_returncode=0, log=f"reconciled\n{failed}\n")
 
     kept = large_import.save_import_failure_evidence(ctx)
 
     diagnostics = tmp_path / "diagnostics"
     assert "Killed process 7" in (diagnostics / "runner-dmesg.txt").read_text()
     assert failed in (diagnostics / "cellctl-at-failure.log").read_text()
-    assert kept["import_job_failures"] == [failed] and kept["runner_dmesg"]["returncode"] == 0
+    assert kept["import_job_failures"] == [failed] and kept["import_job_failures_total"] == 1
+    assert kept["runner_dmesg"]["returncode"] == 0 and kept["cellctl_log"]["returncode"] == 0
+
+
+def test_a_cellctl_log_that_could_not_be_read_is_null_not_an_empty_list(monkeypatch, tmp_path):
+    """Defect: a failed log read reported no failed import Jobs, so the evidence read as complete and clean."""
+    monkeypatch.setattr(large_import, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""))
+    ctx = _failure_ctx(tmp_path, log_returncode=1, log="")
+
+    kept = large_import.save_import_failure_evidence(ctx)
+
+    assert kept["cellctl_log"]["returncode"] == 1
+    assert kept["import_job_failures"] is None and kept["import_job_failures_total"] is None
 
 
 def test_an_app_log_that_cannot_be_read_is_reported_and_does_not_fail_the_run(monkeypatch, tmp_path):

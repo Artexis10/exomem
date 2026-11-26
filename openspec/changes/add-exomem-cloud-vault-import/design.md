@@ -172,7 +172,7 @@ A refused import preserves existing canonical content. Interrupted ZIP preservat
 - `IMPORT_OUT_OF_MEMORY`, when cellctl finds that the kernel killed the import Job's container for memory and the Job wrote no report;
 - `IMPORT_KILLED`, when the Job's container ended without a report for any other reason.
 
-An unexpected exception in the Job keeps `IMPORT_FAILED`. The Job's report then adds a `diagnostic` with the exception class and function only, and cellctl logs it with the container's `reason` and `exit_code` before it deletes the Job.
+An unexpected exception in the Job keeps `IMPORT_FAILED`. The Job's report then adds a `diagnostic` with the exception class (`type`), the function it came from (`function`), the class of an operating system error behind it (`cause`) and that error's number (`errno`), never the exception text. Before it deletes the Job, cellctl logs the diagnostic with the container's `reason` and `exit_code` and the Job's own failure condition reason (`job_reason`).
 
 Import logs carry counts, sizes, durations and codes only.
 
