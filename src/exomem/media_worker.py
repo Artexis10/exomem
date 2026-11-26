@@ -1963,11 +1963,15 @@ class MediaWorker:
             return
         if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
             return
-        from . import media_processing, media_store
+        from . import face_scan, face_store, media_processing, media_store
 
         is_video = job.media_type == "video"
         scene_pairs: list | None = None
         parent_clip_samples: tuple[projected_retrieval.ProjectionClipSample, ...] | None = None
+        # The face step reads the pictures this step decodes: each video keyframe it embeds, or the image.
+        faces_on = face_store.enabled(self._vault_root)
+        keyframes: list[tuple[float, object]] | None = [] if faces_on and is_video else None
+        faces = None
         expected_binary = self._identity(job)
         if expected_binary is None:
             log.warning("CLIP skip %s: media identity unavailable", job.binary_path.name)
@@ -1979,10 +1983,18 @@ class MediaWorker:
                     # representative images to persist (EXOMEM_VIDEO_SCENE_FRAMES).
                     frames, scene_pairs = embeddings.embed_video_scenes(view)
                     parent_clip_samples = scene_frames.projection_clip_samples(frames)
+                    if keyframes is not None:
+                        keyframes.extend((float(scene.rep_ts), image) for scene, image in scene_pairs)
+                elif is_video and keyframes is not None:
+                    frames = embeddings.embed_video_frames(view, keyframes_out=keyframes)
                 elif is_video:
                     frames = embeddings.embed_video_frames(view)
                 else:
                     vec = embeddings.embed_image(view)
+                if faces_on:
+                    # Never raises: a face failure leaves the CLIP result as it is.
+                    faces = face_scan.detect(self._vault_root, view, keyframes)
+                    keyframes = None
         except embeddings.ClipUnavailable as e:
             log.warning("CLIP unavailable for %s: %s", job.binary_path.name, e)
             return
@@ -2020,6 +2032,8 @@ class MediaWorker:
             else:
                 self._clip_index.upsert(rel, vec, mtime)
                 log.info("CLIP-indexed %s", job.binary_path.name)
+            # Under the same identity check as the CLIP rows, so faces never describe changed media.
+            face_scan.commit(self._vault_root, rel, faces)
         if persist_scene_frames:
             # The frames take their own hold once the projection guard is released: encoding them
             # runs with no boundary held, and only the commit of their files holds it.

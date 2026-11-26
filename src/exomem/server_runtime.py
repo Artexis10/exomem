@@ -514,6 +514,10 @@ class LocalRuntimeActivation:
             from . import vault_backup
 
             vault_backup.stop(worker=self.vault_backup)
+        if self.media_worker is not None:
+            from . import face_scan
+
+            face_scan.stop_backfill(self.vault_root, timeout=5)
         semantic_failure = None
         for label, worker in (
             ("semantic drain", self.semantic_drain),
@@ -579,6 +583,14 @@ class LocalRuntimeActivation:
 
     def _start_media_worker(self, vault_root: Path) -> None:
         self.media_worker = _start_media_worker(vault_root)
+        if self.media_worker is not None:
+            from . import face_scan
+
+            try:
+                # Resumes a face backfill that a stop interrupted; nothing runs while faces are off.
+                face_scan.start_backfill(vault_root)
+            except Exception:  # noqa: BLE001 - faces must never deny the core service
+                log.warning("face backfill startup failed", exc_info=True)
 
     def _start_compute_runtime(self, vault_root: Path) -> None:
         _start_compute_runtime(vault_root, owner=self)
