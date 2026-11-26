@@ -23,5 +23,6 @@
 
 ## 4. Acceptance
 
-- [ ] 4.1 On a real Cloud cell after a rollout that carries a note: Home shows the note and one tool reply carries the line; the next reply does not.
+- [x] 4.1 On a real Cloud cell after a rollout that carries a note: Home shows the note and one tool reply carries the line; the next reply does not.
+  - Evidence: on 2026-11-26 a Cloud cell rolled from v0.201.0 to v0.207.0 in its upgrade window (pod restarted 22:28Z; the v0.207.0 image build logged "Wrote 4 release(s) with notes"). The owner reloaded Home: the footer read v0.207.0 and the What's new section listed the notes. In a chat app already connected to that cell, the first reply mentioned what's new once and the next reply did not.
 - [ ] 4.2 A release with no note shows nothing new on Home and adds no line.
