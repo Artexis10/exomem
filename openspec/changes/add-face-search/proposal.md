@@ -12,7 +12,7 @@ Face recognition answers that question. Face data is biometric data, so the capa
 - **One search parameter.** `search_memory` takes `people`, a list of named people. A search with it returns only pictures and videos where each named person's face appears. It composes with `file_types`, capture dates, every other filter and the query text. A video matches through its keyframes and returns as the video.
 - **Owner operations.** `faces.status`, `faces.set`, `faces.name` and `faces.delete` reach one leaf each through MCP, the CLI and REST. Only the owner with unrestricted content authority may call them or use `people`.
 - **Off switch and delete.** Turning faces off stops detection and the person restriction and keeps stored data. `faces.delete` erases every face record, group and name, turns faces off and reports the counts.
-- **Boundary.** Face data lives only in a private face store under the account's state directory. It never enters vault pages, sidecars, indexes, the graph, projections or the catalogue. It never crosses to another account, tenant or principal. The store stays out of every backup and export, so a delete reaches every managed copy.
+- **Boundary.** Face data lives only in a private face store under the account's state directory. It never enters vault pages, sidecars, indexes, the graph, projections or the catalogue. It never crosses to another account, tenant or principal. Face vectors stay out of every backup and export. Backups keep the names the owner gave, as they keep named voiceprints today; a delete erases every live copy at once and reports that older backups hold names until they expire.
 - **State registry.** A state family can declare that it stays out of every backup. The personal backup and the Cloud cell backup honour that declaration.
 
 Default-off and soft-fail: with faces off, no face model loads and no face store exists. A missing runtime or model leaves every other media result unchanged; status reports faces unavailable and a person restriction refuses.
@@ -29,12 +29,11 @@ Scope: the owner's own deployment, desktop or the owner's Evermatter Cloud cell 
 
 ### Modified Capabilities
 
-- `machine-local-state-placement`: a state family can declare that it stays out of every backup.
-- `personal-vault-backup`: a snapshot stages the non-rebuildable families that do not stay out of backups.
+None. The two face families use the existing rebuildable attribute.
 
 ## Impact
 
-- Code: `media_worker.py` and `backfill.py` (face step and backfill), a new face store and grouping module, `find.py` and `find_candidates.py` (eligibility and the pictures-only ranking), `public_tools.py` (`people`), `operation_entries.py` and `commands.py` (face operations), `reserved_paths.py` and `vault_backup.py` (backup exclusion), `media_models.json` (two pinned artifacts), `infra/cellctl` (Cloud cell backup exclusion).
+- Code: `media_worker.py` and `backfill.py` (face step and backfill), a new face store and grouping module, `find.py` and `find_candidates.py` (eligibility and the pictures-only ranking), `public_tools.py` (`people`), `operation_entries.py` and `commands.py` (face operations), `reserved_paths.py` (two face families), `media_models.json` (two pinned artifacts), `infra/cellctl` (Cloud cell backup exclusion).
 - Public surface: one `search_memory` field and four door operations. The tool-schema budget rises by the measured bytes, and hosted connectors need a discovery refresh after release.
 - Dependencies: none new at runtime; ONNX Runtime and Pillow already ship in the `embeddings` and `image-codecs` extras.
 - Depends on `add-images-only-search` for the pictures-only CLIP ranking that a person restriction reuses.

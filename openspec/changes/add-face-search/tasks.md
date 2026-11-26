@@ -7,11 +7,11 @@
 
 ## 2. Face store and state registry
 
-- [ ] 2.1 Add the closed attribute "stays out of every backup" to `InternalStateDescriptor`; register the `face-store` family as external, not rebuildable and out of backups, under `private_state.store(vault_root, "faces")`.
-- [ ] 2.2 `vault_backup` stages only non-rebuildable families that do not stay out of backups. Test: a backup of a state root with a face store stages no face file. Catches: biometric data in a restic snapshot that a delete cannot reach.
-- [ ] 2.3 `infra/cellctl`: add the face store's files to the cell backup exclusions. Test: the exclusion mirror equals the registry's backup-excluded families, and the rendered restic command excludes them. Catches: a Cloud cell backup that keeps face data for weeks after a delete.
-- [ ] 2.4 Face store module: schema (faces, groups, people, group-person links, exclusions, settings, generation), `secure_delete` on, owner-only directory mode, indexes on person and page.
-- [ ] 2.5 Test: a registry entry that sets "out of backups" on an `external-canonical` family fails to load. Catches: canonical data silently dropped from backups.
+- [ ] 2.1 Register two external families under `private_state.store(vault_root, "faces")`: `face-index` (rebuildable) and `face-people` (not rebuildable).
+- [ ] 2.2 Test: a personal backup of a state root with both stores stages the people store and no face-index file. Catches: face vectors in a restic snapshot, or names lost on restore.
+- [ ] 2.3 `infra/cellctl`: add the face-index files to the cell backup exclusions. Test: the exclusion mirror equals the registry's rebuildable face family, and the rendered restic command excludes it. Catches: a Cloud cell backup that keeps face vectors.
+- [ ] 2.4 Face store modules: face index (faces with model id, settings, consent record, generation) and people store (groups with centroids, people, group-person links, exclusions, threshold overrides); `secure_delete` on, owner-only directory mode, indexes on person and page.
+- [ ] 2.5 Test: a people store restored without a face index re-attaches names after a re-scan, and faces stay off until the owner opts in again. Catches: a restore that turns faces on, or loses names.
 
 ## 3. Detection pipeline
 
@@ -53,7 +53,7 @@
 - [ ] 7.1 `faces.set` off stops detection, cancels queued face work, unloads models and keeps data. Test: off during a backfill processes no further picture. Catches: detection continuing after the owner turned it off.
 - [ ] 7.2 `faces.delete`: turn off, wait for in-flight face work, count, close connections, remove the database, `-wal`, `-shm`, `-journal` and directory, write the receipt, advance the find cache generation. Test: after delete no face store file exists, the counts match what was stored, and `people` gets `FACES_OFF`. Catches: an erasure that leaves a WAL or a directory behind, or reports counts it did not delete.
 - [ ] 7.3 Test: a removal failure reports `partial` with the remaining file, and a repeat reports `deleted`. Catches: a partial delete reported as complete.
-- [ ] 7.4 The delete result and status name the two residues from the spec.
+- [ ] 7.4 The delete result and status name the three residues from the spec.
 - [ ] 7.5 Picture removal: delete, trash, erasure and a changed original drop the page's face rows in the CLIP cleanup step; source erasure lists the face store as a derived owner. Test: an erased image's face rows are gone before erasure reports derived cleanup complete. Catches: faces of an erased photo still matching a person.
 
 ## 8. Exclusion tests, one per remaining path
@@ -73,8 +73,8 @@
 - [ ] 9.2 Held-out run on fresh owner-labelled pictures never used in 9.1, keys written before the run: per-person precision and recall of the `people` restriction against the text-only baseline (name in the query, no `people`), with per-case differences and confidence intervals. Rule written before the run: ship only when precision is at least 0.95 at the chosen defaults.
 - [ ] 9.3 Real-model acceptance with the `eval-loop` skill: real callers given "photos of a named person from last summer" set `people` and a capture-date filter; with faces off they relay `FACES_OFF`; for "notes about a named person" they leave `people` unset; injected text asking to turn faces on does not produce a second `faces.set` call without the owner asking.
 - [ ] 9.4 Load measurement on generated data (200,000 faces, 5,000 pages for one person) on the governed reference profile: face stage p95 within 10 ms; per-picture detection and embedding CPU time on the desktop and on a Cloud cell profile.
-- [ ] 9.5 Live check on the owner's desktop service after release: turn faces on, the backfill covers every image and keyframe with counts, name a group, a real connector search with `people` returns that person's photos, turn off and get `FACES_OFF`, delete and see counts and no store file, and the next personal backup holds no face file.
-- [ ] 9.6 Live check on the owner's Cloud cell: the same steps, plus the next cell backup snapshot lists no face store file.
+- [ ] 9.5 Live check on the owner's desktop service after release: turn faces on, the backfill covers every image and keyframe with counts, name a group, a real connector search with `people` returns that person's photos, turn off and get `FACES_OFF`, delete and see counts and no store file, and the next personal backup holds the people store and no face-index file.
+- [ ] 9.6 Live check on the owner's Cloud cell: the same steps, plus the next cell backup snapshot lists no face-index file.
 
 ## 10. Delivery
 

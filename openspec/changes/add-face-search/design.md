@@ -20,7 +20,7 @@ The first plan kept faces on the desktop owner service. The owner ruled on 26 No
 - Faces may run wherever the owner's Evermatter runs, desktop or Cloud cell.
 - Faces stay off per account until its owner opts in explicitly (D9). Biometric data used to identify a person is a special category under GDPR Article 9, which needs explicit consent. A setting in the vault would travel with an import into another account, so the setting lives in the account's state directory.
 - Face data never crosses accounts, tenants or principals, and never enters vault pages or sidecars, where it would travel with the vault.
-- Erasure reaches every managed copy (D11), because the face store stays out of every backup and export.
+- Erasure reaches every live copy at once (D11). Face vectors stay out of every backup and export; whether the names do is D5.
 
 No Cloud-specific path is designed. A cell runs the same worker step on its own CPU; the cost is a named risk.
 
@@ -34,7 +34,8 @@ No Cloud-specific path is designed. A cell runs the same worker step on its own 
 - YuNet's directory states "All files in this directory are licensed under MIT License"; its LICENSE file is MIT, copyright 2020 Shiqi Yu.
 - SFace's directory states "All files in this directory are licensed under Apache 2.0 License"; its LICENSE file is Apache-2.0.
 - InsightFace's code is MIT, but its README and model zoo state that all pretrained models, `buffalo_l` included, are "for non-commercial research purposes only", with commercial licensing by contact. Evermatter is a commercial product, so InsightFace weights are out.
-- Risk: neither model card names the training data. The SFace paper reports models trained on CASIA-WebFace, VGGFace2 and MS-Celeb-1M. The upstream SFace repository has no LICENSE file; OpenCV Zoo publishes the converted ONNX under Apache-2.0. Whether the training sets' terms reach the weights is unverified and is an operator question.
+- Risk: neither model card names the training data. The SFace paper reports models trained on CASIA-WebFace, VGGFace2 and MS-Celeb-1M. The upstream SFace repository has no LICENSE file; OpenCV Zoo publishes the converted ONNX under Apache-2.0. A survey of eight recognizers (26 Nov 2026) found no more accurate option whose weights clearly permit commercial use: InsightFace and EdgeFace weights are non-commercial, AdaFace and GhostFaceNets weights carry no explicit licence, and nearly all were trained on scraped celebrity sets. The owner chose SFace on 26 Nov 2026.
+- Each face row records the embedder's model id. A later switch, for example to a licensed InsightFace model, is a re-embed of stored detections, and names survive it through the group centroids (D6).
 - Calibration values come from the upstream code, not from this repository: YuNet's demo uses a score threshold of 0.9 and NMS threshold 0.3; SFace's `sface.py` uses a cosine same-identity threshold of 0.363.
 - Embedding width (128) and crop size (112 × 112) are expected from SFace; the artifact build records the graph's real input and output shapes, and the manifest carries them.
 
@@ -44,7 +45,7 @@ Both artifacts join `media_models.json` as `face-detect` and `face-embed`, pinne
 
 ### D3. ONNX Runtime and numpy, not OpenCV, at run time
 
-The closest maintained option is `opencv-python-headless`, whose `FaceDetectorYN` and `FaceRecognizerSF` wrap both models. The gap: it adds a large native wheel and a second image-decoding stack that bypasses `image_codecs`' controls, for two calls. ONNX Runtime and Pillow already ship. The added cost is about 150 lines: YuNet's output decode and NMS, a 5-point similarity transform, and a Pillow affine warp. The artifact build compares those outputs with OpenCV's wrappers on fixture images, so OpenCV is a build-time check only. This choice is reversible.
+The closest maintained option is `opencv-python-headless`, whose `FaceDetectorYN` and `FaceRecognizerSF` wrap both models. The gap: it adds a large native wheel and a second image-decoding stack that bypasses `image_codecs`' controls, for two calls. ONNX Runtime and Pillow already ship. The face step asks ONNX Runtime for a GPU execution provider (CUDA, DirectML) when the host has one and falls back to the CPU provider, on self-hosted installs and Cloud cells alike (owner requirement, 26 Nov 2026). The added cost is about 150 lines: YuNet's output decode and NMS, a 5-point similarity transform, and a Pillow affine warp. The artifact build compares those outputs with OpenCV's wrappers on fixture images, so OpenCV is a build-time check only. This choice is reversible.
 
 ### D4. Faces come from images and from the CLIP keyframes
 
@@ -52,13 +53,18 @@ The face step runs in the media worker right after the CLIP step, under the same
 
 Turning faces on queues the existing pictures and videos for a bounded, resumable backfill in sorted path order. Status reports processed and total counts; an unknown total is `unknown`, never 0.
 
-### D5. A private face store, out of every backup
+### D5. Two private stores: face vectors out of backups, names by owner choice
 
-The store is one SQLite database in a private directory, `private_state.store(vault_root, "faces")` (owner-only mode 0700), with `PRAGMA secure_delete=ON`. Tables: faces, groups (centroid sum and count), people (display name, folded name), group-to-person links, face exclusions, settings (on/off, consent record, threshold overrides) and a generation counter.
+Both stores live in a private directory, `private_state.store(vault_root, "faces")` (owner-only mode 0700), as SQLite databases with `PRAGMA secure_delete=ON`.
 
-The registry (`reserved_paths.py`) decides what backups take, through `rebuildable`. The face store is not rebuildable: names and corrections exist nowhere else. Declaring it rebuildable would be false. So the registry gains a second closed attribute, "stays out of every backup", and the face store family sets it. The personal backup stages non-rebuildable families that do not set it. The Cloud cell backup (`infra/cellctl` `BACKUP_PATHS`) takes all of `/data/host`, so cellctl adds the face store to its exclusions, and a test pins that mirror to the registry, as it pins the lexical staging exclusions today.
+- The face index holds detections and embeddings: faces (page, `frame_ts`, box, score, model id, vector, group id) and a generation counter. A re-scan recomputes it in minutes, so its registry family declares itself rebuildable, and backups leave it out as they leave out the CLIP index.
+- The people store holds what only the owner created: groups (centroid sum and count), people (display name, folded name), group-to-person links, face exclusions and settings (on/off, consent record, threshold overrides). Named voiceprints (`.voice_profiles.json`) are the precedent: owner-named biometric centroids, declared not rebuildable, kept by backups.
 
-Cost: a restore brings faces back off and without names. Detection recomputes after the owner turns faces on again; the owner names the groups again.
+Whether backups keep the people store is the owner's choice, asked on 26 Nov 2026. The build follows the recommended answer: the people store declares itself not rebuildable, so the personal backup stages it and a restore keeps names. A restored people store re-attaches names after the re-scan, because each new face joins the nearest group centroid (D6). The other answer adds one closed registry attribute, "stays out of every backup", which the people store sets; the personal backup skips it and cellctl mirrors it into its exclusions.
+
+The Cloud cell backup (`infra/cellctl` `BACKUP_PATHS`) takes all of `/data/host`, so cellctl excludes the face index, and a test pins that mirror to the registry, as it pins the lexical staging exclusions today.
+
+Cost of the recommended answer: a delete erases every live copy at once, but older backups keep the people store until retention expires them (about four weeks on a Cloud cell). The delete result and status state that.
 
 ### D6. Grouping: incremental nearest-centroid, people own groups
 
@@ -115,7 +121,7 @@ Off stops detection, cancels queued face work, unloads the models and refuses `p
 
 Delete turns faces off, waits for in-flight face work under the store lock, counts faces, groups, people and covered pages, closes every connection, and removes the database, its `-wal`, `-shm` and `-journal` files and the directory. A failed removal reports `partial` with what remains; a repeat finishes it. A small receipt (time and counts, no face data) stays in the state directory for status.
 
-What a delete leaves: a volume snapshot that a Cloud cell backup holds while it runs (cellctl deletes it when the backup ends), and freed disk blocks, which the volume's encryption protects until reuse. The result and status state both.
+What a delete leaves: older backups of the people store under D5 until retention expires them, a volume snapshot that a Cloud cell backup holds while it runs (cellctl deletes it when the backup ends), and freed disk blocks, which the volume's encryption protects until reuse. The result and status state both.
 
 Removing one picture drops its face rows in the derived cleanup that drops its CLIP rows, and source erasure counts the face store among the derived owners that must acknowledge.
 
@@ -125,8 +131,8 @@ Removing one picture drops its face rows in the derived cleanup that drops its C
 |---|---|---|---|
 | Vault pages, sidecars, extracted text (`extract._maybe_image_tags`, speaker-name writers) | Pages travel with backup, export, sync and connectors | The face step writes only the face store | Vault tree digest unchanged after detect and name |
 | Lexical, embedding and CLIP indexes, graph, vocabulary | Derived from vault pages | Names never reach a page | Index search for a name finds nothing |
-| Personal backup (`vault_backup.stage_state`) | Stages non-rebuildable families | Face family stays out of backups | Snapshot staging lists no face file |
-| Cloud cell backup (`cellctl` `BACKUP_PATHS`) | Whole `/data/host` | Exclusion mirrored from the registry | Pin test; rendered restic command |
+| Personal backup (`vault_backup.stage_state`) | Stages non-rebuildable families | Face index is rebuildable, so it stays out; the people store follows D5 | Snapshot staging lists no face-index file |
+| Cloud cell backup (`cellctl` `BACKUP_PATHS`) | Whole `/data/host` | Face-index exclusion mirrored from the registry | Pin test; rendered restic command |
 | Owner export, vault portability, Cloud export (`vault_portability.iter_archive_members`) | State dir yields `PORTABLE_DERIVED` only | Face family is not portable | Archive members list no face file |
 | Cloud import (`cloud_import_client`) | Walks an owner folder; state root lies outside the vault | No change | Covered by the portability test |
 | Projected retrieval and projection store | Closed lane set, CLIP samples projected | No face lane; `people` refused | Refusal before store open |
@@ -142,12 +148,12 @@ Removing one picture drops its face rows in the derived cleanup that drops its C
 ## Risks
 
 - A false match shows the owner a picture of someone else under a name. The margin rule, owner corrections and a precision floor in the held-out proof limit it.
-- Training-data provenance of SFace is undocumented (D2). If the operator rejects it, the detector stays and the embedder needs a replacement with documented data.
+- Training-data provenance of SFace is undocumented (D2). The owner accepted it; a switch is a re-embed.
 - Accuracy across ages, skin tones and lighting is unmeasured for SFace on this corpus. The held-out set should include children and older adults where the owner's photos have them.
 - A Cloud cell's CPU limit slows the backfill and competes with other media work. The backfill runs at background priority in bounded batches; no Cloud-specific path is planned.
 - Faces of other people appear in the owner's photos. The opt-in is the owner's; the data stays in the owner's account and the delete is complete.
 - Sampled keyframes can miss a face that appears briefly. A video then does not match that person.
-- A restore loses names (D5).
+- Older backups keep names and centroids until they expire (D5, recommended answer).
 
 ## Sources
 

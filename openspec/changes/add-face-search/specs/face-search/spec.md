@@ -210,7 +210,7 @@ Search results, deep context, explain traces, query logs and hosted logs SHALL c
 
 ### Requirement: Face data stays inside the owner's account
 
-Face rows, groups, names, settings and the consent record SHALL live only in the account's face store, a private directory under its state directory. They SHALL NOT be written to a vault page, sidecar, extracted text, index, graph, vocabulary registry, projection or catalogue. They SHALL NOT reach another account, tenant, cell or principal.
+Face rows, groups, names, settings and the consent record SHALL live only in the account's face store, a private directory under its state directory. It holds a face index (faces, settings, consent) and a people store (groups, centroids, names). They SHALL NOT be written to a vault page, sidecar, extracted text, index, graph, vocabulary registry, projection or catalogue. They SHALL NOT reach another account, tenant, cell or principal.
 
 #### Scenario: Detection and naming leave the vault unchanged
 
@@ -223,19 +223,24 @@ Face rows, groups, names, settings and the consent record SHALL live only in the
 - **WHEN** faces are on in a Cloud cell
 - **THEN** the face store sits under that cell's own state directory and no other cell can open it
 
-### Requirement: Backups and exports leave the face store out
+### Requirement: Backups keep names but never face vectors, and exports carry neither
 
-The face store family SHALL declare that it stays out of every backup. The personal vault backup, the Cloud cell backup, the owner export, vault portability archives and Cloud import SHALL NOT carry it. A restore SHALL therefore bring faces back off and without names. A test SHALL fail when the Cloud cell backup's exclusions and the state registry's backup-excluded families differ.
+The face index family SHALL declare itself rebuildable, so no backup SHALL carry it, and the Cloud cell backup SHALL exclude its files. A test SHALL fail when that exclusion and the registry differ. The people store family SHALL declare itself not rebuildable, so the personal vault backup and the Cloud cell backup SHALL keep it. The owner export, vault portability archives and Cloud import SHALL carry neither.
 
 #### Scenario: A personal backup
 
-- **WHEN** a personal backup runs on a vault with faces on
-- **THEN** the snapshot holds no face store file
+- **WHEN** a personal backup runs on a vault with faces on and named groups
+- **THEN** the snapshot holds the people store and no face index file
 
 #### Scenario: A Cloud cell backup
 
 - **WHEN** cellctl renders a cell's backup Job
-- **THEN** its restic command excludes every face store file
+- **THEN** its restic command excludes every face index file
+
+#### Scenario: A restore
+
+- **WHEN** the owner restores a backup and turns faces on again
+- **THEN** faces stay off until that second opt-in, the re-scan rebuilds the face index, and new faces join the restored named groups
 
 #### Scenario: An owner export
 
@@ -273,12 +278,12 @@ Turning faces off SHALL stop new detection, cancel queued face work, unload the 
 
 ### Requirement: A delete leaves no managed copy
 
-After a delete, no face data SHALL remain in any store, backup or export that Evermatter manages. Two residues MAY remain, and the delete result and status SHALL name both: a volume snapshot that a running Cloud cell backup holds, until that backup ends; and freed disk blocks, which the volume's encryption protects until the filesystem reuses them.
+After a delete, no face data SHALL remain in any live store or export that Evermatter manages. Three residues MAY remain, and the delete result and status SHALL name each and when it ends: older backups that hold the people store, until their retention expires them; a volume snapshot that a running Cloud cell backup holds, until that backup ends; and freed disk blocks, which the volume's encryption protects until the filesystem reuses them.
 
 #### Scenario: The delete result names the residues
 
 - **WHEN** a delete completes
-- **THEN** the result states the two residues and when each ends
+- **THEN** the result states the three residues and when each ends
 
 ### Requirement: Removing a picture removes its faces
 
