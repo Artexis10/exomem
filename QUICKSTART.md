@@ -41,7 +41,7 @@ If you're comfortable in Claude Code, this is ~20–30 minutes.
 > **skill** (step 6) is the *brain* — it tells Claude *when* to save, how to keep
 > raw sources and evidence separate from compiled conclusions, when to suggest
 > links, and how to update knowledge safely. Generic MCP clients that cannot load
-> Skills should call `bootstrap()` once after connecting; that returns the compact
+> Skills should call `read_instructions()` once after connecting; that returns the compact
 > operating contract through MCP. See [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md)
 > for Codex, hosted chat clients, Cursor/Windsurf/Gemini, and generic MCP setup.
 
@@ -460,7 +460,7 @@ own — or just start writing; the writer auto-registers new keys as you use the
 > requires confirmed `restructure_execution`.
 >
 > **Other MCP clients.** ChatGPT, Codex, Cursor, Gemini, Windsurf, or any client
-> without Skill support should call `bootstrap()` once after connecting. It returns
+> without Skill support should call `read_instructions()` once after connecting. It returns
 > Evermatter's search/save/upload defaults, the compiled-note write loop, and
 > performance guidance in a structured MCP response. The copyable standing instruction lives in
 > [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md).
@@ -650,7 +650,7 @@ but a new session or a compaction starts clean. This mode injects far more per
 prompt than the stub block does, which is the trade it exists to let you make.
 
 (Hooks are local-client only — claude.ai web/mobile can't run them, so there the
-skill or `bootstrap()` contract stays best-effort: nudge it with *"save that to
+skill or `read_instructions()` contract stays best-effort: nudge it with *"save that to
 kb"* or *"check the kb."*)
 
 ---

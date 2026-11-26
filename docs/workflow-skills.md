@@ -47,7 +47,7 @@ src/exomem/_scaffold/_Schema/workflow-skills/
 workflow skill as a sibling Claude Code skill folder, so clients that support
 skills can discover them directly.
 
-Generic MCP clients that do not support skills should call `bootstrap()` once.
+Generic MCP clients that do not support skills should call `read_instructions()` once.
 The bootstrap payload includes a compact `workflow_skills` index with names,
 purposes, trigger examples, and the canonical vault-relative path.
 

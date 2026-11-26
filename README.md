@@ -239,7 +239,7 @@ Both clients checkpoint on manual or automatic `PreCompact` and reinject on
 `SessionStart(compact|resume)`; Claude also checkpoints on `SessionEnd`. Pinned
 Codex CLI 0.144.3 has no `SessionEnd` hook, so Evermatter does not invent one.
 Other MCP clients can still use the server. If they do not support Skills,
-have them call `bootstrap()` once at the start of the session; it returns the
+have them call `read_instructions()` once at the start of the session; it returns the
 same compact operating contract through MCP, including when to search, when to
 save, workflow-skill discovery, upload guidance, and performance profiles. It
 also teaches the authoring loop: search first, draft the typed note, run
@@ -286,7 +286,7 @@ uv run exomem demo
 | Claude Code | `exomem setup` registers it for you (see above) |
 | Codex CLI | `codex mcp add` plus optional `exomem install-hook --client codex` - see [docs/ai-assistant-guide.md#codex-cli](docs/ai-assistant-guide.md#codex-cli) |
 | claude.ai or hosted chat | Remote MCP/connector - see [docs/remote-quickstart.md](docs/remote-quickstart.md) and [docs/ai-assistant-guide.md#hosted-chat-clients](docs/ai-assistant-guide.md#hosted-chat-clients) |
-| Any MCP client | Generic stdio config - see below and [docs/ai-assistant-guide.md#generic-stdio-mcp-clients](docs/ai-assistant-guide.md#generic-stdio-mcp-clients); call `bootstrap()` first |
+| Any MCP client | Generic stdio config - see below and [docs/ai-assistant-guide.md#generic-stdio-mcp-clients](docs/ai-assistant-guide.md#generic-stdio-mcp-clients); call `read_instructions()` first |
 | Docker (no Python) | One `docker run` line — see below and [docs/docker.md](docs/docker.md) |
 
 <details>
@@ -329,8 +329,8 @@ env = { EXOMEM_VAULT_PATH = "/path/to/vault" }
 {"mcpServers": {"evermatter": {"command": "exomem", "args": ["--transport", "stdio"], "env": {"EXOMEM_VAULT_PATH": "/path/to/vault"}}}}
 ```
 
-After connecting, ask the agent to call `bootstrap()` before using the KB. Claude
-Skills are still the best UX where available, but `bootstrap()` lets generic MCP
+After connecting, ask the agent to call `read_instructions()` before using the KB. Claude
+Skills are still the best UX where available, but `read_instructions()` lets generic MCP
 clients learn Evermatter's search/save/upload contract without a separate skill file,
 including the write loop for compiled notes.
 See [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md) for the copyable

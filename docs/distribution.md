@@ -14,7 +14,7 @@ definition, hooks and fixtures are maintained by their own channel contracts.
 | Claude.ai, Desktop, Mobile, Code, and Cowork | Claude Connector Directory plus the independent public Claude plugin channel | The hosted connector; the plugin bundle adds skills where the client supports them |
 | Hosted ChatGPT and Codex | One universal OpenAI Plugin Directory entry | The hosted OpenAI plugin and its MCP connection |
 | Self-hosted/local Claude Code and Codex | `exomem setup` (or explicit `codex mcp add`) | A local or remote MCP route plus disk-installed skills and hooks |
-| Cursor and generic MCP clients | Client MCP configuration | A local stdio or remote HTTP MCP route; `bootstrap()` supplies the portable contract when skills are unavailable |
+| Cursor and generic MCP clients | Client MCP configuration | A local stdio or remote HTTP MCP route; `read_instructions()` supplies the portable contract when skills are unavailable |
 
 This repository does not claim a public directory listing until the provider
 reviews and activates one.
