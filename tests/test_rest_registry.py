@@ -605,7 +605,7 @@ def test_cf_access_principals_isolate_explicit_rest_idempotency(
     assert alice.status_code == bob.status_code == alice_replay.status_code == 200
     assert alice.json()["data"] == {"sequence": 1}
     assert bob.json()["data"] == {"sequence": 2}
-    assert alice_replay.json()["data"] == {"sequence": 1}
+    assert alice_replay.json()["data"] == {"sequence": 1, "replayed": True}
     assert calls == ["write", "write"]
 
 
