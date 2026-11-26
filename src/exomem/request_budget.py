@@ -199,7 +199,7 @@ class RequestBudget:
     reason, and it is why `note_skipped` mutates rather than rebinding.
     """
 
-    __slots__ = ("seconds", "deadline", "request", "_skipped", "_truncated", "_lock")
+    __slots__ = ("seconds", "deadline", "request", "commit_started", "_skipped", "_truncated", "_lock")
 
     def __init__(self, *, seconds: float, entry: float | None = None) -> None:
         self.seconds = float(seconds)
@@ -208,6 +208,8 @@ class RequestBudget:
         #: The budget of the whole call. A child that `leaving` or `capped` binds keeps its call's, so work that must
         #: outlive a part's nearer deadline can still stop at the call's own (`request_overrun`).
         self.request: RequestBudget = self
+        #: Whether a write in this call has taken the vault mutation boundary (`commit_may_start`).
+        self.commit_started = False
         self._skipped: list[str] = []
         self._truncated: list[str] = []
         self._lock = threading.Lock()
@@ -304,6 +306,27 @@ def can_afford(reserve: float) -> bool:
     """True when there is no budget at all, or the reserve fits inside it."""
     budget = current()
     return True if budget is None else budget.can_afford(reserve)
+
+
+def commit_may_start() -> bool:
+    """Whether this call's write may take the mutation boundary to start its commit.
+
+    A write whose preparation outlived the call's deadline is refused before its commit, so its client
+    hears back while it still listens. Only the call's first commit is refused: once one has begun,
+    a later one belongs to the same write and always runs. Without a budget every commit runs.
+    """
+    budget = current()
+    if budget is None:
+        return True
+    call = budget.request
+    return call.commit_started or time.monotonic() <= call.deadline
+
+
+def note_commit_started() -> None:
+    """Record that this call's write took the mutation boundary, so no later commit of it is refused."""
+    budget = current()
+    if budget is not None:
+        budget.request.commit_started = True
 
 
 def request_overrun() -> float:

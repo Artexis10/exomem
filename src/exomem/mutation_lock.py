@@ -3408,6 +3408,34 @@ def planned_write_moved_busy() -> OpError:
     )
 
 
+#: The `cause` of a busy refusal for a write whose call ran out of time before its commit began.
+PREPARATION_SPENT = "request_budget"
+
+
+def preparation_spent_busy() -> OpError:
+    """The retryable refusal for a write that used its call's time before its commit could begin.
+
+    Nothing was saved. A wait for the boundary cannot help it, so `waits_out` never absorbs it.
+    """
+    busy = _mutation_busy(None, kind=COORDINATOR_VAULT_BOUNDARY)
+    busy.details["cause"] = PREPARATION_SPENT
+    return OpError(
+        "MUTATION_BUSY",
+        "this write used its time preparing before it could start saving",
+        "The write did not commit. Retry it, with the same idempotency key if it had one.",
+        details=busy.details,
+    )
+
+
+def waits_out(error: OpError) -> bool:
+    """Whether a wait for the boundary can turn this refusal into a commit: busy, nothing saved."""
+    return (
+        error.code == "MUTATION_BUSY"
+        and error.details.get("committed") is False
+        and error.details.get("cause") != PREPARATION_SPENT
+    )
+
+
 def _mutation_busy(
     snapshot: dict[str, object] | None = None,
     *,
