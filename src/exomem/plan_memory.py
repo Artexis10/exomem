@@ -87,7 +87,7 @@ def plan_memory(
 
     Inspect/query/validate/history read; others write. Writes select one queried item.
     Reread if stale; time never proves completion.
-    Help: bootstrap(section="records_planning").
+    Help: read_instructions(section="records_planning").
 
     Args:
         collection: Vault-relative manifest path, collection UUID or memory reference. Omit to list.

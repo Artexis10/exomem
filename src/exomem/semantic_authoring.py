@@ -649,7 +649,7 @@ AUTHORING_TOOLS = frozenset(
     {"remember", "replace_memory", "edit_memory", "observe_memory", "manage_memory_file"}
 )
 CLI_REST_POINTER = (
-    'Semantic authoring rules: see bootstrap(profile="full") / '
+    'Semantic authoring rules: see read_instructions(profile="full") / '
     "`exomem bootstrap --profile full`."
 )
 

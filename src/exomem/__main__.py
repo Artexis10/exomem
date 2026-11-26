@@ -1531,7 +1531,7 @@ def _prominence_main(argv: list[str]) -> int:
     canonical = prom_mod.normalize(args.level)
     print(f"Prominence set to '{canonical}'  ({path})")
     print(f"  {prom_mod.CONTRACTS[canonical].summary}")
-    print("A running exomem server serves it to new sessions via bootstrap().")
+    print("A running exomem server serves it to new sessions via read_instructions().")
     print("Reinstall hooks (exomem install-hook) to apply the matching nudge cadence.")
     return 0
 

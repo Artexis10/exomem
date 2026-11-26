@@ -7020,7 +7020,7 @@ def op_ask_memory(
 
     Reuse recall_context; read_memory opens selected refs. deep=true packs context.
     A miss covers only this query/scope. Follow `next_action`. Evidence is not an answer.
-    Help: bootstrap(profile="full").
+    Help: read_instructions(profile="full").
 
     Args:
         query: Question or search phrase. Empty means recent/filtered recall.
