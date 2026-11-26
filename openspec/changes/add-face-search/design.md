@@ -18,11 +18,12 @@ Sources consulted, by problem:
 The first plan kept faces on the desktop owner service. The owner ruled on 26 Nov 2026 that the owner's own Evermatter Cloud cell may detect, store and search faces too. The boundary is therefore the account, not the machine:
 
 - Faces may run wherever the owner's Evermatter runs, desktop or Cloud cell.
-- Faces stay off per account until its owner opts in explicitly (D9). Biometric data used to identify a person is a special category under GDPR Article 9, which needs explicit consent. A setting in the vault would travel with an import into another account, so the setting lives in the account's state directory.
+- Faces stay off per account until its owner opts in explicitly (D9). A setting in the vault would travel with an import into another account, so the setting lives in the account's state directory.
+- The owner's opt-in is the owner's choice to process their own library. It is not consent from the other people in the photos. Biometric data used to identify a person is a special category under GDPR Article 9; Illinois BIPA and Texas CUBI require consent from each person. On a self-hosted deployment the owner runs the processing for personal use. On a hosted deployment Evermatter supplies the means of processing for paying accounts. So a hosted deployment keeps faces unavailable until its operator sets `EXOMEM_FACES_HOSTED=1` (D9a). What the switch prevents: biometric processing of bystanders on other accounts before a legal basis is reviewed. What it costs when it fires wrongly: those accounts wait for the operator, who can flip it per deployment.
 - Face data never crosses accounts, tenants or principals, and never enters vault pages or sidecars, where it would travel with the vault.
-- Erasure reaches every live copy at once (D11). Face vectors stay out of every backup and export; backups keep the names (D5).
+- Erasure reaches every live copy at once (D11). Faces and unnamed groups stay out of every backup and export; backups keep named people (D5).
 
-No Cloud-specific path is designed. A cell runs the same worker step on its own CPU; the cost is a named risk.
+No other Cloud-specific path is designed. An enabled cell runs the same worker step on its own CPU; the cost is a named risk.
 
 ### D2. Models: OpenCV Zoo YuNet and SFace; InsightFace rejected
 
@@ -34,7 +35,7 @@ No Cloud-specific path is designed. A cell runs the same worker step on its own 
 - YuNet's directory states "All files in this directory are licensed under MIT License"; its LICENSE file is MIT, copyright 2020 Shiqi Yu.
 - SFace's directory states "All files in this directory are licensed under Apache 2.0 License"; its LICENSE file is Apache-2.0.
 - InsightFace's code is MIT, but its README and model zoo state that all pretrained models, `buffalo_l` included, are "for non-commercial research purposes only", with commercial licensing by contact. Evermatter is a commercial product, so InsightFace weights are out.
-- Risk: neither model card names the training data. The SFace paper reports models trained on CASIA-WebFace, VGGFace2 and MS-Celeb-1M. The upstream SFace repository has no LICENSE file; OpenCV Zoo publishes the converted ONNX under Apache-2.0. A survey of eight recognizers (26 Nov 2026) found no more accurate option whose weights clearly permit commercial use: InsightFace and EdgeFace weights are non-commercial, AdaFace and GhostFaceNets weights carry no explicit licence, and nearly all were trained on scraped celebrity sets. The owner chose SFace on 26 Nov 2026.
+- Risk: neither model card names the training data. The SFace paper reports models trained on CASIA-WebFace, VGGFace2 and MS-Celeb-1M. The upstream SFace repository has no LICENSE file; OpenCV Zoo publishes the converted ONNX under Apache-2.0. A survey of recognizers (26 Nov 2026) found no more accurate option whose weights clearly permit commercial use: InsightFace and EdgeFace weights are non-commercial, AdaFace and GhostFaceNets weights carry no explicit licence, dlib's model is public domain but no more accurate and has no ONNX export, and nearly all were trained on scraped celebrity sets. YuNet's training set, WIDER FACE, is listed with non-commercial terms on a secondary source; every candidate detector shares it. The owner chose SFace on 26 Nov 2026.
 - Each face row records the embedder's model id. A later switch, for example to a licensed InsightFace model, is a re-embed of stored detections, and names survive it through the group centroids (D6).
 - Calibration values come from the upstream code, not from this repository: YuNet's demo uses a score threshold of 0.9 and NMS threshold 0.3; SFace's `sface.py` uses a cosine same-identity threshold of 0.363.
 - Embedding width (128) and crop size (112 × 112) are expected from SFace; the artifact build records the graph's real input and output shapes, and the manifest carries them.
@@ -45,7 +46,7 @@ Both artifacts join `media_models.json` as `face-detect` and `face-embed`, pinne
 
 ### D3. ONNX Runtime and numpy, not OpenCV, at run time
 
-The closest maintained option is `opencv-python-headless`, whose `FaceDetectorYN` and `FaceRecognizerSF` wrap both models. The gap: it adds a large native wheel and a second image-decoding stack that bypasses `image_codecs`' controls, for two calls. ONNX Runtime and Pillow already ship. The face step asks ONNX Runtime for a GPU execution provider (CUDA, DirectML) when the host has one and falls back to the CPU provider, on self-hosted installs and Cloud cells alike (owner requirement, 26 Nov 2026). The added cost is about 150 lines: YuNet's output decode and NMS, a 5-point similarity transform, and a Pillow affine warp. The artifact build compares those outputs with OpenCV's wrappers on fixture images, so OpenCV is a build-time check only. This choice is reversible.
+The closest maintained option is `opencv-python-headless`, whose `FaceDetectorYN` and `FaceRecognizerSF` wrap both models. The gap: it adds a large native wheel and a second image-decoding stack that bypasses `image_codecs`' controls, for two calls. ONNX Runtime and Pillow already ship. The face step takes its execution provider from the service's device policy (`accel.onnx_providers`), the one source other ONNX models use (owner requirement, 26 Nov 2026: CPU and GPU, self-hosted and Cloud). CPU is the default. The GPU provider is used when the service runs on a GPU device (performance mode or `EXOMEM_DEVICE`) and the install carries a GPU build of ONNX Runtime. DirectML has no mapping yet. The added cost is about 150 lines: YuNet's output decode and NMS, a 5-point similarity transform, and a Pillow affine warp. The artifact build compares those outputs with OpenCV's wrappers on fixture images, so OpenCV is a build-time check only. This choice is reversible.
 
 ### D4. Faces come from images and from the CLIP keyframes
 
@@ -53,18 +54,18 @@ The face step runs in the media worker right after the CLIP step, under the same
 
 Turning faces on queues the existing pictures and videos for a bounded, resumable backfill in sorted path order. Status reports processed and total counts; an unknown total is `unknown`, never 0.
 
-### D5. Two private stores: face vectors out of backups, names by owner choice
+### D5. Two private stores: backups keep named people only
 
 Both stores live in a private directory, `private_state.store(vault_root, "faces")` (owner-only mode 0700), as SQLite databases with `PRAGMA secure_delete=ON`.
 
-- The face index holds detections, embeddings and the account's switch: faces (page, `frame_ts`, box, score, model id, vector, group id), scanned pages, settings (on/off and the consent record) and a generation counter. A re-scan recomputes it in minutes, so its registry family declares itself rebuildable, and backups leave it out as they leave out the CLIP index.
-- The people store holds what only the owner created: groups (centroid sum and count), people (display name, folded name), group-to-person links, face exclusions and threshold overrides. Because on/off and consent live in the face index, a restore leaves faces off until the owner opts in again. Named voiceprints (`.voice_profiles.json`) are the precedent: owner-named biometric centroids, declared not rebuildable, kept by backups.
+- The face index holds what a re-scan recomputes, plus the account's switch: faces (page, `frame_ts`, box, score, model id, vector, group id), unnamed groups (centroid sum and count), scanned pages, settings (on/off and the consent record) and a generation counter. Its registry family declares itself rebuildable, so backups leave it out, as they leave out the CLIP index.
+- The people store holds only what the owner created: people (display name, folded name), the groups linked to a person (centroid sum and count), face exclusions and threshold overrides. Naming a group moves it from the face index to the people store; clearing a group's name moves it back. Named voiceprints (`.voice_profiles.json`) are the precedent: owner-named biometric centroids, declared not rebuildable, kept by backups.
 
-The owner chose on 26 Nov 2026 that backups keep the people store. It declares itself not rebuildable, so the personal backup stages it and a restore keeps names. A restored people store re-attaches names after the re-scan, because each new face joins the nearest group centroid (D6).
+The owner chose on 26 Nov 2026 that backups keep named people. The people store declares itself not rebuildable, so the personal backup stages it and a restore keeps names. A one-face unnamed group's centroid is that face's embedding, so keeping unnamed groups out of the people store keeps strangers' templates out of backups. Because on/off and consent live in the face index, a restore leaves faces off until the owner opts in again. After the re-scan, new faces join the nearest named centroid (D6).
 
-The Cloud cell backup (`infra/cellctl` `BACKUP_PATHS`) takes all of `/data/host`, so cellctl excludes the face index, and a test pins that mirror to the registry, as it pins the lexical staging exclusions today.
+The Cloud cell backup (`infra/cellctl` `BACKUP_PATHS`) takes all of `/data/host`. cellctl excludes the face index, and a test pins that exclusion to the registry's face-index family. Other rebuildable families stay in cell snapshots; that is old behaviour this change does not alter.
 
-Cost: a delete erases every live copy at once, but older backups keep the people store until retention expires them (about four weeks on a Cloud cell). The delete result and status state that.
+Cost: a delete erases every live copy at once, but older backups keep the people store until retention expires them (seven daily and four weekly snapshots, about four weeks on a Cloud cell). The delete result and status state that.
 
 ### D6. Grouping: incremental nearest-centroid, people own groups
 
@@ -74,7 +75,7 @@ Options:
 2. Batch clustering (for example HDBSCAN or Chinese Whispers) over all faces. Better clusters, but each run costs O(n²) or an ANN index at 200,000 faces, and group ids move between runs, which breaks owner names.
 3. Incremental nearest-centroid assignment. Each new face joins the most similar group when the cosine similarity clears `join_similarity` and beats the runner-up by `join_margin`; otherwise it starts a group. Cost per face is one product with the centroid matrix (G × 128). Group ids stay stable.
 
-Choice: 3. A person owns one or more groups, so naming a second group with the same name joins it to the person without merging centroids. A face the owner moves out of a group never rejoins it. The rule prefers a new group over a doubtful join, as speaker attribution prefers anonymity over a wrong name. Batch regrouping is out of scope.
+Choice: 3. The default `join_similarity` starts from SFace's pairwise same-identity threshold (0.363), but D6 compares a face with a group centroid, a different quantity, so task 9.1 tunes it. A person owns one or more groups, so naming a second group with the same name joins it to the person without merging centroids. A face the owner moves out of a group never rejoins it. The rule prefers a new group over a doubtful join, as speaker attribution prefers anonymity over a wrong name. Batch regrouping is out of scope. A wrong merge is corrected by clearing the group's name and moving the wrong faces out; a large wrong merge means deleting faces and re-scanning with tighter thresholds. The precision floor in task 9.2 exists to keep that rare.
 
 Thresholds (`join_similarity`, `join_margin`, `min_face_side`, `min_detection_score`) are settings. Model calibrations live in the model's manifest entry; the assignment policy defaults (margin, minimum face size) live in one shipped data record; owner overrides live in the face store. A changed threshold applies to faces grouped afterwards, and status says so.
 
@@ -90,7 +91,7 @@ Options: a filter field, an `options` knob, or a top-level parameter.
 - `file_types` started in `options` and moved to a field because hosts kept the old place in cached surfaces and agents did not find it (`public_tools._search`). An `options` knob would repeat that.
 - A top-level parameter is the one obvious place. Its description: `Show only pictures and videos where each named person's face appears, e.g. ["Fixture Person"].` The schema measures 31,743 of 31,750 B today and `search_memory` 1,236 of 1,250 B, so the PR raises both ceilings by the measured bytes, with the reason in `tests/test_tool_schema_budget.py`.
 
-A list means each named person appears (AND). A group photo is the case only a face restriction can answer; "any of these people" is one search per name. This differs from `tags`, which means any, so the description says "each". It is an operator question.
+A list means each named person appears (AND). A group photo is the case only a face restriction can answer; "any of these people" is one search per name. This differs from `tags`, which means any, so the description says "each".
 
 The server never reads names from the query text. The calling agent maps "photos of Fixture Person" to `people`; a real-model check proves it.
 
@@ -105,7 +106,11 @@ Four door operations, each with one leaf that MCP, the CLI (`exomem faces ...`) 
 
 Every operation and the `people` parameter require `raw_protection.has_unrestricted_access` for the caller, decided before the face store opens. The owner's own connector sessions qualify; an audience, a scoped connector session and projected or governed retrieval for another principal do not.
 
-Turning faces on returns a disclosure the agent shows the owner: what is stored, where, that it never leaves the account, and how to turn it off and delete it. A second call with the disclosure's token turns faces on and records the time and surface. What it prevents: one injected instruction turning on biometric processing with no disclosure ever produced. What it costs when it fires wrongly: one extra call. It cannot prove that a person read the disclosure; the help text tells the agent to call it only when the owner asks in this conversation, as `approve_procedure` does.
+Turning faces on happens only in the CLI, `exomem faces on`, run by the person. It prints the disclosure (what is stored, where, that it never leaves the account, how to turn it off and delete it) and requires a typed confirmation, then records the time and surface `cli`. `faces.set` with on, from any agent-reachable surface, returns the same disclosure and that instruction and changes nothing. What it prevents: an injected instruction turning on biometric processing, which an agent-completable two-call token would not stop. What it costs: one command for the owner. Off, naming, status and delete stay agent-reachable owner operations.
+
+### D9a. Hosted deployments need the operator's switch
+
+One function decides availability, and status, the CLI turn-on, the worker step and the `people` restriction all call it. On a Cloud or hosted deployment (`cloud_cell.cloud_mode_enabled()` or `hosted_mode_enabled()`, the check `capture_backfill` already uses), faces are unavailable with `FACES_UNAVAILABLE` unless the deployment sets `EXOMEM_FACES_HOSTED=1`. The operator sets it for the operator's own cell. Enabling it elsewhere waits for a legal review (D1).
 
 ### D10. Search integration and cost
 
@@ -119,7 +124,7 @@ Budget: the face stage stays within 10 ms at p95 with 200,000 faces and 5,000 pa
 
 Off stops detection, cancels queued face work, unloads the models and refuses `people` with `FACES_OFF`. Stored data stays, readable only by `faces.status` and `faces.delete`.
 
-Delete turns faces off, waits for in-flight face work under the store lock, counts faces, groups, people and covered pages, closes every connection, and removes the database, its `-wal`, `-shm` and `-journal` files and the directory. A failed removal reports `partial` with what remains; a repeat finishes it. A small receipt (time and counts, no face data) stays in the state directory for status.
+Delete turns faces off, waits for in-flight face work under the store lock, counts faces, groups, people and covered pages, closes every connection, and removes both databases, their `-wal`, `-shm` and `-journal` files and the directory. A failed removal reports `partial` with what remains; a repeat finishes it. A small receipt (time and counts, no face data) stays in the state directory for status.
 
 What a delete leaves: older backups of the people store under D5 until retention expires them, a volume snapshot that a Cloud cell backup holds while it runs (cellctl deletes it when the backup ends), and freed disk blocks, which the volume's encryption protects until reuse. The result and status state both.
 
@@ -148,10 +153,11 @@ Removing one picture drops its face rows in the derived cleanup that drops its C
 ## Risks
 
 - A false match shows the owner a picture of someone else under a name. The margin rule, owner corrections and a precision floor in the held-out proof limit it.
-- Training-data provenance of SFace is undocumented (D2). The owner accepted it; a switch is a re-embed.
+- Training-data provenance of SFace is undocumented, and YuNet's training set carries non-commercial terms on a secondary source (D2). The owner accepted SFace; a switch is a re-embed.
+- CPU and GPU providers give slightly different floats, so a face near a threshold can group differently on another provider. Determinism holds per provider.
 - Accuracy across ages, skin tones and lighting is unmeasured for SFace on this corpus. The held-out set should include children and older adults where the owner's photos have them.
 - A Cloud cell's CPU limit slows the backfill and competes with other media work. The backfill runs at background priority in bounded batches; no Cloud-specific path is planned.
-- Faces of other people appear in the owner's photos. The opt-in is the owner's; the data stays in the owner's account and the delete is complete.
+- Faces of other people appear in the owner's photos, and the owner's opt-in is not their consent (D1). Hosted deployments stay off until the operator enables them after a legal review; the data stays in the owner's account; a delete reaches older backups only as they expire (D11).
 - Sampled keyframes can miss a face that appears briefly. A video then does not match that person.
 - Older backups keep names and centroids until they expire (D5).
 

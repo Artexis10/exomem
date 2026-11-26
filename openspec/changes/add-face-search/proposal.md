@@ -6,20 +6,20 @@ Face recognition answers that question. Face data is biometric data, so the capa
 
 ## What Changes
 
-- **Opt-in, per account.** Faces are off for every account. The owner turns them on with one setting, stored in that account's state directory, never in the vault. Turning them on takes two calls: the first returns a disclosure, the second carries its token.
-- **Detection in pictures and keyframes.** While faces are on, the media pipeline detects faces in each image and in each video keyframe that the CLIP index holds. It embeds each face with a pinned, permissively licensed CPU model: OpenCV Zoo YuNet (MIT) for detection and SFace (Apache-2.0) for embedding, run through ONNX Runtime.
+- **Opt-in, per account.** Faces are off for every account. The owner turns them on with the CLI command `exomem faces on`, which shows a disclosure and asks the person to type a confirmation. An agent can show the disclosure but cannot turn faces on. The setting lives in that account's state directory, never in the vault.
+- **Detection in pictures and keyframes.** While faces are on, the media pipeline detects faces in each image and in each video keyframe that the CLIP index holds. It embeds each face with a pinned, permissively licensed model that runs on CPU, or on a GPU when the service runs on one: OpenCV Zoo YuNet (MIT) for detection and SFace (Apache-2.0) for embedding, run through ONNX Runtime.
 - **Groups and names.** Similar faces form groups incrementally. The owner names a group once (for example "Fixture Person"), can add more groups to the same person, and can move a wrong face out of a group. Grouping thresholds are settings with defaults from data.
 - **One search parameter.** `search_memory` takes `people`, a list of named people. A search with it returns only pictures and videos where each named person's face appears. It composes with `file_types`, capture dates, every other filter and the query text. A video matches through its keyframes and returns as the video.
 - **Owner operations.** `faces.status`, `faces.set`, `faces.name` and `faces.delete` reach one leaf each through MCP, the CLI and REST. Only the owner with unrestricted content authority may call them or use `people`.
 - **Off switch and delete.** Turning faces off stops detection and the person restriction and keeps stored data. `faces.delete` erases every face record, group and name, turns faces off and reports the counts.
-- **Boundary.** Face data lives only in a private face store under the account's state directory. It never enters vault pages, sidecars, indexes, the graph, projections or the catalogue. It never crosses to another account, tenant or principal. Face vectors stay out of every backup and export. Backups keep the names the owner gave, as they keep named voiceprints today; a delete erases every live copy at once and reports that older backups hold names until they expire.
-- **State registry.** A state family can declare that it stays out of every backup. The personal backup and the Cloud cell backup honour that declaration.
+- **Boundary.** Face data lives only in a private face store under the account's state directory. It never enters vault pages, sidecars, indexes, the graph, projections or the catalogue. It never crosses to another account, tenant or principal. Backups keep only named people: each name with the centroids of its groups, as they keep named voiceprints today. Faces and unnamed groups stay out of every backup, and exports carry nothing. A delete erases every live copy at once and reports that older backups hold the named people until they expire.
+- **Hosted deployments.** On Evermatter Cloud and other hosted deployments, faces are unavailable until the operator enables them for that deployment. Other people appear in an owner's photos, and their consent is not the owner's to give; a legal review precedes enabling faces for accounts other than the operator's.
 
 Default-off and soft-fail: with faces off, no face model loads and no face store exists. A missing runtime or model leaves every other media result unchanged; status reports faces unavailable and a person restriction refuses.
 
 Pure-substrate justification: the detector and the embedder are frozen, deterministic content transducers, like CLIP and the voice embedding that speaker attribution uses. Grouping is a deterministic cosine rule. No generative model runs, and only the owner supplies names.
 
-Scope: the owner's own deployment, desktop or the owner's Evermatter Cloud cell (owner ruling, 26 Nov 2026). Out of scope: linking a person to an entity page, face results inside a hit (boxes, timestamps), batch re-clustering, and face search for any principal other than the owner.
+Scope: self-hosted deployments, and the operator's own Evermatter Cloud cell once the operator enables it (owner ruling, 26 Nov 2026). Out of scope: linking a person to an entity page, face results inside a hit (boxes, timestamps), batch re-clustering, and face search for any principal other than the owner.
 
 ## Capabilities
 

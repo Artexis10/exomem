@@ -2,7 +2,7 @@
 
 ### Requirement: Faces are off until the account owner turns them on
 
-Face detection, grouping and the person restriction SHALL be off for every account until its owner turns them on. The setting SHALL live in the account's face store under its state directory, never in the vault, so importing, restoring or copying a vault never turns faces on. Turning faces on SHALL take two owner calls: the first returns a disclosure of what is stored, where, and how to turn it off and delete it; the second carries the disclosure's token.
+Face detection, grouping and the person restriction SHALL be off for every account until its owner turns them on. The setting SHALL live in the account's face store under its state directory, never in the vault, so importing, restoring or copying a vault never turns faces on. Only the CLI command `exomem faces on`, run by a person, SHALL turn faces on, after it shows the disclosure and the person types a confirmation.
 
 #### Scenario: A new account
 
@@ -15,16 +15,25 @@ Face detection, grouping and the person restriction SHALL be off for every accou
 - **WHEN** a vault whose source account had faces on is imported or restored into another account
 - **THEN** faces are off in the receiving account
 
-#### Scenario: The first call only discloses
+#### Scenario: An agent asks to turn faces on
 
-- **WHEN** the owner calls `faces.set` to turn faces on without a disclosure token
-- **THEN** the result carries the disclosure and its token
+- **WHEN** an agent calls `faces.set` to turn faces on through MCP or REST
+- **THEN** the result carries the disclosure and the CLI command to run
 - **AND** faces stay off and no picture is queued
 
-#### Scenario: The second call turns faces on
+#### Scenario: The owner turns faces on in the CLI
 
-- **WHEN** the owner calls `faces.set` to turn faces on with the token from the disclosure
-- **THEN** faces are on, the consent time and surface are recorded, and existing pictures are queued
+- **WHEN** the owner runs `exomem faces on` and types the confirmation
+- **THEN** faces are on, the consent time and surface `cli` are recorded, and existing pictures are queued
+
+### Requirement: Hosted deployments need the operator's switch
+
+On a Cloud or hosted deployment, faces SHALL be unavailable for every account unless the deployment setting `EXOMEM_FACES_HOSTED` is `1`. One function SHALL decide availability for status, turn-on, detection and the person restriction. A self-hosted deployment SHALL NOT need the setting.
+
+#### Scenario: A hosted deployment without the switch
+
+- **WHEN** an owner on a hosted deployment without the setting runs `exomem faces on` or searches with `people`
+- **THEN** both are refused with `FACES_UNAVAILABLE`, which says the operator has not enabled faces on this deployment
 
 ### Requirement: Only the owner reaches face data
 
@@ -70,9 +79,9 @@ While faces are on, the media pipeline SHALL detect faces in each image and in e
 - **WHEN** the owner reads `faces.status` during the backfill
 - **THEN** it reports processed and total counts, and `unknown` when the total is not yet known
 
-### Requirement: Face models are pinned, permissively licensed and CPU-run
+### Requirement: Face models are pinned, permissively licensed and follow the device policy
 
-The detector and the embedder SHALL be pinned artifacts in the media model manifest, each with revision, digest, licence source, calibration values and input and output shapes. Each SHALL carry a licence that permits commercial use of its weights. Both SHALL run through ONNX Runtime on CPU, SHALL use a GPU provider when the host has one, and SHALL load only while faces are on. A host SHALL acquire them through the served-model lifecycle and never build them.
+The detector and the embedder SHALL be pinned artifacts in the media model manifest, each with revision, digest, licence source, calibration values and input and output shapes. Each SHALL carry a licence that permits commercial use of its weights. Both SHALL run through ONNX Runtime with the provider the service's device policy selects, CPU by default, and SHALL load only while faces are on. A host SHALL acquire them through the served-model lifecycle and never build them.
 
 #### Scenario: A manifest entry without a licence source
 
@@ -96,7 +105,7 @@ Detection, embedding and grouping SHALL be deterministic measurements with no ge
 
 #### Scenario: Same input, same groups
 
-- **WHEN** the same pictures are processed twice in the same order from an empty store
+- **WHEN** the same pictures are processed twice in the same order from an empty store on the same execution provider
 - **THEN** the face rows and groups are identical
 
 ### Requirement: Similar faces group incrementally with thresholds from settings
@@ -223,14 +232,15 @@ Face rows, groups, names, settings and the consent record SHALL live only in the
 - **WHEN** faces are on in a Cloud cell
 - **THEN** the face store sits under that cell's own state directory and no other cell can open it
 
-### Requirement: Backups keep names but never face vectors, and exports carry neither
+### Requirement: Backups keep only named people, and exports carry nothing
 
-The face index family SHALL declare itself rebuildable, so no backup SHALL carry it, and the Cloud cell backup SHALL exclude its files. A test SHALL fail when that exclusion and the registry differ. The people store family SHALL declare itself not rebuildable, so the personal vault backup and the Cloud cell backup SHALL keep it. The owner export, vault portability archives and Cloud import SHALL carry neither.
+The face index, which holds faces and unnamed groups, SHALL be rebuildable, so no backup SHALL carry it; the Cloud cell backup SHALL exclude it, pinned by a test. The people store SHALL hold only people and their named groups, SHALL be not rebuildable, and every backup SHALL keep it. The owner export, vault portability archives and Cloud import SHALL carry neither.
 
 #### Scenario: A personal backup
 
 - **WHEN** a personal backup runs on a vault with faces on and named groups
 - **THEN** the snapshot holds the people store and no face index file
+- **AND** no unnamed group's centroid is in the snapshot
 
 #### Scenario: A Cloud cell backup
 
