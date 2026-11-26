@@ -654,7 +654,8 @@ def test_a_hybrid_dimension_search_reads_no_deeper_vector_window_once_the_lexica
     index.upsert_semantic_units(state, np.stack(vectors), 1.0)
     for path in (RULES, OLD, NEW):
         other = semantic_index.build_parent_index_state(vault, vault / path)
-        index.upsert_semantic_units(other, np.stack([_vector(0.0, 1.0)] * len(other.occurrences)), 1.0)
+        far = np.stack([_vector(0.0, 1.0)] * len(other.occurrences))
+        index.upsert_semantic_units(other, far, 1.0)
     warm_managed_cell(vault)
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setattr(embeddings, "embed_texts", lambda *_a, **_k: np.stack([_vector(1.0)]))
