@@ -16,12 +16,12 @@ from typing import Any, BinaryIO
 
 import ijson
 
+from . import export_transcripts
 from .vault import kb_root
 from .vocabulary import registry
 
 #: The closed `parser` values that `export_transcripts` implements; a registry entry may name only these.
-# nosemgrep: ep-word-set -- These are the readers that code implements, not vendor names or semantic categories.
-PARSERS = frozenset({"chatgpt-conversations", "claude-conversations"})
+PARSERS = frozenset(export_transcripts.READERS)
 PACK = "source-formats.yaml"
 #: What an overlay may change on a shipped entry besides its status: how the transcript labels each author role.
 _RELABELLED = "roles"
