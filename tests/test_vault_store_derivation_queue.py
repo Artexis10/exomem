@@ -356,6 +356,47 @@ def test_a_page_whose_derivation_failed_runs_apart_from_the_pages_of_a_later_sav
     assert batches == [[failing], sorted([LARGE, SMALL])]
 
 
+def test_a_failed_batch_that_outlasts_a_slice_still_settles_one_page_of_its_revision(
+    served, writer, monkeypatch  # noqa: F811
+):
+    """A save of a good and a bad page whose batch fails only after more than a slice. The drain
+    took the deadline before it derived either page alone, so both intents stayed as they were and
+    the next drain took the same batch again: the good page never derived, the bad one never
+    failed, and every read waited for them."""
+    good, bad = "Knowledge Base/Notes/Aaa Good.md", "Knowledge Base/Notes/Zzz Bad.md"
+    real = derive.derive_paths
+
+    def derive_paths(tx, root, *, written, **keywords):
+        if bad in written:
+            if len(written) > 1:
+                time.sleep(derivation.SLICE_SECONDS * 1.3)
+            raise RuntimeError("the derivation broke")
+        return real(tx, root, written=written, **keywords)
+
+    monkeypatch.setattr(derive, "derive_paths", derive_paths)
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: None)
+        with writer_lease.get_manager().mutation_guard(served, operation="note_save"):
+            vault_module.batch_atomic_write(
+                [
+                    planned(served, good, SMALL_TEXT.replace("Small", "Good"), create_only=True),
+                    planned(served, bad, SMALL_TEXT.replace("Small", "Bad"), create_only=True),
+                ],
+                vault_root=served,
+                post_commit_fanout=False,
+            )
+
+    derivation.drain(served.resolve(), writer, deadline=time.monotonic() + derivation.SLICE_SECONDS)
+    after_one = store_rows(served, "SELECT path FROM store_derivation_queue")
+    derivation.drain(served.resolve(), writer, deadline=time.monotonic() + derivation.SLICE_SECONDS)
+
+    assert after_one == [(bad,)], "the first drain derived the good page"
+    assert store_rows(served, "SELECT path, attempts, failed_code FROM store_derivation_queue") == [
+        (bad, 1, derivation.FAILED)
+    ]
+    assert good in bm25_paths(served, "ferry")
+
+
 def test_a_page_whose_derivation_failed_holds_no_reader_back(served, writer, monkeypatch):  # noqa: F811
     """A save whose derivation failed and waits for its retry, which can be minutes away. A reader
     that waited for it would wait out its whole bound on every request until then."""

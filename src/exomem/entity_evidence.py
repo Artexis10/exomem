@@ -41,7 +41,16 @@ from typing import Any
 
 import yaml
 
-from . import access, call_spans, entity_recurrence, find_corpus, freshness, state_paths, vault
+from . import (
+    access,
+    call_spans,
+    entity_recurrence,
+    find_corpus,
+    freshness,
+    request_budget,
+    state_paths,
+    vault,
+)
 from .entity_recurrence import (
     CueGrammar,
     EvidenceContext,
@@ -447,61 +456,85 @@ def _refresh(
         "entity_evidence.refresh",
         {"pages_reextracted": 0, "pages_volatile": 0, "pages_verified": 0},
     ) as fields:
-        for entry in visible:
-            row, identity = entry.row, _identity(entry.info)
-            cue_key = _cue_key(entry.rel, cues)
-            if entry.path_volatile and entry.rel in rows:
-                # A page that became excluded or raw-protected loses any older row, decodable or not.
-                scrubs.add(entry.rel)
-            matches = row is not None and row.cue_key == cue_key and row.identity == identity
-            if row is not None and matches and trust_ctime and not row.racy:
-                if _take_row(conn, entry, row):
-                    continue
-                # A concurrent worker replaced the row: read the page and use that read wholly.
-                row, matches = None, False
-            if matches:
-                fields["pages_verified"] += 1
-            # Taken before the read: a later rewrite then cannot hide inside the racy window.
-            verified_at = time.time_ns()
-            content = find_corpus.read_page_bytes(entry.path, vault_root)
-            if content is None:
-                # Unreadable now: absent from this sweep, exactly as in the full sweep.
-                continue
-            digest = hashlib.sha256(content).hexdigest()
-            if (
-                row is not None
-                and row.sha256 == digest
-                and row.cue_key == cue_key
-                and _take_row(conn, entry, row)
-            ):
-                # The same bytes under a new or racy identity: keep the facts.
-                if identity != row.identity or (trust_ctime and row.racy):
-                    touches.append((*identity, verified_at, entry.rel))
-                continue
-            page = find_corpus.parse_page(
-                entry.path, entry.info.st_mtime, vault_root, content=content
+        try:
+            _extract(
+                conn, cues, rows, visible, fields, writes, touches, scrubs, trust_ctime, vault_root
             )
-            if page is None:
-                # Bytes read but not decodable; the row only spares reading them again.
-                fields["pages_reextracted"] += 1
-                if not entry.path_volatile and _unchanged(entry):
-                    writes.append(
-                        _row(entry, digest, verified_at, _UNPARSEABLE, cue_key, None, None)
-                    )
-                continue
-            evidence = entity_recurrence.page_evidence(page, cues=cues)
-            entry.evidence, entry.live = evidence, True
-            # A row is keyed by the walked path, so a page that names another path never takes one.
-            if entry.path_volatile or evidence.path != entry.rel:
-                fields["pages_volatile"] += 1
-                if entry.rel in rows:
-                    scrubs.add(entry.rel)
-                continue
-            fields["pages_reextracted"] += 1
-            if _unchanged(entry):
-                head, facts = _encode(evidence)
-                writes.append(_row(entry, digest, verified_at, _PARSED, cue_key, head, facts))
+        except request_budget.ReadBudgetExhausted:
+            # The request's deadline stopped the sweep: keep what it extracted, so the next sweep
+            # reads only the rest. An incomplete walk drops no row.
+            _persist(conn, meta, writes, touches, sorted(scrubs), rows, seen, False)
+            raise
         _persist(conn, meta, writes, touches, sorted(scrubs), rows, seen, complete)
+
+
+def _extract(
+    conn: sqlite3.Connection,
+    cues: CueGrammar,
+    rows: Mapping[str, _Row],
+    visible: list[_Visible],
+    fields: dict[str, Any],
+    writes: list[tuple[Any, ...]],
+    touches: list[tuple[Any, ...]],
+    scrubs: set[str],
+    trust_ctime: bool,
+    vault_root: Path,
+) -> None:
+    """Take each visible page's evidence from its verified row or the page, and queue the writes."""
+    for entry in visible:
+        row, identity = entry.row, _identity(entry.info)
+        cue_key = _cue_key(entry.rel, cues)
+        if entry.path_volatile and entry.rel in rows:
+            # A page that became excluded or raw-protected loses any older row, decodable or not.
+            scrubs.add(entry.rel)
+        matches = row is not None and row.cue_key == cue_key and row.identity == identity
+        if row is not None and matches and trust_ctime and not row.racy:
+            if _take_row(conn, entry, row):
+                continue
+            # A concurrent worker replaced the row: read the page and use that read wholly.
+            row, matches = None, False
+        if matches:
+            fields["pages_verified"] += 1
+        # Taken before the read: a later rewrite then cannot hide inside the racy window.
+        verified_at = time.time_ns()
+        content = find_corpus.read_page_bytes(entry.path, vault_root)
+        if content is None:
+            # Unreadable now: absent from this sweep, exactly as in the full sweep.
+            continue
+        digest = hashlib.sha256(content).hexdigest()
+        if (
+            row is not None
+            and row.sha256 == digest
+            and row.cue_key == cue_key
+            and _take_row(conn, entry, row)
+        ):
+            # The same bytes under a new or racy identity: keep the facts.
+            if identity != row.identity or (trust_ctime and row.racy):
+                touches.append((*identity, verified_at, entry.rel))
+            continue
+        page = find_corpus.parse_page(
+            entry.path, entry.info.st_mtime, vault_root, content=content
+        )
+        if page is None:
+            # Bytes read but not decodable; the row only spares reading them again.
+            fields["pages_reextracted"] += 1
+            if not entry.path_volatile and _unchanged(entry):
+                writes.append(
+                    _row(entry, digest, verified_at, _UNPARSEABLE, cue_key, None, None)
+                )
+            continue
+        evidence = entity_recurrence.page_evidence(page, cues=cues)
+        entry.evidence, entry.live = evidence, True
+        # A row is keyed by the walked path, so a page that names another path never takes one.
+        if entry.path_volatile or evidence.path != entry.rel:
+            fields["pages_volatile"] += 1
+            if entry.rel in rows:
+                scrubs.add(entry.rel)
+            continue
+        fields["pages_reextracted"] += 1
+        if _unchanged(entry):
+            head, facts = _encode(evidence)
+            writes.append(_row(entry, digest, verified_at, _PARSED, cue_key, head, facts))
 
 
 def _take_row(conn: sqlite3.Connection, entry: _Visible, row: _Row) -> bool:

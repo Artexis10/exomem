@@ -44,6 +44,12 @@ DESTINATIONS: tuple[tuple[str, str, str, str], ...] = (
     ("settings", "8", "Settings", "mode, appearance, vault"),
 )
 
+#: Owner actions that are not a menu row: reached by key from Home and by the palette, so the numbered menu
+#: keeps its eight rows. Keeping a voice is one: it is an owner action and no connector tool does it.
+ACTIONS: tuple[tuple[str, str, str, str], ...] = (
+    ("voice", "v", "Keep a voice", "name whose voice a speaker label is"),
+)
+
 #: Width of the destination-title column in the Do list.
 TITLE_FIELD = 11
 #: Label field for the Now pane, which has room for longer words.
@@ -200,7 +206,7 @@ class HomeScreen(ExomemScreen):
         *ExomemScreen.BINDINGS,
         *[
             Binding(key, f"open('{name}')", title, show=False)
-            for name, key, title, _ in DESTINATIONS
+            for name, key, title, _ in (*DESTINATIONS, *ACTIONS)
         ],
         Binding("escape", "app.confirm_quit", "quit", show=False),
         Binding("q", "app.confirm_quit", "quit", show=False),

@@ -196,6 +196,17 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   extracts again over a completed transcript. Use it when the text is in the wrong
   language or loops on one line. The `language` code or `multilingual` mode is optional
   and is kept for later runs; the previous extraction stays on a linked prior page.
+- **Attach a speech result and name the speakers.** An owner's agent that transcribed or diarised
+  a recording on its own machine attaches the result with
+  `manage_memory(operation="media.attach_speech", arguments={'path': ..., 'binary_sha256': ...,
+  'binary_size': ..., 'segments': [...], 'turns': [...], 'engine': ...})`. The call binds to the
+  original by SHA-256 and size, fills a pending or failed Source, and replaces an unlabelled result
+  while it keeps the old one on a linked prior page. A labelled or named result is replaced only
+  with `'replace_labelled': true`, which the person asks for. A repeat writes nothing. Rename the
+  labels afterwards with `manage_memory(operation="media.rename_speakers", arguments={'path': ...,
+  'renames': {'Speaker A': ...}})`; it enrols no voice, which is the owner's `enroll-speaker`
+  action. A page whose turns are merged, with no timestamps, is processed again with speaker
+  labels before an attach, because names carry only by timed lines.
 - **Recover a stored original.** Call
   **`download_files(pages=["<title of the stored artifact or custody page>"])`**
   (up to eight pages; each page reports its own result). The response names

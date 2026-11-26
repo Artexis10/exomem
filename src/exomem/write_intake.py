@@ -374,6 +374,28 @@ _REPLAY: contextvars.ContextVar[_Replay | None] = contextvars.ContextVar("exomem
 _WAIT_CAP: contextvars.ContextVar[float | None] = contextvars.ContextVar("exomem_intake_wait_cap", default=None)
 
 
+_QUEUEABLE: contextvars.ContextVar[bool] = contextvars.ContextVar("exomem_intake_queueable", default=False)
+
+
+def queues_busy_refusal() -> bool:
+    """Whether a busy refusal of this call's write, with nothing committed, is queued and lands later."""
+    return _QUEUEABLE.get()
+
+
+@contextmanager
+def queueing_only_if(rerun_safe: bool) -> Iterator[None]:
+    """Keep a write the server cannot safely run again, such as one that fetched caller-supplied
+    temporary handles, out of the spent-call-time stop, so it commits late instead of refetching."""
+    if rerun_safe:
+        yield
+        return
+    token = _QUEUEABLE.set(False)
+    try:
+        yield
+    finally:
+        _QUEUEABLE.reset(token)
+
+
 def busy_wait_cap() -> float | None:
     """The deadline (monotonic) by which an eligible save stops waiting and is queued, if any."""
     return _WAIT_CAP.get()
@@ -1156,6 +1178,7 @@ class Admission:
                 log.warning("write intake could not queue a %s save behind its queue", self.command.name,
                             exc_info=True)
         token = _WAIT_CAP.set(deadline)
+        queueable = _QUEUEABLE.set(self.refusal is None)
         try:
             return call()
         except OpError as error:
@@ -1164,11 +1187,14 @@ class Admission:
             if self.refusal is not None:
                 raise self.refusal from error
             try:
-                return self._accept(reason=error.code, started=started)
+                # The refusal's cause when it names one (a spent call budget, a moved auxiliary), so
+                # the queued row says why it waited and the cause can be counted.
+                return self._accept(reason=str(error.details.get("cause") or error.code), started=started)
             except Exception:  # noqa: BLE001 - an intake that cannot write leaves today's refusal
                 log.warning("write intake could not accept a %s save", self.command.name, exc_info=True)
                 raise error from None
         finally:
+            _QUEUEABLE.reset(queueable)
             _WAIT_CAP.reset(token)
 
     def _known_answer(self, intake_id: str, state: str) -> dict[str, Any] | None:

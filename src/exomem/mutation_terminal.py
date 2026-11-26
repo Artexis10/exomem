@@ -21,6 +21,7 @@ from . import (
 from . import curation as curation_module
 from .kbdir import managed_join, managed_split
 from .operation_entries import OutcomeVerb
+from .speech_attach_schema import SPEECH_OPERATIONS
 
 log = logging.getLogger(__name__)
 
@@ -161,6 +162,13 @@ _MAX_DERIVED_DIAGNOSTICS = 9
 #: Each media operation and the outcome its result reports.
 # nosemgrep: ep-word-set -- the media tool's closed operations, each implemented by the media command.
 MEDIA_OUTCOMES = {"process": "processed", "retry": "retried", "reprocess": "reprocessed"}
+#: The speech-result fields of an attach or rename reply, which the agent reads as built.
+#: `speech_attach.reply` and `speaker_rename` bound each: the lists hold at most `MAX_NAMES` entries.
+_SPEECH_REPLY_FIELDS = (
+    "operation", "outcome", "media_type", "state", "sidecar_path", "extracted_by", "attached_digest",
+    "speakers", "speaker_verification", "names_not_carried", "prior_extraction", "speech_job", "renamed",
+    "next_action",
+)
 #: The media operations whose result reports how many jobs they requeued.
 MEDIA_REQUEUE_OPERATIONS = frozenset({"retry", "reprocess"})
 
@@ -2762,6 +2770,8 @@ def project_terminal(
         compact.update({key: value for key, value in leaf.items() if key != "outcome"})
         if user_summary is None:
             compact["outcome"] = stated_outcome
+    elif isinstance(leaf, Mapping) and leaf.get("operation") in SPEECH_OPERATIONS:
+        compact.update({key: leaf[key] for key in _SPEECH_REPLY_FIELDS if key in leaf})
     elif isinstance(leaf, Mapping) and leaf.get("operation") == "configure_memory":
         # The configuration contract is metadata-only and bounded by the
         # canonical prominence vocabulary. Keep the newly effective contract

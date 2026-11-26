@@ -33,7 +33,8 @@ def cell(vault, monkeypatch, tmp_path):
         monkeypatch.delenv(key, raising=False)
     call_ledger.reset_chain_cache()  # an earlier test's failed append is not this cell's
     mcp, _ = _build_cloud_server(monkeypatch)
-    app = mcp.http_app(stateless_http=True, json_response=True)
+    # The transport a cloud cell serves (server.py): stateless, answering as an event stream.
+    app = mcp.http_app(stateless_http=True)
 
     def run(scenario):
         async def wrapped():
@@ -54,9 +55,10 @@ HOME_ACTIVITY = {"profile": "compact", "section": "activity"}
 
 
 async def _call(client, name, arguments, *, oauth_client=None, client_context=None, app_id=None):
-    """One tools/call exactly as the gateway forwards it."""
+    """One tools/call exactly as the gateway forwards it, read the way Home reads the answer."""
     name, arguments = public_call(name, arguments)
     headers = {
+        # Home's Accept header; the cell refuses a POST that does not accept both formats.
         "accept": "application/json, text/event-stream",
         "content-type": "application/json",
         "authorization": f"Bearer {TOKEN}",
@@ -76,9 +78,17 @@ async def _call(client, name, arguments, *, oauth_client=None, client_context=No
               "params": {"name": name, "arguments": arguments}},
     )
     assert response.status_code == 200, response.text
-    result = response.json()["result"]
+    result = _answer(response, 2)["result"]
     assert result["isError"] is False, result
     return result["structuredContent"]
+
+
+def _answer(response, request_id) -> dict:
+    """The JSON-RPC message that answers `request_id`, from a JSON body or an event stream."""
+    if not response.headers["content-type"].startswith("text/event-stream"):
+        return response.json()
+    messages = [json.loads(line[len("data:"):]) for line in response.text.splitlines() if line.startswith("data:")]
+    return next(message for message in messages if message.get("id") == request_id)
 
 
 def test_home_sets_the_chat_apps_level_that_a_chat_app_then_gets(cell):

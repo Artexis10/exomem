@@ -137,6 +137,9 @@
   - Still open: a restricted caller and a bound collection writer keep the request path and its cost, so a decision on a vault whose pages a collection store owns is not faster.
   - Still open: the refusal of an unknown id still reads every queue. A lookup by id needs an index of item ids.
   - Installed 2026-11-14 (release 0.179.1), from the installed request ledger: a decision by a listed id took 0.83 s and 1.06 s, where one took 970 s that morning on the release before; a listing from the held pass took 0.13 s. The open items above keep this task open.
+  - Evidence 2026-11-25, installed request ledger: with no pass held, two review listings took 757 s and 707 s and one decision took 1,395 s. Each re-extracted the entity evidence of all 16,914 pages in the request, with no deadline.
+  - Built: with no pass held, the request's own audit stops at the request deadline, and a check it could not finish reads as coverage "unknown". An entity evidence sweep that the deadline stops keeps the pages it extracted, so the next sweep reads only the rest. A decision whose lookup the deadline stopped refuses with the retryable `REVIEW_QUEUES_WARMING` and decides nothing.
+  - Verify: `tests/test_entity_evidence.py` stops a sweep after two pages and shows that the next sweep extracts every page but those two and matches a full sweep. `tests/test_ownership_review.py` shows that a decision on a listed item with a spent budget gets `REVIEW_QUEUES_WARMING`.
 - [x] 3.20 Run the working-set warm, graph drain, vocabulary recovery, freshness reconcile, watcher flush, identity catalogue warm and matrix load in `foreground_priority.bulk()`, with a yield between natural units (design decision 10).
   - Verify: one test per pass holds a request in flight and shows the pass makes no progress until it ends, then makes all of it; a request that joins a pass's single flight does not wait out the progress floor.
   - Verify: no yield runs under a lock, boundary, single-flight build or connection that a request waits on; a site with no safe point stays unchanged and the design names why.
@@ -178,6 +181,10 @@
   - Verify: a store migrated without the journal gets every journal object at its next drain, journals that drain's page, keeps its owner schema current, and a rollback drops the journal (`tests/test_vault_store_migration.py`).
 - [x] 3.33 Keep a Source erasure's guarantee across a lexical repair rebuild: the rebuild declines to publish after an erasure, a copied catalogue starts its own change journal, the eraser advances the retirement generation once, before it restarts the journal, and every delete of a page's rows drops the page's unit revision (design decision 14).
   - Verify: a rebuild whose build an erasure overtakes declines and leaves the live catalogue in place; a rebuild that publishes keeps no unit revision of a page deleted during it and no journal history from before its copy (`tests/test_lexstore_atomic_rebuild.py`).
+- [ ] 3.34 Refuse the first write guard of a save the write intake can queue after the call's deadline, so the intake queues it; let every other write commit late; never refuse a later guard of the same call (design decision 15).
+  - Built: `request_budget.commit_may_start` and `note_commit_started`, `write_intake.queues_busy_refusal` and `queueing_only_if`, the check in `writer_lease.mutation_guard`, and `mutation_lock.preparation_spent_busy` and `waits_out`.
+  - Verify: `tests/test_write_intake.py` covers the queued save that lands once, the write the intake cannot queue and the file capture that still land, and the second guard that runs.
+  - Open: after installation, count mutation journal rows with outcome `queued` and code `request_budget`, and compare write durations past 55 s on the installed request ledger (task 3.16's method).
 
 ## 4. Verify installed behavior and deliver
 
