@@ -31,6 +31,7 @@ from repository_docs_reads import RepositoryDocsReads
 
 from exomem import activation_manifest as activation_manifest_module
 from exomem import embeddings as embeddings_module
+from exomem import env_compat as env_compat_module
 from exomem import find as find_module
 from exomem import graph_sync as graph_sync_module
 from exomem import schema as schema_module
@@ -481,6 +482,15 @@ def _query_deadline_off_the_runner_clock():
         for name, profile in shipped.items():
             patch.setitem(runtime.PROFILES, name, {**profile, "timeout_ms": 10_000})
         yield shipped
+
+
+@pytest.fixture(autouse=True)
+def _fresh_settings_conflict_record(monkeypatch):
+    """`env_compat` keeps the conflicts it saw at promotion for the whole process; a test's must not outlive it."""
+    monkeypatch.setattr(env_compat_module, "_process_conflicts", [])
+    monkeypatch.setattr(env_compat_module, "_reported", set())
+    # No snapshot: a test's own environment is the one the process "inherited".
+    monkeypatch.setattr(env_compat_module, "_inherited", None)
 
 
 @pytest.fixture(autouse=True)
@@ -986,6 +996,27 @@ def corpus_cache_on(monkeypatch: pytest.MonkeyPatch):
     freshness.clear()
 
 
+@contextlib.contextmanager
+def held_link_index_warm(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Let a query start the background warm that publishes the link index, and hold that warm in the block.
+
+    A query sees the link index as coming only while such a warm runs; the block ends with the warm done.
+    """
+    release, build = threading.Event(), semantic_contract_module.warm_corpus_context
+
+    def held(root: Path) -> None:
+        release.wait(30)
+        build(root)
+
+    monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM", raising=False)
+    monkeypatch.setattr(semantic_contract_module, "warm_corpus_context", held)
+    try:
+        yield
+    finally:
+        release.set()
+        find_module.await_recall_resolver_warm()
+
+
 #: The single thread name every graph rebuild runs under, in both the
 #: registered-flight path (`graph_sync.GraphRebuildCoordinator.ensure_started`)
 #: and the warming path (`epistemic_graph.schedule_background_rebuild`).
@@ -1007,6 +1038,8 @@ _VAULT_WALKING_THREAD_NAMES = frozenset(
         "exomem-refs-rebuild",
         # A managed request's cold graph proof (`epistemic_graph._start_background_proof`).
         "exomem-graph-proof",
+        # A Records query's link index warm (`find.schedule_link_index_warm`).
+        "exomem-link-index-warm",
         # Not a vault walk by design, but its readiness probe can reach one
         # (`available()` -> `_disk_vault_freshness`), and it stops only when
         # its runtime stops it: one still alive here leaked from its test.

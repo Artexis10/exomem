@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import http.client
 import json
 import os
 import subprocess
@@ -64,9 +65,10 @@ CELL_PINNED_ALERT = "cloud-cell-pinned"
 FAILING_ALERT = "cloud-deploy-failing"
 # A release gets two days for its rollout and any platform upgrade it needs before the fleet counts as behind.
 RELEASE_BEHIND_DEFAULT_HOURS = 48
+PAUSED_STOP = "ROLLOUT_PAUSED"
 # The failing stops that name their cause in an alert of their own, so `cloud-deploy-failing` stays quiet for them.
 # cellctl raises cloud-rollout-paused for a pause, so the pause stop counts as having its own alert.
-OWN_ALERT_STOPS = (PLATFORM_NEEDED_ALERT, BARRIER_ALERT, "ROLLOUT_PAUSED")
+OWN_ALERT_STOPS = (PLATFORM_NEEDED_ALERT, BARRIER_ALERT, PAUSED_STOP)
 # The off switch: a run without the deploy token does nothing, and sends no alert.
 NOT_CONFIGURED = "CLOUD_DEPLOY_NOT_CONFIGURED"
 # Substrate's two answers that say the release is not newer than the fleet: nothing to do.
@@ -97,10 +99,14 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 def urllib_transport(method: str, url: str, headers: dict[str, str], body: bytes | None) -> tuple[int, bytes]:
     request = urllib.request.Request(url, data=body, method=method, headers=headers)
     try:
-        with urllib.request.build_opener(_NoRedirect()).open(request, timeout=HTTP_TIMEOUT) as response:
-            return response.status, response.read()
-    except urllib.error.HTTPError as error:
-        return error.code, error.read()
+        try:
+            with urllib.request.build_opener(_NoRedirect()).open(request, timeout=HTTP_TIMEOUT) as response:
+                return response.status, response.read()
+        except urllib.error.HTTPError as error:
+            return error.code, error.read()
+    except http.client.HTTPException as error:
+        # A truncated or malformed answer, error statuses included, is a failed connection to callers, like a timeout.
+        raise OSError("bad HTTP answer") from error
 
 
 def parse_release(tag: str) -> tuple[int, int, int] | None:
@@ -163,13 +169,19 @@ class GitHub:
         self.settings, self.transport = settings, transport
 
     def _get(self, path: str) -> Any:
-        status, body = self.transport("GET", f"{self.settings.github_api}{path}", {
-            "Authorization": f"Bearer {self.settings.github_token}",
-            "Accept": "application/vnd.github+json",
-        }, None)
+        try:
+            status, body = self.transport("GET", f"{self.settings.github_api}{path}", {
+                "Authorization": f"Bearer {self.settings.github_token}",
+                "Accept": "application/vnd.github+json",
+            }, None)
+        except OSError as error:
+            raise Stop("GITHUB_API_FAILED", ok=False, detail="unreachable") from error
         if status != 200:
             raise Stop("GITHUB_API_FAILED", ok=False, detail=str(status))
-        return json.loads(body)
+        try:
+            return json.loads(body)
+        except ValueError as error:
+            raise Stop("GITHUB_API_FAILED", ok=False, detail="not JSON") from error
 
     def latest_release(self) -> str:
         release = self._get(f"/repos/{self.settings.repository}/releases/latest")
@@ -406,7 +418,7 @@ def report_release_behind(settings: Settings, tools: Tools, github: GitHub, tag:
         if fleet_version is not None and newest is not None and fleet_version < newest:
             try:
                 first_missed = github.first_release_after(fleet_version)
-            except (Stop, OSError):
+            except Stop:
                 # The list read only feeds this alert, so its failure must not stop the rollout.
                 first_missed = None
             if first_missed is None:
@@ -522,7 +534,7 @@ def refuse_paused(view: dict) -> None:
     """Stop with the pause's code, and nothing else, when the rollout view says it is paused."""
 
     if view.get("paused") is True:
-        raise Stop("ROLLOUT_PAUSED", ok=False, detail=_code(view.get("error_code")))
+        raise Stop(PAUSED_STOP, ok=False, detail=_code(view.get("error_code")))
 
 
 def finish(stop: Stop) -> int:

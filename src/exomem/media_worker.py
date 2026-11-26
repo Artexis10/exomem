@@ -3323,13 +3323,20 @@ def _claimable_job(vault_root: Path) -> _Job | None:
 
 
 def _drain(vault_root: Path) -> None:
-    """Hydrate a turned-off store's evicted originals that fit and count the rest, on the same tick (D12)."""
-    from . import media_store
+    """Hydrate a turned-off store's evicted originals that fit and count the rest, on the same tick (D12).
+
+    The same tick refreshes a served store's storage record.
+    """
+    from . import media_storage_record, media_store
 
     try:
         media_store.drain_tick(vault_root, claimable=lambda: _claimable_job(vault_root))
     except Exception:  # noqa: BLE001 - the next tick tries again
         log.warning("media worker: drain deferred", exc_info=True)
+    try:
+        media_storage_record.refresh(vault_root)  # The backup Job copies it for Home (task 4.9); it is due every quarter hour.
+    except Exception:  # noqa: BLE001 - the record ages out and the report says unknown; the next tick tries again
+        log.warning("media worker: storage record deferred", exc_info=True)
 
 
 def run_child(

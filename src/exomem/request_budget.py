@@ -199,12 +199,15 @@ class RequestBudget:
     reason, and it is why `note_skipped` mutates rather than rebinding.
     """
 
-    __slots__ = ("seconds", "deadline", "_skipped", "_truncated", "_lock")
+    __slots__ = ("seconds", "deadline", "request", "_skipped", "_truncated", "_lock")
 
     def __init__(self, *, seconds: float, entry: float | None = None) -> None:
         self.seconds = float(seconds)
         started = time.monotonic() if entry is None else float(entry)
         self.deadline = started + self.seconds
+        #: The budget of the whole call. A child that `leaving` or `capped` binds keeps its call's, so work that must
+        #: outlive a part's nearer deadline can still stop at the call's own (`request_overrun`).
+        self.request: RequestBudget = self
         self._skipped: list[str] = []
         self._truncated: list[str] = []
         self._lock = threading.Lock()
@@ -303,11 +306,19 @@ def can_afford(reserve: float) -> bool:
     return True if budget is None else budget.can_afford(reserve)
 
 
+def request_overrun() -> float:
+    """Seconds the whole call is past its own deadline, whatever nearer one a part of it runs under; 0 before it
+    or without a budget."""
+    budget = current()
+    return 0.0 if budget is None else max(0.0, time.monotonic() - budget.request.deadline)
+
+
 @contextmanager
 def _running_until(parent: RequestBudget, deadline: float, now: float | None = None) -> Iterator[None]:
     """Run under a child budget that ends at `deadline`; the parent also learns what the child skipped or cut."""
     now = time.monotonic() if now is None else now
     child = RequestBudget(seconds=max(0.0, deadline - now), entry=now)
+    child.request = parent.request
     token = set_current(child)
     try:
         yield

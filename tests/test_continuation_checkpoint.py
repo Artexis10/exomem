@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import io
 import json
 import os
 import shutil
@@ -11,6 +12,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from benchmark_capabilities import (
@@ -4276,3 +4278,63 @@ def test_trusted_directory_accepts_a_clean_chain(tmp_path: Path) -> None:
         path.chmod(0o755)
 
     assert checkpoint.unsafe_trusted_directory_ancestors(hooks) == []
+
+
+def test_a_placement_conflict_skips_the_event_and_logs_both_variables(monkeypatch, tmp_path: Path) -> None:
+    reached: list[object] = []
+    monkeypatch.setattr(checkpoint, "_dispatch_core", lambda *args, **kwargs: reached.append(args))
+    payload = {"hook_event_name": "PreCompact", "session_id": "s", "trigger": "manual"}
+    environ = {"EXOMEM_HOOK_HOME": str(tmp_path), "EXOMEM_PROMINENCE": "balanced"}
+
+    checkpoint.dispatch_event("claude", payload, environ=environ)
+    assert len(reached) == 1  # without a conflict the event reaches the checkpoint writer
+
+    checkpoint.dispatch_event(
+        "claude",
+        payload,
+        environ={**environ, "EXOMEM_VAULT_PATH": "/vault-a", "EVERMATTER_VAULT_PATH": "/vault-b"},
+    )
+
+    assert len(reached) == 1
+    log = (tmp_path / "exomem-capture-nudge.log").read_text("utf-8")
+    assert "EVERMATTER_VAULT_PATH and EXOMEM_VAULT_PATH" in log
+
+
+def test_a_conflict_in_a_setting_that_picks_no_data_still_writes_the_checkpoint(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The failure: one stray setting that the hook never reads stops every checkpoint."""
+    reached: list[object] = []
+    monkeypatch.setattr(checkpoint, "_dispatch_core", lambda *args, **kwargs: reached.append(args))
+    payload = {"hook_event_name": "PreCompact", "session_id": "s", "trigger": "manual"}
+    environ = {
+        "EXOMEM_HOOK_HOME": str(tmp_path),
+        "EXOMEM_PROMINENCE": "balanced",
+        "EVERMATTER_PROMINENCE": "minimal",
+    }
+
+    checkpoint.dispatch_event("claude", payload, environ=environ)
+
+    assert len(reached) == 1
+    log = (tmp_path / "exomem-capture-nudge.log").read_text("utf-8")
+    assert "EVERMATTER_PROMINENCE and EXOMEM_PROMINENCE" in log
+    assert "minimal" not in log and "balanced" not in log
+
+
+def test_the_hook_home_flag_wins_over_an_inherited_product_prefix_name(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The failure: the flag's value disagrees with the inherited EVERMATTER_ name, and the hook skips the event."""
+    reached: list[tuple] = []
+    monkeypatch.setattr(checkpoint, "_dispatch_core", lambda *args, **kwargs: reached.append(args))
+    payload = {"hook_event_name": "PreCompact", "session_id": "s", "trigger": "manual"}
+    monkeypatch.delenv("EXOMEM_HOOK_HOME", raising=False)
+    monkeypatch.setenv("EVERMATTER_HOOK_HOME", str(tmp_path / "inherited-home"))
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "balanced")
+    monkeypatch.setattr(
+        sys, "stdin", SimpleNamespace(buffer=io.BytesIO(json.dumps(payload).encode("utf-8")))
+    )
+
+    assert checkpoint.main(["--client", "claude", "--hook-home", str(tmp_path)]) == 0
+
+    assert [Path(args[1]) for args in reached] == [tmp_path]

@@ -660,7 +660,7 @@ _REMAINING = {
     )),
     "adoption_studio": ("action", (
         # "updated", not "saved": a `file` call may only finish a page or stop for space, so it states the run moved on, never that files were saved.
-        _row("file", "import_memory", ("path", "collection", "continuation", "upload"), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("file", "import_memory", ("path", "collection", "continuation", "upload", "wait"), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("start", "import_memory", ("path", "include_hidden", "initialize_kb", "collection", "after", "consume"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("status", "read_import", ("run_id", "path", "after", "series_id", "next_window_bytes", "view", "offset", "limit", "revision")),
         _row("select", "import_memory", ("run_id", "include", "exclude", "overrides", "include_junk"), ("run_id",), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
@@ -911,6 +911,13 @@ def _maintenance_rows():
                              fields if read else (field, *write_extra, "plan_id", "why"),
                              constraints=(_literal(field, value, value is default),), destructive=not read,
                              verb=None if read else "updated"))
+    for value in (True, False, None):
+        # A merge of folder splits is a job kind that takes no audit fields: its preview, or its apply.
+        read = value is not False
+        rows.append(_row("path-variants", "check_memory" if read else "repair_memory",
+                         ("dry_run",) if read else ("dry_run", "plan_id", "why"),
+                         constraints=(_literal("dry_run", value, value is True),), destructive=not read,
+                         verb=None if read else "updated"))
     rows.append(_row("maintenance-job", "check_memory", ("run_id", "cursor")))
     rows.append(_row("maintenance-job-cancel", "repair_memory", ("run_id", "why"), ("run_id", "why"), verb="discarded"))  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     rows.append(_row(

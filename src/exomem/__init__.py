@@ -8,7 +8,9 @@ are honored via promotion below.
 # Promotion MUST run before any module-level or call-time env read in this
 # package can observe a miss — keep it the first statement of the package.
 from .env_compat import promote_legacy as _promote_legacy
+from .env_compat import refuse_program_entry_conflicts as _refuse_program_entry_conflicts
 
 _promote_legacy()
+_refuse_program_entry_conflicts()
 
-__version__ = "0.204.0"  # x-release-please-version
+__version__ = "0.206.0"  # x-release-please-version

@@ -669,7 +669,9 @@ def test_a_deadline_during_projection_serves_the_leads_already_projected(
         source = project(root, source_ref, *args, **kwargs)
         if not projected:
             projected.append(source_ref)
-            clock[0] += 60.0  # the host was starved for the CPU while this lead was read
+            # The host was starved for the CPU while this lead was read, to half a second before the call's
+            # 50 s deadline: too late to project another lead, in time for the final guard.
+            clock[0] += 49.5
         return source
 
     monkeypatch.setattr(context_task, "project_source", starves_after_the_first_lead)
@@ -847,6 +849,43 @@ def test_a_deadline_spent_by_the_turn_slice_marks_task_context_partial_and_keeps
     assert task["state"] == "partial"
     assert {"role": "task_context", "reason": "budget"} in task["missing"]
     assert task["candidates"] == []
+
+
+def test_the_final_guard_stops_at_the_call_deadline_and_says_so(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a starved host the guard once rechecked leads long after the call's deadline, so the packet reached
+    no client; it now withholds the task context it cannot recheck in time and names the stage."""
+    from exomem import context_task
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "off")
+    for number in range(3):
+        _page(
+            vault,
+            f"alignment-visit-{number}",
+            body="Inspect the optical alignment before the workshop.\n",
+        )
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    turn = "Inspect the optical alignment before the workshop"
+    unhurried, _ = _activate_within(vault, 50, turn=turn, max_chars=8000)
+    assert unhurried["task_context"]["candidates"]
+
+    clock = _clock_at(monkeypatch)
+    guard = context_task.guarded
+
+    def starved_before_the_guard(*args, **kwargs):
+        clock[0] += 60.0  # the host was starved for the CPU between discovery and the final guard
+        return guard(*args, **kwargs)
+
+    monkeypatch.setattr(context_task, "guarded", starved_before_the_guard)
+    packet, budget = _activate_within(vault, 50, turn=turn, max_chars=8000)
+    task = packet["task_context"]
+    assert not packet.get("abstained") and packet["map"]
+    assert task["state"] == "partial" and task["candidates"] == []
+    assert {"role": "task_context", "reason": "budget"} in task["missing"]
+    assert context_task.GUARD_STAGE in budget.truncated
 
 
 def test_a_slow_retrieval_carry_leaves_task_discovery_its_reserve(

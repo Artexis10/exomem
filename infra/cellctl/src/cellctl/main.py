@@ -28,6 +28,7 @@ from .manifests import ResourceSettings, check_model_env
 from .media_edge import MediaEdgeConfig
 from .reconcile import ClusterConfig, SecretsConfig, run_loop
 from .restic_verification import VerificationConfig
+from .setting_alias import setting
 from .storage.b2 import B2Config, B2ObjectStorage
 from .storage.hetzner import HetznerVolumeProvider
 from .storage_config import StorageConfig, parse_storage_config
@@ -114,8 +115,9 @@ def build_reconcile_config() -> ReconcileConfig:
         # C6 names this setting. Substrate reads the same variable to state the time limit, so set both alike.
         ("export_ttl", "EXOMEM_EXPORT_TTL_HOURS", "hours"),
     ):
-        if variable in os.environ:
-            amount = int(os.environ[variable])
+        raw = setting(variable)
+        if raw is not None:
+            amount = int(raw)
             if amount <= 0:
                 raise ValueError(f"{variable} must be positive")
             kwargs[field] = timedelta(**{unit: amount})

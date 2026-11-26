@@ -15,6 +15,7 @@ import yaml
 
 from . import (
     access,
+    foreground_priority,
     lifecycle_statuses,
     note_types,
     relation_registry,
@@ -75,11 +76,14 @@ def scan(vault_root: Path) -> ActivationScan:
     if not kb.is_dir() and not find_corpus.store_serves(vault_root):
         return ActivationScan(findings=findings, coverage=coverage)
 
-    for page in find_corpus.corpus_pages(
+    corpus = find_corpus.corpus_pages(
         vault_root, "kb", lambda **walk: find_module._walk_md(kb, **walk),
         lambda path: find_module._parse_page(path, path.stat().st_mtime, vault_root),
         keep=lambda rel, content: egress.content_permits(vault_root, rel, who, snapshot=content),
-    ):
+    )
+    # One unit per page, as in the audit's page walk. A store-mode walk holds a pooled read snapshot here,
+    # which no request waits on.
+    for page in foreground_priority.yielding_in_bulk(corpus):
         if not is_eligible_governed_page(
             vault_root, page, status_basis=status_basis, type_basis=type_basis
         ):

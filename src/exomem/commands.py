@@ -100,6 +100,7 @@ from . import find as find_module
 from . import freshness as freshness_module
 from . import get_page as get_page_module
 from . import held_operation as held_operation_module
+from . import import_filing as import_filing_module
 from . import import_windows as import_windows_module
 from . import install_info as install_info_module
 from . import knowledge_packs as knowledge_packs_module
@@ -9291,6 +9292,41 @@ def op_observe_memory(
         raise ValueError(
             "INVALID_PATH: observe_memory requires a governed KB-relative path or reference"
         )
+
+    def page_without_walk() -> str | None:
+        # The page this call names when finding it reads no more than the page: a vault path, a
+        # vault or source ref, or a memory ref that the current identity projection answers. A
+        # title would need the title index. A caller whose pages are filtered gets no page-specific
+        # wording, so the reply cannot tell it whether a page it cannot see exists.
+        if egress_module.caller_restricted(vault_root):
+            return None
+        if not raw_path.lower().startswith("exomem://"):
+            return raw_path
+        if raw_path.lower().startswith(memory_refs_module.REF_PREFIX):
+            return memory_refs_module.owner_without_walk(vault_root, raw_path)
+        decoded = memory_refs_module.resolve_identifier_read_only(vault_root, raw_path)
+        return decoded if is_in_managed_root(decoded) else None
+
+    early = observe_memory_module.refusal_before_page(
+        vault_root,
+        page=page_without_walk,
+        operation=operation,
+        category=category,
+        content=content,
+        kind=kind,
+        unit=unit,
+        unit_ref=unit_ref,
+        verdict=verdict,
+        check_by=check_by,
+        as_of=as_of,
+        until=until,
+        tags=tags,
+        context=context,
+        relations=relations,
+        validate_only=validate_only,
+    )
+    if early is not None:
+        raise early.leaf_error()
     if not raw_path.lower().startswith("exomem://"):
         path = page_names_module.resolve_page(
             vault_root, path, prefer=page_names_module.prefer_editable, field="path"
@@ -12482,6 +12518,7 @@ def op_adoption_studio(
     limit: Annotated[int, Field(ge=1, le=adoption_run_module.STATUS_PAGE_ITEMS)] = adoption_run_module.STATUS_PAGE_ITEMS,
     revision: str | None = None,
     upload: str | None = None,
+    wait: bool = True,
 ) -> dict:
     """Review and import a collection in a resumable run.
 
@@ -12489,7 +12526,9 @@ def op_adoption_studio(
     Status/work-item read; others write. Apply commits the previewed plan or refuses.
 
     file imports a staged folder in one repeatable call: repeat it with the
-    `continuation` it returns until `filing` is not `working`. An archive sent
+    `continuation` it returns until `filing` is not `working`. A serving cell also
+    finishes a stage it was asked to file: read it with inspect_memory `imports.status` and `view="filing"`;
+    manage_memory `imports.file` with `wait` false registers a stage and files nothing in the call. An archive sent
     with upload_files (lane import) is filed with `upload`. Other actions are
     the step path. start scans; select chooses; plan previews; apply copies into
     Sources and drafts notes under own-note rules; cancel closes pre-apply; finish
@@ -12535,11 +12574,15 @@ def op_adoption_studio(
             with none is refused.
         view: For run `status`, summary by default; inventory, selection, plan,
             outcomes or stale pages. Full is the explicit browser compatibility view.
+            `filing` takes the staged `path` and no run_id: state, progress, left_out (when done), stop,
+            needs, person and rate of the cell's own filing; `unknown` is not zero.
         offset: For status pages, a zero-based row offset.
         limit: For status pages, from 1 to 100 rows, also bounded by response bytes.
         revision: For status pages, the preceding summary's revision; restart paging if it changed.
         upload: For `file`, the `token` that upload_files returned for lane import, in place of `path`.
             The first call unpacks the archive into a staged folder; repeats carry on. Its reply names `path`.
+        wait: For `file`, false only registers `path` for the cell to file under your login (it replaces an
+            ended one) and answers the `view="filing"` reply; it files nothing in the call.
     """
     action = (action or "").strip()
     if action not in _ADOPTION_STUDIO_ACTIONS:
@@ -12559,7 +12602,7 @@ def op_adoption_studio(
                     "IMPORT_REQUEST_INVALID", "status of one run takes no after, series_id or next_window_bytes")
             listing = adoption_run_module.status(
                 vault_root, run_id=run_id, path=path, view=view, offset=offset, limit=limit, revision=revision)
-            if run_id:
+            if run_id or view == "filing":
                 return listing
             return {**listing, **import_windows_module.report(
                 vault_root, after=after, series_id=series_id, next_window_bytes=next_window_bytes)}
@@ -12595,6 +12638,12 @@ def op_adoption_studio(
         if action == "file":
             from . import due_state as due_state_module
 
+            if wait is False:
+                if upload is not None or continuation:
+                    raise adoption_run_module.AdoptionRunError(
+                        "IMPORT_REQUEST_INVALID", "file with wait false takes the staged path alone")
+                import_filing_module.wake(vault_root, path or "", collection)
+                return adoption_run_module.status(vault_root, path=path, view="filing")
             if upload is not None:
                 from . import import_upload
 
@@ -12605,6 +12654,8 @@ def op_adoption_studio(
                 if staged.stopped is not None:
                     return {"path": staged.path, **staged.stopped}
                 path = staged.path
+            # The cell finishes the stage after this call: a serving runtime registers it with its import filer.
+            import_filing_module.note_file_call(vault_root, path, collection)
             # Like `apply`, one call commits a bounded share of the import, so it is one batch at its terminal.
             with due_state_module.batch_scope(vault_root), state_paths_module.resolution_scope():
                 filed = adoption_run_module.file(
@@ -12680,7 +12731,9 @@ def op_observe_transfer(
     2. status: the latest import (or import_id) and the export; poll until an adopt import
        is `done`.
     3. File it: manage_memory `imports.file` on the `next` path (`_Imports/<id>`), repeated with its
-       `continuation` until `filing` is not `working`. An older server refuses it: `imports.start` on
+       `continuation` until `filing` is not `working`. A cell asked to file finishes it: poll
+       inspect_memory `imports.status` (`view="filing"`) until `state` is `done`; `imports.file` with
+       `wait` false only registers it. An older server refuses it: `imports.start` on
        the path, and again with `next_after`; select, plan and apply (at `apply_stop`, stop
        until space is free); finish.
     4. Review the residual with the person; discard with transfer_memory.
@@ -12738,6 +12791,7 @@ def op_maintain_memory(
         "structured-files",
         "curation",
         "tag-variants",
+        "path-variants",
         "maintenance-job",
         "maintenance-job-cancel",
         "collections-store",
@@ -13094,6 +13148,33 @@ def op_maintain_memory(
                 vault_root, plan_id=plan_id, why=why, exclude=exclude_groups
             )
         return _carrying_batch_advisories(vault_root, reconciled)
+    if mode == "path-variants":
+        from . import path_variants as path_variants_module
+
+        if (
+            categories is not None
+            or apply is not None
+            or rebuild_embeddings
+            or rebuild_graph
+            or detail != "actionable"
+            or legacy_sample_limit != audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT
+            or collection is not None
+            or source_snapshot is not None
+        ):
+            raise ValueError("INVALID_ARGUMENTS: path-variants accepts only dry_run, plan_id and why")
+        # Merging moves files across the whole vault, protected captures included: it is the owner's.
+        refusal = egress_module.owner_only_aggregate(vault_root)
+        if refusal is not None:
+            return refusal
+        if dry_run is not False:
+            if plan_id is not None or why is not None:
+                raise ValueError("INVALID_ARGUMENTS: a path-variants preview takes no plan_id or why")
+            return path_variants_module.preview(vault_root)
+        if plan_id is None or why is None:
+            raise ValueError(
+                "INVALID_ARGUMENTS: a path-variants merge needs dry_run=false with the preview's plan_id and a why"
+            )
+        return path_variants_module.apply(vault_root, plan_id=plan_id, why=why)
     if mode == "maintenance-job" or mode == "maintenance-job-cancel":
         from . import maintenance_jobs as maintenance_jobs_module
 
@@ -13271,7 +13352,7 @@ def op_maintain_memory(
         return original_conversion.convert(vault_root, dry_run=True if dry_run is None else dry_run, plan_id=plan_id)
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
-        "backfill-ids, capture-metadata, convert-originals, structured-files, curation, tag-variants, maintenance-job, "
+        "backfill-ids, capture-metadata, convert-originals, structured-files, curation, tag-variants, path-variants, maintenance-job, "
         "maintenance-job-cancel, collections-store, collections-store-adopt-local, "
         "collections-store-export, collections-cutover, or held-resolve"
     )
@@ -15399,6 +15480,9 @@ def invocation_writes_outside_writer(command: Command, kwargs: dict[str, Any]) -
 
     The lease treats it as a read; read-only cells and the call ledger still treat it as a write.
     """
+    if command.name == "adoption_studio" and kwargs.get("action") == "file" and kwargs.get("wait") is False:
+        # Registers a stage in the cell's private filing record and files nothing, so it never waits for a filing call.
+        return True
     return command.name == "transfer_artifact" and kwargs.get("operation") == "cancel"
 
 

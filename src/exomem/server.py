@@ -19,7 +19,6 @@ from copy import copy
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
 from fastmcp import FastMCP
 from fastmcp.server.middleware.middleware import Middleware, MiddlewareContext
 from fastmcp.server.transforms import Transform
@@ -39,6 +38,7 @@ from . import commands as commands_module
 from .access_log import AccessLogMiddleware, WorkerRequestTimingMiddleware
 from .command_surface import DEFAULT_TOOL_SHAPE
 from .edge_ingress import EdgeIngressMiddleware
+from .env_compat import load_dotenv
 from .server_assets import (
     register_asset_routes,
     register_claude_plugin_route,

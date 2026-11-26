@@ -219,17 +219,22 @@ def changelog_changes(start: str, end: str) -> list[dict]:
     return json.loads(output)
 
 
-def schedule() -> dict:
+def schedule(caller: str | None = None) -> dict:
     """Whether a scheduled run should start a cut now, and from which source.
 
     It never starts a cut while a controller run is unfinished, resumes an open cut that no run
     is working on, and otherwise cuts only from a commit with reusable Full evidence when a
-    change since the last release would appear in its changelog.
+    change since the last release would appear in its changelog. `caller` is the evidence
+    callback run that started this decision; it ends seconds later, so it does not hold the slot.
     """
-    # Any unfinished controller run, including an evidence callback, holds the slot; a
-    # callback ends within minutes, and the next slot cuts.
+    # Any other unfinished controller run, including an evidence callback, holds the slot; a
+    # callback ends within minutes, and the next decision cuts.
     runs = evidence.api("actions/workflows/release-evidence-automation.yml/runs?per_page=20")
-    unfinished = [run for run in runs["workflow_runs"] if run["status"] != "completed"]
+    unfinished = [
+        run
+        for run in runs["workflow_runs"]
+        if run["status"] != "completed" and str(run["id"]) != (caller or "")
+    ]
     if unfinished:
         return {
             "cut": False,
@@ -1014,12 +1019,13 @@ def main() -> None:
     parser.add_argument("--candidate", type=Path)
     parser.add_argument("--trusted-main")
     parser.add_argument("--head")
+    parser.add_argument("--caller")
     args = parser.parse_args()
     os.environ["GH_REPO"] = os.environ.get("GH_REPO") or os.environ["GITHUB_REPOSITORY"]
     if args.operation == "pick-source":
         print(json.dumps(pick_source()))
     elif args.operation == "schedule":
-        print(json.dumps(schedule()))
+        print(json.dumps(schedule(args.caller or None)))
     elif args.operation == "prepare":
         if not args.source:
             parser.error("prepare requires --source")

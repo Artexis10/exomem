@@ -343,7 +343,8 @@ pass --rebind-vault to move it deliberately, or correct $ENV_FILE"
     echo "Rebinding the service vault from $PERSISTED_VAULT to $VAULT as requested."
 fi
 DOTENV_STATE_ROOT="$(exomem_dotenv_file_value "$ENV_FILE" EXOMEM_STATE_ROOT)"
-PREFERRED_STATE_ROOT="${EXOMEM_STATE_ROOT:-${DOTENV_STATE_ROOT:-$(exomem_platform_state_root)}}"
+PROCESS_STATE_ROOT="$(exomem_process_setting EXOMEM_STATE_ROOT)"
+PREFERRED_STATE_ROOT="${PROCESS_STATE_ROOT:-${DOTENV_STATE_ROOT:-$(exomem_platform_state_root)}}"
 [[ "$PREFERRED_STATE_ROOT" == /* ]] \
     || die "managed EXOMEM_STATE_ROOT must be absolute"
 PERSISTED_STATE_ROOT="$(exomem_dotenv_file_value "$SERVICE_ENV_FILE" EXOMEM_STATE_ROOT)"
@@ -610,7 +611,7 @@ elif [[ -z "$PERSISTED_STATE_ROOT" ]]; then
     # root while adding the rest of the parsed dotenv environment.
     persist_fresh_state_root_binding
 fi
-export EXOMEM_STATE_ROOT="$MANAGED_STATE_ROOT"
+exomem_export_setting EXOMEM_STATE_ROOT "$MANAGED_STATE_ROOT"
 
 if [[ "$MODE" == "release" ]]; then
     echo "Installing $PACKAGE_REQUIREMENT into the release service venv..."
@@ -667,18 +668,33 @@ for key, value in values.items():
     if "\n" in value or "\r" in value:
         raise SystemExit(f"multiline service environment values are not supported: {key}")
 
-if not values.get("EXOMEM_VAULT_PATH", "").strip():
+# A setting may carry the product prefix or the pre-rename one in the dotenv. The
+# shell has already refused an EXOMEM_/EVERMATTER_ vault or state-root conflict, so
+# here a value is written under the names the dotenv already uses, never as an
+# EXOMEM_ line beside an EVERMATTER_ line that would then differ from it.
+NAME_PREFIXES = ("EXOMEM_", "EVERMATTER_", "KB_MCP_")
+
+def names(suffix: str) -> list[str]:
+    return [prefix + suffix for prefix in NAME_PREFIXES]
+
+def set_value(suffix: str, value: str) -> None:
+    for name in [n for n in names(suffix) if n in values] or names(suffix)[:1]:
+        values[name] = value
+
+def set_default(suffix: str, value: str) -> None:
+    if not any(name in values for name in names(suffix)):
+        values[names(suffix)[0]] = value
+
+if not any(values.get(name, "").strip() for name in names("VAULT_PATH")):
     raise SystemExit(f"EXOMEM_VAULT_PATH is required in {env_path}")
 if not state_root_default or not Path(state_root_default).is_absolute():
     raise SystemExit("managed EXOMEM_STATE_ROOT default must be absolute")
-values["EXOMEM_STATE_ROOT"] = state_root_default
-if not Path(values["EXOMEM_STATE_ROOT"]).is_absolute():
-    raise SystemExit("EXOMEM_STATE_ROOT must be absolute")
-values.setdefault("EXOMEM_LOG_DIR", log_dir)
-# setdefault, not assignment: an explicit choice in the dotenv outranks the
+set_value("STATE_ROOT", state_root_default)
+set_default("LOG_DIR", log_dir)
+# A default, not an assignment: an explicit choice in the dotenv outranks the
 # profile's default, so `--profile onnx` never silently overrides it.
 if embed_backend:
-    values.setdefault("EXOMEM_EMBED_BACKEND", embed_backend)
+    set_default("EMBED_BACKEND", embed_backend)
 if os.environ.get("PATH"):
     values.setdefault("PATH", os.environ["PATH"])
 
@@ -690,10 +706,23 @@ Path(systemd_path).write_bytes(
         "utf-8"
     )
 )
-Path(process_path).write_text(
-    "".join(f"export {key}={shlex.quote(value)}\n" for key, value in values.items()),
-    encoding="utf-8",
-)
+# The process file is sourced by the installer's own shell, which then runs `exomem` commands.
+# Each setting lands there under its EXOMEM_ name (EXOMEM_, else EVERMATTER_, else KB_MCP_) with
+# its other spellings removed, so a value the dotenv names replaces what the shell inherited and
+# a command started from that shell never sees two names for it. The published service.env above
+# keeps the dotenv's own names.
+process_lines = []
+loaded = set()
+for key, value in values.items():
+    prefix = next((p for p in NAME_PREFIXES if key.startswith(p)), None)
+    if prefix is None:
+        process_lines.append(f"export {key}={shlex.quote(value)}\n")
+    elif key[len(prefix):] not in loaded:
+        suffix = key[len(prefix):]
+        loaded.add(suffix)
+        chosen = next(values[name] for name in names(suffix) if name in values)
+        process_lines.append(f"exomem_export_setting {NAME_PREFIXES[0]}{suffix} {shlex.quote(chosen)}\n")
+Path(process_path).write_text("".join(process_lines), encoding="utf-8")
 xml_lines = ["    <key>EnvironmentVariables</key>", "    <dict>"]
 for key, value in values.items():
     xml_lines.extend(
@@ -712,14 +741,16 @@ rm -f "$SERVICE_ENV_STAGING_FILE"
 SERVICE_ENV_STAGING_FILE=""
 
 # This file is generated from parsed values with shlex quoting; it contains no
-# caller-provided shell syntax.
+# caller-provided shell syntax. It sets each setting through exomem_export_setting.
 # shellcheck disable=SC1090
 source "$PROCESS_ENV_FILE"
 rm -f "$PROCESS_ENV_FILE"
 PROCESS_ENV_FILE=""
+# The dotenv may name the vault under any of its names; the commands below take it as a flag.
+RENDERED_VAULT="$(exomem_process_setting EXOMEM_VAULT_PATH)"
 
 echo "Offline state migration..."
-"$VENV_PYTHON" -m exomem maintain --vault "$EXOMEM_VAULT_PATH" \
+"$VENV_PYTHON" -m exomem maintain --vault "$RENDERED_VAULT" \
     --migrate-state --offline --json
 if [[ "$EXISTING_SERVICE" == 1 ]]; then
     exomem_update_transition_receipt \
@@ -730,11 +761,11 @@ fi
 echo "Preflight: exomem doctor --profile $DOCTOR_PROFILE..."
 "$VENV_PYTHON" -m exomem doctor \
     --profile "$DOCTOR_PROFILE" \
-    --vault "$EXOMEM_VAULT_PATH"
+    --vault "$RENDERED_VAULT"
 echo "Preflight: exomem doctor --profile remote..."
 "$VENV_PYTHON" -m exomem doctor \
     --profile remote \
-    --vault "$EXOMEM_VAULT_PATH"
+    --vault "$RENDERED_VAULT"
 if [[ "$EXISTING_SERVICE" == 1 ]]; then
     exomem_update_transition_receipt \
         "$VENV_PYTHON" "$TRANSITION_RECEIPT" "$SERVICE_ID" "$BINDING_PATH" \
