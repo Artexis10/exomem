@@ -34,7 +34,7 @@ from . import images
 from . import substrate as substrate_mod
 from .large_import import TRANSIENT_ATTEMPTS, import_summary
 from .mcp_client import TenantClient
-from .native_import import retain_cli_diagnostics, run_cli_import
+from .native_import import UPLOAD_ONLY, retain_cli_diagnostics, run_cli_import
 from .report import StepFailure, StepRecord, innermost
 from .shell import CommandFailed, run
 
@@ -479,7 +479,7 @@ async def copy_vault(ctx: Context, tenant: Tenant, destination: Path) -> dict[st
 async def import_collection(ctx: Context, plan: RawImportPlan, tenant: Tenant, collection: Path, name: str) -> tuple[str, dict]:
     """The CLI import as a person runs it. Returns the staged folder's vault path and the import's row."""
     try:
-        cli = await run_cli_import(ctx, plan.cli_image, collection, label=name, tenant=tenant)
+        cli = await run_cli_import(ctx, plan.cli_image, collection, label=name, tenant=tenant, cli_args=UPLOAD_ONLY)
     finally:
         retain_cli_diagnostics(ctx, name)
     run(["docker", "rm", "--force", cli.name], check=False, timeout=60)

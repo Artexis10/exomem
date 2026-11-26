@@ -10,7 +10,8 @@ eligible file, with its `collection_path`, `file_modified` and origin fields), t
 with their reasons, and the counts, which add up to the files of the tree.
 
 The run sends the tree with `exomem cloud import --no-wait`: the CLI writes `filing: cell` and the origin into
-each window's series file, makes no `file` call and exits. A cell start, which the harness causes with one pod
+the stage's series file, makes no `file` call and exits. A rehearsal cell has no media store, so the tree goes
+as one import and the CLI says `cell_filing: asked`. A cell start, which the harness causes with one pod
 deletion, finds the series file and registers the stage. The restart that proves exactly-once filing is a
 second pod deletion, made as soon as the filing view shows the stage is being filed. When the stage is already
 `done` by then, the restart proved nothing, and the verdict is `incomplete`, never `pass`.
@@ -310,6 +311,13 @@ def check_origin(series: Mapping[str, Any]) -> list[str]:
     return problems
 
 
+def check_cli_asked(result: Mapping[str, Any]) -> list[str]:
+    """The CLI says it asked the cell to file the one import; a CLI that did not leaves nothing to file the stage."""
+    if result.get("cell_filing") == "asked":
+        return []
+    return [f"the CLI's result says cell_filing {result.get('cell_filing')!r}, expected 'asked': {dict(result)}"]
+
+
 def check_no_client_file_call(call_labels: Sequence[str]) -> list[str]:
     """The harness's own MCP client made no `file` call; it only read the cell's status."""
     return [f"the harness client called {label}, which can file" for label in sorted(set(call_labels))
@@ -375,7 +383,7 @@ def left_behind_lines(log: str) -> list[str]:
 async def send_fixture(ctx: Context, plan: HomeImportPlan, folder: Path, out: dict[str, Any]) -> str:
     """The CLI upload through the real import Job, as a person runs it: it asks the cell to file and files nothing itself."""
     try:
-        cli = await run_cli_import(ctx, plan.cli_image, folder, label="home", tenant=ctx.a, windowed=True,
+        cli = await run_cli_import(ctx, plan.cli_image, folder, label="home", tenant=ctx.a,
                                    cli_args=["--no-wait", "--label", ORIGIN_LABEL])
     finally:
         retain_cli_diagnostics(ctx, "home")
@@ -384,10 +392,10 @@ async def send_fixture(ctx: Context, plan: HomeImportPlan, folder: Path, out: di
     out["cli"] = {"result": cli.result, "left_behind_lines": left_behind_lines(log)}
     await ctx.wait_cell(ctx.a.cell_id, lambda cell: bool(cell.get("ready")) and cell.get("observed_state") == "running"
                         and cell.get("hold_kind") is None, timeout=900, description="the imported cell to resume ready")
-    ids = cli.result.get("import_ids") or []
-    if len(ids) != 1:
-        raise StepFailure(f"the fixture should fit one window, the CLI sent {len(ids)}: {ids}")
-    return str(ids[0])
+    problems = check_cli_asked(cli.result)
+    if problems:
+        raise StepFailure("; ".join(problems))
+    return cli.import_id
 
 
 async def run_home_import(ctx: Context, plan: HomeImportPlan) -> None:

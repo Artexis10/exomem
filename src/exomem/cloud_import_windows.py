@@ -93,6 +93,10 @@ class Cell:
         """One `file` call on a staged window; a cell that cannot file in one call raises FilingUnavailable."""
         raise FilingUnavailable
 
+    async def offers_file(self) -> bool:
+        """Whether the cell takes a request to file; a cell not shown to lack it is taken to offer it."""
+        return True
+
 
 class McpCell(Cell):
     """The cell's tools through the Cloud gateway, signed in with the CLI's OAuth client."""
@@ -135,6 +139,9 @@ class McpCell(Cell):
             if await self._lacks_file():
                 raise FilingUnavailable from error
             return {"success": False, "error": {"code": _TOOL_ERROR, "message": str(error)}}
+
+    async def offers_file(self) -> bool:
+        return not await self._lacks_file()
 
     async def _lacks_file(self) -> bool:
         """Whether the cell's published write door lists its operations, and `imports.file` is not one of them.
@@ -1119,7 +1126,8 @@ async def _import_folder(source, config, checkpoint, *, cell, api, uploads, incl
         if series is not None:  # A series exists: sending the folder as one import would send every landed member again.
             raise stopped(series, "NO_WINDOW_BUDGET", "the cell reports no window budget now (its media store may be off or rolled back), "
                                                        "so the series cannot go on")
-        return await _older_cell(source, config, checkpoint, limits, options, **{k: settings[k] for k in ("api", "uploads", "progress", "poll_seconds")})
+        return await _older_cell(source, config, checkpoint, limits, options, ask_cell=ask_cell, origin_label=origin_label,
+                                 **{k: settings[k] for k in ("cell", "api", "uploads", "progress", "poll_seconds", "collection")})
     if series is None:
         series = await _begin(source, config, record, first, options, settings, origin_label, ask_cell)
     if series not in held:
@@ -1130,14 +1138,10 @@ async def _import_folder(source, config, checkpoint, *, cell, api, uploads, incl
 
 async def _begin(source, config, record, first, options, settings, origin_label, ask_cell) -> Series:
     """Select, classify and refuse before any upload; then record the series."""
-    progress = settings["progress"]
     selection = import_selection.select(source, include_hidden=options["include_hidden"], use_gitignore=options["use_gitignore"])
-    for line in selection.report_lines():
-        progress.say(line)
-    if not selection.kept:
-        raise CloudImportError(PREFLIGHT, "NOTHING_TO_IMPORT", "no file is left to import; pass --include-hidden or --no-gitignore to take more")
+    _report(selection, settings["progress"])
     # The preflight needs classes, which need the cell's classification inputs; an unknown input waits.
-    placeholders = [Member(kept.rel, kept.size, kept.mtime_ns, TEXT) for kept in selection.kept]
+    placeholders = _placeholders(selection)
     series = Series(str(source), config.api_base_url, str(uuid.uuid4()), "", placeholders, options=options)
     run = _Run(series, record, source, config, **settings)
     reading, since = first, run.clock()
@@ -1158,16 +1162,49 @@ async def _begin(source, config, record, first, options, settings, origin_label,
     return series
 
 
-async def _older_cell(source, config, checkpoint, limits, options, *, api, uploads, progress, poll_seconds) -> dict:
-    """A cell without a window budget: refuse a folder above its known size, else send one import as before."""
+def _report(selection: import_selection.Selection, progress: Progress) -> None:
+    """Say what the selection leaves behind, and refuse a selection with nothing to send."""
+    for line in selection.report_lines():
+        progress.say(line)
+    if not selection.kept:
+        raise CloudImportError(PREFLIGHT, "NOTHING_TO_IMPORT", "no file is left to import; pass --include-hidden or --no-gitignore to take more")
+
+
+def _placeholders(selection: import_selection.Selection) -> list[Member]:
+    return [Member(kept.rel, kept.size, kept.mtime_ns, TEXT) for kept in selection.kept]
+
+
+async def _older_cell(source, config, checkpoint, limits, options, *, cell, api, uploads, progress, poll_seconds,
+                      ask_cell, origin_label, collection) -> dict:
+    """A cell without a window budget: refuse a folder above its known size, else send one import.
+
+    A request to file or a label needs the series file that a window carries, and a cell that offers filing reads it.
+    The result names the request, because the cell, not this command, does the filing.
+    """
     maximum = (limits or {}).get("max_storage_gib")
-    if type(maximum) is int:
+    needs_series_file = ask_cell or origin_label is not None
+    offered = needs_series_file and await cell.offers_file()
+    selection = None
+    if offered or type(maximum) is int:
         selection = import_selection.select(source, include_hidden=options["include_hidden"], use_gitignore=options["use_gitignore"])
-        if selection.kept_bytes > maximum * GIB:
-            raise CloudImportError(PREFLIGHT, "FOLDER_ABOVE_CELL_SIZE", f"the folder declares {selection.kept_bytes} bytes and the "
-                                   f"cell's known size is {maximum * GIB} bytes ({maximum} GiB); nothing is sent", resume=False)
-    return await import_source(source, config, checkpoint, api=api, uploads=uploads, poll_seconds=poll_seconds,
-                               progress=progress, include_hidden=options["include_hidden"], use_gitignore=options["use_gitignore"])
+    if type(maximum) is int and selection.kept_bytes > maximum * GIB:
+        raise CloudImportError(PREFLIGHT, "FOLDER_ABOVE_CELL_SIZE", f"the folder declares {selection.kept_bytes} bytes and the "
+                               f"cell's known size is {maximum * GIB} bytes ({maximum} GiB); nothing is sent", resume=False)
+    window = None
+    if offered:
+        _report(selection, progress)
+        series_file = _series_file(collection or source.name, _placeholders(selection), ask_cell=ask_cell, origin_label=origin_label)
+        window = Window(selection, series_file.encode("utf-8"))
+    elif needs_series_file:
+        if ask_cell:
+            progress.say("The cell does not file imports itself. Ask your assistant to file this import once it is staged.")
+        if origin_label is not None:
+            progress.say("The cell cannot record --label, so the files filed from this import will not carry it.")
+    row = await import_source(source, config, checkpoint, api=api, uploads=uploads, poll_seconds=poll_seconds, progress=progress,
+                              include_hidden=options["include_hidden"], use_gitignore=options["use_gitignore"], window=window)
+    if not ask_cell:
+        return row
+    return {**row, "cell_filing": "asked" if offered else "not_offered"}
 
 
 async def _residual(cell: Cell) -> dict[str, tuple[str, int]]:

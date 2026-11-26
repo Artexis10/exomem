@@ -61,6 +61,9 @@ class FakeCell(Cell):
         self.file_replies: list[dict] = []
         self.room_after_filing = BIG
 
+    async def offers_file(self) -> bool:
+        return not self.refuses_file
+
     async def file(self, path, *, collection=None, continuation=None) -> dict:
         if self.refuses_file:
             raise FilingUnavailable
@@ -683,16 +686,86 @@ def test_a_window_that_the_job_refuses_for_space_is_planned_again_smaller(rig):
 # -- Older cells
 
 
-def test_an_older_cell_gets_one_import_with_no_series_file(rig):
+def test_an_older_cell_gets_one_import_with_no_series_file_when_nothing_asks_it_to_file_or_labels_it(rig):
     """Catches windows against a cell that reports no budget, which could not size them."""
     nine(rig)
     rig.cell.older = True
 
-    rig.run()
+    result = rig.run()
 
     assert len(rig.cloud.completed) == 1
     assert import_stage.SERIES_FILE not in rig.cloud.members[rig.cloud.completed[0]]
     assert len(rig.cloud.sent(rig.cloud.completed[0])) == 9
+    assert "cell_filing" not in result
+
+
+def _lone_series(rig, tmp_path: Path):
+    """The series file of the one import that an older cell received, as the cell reads it."""
+    (import_id,) = rig.cloud.completed
+    vault, stage_id = _stage_with(tmp_path, rig.cloud.members[import_id][import_stage.SERIES_FILE])
+    return import_stage.read_series(vault, stage_id)
+
+
+@pytest.mark.parametrize("ask", [{"file": True}, {"file": False, "ask_cell": True}], ids=["default", "no-wait"])
+def test_a_cell_with_no_window_budget_is_asked_to_file_its_one_import_and_the_result_says_so(rig, tmp_path, ask):
+    """Catches `--no-wait` on a cell without a media store: the import lands, nothing asks the cell to file, and the CLI says done."""
+    rig.files(a01__bin=800, n01__md=100)
+    rig.cell.older = True
+
+    result = rig.run(origin_label="Phone photos", **ask)
+
+    series = _lone_series(rig, tmp_path)
+    assert (series.filing, series.label) == ("cell", "Field Notes")
+    assert series.origin == {"browser_family": "cli", "label": "Phone photos"}
+    assert rig.cloud.all_sent() == ["a01.bin", "n01.md"]
+    assert result["cell_filing"] == "asked" and rig.cell.filed == []
+
+
+def test_a_collection_name_becomes_the_label_the_cell_files_a_lone_import_under(rig, tmp_path):
+    """Catches `--collection` that a lone import drops, so the cell files under the folder name."""
+    rig.files(a01__bin=800)
+    rig.cell.older = True
+
+    rig.run(file=True, collection="Reading list")
+
+    assert _lone_series(rig, tmp_path).label == "Reading list"
+
+
+def test_a_no_file_run_on_a_cell_with_no_window_budget_records_the_label_and_does_not_ask_the_cell_to_file(rig, tmp_path):
+    """Catches `--no-file --label` that drops the label, which the assistant's later filing would have recorded."""
+    rig.files(a01__bin=800)
+    rig.cell.older = True
+
+    result = rig.run(file=False, origin_label="Phone photos")
+
+    series = _lone_series(rig, tmp_path)
+    assert series.filing is None and series.origin == {"browser_family": "cli", "label": "Phone photos"}
+    assert "cell_filing" not in result
+
+
+def test_a_cell_that_cannot_file_gets_a_plain_import_and_the_result_does_not_claim_filing(rig):
+    """Catches a result that says the cell will file an import that it ignores, and a label that vanishes unseen."""
+    rig.files(a01__bin=800)
+    rig.cell.older = True
+    rig.cell.refuses_file = True
+
+    result = rig.run(file=True, origin_label="Phone photos")
+
+    (import_id,) = rig.cloud.completed
+    assert import_stage.SERIES_FILE not in rig.cloud.members[import_id]
+    assert result["cell_filing"] == "not_offered"
+    assert "does not file imports itself" in rig.said() and "cannot record --label" in rig.said()
+
+
+def test_a_folder_with_nothing_to_send_is_refused_before_a_series_file_alone_is_uploaded(rig):
+    """Catches a stage that holds only the series file, which the empty selection would otherwise still declare."""
+    (rig.source / ".hidden").write_text("x")
+    rig.cell.older = True
+
+    with pytest.raises(CloudImportError) as refused:
+        rig.run(file=True)
+
+    assert refused.value.code == "NOTHING_TO_IMPORT" and not rig.cloud.registered_at
 
 
 def test_an_older_cell_refuses_a_folder_above_its_known_size_before_any_upload(rig):

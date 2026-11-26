@@ -32,7 +32,7 @@ from . import drill_cluster, host_speed, platform
 from . import large_import_fixture as fixture
 from .infra import docker_labels
 from .mcp_client import TenantClient, ToolResult
-from .native_import import retain_cli_diagnostics, run_cli_import
+from .native_import import UPLOAD_ONLY, retain_cli_diagnostics, run_cli_import
 from .report import StepFailure, StepRecord, innermost, percentile
 from .scenarios import Context, first_session
 from .shell import CommandFailed, run
@@ -549,7 +549,7 @@ async def generate(ctx: Context, plan: LargeImportPlan, name: str) -> Folder:
 async def upload(ctx: Context, plan: LargeImportPlan, folder: Folder) -> dict:
     """The CLI import as a person runs it; returns the import's row once the cell has resumed."""
     try:
-        cli = await run_cli_import(ctx, plan.cli_image, folder.source, label=folder.name,
+        cli = await run_cli_import(ctx, plan.cli_image, folder.source, label=folder.name, cli_args=UPLOAD_ONLY,
                                    include_hidden=folder.include_hidden, wait_seconds=int(max(300, min(2700, plan.remaining()))))
     finally:
         with contextlib.suppress(Exception):

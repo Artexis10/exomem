@@ -61,3 +61,12 @@ def test_a_write_door_without_imports_file_marks_an_older_cell():
 
     assert asyncio.run(older._lacks_file()) is True
     assert asyncio.run(current._lacks_file()) is False
+
+
+def test_a_cell_offers_filing_unless_its_write_door_is_shown_to_lack_it():
+    """Catches a lone import that claims the cell will file it on a cell that cannot, or that never asks a cell that can."""
+    older, _ = _cell(["imports.start", "imports.select"])
+    current, _ = _cell(["imports.start", "imports.file"])
+    unreadable, _ = _cell([])
+
+    assert [asyncio.run(cell.offers_file()) for cell in (older, current, unreadable)] == [False, True, True]

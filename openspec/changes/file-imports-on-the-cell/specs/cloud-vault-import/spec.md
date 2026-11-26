@@ -22,3 +22,17 @@
 
 - **WHEN** `exomem cloud import --no-wait` uploads a folder
 - **THEN** each window's series file asks the cell to file, the command makes no `file` call, and the cell files the stage
+
+### Requirement: A folder with no window budget goes as one import that the cell files
+
+A folder sent as one import, because the cell reports no window budget, SHALL carry the series file that a window carries when the cell offers filing and the command asks the cell to file or states a label. When the command asks the cell to file, the final result line SHALL say `"cell_filing": "asked"`. For a cell that does not offer filing, the import SHALL stay plain, the line SHALL say `"cell_filing": "not_offered"`, and a given `--label` SHALL be reported as one that the cell cannot record.
+
+#### Scenario: A cell with no window budget
+
+- **WHEN** `exomem cloud import --no-wait` uploads a folder to a cell that reports no window budget and offers filing
+- **THEN** the one import carries the series file that asks the cell to file, and the result line says `"cell_filing": "asked"`
+
+#### Scenario: A cell that cannot file
+
+- **WHEN** `exomem cloud import` uploads a folder to a cell that reports no window budget and does not offer filing
+- **THEN** the import is plain, the result line says `"cell_filing": "not_offered"`, and the result does not claim that the cell will file it

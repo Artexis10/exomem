@@ -710,5 +710,5 @@ def main(argv=None) -> int:
         print(json.dumps({"ok": True, **result}))
         return 0
     print(json.dumps({"ok": True, "import_id": result["import_id"], "state": result["observed_state"],
-                      **{key: result[key] for key in ("staged_files", "staged_bytes") if result.get(key) is not None}}))
+                      **{key: result[key] for key in ("staged_files", "staged_bytes", "cell_filing") if result.get(key) is not None}}))
     return 0
