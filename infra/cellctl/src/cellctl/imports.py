@@ -89,6 +89,8 @@ class ImportJob:
     failed: bool = False
     report: dict = field(default_factory=dict)
     pods_present: bool = False
+    # The failed container's `terminated.reason`, which names an out-of-memory kill when the report is empty.
+    termination_reason: str | None = None
 
 
 # The cell's Job report says "retry": "owner" for a refusal that waits on someone other than cellctl.
@@ -96,10 +98,24 @@ RETRY_OWNER_KEY = "retry"
 RETRY_OWNER = "owner"
 
 
+# The two ends a Job leaves no report for: the kernel killed it for memory, or something else stopped it.
+OUT_OF_MEMORY = "IMPORT_OUT_OF_MEMORY"
+KILLED = "IMPORT_KILLED"
+# Kubernetes' own reason for a container that the kernel's memory limit stopped; a closed value of its API.
+OOM_KILLED_REASON = "OOMKilled"
+# The words cellctl logs between an import Job's name and its diagnostic. The rehearsal finds those lines by them.
+JOB_FAILED_LOG_PHRASE = " Job failed: "
+
+
 def _report_error(job: ImportJob) -> str:
     reported = job.report.get("error") if isinstance(job.report, dict) else None
     # The trusted cell command emits fixed uppercase error tokens, never exception text.
-    return reported if isinstance(reported, str) and re.fullmatch(r"[A-Z_]{1,64}", reported) else "IMPORT_FAILED"
+    if isinstance(reported, str) and re.fullmatch(r"[A-Z_]{1,64}", reported):
+        return reported
+    if job.failed and not job.report:
+        # The Job writes a report from every exception it catches, so a failure without one was a kill from outside.
+        return OUT_OF_MEMORY if job.termination_reason == OOM_KILLED_REASON else KILLED
+    return "IMPORT_FAILED"
 
 
 def job_name(import_id: str, phase: str) -> str:

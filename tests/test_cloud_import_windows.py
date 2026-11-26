@@ -20,7 +20,7 @@ import pytest
 
 from exomem import import_stage
 from exomem.cli_progress import Progress
-from exomem.cloud_import_client import CloudImportClientConfig, CloudImportError
+from exomem.cloud_import_client import CloudImportClientConfig, CloudImportError, _report_failure
 from exomem.cloud_import_windows import Cell, FilingUnavailable, import_folder
 
 CONFIG = CloudImportClientConfig("https://cloud.example/mcp", "https://cloud.example")
@@ -1185,6 +1185,25 @@ def test_a_window_whose_attempt_ended_failed_is_sent_again_under_a_new_import_an
 
     assert rig.cloud.all_sent() == ["a01.bin", "a02.bin"]
     assert len(rig.cloud.rows) == 2
+
+
+@pytest.mark.parametrize(("code", "says_to_rerun"), [("IMPORT_OUT_OF_MEMORY", False), ("IMPORT_KILLED", True)])
+def test_a_folder_stop_after_an_ended_import_says_to_rerun_only_where_a_rerun_can_help(rig, code, says_to_rerun):
+    """Catches a folder run that says to rerun after an out-of-memory stop: the same archive stops the same way after hours of upload."""
+    rig.files(a01__bin=800, a02__bin=800)
+    refused = []
+    rig.cloud.refusal_code = code
+    rig.cloud.refuse_when = lambda members: not refused and not refused.append(True)
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+    shown: list[str] = []
+
+    _report_failure(stop.value, rig.tmp / "checkpoint", Progress(shown.append))
+
+    assert stop.value.code == code
+    assert ("Run the same command again" in " ".join(shown)) is says_to_rerun
+    rig.run()  # Either way the window is renewed, so a later rerun lands the members.
+    assert rig.cloud.all_sent() == ["a01.bin", "a02.bin"]
 
 
 def test_a_window_whose_member_changed_after_a_failed_attempt_is_sent_again_under_a_new_import(rig):

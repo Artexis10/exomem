@@ -304,6 +304,9 @@ def _unpack_into(
                 raise
             except Exception:  # noqa: BLE001 -- the message may quote archive content
                 raise ArchiveRefused(ARCHIVE_UNREADABLE, "format", members + 1) from None
+            # The stream never seeks back, so a TarInfo is dead once its member is read; `next()` would keep
+            # every one in `TarFile.members` for the whole archive.
+            archive.members.clear()
             if member is None:
                 break
             members += 1
