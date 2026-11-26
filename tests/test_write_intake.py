@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import json
 import threading
 import time
 from dataclasses import replace
@@ -25,6 +26,7 @@ from exomem import (
     call_ledger,
     cloud_cell,
     commands,
+    mutation_journal,
     request_budget,
     write_intake,
     writer_lease,
@@ -446,6 +448,14 @@ def test_a_save_that_used_its_call_time_preparing_is_queued_and_lands_once(
 
     assert receipt["state"] == "queued"
     assert receipt["committed"] is False
+    queued = [
+        json.loads(line)
+        for line in mutation_journal.journal_path().read_text(encoding="utf-8").splitlines()
+        if '"queued"' in line
+    ]
+    # The journal row is how an operator counts saves queued because their call's time ran out.
+    assert queued[-1]["outcome"] == "queued"
+    assert queued[-1]["error_code"] == "request_budget"
     assert _pages_titled(vault, "Queued save 31") == []
     _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
     assert len(_pages_titled(vault, "Queued save 31")) == 1

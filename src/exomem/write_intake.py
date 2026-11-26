@@ -1164,7 +1164,9 @@ class Admission:
             if self.refusal is not None:
                 raise self.refusal from error
             try:
-                return self._accept(reason=error.code, started=started)
+                # The refusal's cause when it names one (a spent call budget, a moved auxiliary), so
+                # the queued row says why it waited and the cause can be counted.
+                return self._accept(reason=str(error.details.get("cause") or error.code), started=started)
             except Exception:  # noqa: BLE001 - an intake that cannot write leaves today's refusal
                 log.warning("write intake could not accept a %s save", self.command.name, exc_info=True)
                 raise error from None

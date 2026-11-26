@@ -7917,7 +7917,7 @@ class LeaseManager:
         except OpError as error:
             before_commit = not commit_state["observed"]
             if error.code == "MUTATION_BUSY":
-                if before_commit and eligible and error.details.get("committed") is False:
+                if before_commit and eligible and mutation_lock.waits_out(error):
                     attempt.handed_off = error
                 elif eligible:
                     _count_busy_once(error)

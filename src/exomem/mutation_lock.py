@@ -3422,7 +3422,7 @@ def preparation_spent_busy() -> OpError:
     return OpError(
         "MUTATION_BUSY",
         "this write used its time preparing before it could start saving",
-        "The write did not commit. Retry it with the same idempotency key.",
+        "The write did not commit. Retry it, with the same idempotency key if it had one.",
         details=busy.details,
     )
 
