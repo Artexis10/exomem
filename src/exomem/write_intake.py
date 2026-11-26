@@ -382,20 +382,6 @@ def queues_busy_refusal() -> bool:
     return _QUEUEABLE.get()
 
 
-@contextmanager
-def queueing_only_if(rerun_safe: bool) -> Iterator[None]:
-    """Keep a write the server cannot safely run again, such as one that fetched caller-supplied
-    temporary handles, out of the spent-call-time stop, so it commits late instead of refetching."""
-    if rerun_safe:
-        yield
-        return
-    token = _QUEUEABLE.set(False)
-    try:
-        yield
-    finally:
-        _QUEUEABLE.reset(token)
-
-
 def busy_wait_cap() -> float | None:
     """The deadline (monotonic) by which an eligible save stops waiting and is queued, if any."""
     return _WAIT_CAP.get()
@@ -1386,6 +1372,10 @@ def admission(command: Any, injected: tuple[Any, ...], kwargs: Mapping[str, Any]
     if len(encoded.encode("utf-8")) > MAX_ARGUMENT_BYTES:
         return None
     if not busy_intake_applies(command, jsonable):
+        return None
+    if not writer_lease.rerun_safe(command, jsonable):
+        # A replay would fetch the caller's temporary file links again, or find them expired; such
+        # a save keeps today's busy refusal and full wait, so only its caller retries it.
         return None
     control = {key: kwargs[key] for key in control_names if key in kwargs}
     try:

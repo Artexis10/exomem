@@ -179,7 +179,8 @@ def test_unrelated_owner_mode_does_not_block_private_claim_or_replay(tmp_path: P
     first = store.run("fresh", "digest", leaf)
     replay = store.run("fresh", "digest", lambda: pytest.fail("replay ran the leaf"))
 
-    assert first == replay == {"ok": True, "value": "saved"}
+    assert first == {"ok": True, "value": "saved"}
+    assert replay == {"ok": True, "value": "saved", "replayed": True}
     assert calls == 1
     assert set(owners.iterdir()) == original_entries
     assert stat.S_IMODE(unrelated.stat().st_mode) == 0o644
@@ -236,7 +237,8 @@ def test_legacy_owner_owned_runtime_state_is_hardened_before_sqlite_open(
     store = IdempotencyStore(database)
 
     assert store.run("legacy", "digest", lambda: pytest.fail("legacy replay lost")) == {
-        "kept": True
+        "kept": True,
+        "replayed": True,
     }
     assert stat.S_IMODE(state.stat().st_mode) == 0o700
     assert stat.S_IMODE(database.stat().st_mode) == 0o600
@@ -486,7 +488,9 @@ def test_concurrent_cold_idempotency_initialization_keeps_both_clients_usable(tm
 
     for role, result in zip(("first", "second"), results, strict=True):
         # pytest truncates a tuple message; the formatted text keeps the child's full diagnostics.
-        assert result[:4] == ("ok", {"writer": role}, {"writer": role}, None), pprint.pformat(result)
+        assert result[:4] == (
+            "ok", {"writer": role}, {"writer": role, "replayed": True}, None
+        ), pprint.pformat(result)
         if os.name != "nt":
             assert result[4] and all(mode == 0o600 for mode in result[4])
 
@@ -516,7 +520,9 @@ def test_concurrent_legacy_idempotency_initialization_preserves_completed_result
     results = _run_concurrent_idempotency_initialization(database, legacy=True)
 
     for role, result in zip(("first", "second"), results, strict=True):
-        assert result[:4] == ("ok", {"writer": role}, {"writer": role}, {"kept": True}), pprint.pformat(result)
+        assert result[:4] == (
+            "ok", {"writer": role}, {"writer": role, "replayed": True}, {"kept": True, "replayed": True}
+        ), pprint.pformat(result)
         if os.name != "nt":
             assert result[4] and all(mode == 0o600 for mode in result[4])
 
@@ -2910,7 +2916,10 @@ def test_idempotency_returns_saved_result_and_rejects_mismatch(tmp_path: Path) -
     manager = _manager(tmp_path, LeaseRecord("desktop", 99, 4))
     command = _command(writes=True, leaf=lambda value: calls.append(value) or {"value": value})
     assert manager.invoke(command, (), {"value": 1}, idempotency_key="request-1") == {"value": 1}
-    assert manager.invoke(command, (), {"value": 1}, idempotency_key="request-1") == {"value": 1}
+    assert manager.invoke(command, (), {"value": 1}, idempotency_key="request-1") == {
+        "value": 1,
+        "replayed": True,
+    }
     with pytest.raises(OpError, match="IDEMPOTENCY_KEY_REUSED"):
         manager.invoke(command, (), {"value": 2}, idempotency_key="request-1")
     assert calls == [1]
@@ -2938,7 +2947,8 @@ def test_idempotency_replays_reviewed_none_alias_as_the_same_mutation(tmp_path: 
         idempotency_key="reviewed-none-retry",
     )
 
-    assert first == replay == {"relation_disposition": "reviewed_none"}
+    assert first == {"relation_disposition": "reviewed_none"}
+    assert replay == {"relation_disposition": "reviewed_none", "replayed": True}
     assert calls == ["reviewed_none"]
 
 
@@ -2997,7 +3007,56 @@ def test_identical_inflight_retry_waits_for_original_terminal_result(
     assert not original.is_alive()
     assert not retry.is_alive()
     expected = {"committed": True, "value": 1}
-    assert outcomes == {"original": expected, "retry": expected}
+    assert outcomes == {"original": expected, "retry": {**expected, "replayed": True}}
+    assert calls == [1]
+
+
+def test_a_retry_that_finds_the_canonical_commit_before_the_completed_row_reads_as_a_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The original call has committed but not completed: its retry answers it without the leaf."""
+    canonical_committed = threading.Event()
+    retry_returned = threading.Event()
+    calls: list[int] = []
+    outcomes: dict[str, object] = {}
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base").mkdir(parents=True)
+    manager = LeaseManager(
+        LeaseConfig(state_dir=tmp_path), mutation_timeout_seconds=0, idempotency_wait_seconds=2
+    )
+    command = _command(
+        writes=True, leaf=lambda _vault, value: calls.append(value) or {"committed": True, "value": value}
+    )
+    release_attempt = manager.idempotency._release_attempt
+
+    def held_release(key: str, attempt: object) -> None:
+        # The first release is the original call's, right after its canonical commit.
+        if not canonical_committed.is_set():
+            canonical_committed.set()
+            assert retry_returned.wait(_HOLD_SECONDS)
+        release_attempt(key, attempt)
+
+    monkeypatch.setattr(manager.idempotency, "_release_attempt", held_release)
+
+    def invoke(name: str) -> None:
+        try:
+            outcomes[name] = manager.invoke(
+                command, (vault,), {"value": 1}, implicit_idempotency_scope="principal:alice"
+            )
+        except BaseException as error:  # noqa: BLE001 - assert thread outcome below
+            outcomes[name] = error
+
+    original = threading.Thread(target=invoke, args=("original",), daemon=True)
+    original.start()
+    assert canonical_committed.wait(_OBSERVE_SECONDS)
+    retry = threading.Thread(target=invoke, args=("retry",), daemon=True)
+    retry.start()
+    retry.join(timeout=_HOLD_SECONDS)
+    retry_returned.set()
+    original.join(timeout=_HOLD_SECONDS)
+
+    expected = {"committed": True, "value": 1}
+    assert outcomes == {"original": expected, "retry": {**expected, "replayed": True}}
     assert calls == [1]
 
 
@@ -3035,7 +3094,7 @@ def test_terminal_receipt_survives_acknowledgement_cancellation(tmp_path: Path) 
         {"value": 1},
         idempotency_key="ack-lost",
         idempotency_principal_scope="principal:alice",
-    ) == {"committed": True, "value": 1}
+    ) == {"committed": True, "value": 1, "replayed": True}
     assert calls == [1]
 
 
@@ -3498,7 +3557,7 @@ def test_uncommitted_result_is_completed_without_a_graph_receipt(
     ) == {"validate_only": True, "committed": False}
     assert manager.invoke(
         command, (), {}, idempotency_key="validate-receipt-failure"
-    ) == {"validate_only": True, "committed": False}
+    ) == {"validate_only": True, "committed": False, "replayed": True}
 
     assert calls == 1
 
@@ -4183,7 +4242,8 @@ def test_implicit_idempotency_is_bounded_and_principal_scoped(tmp_path: Path) ->
         "value": 1
     }
     assert manager.invoke(command, (), {"value": 1}, implicit_idempotency_scope="alice") == {
-        "value": 1
+        "value": 1,
+        "replayed": True,
     }
     assert manager.invoke(command, (), {"value": 1}, implicit_idempotency_scope="bob") == {
         "value": 1
@@ -6021,7 +6081,7 @@ def test_startup_sweep_leaves_an_executing_row_for_its_evidence_bearing_retry(
         resume_canonically_committed=lambda _stored: {"canonical": "resumed"},
     )
 
-    assert replayed == {"canonical": "resumed"}
+    assert replayed == {"canonical": "resumed", "replayed": True}
     assert _row_state(database, "proved:one")[0] == "completed"
 
 

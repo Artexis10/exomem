@@ -411,6 +411,22 @@ def rows_behind():
     )
 
 
+def backlog_too_large():
+    """The refusal of a check that reads every page whose rows wait (``derivation.underived``) while
+    more pages wait than one check reads. Unlike ``rows_behind``, it speaks for a write, a delete or
+    a found page: the check cannot yet say that a link or a reference is safe, and nothing was
+    changed."""
+    from ..cli_ops import OpError
+
+    return OpError(
+        DERIVED_BEHIND,
+        "Recently saved pages are still being indexed, so Evermatter cannot yet check links or "
+        "references safely. Nothing was saved or changed.",
+        "Retry in a few seconds: the running service indexes the saved pages, and status shows "
+        "how many still wait.",
+    )
+
+
 def require_caught_up(vault_root: Path) -> None:
     """Refuse a direct read that found no page while the rows of the writes acknowledged before this
     request still lag (``request_snapshot``): its old path or its title may name a page that those

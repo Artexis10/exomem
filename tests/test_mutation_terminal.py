@@ -1489,7 +1489,7 @@ def test_preupgrade_completed_receipt_replays_raw_without_leaf_execution(tmp_pat
         idempotency_key="pre-upgrade",
     )
 
-    assert replay == raw
+    assert replay == {**raw, "replayed": True}
 
 
 def test_mutation_response_detail_is_declared_once_for_every_shared_surface() -> None:

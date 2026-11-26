@@ -255,18 +255,24 @@ def test_a_continuation_that_stopped_before_removing_a_chunk_s_staged_copies_rem
 
 def test_an_import_rotates_the_live_log_instead_of_growing_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The import commit wrote its log entry around the rotation, so a 70,000-file import left a log of many MB
-    that every later commit re-read and re-parsed."""
-    monkeypatch.setenv("EXOMEM_LOG_ROTATE_BYTES", "4000")
+    that every later commit re-read and re-parsed. Each apply call logs one entry for what it filed."""
+    monkeypatch.setenv("EXOMEM_LOG_ROTATE_BYTES", "1000")
     monkeypatch.setattr(vault_module, "LOG_ROTATE_KEEP_ENTRIES", 3)
     monkeypatch.setattr(adoption_run, "APPLY_CHUNK_ITEMS", 5)
     vault = _vault(tmp_path)
     stage = _stage(vault, {f"notes/{n:03d}.txt": f"note {n}\n".encode() for n in range(60)})
     run = adoption_run.start(vault, path=stage, today=TODAY)
+    plan_id = _plan(vault, run, stage)
+    originals = [item["original_path"] for item in adoption_run.AdoptionRunStore(vault).load(run["run_id"])["plan"]["items"]]
 
-    reply = _apply_all(vault, run, _plan(vault, run, stage))
+    for start in range(0, 60, 5):
+        reply = adoption_run.apply(
+            vault, run_id=run["run_id"], plan_id=plan_id, only_paths=originals[start:start + 5], today=TODAY)
 
     assert {outcome["status"] for outcome in reply["outcomes"].values()} == {"applied"}
     kb = vault / "Knowledge Base"
-    assert (kb / "log.md").read_text(encoding="utf-8").count("adopt-copy") <= 3 + 1
-    archived = "".join(path.read_text(encoding="utf-8") for path in (kb / "_archive" / "logs").glob("log-*.md"))
-    assert all(f"notes/{n:03d}.txt" in archived + (kb / "log.md").read_text(encoding="utf-8") for n in range(60))
+    live = (kb / "log.md").read_text(encoding="utf-8")
+    assert live.count("adopt-copy") <= 3 + 1
+    assert list((kb / "_archive" / "logs").glob("log-*.md"))
+    entries = [entry for entry in vault_module.read_operation_log(vault)["entries"] if entry["op"] == "adopt-copy"]
+    assert sum(entry["provenance"]["files"] for entry in entries) == 60

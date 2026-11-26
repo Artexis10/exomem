@@ -6388,21 +6388,27 @@ def batch_atomic_write(
         from .vault_store import availability
         from .vault_store import batch as store_batch
 
+        # The native writer below reads the batch again when the store hands it back.
+        writes = list(writes)
         writer = availability.page_writer(Path(vault_root))
         if writer is not None:
             if _payload_custody is not None:
                 # A file-owner contract cannot silently lose its custody in another persistence owner.
                 raise ValueError("file payload custody requires its native writer")
-            return store_batch.commit_batch(
-                writer, writes, vault_root=Path(vault_root), required_guards=required_guards,
-                completion_guards=completion_guards, index_reports=index_reports,
-                post_commit_fanout=post_commit_fanout, commit_point=commit_point,
-                defer_graph_completion=defer_graph_completion,
-                vocabulary_auxiliaries=_vocabulary_auxiliaries,
-                validate_prepared_bindings=_validate_prepared_bindings, prepare=_prepare,
-                publish_originals=_publish_originals, retained_original=_retained_original,
-                file_commit_witness=_file_commit_witness,
-            )
+            try:
+                return store_batch.commit_batch(
+                    writer, writes, vault_root=Path(vault_root), required_guards=required_guards,
+                    completion_guards=completion_guards, index_reports=index_reports,
+                    post_commit_fanout=post_commit_fanout, commit_point=commit_point,
+                    defer_graph_completion=defer_graph_completion,
+                    vocabulary_auxiliaries=_vocabulary_auxiliaries,
+                    validate_prepared_bindings=_validate_prepared_bindings, prepare=_prepare,
+                    publish_originals=_publish_originals, retained_original=_retained_original,
+                    file_commit_witness=_file_commit_witness,
+                )
+            except store_batch.NoStoreChange:
+                # Only files that the store does not hold (a curation run's JSON): file-mode's.
+                pass
     if _retained_original is not None:
         raise ValueError("retained import original requires its canonical store writer")
     with _BATCH_COMMIT_LOCK, ExitStack() as custody_stack:
@@ -9496,7 +9502,9 @@ def store_inbound_wikilinks(
     its stored bytes gives its links from those bytes (``_underived_inbound``). The links come in
     path order, then scan order, which is deterministic across runs. A store that an older build
     set up raises ``VAULT_STORE_DERIVED_BEHIND`` until its pass has derived every page's rows: a
-    partial or empty answer would say that fewer pages, or none, link to the page.
+    partial or empty answer would say that fewer pages, or none, link to the page. So does more than
+    ``UNDERIVED_CAP`` pages whose rows wait: any of them could add a link, and the check reads them
+    all, so it refuses before it reads one.
     """
     from .vault_store import read as store_read
 
@@ -9579,7 +9587,8 @@ def store_inbound_sources(conn, rels: Iterable[str]) -> frozenset[str]:
     from .vault_store import read as store_read
 
     wanted = list(dict.fromkeys(rels))
-    underived = _underived_inbound(conn)
+    # Only the pending state of ``wanted`` decides the answer, so the read is keyed to ``wanted``.
+    underived = _underived_inbound(conn, wanted)
     found: set[str] = set()
     for start in range(0, len(wanted), store_read.KEYS_PER_QUERY):
         chunk = wanted[start : start + store_read.KEYS_PER_QUERY]
@@ -9587,25 +9596,28 @@ def store_inbound_sources(conn, rels: Iterable[str]) -> frozenset[str]:
             f"SELECT path FROM inbound_sources WHERE path IN ({', '.join('?' * len(chunk))})",
             chunk,
         ) if path not in underived)
-    found.update(path for path, given in underived.items() if given is not None and path in wanted)
+    found.update(path for path, given in underived.items() if given is not None)
     return frozenset(found)
 
 
-def _underived_inbound(conn) -> dict[str, tuple[str, list[tuple[int, str, str, str]]] | None]:
+def _underived_inbound(
+    conn, paths: Iterable[str] | None = None
+) -> dict[str, tuple[str, list[tuple[int, str, str, str]]] | None]:
     """The rows that each page whose derivation trails its stored bytes will hold, from those bytes.
 
     A failed or waiting derivation leaves a page's inbound rows describing bytes that the store no
     longer holds, so every read of the rows takes these in their place: ``inbound_rows`` of the
     bytes, or None for a page that gives no rows (the store holds none there, the walk does not
     reach it, or its bytes are not UTF-8), as the drain writes them once it succeeds. No link guard
-    or link rewrite then trusts a row that its page no longer gives. The work follows the queue's
-    lag, which is empty once the drain keeps up.
+    or link rewrite then trusts a row that its page no longer gives. With ``paths`` the read covers
+    those pages alone; without, it covers every pending page, which any of them could change a link
+    for, and ``derivation.underived`` refuses it when the backlog passes ``UNDERIVED_CAP``.
     """
     from .vault_store import derivation
     from .vault_store import read as store_read
 
     given: dict[str, tuple[str, list[tuple[int, str, str, str]]] | None] = {}
-    for rel, raw in derivation.underived(conn).items():
+    for rel, raw in derivation.underived(conn, paths).items():
         try:
             given[rel] = (None if raw is None or not store_read.walk_member(rel)
                           else inbound_rows(rel, raw.decode("utf-8")))

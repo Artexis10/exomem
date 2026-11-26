@@ -87,6 +87,8 @@ def inbound_links(vault_root: Path, rels: Iterable[str]) -> dict[str, InboundChe
     """
     root = Path(vault_root)
     targets = list(dict.fromkeys(rels))
+    if not targets:
+        return {}  # nothing is linked to: no row to read and no file to walk
     # A form names the pages that a link in that form reaches: two pages may share a basename.
     reached: dict[str, set[str]] = {}
     for rel in targets:

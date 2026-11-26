@@ -36,6 +36,41 @@ def _cpu_seconds(native_id: int) -> float | None:
         return None
 
 
+def _set_os_name(native_id: int | None, name: str) -> None:
+    """Name one thread of this process at the OS level, cut to the 15 bytes that Linux keeps."""
+    # Every thread the service starts is called `exomem-...`; dropping that keeps the bytes that tell them apart.
+    short = name.removeprefix("exomem-").encode("utf-8")[:15].decode("utf-8", "ignore")
+    try:
+        Path(f"/proc/self/task/{native_id}/comm").write_text(short, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def name_os_threads() -> bool:
+    """Give each Python thread its name at the OS level, so /proc and `top -H` tell the threads apart.
+
+    Python 3.14 does this itself; before it every thread shows the process name. The main thread keeps
+    the process name. Returns False where this does nothing.
+    """
+    if sys.version_info >= (3, 14) or not Path("/proc/self/task").is_dir():
+        return False
+    if getattr(threading.Thread._bootstrap_inner, "_names_os_thread", False):
+        return True
+    for thread in threading.enumerate():
+        if thread is not threading.main_thread():
+            _set_os_name(thread.native_id, thread.name)
+    started = threading.Thread._bootstrap_inner
+
+    def _bootstrap_inner(self: threading.Thread) -> None:
+        _set_os_name(threading.get_native_id(), self.name)
+        started(self)
+
+    _bootstrap_inner._names_os_thread = True  # type: ignore[attr-defined]
+    # Python 3.12 has no public hook at thread start; 3.14 names the OS thread in this same method.
+    threading.Thread._bootstrap_inner = _bootstrap_inner  # type: ignore[method-assign]
+    return True
+
+
 def render() -> str:
     """The dump text: one block per OS thread, busiest first."""
     frames = sys._current_frames()

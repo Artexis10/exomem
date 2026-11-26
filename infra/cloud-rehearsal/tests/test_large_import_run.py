@@ -9,6 +9,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import gzip
+import json
+import os
+import subprocess
+import sys
 import time
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -85,6 +89,36 @@ def test_a_peak_over_ticks_that_could_not_read_the_cell_is_unknown_not_zero():
     reading = large_import.peaks(seen)
     assert reading["peak_volume_used_bytes"] == 70
     assert reading["ticks"] == 3 and reading["ticks_with_cell_reading"] == 1
+
+
+def test_thread_cpu_charges_a_phase_only_what_each_thread_used_during_it():
+    """Catches a phase charged with the CPU its threads used before it, and an unread phase shown as idle."""
+    rows = [{"label": "start", "threads": {"7": ["drain", 5_000_000]}},
+            {"label": "paging", "threads": {"7": ["drain", 7_000_000], "9": ["filing", 1_000_000]}},
+            {"label": "paging", "cell_error": "CommandFailed"},
+            {"label": "paging", "threads": {"7": ["drain", 8_000_000], "9": ["filing", 4_000_000]}},
+            {"label": "blind"}]
+
+    assert large_import.thread_cpu(rows, "paging") == {"filing": 4.0, "drain": 3.0}
+    assert large_import.thread_cpu(rows, "blind") is None
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/task"), reason="reads /proc")
+def test_the_sample_script_reads_each_thread_of_the_other_processes():
+    """Catches a sample script that fails on the /proc it reads, which would leave every tick without threads."""
+    sleeper = subprocess.Popen([sys.executable, "-c", "import threading, time\n"
+                                "threading.Thread(target=time.sleep, args=(30,), daemon=True).start()\ntime.sleep(30)"])
+    try:
+        time.sleep(0.5)
+        sample = json.loads(subprocess.run([sys.executable, "-c", large_import.SAMPLE_SCRIPT], capture_output=True,
+                                           text=True, check=True, timeout=60).stdout)
+        tids = os.listdir(f"/proc/{sleeper.pid}/task")
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+
+    assert len(tids) == 2
+    assert all(isinstance(sample["threads"][tid][1], int) for tid in tids)
 
 
 # --- filing ---------------------------------------------------------------------------------
@@ -235,6 +269,27 @@ def test_each_file_call_keeps_its_counts_and_the_page_shows_files_per_call_and_p
     (page,) = folder.report["pages"]
     assert [(step["files"], step["filing"]) for step in page["file_steps"]] == [(40, "working"), (60, "done")]
     assert page["files_per_second"] == 100.0  # 100 files over two calls of 0.5 s
+
+
+def test_a_deadline_that_stops_filing_still_reports_the_calls_made():
+    """Catches the report that lost every page because the deadline check came before the pages were recorded."""
+    agent = Scripted({"file": [_working("r1", filed=40, token="a"), _working("r1", filed=90, token="b")]})
+    folder = _folder(name="media")
+    plan = _plan()
+    checks = []
+
+    def require_time(what, *, seconds=0):
+        checks.append(what)
+        if len(checks) == 3:
+            raise large_import.OutOfTime(f"the scenario's deadline came before {what}")
+
+    plan.require_time = require_time
+
+    with pytest.raises(large_import.OutOfTime):
+        asyncio.run(large_import.file_pages(agent, plan, folder))
+
+    (page,) = folder.report["pages"]
+    assert [step["files"] for step in page["file_steps"]] == [40, 50]
 
 
 def test_a_reply_without_counts_leaves_its_files_and_the_rate_unknown_not_zero():

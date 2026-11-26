@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from . import vault
+from .cli_ops import OpError
 from .vault import find_body_wikilinks
 
 
@@ -23,20 +24,27 @@ def outbound_link_targets(body: str) -> list[str]:
 def link_summary(vault_root: Path, rel_path: str, body: str) -> dict:
     """Inbound + outbound wikilink summary for the `get(links=True)` option.
 
-    Unknown inbound information is null while the existing owner rebuilds it.
+    Unknown inbound information is null while the existing owner rebuilds it, and while more
+    saved pages wait for their rows than one check reads.
     Inbound links resolve over the reader's view: for a reader other than the
     owner a bare link counts as inbound when this page's basename is unique
     among the pages it may see.
     """
     from .governance import egress
+    from .vault_store import read as store_read
 
     with egress.proven_withheld_scope(reuse=True):
-        matches = (
-            vault.cached_inbound_wikilinks(
-                vault_root, rel_path, visible=egress.reader_view(vault_root)
+        try:
+            matches = (
+                vault.cached_inbound_wikilinks(
+                    vault_root, rel_path, visible=egress.reader_view(vault_root)
+                )
+                if rel_path else None
             )
-            if rel_path else None
-        )
+        except OpError as error:
+            if error.code != store_read.DERIVED_BEHIND:
+                raise
+            matches = None  # pages still waiting for their rows: unknown, and the page read stands
     inbound = None if matches is None else [match.as_dict() for match in matches]
     prose = egress.prose_for_caller(vault_root, body, owner_path=rel_path)
     return {"inbound": inbound, "outbound": outbound_link_targets(prose)}

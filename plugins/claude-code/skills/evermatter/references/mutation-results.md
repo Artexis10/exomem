@@ -40,7 +40,8 @@ carry the codes and reasons. A result whose status is
 `replayed` reads `Already saved -> <title>`. Each sentence ends with the name of the store
 that took the write, such as `Saved -> <title> (personal Evermatter)`; the `read_instructions` reply's `store`
 names the same store. A repeat of a request with the same idempotency key returns the
-first reply, so it reads as the first call did.
+first reply with a top-level `replayed: true`, so you can tell it from a new call. A reply that
+defines its own `replayed` field keeps that field as it was.
 When a `save_source` call passed `options.custody_only` and stored a new Source, the sentence adds
 ` (kept for custody only)` and the Source's frontmatter records `custody_only: true`.
 A refusal carries no `user_summary`; see "Refusals" below. The reply carries only what

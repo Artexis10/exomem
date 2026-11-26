@@ -190,6 +190,43 @@ def admitted_catalog_scope(vault_root: Path):
         _ADMITTED_CATALOG.reset(token)
 
 
+@dataclass
+class _HeldRead:
+    """One read connection that a run of lookups on one thread shares (`shared_reads`)."""
+
+    root: Path
+    owner_thread: int = field(default_factory=threading.get_ident)
+    path: Path | None = None
+    file_id: tuple[int, int] | None = None
+    connection: sqlite3.Connection | None = None
+
+    def drop(self) -> None:
+        connection, self.connection, self.path, self.file_id = self.connection, None, None, None
+        if connection is not None:
+            connection.close()
+
+
+_HELD_READ: ContextVar[_HeldRead | None] = ContextVar("held_catalogue_read", default=None)
+
+
+@contextlib.contextmanager
+def shared_reads(vault_root: Path):
+    """Let the catalogue reads of one loop on this thread share one connection, then close it.
+
+    A plan or a chunk asks the duplicate index about every file, and each answer opened two
+    connections. Each statement still reads the newest commit: the connection holds no transaction.
+    A sidecar that a rebuild replaced gets a fresh connection, and while a whole-catalogue rebuild runs the
+    loop reads on connections of their own, so the rebuild can fold the sidecar and publish.
+    """
+    held = _HeldRead(Path(vault_root).resolve())
+    token = _HELD_READ.set(held)
+    try:
+        yield
+    finally:
+        _HELD_READ.reset(token)
+        held.drop()
+
+
 #: Set while one request reads a vault whose pages the store holds.
 _STORE_CATALOGUE: ContextVar[bool] = ContextVar("store_catalogue_request", default=False)
 
@@ -6822,11 +6859,42 @@ class LexicalStore:
         if view is not None and view.store is self:
             yield view.connection
             return
+        held = self._held_read()
+        if held is not None:
+            try:
+                yield held.connection
+            except BaseException:
+                held.drop()  # A failed read may leave the handle unusable; the next read opens a new one.
+                raise
+            return
         conn = self._connect()
         try:
             yield conn
         finally:
             conn.close()
+
+    def _held_read(self) -> _HeldRead | None:
+        """The `shared_reads` connection for this sidecar, opened on first use, or None outside one."""
+        held = _HELD_READ.get()
+        if held is None or held.owner_thread != threading.get_ident() or held.root != self.vault_root.resolve():
+            return None
+        if held.root in _FULL_REBUILDS_IN_FLIGHT:
+            # A rebuild folds the live sidecar out of WAL mode only when no other connection is open, and a
+            # declined publication queues the whole build again. Membership is a single atomic set lookup, so
+            # it takes no lock on this hot path; a stale answer costs one more statement on the held connection.
+            held.drop()
+            return None
+        try:
+            status = os.stat(self.path)
+        except OSError:
+            held.drop()
+            return None
+        file_id = (status.st_dev, status.st_ino)
+        if held.connection is not None and (held.path, held.file_id) == (self.path, file_id):
+            return held
+        held.drop()
+        held.connection, held.path, held.file_id = self._connect(), self.path, file_id
+        return held
 
     def _connect(self, path: Path | None = None) -> sqlite3.Connection:
         """Ordinary-read connection: bounded busy/synchronous policy only.

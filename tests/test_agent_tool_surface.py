@@ -674,6 +674,41 @@ def test_every_route_a_public_reply_carries_names_a_listed_tool_and_arguments_it
     assert {"edit_note", "decide_review_item", "create_note", "search_memory"} <= {route["tool"] for route in routes}
 
 
+def test_a_review_item_from_the_held_pass_spells_its_call_for_the_surface_that_lists_it(
+    build, vault, warm_managed_cell
+) -> None:
+    """The refresh worker holds the pass with no surface bound, so a held item named a tool that
+    the public surface does not list."""
+    from test_name_drift import _invent
+
+    from exomem import due_state, find, review_pass
+
+    _invent(vault)
+    find.clear_cache()
+    warm_managed_cell(vault)
+    due_state.reconcile(vault)
+    review_pass.start(vault)
+
+    async def scenario(client):
+        for _ in range(600):
+            reply = await _call(client, "list_review_items", {"categories": ["name_drift"]})
+            if "as_of" in reply:  # only a listing that read the held pass names its time
+                return reply
+            await asyncio.sleep(0.05)
+        raise AssertionError("no listing read the held pass")
+
+    try:
+        reply = _session(build(), scenario)
+    finally:
+        review_pass.stop()
+
+    (item,) = reply["items"]
+    (reason,) = item["reasons"]
+    for call in (reason["detail"], reason["meta"]["call"]):
+        assert "manage_memory" in call and "curation.relocate" in call, call
+        assert "maintain_memory" not in call, call
+
+
 def test_an_uncoded_fault_names_the_tool_the_agent_called_not_the_command_behind_it(build, monkeypatch) -> None:
     def refuse(command, *args, **kwargs):
         raise RuntimeError("[withheld]")

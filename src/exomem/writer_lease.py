@@ -3852,7 +3852,9 @@ class IdempotencyStore:
                     raise _PostCommitOutcomeUncertain() from storage_error
                 self._notify_waiters()
                 self._after_terminal_persisted()
-                return terminal_result
+                # The leaf did not run in this call: the original call, or the one that died after
+                # its canonical commit, ran it. This call answers that call's retry, as a replay.
+                return self._replay("completed", terminal_result, on_replay)
             if disposition == "outcome_unknown":
                 raise _mutation_outcome_unknown_error()
             return self._replay(disposition, stored, on_replay)
@@ -7215,11 +7217,7 @@ class LeaseManager:
         # leave a text capture unguarded, and leaving it out holds the vault
         # lock across every fetch and blocks all other writers for the
         # duration. The boundary follows the invocation, not the command.
-        narrow_source_artifact_commit = (
-            command.name == "capture_source"
-            and bool(kwargs.get("files"))
-            and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
-        )
+        narrow_source_artifact_commit = _narrow_source_artifact_commit(command, kwargs)
         narrow_relation_registry_commit = (
             command.name == "schema_memory"
             and kwargs.get("subject", "contract") == "relations"
@@ -7446,25 +7444,17 @@ class LeaseManager:
                         reconcile_abandoned=command.name == "adoption_studio" and kwargs.get("action") in ("apply", "file"),
                 )
 
-            from . import write_intake
-            from .command_surface import OPEN_WORLD_OPS
-
-            # A narrow leaf meets the busy only after its own preparation. When
-            # that preparation fetched caller-supplied temporary handles, the
-            # server cannot fetch them again; only the caller can retry.
-            rerun_safe = not (narrow_boundary and command.name in OPEN_WORLD_OPS)
-            with write_intake.queueing_only_if(rerun_safe):
-                result = self._run_absorbing_capture_contention(
-                    command,
-                    run_idempotent,
-                    key=key,
-                    commit_state=commit_state,
-                    request_id=request_id,
-                    wait_started=wait_started,
-                    wait_deadline=wait_deadline,
-                    rerun_safe=rerun_safe,
-                    absorb_unkeyed=absorb_unkeyed,
-                )
+            result = self._run_absorbing_capture_contention(
+                command,
+                run_idempotent,
+                key=key,
+                commit_state=commit_state,
+                request_id=request_id,
+                wait_started=wait_started,
+                wait_deadline=wait_deadline,
+                rerun_safe=rerun_safe(command, kwargs),
+                absorb_unkeyed=absorb_unkeyed,
+            )
             if (
                 vocabulary_replay_terminal is not None
                 and vocabulary_binding is not None
@@ -9477,14 +9467,16 @@ def invoke_command(
         implicit_idempotency_scope is not None
         and command.name == "maintain_memory"
         and kwargs.get("mode") == "curation"
-        and kwargs.get("curation_action") == "resume"
+        and isinstance(kwargs.get("curation_action"), str)
+        and kwargs["curation_action"] in curation_module.CONTINUING_ACTIONS
     ):
-        # Resume advances a run as far as one call's budget allows, and every call carries the
-        # same arguments, so the call's own request id joins the scope: a new call runs the next
-        # steps instead of replaying the last reply for 600 s, while a retry of one call, the busy
-        # and warm-up waits and a vocabulary binding keep a canonical identity.
+        # A continuing action (resume, relocate) advances as far as one call's budget allows, and
+        # every call carries the same arguments, so the call's own request id joins the scope: a
+        # new call runs the next steps instead of replaying the last reply for 600 s, while a
+        # retry of one call, the busy and warm-up waits and a vocabulary binding keep a canonical
+        # identity.
         implicit_idempotency_scope = (
-            f"{implicit_idempotency_scope}\0resume:{mutation_request_id or uuid.uuid4()}"
+            f"{implicit_idempotency_scope}\0continue:{mutation_request_id or uuid.uuid4()}"
         )
     if selector_error is not None:
 
@@ -9675,6 +9667,32 @@ def invoke_command(
 
         call_ledger.note_released_items(released_item_count(collector, result))
         return result
+
+
+def _narrow_source_artifact_commit(command: Any, kwargs: Mapping[str, Any]) -> bool:
+    """A source capture of client files stages them before it takes its own narrow guard."""
+    return (
+        command.name == "capture_source"
+        and bool(kwargs.get("files"))
+        and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
+    )
+
+
+def rerun_safe(command: Any, kwargs: Mapping[str, Any]) -> bool:
+    """Whether the server may run this call again after a busy refusal, by waiting or by queuing it.
+
+    A narrow open-world leaf meets the busy only after its own preparation. When that preparation
+    fetched caller-supplied temporary handles, the server cannot fetch them again; only the caller
+    can retry.
+    """
+    from .command_surface import OPEN_WORLD_OPS
+
+    if command.name not in OPEN_WORLD_OPS:
+        return True
+    narrow = _narrow_source_artifact_commit(command, kwargs) or (
+        command.name in _NARROW_BOUNDARY_COMMANDS and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
+    )
+    return not narrow
 
 
 @cache

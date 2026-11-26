@@ -48,6 +48,15 @@ A save SHALL be accepted only when the intake is enabled, a drainer runs in the 
 - **WHEN** a stdio server or the CLI meets a busy boundary on an eligible save
 - **THEN** it returns `MUTATION_BUSY` and queues nothing
 
+### Requirement: A save the server cannot run again is not accepted
+
+A save whose run the server cannot safely repeat SHALL NOT be accepted, and SHALL keep the existing `MUTATION_BUSY` contract. The writer lease's rerun-safety rule decides this at admission, as it does for absorbing a busy boundary, so such a save keeps the full capture wait.
+
+#### Scenario: A capture of a caller's file links keeps the busy refusal
+
+- **WHEN** a `capture_source` call that fetched a caller's temporary file links meets a busy boundary
+- **THEN** it returns `MUTATION_BUSY` with `committed: false` and queues nothing, because a replay would fetch the links again or find them expired
+
 ### Requirement: The intake stays off the uncontended path
 
 A save that meets no contention SHALL NOT read the intake store, and a fault in the intake SHALL NOT refuse a save that would otherwise run. A drainer with nothing queued SHALL NOT write to the store or change the vault's private identities, and SHALL read it at most once every few minutes.
