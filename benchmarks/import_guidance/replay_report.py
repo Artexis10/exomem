@@ -151,6 +151,8 @@ def build(
     models = sorted({r["model"] for r in rows})
     sets = sorted(set(sets_of.values()))
     in_set = {name: sorted(case for case, s in sets_of.items() if s == name) for name in sets}
+    rejections = [r.get("rejected_unavailable_tools") for r in rows]
+    measured_rejections = [v for v in rejections if isinstance(v, list) and all(isinstance(n, str) for n in v)]
     out = [
         f"Baseline `{baseline}` at {states(baseline)}. Candidate `{candidate}` at {states(candidate)}.",
         f"Stage-B runs read: {len(rows)}, of which {sum(r['error'] is not None for r in rows)} ended in an error (unknown). "
@@ -161,6 +163,9 @@ def build(
         + f"{sum(map(used_outside_script, rows))} of {len(rows)} ("
         + ", ".join(f"{arm} {sum(used_outside_script(r) for r in rows if r['arm'] == arm)}" for arm in (baseline, candidate))
         + ").",
+        "Rejected unavailable tool attempts (report only): "
+        + f"{sum(map(len, measured_rejections))} confirmed in {sum(bool(v) for v in measured_rejections)} runs; "
+        + f"evidence unverified for {len(rows) - len(measured_rejections)} runs.",
         (agreement_line(agreement) if agreement else "No judge batch was given: every judged criterion is unknown.")
         + ("" if agreement and not agreement["incomplete"] else " The result below is incomplete."),
         "Runs whose stream shows a hook response (information only, not a gate): "

@@ -9,7 +9,7 @@ from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
-from .. import state_migration, state_paths
+from .. import semantic_index, state_migration, state_paths
 from ..collection_store import capability, connection, schema
 from . import resident_catalogue
 
@@ -222,6 +222,8 @@ STORE_FIGURES = (
     "registry_target_revision",
     "registry_waiting_on_paths",
     "owner_schema",
+    "parser_version",
+    "required_parser_version",
     "unowned_rows_as_of",
     "derived",
     "derived_pending",
@@ -248,6 +250,8 @@ def status(vault_root: Path) -> dict:
     that a person's edit holds: the job waits for each, so a held path keeps a vault ``rebuilding``.
     ``owner_schema`` is ``behind`` while the store lacks derived objects that this build adds, which
     the registry pass creates and fills (``registry`` is then ``unknown``), else ``current``.
+    ``parser_version`` names the completed full-pass parser input; ``required_parser_version``
+    names this build's parser input. A mismatch keeps semantic answers unavailable during repair.
     ``unowned_rows_as_of`` is when the importer's last complete sweep began to read the files that
     the store does not own, whose rows are as fresh as that sweep (None when no sweep is recorded).
     ``derived`` says whether the search, identity and graph rows follow every committed page
@@ -351,5 +355,7 @@ def _store_figures(vault_root: Path) -> dict:
         "registry_waiting_on_paths": waiting,
         # Whether the store holds the derived objects of this build, or a pass still creates them.
         "owner_schema": "behind" if registry.owner_schema_behind else "current",
+        "parser_version": registry.parser_version if registry.parser_version is not None else UNKNOWN,
+        "required_parser_version": semantic_index.PARSER_VERSION,
         "unowned_rows_as_of": unowned.get("at"),
     }

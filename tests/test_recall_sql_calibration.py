@@ -140,7 +140,9 @@ def test_busy_reference_writes_a_content_free_refusal(tmp_path, monkeypatch):
     report = json.loads(output.read_text())
     assert report["state"] == "refused" and report["reason"] == "load-above-reference"
     assert report["samples"] == [] and report["environment"] is None
-    assert report["expected_samples"] == 960 and report["completed_samples"] == 0
+    # Every case of the case file, for both principals and both lexical projections.
+    cases = json.loads((gate.BENCHMARK / "cases.json").read_text())
+    assert report["expected_samples"] == 2 * 2 * len(cases) and report["completed_samples"] == 0
     assert report["coverage_complete"] is False
     report["query"] = "private material"
     with pytest.raises(ValidationError):

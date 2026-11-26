@@ -20,7 +20,8 @@
               "filtered_hybrid",
               "temporal",
               "mixed",
-              "unit"
+              "unit",
+              "dimension_filter"
             ]
           },
           "maximum_ratio": {

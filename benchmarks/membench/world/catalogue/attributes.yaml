@@ -198,8 +198,8 @@ reading_arguments:
 
 # The two ways one statement may defeat another.
 defeat_modes:
-  rebut: "The statement supports the opposite conclusion."
-  undercut: "The statement removes the reason to believe, and supports no opposite."
+  rebut: "An effective rebuttal defeats the target statement by supporting the opposite conclusion."
+  undercut: "An effective undercut defeats the target statement by removing its grounds, without supporting an opposite."
 
 # On what basis a holder makes a statement.
 statement_bases:

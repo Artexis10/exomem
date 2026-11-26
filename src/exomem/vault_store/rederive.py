@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from sqlite3 import Connection
 
-from .. import access, lexstore, registry_history, vault
+from .. import access, lexstore, registry_history, semantic_index, vault
 from ..kbdir import managed_join
 from . import derive, mode
 
@@ -41,16 +41,24 @@ PASS = "vault_store_registry_pass"
 #: The version of the owners' objects (tables and indexes outside the collection schema) whose rows
 #: the store holds, and this build's version. A store that an older build set up lacks an object
 #: that this build derives; its pass creates the objects and derives every page, and only then
-#: records this version. Version 1 adds the inbound-link tables.
+#: records this version. Version 1 adds inbound links; version 2 adds page admission;
+#: version 3 adds payload hashes for legacy Evidence pages; version 4 adds lineage prior paths;
+#: version 5 adds authored unit row keys and title contact.
 OWNER_SCHEMA = "vault_store_owner_schema"
-# Inbound rows were complete at v1; later owners must not invalidate that readiness proof.
-LINK_ROWS_VERSION = 1
-#: The generation of the owners' derivation. Version 3 rederives payload hashes that older builds omitted
-#: from legacy Evidence pages. Version 4 derives the prior-path rows of every page's lineage. A lexical schema
-#: bump needs no number here: it leaves the store's lexical catalogue behind this build's, and ``read`` and
-#: ``owner_schema_behind`` count that as behind too.
-OWNER_SCHEMA_VERSION = 4
-KEYS = (OVERLAY_REVISION, REGISTRY_REVISION, PASS, OWNER_SCHEMA)
+# These generations are the closed introduction versions of the owners' derived projections.
+INBOUND_LINKS_OWNER_VERSION = 1
+# Duplicate lookup needs only the payload hashes, which version 3 completed.
+PAYLOAD_HASHES_OWNER_VERSION = 3
+# Version 4 derives the prior-path rows of every page's lineage. Version 5 introduces the unit-row keys and
+# the title-contact projections, so a store at 4 lacks them and needs another pass. A lexical schema bump
+# needs no number here: it leaves the store's lexical catalogue behind this build's, and ``read`` and
+# ``owner_schema_behind`` count that as behind too.
+UNIT_ROW_KEYS_OWNER_VERSION = 5
+TITLE_CONTACT_OWNER_VERSION = UNIT_ROW_KEYS_OWNER_VERSION
+OWNER_SCHEMA_VERSION = UNIT_ROW_KEYS_OWNER_VERSION
+# A parser input change needs new rows, but no owner DDL or collection-schema barrier.
+PARSER_VERSION = "vault_store_parser_version"
+KEYS = (OVERLAY_REVISION, REGISTRY_REVISION, PASS, OWNER_SCHEMA, PARSER_VERSION)
 
 #: The states that status reports: the closed set of this module's own states. ``unknown`` is
 #: ``mode.UNKNOWN``.
@@ -82,6 +90,9 @@ class Registry:
     #: Whether the store's owner objects are older than this build's (``OWNER_SCHEMA``): the state
     #: is then ``unknown`` until a pass creates and fills them.
     owner_schema_behind: bool = False
+    parser_version: int | None = None
+    parser_behind: bool = False
+    owner_schema_version: int | None = None
 
 
 def is_overlay_source(
@@ -150,6 +161,7 @@ def record_derived_from_files(tx: Connection, revision: int) -> None:
     _set(tx, OVERLAY_REVISION, str(revision))
     _set(tx, REGISTRY_REVISION, str(revision))
     _set(tx, OWNER_SCHEMA, str(OWNER_SCHEMA_VERSION))
+    _set(tx, PARSER_VERSION, str(semantic_index.PARSER_VERSION))
     tx.execute("DELETE FROM store_meta WHERE key = ?", (PASS,))
 
 
@@ -164,25 +176,28 @@ def read(conn: Connection) -> Registry:
     ``unknown`` is a store that records no reflected revision, and one whose record of the last
     overlay change is not a number: neither says which overlay the rows reflect, and a guess of
     ``current`` would serve the rows of an overlay that may have changed. A store whose owner
-    objects are older than this build's is ``unknown`` too: some of its rows do not exist yet.
+    objects or parser inputs differ from this build's is ``unknown`` too: some rows do not exist yet.
     """
     meta = dict(
         conn.execute(
-            "SELECT key, value FROM store_meta WHERE key IN (?, ?, ?)",
-            (OVERLAY_REVISION, REGISTRY_REVISION, OWNER_SCHEMA),
+            "SELECT key, value FROM store_meta WHERE key IN (?, ?, ?, ?)",
+            (OVERLAY_REVISION, REGISTRY_REVISION, OWNER_SCHEMA, PARSER_VERSION),
         )
     )
     reflected = _revision(meta.get(REGISTRY_REVISION))
     # No overlay change on record is a revision of 0: every reflected revision is at or past it.
     changed = 0 if OVERLAY_REVISION not in meta else _revision(meta[OVERLAY_REVISION])
+    owner = _revision(meta.get(OWNER_SCHEMA))
     behind = _owners_behind(meta.get(OWNER_SCHEMA)) or not lexstore.catalogue_schema_current(conn)
-    if reflected is None or changed is None or behind:
+    parser = _revision(meta.get(PARSER_VERSION))
+    parser_behind = parser != semantic_index.PARSER_VERSION
+    if reflected is None or changed is None or behind or parser_behind:
         # One pass over every page to the head settles it, and until then it is unknown.
         head = conn.execute("SELECT revision FROM store_mode WHERE id = 1").fetchone()
-        return Registry(mode.UNKNOWN, reflected, None if head is None else head[0], behind)
-    if reflected >= changed:
-        return Registry(CURRENT, reflected, changed)
-    return Registry(REBUILDING, reflected, changed)
+        state, target = mode.UNKNOWN, None if head is None else head[0]
+    else:
+        state, target = (CURRENT if reflected >= changed else REBUILDING), changed
+    return Registry(state, reflected, target, behind, parser, parser_behind, owner)
 
 
 def recorded_revisions(conn: Connection) -> dict[str, str | None]:
@@ -267,7 +282,10 @@ def settle(root: Path, writer) -> str:
         paths = [
             row[0]
             for row in tx.execute(
-                "SELECT path FROM store_pages WHERE path > ? ORDER BY path LIMIT ?",
+                # Published unowned rows need the same generation; the importer still discovers unseen files.
+                "SELECT path FROM store_pages WHERE path > ?1 "
+                "UNION SELECT path FROM pages WHERE path > ?1 "
+                "UNION SELECT path FROM identities WHERE path > ?1 ORDER BY path LIMIT ?2",
                 (found, BATCH_PAGES),
             )
         ]
@@ -288,6 +306,7 @@ def settle(root: Path, writer) -> str:
                 # The pass has derived every page under this generation, so the lexical stamp may say so.
                 lexstore.stamp_catalogue_schema(tx)
                 _set(tx, OWNER_SCHEMA, str(OWNER_SCHEMA_VERSION))
+            _set(tx, PARSER_VERSION, str(semantic_index.PARSER_VERSION))
             tx.execute("DELETE FROM store_meta WHERE key = ?", (PASS,))
             return DONE
         _set(tx, PASS, json.dumps({"target": target, "after": paths[-1], **_generation()}))
@@ -361,6 +380,7 @@ def _resume(tx: Connection, target: int, state: str) -> tuple[int, str]:
     began with: the head moves with every commit, a page committed meanwhile is derived by the
     overlay it was committed under, and an overlay commit sets its own revision, which this pass
     does not reflect. Restarting at each head would never finish on a vault that is written to.
+    A different or missing owner or parser generation restarts: earlier pages lack the required rows.
     """
     row = tx.execute("SELECT value FROM store_meta WHERE key = ?", (PASS,)).fetchone()
     if row is not None:
@@ -378,8 +398,12 @@ def _resume(tx: Connection, target: int, state: str) -> tuple[int, str]:
 
 
 def _generation() -> dict[str, int]:
-    """What a pass derives under: the owners' version and the lexical schema its rows and stamp follow."""
-    return {"owner_schema": OWNER_SCHEMA_VERSION, "lexical_schema": lexstore.SCHEMA_VERSION}
+    """What a pass derives under: the owners' version, the lexical schema its rows and stamp follow, and the parser."""
+    return {
+        "owner_schema": OWNER_SCHEMA_VERSION,
+        "lexical_schema": lexstore.SCHEMA_VERSION,
+        "parser_version": semantic_index.PARSER_VERSION,
+    }
 
 
 def _revision(value: str | None) -> int | None:

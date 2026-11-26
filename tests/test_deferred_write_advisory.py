@@ -1031,6 +1031,12 @@ def test_ready_advisory_review_ref_keeps_existing_triage_semantics(
     assert _run(vault)[0].outcome == "published"
 
     [advisory] = _resolve(vault, ref)["advisories"]
+    from exomem import epistemic_graph, file_watcher, lexstore
+
+    # Read current annotations before dismissal, rather than racing their background repair.
+    file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
+    assert lexstore.ensure_fresh(vault)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
     before = json.loads(_carrier_bytes(vault))
     decision = corpus_aware.triage_write_advisory(
         vault,

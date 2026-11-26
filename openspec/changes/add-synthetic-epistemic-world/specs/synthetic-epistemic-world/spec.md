@@ -277,6 +277,43 @@ The template renderer SHALL be the default and SHALL use no model. A model-prose
 
 ### Requirement: The full-history arm gates the keys on development worlds
 
+A probe's task SHALL expose its declared reading and target without revealing the answer. Task selection SHALL use registered readings and recipe arguments, never phenomenon identifiers. A statement target SHALL keep its source-record reference. An attribute target that reads the current basis SHALL ask for the current standing claim's basis. Task wording SHALL preserve applicable context, holder and date arguments.
+
+Weekly sessions SHALL place each probe slot at the end of its session before deriving keys or rendering tasks. Source slots SHALL retain their seeded weekday. Every file available in a probe workspace, H history, G evidence or preceding persistent-memory snapshot SHALL publish no later than that probe's date. A placement repair SHALL regenerate prospective manifests and key dates without rewriting prior rounds. Semantic key preservation SHALL compare every field except the deliberately changed date. A later recipe with date-sensitive expiry or a historical reading SHALL require its own freshness check.
+
+Every arm and its judge SHALL receive the same task conventions. A recorded assertion SHALL NOT imply independent verification. Absence of a recorded hedge SHALL NOT imply verification or authorize an invented hedge. An attribution request SHALL keep a claim attributed rather than select its content as a work input. These conventions SHALL add no universal verification prerequisite.
+
+Defeat snapshots SHALL state effective rebuttal or undercut semantics. Ordinary opposition SHALL NOT imply recorded defeat. Snapshot sentences SHALL retain opaque endpoint references and relation wording, without stating the winning value. A prospective task-contract repair SHALL preserve oracle readings and previous generated worlds. Its manifest SHALL distinguish changed tasks, source wording and grading descriptions from evidence-only repairs.
+
+#### Scenario: Equivalent assertions serve different requests
+
+- **WHEN** equivalent unhedged assertions support an attribution request and a recorded-hedge request
+- **THEN** their tasks expose those different requests before any actor runs
+- **AND** the hedge request does not imply that the assertion was independently verified
+
+#### Scenario: A trace targets a specific statement
+
+- **WHEN** a recipe asks for the basis of one statement rather than an attribute's current claim
+- **THEN** its task names that statement's opaque source-record reference
+- **AND** rendering does not replace the target with the attribute
+
+#### Scenario: Opposition carries no effective defeat
+
+- **WHEN** source text records disagreement without an effective defeat relation
+- **THEN** that text alone does not claim that either statement has ceased to stand
+
+#### Scenario: A development task contract changes
+
+- **WHEN** a source audit identifies a hidden task selector or grading convention
+- **THEN** the next development round records the prospective repair and its source-only checks
+- **AND** prior keys, answers, verdicts and failed gates remain unchanged
+
+#### Scenario: Another thread files a document later in the same week
+
+- **WHEN** weekly main work ingests that document before the session's probes
+- **THEN** every probe date is at or after that document's publication date
+- **AND** H, G, current workspaces and persistent-memory inputs use the same temporal boundary
+
 On a development world, an arm with no memory and the full text of every earlier session SHALL solve at least the declared share of the probes. Each probe that it fails SHALL be repaired or dropped, and the report SHALL record the repair rate. An arm with no memory and no history SHALL fail at least the declared share of the probes that are read as a position, and each such probe that it passes SHALL be repaired or dropped. That second gate SHALL NOT apply to a probe that is read as harm. The gold-evidence arm SHALL NOT be the check on a key.
 
 #### Scenario: A key ignores a contrary statement

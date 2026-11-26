@@ -105,6 +105,31 @@ def test_a_page_the_turn_names_by_its_title_resolves(titled_vault: Path) -> None
     assert packet["abstained"] is False
 
 
+def test_a_title_named_question_serves_both_unowned_claims(vault: Path) -> None:
+    """Naming a specific page must not erase the title words its claim bodies share."""
+    seed_ordinary_notes(vault)
+    page = f"{NOTES}/glasshouse-access-bond.md"
+    claims = (
+        "The glasshouse access bond is refundable after the inspection.",
+        "The glasshouse access bond excludes the retained cleaning charge.",
+    )
+    _page(vault, page, "Glasshouse access bond", "\n\n".join(
+        f"## Claim\n- id: bond-{index}\n\n{text}" for index, text in enumerate(claims)
+    ))
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+
+    packet = commands.op_activate_context(vault, turn="What happened with the glasshouse access bond?")
+
+    assert _anchors(packet) == {page: ("resolved", ["lexical_overlap", "retrieval"])}
+    assert packet["abstained"] is False
+    assert [role["id"] for role in packet["roles"]] == ["material"]
+    assert {unit["text"] for unit in packet["units"]} == set(claims)
+    assert {unit["provenance"]["path"] for unit in packet["units"]} == {page}
+    assert {unit["provenance"]["category"] for unit in packet["units"]} == {"claim"}
+
+
 def test_the_current_revision_alone_resolves(titled_vault: Path) -> None:
     packet = commands.op_activate_context(titled_vault, turn="What's the harbin cutover plan now?")
 
