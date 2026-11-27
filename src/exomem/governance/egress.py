@@ -6897,6 +6897,9 @@ _METADATA_ONLY_COMMANDS: frozenset[str] = frozenset(
         # Owner-only mutation of one ref the caller supplied; a result shows the
         # change to that page only at FULL release.
         "approve_procedure",
+        # Owner-only face operations: the leaf refuses every caller without unrestricted
+        # content authority before it reads anything, so no path it names is withheld from its caller.
+        "manage_faces",
         "process_media",
         "transfer_artifact",
         "adopt_vault",
@@ -7031,6 +7034,11 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "approve": "mutation",
         "revoke": "mutation",
         "quarantine": "mutation",
+    },
+    ("manage_faces", "action"): {
+        "status": "structure",
+        "set": "mutation",
+        "name": "mutation",
     },
     ("configure_memory", "action"): {
         "inspect": "structure",

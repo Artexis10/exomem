@@ -3985,6 +3985,96 @@ def _install_hook_main(argv: list[str]) -> int:
 # --------------------------------------------------------------------------- #
 # Simple product actions (friendly CLI aliases over canonical registry commands)
 # --------------------------------------------------------------------------- #
+def _faces_main(argv: list[str]) -> int:
+    """`exomem faces on|off|status|set|name ...`: `on` here; the rest through the registry command `manage_faces`."""
+    # nosemgrep: ep-word-set -- the help flags this CLI's parsers register.
+    if not argv or argv[0] in {"-h", "--help"}:
+        print(
+            "usage: exomem faces {on,off,status,set,name} ...\n\n"
+            "Search by person. `on` shows what it stores and asks you to confirm; `off` stops it and keeps what\n"
+            "is stored; `status`, `set` and `name` take the options of `exomem manage_faces --help`."
+        )
+        return 0 if argv else 2
+    head, rest = argv[0], argv[1:]
+    if head == "on":
+        return _faces_on_main(rest)
+    if head == "off":
+        return _core_op_main(["manage_faces", "--action", "set", "--state", "off", *rest])
+    return _core_op_main(["manage_faces", "--action", head, *rest])
+
+
+def _faces_on_main(argv: list[str]) -> int:
+    from . import face_operations, face_scan, face_search, face_store
+    from .cli_ops import OpError
+    from .vault import resolve_vault
+
+    parser = argparse.ArgumentParser(
+        prog="exomem faces on",
+        description=(
+            "Turn on search by person for this account. Shows what it stores, asks you to type the "
+            "confirmation, then scans the existing pictures and video keyframes. Ctrl-C stops the scan; "
+            "the service resumes it at its next start."
+        ),
+    )
+    parser.add_argument(
+        "--confirm", metavar="TEXT",
+        help=f'without a terminal: the confirmation, exactly "{face_operations.CONFIRMATION}", after reading the disclosure',
+    )
+    parser.add_argument("--vault", default=None, help="vault root (default: $EXOMEM_VAULT_PATH)")
+    args = parser.parse_args(argv)
+    root = Path(args.vault).expanduser() if args.vault else resolve_vault()
+    refusal = face_store.deployment_refusal()
+    if refusal is not None:
+        error = face_search.faces_unavailable(refusal)
+        print(f"Error [{error.code}]: {error.message} {error.remediation}", file=sys.stderr)
+        return 1
+    if face_store.enabled(root):
+        print("Faces are already on.")
+        return 0
+    print(face_operations.DISCLOSURE)
+    if args.confirm is not None:
+        typed = args.confirm
+    elif sys.stdin.isatty():
+        typed = input(f'\nType "{face_operations.CONFIRMATION}" to turn faces on: ')
+    else:
+        print(
+            "Error [CONFIRMATION_REQUIRED]: faces stay off, because no terminal can take the confirmation. "
+            f'Run `exomem faces on` in a terminal, or pass --confirm "{face_operations.CONFIRMATION}".',
+            file=sys.stderr,
+        )
+        return 2
+    if typed.strip() != face_operations.CONFIRMATION:
+        print("Faces stay off: the confirmation did not match.", file=sys.stderr)
+        return 1
+    try:
+        started = face_operations.turn_on(root)
+    except OpError as error:
+        print(f"Error [{error.code}]: {error.message} {error.remediation}", file=sys.stderr)
+        return 1
+    print("Faces are on.")
+    if not started:
+        return 0
+    try:
+        while face_scan.backfill_running(root):
+            progress = face_scan.progress(root)
+            total = "unknown" if progress.total is None else progress.total
+            print(f"\rScanned {progress.processed} of {total} pictures.", end="", flush=True)
+            time.sleep(2)
+    except KeyboardInterrupt:
+        face_scan.stop_backfill(root, timeout=30)
+        print("\nThe scan stopped. The service resumes it at its next start.")
+        return 0
+    face_scan.stop_backfill(root, timeout=30)
+    setting = face_store.read_setting(root)
+    unavailable = face_store.unavailable_reason(setting)
+    if unavailable is not None:
+        print(f"\nFaces are on but cannot run here: {unavailable}. `exomem faces status` shows it.")
+        return 1
+    progress = face_scan.progress(root)
+    print(f"\nScanned {progress.processed} pictures. New pictures are scanned as they arrive.")
+    return 0
+
+
 def _activate_main(argv: list[str]) -> int:
     from . import commands as commands_module
 
@@ -5595,6 +5685,7 @@ _COMMANDS: dict[str, Callable[[list[str]], int]] = {
     # A thin alias over the registry command, so there is exactly one leaf; the long form
     # `exomem activate_context` keeps working.
     "activate": _activate_main,
+    "faces": _faces_main,
 }
 
 # The table entries that never configured the one-shot CLI log file: the cloud client, the cell jobs and the

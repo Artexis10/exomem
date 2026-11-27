@@ -356,3 +356,175 @@ def scanned_count(vault_root: Path, *, model_id: str) -> int:
         return 0
     with closing(face_store.connect_index(vault_root)) as index:
         return int(index.execute("SELECT COUNT(*) FROM scanned_pages WHERE model_id = ?", (model_id,)).fetchone()[0])
+
+
+# --- Reads for search and status ----------------------------------------------------------------------
+# Every read of names, groups and faces together lives here, so a change to where groups live stays local.
+
+
+def person_pages(vault_root: Path, folded_names: Sequence[str]) -> dict[str, set[str]]:
+    """The pages with a face of each named person, keyed by folded name; a name no person has is absent.
+
+    Two queries whatever the store's size: one indexed name lookup in the people store and one indexed
+    page lookup in the face index. A keyframe face's page is its video's page. Opens both read-only.
+    """
+    people_file, index_file = face_store.people_path(vault_root), face_store.index_path(vault_root)
+    if not folded_names or not people_file.is_file() or not index_file.is_file():
+        return {}
+    with closing(face_store.connect_read_only(people_file)) as people:
+        owners = people.execute(
+            "SELECT g.id, p.folded_name FROM people p JOIN groups g ON g.person_id = p.id "
+            "WHERE p.folded_name IN (SELECT value FROM json_each(?))",
+            (json.dumps(list(folded_names)),),
+        ).fetchall()
+    found: dict[str, set[str]] = {folded: set() for _, folded in owners}
+    if not owners:
+        return found
+    person_of = dict(owners)
+    with closing(face_store.connect_read_only(index_file)) as index:
+        rows = index.execute(
+            "SELECT DISTINCT group_id, page FROM faces WHERE group_id IN (SELECT value FROM json_each(?))",
+            (json.dumps(sorted(person_of)),),
+        ).fetchall()
+    for group_id, page in rows:
+        found[person_of[group_id]].add(page)
+    return found
+
+
+def named_people(vault_root: Path, *, limit: int) -> list[str]:
+    """Up to `limit` person names, in name order, for a refusal that lists who can be searched."""
+    path = face_store.people_path(vault_root)
+    if not path.is_file():
+        return []
+    with closing(face_store.connect_read_only(path)) as people:
+        return [name for (name,) in people.execute(
+            "SELECT display_name FROM people ORDER BY folded_name LIMIT ?", (limit,)
+        )]
+
+
+@dataclass(frozen=True)
+class Sample:
+    """One face, as status shows it: `page` and `region` are what `read_media` takes to show it."""
+
+    face: int
+    page: str
+    frame_ts: float | None
+    region: tuple[float, float, float, float]
+
+
+@dataclass(frozen=True)
+class Group:
+    group: int
+    face_count: int
+    person: str | None
+    samples: tuple[Sample, ...]
+
+
+@dataclass(frozen=True)
+class Counts:
+    faces: int
+    groups: int
+    people: int
+
+
+def counts(vault_root: Path) -> Counts:
+    """How many faces, non-empty groups and people the stores hold; zero for a store that does not exist."""
+    people_file, index_file = face_store.people_path(vault_root), face_store.index_path(vault_root)
+    faces = groups = people_count = 0
+    if index_file.is_file():
+        with closing(face_store.connect_read_only(index_file)) as index:
+            (faces,) = index.execute("SELECT COUNT(*) FROM faces").fetchone()
+    if people_file.is_file():
+        with closing(face_store.connect_read_only(people_file)) as people:
+            groups, people_count = people.execute(
+                "SELECT (SELECT COUNT(*) FROM groups WHERE face_count > 0), (SELECT COUNT(*) FROM people)"
+            ).fetchone()
+    return Counts(int(faces), int(groups), int(people_count))
+
+
+def _samples(index: sqlite3.Connection, group_ids: Sequence[int], per_group: int) -> dict[int, list[Sample]]:
+    """Up to `per_group` faces of each group, in page order, in one statement over the group index."""
+    found: dict[int, list[Sample]] = {group_id: [] for group_id in group_ids}
+    rows = index.execute(
+        "SELECT g.value, f.id, f.page, f.frame_ts, f.x, f.y, f.width, f.height FROM json_each(?) g "
+        "JOIN faces f ON f.id IN (SELECT id FROM faces WHERE group_id = g.value ORDER BY page LIMIT ?) "
+        "ORDER BY g.key, f.page, f.id",
+        (json.dumps(list(group_ids)), per_group),
+    )
+    for group_id, face_id, page, frame_ts, x, y, width, height in rows:
+        found[int(group_id)].append(Sample(int(face_id), page, frame_ts, (x, y, width, height)))
+    return found
+
+
+def groups_by_size(
+    vault_root: Path, *, limit: int, after: tuple[int, int] | None, per_group: int
+) -> list[Group]:
+    """One page of non-empty groups, largest first, each with its person and up to `per_group` samples.
+
+    `after` is the last listed group's (face_count, group id). Two statements whatever the store's size.
+    """
+    people_file, index_file = face_store.people_path(vault_root), face_store.index_path(vault_root)
+    if not people_file.is_file() or not index_file.is_file():
+        return []
+    count, last = after if after is not None else (None, None)
+    with closing(face_store.connect_read_only(people_file)) as people:
+        rows = people.execute(
+            "SELECT g.id, g.face_count, p.display_name FROM groups g LEFT JOIN people p ON p.id = g.person_id "
+            "WHERE g.face_count > 0 AND (? IS NULL OR g.face_count < ? OR (g.face_count = ? AND g.id > ?)) "
+            "ORDER BY g.face_count DESC, g.id LIMIT ?",
+            (count, count, count, last, limit),
+        ).fetchall()
+    if not rows:
+        return []
+    with closing(face_store.connect_read_only(index_file)) as index:
+        samples = _samples(index, [int(row[0]) for row in rows], per_group)
+    return [Group(int(group_id), int(size), person, tuple(samples[int(group_id)])) for group_id, size, person in rows]
+
+
+def page_faces(vault_root: Path, page: str) -> list[tuple[Sample, int | None, str | None]]:
+    """The faces on one picture with each face's group and person, in frame and position order."""
+    people_file, index_file = face_store.people_path(vault_root), face_store.index_path(vault_root)
+    if not index_file.is_file():
+        return []
+    with closing(face_store.connect_read_only(index_file)) as index:
+        rows = index.execute(
+            "SELECT id, frame_ts, x, y, width, height, group_id FROM faces WHERE page = ? "
+            "ORDER BY frame_ts, y, x, id",
+            (page,),
+        ).fetchall()
+    persons: dict[int, str] = {}
+    group_ids = sorted({int(row[6]) for row in rows if row[6] is not None})
+    if group_ids and people_file.is_file():
+        with closing(face_store.connect_read_only(people_file)) as people:
+            persons = dict(people.execute(
+                "SELECT g.id, p.display_name FROM groups g JOIN people p ON p.id = g.person_id "
+                "WHERE g.id IN (SELECT value FROM json_each(?))",
+                (json.dumps(group_ids),),
+            ).fetchall())
+    return [
+        (Sample(int(face_id), page, frame_ts, (x, y, width, height)), group_id, persons.get(group_id))
+        for face_id, frame_ts, x, y, width, height, group_id in rows
+    ]
+
+
+def overrides(vault_root: Path) -> dict[str, float]:
+    """The owner's threshold overrides; empty when the people store does not exist."""
+    path = face_store.people_path(vault_root)
+    if not path.is_file():
+        return {}
+    with closing(face_store.connect_read_only(path)) as people:
+        return {name: float(value) for name, value in people.execute("SELECT name, value FROM threshold_overrides")}
+
+
+def set_overrides(vault_root: Path, changes: dict[str, float | None]) -> None:
+    """Write threshold overrides; None removes one. Faces grouped afterwards use them; groups stay."""
+    with Writing(vault_root) as writing:
+        for name, value in changes.items():
+            if value is None:
+                writing.people.execute("DELETE FROM threshold_overrides WHERE name = ?", (name,))
+            else:
+                writing.people.execute(
+                    "INSERT INTO threshold_overrides (name, value) VALUES (?, ?) "
+                    "ON CONFLICT (name) DO UPDATE SET value = excluded.value",
+                    (name, value),
+                )

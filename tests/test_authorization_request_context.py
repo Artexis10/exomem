@@ -83,8 +83,8 @@ def test_governance_variants_have_one_closed_credential_rule(
 
 
 def _expected_rule(command_name: str) -> str:
-    """Owner-only approvals take matrix row 4; every other non-governance command is optional."""
-    return "non_authorizing" if command_name == "approve_procedure" else "optional"
+    """Owner-only approvals and face operations take matrix row 4; every other non-governance command is optional."""
+    return "non_authorizing" if command_name in {"approve_procedure", "manage_faces"} else "optional"
 
 
 def test_every_non_governance_product_command_has_its_declared_credential_rule() -> None:

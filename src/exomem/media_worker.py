@@ -1969,7 +1969,7 @@ class MediaWorker:
         scene_pairs: list | None = None
         parent_clip_samples: tuple[projected_retrieval.ProjectionClipSample, ...] | None = None
         # The face step reads the pictures this step decodes: each video keyframe it embeds, or the image.
-        faces_on = face_store.enabled(self._vault_root)
+        faces_on = face_store.active(self._vault_root)
         keyframes: list[tuple[float, object]] | None = [] if faces_on and is_video else None
         faces = None
         expected_binary = self._identity(job)

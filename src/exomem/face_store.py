@@ -15,6 +15,7 @@ setting never creates the store: an account that never turned faces on has no fa
 
 from __future__ import annotations
 
+import os
 import secrets
 import sqlite3
 import unicodedata
@@ -75,6 +76,7 @@ CREATE TABLE IF NOT EXISTS groups (
     person_id INTEGER REFERENCES people (id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS groups_by_person ON groups (person_id);
+CREATE INDEX IF NOT EXISTS groups_by_size ON groups (face_count DESC, id);
 CREATE TABLE IF NOT EXISTS exclusions (
     group_id INTEGER NOT NULL REFERENCES groups (id) ON DELETE CASCADE,
     page TEXT NOT NULL,
@@ -164,7 +166,7 @@ def read_setting(vault_root: Path) -> FaceSetting | None:
     path = index_path(vault_root)
     if not path.is_file():
         return None
-    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=BUSY_TIMEOUT_MS / 1000)) as connection:
+    with closing(connect_read_only(path)) as connection:
         row = connection.execute(
             "SELECT enabled, consent_at, consent_surface, unavailable, epoch, generation FROM face_setting WHERE id = 1"
         ).fetchone()
@@ -178,6 +180,35 @@ def enabled(vault_root: Path) -> bool:
     """Whether the owner turned faces on. False when the store does not exist; it never creates one."""
     setting = read_setting(vault_root)
     return setting is not None and setting.enabled
+
+
+#: The deployment setting that lets a Cloud or hosted deployment run faces. Its operator sets it to `1`.
+HOSTED_SETTING = "EXOMEM_FACES_HOSTED"
+
+
+def deployment_refusal() -> str | None:
+    """Why this deployment does not run faces, or None when it may.
+
+    A self-hosted deployment may. A Cloud or hosted deployment may only when its operator set
+    `EXOMEM_FACES_HOSTED=1`. Turn-on, status, the face step and the `people` restriction all ask here.
+    """
+    from . import cloud_cell
+
+    if not (cloud_cell.cloud_mode_enabled() or cloud_cell.hosted_mode_enabled()):
+        return None
+    if os.environ.get(HOSTED_SETTING, "").strip() == "1":
+        return None
+    return "the operator has not enabled faces on this deployment"
+
+
+def active(vault_root: Path) -> bool:
+    """Whether faces run here now: the owner turned them on and the deployment allows them."""
+    return enabled(vault_root) and deployment_refusal() is None
+
+
+def unavailable_reason(setting: FaceSetting | None) -> str | None:
+    """Why faces cannot run here: the deployment's refusal, else the face step's last model failure."""
+    return deployment_refusal() or (setting.unavailable if setting is not None else None)
 
 
 def advance_generation(index: sqlite3.Connection) -> str:
@@ -202,6 +233,18 @@ def record_opt_in(index: sqlite3.Connection, *, at: str, surface: str) -> None:
             "UPDATE face_setting SET enabled = 1, consent_at = ?, consent_surface = ? WHERE id = 1", (at, surface)
         )
         advance_generation(index)
+
+
+def record_opt_out(index: sqlite3.Connection) -> None:
+    """Turn faces off. Stored faces, groups, names and the consent record stay."""
+    with index:
+        index.execute("UPDATE face_setting SET enabled = 0 WHERE id = 1")
+        advance_generation(index)
+
+
+def connect_read_only(path: Path) -> sqlite3.Connection:
+    """Open one face store database for reading; it never creates the file or its directory."""
+    return sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=BUSY_TIMEOUT_MS / 1000)
 
 
 def record_availability(index: sqlite3.Connection, reason: str | None) -> None:

@@ -120,7 +120,7 @@ def detect(vault_root: Path, path: Path, keyframes: Sequence[tuple[float, Any]] 
 
 def commit(vault_root: Path, page: str, faces: Sequence[PageFace] | None) -> bool:
     """Store a picture's faces and group them, unless faces were turned off meanwhile. Never raises."""
-    if faces is None or not face_store.enabled(vault_root):
+    if faces is None or not face_store.active(vault_root):
         return False
     try:
         face_groups.record_page(vault_root, page, faces, model_id=face_models.embedder_model_id())
@@ -197,7 +197,7 @@ def backfill_batch(vault_root: Path, *, after: str = "", limit: int = BATCH) -> 
             if page in done:
                 continue
             foreground_priority.yield_in_bulk()
-            if not face_store.enabled(vault_root):
+            if not face_store.active(vault_root):
                 return stored, None
             stored += _scan_picture(vault_root, clip_index, page)
             if stored >= limit:
@@ -216,7 +216,7 @@ class _Backfill:
         cursor: str | None = ""
         try:
             with foreground_activity.background_scope(self.vault_root), foreground_priority.bulk(stop=self.stop):
-                while cursor is not None and not self.stop.is_set() and face_store.enabled(self.vault_root):
+                while cursor is not None and not self.stop.is_set() and face_store.active(self.vault_root):
                     if models(self.vault_root) is None:
                         return
                     _, cursor = backfill_batch(self.vault_root, after=cursor)
@@ -231,12 +231,12 @@ _RUNNERS_LOCK = threading.Lock()
 
 
 def start_backfill(vault_root: Path) -> bool:
-    """Start scanning the pictures the face index lacks, in the background. False when faces are off.
+    """Start scanning the pictures the face index lacks, in the background. False when faces do not run here.
 
     One backfill runs per vault; a second start while it runs does nothing. It runs at background
     priority: each picture waits for requests in flight first.
     """
-    if not face_store.enabled(vault_root):
+    if not face_store.active(vault_root):
         return False
     key = Path(vault_root).resolve()
     with _RUNNERS_LOCK:
