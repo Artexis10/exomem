@@ -330,7 +330,11 @@ jobs:
         with:
           ref: ${{ github.sha }}
           path: .release-tools
-          sparse-checkout: infra/scripts
+          sparse-checkout: |
+            infra/scripts
+            scripts/release_notes_asset.py
+            scripts/user_notes.py
+            src/exomem/release_notes_format.py
 
       - name: Install distribution filename parser
         run: python3 -m pip install packaging
@@ -418,6 +422,44 @@ jobs:
           assert payload["sha256"] == sha256()
           print(payload["tool_count"], payload["sha256"])
           PY
+
+      # The notes of this release alone, found from the tags (scripts/release_notes_asset.py), which need
+      # the full history. The file is a required asset: none of these steps continues on error, and the
+      # upload below refuses to run without it. A dry run builds it and changes nothing on GitHub.
+      - name: Check out the full history and version tags for the release notes
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.plan.outputs.tag }}
+          path: .notes-history
+          fetch-depth: 0
+          fetch-tags: true
+          filter: blob:none
+
+      - name: Build the release notes file
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          uv run --frozen python .release-tools/scripts/release_notes_asset.py file \
+            --repo .notes-history --version "${TAG#v}" --output dist/release-notes.json
+
+      # Written before the upload, so a release that has the file has its section. The script leaves a
+      # page that already has the section as it is, and the edit is skipped when nothing changed.
+      - name: Start the release page with What's new
+        if: ${{ needs.plan.outputs.dry_run != 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --json body | jq -j .body > "$RUNNER_TEMP/release-body.md"
+          python3 .release-tools/scripts/release_notes_asset.py page \
+            --notes dist/release-notes.json --body "$RUNNER_TEMP/release-body.md" \
+            --output "$RUNNER_TEMP/release-body-new.md"
+          if cmp -s "$RUNNER_TEMP/release-body.md" "$RUNNER_TEMP/release-body-new.md"; then
+            echo "The release page of $TAG needs no What's new section change."
+          else
+            gh release edit "$TAG" --notes-file "$RUNNER_TEMP/release-body-new.md"
+          fi
 
       - name: Upload missing artifacts to the GitHub release
         if: ${{ needs.plan.outputs.dry_run != 'true' }}

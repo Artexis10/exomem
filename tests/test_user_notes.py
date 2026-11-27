@@ -282,3 +282,102 @@ def test_a_file_name_cannot_start_a_workflow_command_of_its_own(notes, repo, cap
     lines = capsys.readouterr().out.splitlines()
     assert len(lines) == 1
     assert lines[0].startswith("::warning file=user-notes/x%0A%3A%3Aerror%3A%3Ainjected.md::")
+
+
+# --------------------------------------------------------------------------
+# scripts/release_notes_asset.py: one release's notes file and the start of its page
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def asset(monkeypatch):
+    monkeypatch.syspath_prepend(str(SCRIPT.parent))  # the script imports user_notes beside it, as it does when run
+    script = ROOT / "scripts" / "release_notes_asset.py"
+    spec = importlib.util.spec_from_file_location("release_notes_asset_under_test", script)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_a_releases_file_holds_that_release_alone_and_the_cells_reader_accepts_it(asset, repo, tmp_path):
+    repo.commit("2026-01-10", {"user-notes/older.md": note_file("Older", "Older change.")})
+    repo.tag("v1.2.0")
+    repo.commit("2026-02-01", {"user-notes/first.md": note_file("First", "First change.")})
+    repo.commit("2026-02-02", {"user-notes/second.md": note_file(None, "Second change.")})
+    repo.tag("v1.3.0")
+    output = tmp_path / "release-notes.json"
+
+    assert asset.main(["file", "--repo", str(repo.path), "--version", "1.3.0", "--output", str(output)]) == 0
+
+    assert json.loads(output.read_text("utf-8")) == {
+        "schema": 2,
+        "releases": [
+            {
+                "version": "1.3.0",
+                "released_on": "2026-02-02",
+                "notes": [{"title": None, "text": "Second change."}, {"title": "First", "text": "First change."}],
+            }
+        ],
+    }
+    assert [r.version for r in release_notes_format.parse_document(output.read_text("utf-8"))] == ["1.3.0"]
+
+
+def test_a_release_without_notes_gets_an_empty_list_that_the_cells_reader_accepts(asset, repo, tmp_path):
+    """The file must exist for such a release: a missing file has to mean the notes are missing."""
+    repo.commit("2026-01-10", {"user-notes/older.md": note_file("Older", "Older change.")})
+    repo.tag("v1.2.0")
+    repo.commit("2026-01-20", {"code": "a"})
+    repo.tag("v1.2.1")
+    output = tmp_path / "release-notes.json"
+
+    assert asset.main(["file", "--repo", str(repo.path), "--version", "1.2.1", "--output", str(output)]) == 0
+
+    assert json.loads(output.read_text("utf-8")) == {"schema": 2, "releases": []}
+    assert release_notes_format.parse_document(output.read_text("utf-8")) == ()
+
+
+def test_the_page_starts_with_whats_new_and_shows_a_note_without_a_title_by_its_sentence(asset):
+    notes_file = json.dumps(
+        {
+            "schema": 2,
+            "releases": [
+                {
+                    "version": "1.3.0",
+                    "released_on": "2026-02-02",
+                    "notes": [{"title": "Photos keep their date", "text": "Imported photos keep the day they were taken."},
+                              {"title": None, "text": "Searches find more."}],
+                }
+            ],
+        }
+    )
+
+    body = asset.page_body("## 1.3.0\n\n* a technical change\n", notes_file)
+
+    assert body.splitlines()[:3] == [asset.PAGE_MARKER, "", "## What's new"]
+    assert body.index("**Photos keep their date**") < body.index("Imported photos keep the day they were taken.")
+    assert "- Searches find more." in body.splitlines()  # no title: the sentence alone
+    assert body.endswith("## 1.3.0\n\n* a technical change\n")  # the changelog follows, untouched
+
+
+def test_a_release_without_notes_leaves_its_page_alone(asset):
+    changelog = "## 1.2.1\n\n* a technical change\n"
+
+    assert asset.page_body(changelog, json.dumps({"schema": 2, "releases": []})) == changelog
+
+
+def test_a_second_run_on_the_same_page_adds_no_second_section(asset, repo, tmp_path):
+    """A recovery run builds the page again from the same file; the page must still hold one section."""
+    repo.commit("2026-02-01", {"user-notes/first.md": note_file("First", "First change.")})
+    repo.tag("v1.3.0")
+    notes_file, changelog = tmp_path / "release-notes.json", tmp_path / "changelog.md"
+    first, second = tmp_path / "first.md", tmp_path / "second.md"
+    changelog.write_bytes(b"## 1.3.0\r\n\r\n* a technical change\r\n")
+    asset.main(["file", "--repo", str(repo.path), "--version", "1.3.0", "--output", str(notes_file)])
+
+    asset.main(["page", "--notes", str(notes_file), "--body", str(changelog), "--output", str(first)])
+    asset.main(["page", "--notes", str(notes_file), "--body", str(first), "--output", str(second)])
+
+    assert first.read_bytes() != changelog.read_bytes()
+    assert second.read_bytes() == first.read_bytes()
+    assert first.read_bytes().endswith(changelog.read_bytes())  # the changelog's own line endings survive

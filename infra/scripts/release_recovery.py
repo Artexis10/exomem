@@ -42,6 +42,10 @@ SLSA_PREDICATE = "https://slsa.dev/provenance/v1"
 # PyPI's JSON API can trail the first upload of a new project by more than a minute, so
 # qualification observes it with a bounded backoff that fits inside the job timeout.
 PYPI_OBSERVATION_PAUSES = (10, 20, 30, 60, 60, 60, 60)
+# The user notes file of one release (scripts/release_notes_asset.py builds it) and the script that
+# builds it. A tag cut before that script existed never carried the file, so it is not asked for.
+NOTES_ASSET = "release-notes.json"
+NOTES_BUILDER = "scripts/release_notes_asset.py"
 
 
 def _digest(value: object, *, label: str) -> str:
@@ -637,6 +641,11 @@ def upload_missing(tag: str, paths: Iterable[Path]) -> None:
             run("gh", "release", "upload", tag, str(path))
 
 
+def carries_notes_builder(tag: str) -> bool:
+    """Whether `tag`'s own tree has the notes file builder: only such a tag's run can publish the file."""
+    return bool(run("git", "ls-tree", "--name-only", tag, "--", NOTES_BUILDER))
+
+
 def asset_status(tag: str) -> dict:
     package = project(tag)
     packages = package_names(package)
@@ -667,6 +676,7 @@ def asset_status(tag: str) -> dict:
             (directory / name).is_file() and sha256(directory / name) == digest
             for name, (_, digest) in expected_cloud.items()
         )
+        notes_complete = not carries_notes_builder(tag) or any(a["name"] == NOTES_ASSET for a in assets)
         try:
             urls = release_pypi_files(packages, package["version"])
             pypi_complete = complete and not missing_distributions(distributions, urls)
@@ -674,7 +684,7 @@ def asset_status(tag: str) -> dict:
         except (OSError, ValueError) as error:
             pypi_state = f"unknown ({error})"
         return {
-            "assets": "present" if complete and cloud_complete else "missing",
+            "assets": "present" if complete and cloud_complete and notes_complete else "missing",
             "pypi": pypi_state,
         }
 
@@ -1134,6 +1144,10 @@ def main() -> None:
         package = project(args.tag)
         packages = package_names(package)
         cloud = cloud_files(args.tag)
+        # The notes file is a required release asset: a release job that built none stops here,
+        # before it uploads a partial set.
+        if not (args.directory / NOTES_ASSET).is_file():
+            raise SystemExit(f"{NOTES_ASSET} is missing from {args.directory}: build it before the upload")
         upload_missing(
             args.tag,
             (
@@ -1144,6 +1158,7 @@ def main() -> None:
                     for name in packages
                 )
                 or path.name in cloud
+                or path.name == NOTES_ASSET
             ),
         )
     elif args.command == "pypi":
