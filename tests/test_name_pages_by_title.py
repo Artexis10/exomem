@@ -387,7 +387,7 @@ def test_receipt_does_not_wait_on_a_held_governance_lock(build, vault, monkeypat
     asyncio.run(run())
 
 
-def test_sqlite_write_keeps_its_receipt_summary(store_env, capsys, monkeypatch) -> None:  # noqa: F811
+def test_sqlite_write_names_its_row_and_collection(store_env, capsys, monkeypatch) -> None:  # noqa: F811
     from conftest import _drain_background_threads
     from test_collection_store_migration import WORK, legacy_vault, migrate, printed
 
@@ -406,8 +406,8 @@ def test_sqlite_write_keeps_its_receipt_summary(store_env, capsys, monkeypatch) 
                 "collection": WORK, "why": "Track dispatch", "item": {"title": "Panel shipment"},
             })
             assert saved["outcome"] == "committed"
-            assert saved["user_summary"].startswith(f"Saved -> {saved['paths'][0]} (")
-            assert saved["item_key"] and saved["after_item_hash"]
+            assert saved["user_summary"].startswith("Saved Panel shipment in Work (")
+            assert saved["paths"] and saved["item_key"] and saved["after_item_hash"]
 
     try:
         asyncio.run(run())
