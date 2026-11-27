@@ -814,7 +814,6 @@
     "too-long spec/agent-bootstrap-contract :: Agent Bootstrap Contract",
     "too-long spec/agent-bootstrap-contract :: Agents handle role and current-state review through existing authority",
     "too-long spec/agent-bootstrap-contract :: Bootstrap Presents Simple Front-Door Actions",
-    "too-long spec/agent-bootstrap-contract :: Bootstrap Teaches The Semantic Unit Language",
     "too-long spec/agent-bootstrap-contract :: Bootstrap exposes Planning actions and guidance compactly",
     "too-long spec/agent-bootstrap-contract :: Bootstrap exposes collection guidance compactly",
     "too-long spec/agent-bootstrap-contract :: Bootstrap exposes workflow contract resolution compactly",
