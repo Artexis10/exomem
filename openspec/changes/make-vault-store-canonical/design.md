@@ -14,7 +14,7 @@ The change ships in two stages. Stage 1 is store mode itself (D1 to D9). Stage 2
 - Markdown stays a complete, byte-exact, editable copy, and outside edits return safely.
 - In stage 1, the same derived rows as today, so recall, graph context and every reader behave the same.
 - In stage 2, unit-level rows, typed relationships stored as rows with no limit per unit, and a canonicity record for every stored file.
-- A verified, reversible migration.
+- A verified migration, reversible until D15 step 2.
 
 **Non-Goals**
 - No change to governance, vocabulary, the public tool surface, semantic authoring or the unit identity rule.
@@ -177,7 +177,7 @@ Vector rows stay derived and are computed after commit by the semantic drain, ke
 
 ### D8. Migration and rollback
 
-A vault is in store mode when two records agree: the vault state manifest records the compatibility id `vault-store-v1`, and the store's `store_mode` row says `store`. Activation records the id before its commit, and rollback drops it after its own commit, so a crash between the two leaves file mode and both commands rerun cleanly. Builds that support the id can roll a vault back with the release capability off. The release capability allows serving and explicit owner migration. File mode is the default, including after a managed upgrade. `store-mode migrate` refuses on Windows, including Cygwin and MSYS, until NTFS acceptance passes. The refusal and `store-mode status` name `VAULT_STORE_WINDOWS_UNSUPPORTED`. The platform check applies to migration. Native Windows reads and rollback await verification.
+A vault is in store mode when two records agree: the vault state manifest records the compatibility id `vault-store-v1`, and the store's `store_mode` row says `store`. Activation records the id before its commit, and rollback drops it after its own commit, so a crash between the two leaves file mode and both commands rerun cleanly. Builds that support the id can roll a vault back with the release capability off. The release capability allows serving and explicit owner migration. File mode is the default, including after a managed upgrade, until D15 step 1. `store-mode migrate` refuses on Windows, including Cygwin and MSYS, until NTFS acceptance passes. The refusal and `store-mode status` name `VAULT_STORE_WINDOWS_UNSUPPORTED`. The platform check applies to migration. Native Windows reads and rollback await verification.
 
 The manifest is machine-local, because each state root holds its own. A second service on another state root over the same vault, such as Windows and WSL sharing one coordinator, would read file mode. So activation records its claim, which sets the `store_meta` key `vault_store_mode`, and publishes it before the transaction that writes the `store_mode` row, and rollback deletes the key in the transaction that drops that row. The lease hand-back copies `store_meta` into the replica under the vault, which every sync carries, and a root forces that copy when its own decision is newer than the replica's, because store mode moves no collection head and a publication by head alone would skip it. **Decision register.** Each decision to enter or leave store mode takes `n`, one above the largest `n` that the deciding root sees under the lease in its own store and in the replica, and is stored with its id and mode as `vault_store_decision`; the larger `n` is the newer decision, a tie goes to the replica's copy, and `vault_store_mode` follows the newest decision, so a build that reads only that key still refuses. A takeover decides nothing: it merges the replica's decision into the store it starts, so the newest decision wins whichever root made it, it carries a replica decision that it cannot read as it stands, so that no publication erases it, and it keeps the root-local `vault_store_claim`, the id of this root's own claim: the replica's copy of the table holds the publisher's claim, and the takeover resets it. **Claim-first migrate.** `store-mode migrate` checks at its preflight and again inside the lease after it merges the replica, records its claim, publishes the replica and reads it back, and installs rows only when the replica carries the claim; a claim that no replica carried is withdrawn without a decision, so a failed publication leaves the root in file mode and the second of two roots to migrate refuses. **Release.** `exomem store-mode release --apply --claim ID --why TEXT` runs offline on a file-mode root while no service holds the lease and decides `file` over the named claim, so a refused root whose holder is gone has a remedy that does not need that root; a holder that returns merges the decision, reads displaced and cannot reassert its claim. A store key with no decision, which a build older than the register wrote, is the claim `legacy`. A displaced holder's rollback keeps its present behaviour (settled by the owner): it writes the store's versions of the files, and edits made on disk survive only in the rollback export (`--export-held`). A file-mode service reads the keys from the replica when it starts and refuses with `VAULT_STORE_ELSEWHERE`, which names the rollback and the release command with the claim id; `exomem store-mode status` shows the standing decision and whether this root holds, is displaced from or is refused by it, and the doctor shows the same. Only a readable replica that says store refuses, at whatever store schema it was written: a replica that is absent or unreadable starts the vault, because a synced vault is eventually consistent and a half-arrived copy is no sign of store mode, and a vault that never migrated has no key. A state root whose own store carries a newer decision than the replica's, or whose claim the replica carries, also starts, so a rollback whose hand-back failed never locks out the one root that can publish the replica that clears the key. A sync that restores an older replica saying store lets the root that already merged the rollback start, and that root's next publication meets the publisher's divergence guard: it republishes only through `exomem collections adopt-local`, as for any divergence. A decision that cannot be read, or that disagrees with `vault_store_mode`, is an order unknown: it refuses on a store key and forces no copy, and a takeover carries an unknown replica decision as it stands, so no publication drops it. The check runs at start and not while a service runs, because a service that holds the vault cannot see a later migration on another root; the one-service rule stays the operator's rule for a running pair. A build from before this check ignores the key, so every host must run a build with it before the switch.
 
@@ -287,6 +287,43 @@ The cache keys no transaction head. Some collection rows change without a transa
 
 On a generated vault with 312 collection views, the laptop timed five creates and five edits for each arm. A store create took 3.49 to 3.72 s before this change and 0.65 to 0.80 s after it. An edit took 1.90 to 2.05 s before and 0.43 to 0.58 s after. `tests/test_vault_store_kept_admission.py` counts the views that a create decides afresh. At 28 and 44 views, the base decided 133 and 165, and this change decides none. The owner-copy measurement remains task 7.1's.
 
+### D15. Store mode becomes the default, then the only canonical mode
+
+The owner decided on 2026-11-27 that the store is the source of truth and the Markdown files are a generated view. The note and wikilink model stays the data model: the store keeps each page's Markdown bytes, frontmatter and wikilinks, and the graph keeps wikilinks as edges. This reverses two earlier decisions: D8's "File mode is the default, including after a managed upgrade", and the 2026-11-21 ruling that store mode stays opt-in. The reversal runs in two steps, each behind named gates.
+
+**Step 1: store mode is the default.** A release makes store mode the default when all of these hold:
+
+1. The owner's vault has switched (7.4).
+2. The restricted-caller read budgets of 3.2 pass, because other vaults have restricted callers.
+3. Store paths fold case, so store mode can serve a vault on a case-insensitive file system such as macOS (D4).
+4. The outcome evaluation (7.3) shows no case where store mode loses what file mode finds.
+5. Every `PAGES` entry in `cli_fence.ACCESS` is served from the store or retired. Today `setup`, `init`, `personalize`, `import`, the cell commands, `collections create` and `collections migrate`, `index`, `relations` and `warm` refuse on a store-mode vault.
+
+A platform gets the new default only where `store-mode migrate` admits it. Windows keeps file mode as its default until native Windows acceptance passes (6.3).
+
+From that release:
+
+- `exomem init` creates a new vault in store mode. It creates the collection store as part of that command, so D1's rule that no other command creates a store as a side effect still holds.
+- A managed upgrade migrates a file-mode vault: backup first, then the verified migration of D8. A vault without a collection store gets one in the same explicit step. A migration that fails verification leaves the vault in file mode and reports the differing tables.
+- An owner can decline the migration with an explicit option.
+- A vault under a multi-host writer lease keeps file mode (D1).
+- Rollback stays the undo.
+
+**Step 2: file mode retires.** Task 8.1 deletes the D9 modules when all of these hold:
+
+1. Native Windows acceptance passes in store mode (6.3).
+2. Every Cloud cell has migrated (6.2, 7.4). A cell's backup carries its store database, a restore of a cell backup has been proven, and the backup size and cost per cell have been measured.
+3. The owner has decided the multi-host question below.
+4. Two minor releases have shipped since step 1, and both releases' notes name the release that ends file mode.
+
+The migration, the lexical builder and the migration's sidecar copy stay after 8.1; 8.1 deletes only the sync machinery that keeps sidecars in step. Where a file-mode lexical sidecar exists, the migration copies it as D8 step 3 says, keeping unit revisions. Where none exists, such as an export moved to a fresh machine, the migration builds the lexical rows cold, and unit revisions start fresh. A build after step 2 that finds a file-mode vault, for example one that no managed upgrade reached, migrates it at its first start: backup first, then the verified migration. If the migration refuses at any step, including its preflight, it refuses to serve, names the refusal and names the last release that serves file mode.
+
+After step 2, a backup restore is the undo for a store-mode vault. "Export to a Markdown vault" writes the projected files for portability. A fresh migration can read that export, but it starts a new audit trail and carries no held corrections. That loss is stated in the export's result.
+
+**Outside edits after either step.** D5 stays: a clean edit imports, an edit that races an Exomem change is held, and an outside delete is held. In addition, each outside-edit import runs the vocabulary and folder steps of `one-write-pipeline` as advice. A folder name they would steer, or a term that needs a vocabulary decision, raises a review item that names the registered spelling. Like the collection edit-back, the advice waits for 2 s of stable bytes, and one item is kept per path and suggested spelling, so an autosave adds nothing new. The import keeps the person's bytes. Exomem never holds an edit only for a name, because a hold would hide the owner's own edit for a variant that the audit finds anyway.
+
+**Open question for the owner.** A vault under a multi-host writer lease cannot run store mode. Retiring file mode ends support for those setups unless the store gains a replica. Should step 2 end multi-host support, with one host owning each vault?
+
 ## Estimate
 
 **Evidence.**
@@ -338,6 +375,6 @@ The design's epistemics check is a separate outcome evaluation, run in its own s
 ## Open Questions
 
 - Whether append-only pages such as `log.md` should become rows that the projection renders, so a write appends one row instead of re-indexing a 1.3 MB page. Measure the transaction with and without that file first.
-- Switch timing: decided on 2026-11-21. The gate lift ships in a normal release, store mode stays opt-in through `exomem store-mode migrate`, and the owner's vault switches when the switch path in tasks.md holds.
+- Switch timing: decided on 2026-11-21. The gate lift ships in a normal release, store mode stays opt-in through `exomem store-mode migrate` until D15 step 1, and the owner's vault switches when the switch path in tasks.md holds.
 - Whether a Cloud cell projects Markdown at all, or exports only on request.
 - Whether recall keeps the one-hop graph lane before task 5.4 or the outcome evaluation shows a gain. In the live logs of 2026-09-09 to 2026-11-07, 4.6% of returned hits came from that lane alone, and agents read them within 30 s at about a sixth of the rate of other hits at the same ranks.

@@ -577,3 +577,40 @@ In store mode, the collision check for a new page name SHALL read the store and 
 - **WHEN** two governed writes create pages whose titles differ only in case, and projection has not yet written the first page
 - **THEN** the second page gets a numbered suffix
 - **AND** the first page keeps its name
+
+### Requirement: Store mode becomes the default behind named gates
+Once the owner's vault has switched, the restricted-caller read budgets pass, store paths fold case, the outcome evaluation shows no loss and every command that refuses on a store-mode vault is served or retired, a release SHALL make store mode the default. From that release, `exomem init` SHALL create a new vault in store mode on each platform where `store-mode migrate` admits store mode.
+
+#### Scenario: Windows keeps file mode until its acceptance passes
+- **WHEN** `exomem init` runs on native Windows before Windows acceptance passes
+- **THEN** it creates a file-mode vault
+
+### Requirement: A managed upgrade migrates a file-mode vault
+From the release that makes store mode the default, a managed upgrade SHALL migrate a file-mode vault after a backup, through the verified migration. A failed verification SHALL leave the vault in file mode and report the differing tables. An owner SHALL be able to decline the migration. A vault under a multi-host writer lease SHALL keep file mode. Rollback SHALL remain available until file mode retires.
+
+#### Scenario: A failed verification at upgrade keeps file mode
+- **WHEN** a managed upgrade migrates a vault and the staged store differs from a fresh derivation
+- **THEN** the vault stays in file mode
+- **AND** the upgrade reports the differing tables
+
+### Requirement: An outside-edit import gets name advice, not a hold
+When an outside-edit import runs, Exomem SHALL run the vocabulary and folder steps on it as advice. After the file's bytes have been stable for 2 s, a folder name those steps would steer, or a term that needs a vocabulary decision, SHALL raise one review item per path and suggested spelling, naming the registered spelling. The import SHALL keep the person's bytes. Exomem SHALL NOT hold an outside edit only for a name.
+
+#### Scenario: An Obsidian move into a case-variant folder imports with a review item
+- **WHEN** a person moves a page in Obsidian into `Notes/Research food` while the vault holds `Notes/Research Food`
+- **THEN** the move imports at the person's path
+- **AND** a review item names `Notes/Research Food`
+
+### Requirement: A build after file mode retires migrates a file-mode vault at first start
+A build released after file mode retires SHALL migrate a file-mode vault at its first start, after a backup, through the verified migration. When the migration refuses at any step, including its preflight, the build SHALL refuse to serve, and the refusal SHALL name the migration's refusal and the last release that serves file mode. The migration and the lexical builder SHALL remain in that build.
+
+#### Scenario: A skipped-release vault migrates at first start
+- **WHEN** a vault last served by a file-mode release starts on a build released after file mode retires
+- **THEN** the build backs the vault up and migrates it
+- **AND** it serves the vault in store mode
+
+#### Scenario: A refused migration names the way back
+- **WHEN** that first-start migration refuses at its preflight
+- **THEN** the build serves nothing
+- **AND** its refusal names the migration's reason and the last release that serves file mode
+
