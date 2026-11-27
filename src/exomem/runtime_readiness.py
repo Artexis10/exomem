@@ -397,6 +397,7 @@ _LEXICAL_REPAIR_RESULTS = frozenset(
         "publish_conflict",
         "wal_busy",
         "fold_failed",
+        "waiting_for_space",
         "transient_failure",
         "error",
     }
@@ -418,6 +419,8 @@ def _public_lexical_repair(value: object) -> dict[str, object] | None:
             return None
         return round(min(max(float(raw), 0.0), 604800.0), 3)
 
+    # A waiting rebuild shows its result only. The bytes it needs and the volume's free bytes stay in the
+    # `lexical_repair_finished` log event: the readiness route is unauthenticated.
     return {
         "phase": phase,
         "age_seconds": duration("age_seconds"),

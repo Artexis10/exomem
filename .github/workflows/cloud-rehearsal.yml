@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "full: P3. full-coexistence: P3 with TopoLVM. owner-export: C6 after steps 1-2. operator-restore-abort: interrupted recovery. local-storage-drill: node-loss recovery. large-import: a large agent-led import into a local-storage cell that cannot hold two copies. raw-import: messy generated notes into a new and an existing vault, compared item by item with the same journey run locally. home-import: a fixture tree sent through the real import Job and filed by the cell alone, with one cell restart during filing, checked against the fixture's manifest. original-fixity: time the fixity pass on a cell after steps 1-2, then restore one damaged original by the restore runbook. catalogue-prewarm: after steps 1-2, three upgrade scenarios for the staged catalogue build (adopted, cancelled unfinished, yielded for capacity). release: the cloud-release rollout on three local-storage cells (the deploy token sets the image, upgrade windows and idle rules order the rolls, a failed canary pauses the rollout and is restored, only the admin token clears the pause); a partial proof that never gates a node."
+        description: "full: P3. full-coexistence: P3 with TopoLVM. owner-export: C6 after steps 1-2. operator-restore-abort: interrupted recovery. local-storage-drill: node-loss recovery. large-import: a large agent-led import into a local-storage cell whose volume is below twice the data and below what staged copies left behind would need. raw-import: messy generated notes into a new and an existing vault, compared item by item with the same journey run locally. home-import: a fixture tree sent through the real import Job and filed by the cell alone, with one cell restart during filing, checked against the fixture's manifest. original-fixity: time the fixity pass on a cell after steps 1-2, then restore one damaged original by the restore runbook. catalogue-prewarm: after steps 1-2, three upgrade scenarios for the staged catalogue build (adopted, cancelled unfinished, yielded for capacity). release: the cloud-release rollout on three local-storage cells (the deploy token sets the image, upgrade windows and idle rules order the rolls, a failed canary pauses the rollout and is restored, only the admin token clears the pause); a partial proof that never gates a node."
         type: choice
         options: [full, full-coexistence, owner-export, operator-restore-abort, local-storage-drill, large-import, raw-import, home-import, original-fixity, catalogue-prewarm, release]
         default: full
@@ -26,7 +26,7 @@ on:
         type: string
         default: ""
       large_import_gb:
-        description: "large-import only: target size of both folders in GB (default 6), scaled down to the runner's free disk."
+        description: "large-import only: target size of both folders in GB (default 10), scaled down to the runner's free disk."
         type: string
         default: ""
       large_import_smoke:
