@@ -1633,8 +1633,8 @@ def op_bootstrap(
             ),
             "supersede_never_overwrite": (
                 "When a durable conclusion changes, supersede it so the earlier view "
-                "stays readable and linked. Never overwrite what was believed; a "
-                "store that rewrites its own past cannot be audited."
+                "stays readable and linked. Never overwrite what was believed: an "
+                "overwritten past cannot be audited."
             ),
             "state_the_expectation_first": (
                 "Write down what you expect before the answer arrives. A durable "
@@ -1648,9 +1648,9 @@ def op_bootstrap(
             ),
             "keep_the_negative_result": (
                 "Refuted is not superseded. A refuted claim keeps active standing and "
-                "full rank, because a negative result is knowledge rather than "
-                "replaced knowledge. Record a real conflict as a typed contradicts "
-                "relation instead of quietly reconciling it away."
+                "full rank, because a negative result is knowledge, not replaced "
+                "knowledge. Record a real conflict as a typed contradicts relation; "
+                "never quietly reconcile it away."
             ),
         },
         "vocabulary": {
@@ -15841,6 +15841,7 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
             "configure_memory",
             "govern_memory",
             "approve_procedure",
+            "manage_faces",
             "schema_memory",
             "manage_memory_file",
         ],
