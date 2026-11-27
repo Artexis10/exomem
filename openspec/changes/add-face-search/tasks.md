@@ -87,9 +87,9 @@
 ## 10. Delivery
 
 - [ ] 10.1 Add a user note under `user-notes/` in one plain sentence in the pull request that releases faces to users. The note to add: "You can now find photos and videos of a person by name, once you turn on face search on your computer and name the faces it groups."
-- [ ] 10.4 Before release, record the new MCP discovery fingerprint as pending in the personal plugin contract, and upload both face model assets to the `served-models` release, built from the committed build script.
+- [x] 10.4 Before release, record the new MCP discovery fingerprint as pending in the personal plugin contract, and upload both face model assets to the `served-models` release, built from the committed build script. Evidence: the plugin contract's pending digest equals the merged tool-surface digest; both assets are on `served-models` with GitHub digests equal to `asset_digest` in `media_models.json` (27 Nov 2026).
   The fingerprint is recorded as pending in `deploy/chatgpt/personal-plugin-contract.json`; the asset upload is open.
-- [ ] 10.2 Two blind review passes by separate reviewers (biometric data), each with the risk lens, before merge.
+- [x] 10.2 Two blind review passes by separate reviewers (biometric data), each with the risk lens, before merge. Evidence: both passes approved the merged head on PR #3307 (27 Nov 2026).
 - [ ] 10.3 After release, refresh hosted connector discovery for the new `search_memory` field and door operations.
 - [ ] 10.5 Let a Cloud cell listed in `cellctl.facesHostedCellIds` run faces: bake both face artifacts into the cell image beside the CLIP towers with an offline load gate, turn the CLIP step on for that cell only (cells default to `EXOMEM_DISABLE_CLIP=1`), and measure the face models in the media child against its CLIP memory budget. Task 9.6 depends on it.
 
