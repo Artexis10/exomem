@@ -79,6 +79,7 @@ def test_an_image_with_two_faces_gets_two_rows_in_read_media_region_form(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Catches boxes in rotated or pixel coordinates that `read_media` would crop wrongly."""
+    pytest.importorskip("PIL")  # The core tier has no image decoder; the face step decodes the picture.
     from PIL import Image
 
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
@@ -198,6 +199,7 @@ def test_a_face_model_that_fails_its_digest_check_leaves_extraction_and_clip_as_
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Catches a face failure that blocks ordinary media processing."""
+    pytest.importorskip("onnxruntime")  # Without the runtime, loading stops before any digest is read.
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     clip_vector = np.linspace(-1.0, 1.0, embeddings.CLIP_DIM, dtype=np.float32)
@@ -264,6 +266,7 @@ def test_turning_faces_off_during_a_backfill_processes_no_further_picture(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Catches detection continuing after the owner turned it off."""
+    pytest.importorskip("PIL")  # The core tier has no image decoder; the face step decodes the picture.
     import threading
 
     from exomem import face_operations
@@ -308,6 +311,7 @@ def test_turning_faces_off_during_a_backfill_processes_no_further_picture(
 
 def test_a_changed_original_drops_the_faces_of_its_old_bytes(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Catches faces of a replaced photo still matching a person after its new bytes hold none."""
+    pytest.importorskip("PIL")  # The core tier has no image decoder; the face step decodes the picture.
     import os
 
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)

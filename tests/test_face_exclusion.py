@@ -62,6 +62,7 @@ def files_holding(root: Path, needle: str, *, skip: Path | None = None) -> list[
 
 def test_detection_and_naming_leave_every_vault_files_bytes_unchanged(vault: Path, monkeypatch) -> None:
     """Catches a name or box written into a page, sidecar or extracted text."""
+    pytest.importorskip("PIL")  # The core tier has no image decoder; the face step decodes the picture.
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     monkeypatch.setattr(embeddings, "embed_image", lambda path: np.ones(embeddings.CLIP_DIM, dtype=np.float32))
     worker = media_worker.MediaWorker(vault)
