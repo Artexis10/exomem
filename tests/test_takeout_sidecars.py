@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 
+import pytest
 from test_adoption_series import _window
 from test_app_export_import import (  # noqa: F401 -- `_private_journal_folder` is an autouse fixture that the tests need
     _private_journal_folder,
@@ -23,7 +24,9 @@ from test_app_export_import import (  # noqa: F401 -- `_private_journal_folder` 
 )
 from test_notes_mail_exports import JPEG
 
-from exomem import export_expansion, import_stage
+from exomem import export_expansion, import_stage, lexstore
+from exomem import find as find_module
+from exomem.vault import parse_frontmatter
 
 ALBUM = "Takeout/Google Photos/Lake trip"
 UPLOADED = dt.datetime(2025, 1, 9, 8, 30, tzinfo=dt.UTC)
@@ -356,3 +359,67 @@ def test_a_sidecar_that_cannot_be_read_ends_the_pass_in_part_and_releases_the_ph
     assert view["state"] == "done"
     assert "IMPORT_EXPORT_PARTIAL" in view["left_out"]["by_reason"]
     assert expansion_rows(vault, import_id)[-1]["sidecars_end"] == "partial"
+
+
+def test_a_caption_files_in_the_description_section_with_a_card_number_removed_and_search_finds_it(vault: Path) -> None:
+    """Catches a caption that files whole, card number included, or one that no search can reach."""
+    from test_capture_metadata_index import _reset
+
+    _id, pages, _view = one_photo_albums(vault, {
+        f"{ALBUM}/IMG_60.jpg": photo("IMG_60.jpg"),
+        f"{ALBUM}/IMG_60.jpg.json": sidecar(
+            "IMG_60.jpg", taken=taken_at(60), caption="Regatta dinner, paid with card 4111 1111 1111 1111"),
+    })
+
+    text = pages[f"{ALBUM}/IMG_60.jpg"][1]
+    assert "\n## Description\n\nRegatta dinner, paid with card [card number removed, ends 1111]\n" in text
+    assert "4111" not in text.replace("ends 1111", "")
+    if lexstore.fts5_available():
+        _reset(vault)
+        hits = find_module.find(vault, query="regatta", scope="kb-only", mode="keyword", graph=False, result_level="page", limit=10)
+        assert [hit.path for hit in hits] == list(source_pages(vault))
+
+
+def _jpeg_file(*, taken: str | None, seed: int) -> bytes:
+    """A small real JPEG that states `taken` (an EXIF time) or none, whose pixels differ by `seed`."""
+    import io
+
+    from PIL import Image
+
+    exif = Image.Exif()
+    if taken is not None:
+        exif.get_ifd(0x8769)[0x9003] = taken
+    out = io.BytesIO()
+    Image.new("RGB", (64, 48), (seed, 90, 160)).save(out, "JPEG", exif=exif)
+    return out.getvalue()
+
+
+@pytest.mark.frame_codecs
+def test_the_media_worker_keeps_a_sidecar_date_only_where_the_picture_states_none(vault: Path, monkeypatch) -> None:
+    """Catches a worker that lets the sidecar override a time the picture states, drops the date of a picture that states none, or the caption."""
+    from exomem import extract, media_worker
+    from exomem.ocr_models import OcrReading
+
+    monkeypatch.setattr(extract, "_ocr_png", lambda _png: OcrReading("", ()))
+    monkeypatch.setattr(extract, "_has_audio_stream", lambda _path: False)
+    members = {
+        f"{ALBUM}/received.jpg": _jpeg_file(taken=None, seed=1),
+        f"{ALBUM}/camera.jpg": _jpeg_file(taken="2021:03:02 10:00:00", seed=2),
+    }
+    for name in list(members):
+        members[f"{name}.json"] = sidecar(name.rpartition("/")[2], taken=taken_at(70), caption="Sunday regatta")
+    import_id, pages, _view = one_photo_albums(vault, members)
+    assert {pages[path][0]["capture_date_source"] for path in pages if path.endswith(".jpg")} == {"export-sidecar"}
+
+    after = {}
+    for page, (frontmatter, _text) in source_pages(vault).items():
+        stage_path = frontmatter["imported_from"].removeprefix(f"_Imports/{import_id}/")
+        media_worker.MediaWorker(vault, execution_mode="inline")._process(media_worker._Job(
+            binary_path=vault / frontmatter["evidence_file"], sidecar_path=vault / page, media_type="image"))
+        text = (vault / page).read_text(encoding="utf-8")
+        after[stage_path] = parse_frontmatter(text)[0]
+        assert "\n## Description\n\nSunday regatta\n" in text  # the caption stays where filing put it
+
+    received, camera = after[f"{ALBUM}/received.jpg"], after[f"{ALBUM}/camera.jpg"]
+    assert (received["capture_date"], received["capture_date_source"]) == ("2022-09-12", "export-sidecar")
+    assert (camera["capture_date"], camera["capture_date_source"]) == ("2021-03-02", "camera-exif")
