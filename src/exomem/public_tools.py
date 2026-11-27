@@ -204,7 +204,10 @@ class FileHandle(Wire):
     )
 
 
-_UNLINKED = Field(default=None, description="Why your review found no useful link; never added to note text.")
+_UNLINKED = Field(
+    default=None,
+    description="Why your review found no useful link; never added to note text. Only active pages of a compiled type take a link review.",
+)
 _PREVIEW = Field(default=None)
 _DETAIL = Field(default=None)
 _REVIEW = Field(default=None, description="This call's preview `review_token`; a profile page's write needs it.")
@@ -403,8 +406,8 @@ class AddObservation(Wire):
     kind: str | None = Field(default=None, description="A rich kind, such as hypothesis; omit for a compact observation.")
     verdict: str | None = Field(default=None, description="Verdict in words, never a number; needs a rich `kind`. See inspect_memory schema.infer.")
     anchor: str | None = Field(default=None, description="Unique within the note; derived when omitted.")
-    as_of: str | None = Field(default=None, description="ISO date this starts to hold; needs a rich `kind`.")
-    until: str | None = Field(default=None, description="ISO date this stops holding; needs a rich `kind`.")
+    as_of: str | None = Field(default=None, description="ISO date this starts to hold; with no `kind`, saves in a dated block.")
+    until: str | None = Field(default=None, description="ISO date this stops holding; with no `kind`, saves in a dated block.")
     check_by: str | None = Field(default=None, description="ISO date to revisit; needs a rich `kind`.")
     unlinked_reason: str | None = _UNLINKED
     review: str | None = _REVIEW
@@ -486,7 +489,7 @@ class EditNote(Wire):
     verdict: str | None = Field(default=None, description="assess_observation, edit_observation: a governed verdict such as confirmed, qualified, or refuted.")
     check_by: str | None = Field(default=None, description="assess_observation: an ISO date to revisit the claim.")
     kind: str | None = Field(default=None, description="supersede_observation, assess_observation, link_observation, edit_observation: a governed rich kind; required to promote a compact observation.")
-    as_of: str | None = Field(default=None, description="supersede_observation, edit_observation: the ISO date the claim started holding.")
+    as_of: str | None = Field(default=None, description="supersede_observation, edit_observation: the ISO date the claim started holding. Dating a compact unit moves it to a dated block.")
     category: str | None = Field(default=None, description="edit_observation, supersede_observation.")
     text: str | None = Field(default=None, description="edit_observation, supersede_observation.")
     context: str | None = Field(default=None, description="edit_observation, supersede_observation.")
