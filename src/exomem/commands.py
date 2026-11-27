@@ -8111,6 +8111,19 @@ def _op_activate_context_body(
     managed_runtime = readiness_module.runtime_managed()
     event_indexes_on = freshness_module.event_indexes_enabled()
     recall_live = freshness_module.recall_is_live(vault_root, "kb")
+    if (
+        managed_runtime
+        and event_indexes_on
+        and not recall_live
+        and freshness_module.recall_seed_pending(vault_root, "kb")
+    ):
+        # A fresh process seeds its recall registry at boot; a small vault finishes in seconds,
+        # so the first turn waits a bounded time for that seed before it abstains on it.
+        with find_types.timing_span(timings, "working_set.seed_wait"):
+            freshness_module.wait_seed_settled(
+                vault_root, "kb", working_set_runtime_module.first_turn_warm_wait_seconds()
+            )
+        recall_live = freshness_module.recall_is_live(vault_root, "kb")
     managed_cold = (
         managed_runtime
         and event_indexes_on

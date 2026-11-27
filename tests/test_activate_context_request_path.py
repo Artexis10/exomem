@@ -1433,3 +1433,103 @@ def test_nested_refresh_deferral_dispatches_once_after_an_exception_and_preserve
             monkeypatch.setattr(working_set_runtime, "_schedule_build", failed_dispatch)
             raise original
     assert raised.value is original
+
+
+# --------------------------------------------------------------------------- #
+# A fresh process's first turn waits a bounded time for its in-memory warm-up
+# --------------------------------------------------------------------------- #
+
+
+def _drop_identity_inventory(root: Path) -> None:
+    """Forget this process's private-identity inventory, as a freshly started process has none."""
+    from exomem import reserved_paths
+
+    with reserved_paths._PUBLISHED_IDENTITY_LOCK:
+        reserved_paths._BASELINE_IDENTITY_CATALOGUES.pop(reserved_paths._vault_identity_key(root), None)
+    assert reserved_paths.identity_catalogue_ready(root) is False
+
+
+@pytest.mark.usefixtures("anchors_packet")  # the test vault builds no context catalogue for maps
+def test_a_first_turn_waits_for_a_short_identity_warm_instead_of_abstaining(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch, budget_free
+) -> None:
+    """A fresh process has no private-identity inventory until its background walk ends. On a small
+    vault that takes about a second, and the first turn used to answer `index_warming` at once and
+    leave the agent without its context. It now waits for the walk and serves."""
+    from exomem import reserved_paths
+
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    _seed_live_recall(activation_vault)
+    real_build = reserved_paths._build_baseline_identity_catalogue
+
+    def slow_build(root: Path):
+        time.sleep(0.5)
+        return real_build(root)
+
+    monkeypatch.setattr(reserved_paths, "_build_baseline_identity_catalogue", slow_build)
+    _drop_identity_inventory(activation_vault)
+
+    packet = commands.op_activate_context(activation_vault, turn=TURN)
+
+    assert packet["abstained"] is False
+    assert reserved_paths.identity_catalogue_ready(activation_vault) is True
+
+
+def test_a_first_turn_still_abstains_when_the_identity_warm_outlasts_its_wait(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch, bind_budget
+) -> None:
+    """A mature vault's walk takes tens of seconds. The turn waits at most half its budget for it,
+    then answers `index_warming` as before, well inside the budget."""
+    from exomem import reserved_paths
+
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    _seed_live_recall(activation_vault)
+    release = threading.Event()
+    real_build = reserved_paths._build_baseline_identity_catalogue
+
+    def stalled_build(root: Path):
+        release.wait(30)
+        return real_build(root)
+
+    monkeypatch.setattr(reserved_paths, "_build_baseline_identity_catalogue", stalled_build)
+    _drop_identity_inventory(activation_vault)
+    bind_budget(2.0)
+    started = time.monotonic()
+    try:
+        packet = commands.op_activate_context(activation_vault, turn=TURN)
+    finally:
+        release.set()
+    elapsed = time.monotonic() - started
+
+    assert packet["abstained"] is True
+    assert packet["abstention"] == {"reason": "index_warming"}
+    assert elapsed < 2.0, f"the turn waited {elapsed:.1f} s on a 2 s budget"
+
+
+@pytest.mark.usefixtures("anchors_packet")  # the test vault builds no context catalogue for maps
+def test_a_first_turn_waits_for_a_short_boot_seed_instead_of_abstaining(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch, budget_free
+) -> None:
+    """At boot the file watcher seeds the recall registry; until it is live a managed turn abstained
+    `index_warming`, even when the seed was a second from done. The turn now waits for the seed."""
+    from exomem import reserved_paths
+
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    reserved_paths._baseline_identity_catalogue(activation_vault)
+    freshness.announce_seed_pending(activation_vault, "kb")
+
+    def finish_seed() -> None:
+        time.sleep(0.5)
+        try:
+            _seed_live_recall(activation_vault)
+        finally:
+            freshness.clear_seed_pending(activation_vault, "kb")
+
+    seeder = threading.Thread(target=finish_seed)
+    seeder.start()
+    try:
+        packet = commands.op_activate_context(activation_vault, turn=TURN)
+    finally:
+        seeder.join()
+
+    assert packet["abstained"] is False, packet.get("abstention")

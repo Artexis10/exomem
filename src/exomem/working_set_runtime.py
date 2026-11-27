@@ -270,6 +270,25 @@ CONTINUITY_THREAD_MAX_NS = 7 * 24 * 3600 * 1_000_000_000
 
 READY = "ready"
 
+#: The longest a fresh process's first turn waits for its in-memory warm-up (the identity inventory,
+#: the recall seed) before it answers warming. A small vault warms within it; a mature one keeps
+#: warming in the background and the turn abstains as before.
+FIRST_TURN_WARM_WAIT_SECONDS = 10.0
+
+
+def first_turn_warm_wait_seconds() -> float:
+    """How long this request may wait for the warm-up: the cap, and at most half its remaining budget.
+
+    The other half stays for the recall the wait makes possible.
+    """
+    from . import request_budget
+
+    budget = request_budget.current()
+    if budget is None:
+        return FIRST_TURN_WARM_WAIT_SECONDS
+    return max(0.0, min(FIRST_TURN_WARM_WAIT_SECONDS, budget.remaining() / 2))
+
+
 _CACHE_LOCK = threading.Lock()
 _PACKET_CACHE: OrderedDict[tuple, tuple[dict[str, Any], tuple[str, str]]] = OrderedDict()
 _BUILDS: dict[Path, threading.Thread] = {}
@@ -1121,10 +1140,12 @@ def ensure_index(
         if not reserved_paths.identity_catalogue_ready(root):
             # A cold private-identity inventory is built by a whole-vault walk
             # under the all-domain identity gate, and every governed read below
-            # needs it. An interactive turn abstains and the walk runs in the
-            # background.
+            # needs it. The walk runs in the background. A fresh process's first
+            # turn waits a bounded time for it, since a small vault warms in
+            # seconds, and abstains only when the walk is still running.
             reserved_paths.schedule_identity_catalogue_warm(root)
-            return WARMING, None, False
+            if not reserved_paths.await_identity_catalogue_warm(root, first_turn_warm_wait_seconds()):
+                return WARMING, None, False
     if not index.readable():
         return UNAVAILABLE, None, False
     if not index.anchors():
