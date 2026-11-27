@@ -24,7 +24,7 @@ FORMATS_PACK = "capture-date-name-formats.yaml"
 
 #: The code paths that can produce a date. A source entry names one, so the key stays data.
 # nosemgrep: ep-word-set -- closed set of code paths implemented in this module's callers, not vocabulary.
-PRODUCERS = frozenset({"file-metadata", "perceptual-match", "file-name", "captured-field"})
+PRODUCERS = frozenset({"file-metadata", "perceptual-match", "file-name", "export-sidecar", "captured-field"})
 #: `evidence` is a time that a file states. A `fallback` is derived from another fact and never stored.
 # nosemgrep: ep-word-set -- the closed trust classes this module and its callers implement.
 CLASSES = frozenset({"evidence", "fallback"})
@@ -54,6 +54,8 @@ class Source:
     producer: str
     #: Position among the evidence entries in pack order; `None` for a fallback.
     rank: int | None
+    #: Whether reading the file again can produce this date. `False` marks a date that comes from outside the file.
+    reread: bool = True
 
 
 @cache
@@ -66,7 +68,10 @@ def sources() -> Mapping[str, Source]:
         if kind not in CLASSES or producer not in PRODUCERS:
             raise RuntimeError(f"shipped pack {SOURCES_PACK}: {entry.key!r} needs a known class and producer")
         evidence = kind == "evidence"
-        found[entry.key] = Source(entry.key, evidence, producer, rank if evidence else None)
+        reread = entry.attributes.get("reread", True)
+        if not isinstance(reread, bool):
+            raise RuntimeError(f"shipped pack {SOURCES_PACK}: {entry.key!r} needs reread to be true or false")
+        found[entry.key] = Source(entry.key, evidence, producer, rank if evidence else None, reread)
         rank += 1 if evidence else 0
     if sorted(item.producer for item in found.values()) != sorted(PRODUCERS):
         raise RuntimeError(f"shipped pack {SOURCES_PACK}: each producer needs exactly one source")
@@ -112,10 +117,12 @@ def survives_extraction(recorded: object, extracted: object) -> bool:
     """Whether a recorded date stays when a read of the file now states `extracted` (or no date, `None`).
 
     Reading the file again reproduces its camera date and its file-name date, so those follow the
-    file. A matched original is a fact about another file that no re-read can reproduce, so it
-    stays unless the read now states a source of higher precedence.
+    file. A source that the pack marks `reread: false` is a fact from outside the file, such as a matched
+    original or an export's sidecar, that no re-read can reproduce, so it stays unless the read now
+    states a source of higher precedence.
     """
-    if not isinstance(recorded, str) or recorded != source_for("perceptual-match"):
+    source = sources().get(recorded) if isinstance(recorded, str) else None
+    if source is None or source.reread:
         return False
     return not (isinstance(extracted, str) and outranks(extracted, recorded))
 

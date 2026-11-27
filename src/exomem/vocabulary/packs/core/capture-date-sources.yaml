@@ -5,6 +5,9 @@ registry: capture-date-sources
 # `class` says how far to trust the date. An evidence date is a time that a file states.
 # A fallback date is derived from another fact and is never stored. Pack order is
 # precedence among the evidence entries: a later entry never replaces an earlier one.
+# `reread: false` marks a source that no re-read of the file can reproduce, so its date
+# survives a re-extraction, a plain backfill and a recovery unless a read states a source
+# of higher precedence.
 entries:
   camera-exif:
     label: Camera metadata
@@ -13,11 +16,15 @@ entries:
   matched-original:
     label: Matched original
     description: The date of a unique, camera-dated original that the image matches by content.
-    attributes: {class: evidence, producer: perceptual-match}
+    attributes: {class: evidence, producer: perceptual-match, reread: false}
   file-name:
     label: File name
     description: The file name states a date and time in a known tool format.
     attributes: {class: evidence, producer: file-name}
+  export-sidecar:
+    label: Export sidecar
+    description: The capture time that a Google Takeout sidecar records for a photo whose file states none.
+    attributes: {class: evidence, producer: export-sidecar, reread: false}
   source-date:
     label: Source date
     description: The day the source was captured into the vault, used only when no evidence date exists.

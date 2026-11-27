@@ -186,3 +186,37 @@ def test_a_re_read_replaces_a_file_name_date_because_the_file_still_states_it():
     rewritten = preserve.set_capture_fields(named, CaptureFacts(width=64, height=48))
 
     assert "capture_date" not in _stated(rewritten)
+
+
+TAKEOUT = {
+    "time": "2019-05-04T10:00:00Z", "date": "2019-05-04", "date_basis": "utc", "date_source": "export-sidecar",
+    "date_matched_from": "Takeout/Google Photos/Trip/IMG_0001.jpg.json",
+}
+
+
+def test_a_re_read_that_states_no_date_keeps_a_date_from_a_takeout_sidecar_and_its_origin():
+    """Catches an extraction that wipes a sidecar date because the photo's own bytes state none."""
+    from exomem import preserve
+    from exomem.capture_metadata import CaptureFacts
+
+    dated = _sidecar(**TAKEOUT)
+
+    rewritten = preserve.set_capture_fields(dated, CaptureFacts(width=64, height=48))
+
+    assert _stated(rewritten) == _stated(dated)
+    assert _stated(rewritten)["capture_date_matched_from"] == TAKEOUT["date_matched_from"]
+
+
+@pytest.mark.parametrize("source", ["camera-exif", "matched-original", "file-name"])
+def test_a_source_that_outranks_a_takeout_sidecar_replaces_its_date(source):
+    from exomem import preserve
+    from exomem.capture_metadata import CaptureFacts
+
+    stronger = CaptureFacts(time="2020-01-02T03:04:05", date="2020-01-02", date_source=source)
+
+    rewritten = preserve.set_capture_fields(_sidecar(**TAKEOUT), stronger)
+
+    assert _stated(rewritten)["capture_date"] == "2020-01-02"
+    assert _stated(rewritten)["capture_date_source"] == source
+    assert "capture_date_matched_from" not in _stated(rewritten)
+
