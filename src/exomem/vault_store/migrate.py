@@ -1,8 +1,9 @@
 """Move a file-mode vault into store mode (OpenSpec make-vault-store-canonical D8, tasks 1.1, 1.3 and 1.4).
 
-Migration runs offline, as the owner. It stages the vault's exact bytes and the sidecars' current rows in a private
-database, proves that those rows equal what the owners derive from the files, and only then installs everything in one
-writer transaction. A refusal or a kill leaves file mode as it was.
+Migration runs offline, as the owner. It stages the vault's exact bytes, the lexical and reference
+sidecars' current rows and the graph rows that the owners derive from the files in a private
+database, proves that the staged rows equal what the owners derive, and only then installs
+everything in one writer transaction. A refusal or a kill leaves file mode as it was.
 """
 
 from __future__ import annotations
@@ -76,6 +77,8 @@ class Staged:
     refs_tables: list[str] = field(default_factory=list)
     #: The tables that no sidecar holds, so staging derives their rows from the files.
     link_tables: list[str] = field(default_factory=list)
+    #: How the graph sidecar's rows differed from the files' derivation, which staging took instead.
+    graph_sidecar: tuple[verify.Difference, ...] = ()
     timings: dict[str, float] = field(default_factory=dict)
 
 
@@ -136,8 +139,15 @@ def create_owner_schema(
     )
 
 
-def stage(vault_root: Path, conn: sqlite3.Connection, *, revision: int = 1) -> Staged:
-    """Load the exact bytes of every owned file and copy the sidecars' rows into ``conn``, a staged store."""
+def stage(
+    vault_root: Path, conn: sqlite3.Connection, expected: Path, *, revision: int = 1
+) -> Staged:
+    """Load the exact bytes of every owned file into ``conn``, a staged store, and fill its tables.
+
+    The one derivation of the files goes to a new database at ``expected``, which `verify_staged`
+    compares with next. The graph tables are that derivation's rows; the lexical and reference
+    tables are the sidecars' rows, which `verify_staged` proves against it.
+    """
     staged = Staged()
     started = time.perf_counter()
     lexical, graph, refs, links = create_owner_schema(conn)
@@ -149,7 +159,13 @@ def stage(vault_root: Path, conn: sqlite3.Connection, *, revision: int = 1) -> S
     _load_files(vault_root, conn, staged, revision)
     staged.timings["load_files_s"] = time.perf_counter() - started
     started = time.perf_counter()
-    _copy_sidecars(vault_root, conn, staged)
+    verify.derive_expected(vault_root, expected)
+    staged.timings["derive_expected_s"] = time.perf_counter() - started
+    started = time.perf_counter()
+    staged.graph_sidecar = _graph_sidecar_differences(vault_root, expected, staged)
+    staged.timings["graph_sidecar_s"] = time.perf_counter() - started
+    started = time.perf_counter()
+    _copy_sidecars(vault_root, conn, staged, expected)
     staged.timings["copy_sidecars_s"] = time.perf_counter() - started
     started = time.perf_counter()
     _derive_links(vault_root, conn)
@@ -200,11 +216,37 @@ def _load_files(vault_root: Path, conn: sqlite3.Connection, staged: Staged, revi
         raise
 
 
-def _copy_sidecars(vault_root: Path, conn: sqlite3.Connection, staged: Staged) -> None:
-    """Copy each sidecar table, rows and row ids as they are, into the staged database."""
+def _graph_row_tables(staged: Staged) -> list[str]:
+    """The graph tables whose rows derive from the files; the owner names the stamp table."""
+    return [name for name in staged.graph_tables if name not in epistemic_graph.BUILD_STAMP_TABLES]
+
+
+def _graph_sidecar_differences(
+    vault_root: Path, expected: Path, staged: Staged
+) -> tuple[verify.Difference, ...]:
+    """How the graph sidecar's rows differ from the derivation in ``expected``, taken instead."""
+    path = epistemic_graph.sidecar_path(vault_root)
+    with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as sidecar:
+        return verify.compare_tables(sidecar, expected, only=_graph_row_tables(staged)).differences
+
+
+def _copy_sidecars(
+    vault_root: Path, conn: sqlite3.Connection, staged: Staged, expected: Path
+) -> None:
+    """Copy each table's rows and row ids as they are into the staged database.
+
+    The graph row tables come from the derivation, not the graph sidecar: file-mode graph sync
+    derives again only a page whose own bytes changed, so the sidecar can keep a page's edges to a
+    page that has left the catalogue, and a copy would carry them into the store. The derivation's
+    row ids keep a page's edges in the order of one write.
+    """
     sources = (
         (lexstore.lexical_path(vault_root), staged.lexical_tables),
-        (epistemic_graph.sidecar_path(vault_root), staged.graph_tables),
+        (expected, _graph_row_tables(staged)),
+        (
+            epistemic_graph.sidecar_path(vault_root),
+            [name for name in staged.graph_tables if name in epistemic_graph.BUILD_STAMP_TABLES],
+        ),
         (memory_refs.sidecar_path(vault_root), staged.refs_tables),
     )
 
@@ -217,6 +259,12 @@ def _copy_sidecars(vault_root: Path, conn: sqlite3.Connection, staged: Staged) -
                 with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as source:
                     for table in tables:
                         _copy_table(conn, source, table)
+            # The stamp table stays the sidecar's: the schema stamp and instance that readers key on
+            # are no derivation's. Only the registry stamps move to the derivation of the rows.
+            for key, value in epistemic_graph.graph_registry_stamps(vault_root):
+                conn.execute(
+                    "INSERT OR REPLACE INTO main.graph_meta(key, value) VALUES (?, ?)", (key, value)
+                )
             conn.execute("COMMIT")
         except BaseException:
             conn.execute("ROLLBACK")
@@ -253,11 +301,9 @@ def _copy_table(conn: sqlite3.Connection, source: sqlite3.Connection, table: str
 
 
 def verify_staged(
-    vault_root: Path, conn: sqlite3.Connection, work: Path
+    conn: sqlite3.Connection, expected: Path, work: Path
 ) -> tuple[verify.Comparison, list[str]]:
-    """Derive the rows afresh from the files and compare them, then project the stored pages and compare bytes."""
-    expected = work / "expected.sqlite"
-    verify.derive_expected(vault_root, expected)
+    """Compare each staged table with the derivation in ``expected``, then project the pages."""
     comparison = verify.compare_tables(conn, expected)
     expected.unlink()
     return comparison, verify.projection_differences(conn, work / "projection")
@@ -307,6 +353,12 @@ def preflight(vault_root: Path) -> dict:
         "binaries": owned[ownership.Ownership.BINARY],
         "skipped": _skipped_report(skipped),
     }
+    # The dry run derives nothing, so it cannot say how far the graph sidecar trails the files.
+    report["graph_sidecar"] = {
+        "checked": False,
+        "apply": "stages the graph tables from the files, so a stale graph index does not refuse "
+        "it, and reports how many rows the graph index differed by",
+    }
     if queued := queued_graph_work(vault_root):
         # Not a refusal: apply drains this queue before it stages, so the dry run only says so.
         report["queued_graph_work"] = {
@@ -334,12 +386,12 @@ def queued_graph_work(vault_root: Path) -> dict | None:
 
 
 def catch_up_graph_work(vault_root: Path) -> dict | None:
-    """Drain the queued graph repair into the sidecar before staging copies it; refuse if the graph stays behind.
+    """Drain the queued graph repair into the sidecar before staging; refuse if it stays behind.
 
     The offline owner holds the writer lease and this process never set the service's startup gate,
     so the drain publishes. Passes repeat while any clears a receipt. The queue need not empty: a page
     that the graph holds no rows for keeps its receipt, so the verdict is the graph's own status.
-    The staged proof still compares every row, so a pass that this misses costs a refusal after staging.
+    Staging takes the graph rows from the files, so what this misses never reaches the store.
     """
     queued = queued_graph_work(vault_root)
     if queued is None:
@@ -432,6 +484,18 @@ def dry_run(vault_root: Path) -> dict:
     return {"status": "dry-run", **preflight(Path(vault_root).resolve())}
 
 
+def _graph_sidecar_report(differences: tuple[verify.Difference, ...]) -> dict:
+    """What the apply says of the graph sidecar: the rows that differed, and the first keys."""
+    return {
+        "checked": True,
+        "differing_rows": sum(difference.rows for difference in differences),
+        "tables": {
+            difference.table: {"rows": difference.rows, "keys": list(difference.keys)}
+            for difference in differences
+        },
+    }
+
+
 def apply_route(vault_root: Path, *, why: str) -> dict:
     """Move the vault into store mode as the offline owner, or refuse and leave file mode as it was."""
     if not isinstance(why, str) or not why.strip():
@@ -482,7 +546,8 @@ def _cutover(root: Path, session, token, writer, *, why: str) -> dict:
             "a collection store operation is still pending; finish it before entering store mode",
         )
     _require_no_other_claim(root, writer)
-    # Staging copies the sidecars, so what the service left queued goes in first.
+    # The graph sidecar is what a rollback returns to and what the report compares to the files,
+    # so the repair that a stopped service left queued goes in first.
     caught_up = catch_up_graph_work(root)
     revision = _next_revision(writer.connection)
     # An activation that died before its commit left the id and no mode row; this run records the id again and goes on.
@@ -492,12 +557,13 @@ def _cutover(root: Path, session, token, writer, *, why: str) -> dict:
     timings: dict[str, float] = {}
     with tempfile.TemporaryDirectory(prefix=STAGING_PREFIX, dir=state_dir) as scratch:
         work = Path(scratch)
+        expected = work / "expected.sqlite"
         with connection.staging_store(work / "staged.sqlite") as conn:
-            staged = stage(root, conn, revision=revision)
+            staged = stage(root, conn, expected, revision=revision)
             timings.update(staged.timings)
             _refuse_partial_walk(staged)
             started = time.perf_counter()
-            comparison, unprojected = verify_staged(root, conn, work)
+            comparison, unprojected = verify_staged(conn, expected, work)
             timings["verify_s"] = time.perf_counter() - started
         if comparison.differences or unprojected:
             raise OpError(
@@ -535,6 +601,7 @@ def _cutover(root: Path, session, token, writer, *, why: str) -> dict:
         "binaries": staged.binaries,
         "skipped": _skipped_report(staged.skipped),
         "verified_tables": len(comparison.tables),
+        "graph_sidecar": _graph_sidecar_report(staged.graph_sidecar),
         **({"graph_catch_up": caught_up} if caught_up else {}),
         "timings": {name: round(seconds, 2) for name, seconds in timings.items()},
     }

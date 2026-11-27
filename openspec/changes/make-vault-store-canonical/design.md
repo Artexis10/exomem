@@ -189,11 +189,14 @@ Both refusals name the offline rollback with `--export-held`.
 Migration runs offline:
 
 1. Load every text file's exact bytes and frontmatter.
-2. Copy the current lexical and graph rows.
-3. Verify that a fresh derivation from the loaded bytes equals the copied rows.
-4. Verify that a full projection reproduces every file byte for byte.
+2. Derive every owner's rows afresh from the loaded bytes, once.
+3. Stage the graph rows from that derivation, whole tables in its row order and with its row ids, and copy the current lexical and reference rows.
+4. Verify that the derivation equals every staged table. The graph rows equal it by construction; the lexical and reference rows are the proof of the copy.
+5. Verify that a full projection reproduces every file byte for byte.
 
-In the spike, loading and copying the real-vault copy (19,563 text files) took 12.3 s and produced a 1.56 GB database; the two verifications add about a cold build.
+The graph rows are never copied from the graph sidecar. File-mode graph sync derives again only a page whose own bytes changed, so the sidecar can keep a page's edges to a page that has left the catalogue; a copy carried them into the store, and two live migrations refused at step 4 for it. The graph's `graph_meta` table keeps the sidecar's rows, because the schema stamp and the instance that readers key on come from the sidecar, with the registry stamps of the derivation. Nothing outside the store's graph tables refers to a graph row id: a reader orders a page's edges by their row id within one query, the dependency census keeps its cursor under the store revision, and the store takes no publication tables. The migration compares the sidecar's graph rows with the derivation and reports how many rows differed, with the first keys, in the result of the apply. The dry run derives nothing and says that it did not check. The file-mode cause is a separate defect of graph sync (#3249).
+
+In the spike, loading and copying the real-vault copy (19,563 text files) took 12.3 s and produced a 1.56 GB database; the two verifications add about a cold build, and the derivation runs once.
 
 Some data exists only in the store: the audit trail, queued projection intents, held corrections, held deletions and, in stage 2, canonicity records. Rollback therefore runs in this order:
 
