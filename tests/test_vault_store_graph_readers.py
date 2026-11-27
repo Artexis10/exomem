@@ -1052,6 +1052,39 @@ def test_a_family_dimension_finds_members_the_vector_ranks_last_in_one_read(
     assert "notice" not in result
 
 
+def test_a_stopped_scan_says_more_matches_may_exist_when_the_vector_lane_cannot_return_every_member(
+    stored, writer, encoder,  # noqa: F811
+):
+    """Catches a hybrid result that drops the partial-coverage notice because the member read was
+    complete, although the vector lane returns only one window and more members than that exist."""
+    body = "# Family source\n\n" + "\n".join(
+        f"## Claim\n- id: noise-{index}\n\nSignal number {index}.\n" for index in range(300)
+    )
+    # Forty-one members: more than the vector lane's window at limit 2, so it cannot return them all.
+    body += "\n".join(
+        f"## Claim\n- id: member-{index}\n- relations: derived_from: [[Family target]]\n\n"
+        f"Qualifying source material for outcome {index}.\n"
+        for index in range(40)
+    )
+    body += (
+        "\n## Claim\n- id: member-last\n- relations: derived_from: [[Family target]]\n\n"
+        "Signal xylophone member.\n"
+    )
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=(
+        write.PagePut("Knowledge Base/Notes/Family source.md", body.encode()),
+        write.PagePut("Knowledge Base/Notes/Family target.md", b"# Family target\n\nSurvey material.\n"),
+    )))
+    catch_up(stored)
+
+    result = commands.op_ask_memory(
+        stored, query="signal", scope="kb-only", mode="hybrid", result_level="unit",
+        filters={"unit.dimension": {"$eq": "provenance"}}, limit=2, graph=False,
+    )
+
+    assert len(result["hits"]) == 2
+    assert result.get("notice") == commands._SEARCH_NOTICE_DIMENSION
+
+
 @pytest.mark.parametrize(
     ("mode", "restricted"), [("keyword", False), ("hybrid", False), ("hybrid", True)],
     ids=["keyword", "hybrid", "hybrid-restricted"],

@@ -4572,8 +4572,8 @@ def _find_semantic_units(
             _record_degradation("vector")
             if failed_out is not None and "vector" not in failed_out:
                 failed_out.append("vector")
-        if member_refs is not None and vector_hits:
-            # The vector lane ranked every member, so the lexical scan's stop left none out.
+        if member_refs is not None and member_refs <= {hit.unit_ref for hit in vector_hits}:
+            # The vector lane returned every member, so the lexical scan's stop left none out.
             partial = False
 
     # Pure vector mode keeps lexical rows cold unless the vector lane could not
