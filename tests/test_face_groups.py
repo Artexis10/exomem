@@ -227,13 +227,17 @@ def test_a_store_that_another_process_deleted_is_never_written_through_a_connect
     assert len(faces_of(vault, "Photos/street.jpg")) == 1
 
 
-def test_a_cleared_name_is_left_in_no_file_of_the_people_store(vault: Path) -> None:
+@pytest.mark.parametrize("removal", ["clear the person", "name the group another name"])
+def test_a_removed_name_is_left_in_no_file_of_the_people_store(vault: Path, removal: str) -> None:
     """Catches a removed name kept in the write-ahead log, which a Cloud cell's backup copies as it is."""
     turn_on(vault)
     [group] = face_groups.record_page(vault, "Photos/garden.jpg", [face(unit(1, 0))], model_id=MODEL)
     face_naming.name_group(vault, group, "Rowan Example")
 
-    face_naming.clear_person(vault, "Rowan Example")
+    if removal == "clear the person":
+        face_naming.clear_person(vault, "Rowan Example")
+    else:
+        face_naming.name_group(vault, group, "Sam Example")  # Rowan named only this group, so Rowan goes.
 
     store_files = sorted(face_store.store_dir(vault).glob("people.sqlite*"))
     assert store_files  # The store is still there, so the check reads real files.

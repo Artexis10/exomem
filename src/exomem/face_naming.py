@@ -116,6 +116,8 @@ def name_group(vault_root: Path, group_id: int, name: str) -> int:
             (group_id, person_id),
         )
         if previous != person_id:
+            # The group's earlier person goes when it named no other group; its name must leave the log too.
+            writing.scrub = previous is not None
             _drop_if_unused(people, previous)
         face_store.advance_generation(writing.index)
     return person_id
