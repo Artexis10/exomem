@@ -264,6 +264,7 @@ def test_a_note_with_a_200_mib_resource_is_read_in_well_under_256_mib_of_memory(
         capture_output=True, text=True, check=True, cwd=tmp_path,
         env={"PYTHONPATH": ":".join(path for path in sys.path if path), "EXOMEM_STATE_ROOT": str(tmp_path / "state")})
 
+    export.unlink()  # a 280 MB file: do not leave it to the test folder's retention
     items, before, after = (int(value) for value in run.stdout.split())
     unit = 1 if sys.platform == "darwin" else 1024  # ru_maxrss is in KiB on Linux
     assert items == 1
