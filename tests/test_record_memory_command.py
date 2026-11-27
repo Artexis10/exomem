@@ -117,6 +117,22 @@ def test_a_manifest_without_an_id_creates_and_the_receipt_names_the_assigned_id(
     assert created["collection_id"] == written["exomem_id"]
 
 
+def test_a_collection_created_without_an_id_revises_with_the_same_text(tmp_path: Path) -> None:
+    """An agent keeps the id-less text it created from; revising with it must not ask for an id it never had."""
+    from exomem.record_memory import record_memory
+
+    _activity_log(tmp_path)
+    manifest_path = "Knowledge Base/Records/New/_collection.md"
+    manifest_text = _records_manifest().replace("exomem_id: 44444444-4444-4444-8444-444444444444\n", "")
+    created = record_memory(
+        tmp_path, action="create", manifest_path=manifest_path, manifest_text=manifest_text, why="new table"
+    )
+
+    validated = record_memory(tmp_path, action="validate", collection=created["collection_id"], manifest_text=manifest_text)
+
+    assert validated["valid"] is True
+
+
 def test_a_malformed_manifest_id_is_refused_not_replaced(tmp_path: Path) -> None:
     from exomem.cli_ops import OpError
     from exomem.record_memory import record_memory

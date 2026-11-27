@@ -269,6 +269,10 @@ def record_memory(
     if action in {"create", "validate"} and collection is None and isinstance(manifest_text, str):
         manifest_text, assigned_id = structured_collections.assign_missing_id(manifest_text)
         values["manifest_text"] = manifest_text
+    elif action in {"validate", "revise"} and isinstance(manifest_text, str):
+        selected = collection_refs.selected_collection_id(vault_root, collection)
+        manifest_text = structured_collections.fill_collection_id(manifest_text, selected)
+        values["manifest_text"] = manifest_text
     try:
         from .collection_store import preview
 

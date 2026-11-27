@@ -1328,6 +1328,20 @@ def assign_missing_id(manifest_text: str) -> tuple[str, str | None]:
     return (rendered, identity) if rendered != manifest_text else (manifest_text, None)
 
 
+def fill_collection_id(manifest_text: str, collection_id: str | None) -> str:
+    """Give a revision's manifest that names no id the revised collection's own.
+
+    A manifest written from an id-less example keeps no id after create, so revising it with the
+    same text would otherwise fail. A manifest that names another id is left as it is and refused.
+    """
+    if collection_id is None:
+        return manifest_text
+    try:
+        return memory_refs.add_id_to_markdown(manifest_text, exomem_id=collection_id)[0]
+    except (memory_refs.ReferenceError, vault.FrontmatterError):
+        return manifest_text
+
+
 def note_assigned_id(result: Any, action: str, assigned_id: str | None) -> Any:
     """Tell a validate caller that the id it sees is a placeholder: create mints its own."""
     if assigned_id is None or action != "validate" or not isinstance(result, dict):
