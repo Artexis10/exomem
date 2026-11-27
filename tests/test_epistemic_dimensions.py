@@ -705,16 +705,19 @@ def test_a_dimension_with_more_members_than_the_vector_bound_fills_from_its_newe
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setattr(embeddings, "embed_texts", lambda *_a, **_k: np.stack([_vector(1.0)]))
     failed: list[str] = []
+    partial: list[str] = []
 
     hits = find_module.find(
         vault, query="beacon", scope="kb-only", mode="hybrid", graph=False, rerank=False,
         result_level="unit", filters={"unit.dimension": {"$eq": "measured"}}, limit=2,
-        failed_out=failed,
+        failed_out=failed, partial_coverage_out=partial,
     )
 
     assert len(hits) == 2
     assert all(hit.source_anchor.startswith("member-") for hit in hits)
-    assert "semantic_units_candidate_window" in failed
+    # The bound is a designed stop, not a failed lane.
+    assert partial == [find_module.PARTIAL_DIMENSION_SCAN]
+    assert failed == []
 
 
 def test_a_dimension_on_more_pages_than_the_vector_bound_reads_no_members_when_its_pages_fill(

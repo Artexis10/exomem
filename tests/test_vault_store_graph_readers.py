@@ -1052,6 +1052,156 @@ def test_a_family_dimension_finds_members_the_vector_ranks_last_in_one_read(
     assert "notice" not in result
 
 
+def test_a_stopped_scan_says_more_matches_may_exist_when_the_vector_lane_cannot_return_every_member(
+    stored, writer, encoder,  # noqa: F811
+):
+    """Catches a hybrid result that drops the partial-coverage notice because the member read was
+    complete, although the vector lane returns only one window and more members than that exist."""
+    body = "# Family source\n\n" + "\n".join(
+        f"## Claim\n- id: noise-{index}\n\nSignal number {index}.\n" for index in range(300)
+    )
+    # Forty-one members: more than the vector lane's window at limit 2, so it cannot return them all.
+    body += "\n".join(
+        f"## Claim\n- id: member-{index}\n- relations: derived_from: [[Family target]]\n\n"
+        f"Qualifying source material for outcome {index}.\n"
+        for index in range(40)
+    )
+    body += (
+        "\n## Claim\n- id: member-last\n- relations: derived_from: [[Family target]]\n\n"
+        "Signal xylophone member.\n"
+    )
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=(
+        write.PagePut("Knowledge Base/Notes/Family source.md", body.encode()),
+        write.PagePut("Knowledge Base/Notes/Family target.md", b"# Family target\n\nSurvey material.\n"),
+    )))
+    catch_up(stored)
+
+    result = commands.op_ask_memory(
+        stored, query="signal", scope="kb-only", mode="hybrid", result_level="unit",
+        filters={"unit.dimension": {"$eq": "provenance"}}, limit=2, graph=False,
+    )
+
+    assert len(result["hits"]) == 2
+    assert result.get("notice") == commands._SEARCH_NOTICE_DIMENSION
+
+
+@pytest.mark.parametrize(
+    ("mode", "restricted"), [("keyword", False), ("hybrid", False), ("hybrid", True)],
+    ids=["keyword", "hybrid", "hybrid-restricted"],
+)
+def test_a_sparse_family_dimension_checks_no_more_rows_as_the_corpus_grows(
+    stored, writer, encoder, monkeypatch, mode, restricted,  # noqa: F811
+):
+    """Catches exact checks that grow with the corpus when a family's members are one unit in nine
+    and lack the query word, a stopped scan whose result does not say more matches may exist or
+    calls it a failed search method, and a stopped scan that is not cached like a full one.
+    A restricted caller ranks its lexical lane by admitted statistics, a separate branch."""
+    def sources(first):
+        return tuple(
+            write.PagePut(f"Knowledge Base/Notes/Source {index:02d}.md", (
+                f"# Source {index}\n\n"
+                + "\n".join(f"## Claim\n- id: noise-{unit}\n\nSignal note {unit}.\n" for unit in range(8))
+                + f"\n## Claim\n- id: member-{index}\n- relations: derived_from: [[Family target]]\n\n"
+                f"Qualifying source material {index}.\n"
+            ).encode())
+            for index in range(first, first + 8)
+        )
+
+    # One window of rejected rows stops a scan, so eight pages already pass the bound.
+    monkeypatch.setattr(find, "_DIMENSION_MEMBER_WINDOWS", 1)
+    if restricted:
+        restrict_external(stored, 'tags: ["secret"]')
+    checks: list[str] = []
+    real = lexstore._SelectedUnits.matches_filter
+    monkeypatch.setattr(
+        lexstore._SelectedUnits, "matches_filter", lambda self, row, unit: checks.append(row[1]) or real(self, row, unit),
+    )
+
+    def ask(filters):
+        checks.clear()
+        with request_scope(EXTERNAL) if restricted else contextlib.nullcontext():
+            result = commands.op_ask_memory(
+                stored, query="signal", scope="kb-only", mode=mode, result_level="unit",
+                filters=filters, limit=2, graph=False,
+            )
+        return result, len(checks)
+
+    grouped = {"unit.dimension": {"$eq": "provenance"}}
+    # A filter that asks for dimension groups is never cached, so the repeat names the same members
+    # through `$or`, which asks for none.
+    ungrouped = {"$or": [{"unit.dimension": {"$eq": "provenance"}}, {"unit.dimension": {"$eq": "currency"}}]}
+
+    def search(*puts):
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=puts))
+        if mode != "keyword":
+            catch_up(stored)
+        find.clear_cache()
+        return ask(grouped)
+
+    smaller, smaller_checks = search(
+        *sources(0), write.PagePut("Knowledge Base/Notes/Family target.md", b"# Family target\n\nSurvey material.\n"),
+    )
+    larger, larger_checks = search(*sources(8), *sources(16))
+    first, first_checks = ask(ungrouped)
+    repeat, repeat_checks = ask(ungrouped)
+
+    assert larger_checks == smaller_checks
+    for result in (smaller, larger, first, repeat):
+        # The agent reads that the filter covered the best matches only, not that a method failed.
+        assert result["notice"] == commands._SEARCH_NOTICE_DIMENSION
+        # Keyword search needs the query word, which no member holds; the vector lane ranks members.
+        assert len(result["hits"]) == (0 if mode == "keyword" else 2)
+        assert all("Qualifying source material" in hit["excerpt"] for hit in result["hits"])
+    assert repeat["hits"] == first["hits"]
+    # The cache serves the repeat with its notice; a restricted caller's search is never cached.
+    assert first_checks > 0
+    assert repeat_checks == (first_checks if restricted else 0)
+
+
+@pytest.mark.parametrize(
+    ("limit", "superseded", "notice"), [(5, 0, False), (10, 0, False), (5, 2, True)],
+    ids=["limit-5", "limit-10", "newest-pages-superseded"],
+)
+def test_a_stopped_keyword_scan_says_more_matches_may_exist_only_when_release_keeps_too_few(
+    stored, writer, limit, superseded, notice,  # noqa: F811
+):
+    """Catches a keyword notice decided on the over-fetch pool, which a policy makes larger than the
+    caller's limit: a scan that stops after the limit is full still said more matches may exist.
+    A unit of a superseded page ranks after every active match, including those past the stop."""
+    def source(page):
+        status = "status: superseded\n" if page >= 10 - superseded else ""
+        body = "\n".join(f"## Claim\n- id: noise-{unit}\n\nSignal note {unit}.\n" for unit in range(18))
+        body += "".join(
+            f"\n## Claim\n- id: member-{member}\n- relations: derived_from: [[Family target]]\n\n"
+            f"Signal from member {page}{member}.\n"
+            for member in "ab"
+        )
+        return write.PagePut(
+            f"Knowledge Base/Notes/Source {page}.md",
+            f"---\nupdated: 2026-01-{10 + page}\n{status}---\n# Source {page}\n\n{body}".encode(),
+        )
+
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=(
+        *(source(page) for page in range(10)),
+        write.PagePut("Knowledge Base/Notes/Family target.md", b"# Family target\n\nSurvey material.\n"),
+    )))
+    # Any policy makes release over-fetch, so the search asks for about twice the caller's limit.
+    restrict_external(stored, 'tags: ["secret"]')
+
+    result = commands.op_ask_memory(
+        stored, query="signal", scope="kb-only", mode="keyword", result_level="unit",
+        filters={"unit.dimension": {"$eq": "provenance"}}, limit=limit, graph=False,
+    )
+
+    excerpts = [hit["excerpt"] for hit in result["hits"]]
+    assert len(excerpts) == limit
+    if not superseded:
+        # The newest members in recency order, as a scan without a bound returns them.
+        newest = [f"Signal from member {page}{member}." for page in range(9, -1, -1) for member in "ab"]
+        assert excerpts == newest[:limit]
+    assert (result.get("notice") == commands._SEARCH_NOTICE_DIMENSION) is notice
+
+
 def test_a_family_dimension_does_no_graph_work_for_unrelated_pages(stored, writer, monkeypatch):  # noqa: F811
     """Pages that no family edge touches add no per-unit membership work to a filtered search."""
     source = "Knowledge Base/Notes/Family source.md"
