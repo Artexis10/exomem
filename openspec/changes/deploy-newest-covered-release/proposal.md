@@ -15,9 +15,9 @@ On 2026-11-26 the Cloud fleet ran v0.201.0 and the platform was deployed at v0.2
 
 ## Capabilities
 
-### New Capabilities
+### Modified Capabilities
 
-- `cloud-release-automation`: one requirement for the fallback rollout. The capability is not canonical yet. It lives in the delta of `automate-cloud-releases`, so this change archives after that one and after `alert-cloud-release-lag`.
+- `cloud-release-automation`: adds one requirement for the fallback rollout.
 
 ## Impact
 

@@ -1,7 +1,3 @@
-## Purpose
-
-Moves each successful Exomem release into Cloud's `cell_image` without an operator step, unless the release needs a platform upgrade or crosses an upgrade barrier, and then moves the newest older release that the platform carries. It alerts the operator when a rollout stops.
-
 ## ADDED Requirements
 
 ### Requirement: A release sets the cell image only after its attestation verifies
