@@ -26,6 +26,7 @@ from test_working_set_index import _seed_structure
 from test_working_set_withheld_twins import _withhold
 
 from exomem import (
+    capabilities,
     capture_carrier,
     commands,
     context_catalogue,
@@ -137,7 +138,7 @@ def test_an_empty_vault_returns_an_empty_map(vault: Path, monkeypatch: pytest.Mo
         refs=[TIDE], roles=[], thread="earlier-thread",
     )
     waiting = _activate(vault, turn="", continuity=previous)
-    assert waiting["abstention"] == {"reason": "index_warming"}
+    assert waiting["abstention"]["reason"] == "index_warming"
     assert waiting["next_action"]["state"] == "index_warming"
     assert waiting["next_action"]["tool"] == "search_memory"
     assert "map" not in waiting
@@ -166,7 +167,8 @@ def test_the_map_fits_the_budget(vault: Path, monkeypatch: pytest.MonkeyPatch) -
             rendered.append(block["overflow"])
         if description := packet.get("turn_slice", {}).get("description"):
             rendered.append(description)
-        used = len("\n".join(rendered)) + len((packet.get("next_action") or {}).get("say", "")) + _capture_chars(packet)
+        used = (len("\n".join(rendered)) + len((packet.get("next_action") or {}).get("say", "")) + _capture_chars(packet)
+                + len(packet.get("later_turns", "")))
         # `used_chars` charges the prose; `serialized_chars` is the wire size of the packet without that field.
         sent = json.dumps({**packet, "budget": {"limit_chars": budget, "used_chars": used}}, separators=(",", ":"), ensure_ascii=False)
         assert packet["budget"] == {"limit_chars": budget, "used_chars": used, "serialized_chars": len(sent)}
@@ -205,6 +207,73 @@ def test_the_first_requests_map_does_not_pay_for_the_capture_rules_text(vault: P
     assert served["map"]["items"]
     assert heavier["map"] == served["map"]
     assert heavier["budget"]["used_chars"] == served["budget"]["used_chars"]
+
+
+def _first_recall(vault: Path, monkeypatch: pytest.MonkeyPatch, *, surface: str, level: str, caller=None, **kwargs):
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    monkeypatch.setenv("EXOMEM_SURFACE", surface)
+    monkeypatch.setenv("EXOMEM_PROMINENCE", level)
+    _world(vault, with_w=True)
+    _seed_structure(vault)
+    _built(vault).close()
+    return _activate(vault, caller or principal.owner_principal(surface="mcp"), turn="", max_chars=6000, **kwargs)
+
+
+def test_a_hookless_agents_first_recall_asks_for_a_lookup_on_each_later_question(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An agent with no per-turn guidance recalled once and then answered later questions from general
+    knowledge, although the user's recorded view existed. A full map must not crowd that line out."""
+    first = _first_recall(vault, monkeypatch, surface="claude-ai", level="balanced")
+    later = _activate(
+        vault, principal.owner_principal(surface="mcp"), turn="", max_chars=6000, continuity=first["continuity"]
+    )
+
+    assert first["map"]["items"]
+    assert "search_memory" in first["later_turns"] and first["budget"]["used_chars"] <= 6000
+    assert "later_turns" not in later
+
+
+@pytest.mark.parametrize(
+    "surface,level,caller",
+    [
+        ("claude-code", "balanced", None),  # a hooked client gets per-turn guidance already
+        ("claude-ai", "off", None),  # off searches only when the user asks
+        ("claude-ai", "light", None),  # light recalls only when a turn is clearly on topic
+        ("claude-ai", "balanced", OWNER),  # a hook, CLI or REST fetch never shows the field
+    ],
+)
+def test_no_later_turns_move_where_it_does_not_apply(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, surface: str, level: str, caller
+) -> None:
+    assert "later_turns" not in _first_recall(vault, monkeypatch, surface=surface, level=level, caller=caller)
+
+
+def test_no_later_turns_move_names_a_call_the_surface_hides(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A surface that exposes recall but not search must not be told to search."""
+    recall_only = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="product", tier2_enabled=True, product_commands=("activate_context",), tool_shape="public"
+    )
+    with capabilities.active_surface(recall_only):
+        packet = _first_recall(vault, monkeypatch, surface="claude-ai", level="balanced")
+
+    assert "later_turns" not in packet
+
+
+def test_a_small_first_recall_keeps_its_map_and_the_move_rides_only_on_room_left(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Holding the move's characters back from a small packet emptied its map; the map comes first."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    monkeypatch.setenv("EXOMEM_SURFACE", "claude-ai")
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "balanced")
+    _world(vault, with_w=True)
+    _seed_structure(vault)
+    _built(vault).close()
+    packet = _activate(vault, principal.owner_principal(surface="mcp"), turn="", max_chars=800)  # holds one map item, but not one item plus the held-back move
+
+    assert packet["map"]["items"] and packet["budget"]["used_chars"] <= 800
+    assert ("later_turns" in packet) != ("later_turns_unavailable" in packet.get("diagnostics", []))
 
 
 def _topic_titles(packet: dict) -> set[str]:

@@ -1370,19 +1370,19 @@ def earlier_layout() -> Iterator[pytest.MonkeyPatch]:
     from exomem import add as add_module
     from exomem import episode_capture, episode_memory
 
-    def write(vault_root, source_schema, recap, when, audience):
+    def write(vault_root, source_schema, recap, when, audience, declared=None):
         revisions = episode_memory._revisions(vault_root, recap.key, audience)  # noqa: SLF001
         live = [item for item in revisions if item.live]
         paths = [item.path for item in revisions]
         if live and live[-1].frontmatter.get("episode_digest") == recap.digest:
-            return episode_memory._source(live[-1].path, live[-1].frontmatter), True, paths  # noqa: SLF001
+            return episode_memory._source(live[-1].path, live[-1].frontmatter), True, paths, None  # noqa: SLF001
         order = episode_capture.order_token(when, after=revisions[-1].order if revisions else None)
         result = add_module.add(
             vault_root, source_schema, content=recap.body, title=recap.subject, source_type="episode",
             slug=recap.slug_at(order), today=when.replace(microsecond=0), extra_frontmatter=recap.frontmatter,
             supersede=tuple((item.path, item.hash) for item in live), defer_fanout_to_terminal=True,
         )
-        return {"ref": result.ref, "path": result.path, "title": recap.subject}, False, [*paths, result.path]
+        return {"ref": result.ref, "path": result.path, "title": recap.subject}, False, [*paths, result.path], None
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(episode_memory, "_write", write)

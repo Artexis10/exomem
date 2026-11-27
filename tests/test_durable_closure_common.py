@@ -246,7 +246,10 @@ def test_exomem_runtime_storage_resolves_inside_disposable_state(tmp_path: Path)
 
 def test_basic_memory_environment_is_fresh_and_only_has_basic_memory_prefixes(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    for spelling in ("EXOMEM_", "EVERMATTER_", "KB_MCP_"):
+        monkeypatch.setenv(f"{spelling}INHERITED", "live")
     env = common.basic_memory_environment(tmp_path / "state", tmp_path / "vault")
 
     assert env["BASIC_MEMORY_HOME"] == str(tmp_path / "state" / "home")
@@ -256,7 +259,7 @@ def test_basic_memory_environment_is_fresh_and_only_has_basic_memory_prefixes(
     assert env["BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED"] == "false"
     assert env["BASIC_MEMORY_AUTO_UPDATE"] == "false"
     assert env["BASIC_MEMORY_NO_PROMOS"] == "1"
-    assert not any(key.startswith("EXOMEM_") for key in env)
+    assert not any(key.startswith(("EXOMEM_", "EVERMATTER_", "KB_MCP_")) for key in env)
 
 
 def test_percentiles_and_call_counts_only_include_public_calls() -> None:

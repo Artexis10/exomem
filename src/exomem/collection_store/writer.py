@@ -29,6 +29,7 @@ from .. import (
     planning,
     record_formats,
     records,
+    sensitivity_classes,
     state_paths,
     sync_providers,
     vault,
@@ -2257,7 +2258,7 @@ class CollectionWriter:
                 _json(data["item_schema"]),
                 _json(list(manifest.schema.natural_key)),
                 txn_id,
-                governance.manifest_metadata(text),
+                governance.manifest_metadata(text, vault_root=self.root),
             ),
         )
         rendered = views.manifest_view(
@@ -2407,6 +2408,7 @@ class CollectionWriter:
         if declared.kind == "intended":
             planning.require_planning_profile(manifest)
         records._refuse_excluded_manifest_fields(manifest)
+        collections.require_valid_subject(manifest)
         record_formats.validate_storage_contract(manifest)
         if manifest.storage.strategy == "dataset":
             raise collections.CollectionError("READ_ONLY_COLLECTION", "datasets remain file-canonical")
@@ -2466,6 +2468,8 @@ class CollectionWriter:
             if before is not None:
                 planning._require_same_area_side(before, values)
         values = records._validate_values(manifest, values, written=written)
+        if operation != "revise":
+            governance.require_registered(self.root, manifest.schema, values)
         if declared.validators and validate_graph:
             validators = [types.named_validator(name) for name in declared.validators]
             plans = None
@@ -3248,9 +3252,26 @@ class CollectionWriter:
                     self._insert_txn(txn, result)
         if isinstance(result, collections.CollectionError):
             raise result
-        return self._item_carriers(result, manifest, key=key, values=values, link_notes=candidate.link_notes,
-                                   related_notes=candidate.related_notes,
-                                   path=result["affected_paths"][0] if manifest.view_mode == "items" else manifest.path)
+        return self._with_sensitivity(
+            self._item_carriers(result, manifest, key=key, values=values, link_notes=candidate.link_notes,
+                                related_notes=candidate.related_notes,
+                                path=result["affected_paths"][0] if manifest.view_mode == "items" else manifest.path),
+            manifest, key, values)
+
+    def _with_sensitivity(self, result, manifest, key, values):
+        """``result`` with the `sensitivity` its row carries, the way a page capture reports it.
+
+        Like the other carriers it is not part of the stored receipt, so a row with no class adds nothing and a
+        replay returns the receipt it stored. A canonical row has no page file whose path policy answers for it,
+        so the disclosure names no path and a policy in force reports the caller's ceiling as unknown.
+        """
+        row = self._item(manifest.collection_id, key)
+        if row is None:
+            return result
+        found = governance.classification(row["governance_json"], manifest.schema, values)
+        if not found.classes:
+            return result
+        return {**result, "sensitivity": sensitivity_classes.report(self.root, found, rel_path=None)}
 
     @source_dependencies.record_operation
     def update_record(
@@ -3486,6 +3507,7 @@ class CollectionWriter:
         proposed = collections.parse_manifest_bytes(
             self.root, current.path, manifest_text.encode()
         )
+        collections.require_valid_subject(proposed)
         if (
             proposed.collection_id,
             proposed.semantic_profile,
@@ -3556,7 +3578,7 @@ class CollectionWriter:
         }
         for name in declared.validators:
             types.named_validator(name).validate(proposed, plans, write=None)
-        metadata = governance.manifest_metadata(manifest_text)
+        metadata = governance.manifest_metadata(manifest_text, vault_root=self.root)
         row_metadata = {key: governance.row_metadata(proposed.schema, values, metadata)
                         for key, values in plans.items()}
         return proposed, mode_change, plans, metadata, row_metadata
@@ -3645,12 +3667,12 @@ class CollectionWriter:
             )
             self._execute("UPDATE item_rows SET governance_json=? WHERE collection_id=? AND item_key=?",
                 ((value, current.collection_id, key) for key, value in row_metadata.items()), many=True)
-            # A retracted row is not validated again; its history is judged on the revised projects. Only a change of
-            # projects touches them, and then in fixed-size batches by row id, so memory and statements stay bounded.
+            # A retracted row is not validated again; its history is judged on the revised projects and floor. Only a
+            # change of either touches them, and then in fixed-size batches by row id, so memory and statements stay bounded.
             before_metadata = self.connection.execute(
                 "SELECT governance_json FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
                 (current.collection_id, row["manifest_version"])).fetchone()[0]
-            if governance.projects_changed(before_metadata, metadata):
+            if governance.inherited_changed(before_metadata, metadata):
                 last = 0
                 while batch := self.connection.execute(
                         "SELECT row_id,governance_json FROM item_rows "

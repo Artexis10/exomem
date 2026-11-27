@@ -6067,6 +6067,8 @@ def sibling_name_variants(parent: Path, name: str) -> list[str]:
 def folder_split_warnings(vault_root: Path, directory: Path) -> list[str]:
     """One warning per folder on the way to `directory` that already has a variant sibling.
 
+    A variant shares the folder's `vault_name_key`, or is a folder that shares its `folder_lookalike_key`.
+
     An old split never blocks a write; it is named so the owner can merge it.
     """
     try:
@@ -6077,9 +6079,19 @@ def folder_split_warnings(vault_root: Path, directory: Path) -> list[str]:
 
     warnings: list[str] = []
     current = Path(vault_root)
-    for part in relative.parts:
-        variants = sibling_name_variants(current, part)
-        if variants and (current / part).is_dir():
+    for index, part in enumerate(relative.parts):
+        try:
+            with os.scandir(current) as entries:
+                listed = {entry.name: entry.is_dir() for entry in entries}
+        except OSError:
+            listed = {}
+        separated = separator_rule_applies("/".join(relative.parts[:index]))
+        variants = sorted(
+            set(held_fs.name_variants(listed, part))
+            | {name for name in folder_variants(listed, part) if separated and listed[name]}
+        )
+        # A folding volume may answer for a spelling it does not list.
+        if variants and (listed[part] if part in listed else (current / part).is_dir()):
             preview_call = active_call_text("maintain_memory", {"mode": "path-variants"})
             warnings.append(
                 f"folder '{part}' also exists as {', '.join(repr(v) for v in variants)}; "
@@ -7773,7 +7785,61 @@ def canonical_vault_rel(vault_root: Path, rel: str) -> str:
     return canonical
 
 
-def respell_new_path(vault_root: Path, rel: str, *, replacing: str | None = None) -> str:
+def folder_lookalike_key(name: str) -> str:
+    """The identity key of a folder name for writes and merges: `vault_name_key` without its separators.
+
+    The key drops every Unicode space separator, dash and connector (such as `_`), so `Garden Tools`,
+    `garden-tools` and `garden_tools` share it. A leading run of connectors stays, because a leading
+    underscore marks a system folder (`_Schema`) and `Schema` is another name. Letters, digits and
+    every other character stay, so `C++` and `C` differ. A separator between two digits stays as one
+    `-`, so `Week 1-2` and `Week 12` differ. Keys apply to folders: a file name keeps
+    `vault_name_key`, because `a-b.md` and `ab.md` can be different pages.
+    """
+    key = vault_name_key(name)
+    leading = next((i for i, char in enumerate(key) if unicodedata.category(char) != "Pc"), len(key))
+    kept = list(key[:leading])
+    separated = False
+    for char in key[leading:]:
+        # The categories are fixed by the Unicode standard (Zs spaces, Pd dashes, Pc connectors), not a word list of ours.
+        if not char.isalnum() and unicodedata.category(char) in ("Zs", "Pd", "Pc"):
+            separated = True
+            continue
+        if separated and kept and kept[-1].isdigit() and char.isdigit():
+            # A separator between two digits divides two numbers: `Week 1-2` is not `Week 12`.
+            kept.append("-")
+        separated = False
+        kept.append(char)
+    return "".join(kept)
+
+
+def separator_rule_applies(parent: str) -> bool:
+    """Whether sibling folders under the vault-relative folder `parent` join by `folder_lookalike_key`.
+
+    Not at the vault top or the managed root, where code reads folders by exact spelling, and not in
+    the Sources tree, whose kind and domain folders the source taxonomy names and a Source commits
+    to by their exact label.
+    """
+    from .source_taxonomy import SOURCES_ROOT
+
+    root = managed_root_rel()
+    sources = f"{root}/{SOURCES_ROOT}"
+    return parent not in {"", root} and parent != sources and not parent.startswith(f"{sources}/")
+
+
+def folder_variants(names: Iterable[str], name: str) -> list[str]:
+    """The names in `names` other than `name` that share its `folder_lookalike_key`, sorted.
+
+    A name whose key is empty (one made only of separators) has no look-alike.
+    """
+    key = folder_lookalike_key(name)
+    if not key:
+        return []
+    return sorted(other for other in names if other != name and folder_lookalike_key(other) == key)
+
+
+def respell_new_path(
+    vault_root: Path, rel: str, *, replacing: str | None = None, leaf_is_folder: bool = False
+) -> str:
     """The spelling under which a path that a writer is about to create joins the vault.
 
     A component that does not exist as spelled, but matches an existing sibling
@@ -7787,6 +7853,10 @@ def respell_new_path(vault_root: Path, rel: str, *, replacing: str | None = None
     key) keeps the host's spelling, so a split that already exists on a
     case-sensitive volume keeps two identities.
 
+    A folder that the walk would create, because more path follows it or the caller says the leaf
+    is a folder (`leaf_is_folder`), takes the spelling of an existing sibling folder with the same
+    `folder_lookalike_key` (`_steered_folder`). A file leaf keeps its spelling.
+
     `replacing` is the path that a move vacates. It is not a sibling to land
     on, so a move that changes only the case or Unicode form of a name still
     renames it. Each component costs one `lstat`, and each folder on the way
@@ -7794,7 +7864,7 @@ def respell_new_path(vault_root: Path, rel: str, *, replacing: str | None = None
     existing file. Fails open to `rel` when a component cannot be read.
     """
     parts = [part for part in str(rel).replace("\\", "/").split("/") if part]
-    stored = _respell_in_store(Path(vault_root), parts, replacing)
+    stored = _respell_in_store(Path(vault_root), parts, replacing, leaf_is_folder)
     if stored is not None:
         return stored
     root = Path(vault_root)
@@ -7819,7 +7889,13 @@ def respell_new_path(vault_root: Path, rel: str, *, replacing: str | None = None
             spelled.append(part)
             current = current / part
             continue
-        variant = _sibling_spelling(_listed(current), part, "/".join(spelled), replacing)
+        names = _listed(current)
+        prefix = "/".join(spelled)
+        variant = _sibling_spelling(names, part, prefix, replacing)
+        if variant is None and (index + 1 < len(parts) or leaf_is_folder):
+            variant = _steered_folder(
+                root, names, part, prefix, replacing, lambda name, base=current: _disk_entries(base / name)
+            )
         if variant is None:
             spelled.extend(parts[index:])
             break
@@ -7867,10 +7943,7 @@ def canonical_variant(
     counts = {name: len(found) for name in spellings if (found := entries(name)) is not None}
     if not counts:
         return None
-    from . import layout, project_keys
-
-    declared = layout.declared_folders(vault_root)
-    registered = set(project_keys.load_project_registry(vault_root).project_to_folder.values())
+    declared, registered = _exact_spellings(vault_root)
     if parent in {"", managed_root_rel()} and not any(
         (f"{parent}/{name}" if parent else name) in declared for name in counts
     ):
@@ -7900,7 +7973,8 @@ def _split_spelling(
 ) -> str:
     """The spelling an existing folder `part` on a destination's way takes.
 
-    Without a listed variant sibling it is `part`. With one it is the split's canonical spelling,
+    Without a listed variant sibling (one with the same `vault_name_key` or `folder_lookalike_key`)
+    it is `part`. With one it is the split's canonical spelling,
     unless the destination is a file that already exists under `part` (`exists`): a write to it
     must not fork it into the other spelling. A destination folder that exists is steered, so a
     caller that respells only a folder lands in the canonical one.
@@ -7909,9 +7983,10 @@ def _split_spelling(
     if part not in listed:
         # A folding volume answered for a spelling it does not list: no split here.
         return part
+    lookalikes = set(folder_variants(listed, part)) if separator_rule_applies(prefix) else set()
     variants = [
         name
-        for name in held_fs.name_variants(listed, part)
+        for name in sorted(set(held_fs.name_variants(listed, part)) | lookalikes)
         if (f"{prefix}/{name}" if prefix else name) != replacing
     ]
     if not variants or exists(part):
@@ -7934,16 +8009,70 @@ def _sibling_spelling(
     return variants[0] if variants else None
 
 
-def _respell_in_store(vault_root: Path, parts: list[str], replacing: str | None) -> str | None:
+def _exact_spellings(vault_root: Path) -> tuple[frozenset[str], frozenset[str]]:
+    """The vault-relative folders the layout declares, and the folder names the project registry names.
+
+    Code reads these folders by their exact spelling, so a write keeps it and a split converges on it.
+    """
+    from . import layout, project_keys
+
+    registered = frozenset(project_keys.load_project_registry(vault_root).project_to_folder.values())
+    return layout.declared_folders(vault_root), registered
+
+
+def _steered_folder(
+    vault_root: Path,
+    names: Iterable[str],
+    part: str,
+    prefix: str,
+    replacing: str | None,
+    entries: Callable[[str], set[str] | None],
+) -> str | None:
+    """The spelling of the sibling folder that a folder `part`, which the walk would create, lands in.
+
+    The siblings are `names` under `prefix`. A target is an existing folder (`entries` is not None)
+    with the same `folder_lookalike_key`; the path that a move vacates is no target. One target gives
+    its spelling. Several give their canonical spelling (`canonical_variant`), so the write adds no
+    third spelling. None keeps the caller's spelling: no target, a parent where the rule does not apply
+    (`separator_rule_applies`), a folder the layout declares, or a project
+    folder the registry names in the research folder, the one place code reads it by exact spelling.
+    """
+    if not separator_rule_applies(prefix):
+        return None
+    targets = [
+        name
+        for name in folder_variants(names, part)
+        if (f"{prefix}/{name}") != replacing and entries(name) is not None
+    ]
+    if not targets:
+        return None
+    from . import project_keys
+
+    declared, registered = _exact_spellings(vault_root)
+    if f"{prefix}/{part}" in declared or (part in registered and prefix == project_keys.research_parent_rel()):
+        return None
+    return targets[0] if len(targets) == 1 else canonical_variant(vault_root, prefix, targets, entries)
+
+
+def _respell_in_store(
+    vault_root: Path, parts: list[str], replacing: str | None, leaf_is_folder: bool
+) -> str | None:
     """``respell_new_path`` for a stored page, reading folders from the store and the disk.
 
-    It returns None for a path that the store does not serve. A stored page may have no file yet,
+    It returns None for a path that the store does not serve: a page that it owns, or with
+    `leaf_is_folder` a folder whose pages it owns. A stored page may have no file yet,
     so a folder that only the store knows would read as new. A folder that holds no page (one with
     only binaries) is not in the store, so the disk adds its names.
     """
-    from .vault_store import read
+    from .vault_store import mode, ownership, read
 
-    if not read.serves(vault_root, "/".join(parts)):
+    rel = "/".join(parts)
+    served = (
+        ownership.owns_folder(rel) and mode.store_mode_for_reads(vault_root)
+        if leaf_is_folder and parts
+        else read.serves(vault_root, rel)
+    )
+    if not served:
         return None
     spelled: list[str] = []
     with read.snapshot(vault_root) as view:
@@ -7970,6 +8099,13 @@ def _respell_in_store(vault_root: Path, parts: list[str], replacing: str | None)
                 spelled.append(part)
                 continue
             variant = _sibling_spelling(names, part, prefix, replacing)
+            if variant is None and (index + 1 < len(parts) or leaf_is_folder):
+                variant = _steered_folder(
+                    vault_root, names, part, prefix, replacing,
+                    lambda name, prefix=prefix: folder_entries(
+                        vault_root, view, f"{prefix}/{name}" if prefix else name
+                    ),
+                )
             if variant is None:
                 spelled.extend(parts[index:])
                 break

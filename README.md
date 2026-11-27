@@ -153,7 +153,7 @@ the `mcp__evermatter__*` prefix. A rule that names `mcp__plugin_exomem_exomem__*
 matching once the plugin is `evermatter`. Change it to `mcp__plugin_evermatter_evermatter__*`.
 A rule still matches while a client holds an `exomem` server or Claude Code enables an
 `exomem` plugin. `evermatter setup --migrate` and `evermatter doctor` list each rule
-that nothing answers any more, with the file that holds it. Settings keep their `EXOMEM_*` names.
+that nothing answers any more, with the file that holds it. Settings use the `EVERMATTER_*` prefix; see [Configuration](#configuration).
 
 ### claude.ai and ChatGPT
 
@@ -190,7 +190,7 @@ instruction for each client's `CLAUDE.md` or `AGENTS.md`, and writes it only if
 you agree. The instruction asks the agent to recall Evermatter before a task and
 save what it learns.
 
-If cwd `.env` or the process contains `EXOMEM_BASE_URL`, setup registers its
+If cwd `.env` or the process contains `EVERMATTER_BASE_URL`, setup registers its
 canonical `/mcp` endpoint with Claude Code and Codex so they share the existing
 service. Otherwise it uses the explicit local stdio fallback. Use `--mcp-url`
 to choose a service directly, `--stdio` to force local stdio, and
@@ -227,10 +227,10 @@ transcript provenance hashes), never conversation, tool, summary, or artifact
 content. It needs no MCP connection or Evermatter credential.
 The read-side hook suppresses obvious control/status prompts like `continue`,
 `merge it`, and `are you done?`, and can optionally upgrade that reminder to real
-retrieved KB content (`EXOMEM_RETRIEVE_INJECT=1`, opt-in; the legacy
+retrieved KB content (`EVERMATTER_RETRIEVE_INJECT=1`, opt-in; the legacy
 `KB_RETRIEVE_INJECT` name still works) — or, with
-`EXOMEM_RETRIEVE_INJECT=working_set`, to a compiled `recall_context` packet
-under a data header, bounded by `EXOMEM_RETRIEVE_INJECT_MAX_CHARS` (default
+`EVERMATTER_RETRIEVE_INJECT=working_set`, to a compiled `recall_context` packet
+under a data header, bounded by `EVERMATTER_RETRIEVE_INJECT_MAX_CHARS` (default
 4,000). For Codex, run
 `exomem install-hook --client codex`; for Claude Code, `exomem install-hook` —
 see
@@ -293,7 +293,7 @@ uv run exomem demo
 <summary>Codex CLI</summary>
 
 ```bash
-codex mcp add exomem --env EXOMEM_VAULT_PATH="/path/to/vault" -- exomem --transport stdio
+codex mcp add exomem --env EVERMATTER_VAULT_PATH="/path/to/vault" -- exomem --transport stdio
 ```
 
 Optional local hooks, using the same Evermatter scripts as Claude Code:
@@ -317,7 +317,7 @@ Or add it directly to `~/.codex/config.toml`:
 [mcp_servers.evermatter]
 command = "exomem"
 args = ["--transport", "stdio"]
-env = { EXOMEM_VAULT_PATH = "/path/to/vault" }
+env = { EVERMATTER_VAULT_PATH = "/path/to/vault" }
 ```
 
 </details>
@@ -326,7 +326,7 @@ env = { EXOMEM_VAULT_PATH = "/path/to/vault" }
 <summary>Any MCP client (generic stdio)</summary>
 
 ```json
-{"mcpServers": {"evermatter": {"command": "exomem", "args": ["--transport", "stdio"], "env": {"EXOMEM_VAULT_PATH": "/path/to/vault"}}}}
+{"mcpServers": {"evermatter": {"command": "exomem", "args": ["--transport", "stdio"], "env": {"EVERMATTER_VAULT_PATH": "/path/to/vault"}}}}
 ```
 
 After connecting, ask the agent to call `read_instructions()` before using the KB. Claude
@@ -347,12 +347,12 @@ standing instruction.
 > lines and compose files to keep upgrading.
 
 ```bash
-claude mcp add evermatter -- docker run -i --rm -v "/path/to/vault:/vault" -e EXOMEM_VAULT_PATH=/vault ghcr.io/substrate-systems/evermatter:latest --transport stdio
+claude mcp add evermatter -- docker run -i --rm -v "/path/to/vault:/vault" -e EVERMATTER_VAULT_PATH=/vault ghcr.io/substrate-systems/evermatter:latest --transport stdio
 ```
 
 Use `:latest` for the lean keyword/BM25 image, `:ml` for CPU hybrid search, or
 `:cuda` for NVIDIA/Linux CUDA capability. CUDA images still boot CPU-default at
-idle; opt into GPU residency with `EXOMEM_MODE=performance` when you want it.
+idle; opt into GPU residency with `EVERMATTER_MODE=performance` when you want it.
 The image also runs as an always-on remote server via `docker compose` with a
 tunnel sidecar — see [docs/docker.md](docs/docker.md). Windows users with a live
 vault should usually prefer the native install (WSL2 bind mounts miss live
@@ -385,15 +385,15 @@ semantic/CLIP reindex work can be deferred and is reported in resource status.
 Run `exomem index` or `kb reconcile` later to heal deferred semantic work.
 
 Automatic quiet switching is optional. Its watcher skips GPU pressure queries
-when you select `quiet` manually, pin a mode with `EXOMEM_MODE`, or disable
-`EXOMEM_AUTO_QUIET`. Automatic quiet still monitors pressure so it can restore
+when you select `quiet` manually, pin a mode with `EVERMATTER_MODE`, or disable
+`EVERMATTER_AUTO_QUIET`. Automatic quiet still monitors pressure so it can restore
 the previous mode.
 
 On affected WSL/NVIDIA systems, repeated Linux `nvidia-smi` processes can grow
 the Windows driver's kernel memory and disrupt foreground work.
 [Microsoft WSL issue #12756](https://github.com/microsoft/WSL/issues/12756)
 records a reproduction. For older Evermatter versions, a service configured with
-`EXOMEM_AUTO_QUIET=0` stops its watcher after that service restarts.
+`EVERMATTER_AUTO_QUIET=0` stops its watcher after that service restarts.
 An empty `CUDA_VISIBLE_DEVICES` also disables GPU work and GPU headroom queries.
 These settings do not require a Windows reboot; existing driver state may remain.
 
@@ -480,7 +480,7 @@ exomem exposes typed MCP tools for common knowledge-base work:
 Tier-2 tools cover governance administration and filesystem escape hatches such
 as listing directories, creating files, moving pages, trashing files, and
 recovering from trash. Set
-`EXOMEM_DISABLE_TIER2=1` if you want a smaller tool surface.
+`EVERMATTER_DISABLE_TIER2=1` if you want a smaller tool surface.
 
 Every write records durable history in `Knowledge Base/log.md`. Service calls
 also go to `logs/exomem.log`.
@@ -491,7 +491,7 @@ Every operation is declared once and exposed through:
 
 - **MCP** for agents.
 - **CLI** for terminal and scripts.
-- **REST** for personal HTTP integrations when `EXOMEM_REST_API_KEY` is set.
+- **REST** for personal HTTP integrations when `EVERMATTER_REST_API_KEY` is set.
 
 Examples:
 
@@ -505,7 +505,7 @@ kb note --note-type insight --title "Agents need durable context" \
 
 ```bash
 curl -s -X POST http://127.0.0.1:8765/api/find \
-  -H "Authorization: Bearer $EXOMEM_REST_API_KEY" \
+  -H "Authorization: Bearer $EVERMATTER_REST_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"query": "project handoff", "mode": "keyword"}'
 ```
@@ -562,34 +562,34 @@ The server reads environment variables or a `.env` file. The main ones are:
 
 | Variable | Purpose |
 | --- | --- |
-| `EXOMEM_VAULT_PATH` | Vault root containing the governed folder (default `Knowledge Base/`). |
-| `EXOMEM_KB_DIRNAME` | Name of the governed folder inside the vault (default `Knowledge Base`). |
-| `EXOMEM_DISABLE_EMBEDDINGS` | `1` forces keyword/BM25-only search. |
-| `EXOMEM_RECALL_MODEL` | Names the recall encoder. Default: `BAAI/bge-m3` on a personal server and a cloud cell, `BAAI/bge-base-en-v1.5` on a hosted cell. A vault whose vectors came from another model is re-embedded in the background. |
-| `EXOMEM_RECALL_REEMBED` | `off` builds no new sidecar. A personal server keeps serving the old sidecar with its model; a cell keeps dense recall off. |
-| `EXOMEM_DISABLE_TIER2` | `1` hides Tier-2 filesystem tools. |
-| `EXOMEM_REST_API_KEY` | Enables authenticated REST routes. |
-| `EXOMEM_DISABLE_MEDIA_EXTRACTION` | `1` skips server-side OCR/ASR/PDF/Office extraction. |
-| `EXOMEM_DISABLE_CLIP` | `1` disables CLIP image search. |
-| `EXOMEM_MODE` | Hard-pin resource mode: `quiet`, `normal`, or `performance`. Env wins over config. |
-| `EXOMEM_QUIET_MODE` | Legacy truthy alias for `quiet` when `EXOMEM_MODE` is unset. |
-| `EXOMEM_AUTO_QUIET` | `1` enables optional non-torch GPU-pressure auto-quiet switching (default off). |
-| `EXOMEM_DEVICE` / `EXOMEM_TORCH_DEVICE` | Force all torch models to `cuda`, `mps`, or `cpu`. Normally leave unset and use `exomem mode`. |
-| `EXOMEM_MPS_FP16` | On Apple Silicon, run bge/CLIP in fp16 on the Metal GPU — ~half the memory, faster encodes (default on; set `0` to keep fp32). |
-| `EXOMEM_VIDEO_SCENE_FRAMES` | Set to enable video scene detection + persisted, OCR'd scene-frame JPEGs (default off). |
-| `EXOMEM_VIDEO_SCENE_THRESHOLD` | Scene-boundary hash threshold in bits of 64 (default 10). |
-| `EXOMEM_VIDEO_SCENE_MIN_SECS` | Minimum scene duration in seconds; closer boundaries merge (default 4). |
-| `EXOMEM_SEMANTIC_SEGMENTS` | Set to enable timed transcripts + semantic segment retrieval for audio/video (default off). |
-| `EXOMEM_WHISPER_MODEL` | faster-whisper model size for ASR, such as `base` or `small`. |
-| `EXOMEM_ASR_BACKEND` | ASR engine: `mlx` (Apple Silicon Metal GPU, needs the `media-mlx` extra) or `faster-whisper` (CUDA/CPU). Default auto-selects MLX on Apple Silicon, else faster-whisper. |
-| `EXOMEM_ASR_LANGUAGE` | Language code to force for speech transcripts, such as `et`. Unset means the engine detects the language on speech. A `reprocess` request with a `language` takes precedence. A code the speech model does not publish fails the job. |
-| `EXOMEM_MLX_WHISPER_MODEL` | HF repo for the MLX ASR model (default `mlx-community/whisper-large-v3-mlx`; use `mlx-community/whisper-large-v3-turbo` for speed). |
-| `EXOMEM_TESSERACT_CMD` | Path to the `tesseract` binary if not auto-discovered. |
-| `EXOMEM_CLAIM_LEVEL` | `1` enables the claim-level subsystem (default off). |
-| `EXOMEM_CLAIM_POLARITY_NLI` | `1` opts into the frozen stance verifier (default off). It still runs only if the exact repository-pinned revision and declared artifact manifest are resident and verified. |
-| `EXOMEM_CONTRADICTION_TOP_N` | Caps the surfaced contradiction queue and therefore verifier enrichment (default `40`; `0` is uncapped). This is the sole polarity-work bound. |
+| `EVERMATTER_VAULT_PATH` | Vault root containing the governed folder (default `Knowledge Base/`). |
+| `EVERMATTER_KB_DIRNAME` | Name of the governed folder inside the vault (default `Knowledge Base`). |
+| `EVERMATTER_DISABLE_EMBEDDINGS` | `1` forces keyword/BM25-only search. |
+| `EVERMATTER_RECALL_MODEL` | Names the recall encoder. Default: `BAAI/bge-m3` on a personal server and a cloud cell, `BAAI/bge-base-en-v1.5` on a hosted cell. A vault whose vectors came from another model is re-embedded in the background. |
+| `EVERMATTER_RECALL_REEMBED` | `off` builds no new sidecar. A personal server keeps serving the old sidecar with its model; a cell keeps dense recall off. |
+| `EVERMATTER_DISABLE_TIER2` | `1` hides Tier-2 filesystem tools. |
+| `EVERMATTER_REST_API_KEY` | Enables authenticated REST routes. |
+| `EVERMATTER_DISABLE_MEDIA_EXTRACTION` | `1` skips server-side OCR/ASR/PDF/Office extraction. |
+| `EVERMATTER_DISABLE_CLIP` | `1` disables CLIP image search. |
+| `EVERMATTER_MODE` | Hard-pin resource mode: `quiet`, `normal`, or `performance`. Env wins over config. |
+| `EVERMATTER_QUIET_MODE` | Legacy truthy alias for `quiet` when `EVERMATTER_MODE` is unset. |
+| `EVERMATTER_AUTO_QUIET` | `1` enables optional non-torch GPU-pressure auto-quiet switching (default off). |
+| `EVERMATTER_DEVICE` / `EVERMATTER_TORCH_DEVICE` | Force all torch models to `cuda`, `mps`, or `cpu`. Normally leave unset and use `exomem mode`. |
+| `EVERMATTER_MPS_FP16` | On Apple Silicon, run bge/CLIP in fp16 on the Metal GPU — ~half the memory, faster encodes (default on; set `0` to keep fp32). |
+| `EVERMATTER_VIDEO_SCENE_FRAMES` | Set to enable video scene detection + persisted, OCR'd scene-frame JPEGs (default off). |
+| `EVERMATTER_VIDEO_SCENE_THRESHOLD` | Scene-boundary hash threshold in bits of 64 (default 10). |
+| `EVERMATTER_VIDEO_SCENE_MIN_SECS` | Minimum scene duration in seconds; closer boundaries merge (default 4). |
+| `EVERMATTER_SEMANTIC_SEGMENTS` | Set to enable timed transcripts + semantic segment retrieval for audio/video (default off). |
+| `EVERMATTER_WHISPER_MODEL` | faster-whisper model size for ASR, such as `base` or `small`. |
+| `EVERMATTER_ASR_BACKEND` | ASR engine: `mlx` (Apple Silicon Metal GPU, needs the `media-mlx` extra) or `faster-whisper` (CUDA/CPU). Default auto-selects MLX on Apple Silicon, else faster-whisper. |
+| `EVERMATTER_ASR_LANGUAGE` | Language code to force for speech transcripts, such as `et`. Unset means the engine detects the language on speech. A `reprocess` request with a `language` takes precedence. A code the speech model does not publish fails the job. |
+| `EVERMATTER_MLX_WHISPER_MODEL` | HF repo for the MLX ASR model (default `mlx-community/whisper-large-v3-mlx`; use `mlx-community/whisper-large-v3-turbo` for speed). |
+| `EVERMATTER_TESSERACT_CMD` | Path to the `tesseract` binary if not auto-discovered. |
+| `EVERMATTER_CLAIM_LEVEL` | `1` enables the claim-level subsystem (default off). |
+| `EVERMATTER_CLAIM_POLARITY_NLI` | `1` opts into the frozen stance verifier (default off). It still runs only if the exact repository-pinned revision and declared artifact manifest are resident and verified. |
+| `EVERMATTER_CONTRADICTION_TOP_N` | Caps the surfaced contradiction queue and therefore verifier enrichment (default `40`; `0` is uncapped). This is the sole polarity-work bound. |
 
-`EXOMEM_CLAIM_NLI_MODEL` is **retired**. Model identity comes only from the
+`EVERMATTER_CLAIM_NLI_MODEL` is **retired**. Model identity comes only from the
 in-repo pin registry; a value left in it selects nothing and is reported as
 ignored by `exomem doctor`.
 
@@ -614,10 +614,15 @@ substitute. What "absent" means, per tier:
 | Vector KNN (`sqlite-vec`) | with `embeddings` | Exact in-memory scan over the same vectors; identical results, more work. |
 | Frozen stance verifier | `--extra nli` | Review-queue entries carry **no** model polarity label — never a differently-produced label under the verifier's name. Write responses, rankings, and every other surface are byte-identical to a build with no verifier tier at all; only `exomem doctor` names the absence. The verifier runs only under an exact pinned revision and artifact-manifest digest, a versioned label map, and a green bounded multilingual fixture set, and it labels review-queue entries only. Hosted cells do not install or enable it. |
 
-Legacy `EXOMEM_*` names (from the project's former working name, exomem) remain
-honored: each is promoted to its `EXOMEM_*` equivalent at startup, with an
-explicitly set `EXOMEM_*` value winning on conflict. `import exomem` and
-`python -m exomem` likewise keep working as deprecated aliases.
+Every setting takes the `EVERMATTER_` prefix. The earlier `EXOMEM_` and `KB_MCP_`
+prefixes still work as aliases, so an existing `.env` or service file needs no
+change. When one setting holds different values under two names, `EXOMEM_` wins
+over `EVERMATTER_`, and `EVERMATTER_` wins over `KB_MCP_`. The service logs a
+warning only when an `EVERMATTER_` and an `EXOMEM_` name differ; a `KB_MCP_` name
+that loses is ignored silently. For `VAULT_PATH`, `STATE_ROOT` and
+`HOSTED_STATE_ROOT`, that difference stops the service instead. To settle it, set
+the value once, under its `EVERMATTER_` name, and remove the other name.
+`import exomem` and `python -m exomem` likewise keep working as deprecated aliases.
 
 Remote-only variables and full deployment notes are in
 [docs/deployment.md](docs/deployment.md).

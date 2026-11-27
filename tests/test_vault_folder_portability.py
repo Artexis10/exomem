@@ -399,7 +399,7 @@ def test_the_audit_finds_case_and_unicode_groups(vault: Path) -> None:
     _page(notes / "Cafés" / f"{composed}.md")
     _page(notes / "Cafés" / f"{decomposed}.md")
     _page(notes / "Tool Kit" / "a.md")
-    _page(notes / "tool-kit" / "a.md")
+    _page(notes / "Tool+Kit" / "a.md")
 
     findings = [
         finding

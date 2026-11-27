@@ -2,7 +2,7 @@
 
 Per-machine playbook for putting exomem behind **Cloudflare Tunnel** — either a fresh
 setup or **migrating an existing host off Tailscale Funnel**. The server code is
-unchanged (the public URL is env-driven via `KB_MCP_BASE_URL`); this is purely
+unchanged (the public URL is env-driven via `EVERMATTER_BASE_URL`); this is purely
 ingress + `.env` + GitHub OAuth App + the claude.ai connector.
 
 > **No domain?** Cloudflare Tunnel needs a domain you own in Cloudflare. If you don't
@@ -40,7 +40,7 @@ Substitute throughout:
    - **Update application** (the fields aren't saved until you click it).
 4. **Point the server at `<HOST>`** and restart so it reloads:
    ```
-   (Get-Content .env) -replace '^KB_MCP_BASE_URL=.*','KB_MCP_BASE_URL=https://<HOST>' | Set-Content .env
+   uv run --no-sync python scripts/set-env.py EVERMATTER_BASE_URL https://<HOST>
    pwsh -File scripts/restart.ps1
    ```
    > **CRITICAL:** steps 3 and 4 must *both* point at `<HOST>` before step 6. If the
@@ -66,7 +66,7 @@ Substitute throughout:
 - Reboot: both `cloudflared` and `exomem` services auto-start and the connector still works.
 
 ## Rollback (config-only — keep Tailscale Funnel running as standby)
-- `.env`: `KB_MCP_BASE_URL` back to the `*.ts.net` URL.
+- `.env`: `uv run --no-sync python scripts/set-env.py EVERMATTER_BASE_URL https://<ts.net-host>`.
 - GitHub OAuth App callback back to `https://<ts.net-host>/auth/callback`.
 - `pwsh -File scripts/restart.ps1`.
 - claude.ai connector back to `https://<ts.net-host>/mcp`.

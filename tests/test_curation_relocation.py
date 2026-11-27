@@ -166,6 +166,15 @@ def test_a_move_fields_patch_sets_only_pointer_fields(vault: Path) -> None:
     assert (vault / NOTES[0]).is_file()
 
 
+def test_a_move_fields_patch_cannot_set_the_class_of_a_page(vault: Path) -> None:
+    """A rehome that changes a page's sensitivity class without the classify operation's registry check
+    and reason record."""
+    with pytest.raises(curation.CurationError, match="CURATION_STEP_INVALID.*sensitivity"):
+        _propose(vault, _move_step(NOTES[0], sensitivity=["identity"]))
+
+    assert (vault / NOTES[0]).is_file()
+
+
 def test_a_move_its_contract_would_refuse_is_refused_at_proposal(vault: Path) -> None:
     """A plan that seals a move whose commit must refuse, so its run stops part way through, after
     the earlier moves committed."""

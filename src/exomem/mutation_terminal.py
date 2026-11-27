@@ -2871,6 +2871,15 @@ def project_terminal(
             {key: leaf[key] for key in ("duplicate_of", "fields_not_applied", "same_url", "duplicate_check_unavailable")
              if key in leaf}
         )
+    if isinstance(leaf, Mapping) and isinstance(leaf.get("sensitivity"), Mapping):
+        # The classes the page records, from a write or from the earlier copy a repeat found, and what governs who
+        # reads them now; built by `sensitivity_classes.report`.
+        compact["sensitivity"] = leaf["sensitivity"]
+        # The record id a classify wrote: the caller passes it back as `revert_record` to undo the
+        # classification, so it must survive the default detail.
+        record = leaf.get("pointer_write")
+        if isinstance(record, str) and len(record) == 32 and all(c in "0123456789abcdef" for c in record):
+            compact["pointer_write"] = record
     if result.get("state") == "committed":
         compact.update(_commit_metadata_projection(leaf))
     compact.update(media_projection)

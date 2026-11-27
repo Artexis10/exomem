@@ -5,7 +5,7 @@ variable "hcloud_token" {
 }
 
 variable "cloudflare_api_token" {
-  description = "Cloudflare API token scoped to Tunnel, DNS, and Access resources."
+  description = "Cloudflare API token scoped to Tunnel, DNS, Access, and Turnstile resources."
   type        = string
   sensitive   = true
 }

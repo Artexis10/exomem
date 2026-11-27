@@ -4,6 +4,11 @@ The release build writes `user_release_notes.json` (`scripts/user_notes.py gener
 image serves it (`release_notes`). Both import this module, so a change to a key, the version shape or
 the date shape reaches the writer and the reader together. The release build loads it by file path
 without installing the package, so it imports the standard library only.
+
+The release build also attaches each release's own entry to its GitHub release as `release-notes.json`
+(`scripts/release_notes_asset.py`). A separate service, the monthly what's-new digest, reads that file.
+So the format is a published contract: any change to it raises `SCHEMA`, and that service must accept
+the new schema before a release emits it.
 """
 
 from __future__ import annotations

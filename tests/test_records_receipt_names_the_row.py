@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +17,7 @@ from _public_call import public_call
 from conftest import FIXTURE_VAULT
 from fastmcp import Client
 from test_collection_store_s1_gate import ROW
+from test_collection_store_service import _store_thread_held_with_intake_on
 from test_collection_store_service import service as service  # noqa: F401
 from test_collection_store_writer import CID, manifest_path, manifest_text
 from test_collection_store_writer import store as store  # noqa: F401
@@ -86,6 +88,37 @@ def test_a_replay_names_the_row_only_at_its_committed_version(served) -> None:
             assert moved_on["user_summary"].startswith("Saved a row in Work (")
 
     asyncio.run(run())
+
+
+def test_a_queued_add_record_names_its_row_when_the_applied_save_is_read_back(served, service, monkeypatch) -> None:
+    """A save queued behind a busy store replays through the same release step, so its stored outcome names the row."""
+    from exomem import write_intake
+
+    async def run() -> dict:
+        async with Client(server_module.build_server(require_auth=False)) as client:
+            with _store_thread_held_with_intake_on(service, monkeypatch):
+                queued = await _tool(client, "add_record", {
+                    "collection": CID, "why": "Track dispatch", "item": {"title": "Panel shipment"},
+                })
+            assert queued["state"] == "queued"
+            read_back: dict = {}
+            deadline = time.monotonic() + 30
+            while read_back.get("state") != "applied" and time.monotonic() < deadline:
+                reply = await _tool(client, "inspect_memory", {
+                    "operation": "review.queued_write", "arguments": {"ref": queued["queued_write"]["ref"]},
+                })
+                read_back = reply.get("queued_write", {})
+                await asyncio.sleep(0.1)
+            return read_back
+
+    try:
+        applied = asyncio.run(run())
+    finally:
+        write_intake.stop(service.root)
+    assert applied.get("state") == "applied", applied
+    summary = applied["outcome"]["user_summary"]
+    assert summary.startswith("Saved Panel shipment in Work (")
+    assert "_summary.md" not in summary
 
 
 def test_a_collection_the_store_does_not_hold_keeps_its_path_summary(store) -> None:

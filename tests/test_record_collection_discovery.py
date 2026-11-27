@@ -164,16 +164,17 @@ def test_describe_examples_are_generic_parseable_and_cover_nested_laboratory_val
     tmp_path: Path,
 ) -> None:
     from exomem.commands import op_record_memory
-    from exomem.structured_collections import parse_manifest_bytes
+    from exomem.structured_collections import assign_missing_id, parse_manifest_bytes
 
     _empty_vault(tmp_path)
     described = op_record_memory(tmp_path, action="describe")
 
     for example in described["examples"].values():
+        # An example is create input with no fixed id, so parse it as create sees it.
         manifest = parse_manifest_bytes(
             tmp_path,
             example["manifest_path"],
-            example["manifest_text"].encode("utf-8"),
+            assign_missing_id(example["manifest_text"])[0].encode("utf-8"),
         )
         manifest.schema.validate(example["append_item"])
 
@@ -362,12 +363,12 @@ def test_manifest_json_schema_does_not_reject_parser_accepted_extension_fields(
     from jsonschema import validate
 
     from exomem.commands import op_record_memory
-    from exomem.structured_collections import parse_manifest_bytes
+    from exomem.structured_collections import assign_missing_id, parse_manifest_bytes
 
     _empty_vault(tmp_path)
     described = op_record_memory(tmp_path, action="describe")
     example = described["examples"]["minimal"]
-    manifest_text = example["manifest_text"].replace(
+    manifest_text = assign_missing_id(example["manifest_text"])[0].replace(
         "      type: string\n      required: true\n    source:",
         "      type: string\n      required: true\n      description: Human label\n    source:",
     )

@@ -68,6 +68,7 @@ from .adopt import _TEXT_IMPORT_SUFFIXES
 from .governance import raw_protection
 from .kbdir import is_in_managed_root, managed_join, managed_root
 from .log_events import log_event
+from .mutation_terminal import as_reused
 from .vault import (
     MISSING_CONTENT_HASH,
     ContentHashMismatchError,
@@ -4909,8 +4910,10 @@ def finish(
         run = store.load_for_update(run_id)
         if run["phase"] == "done":
             # A retry of the call that finished the page (a new key, or after the replay window) and a bare `finish` on a
-            # finished page get the recorded result; nothing runs again, so repeating the call costs nothing.
-            return _present(root, run, coverage=(run.get("finish") or {}).get("coverage"))
+            # finished page get the recorded result; nothing runs again, so repeating the call costs nothing. It is marked
+            # as a reuse that wrote nothing, so the MCP reply keeps the finishing reply's compact shape and leads with
+            # "Already saved" instead of the whole run document with no lead for the person.
+            return as_reused(_present(root, run, coverage=(run.get("finish") or {}).get("coverage")))
         if run["phase"] not in _FINISH_PHASES:
             raise AdoptionRunError(
                 "INVALID_PHASE", f"finish requires phase 'applied' or 'partial', got {run['phase']!r}"

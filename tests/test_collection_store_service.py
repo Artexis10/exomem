@@ -237,8 +237,8 @@ def offline_create(root, manifest_file, path, *, why):
                                       "--manifest-file", str(manifest_file), "--why", why])
 
 
-def _served_vault(tmp_path, monkeypatch):
-    """A/B in files and the service's environment, before the owner enrols summary C."""
+def _served_vault(tmp_path, monkeypatch, c_text=None):
+    """A/B in files and the service's environment, before the owner enrols summary C (`c_text` replaces its manifest)."""
     root = tmp_path / "vault"
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
     monkeypatch.delenv(OPERATOR, raising=False)
@@ -259,17 +259,18 @@ def _served_vault(tmp_path, monkeypatch):
         "EXOMEM_WRITER_LEASE_PREFERRED": "1",
     }.items():
         monkeypatch.setenv(name, value)
-    (tmp_path / "c.md").write_text(sqlite_text())
+    (tmp_path / "c.md").write_text(c_text or sqlite_text())
     # Only a release that enables the slice enrols a vault and serves its summary collection C.
     monkeypatch.setattr(capability, "RELEASED", ON)
     return root
 
 
 @pytest.fixture
-def service(tmp_path, monkeypatch):
+def service(tmp_path, monkeypatch, request):
     """A/B in files, summary C enrolled offline by the owner, then the service started without the operator
-    credential, all under a release that enables records-summary-v1."""
-    root = _served_vault(tmp_path, monkeypatch)
+    credential, all under a release that enables records-summary-v1. A test replaces C's manifest by
+    parametrizing `service` indirectly with the text."""
+    root = _served_vault(tmp_path, monkeypatch, getattr(request, "param", None))
     with coordinator(tmp_path / "coordinator.sqlite"):
         assert offline_create(root, tmp_path / "c.md", manifest_path(), why="new store collection") == 0
         started = Service(root, writer_lease.start_server_lifecycle())
@@ -2589,6 +2590,88 @@ def test_queued_mutation_timeout_never_executes(service, monkeypatch, tmp_path):
             release.set()
             occupied.result(timeout=5)
     assert titles(service.root, CID) == ["Canonical"]
+
+
+INCIDENT_LOG = "Incident Log"
+INCIDENT_TEXT = sqlite_text(manifest_text().replace("title: Work", f"title: {INCIDENT_LOG}").replace(
+    "    count: {type: integer}\n", "    count: {type: integer}\n    status: {type: enum, enum: [open, closed]}\n"))
+
+
+@contextmanager
+def _store_thread_held_with_intake_on(service, monkeypatch):
+    """The store thread is busy, a save that would wait for it queues after 0.3 s, and the drainer runs."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from exomem import request_budget, write_intake
+
+    monkeypatch.setenv("EXOMEM_BUSY_INTAKE_AFTER_SECONDS", "0.3")
+    server = runtime._SERVERS[service.root]
+    entered, release = threading.Event(), threading.Event()
+
+    def occupy():
+        entered.set()
+        assert release.wait(10)
+
+    write_intake.start(service.root)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        occupied = pool.submit(server.call, occupy)
+        try:
+            assert entered.wait(5)
+            # The short budgets belong to the save, after the setup owns the thread.
+            token = request_budget.set_current(request_budget.RequestBudget(
+                seconds=request_budget.DELIVERY_RESERVE_SECONDS + 5))
+            with monkeypatch.context() as short:
+                short.setattr(service.manager, "_mutation_timeout_seconds", 0.1)
+                try:
+                    yield
+                finally:
+                    request_budget.reset_current(token)
+        finally:
+            release.set()
+            occupied.result(timeout=10)
+
+
+def _save_by_title(service, changes):
+    """The save an agent sends with the collection's title, under the busy intake's own scope."""
+    command = next(c for c in commands.product_commands_for("mcp") if c.name == "record_memory")
+    with request_scope(OWNER):
+        return writer_lease.invoke_command(
+            command, service.root, implicit_idempotency_scope="principal:session-b", action="update",
+            collection=INCIDENT_LOG, item_key=ROW, changes=changes, expected_container_hash="0" * 64,
+            expected_item_version="0" * 64, why="resolve the entry")
+
+
+@pytest.mark.parametrize("service", [pytest.param(INCIDENT_TEXT, id="incident-log")], indirect=True)
+def test_an_undeclared_value_for_a_store_collection_named_by_title_is_refused_while_the_store_is_busy(
+        service, monkeypatch):
+    """Defect: an agent set `status` to a value the collection never declares, by the collection's title, while the
+    store was busy. The call came back "Queued, not saved yet" and failed only at its replay."""
+    from exomem import write_intake
+
+    try:
+        with _store_thread_held_with_intake_on(service, monkeypatch):
+            with pytest.raises(OpError) as refused:
+                _save_by_title(service, {"status": "resolved"})
+            assert refused.value.code == "SCHEMA_ENUM"
+            assert refused.value.message.endswith('allowed: "open", "closed"')
+            assert refused.value.details["field"] == "status"
+            assert write_intake.read(service.root)["items"] == []
+    finally:
+        write_intake.stop(service.root)
+    assert titles(service.root, CID) == ["Canonical"]
+
+
+@pytest.mark.parametrize("service", [pytest.param(INCIDENT_TEXT, id="incident-log")], indirect=True)
+def test_a_declared_value_for_a_store_collection_named_by_title_still_queues_while_the_store_is_busy(
+        service, monkeypatch):
+    from exomem import write_intake
+
+    try:
+        with _store_thread_held_with_intake_on(service, monkeypatch):
+            queued = _save_by_title(service, {"status": "closed"})
+            assert queued["state"] == "queued"
+    finally:
+        write_intake.stop(service.root)
 
 
 def counted_appends(monkeypatch):

@@ -455,7 +455,10 @@ def test_a_finish_repeated_on_a_finished_page_returns_the_finished_reply_not_a_p
     retried = adoption_run.finish(vault, run_id=run_id, continuation=removing["continuation"], today=TODAY)
     bare = adoption_run.finish(vault, run_id=run_id, today=TODAY)
 
-    assert retried == completing and bare == completing
+    # A repeat is marked as a reuse that wrote nothing (it is what leads the MCP reply with "Already saved"); the rest is the finished reply.
+    for repeat in (retried, bare):
+        assert (repeat.pop("mutated"), repeat.pop("capture_outcome")) == (False, "reused")
+        assert repeat == completing
 
 
 def _twelve_filed_notes(tmp_path: Path) -> tuple[Path, str]:

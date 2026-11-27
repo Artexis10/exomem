@@ -57,6 +57,7 @@ from . import (
     semantic_contract,
     semantic_units,
     semantic_writes,
+    sensitivity_classes,
     source_closure,
     source_coverage,
     tag_variants,
@@ -164,7 +165,7 @@ def _plan_project_registrations(
         close = project_keys_module._closest_existing_key(candidate, list(folders))
         if close is not None:
             raise project_keys_module.ProjectKeyTypoError(candidate, close[0], close[1])
-        research_dir = kb_root(vault_root) / "Notes" / "Research"
+        research_dir = kb_root(vault_root).joinpath(*project_keys_module.RESEARCH_PARENT)
         folder = project_keys_module._title_case_slug(
             candidate, [*folders.values(), *project_keys_module.child_folder_names(research_dir)]
         )
@@ -178,7 +179,7 @@ def _plan_project_registrations(
         )
         folders[candidate] = folder
         categories[candidate] = category
-        required_project_dirs.append(kb_root(vault_root) / "Notes" / "Research" / folder)
+        required_project_dirs.append(kb_root(vault_root).joinpath(*project_keys_module.RESEARCH_PARENT, folder))
         changed = True
         warnings.append(
             f"Auto-registered project key {candidate!r} (folder: {folder!r}"
@@ -1438,7 +1439,7 @@ def _resolve_path(
         predecessor=predecessor,
     )
     folder = vault_root / respell_new_path(
-        vault_root, placement.folder.relative_to(vault_root).as_posix()
+        vault_root, placement.folder.relative_to(vault_root).as_posix(), leaf_is_folder=True
     )
     stem = placement.stem
     from .governance import connector_boundary
@@ -1450,7 +1451,7 @@ def _resolve_path(
         )
         if inbox is not None:
             # The inbox is another tree, so its folders take their existing spellings too.
-            folder = vault_root / respell_new_path(vault_root, inbox)
+            folder = vault_root / respell_new_path(vault_root, inbox, leaf_is_folder=True)
         connector_boundary.require_create(vault_root, (folder / f"{stem}.md").relative_to(vault_root).as_posix())
     except ValueError as error:
         raise NoteError("WRITE_REFUSED", [], "target is unavailable") from error
@@ -1504,6 +1505,7 @@ def _render_note(
     bridge_review: str | None = None,
     summary: str | None = None,
     topics: list[str] | None = None,
+    sensitivity: Sequence[str] = (),
     verbatim_body: bool = False,
 ) -> str:
     lines = ["---"]
@@ -1515,6 +1517,8 @@ def _render_note(
         lines.append(f"summary: {yaml_scalar(summary)}")
     if topics is not None:
         lines.append("topics: [" + ", ".join(yaml_scalar(topic) for topic in topics) + "]")
+    if sensitivity:
+        lines.append(f"{sensitivity_classes.FIELD}: {yaml_flow_list(sensitivity)}")
 
     # Type-specific required fields, ordered per fixture convention.
     if note_type == "research-note":
@@ -1975,6 +1979,7 @@ def note(
     vocabulary_decision: dict[str, Any] | None = None,
     summary: str | None = None,
     topics: str | list[str] | None = None,
+    sensitivity: Sequence[str] | None = None,
     _return_prepared: bool = False,
     _defer_navigation: bool = False,
     _supersedes_target: str | None = None,
@@ -1997,6 +2002,11 @@ def note(
         or (summary and summary.splitlines() != [summary])
     ):
         raise NoteError("INVALID_NOTE", ["summary"], "summary must be one line of at most 1024 characters")
+    # Before anything is planned: an unknown class refuses the whole write.
+    try:
+        classes = sensitivity_classes.validated(root, sensitivity)
+    except sensitivity_classes.SensitivityError as error:
+        raise NoteError(error.code, ["sensitivity"], error.reason) from error
     home_set = homes_module.load(root)
     home_warnings = _homes_warnings(home_set)
     topic_writes: tuple[PlannedWrite, ...] = ()
@@ -2226,6 +2236,7 @@ def note(
         bridge_review=bridge_review,
         summary=summary,
         topics=topics,
+        sensitivity=classes,
         verbatim_body=_verbatim_body,
     )
     if _supersedes_target is not None:

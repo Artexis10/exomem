@@ -58,6 +58,7 @@ jobs:
       source_commit: ${{ steps.plan.outputs.source_commit }}
       publish: ${{ steps.plan.outputs.publish }}
       dry_run: ${{ steps.plan.outputs.dry_run }}
+      notes_publish: ${{ steps.plan.outputs.notes_publish }}
       latest: ${{ steps.plan.outputs.latest }}
       pypi: ${{ steps.plan.outputs.pypi }}
       pypi_present: ${{ steps.plan.outputs.pypi_present }}
@@ -112,9 +113,17 @@ jobs:
             exit 1
           fi
           version="${tag#v}"
+          # The notes job writes to GitHub only for a run of reviewed code: main, or the release tag itself. A dispatch
+          # from any other ref builds the notes of its tag and writes nothing, as a dry run does; an upload of unreviewed
+          # code would stay, because the upload path never replaces a published file.
+          notes_publish=false
+          if [[ "$DRY_RUN" != true && ("$GITHUB_REF" == refs/heads/main || "$GITHUB_REF" == "refs/tags/$tag") ]]; then
+            notes_publish=true
+          fi
           {
             echo "tag=$tag"
             echo "dry_run=$DRY_RUN"
+            echo "notes_publish=$notes_publish"
           } >> "$GITHUB_OUTPUT"
 
           tag_state=$(probe -H "Authorization: Bearer $GH_TOKEN" "$api/git/ref/tags/$tag")
@@ -431,6 +440,100 @@ jobs:
       - name: Record the original Python producer attempt
         id: producer
         run: echo "attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
+  # The user notes of each release: `release-notes.json` for the digest that reads it, and a What's new
+  # section at the top of the release page for the people who read it (scripts/release_notes_asset.py).
+  # Nothing waits for this job: when it fails it turns itself and the run red and stops no package, image or
+  # rollout. Every real run gives its notes to each release published since the start of the previous UTC month
+  # that lacks the file (the release list, 100 a page, until a page holds only releases older than that start),
+  # at most 40 a run, oldest first, and to the release a `workflow_dispatch` run names in its `tag` input, however
+  # old, so the operator can heal one named release. The notes come from each release's tag tree; the file is
+  # written with the code of the run that builds it, so a healed file has that run's schema.
+  # It runs after `build-artifacts` whatever that job's result. Only a real run writes to GitHub: the plan
+  # decides that (`notes_publish`: not a dry run, and on main or the release tag). Any other run builds the
+  # notes of its own tag and writes nothing.
+  release-notes:
+    needs: [plan, build-artifacts]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # One real run at a time, so two runs never upload the same file together; a run that waits is replaced by
+    # a newer one, which checks the same releases again. Runs that write nothing have their own group, so one
+    # never displaces a real run.
+    concurrency:
+      group: release-notes-${{ needs.plan.outputs.notes_publish == 'true' && 'publish' || 'dry-run' }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      DRY_RUN: ${{ needs.plan.outputs.notes_publish != 'true' }}
+    steps:
+      - name: Check out the notes tools from the workflow revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: |
+            infra/scripts
+            scripts/release_notes_asset.py
+            scripts/user_notes.py
+            src/exomem/release_notes_format.py
+
+      - name: Find the releases that lack their notes file
+        id: scan
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [[ "$DRY_RUN" == true ]]; then
+            tags="$TAG"
+          else
+            arguments=()
+            # A dispatch's tag is the one release this run was asked to serve; it joins the sweep whatever its age.
+            [[ "$EVENT" == workflow_dispatch ]] && arguments+=(--also "$TAG")
+            tags=$(python3 scripts/release_notes_asset.py missing "${arguments[@]}" | tr '\n' ' ')
+          fi
+          echo "tags=${tags% }" >> "$GITHUB_OUTPUT"
+          echo "Releases to publish notes for: ${tags:-none}"
+
+      # The full history and the version tags, without file contents: the notes of each release are found
+      # from the tags (scripts/user_notes.py generate). Only a run with something to publish pays for it.
+      - name: Check out the full history and version tags
+        if: ${{ steps.scan.outputs.tags != '' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .notes-history
+          fetch-depth: 0
+          fetch-tags: true
+          filter: blob:none
+
+      - name: Install uv
+        if: ${{ steps.scan.outputs.tags != '' }}
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          prune-cache: true
+
+      # The page is written before the upload, so a release that has the file has its page. A failure of one
+      # release does not stop the others, and fails this job when all have been tried.
+      - name: Publish the notes of those releases
+        if: ${{ steps.scan.outputs.tags != '' }}
+        env:
+          TAGS: ${{ steps.scan.outputs.tags }}
+        run: |
+          set -euo pipefail
+          arguments=()
+          [[ "$DRY_RUN" == true ]] && arguments+=(--dry-run)
+          read -ra tags <<<"$TAGS"
+          # The notes generator reads the Markdown and the front matter with the versions that uv.lock pins, and
+          # the release recovery script reads distribution names with `packaging`, which fastmcp requires. This
+          # checkout holds only the tools, so the project itself is not installed.
+          uv sync --frozen --no-dev --no-install-project
+          .venv/bin/python scripts/release_notes_asset.py publish \
+            --repo .notes-history --directory "$RUNNER_TEMP/release-notes" "${arguments[@]}" "${tags[@]}"
 
   # A dry run skips this job, because entering the pypi environment records a deployment.
   publish-pypi:

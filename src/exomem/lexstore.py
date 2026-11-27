@@ -1088,7 +1088,9 @@ SCHEMA_VERSION = 20
 _FTS_TOKENIZE = "tokenize=\"unicode61 remove_diacritics 0 categories 'L* N* Co M*'\""
 CATALOG_FOREGROUND_DELTA_CAP = 32
 #: Steps a lagging-delta catch-up may take beyond the ones its first lag needs.
-#: A lag that outgrows them keeps the full pass, which publishes under writes.
+#: A round that no longer fits them is not started; the rounds before it record
+#: their checkpoint and a lag-only catch-up continues. Only a catch-up with no
+#: complete round to record keeps the full pass, which publishes under writes.
 _CATCH_UP_SLACK_STEPS = 2
 #: A rebuild temp untouched this long, and held open by no connection, is the
 #: leftover of a killed build; the next rebuild removes it.
@@ -1234,12 +1236,17 @@ _SPACE_CHECK_EVERY = 64
 
 
 class _RebuildWaitingForSpace(Exception):
-    """A running rebuild found the volume's free bytes below the import reserve; the pass declines to wait."""
+    """A running rebuild found the volume's free bytes below the import reserve; the pass declines to wait.
 
-    def __init__(self, needed: int, free: int) -> None:
-        super().__init__(f"{free} bytes free, {needed} needed")
-        self.needed = needed
+    `footprint` is the bytes that the build's own temp and its journal held when it stopped. The build measures
+    them where it raises, because the rollback that follows gives back what an open transaction had written.
+    """
+
+    def __init__(self, reserve: int, free: int, footprint: int) -> None:
+        super().__init__(f"{free} bytes free, below the {reserve} reserve")
+        self.reserve = reserve
         self.free = free
+        self.footprint = footprint
 
 
 #: Progress floor of a full repair's rebuild (`foreground_priority.PassBudget`).
@@ -1407,7 +1414,9 @@ def _log_repair_finished(
     yields for foreground work, such as an apply that holds the mutation boundary.
     `declined_for` names the bound that ended a pass that declined for a moving
     source, or the refusal that left a catch-up's lag to a full pass, and is
-    absent for any other result. `space_wait` is the (needed, free) bytes of a pass that waits for space.
+    absent for any other result. `space_wait` is the (needed, free) bytes of a pass that waits for space: the
+    reserve plus the room the stopped build had taken, and the volume's free bytes when it stopped
+    (`_note_space_stop`).
     """
     fields: dict[str, object] = {
         "kind": kind,
@@ -6825,6 +6834,10 @@ class LexicalStore:
         # The (free bytes it needs, free bytes the volume has) of the last full pass that declined to wait for
         # space (`_rebuild_space_wait`); None for any other result.
         self._last_space_wait: tuple[int, int] | None = None
+        # The free bytes the next rebuild start must find, learned from the last build that a volume with too little
+        # room stopped mid-way (`_note_space_stop`); 0 until one does. It lives in memory, and a published rebuild
+        # clears it.
+        self._space_need_floor = 0
         self._last_catch_up_decline: CatchUpDecline | None = None
         # Seconds the last rebuild waited at its yields for foreground work:
         # requests and every wait for or hold of a mutation boundary.
@@ -9179,7 +9192,11 @@ class LexicalStore:
         settled by an earlier one (`_settled_catch_up_paths`, re-read under the
         last step's barrier). A step whose source moves rolls back and settles
         nothing; its paths stay in the lag. Steps beyond the first lag's need
-        come from `_CATCH_UP_SLACK_STEPS`; a lag that outgrows them returns False.
+        come from `_CATCH_UP_SLACK_STEPS`. A round starts only when the steps
+        left cover all of it. Otherwise the catch-up records the checkpoint its
+        complete rounds reached and returns False, with `_last_catch_up_advanced`
+        set so that the worker queues a lag-only catch-up. It declines as
+        outpaced only when no complete round can be recorded.
         """
         from . import freshness as freshness_module
 
@@ -9199,22 +9216,33 @@ class LexicalStore:
             # settled but unstamped, one more step carries the stamp.
             pending = sorted(lagging - self._settled_catch_up_paths(steps))
             pending = pending or sorted(lagging)[:cap]
-            while pending:
-                if taken >= budget:
-                    # Writes outran the round, but its steps may still have
-                    # applied everything up to a registry checkpoint.
-                    if self._stamp_outpaced_round(plans, steps, rows_at_start):
-                        self._last_catch_up_advanced = True
-                        log.info(
-                            "lexical catch-up advanced (outpaced) paths=%d steps=%d;"
-                            " queueing a lag-only catch-up",
-                            len(lagging),
-                            taken,
-                        )
-                        return False
-                    return _log_catch_up_decline(
-                        self, CatchUpDecline.OUTPACED, paths=len(lagging), steps=taken
+            if -(-len(pending) // cap) > budget - taken:
+                # The step budget stops a catch-up that writes keep outrunning,
+                # and the stop sits before a round, never inside one. A round
+                # that stopped partway holds rows for pages that the checkpoint
+                # of the rounds before it did not hold, so no checkpoint could be
+                # recorded and the worker would rebuild the whole catalogue
+                # (O(vault) reads and hashes) in the middle of an import.
+                # Stopping here records the last complete round and queues a
+                # lag-only catch-up.
+                # When the stop was not needed, because the writes were about to
+                # slow, the cost is one more catch-up: search trails the registry
+                # by about one round of writes while writes outrun the replay. The
+                # person searching during the import pays; the import's writes
+                # never wait.
+                if self._stamp_outpaced_round(plans, steps, rows_at_start):
+                    self._last_catch_up_advanced = True
+                    log.info(
+                        "lexical catch-up advanced (outpaced) paths=%d steps=%d;"
+                        " queueing a lag-only catch-up",
+                        len(lagging),
+                        taken,
                     )
+                    return False
+                return _log_catch_up_decline(
+                    self, CatchUpDecline.OUTPACED, paths=len(lagging), steps=taken
+                )
+            while pending:
                 taken += 1
                 chunk, pending = pending[:cap], pending[cap:]
                 # Taken before the step reads any file: an edit after it has an
@@ -10055,28 +10083,34 @@ class LexicalStore:
         setting that guards a volume against a full disk). A temp that is a plain copy or a first build then
         needs about one copy; a rebuild that parses every page again can need more, and `_watching_space` stops it
         at the reserve. The rebuild waits: that costs a stale search, where an early start would cost saves.
+        A build that a volume stopped mid-way raises the need to the reserve plus the room that its own temp and
+        journal had taken (`_space_need_floor`), so the retry does not copy the catalogue again only to stop at the
+        same place. Bytes that another writer took meanwhile are not part of that room. A floor
+        that outlives the pressure that set it, such as an import's pages since deleted, makes the rebuild wait for room
+        it no longer needs: search stays stale until the volume holds the floor or the process restarts, and the person
+        searching pays. A published rebuild clears the floor.
         A volume whose free space cannot be read does not wait: that is no evidence that space is short.
         """
         from . import cloud_import
 
         wal, _shm = self._wal_shm_paths(self.path)
-        needed = cloud_import.reserve_bytes_from_env()
-        for member in (self.path, wal):
-            with contextlib.suppress(OSError):  # a missing member holds no bytes
-                needed += member.stat().st_size
+        needed = cloud_import.reserve_bytes_from_env() + self._bytes_held(self.path, wal)
+        needed = max(needed, self._space_need_floor)
         try:
             free = shutil.disk_usage(self.path.parent).free
         except OSError:
             return None
         return None if free >= needed else (needed, free)
 
-    def _watching_space(self, items: Iterable[_Item]) -> Iterator[_Item]:
+    def _watching_space(self, items: Iterable[_Item], temp_path: Path) -> Iterator[_Item]:
         """Yield `items`; stop the build when the volume's free bytes fall below the import reserve.
 
         It wraps a rebuild's bulk loops, so the check runs at the loops' own yield points and costs one `statvfs`
         for each `_SPACE_CHECK_EVERY` pages. It covers a build that outgrows its first estimate, such as one that
         parses every page again, and a chunk of an import that starts while the build runs (the import's own
         check happens at its start only). A volume whose free space cannot be read does not stop the build.
+        The stop carries the bytes that the build's own `temp_path` family holds, measured here before the
+        rollback that follows gives back its open transaction.
         """
         from . import cloud_import
 
@@ -10088,8 +10122,32 @@ class LexicalStore:
                 except OSError:
                     free = None
                 if free is not None and free < reserve:
-                    raise _RebuildWaitingForSpace(reserve, free)
+                    journal = temp_path.with_name(f"{temp_path.name}-journal")
+                    footprint = self._bytes_held(temp_path, *self._wal_shm_paths(temp_path), journal)
+                    raise _RebuildWaitingForSpace(reserve, free, footprint)
             yield item
+
+    @staticmethod
+    def _bytes_held(*members: Path) -> int:
+        """The bytes that the named files hold; a missing one holds none."""
+        total = 0
+        for member in members:
+            with contextlib.suppress(OSError):
+                total += member.stat().st_size
+        return total
+
+    def _note_space_stop(self, stop: _RebuildWaitingForSpace) -> None:
+        """Record what a build that ran out of room needed, as the next start check measures it.
+
+        The next start needs the reserve plus the room that this build's own temp and journal had taken, to get
+        as far; that figure is the floor, and the log's `space_needed_bytes` carries it with the volume's free
+        bytes when the build stopped. The volume's drop since the start check is not the build's need: an import
+        that fills the volume while the build runs takes bytes that the build never held, and counting them would
+        keep the repair waiting for room that the build does not need. The footprint is `stop.footprint`, measured
+        where the build stopped: the temp's size after the rollback would miss what that rollback gave back.
+        """
+        self._space_need_floor = stop.reserve + stop.footprint
+        self._last_space_wait = (self._space_need_floor, stop.free)
 
     @call_spans.timed("lexical.rebuild_atomic")
     def rebuild_atomic(self) -> bool:
@@ -10224,8 +10282,8 @@ class LexicalStore:
                         self._last_parked_seconds = foreground_priority.pass_waited() - parked_before
             except _RebuildWaitingForSpace as e:
                 # The temp is removed below; the worker retries on its schedule, and the gate above waits until
-                # the volume holds one more copy of the catalogue and the reserve.
-                self._last_space_wait = (e.needed, e.free)
+                # the volume holds what this build had taken plus the reserve.
+                self._note_space_stop(e)
                 return self._decline_rebuild(_WAITING_FOR_SPACE)
             except sqlite3.Error as e:
                 if classify_sqlite_error(e) == "transient":
@@ -10249,6 +10307,7 @@ class LexicalStore:
 
         if published:
             self._last_rebuild_result = "published"
+            self._space_need_floor = 0
             with self._lock:
                 # A published current catalog clears the disposable-failure flag
                 # and every stale attestation; the persisted meta triples let the
@@ -10513,6 +10572,9 @@ class LexicalStore:
         """
         conn = self._connect_setup(temp_path)
         try:
+            # The refusal keeps a write-ahead log from holding the catalogue twice, which the one-copy space gate
+            # (`_rebuild_space_wait`) does not count. Fired wrongly, on a filesystem that cannot switch modes, every
+            # rebuild fails and search stays stale until the filesystem changes: the person searching pays.
             if not self._use_rollback_journal(conn):
                 raise sqlite3.OperationalError("lexical build temp refused rollback-journal mode")
         except BaseException:
@@ -10568,7 +10630,7 @@ class LexicalStore:
                 if counts is None:
                     pages = foreground_priority.yielding_in_bulk(members.items())
                     for path, (in_kb, in_vault) in (
-                        self._watching_space(pages) if watch_space else pages
+                        self._watching_space(pages, temp_path) if watch_space else pages
                     ):
                         if cancel is not None and cancel.is_set():
                             raise _DetachedBuildCancelled
@@ -10642,7 +10704,7 @@ class LexicalStore:
             basis = self._seed_from_live(conn, identity)
             if basis is None:
                 counts = self._reconcile_catalog(
-                    conn, members, signatures, watch_space=watch_space
+                    conn, members, signatures, watch_temp=temp_path if watch_space else None
                 )
                 if counts is not None:
                     return counts, "current"
@@ -10761,7 +10823,7 @@ class LexicalStore:
         members: dict[Path, list[bool]],
         signatures: dict,
         *,
-        watch_space: bool = False,
+        watch_temp: Path | None = None,
     ) -> tuple[int, int, int, int] | None:
         """Bring a catalogue's page rows to one walk, parsing only the pages that moved.
 
@@ -10780,8 +10842,9 @@ class LexicalStore:
 
         Returns the (reparsed, removed, inserted, unchanged) page counts, or None
         when an owner row lacks its full-text row (`_index_rows_missing`). With
-        ``watch_space`` the walk loop raises `_RebuildWaitingForSpace` when the
-        volume's free bytes fall below the import reserve (`_watching_space`).
+        ``watch_temp``, the temp file that `conn` holds, the walk loop raises
+        `_RebuildWaitingForSpace` when the volume's free bytes fall below the
+        import reserve (`_watching_space`).
         """
         from . import freshness as freshness_module
         from . import semantic_index
@@ -10847,7 +10910,7 @@ class LexicalStore:
             # lock or boundary.
             pages = foreground_priority.yielding_in_bulk(walk.items())
             for rel, (path, mtime_ns, in_kb, in_vault) in (
-                self._watching_space(pages) if watch_space else pages
+                self._watching_space(pages, watch_temp) if watch_temp is not None else pages
             ):
                 row = stored.get(rel)
                 if row is None:

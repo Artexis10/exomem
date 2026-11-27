@@ -180,6 +180,8 @@ def pause(vault: Path, staging: Path, *, export_id: str, cell_id: str, media_mod
     evicted = _evicted(vault, media_mode)
     listed = list(vault_portability.iter_archive_members(vault))
     stored = [(entry["path"], entry["size"]) for entry in evicted]
+    # A case split fails the pack's own check after every copy; refused here on the listed paths instead.
+    vault_portability.check_path_collisions([member.path for member in listed] + [path for path, _ in stored])
     # Refused on the listed sizes before any copy, so an export too large to upload costs the hold nothing.
     if planned_archive_bytes([(member.path, member.source_path.lstat().st_size) for member in listed] + stored) > max_bytes:
         raise ExportRefused(EXPORT_TOO_LARGE)

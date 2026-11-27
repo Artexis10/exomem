@@ -28,6 +28,77 @@ def templates(activate: str, read: str, search: str) -> dict[str, str]:
     }
 
 
+def _callable(command: str) -> bool:
+    """Whether this surface lets the caller call `command`: a move never names a tool that would fail."""
+    tools = capabilities.active_tools(command)
+    active = capabilities.current_active_surface()
+    # All names here are command-registry aliases, not interpretations of a user message.
+    names = (command, *tools, capabilities.active_spell_call(command, {})[0])
+    return bool(tools) and (active is None or bool(active.callable_commands.intersection(names)))
+
+
+def _later_turns(continuity: str | None) -> str | None:
+    """The later-turns move for this call, or None when the call gets none.
+
+    One recall at the start of a conversation left later questions answered from general
+    knowledge, although the user's recorded view existed (incidents of 2026-11-24 and 2026-11-25). Only a
+    hookless conversation client lacks per-turn guidance, and only a level that recalls
+    proactively asks for it; a conversation's first recall carries the move once.
+    """
+    from . import prominence
+    from .governance import principal
+
+    who = principal.current_principal()
+    if continuity or who is None or who.surface != "mcp":
+        return None
+    if prominence.context_for_surface(prominence.detect_surface()) != prominence.CONVERSATION_CONTEXT:
+        return None
+    if not prominence.engages_any_subject(prominence.resolve()):
+        return None
+    if not (_callable("search_memory") and _callable("activate_context")):
+        return None
+    text = (
+        "Before you answer a later turn with a new question or claim on the user's life, work or a topic their "
+        f"memory lists, {capabilities.active_call_text('search_memory', {})} it or call "
+        f"{capabilities.active_call_text('activate_context', {})} again: they may keep a view on it. "
+        "One about nothing of theirs needs none."
+    )
+    if len(text) > MAX_CHARS:
+        raise ValueError("later-turns prose exceeds its protocol bound")
+    return text
+
+
+#: The largest share of a caller's requested characters that the later-turns move may hold back.
+#: A caller that asks for a small packet keeps its map; the move then rides only on room left over.
+LATER_TURNS_MAX_SHARE = 0.1
+
+
+def later_turns_reserve(continuity: str | None, requested_chars: int) -> int:
+    """Characters the packet holds back so a full map cannot crowd out the later-turns move."""
+    try:
+        size = len(_later_turns(continuity) or "")
+    except Exception:  # noqa: BLE001 - an optional move never fails the read
+        return 0
+    return size if size <= requested_chars * LATER_TURNS_MAX_SHARE else 0
+
+
+def attach_later_turns(packet: dict[str, Any], continuity: str | None) -> None:
+    """Add the later-turns move to an MCP agent's first recall of a conversation, within its budget."""
+    try:
+        text = _later_turns(continuity)
+        if text is None:
+            return
+        budget = packet.get("budget")
+        if budget is not None:
+            used = budget.get("used_chars", 0)
+            if used + len(text) > budget["limit_chars"]:
+                raise ValueError("no room for the later-turns move")
+            budget["used_chars"] = used + len(text)
+        packet["later_turns"] = text
+    except Exception:  # noqa: BLE001 - an optional move never fails the read
+        packet.setdefault("diagnostics", []).append("later_turns_unavailable")
+
+
 def state(packet: Mapping[str, Any], *, search: bool = False) -> str | None:
     if (packet.get("abstention") or {}).get("reason") == activation_result.INDEX_WARMING:
         return activation_result.INDEX_WARMING
@@ -70,13 +141,8 @@ def move(packet: Mapping[str, Any], *, search: bool = False) -> dict[str, Any] |
     if selected is None:
         return None
     command = {activation_result.INDEX_WARMING: "search_memory", "ambiguous": "activate_context", "slice_empty": "search_memory", "related": "read_memory", "task_read": "read_memory", "skill_check": "read_memory"}.get(selected)
-    if command is not None:
-        tools = capabilities.active_tools(command)
-        active = capabilities.current_active_surface()
-        # All names here are command-registry aliases, not interpretations of a user message.
-        names = (command, *tools, capabilities.active_spell_call(command, {})[0])
-        if not tools or (active is not None and not active.callable_commands.intersection(names)):
-            return None
+    if command is not None and not _callable(command):
+        return None
     text = templates(
         capabilities.active_call_text("activate_context", {}),
         capabilities.active_call_text("read_memory", {}),

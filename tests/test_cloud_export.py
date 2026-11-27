@@ -169,7 +169,7 @@ def test_completed_export_uses_range_reads_and_rejects_corruption_and_expired_ve
     verified = cloud_export.verify_remote_export(f"{storage['base']}{signed_path}",
         cell_id=CELL, archive_bytes=packed["bytes"], archive_sha256=packed["sha256"], max_bytes=1024**3)
     assert verified == {"bytes": len(archive), "sha256": packed["sha256"], "verified": True}
-    assert PartStore.ranges and all(end - start < 1024 * 1024 for start, end in PartStore.ranges)
+    assert PartStore.ranges and all(end - start < cloud_export.VERIFY_BLOCK_BYTES for start, end in PartStore.ranges)
     monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", CELL)
     monkeypatch.setenv("EXOMEM_EXPORT_VERIFY_URL", f"{storage['base']}{signed_path}")
     verification_log = tmp_path / "outcome.json"
@@ -186,6 +186,29 @@ def test_completed_export_uses_range_reads_and_rejects_corruption_and_expired_ve
         with pytest.raises(cloud_export.ExportRefused, match="^EXPORT_FAILED$"):
             cloud_export.verify_remote_export(f"{storage['base']}/completed?versionId={version}",
                 cell_id=CELL, archive_bytes=len(archive), archive_sha256=packed["sha256"], max_bytes=1024**3)
+
+
+def test_a_remote_verification_downloads_the_archive_once(vault, tmp_path, storage, monkeypatch):
+    """Defect: the verifier reads the archive once per entry check and again for its digest, so a
+    multi-gigabyte export spends its whole deadline downloading and fails after a good upload."""
+    # Small blocks make an archive of a few hundred KiB many times the two-block cache, as a real one is.
+    monkeypatch.setattr(cloud_export, "VERIFY_BLOCK_BYTES", 64 * 1024)
+    (vault / "Bulk").mkdir()
+    for number in range(60):
+        (vault / "Bulk" / f"note-{number}.md").write_text("# Bulk\n\n" + os.urandom(6000).hex(), encoding="utf-8")
+    urls = [f"{storage['base']}/part-{number}" for number in range(200)]
+    status, packed = _cell_export(vault, tmp_path, storage, part_bytes=1024 * 1024, urls=urls)
+    assert status == 0, packed
+    archive = b"".join(storage["parts"][f"/part-{number}"] for number in range(packed["parts"]))
+    assert len(archive) > 8 * cloud_export.VERIFY_BLOCK_BYTES
+    PartStore.objects["/completed?versionId=once"] = archive
+    PartStore.ranges = []
+    verified = cloud_export.verify_remote_export(f"{storage['base']}/completed?versionId=once", cell_id=CELL,
+        archive_bytes=len(archive), archive_sha256=packed["sha256"], max_bytes=1024**3)
+    assert verified["verified"] is True
+    downloaded = sum(end - start + 1 for start, end in PartStore.ranges)
+    # The reads before the entries and after them may fetch a few blocks twice; a second pass fetches them all.
+    assert downloaded <= len(archive) + 4 * cloud_export.VERIFY_BLOCK_BYTES
 
 
 def test_a_refused_verification_names_its_cause_but_never_the_signed_url(vault, tmp_path, storage, monkeypatch):
