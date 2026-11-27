@@ -472,9 +472,15 @@ def test_with_the_speech_engine_on_a_kept_recording_queues_no_speech_job_and_a_k
     monkeypatch.setattr(extract, "extract_text", lambda *_a, **_k: pytest.fail("the speech engine ran"))
     frames = [(1.0, np.ones(embeddings.CLIP_DIM, dtype=np.float32)), (2.0, np.ones(embeddings.CLIP_DIM, dtype=np.float32))]
     monkeypatch.setattr(embeddings, "embed_video_frames", lambda _view: frames)
+    asked: list[str] = []
+    real_request = adoption_run._request_extraction
+    monkeypatch.setattr(
+        adoption_run, "_request_extraction", lambda root, planned, *rest: asked.append(planned["original_path"]) or real_request(root, planned, *rest)
+    )
 
     _, applied = _adopt(vault)
 
+    assert asked == []  # a recording whose transcript the plan keeps is never asked for a speech job, only for frame vectors
     stored_audio = vault / applied["outcomes"][f"{STAGE}/{audio.name}"]["artifact_path"]
     stored_video = vault / applied["outcomes"][f"{STAGE}/{video.name}"]["artifact_path"]
     ledger = media_jobs.MediaJobStore(vault)
@@ -596,6 +602,73 @@ def test_a_held_page_files_as_text_when_the_window_that_held_its_recording_is_di
     assert applied["apply_result"]["kept_speech"]["unpaired"] == {kept_speech.NO_RECORDING: 1}
     [text] = [page for page in _stored_pages(vault) if page not in pages]
     assert "Line 7 of the talk." in text.read_text(encoding="utf-8")
+
+
+def test_a_held_page_files_as_text_once_when_the_run_of_the_window_that_held_its_recording_is_cancelled(
+    duplicate_index: Path, owner: Path, monkeypatch: pytest.MonkeyPatch, long_transcripts: None
+) -> None:
+    vault = duplicate_index
+    audio, audio_page = _transcribed(owner, monkeypatch, "interview.m4a", lines=40)
+    recording_window = _series_window(vault, audio, series=(audio, audio_page))
+    page_window = _series_window(vault, audio_page, series=(audio, audio_page))
+    pages = _stored_pages(vault)
+    recording_run, _ = consume._plan(vault, f"_Imports/{recording_window}")
+    run_id, plan_id = consume._plan(vault, f"_Imports/{page_window}")
+    held = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=TODAY)
+    assert held["apply_stop"]["code"] == kept_speech.RECORDING_PENDING and not held["outcomes"]
+    adoption_run.cancel(vault, run_id=recording_run, why="the person stopped that window")  # its filing step is done: nothing files it
+
+    applied = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, continuation=held["continuation"], today=TODAY)
+
+    assert applied["phase"] == "applied" and "apply_stop" not in applied
+    assert applied["apply_result"]["kept_speech"]["held"] == 0
+    assert applied["apply_result"]["kept_speech"]["unpaired"] == {kept_speech.NO_RECORDING: 1}  # once, not once for each call
+    [text] = [page for page in _stored_pages(vault) if page not in pages]
+    assert "Line 7 of the talk." in text.read_text(encoding="utf-8")
+
+
+def test_a_page_is_not_held_when_the_configuration_turns_the_duplicate_index_off(
+    duplicate_index: Path, owner: Path, monkeypatch: pytest.MonkeyPatch, long_transcripts: None
+) -> None:
+    vault = duplicate_index
+    audio, audio_page = _transcribed(owner, monkeypatch, "interview.m4a", lines=40)
+    page_window = _series_window(vault, audio_page, series=(audio_page,))
+    pages = _stored_pages(vault)
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")  # no index will ever answer: waiting cannot change that
+
+    run_id, plan_id = consume._plan(vault, f"_Imports/{page_window}")
+    plan = adoption_run.AdoptionRunStore(vault).load(run_id)["plan"]
+    applied = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=TODAY)
+
+    assert plan["kept_speech"]["awaiting"] == 0 and plan["kept_speech"]["unpaired"] == {kept_speech.NO_RECORDING: 1}
+    assert applied["phase"] == "applied" and applied["apply_result"]["kept_speech"]["held"] == 0
+    [text] = [page for page in _stored_pages(vault) if page not in pages]
+    assert "Line 7 of the talk." in text.read_text(encoding="utf-8")
+
+
+def test_deciding_whether_a_recording_is_coming_loads_no_adoption_run_of_the_vault(
+    duplicate_index: Path, owner: Path, monkeypatch: pytest.MonkeyPatch, long_transcripts: None
+) -> None:
+    vault = duplicate_index
+    audio, audio_page = _transcribed(owner, monkeypatch, "interview.m4a", lines=40)
+    recording_window = _series_window(vault, audio, series=(audio, audio_page))
+    page_window = _series_window(vault, audio_page, series=(audio, audio_page))
+    recording_run, recording_plan = consume._plan(vault, f"_Imports/{recording_window}")
+    loads: list[str] = []
+    for name in ("runs_by_stage", "runs_of_stage", "_readable_runs"):  # each reads every run that the vault has ever kept
+        real = getattr(adoption_run.AdoptionRunStore, name)
+        monkeypatch.setattr(
+            adoption_run.AdoptionRunStore, name,
+            lambda *args, _name=name, _real=real, **kwargs: loads.append(_name) or _real(*args, **kwargs),
+        )
+
+    run_id, plan_id = consume._plan(vault, f"_Imports/{page_window}")  # plans the page: its recording is still to come
+    held = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=TODAY)  # holds it, as each retry of the filer does
+    consume._apply(vault, recording_run, recording_plan)
+    applied = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, continuation=held["continuation"], today=TODAY)
+
+    assert held["apply_stop"]["code"] == kept_speech.RECORDING_PENDING and applied["phase"] == "applied"
+    assert loads == []
 
 
 @pytest.fixture

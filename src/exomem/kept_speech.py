@@ -231,12 +231,15 @@ def find_recording(root: Path, sha256: str, size: int, *, prefer: str | None = N
     plan that named its recording applies when the index cannot answer. Otherwise the duplicate index proposes
     candidates and raises `LookupUnavailable` when it cannot answer. A Source's own record of its original's SHA-256 and
     size is its identity, as it is for an attach (`speech_attach.bind`), so no original is read again: a hash of
-    every large recording would cost more than the transcript it saves.
+    every large recording would cost more than the transcript it saves. While the configuration keeps no duplicate
+    index the answer is None as well: waiting never changes that, so it is no case for `LookupUnavailable`.
     """
     candidates = [prefer] if prefer else []
     for recording in candidates:
         if _binds(root, recording, sha256, size):
             return recording
+    if not lexstore.duplicate_index_configured():
+        return None  # the configuration retired the index: no stored recording can be found, now or on a retry
     found = lexstore.payload_candidates(root, sha256)
     if found is None:
         raise LookupUnavailable

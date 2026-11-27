@@ -147,7 +147,7 @@ The selection rules that `exomem import` and `exomem cloud import` share SHALL s
 
 ### Requirement: A page waits for a recording that another window has yet to file
 
-A complete page whose recording no Source holds yet SHALL wait while another window of the same import series still holds that recording. It SHALL wait as a retryable item with the code `KEPT_EXTRACTION_RECORDING_PENDING`, and apply SHALL write no Source and record no outcome for it. A later `apply` or `file` call SHALL pair the page once the recording is stored.
+A complete page whose recording no Source holds yet SHALL wait while another window of the same import series still holds that recording and its filing is unfinished. It SHALL wait as a retryable item with the code `KEPT_EXTRACTION_RECORDING_PENDING`, and apply SHALL write no Source and record no outcome for it. A later `apply` or `file` call SHALL pair the page once the recording is stored.
 
 #### Scenario: A page whose window is filed before its recording's window
 
@@ -157,12 +157,22 @@ A complete page whose recording no Source holds yet SHALL wait while another win
 
 ### Requirement: A page stops waiting when no window will file its recording
 
-A page SHALL wait in the same way, under `KEPT_EXTRACTION_LOOKUP_UNAVAILABLE`, while the duplicate index cannot say which Source holds its recording. When no window of the series is still to file the recording, the page SHALL file as a text Source, and the result SHALL count it under `KEPT_EXTRACTION_NO_RECORDING`, which is not a mismatch.
+A page SHALL wait in the same way, under `KEPT_EXTRACTION_LOOKUP_UNAVAILABLE`, while the duplicate index fails for now. When no window is still to file the recording, or the configuration turns the index off, the page SHALL file as a text Source and the result SHALL count it under `KEPT_EXTRACTION_NO_RECORDING`, which is not a mismatch.
 
 #### Scenario: The recording's window is discarded
 
 - **WHEN** a page waits and the person discards the window that held its recording
 - **THEN** the next call files the page as a text Source and counts it under `KEPT_EXTRACTION_NO_RECORDING`
+
+#### Scenario: The recording's window is cancelled
+
+- **WHEN** a page waits and the person cancels the run of the window that held its recording
+- **THEN** the next call files the page as a text Source and counts it under `KEPT_EXTRACTION_NO_RECORDING` once
+
+#### Scenario: The configuration turns the duplicate index off
+
+- **WHEN** a page's recording is stored nowhere and the configuration turns the duplicate index off
+- **THEN** the page files as a text Source and no call waits for it
 
 #### Scenario: The duplicate index cannot answer
 

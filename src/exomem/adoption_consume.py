@@ -43,15 +43,6 @@ def _stay(reason: str) -> tuple[bool, str]:
     return STAYS.get(reason, (False, "{n} " + reason))
 
 
-#: The reasons that a staged file stays only because adoption has not reached it yet. Every other reason needs the person.
-_NOT_REACHED = ("pending", OUTSIDE_RUN)  # nosemgrep: ep-word-set -- two of the closed result keys of `STAYS`, not vocabulary.
-
-
-def to_come(reason: str) -> bool:
-    """Whether a member that stays for this reason is still to be filed by a run that carries on."""
-    return reason in _NOT_REACHED  # nosemgrep: ep-word-membership -- a closed result key of `STAYS`.
-
-
 def is_filed(reason: str) -> bool:
     """Whether a member that stays for this reason is in the Knowledge Base."""
     return _stay(reason)[0]
