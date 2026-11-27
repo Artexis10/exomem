@@ -463,10 +463,11 @@ prediction stays active and ranked, for the same reason a refuted experiment sta
 
 ### Recording a tried approach
 
-When you ran a test, trial or comparison that tried a change, write or update its `experiment` note in that
-turn. The note's `outcome:` is the experiment's verdict; a `## Prediction` unit keeps its own `verdict:`. Use `refuted` when
-the result rules out the hoped-for gain, including a change that made the result worse: say the direction and
-size in the body. Use `inconclusive` when the interval includes no change or is too wide to say. The body holds:
+A tried approach is a change that was tried to improve a result and compared before and after, with an outcome
+that a later session needs. A verification run after an edit, such as tests that pass or fail, is not one.
+Record it as an `experiment` note, as the capture disposition allows. The note's `outcome:` is the experiment's
+verdict; a `## Prediction` unit keeps its own `verdict:`. Use `refuted` when the result rules out the hoped-for
+gain, including a change that made the result worse: say the direction and size in the body. Use `inconclusive` when the interval includes no change or is too wide to say. The body holds:
 
 - the intent: what the run was meant to learn or achieve;
 - what changed, with its commit or run id;
@@ -474,7 +475,7 @@ size in the body. Use `inconclusive` when the interval includes no change or is 
 - what would reopen it: the change that makes a retry worth trying.
 
 A concluded experiment's body is read-only, so a retry is a new `experiment` note that links the earlier one.
-When the project keeps a run record, give the record a link to this note; the record never copies the verdict.
+When the project keeps a run record, give the record a link to this note; the note holds the verdict.
 
 ### Recording a degree of belief
 

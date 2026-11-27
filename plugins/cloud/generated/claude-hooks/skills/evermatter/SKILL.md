@@ -224,8 +224,8 @@ inside the agent's turn, never as an implied background job.
 A landing includes a durable conclusion, a recurring entity with reusable facts,
 a method actually carried out for which the user reports the result, an explicit
 intent/commitment, or an observed event. A reusable method, parameter comparison,
-and diagnosed failure route respectively to a how-to note, experiment, and failure. After you ran a test or
-trial of a change, write or update its experiment note in the same turn: see "Recording a tried approach" in
+and diagnosed failure route respectively to a how-to note, experiment, and failure. A tried approach's outcome
+is an experiment note, as the capture disposition allows: see "Recording a tried approach" in
 [page-types](references/page-types.md).
 A landing also includes, saved at its true strength (never more certain, more general
 or more settled than its source made it), a held view or an unsure report (attributed,
