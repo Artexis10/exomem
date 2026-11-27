@@ -397,7 +397,11 @@ def replay_stop_event() -> threading.Event | None:
 
 
 def replay_stopping() -> bool:
-    """Whether this thread replays a queued save whose drainer is stopping; every dispatcher wait ends then."""
+    """Whether this thread replays a queued save whose drainer is stopping.
+
+    The warm-up wait, the turn wait and the store queue wait end then. A guard wait inside one
+    attempt still runs to its own short bound.
+    """
     stop = replay_stop_event()
     return stop is not None and stop.is_set()
 
