@@ -10,3 +10,7 @@ The Records command's `create` and `validate` of a new collection SHALL accept a
 #### Scenario: A malformed id is refused, not replaced
 - **WHEN** a client creates a collection from a manifest whose `exomem_id` is not a UUID
 - **THEN** the create is refused with `INVALID_COLLECTION_ID` and nothing is written
+
+#### Scenario: A revision with the text the collection was created from
+- **WHEN** a client validates or revises an existing collection with a manifest that has no `exomem_id` line
+- **THEN** the manifest takes that collection's own id, and a manifest that names another id is still refused

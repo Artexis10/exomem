@@ -10,7 +10,7 @@
 ## 2a. New collection id
 
 - [x] 2a.1 Assign a missing `exomem_id` in Records and Planning `create` and `validate`, through the existing id helper, and in the store's create routing; keep the malformed-id refusal; mark the id optional in `describe` and drop the examples' fixed ids.
-- [x] 2a.2 Test: Records and Planning creates without an id commit and name the assigned id; a malformed id is refused; `describe`'s store example creates.
+- [x] 2a.2 Test: Records and Planning creates without an id commit and name the assigned id; a revision with the same id-less text validates; a malformed id is refused; `describe`'s store example creates.
 
 ## 3. Proof
 
