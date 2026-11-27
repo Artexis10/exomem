@@ -403,7 +403,7 @@ In store mode, once stage 2 ships, every stored file SHALL carry a canonicity re
 - **THEN** it sees the file's origin, hash, size, format and derivation
 
 ### Requirement: Migration into the store is verified and reversible
-Exomem SHALL migrate a file-mode vault into store mode offline. The migration SHALL load every page's exact bytes, copy the lexical and reference rows, and stage the graph rows from one fresh derivation of the files, in the derivation's row order and with its row ids. It SHALL verify before activation that every staged row equals that derivation, that a projection of every page reproduces the original bytes, and that no loaded file changed since it was loaded. It SHALL report how many graph rows were present in only one of the graph sidecar and the derivation, with the first differing keys, and SHALL NOT refuse for that difference. Reverting to file mode SHALL first project every queued intent, including a full projection when projection was off. It SHALL refuse while held corrections or held deletions remain, unless they are exported for review. Exporting a held item SHALL move the person's held bytes into the export and project the store's version of that file, so the rebuild does not apply the held edit. It SHALL export the audit trail, the canonicity records and the stored relationships' history, which file mode has no tables for. After those steps, stopping the store and rebuilding the file-mode sidecars from the projected Markdown SHALL restore file mode with the same pages.
+Until file mode retires (design D15), a migration SHALL be reversible by rollback; after that, a backup restore is the undo. Exomem SHALL migrate a file-mode vault into store mode offline. The migration SHALL load every page's exact bytes, copy the lexical and reference rows, and stage the graph rows from one fresh derivation of the files, in the derivation's row order and with its row ids. It SHALL verify before activation that every staged row equals that derivation, that a projection of every page reproduces the original bytes, and that no loaded file changed since it was loaded. It SHALL report how many graph rows were present in only one of the graph sidecar and the derivation, with the first differing keys, and SHALL NOT refuse for that difference. Reverting to file mode SHALL first project every queued intent, including a full projection when projection was off. It SHALL refuse while held corrections or held deletions remain, unless they are exported for review. Exporting a held item SHALL move the person's held bytes into the export and project the store's version of that file, so the rebuild does not apply the held edit. It SHALL export the audit trail, the canonicity records and the stored relationships' history, which file mode has no tables for. After those steps, stopping the store and rebuilding the file-mode sidecars from the projected Markdown SHALL restore file mode with the same pages.
 
 #### Scenario: Migration preserves every page byte
 - **WHEN** a vault is migrated and then fully projected to an empty directory
@@ -586,12 +586,17 @@ Once the owner's vault has switched, the restricted-caller read budgets pass, st
 - **THEN** it creates a file-mode vault
 
 ### Requirement: A managed upgrade migrates a file-mode vault
-From the release that makes store mode the default, a managed upgrade SHALL migrate a file-mode vault after a backup, through the verified migration. A failed verification SHALL leave the vault in file mode and report the differing tables. An owner SHALL be able to decline the migration. A vault under a multi-host writer lease SHALL keep file mode. Rollback SHALL remain available until file mode retires.
+From the release that makes store mode the default, a managed upgrade SHALL migrate a file-mode vault, where `store-mode migrate` admits store mode, after a complete product-backup snapshot. Without a reachable backup target it SHALL NOT migrate. A refusal at any step, preflight included, or a failed verification SHALL leave file mode and report why. An owner SHALL be able to decline. Rollback SHALL remain until file mode retires.
 
 #### Scenario: A failed verification at upgrade keeps file mode
 - **WHEN** a managed upgrade migrates a vault and the staged store differs from a fresh derivation
 - **THEN** the vault stays in file mode
 - **AND** the upgrade reports the differing tables
+
+#### Scenario: A vault with case twins keeps file mode at upgrade
+- **WHEN** a managed upgrade finds `Notes/Research food` beside `Notes/Research Food`
+- **THEN** the migration preflight refuses with `CASE_COLLISION`, naming the pair and the path-variants merge
+- **AND** the vault stays in file mode
 
 ### Requirement: An outside-edit import gets name advice, not a hold
 When an outside-edit import runs, Exomem SHALL run the vocabulary and folder steps on it as advice. After the file's bytes have been stable for 2 s, a folder name those steps would steer, or a term that needs a vocabulary decision, SHALL raise one review item per path and suggested spelling, naming the registered spelling. The import SHALL keep the person's bytes. Exomem SHALL NOT hold an outside edit only for a name.

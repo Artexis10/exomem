@@ -295,16 +295,18 @@ The owner decided on 2026-11-27 that the store is the source of truth and the Ma
 
 1. The owner's vault has switched (7.4).
 2. The restricted-caller read budgets of 3.2 pass, because other vaults have restricted callers.
-3. Store paths fold case, so store mode can serve a vault on a case-insensitive file system such as macOS (D4).
+3. Store paths fold case (D4 names the need). Folding means: the store treats two paths that differ only by case as one key, a write that would create a case twin lands on the existing path, and a migration preflight refuses a vault that already holds case twins with `CASE_COLLISION`, naming each pair and the path-variants merge as the fix. Until this passes, the default changes only on case-sensitive file systems.
 4. The outcome evaluation (7.3) shows no case where store mode loses what file mode finds.
-5. Every `PAGES` entry in `cli_fence.ACCESS` is served from the store or retired. Today `setup`, `init`, `personalize`, `import`, the cell commands, `collections create` and `collections migrate`, `index`, `relations` and `warm` refuse on a store-mode vault.
+5. Every `PAGES` entry in `cli_fence.ACCESS` is served from the store or retired. The entries that refuse on a store-mode vault today include `setup`, `init`, `personalize`, `import`, the cell commands, the collection commands, `index`, `relations` and `warm`.
 
 A platform gets the new default only where `store-mode migrate` admits it. Windows keeps file mode as its default until native Windows acceptance passes (6.3).
 
 From that release:
 
-- `exomem init` creates a new vault in store mode. It creates the collection store as part of that command, so D1's rule that no other command creates a store as a side effect still holds.
-- A managed upgrade migrates a file-mode vault: backup first, then the verified migration of D8. A vault without a collection store gets one in the same explicit step. A migration that fails verification leaves the vault in file mode and reports the differing tables.
+- `exomem init` creates a new vault in store mode.
+- A managed upgrade migrates a file-mode vault. First it takes a complete snapshot with the product backup, to its configured target; with no configured or reachable target it does not migrate and says why. Then it runs the verified migration of D8, offline. The upgrade states the expected downtime before it starts; from the spike's numbers it is about 2.5 minutes on a vault of 14,000 pages.
+- D1's rule that store mode never creates a store as a side effect is amended: `init` and the upgrade's migration step create the collection store when a vault has none, and their results say so.
+- A migration that refuses at any step, including its preflight (platform, lease, `CASE_COLLISION`), or fails verification leaves the vault in file mode and reports the refusal or the differing tables.
 - An owner can decline the migration with an explicit option.
 - A vault under a multi-host writer lease keeps file mode (D1).
 - Rollback stays the undo.
@@ -322,7 +324,12 @@ After step 2, a backup restore is the undo for a store-mode vault. "Export to a 
 
 **Outside edits after either step.** D5 stays: a clean edit imports, an edit that races an Exomem change is held, and an outside delete is held. In addition, each outside-edit import runs the vocabulary and folder steps of `one-write-pipeline` as advice. A folder name they would steer, or a term that needs a vocabulary decision, raises a review item that names the registered spelling. Like the collection edit-back, the advice waits for 2 s of stable bytes, and one item is kept per path and suggested spelling, so an autosave adds nothing new. The import keeps the person's bytes. Exomem never holds an edit only for a name, because a hold would hide the owner's own edit for a variant that the audit finds anyway.
 
-**Multi-host setups (owner, 2026-11-27).** Each vault is owned by one machine; other machines reach it through the connector. Multi-host writer-lease support and the in-vault collection replica that serves it are removed. The removal is its own step and does not wait for step 2 (task 10.10).
+**Multi-host setups (owner, 2026-11-27).** Each vault is owned by one machine; other machines reach it through the connector. Multi-host writer-lease support is removed as its own step, which does not wait for step 2 (task 10.10). The change that removes it also removes the `multi-host-writer-lease` requirements.
+
+The in-vault collection replica goes next (task 10.11). It also does two other jobs, and each needs a replacement first:
+
+- It carries the store-mode decision register that a second root reads (D8, `vault_store/marker.py`, `VAULT_STORE_ELSEWHERE`).
+- It carries the collection flush that Cloud export relies on (`hosted-vault-portability`).
 
 ## Estimate
 

@@ -1,8 +1,8 @@
 ## ADDED Requirements
 
-### Requirement: Validation runs the commit path to its preparation stop
+### Requirement: Validation and commit share one plan function
 
-Every write surface that writes owner pages SHALL validate by running its write through the commit path with native preparation, stopping before any effect. The plan SHALL be complete at the stop, including log, navigation index, trash metadata and curation witness writes. Validation SHALL bind the bytes of the pages the caller writes. The commit SHALL plan the log and navigation index writes again and check them again.
+Every write surface that writes owner pages SHALL validate through the same plan function that its commit runs. The plan function SHALL complete the plan, including log, navigation index, trash metadata and curation witness writes, and SHALL run the access check on every planned write. The commit SHALL run it again under its lock.
 
 #### Scenario: An auxiliary write the caller may not make is refused at validation
 
@@ -10,16 +10,26 @@ Every write surface that writes owner pages SHALL validate by running its write 
 - **THEN** validation refuses with the same code that commit would return
 - **AND** nothing is written
 
+#### Scenario: Every planned path is checked at both steps
+
+- **WHEN** the parity test denies, in turn, each path that a write command's commit plans
+- **THEN** validation and commit return the same refusal code for each denied path
+
+### Requirement: Validation stays read-only and binds only the caller's pages
+
+Validation SHALL NOT take the mutation boundary, the writer lease or the store writer. It SHALL bind the bytes of the pages the caller writes. The commit SHALL plan the other writes again and check them again.
+
+#### Scenario: Validation overlaps a live writer
+
+- **WHEN** a validate-only write overlaps another mutation
+- **THEN** validation answers without returning `MUTATION_BUSY` because that writer holds the boundary
+- **AND** the later commit still runs the plan function under its lock
+
 #### Scenario: A concurrent write does not stale a validated commit through the log
 
 - **WHEN** a caller validates a note edit, and another write appends to the log before the caller commits
 - **THEN** the commit succeeds with the validated page bytes
 - **AND** the log holds both entries
-
-#### Scenario: Every planned path is checked at both steps
-
-- **WHEN** the parity test denies, in turn, each path that a write command's commit plans
-- **THEN** validation and commit return the same refusal code for each denied path
 
 ### Requirement: Names are resolved once, before the write is planned
 
@@ -42,9 +52,3 @@ Every write surface SHALL resolve vocabulary terms and folder names through one 
 - **WHEN** a move renames `Notes/Research food` to `Notes/Research Food`
 - **THEN** the batch write passes the vacated path to the check
 - **AND** the move commits
-
-#### Scenario: An import run item that needs a vocabulary decision stays staged
-
-- **WHEN** an import run files a page whose domain has nearby registered meanings
-- **THEN** that item stays in the import run's staging area with `VOCABULARY_DECISION_REQUIRED` and its candidates
-- **AND** the other items of the batch are filed
