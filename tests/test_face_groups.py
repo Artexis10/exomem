@@ -71,17 +71,25 @@ def test_the_same_faces_in_the_same_order_give_identical_groups(tmp_path: Path) 
         turn_on(vault)
         return [(page, face_groups.record_page(vault, page, faces, model_id=MODEL)) for page, faces in pages]
 
+    def partition(run: list[tuple[str, list[int]]]) -> list[list[tuple[str, int]]]:
+        """Which faces share a group; ids are random, so two runs agree on the partition, not the ids."""
+        members: dict[int, list[tuple[str, int]]] = {}
+        for page, groups in run:
+            for slot, group in enumerate(groups):
+                members.setdefault(group, []).append((page, slot))
+        return sorted(members.values())
+
+    def centroids(vault: Path) -> list[tuple[bytes, int]]:
+        with closing(sqlite3.connect(face_store.index_path(vault))) as index:
+            return sorted(index.execute("SELECT centroid_sum, face_count FROM groups").fetchall())
+
     first_run = group_everything(tmp_path / "first")
     second_run = group_everything(tmp_path / "second")
 
-    assert first_run == second_run
-    assert len({group for _, groups in first_run for group in groups}) >= 3
+    assert partition(first_run) == partition(second_run)
+    assert len(partition(first_run)) >= 3
     # Nothing is named, so every group is in the face index.
-    with closing(sqlite3.connect(face_store.index_path(tmp_path / "first"))) as one, closing(
-        sqlite3.connect(face_store.index_path(tmp_path / "second"))
-    ) as other:
-        query = "SELECT id, centroid_sum, face_count FROM groups ORDER BY id"
-        assert one.execute(query).fetchall() == other.execute(query).fetchall()
+    assert centroids(tmp_path / "first") == centroids(tmp_path / "second")
 
 
 def test_a_face_moved_out_of_a_group_does_not_rejoin_it_when_more_faces_arrive(vault: Path) -> None:
@@ -145,6 +153,61 @@ def test_a_restored_people_store_names_rescanned_faces_once_faces_are_turned_on_
             (regrouped,),
         ).fetchall()
     assert name == "Rowan Example"
+
+
+def back_up_people_store(vault: Path, copy: Path) -> None:
+    with closing(sqlite3.connect(face_store.people_path(vault))) as people, closing(sqlite3.connect(copy)) as saved:
+        people.backup(saved)
+
+
+def restore_people_store(vault: Path, copy: Path) -> None:
+    with closing(sqlite3.connect(copy)) as saved, closing(sqlite3.connect(face_store.people_path(vault))) as people:
+        saved.backup(people)
+
+
+def remove_face_store(vault: Path) -> None:
+    for path in (face_store.index_path(vault), face_store.people_path(vault)):
+        for suffix in ("", "-wal", "-shm"):
+            Path(str(path) + suffix).unlink(missing_ok=True)
+
+
+def test_a_people_store_restored_after_a_delete_does_not_name_a_stranger(vault: Path, tmp_path: Path) -> None:
+    """Catches a restored name landing on another person's group that reused the named group's id."""
+    turn_on(vault)
+    [named] = face_groups.record_page(vault, "Photos/garden.jpg", [face(unit(1, 0))], model_id=MODEL)
+    face_naming.name_group(vault, named, "Rowan Example")
+    back_up_people_store(vault, tmp_path / "people-backup.sqlite")
+    remove_face_store(vault)  # The owner deletes faces, then turns them on again.
+    turn_on(vault)
+    [stranger] = face_groups.record_page(vault, "Photos/street.jpg", [face(unit(0, 1))], model_id=MODEL)
+
+    restore_people_store(vault, tmp_path / "people-backup.sqlite")
+
+    with closing(sqlite3.connect(face_store.people_path(vault))) as people:
+        names_of_stranger = people.execute(
+            "SELECT p.display_name FROM group_people g JOIN people p ON p.id = g.person_id WHERE g.group_id = ?",
+            (stranger,),
+        ).fetchall()
+    assert names_of_stranger == []
+
+
+def test_a_restored_people_store_counts_each_rescanned_face_once(vault: Path, tmp_path: Path) -> None:
+    """Catches a named group counting a re-scanned picture twice, which drags its centroid off the person."""
+    turn_on(vault)
+    [group] = face_groups.record_page(vault, "Photos/garden.jpg", [face(unit(1, 0))], model_id=MODEL)
+    face_naming.name_group(vault, group, "Rowan Example")
+    back_up_people_store(vault, tmp_path / "people-backup.sqlite")
+    remove_face_store(vault)
+    restore_people_store(vault, tmp_path / "people-backup.sqlite")
+    turn_on(vault)
+
+    [again] = face_groups.record_page(vault, "Photos/garden.jpg", [face(unit(1, 0.02))], model_id=MODEL)
+
+    assert again == group
+    with closing(sqlite3.connect(face_store.people_path(vault))) as people:
+        [(blob, count)] = people.execute("SELECT centroid_sum, face_count FROM groups").fetchall()
+    assert count == 1
+    np.testing.assert_allclose(face_store.unpack_vector(blob), unit(1, 0.02), atol=1e-6)
 
 
 @pytest.fixture(autouse=True)

@@ -10,7 +10,7 @@ and the assignment policy in `face_policy.json`. The owner's overrides in the pe
 setting applies to faces grouped afterwards; existing groups stay as they are.
 
 Grouping is incremental and deterministic: the same faces in the same order from an empty store give the
-same groups with the same ids. Group ids stay stable, so names attached to groups survive later faces.
+same groups. Group ids stay stable, so names attached to groups survive later faces.
 A face the owner moved out of a group (an exclusion) never joins that group again.
 
 A re-scanned page's faces leave their groups before they are assigned again. A group that loses its last
@@ -18,8 +18,11 @@ face this way keeps its direction, so the same face, or its person in another pi
 its name stays attached. The first face to join it replaces that direction.
 
 A new group starts unnamed in the face index. Naming moves it into the people store with its id, centroid
-and exclusions (`face_naming`), so grouping reads the groups of both stores as one set. Group ids come from
-one sequence over both stores, so an id never names two groups.
+and exclusions (`face_naming`), so grouping reads the groups of both stores as one set. A group id is
+random, not the next number: a people store restored from a backup, or a rebuilt face index, then never
+hands an id it holds to another person's group. A restored people store can also count faces that the
+face index no longer holds, so loading the groups takes a named group's count and centroid from the faces
+the index holds.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import secrets
 import sqlite3
 import threading
 from collections.abc import Sequence
@@ -49,6 +53,9 @@ log = logging.getLogger(__name__)
 _SAME_FACE_OVERLAP = 0.5
 #: Keyframe times of one face agree to this many seconds; the CLIP index stores the time it sampled.
 _SAME_FRAME_SECONDS = 1e-3
+#: Group ids are drawn below this bound: the largest integer that a JSON client reading numbers as
+#: doubles keeps exact, since an agent passes a group id back to name it.
+_GROUP_ID_BOUND = 2**53
 
 
 @dataclass(frozen=True)
@@ -206,14 +213,16 @@ class _Centroids:
             row = self.row_of.get(group_id)
             if row is not None:
                 similarity[row] = -np.inf
-        order = np.argsort(-similarity, kind="stable")  # ties go to the older group
-        best = float(similarity[order[0]])
+        # The best two in one pass each, not a sort of every group; a tie goes to the lower id.
+        best_row = int(np.argmax(similarity))
+        best = float(similarity[best_row])
         if not np.isfinite(best) or best < limits.join_similarity:
             return None
-        runner = float(similarity[order[1]]) if count > 1 else -np.inf
+        similarity[best_row] = -np.inf
+        runner = float(similarity.max()) if count > 1 else -np.inf
         if best - runner < limits.join_margin:
             return None
-        return self.ids[int(order[0])]
+        return self.ids[best_row]
 
     def changed_rows(self) -> tuple[list[tuple[bytes, int, int]], list[tuple[bytes, int, int]]]:
         """The changed groups' (centroid sum, count, id) rows: the people store's, then the face index's."""
@@ -241,19 +250,66 @@ def _centroids(people: sqlite3.Connection, index: sqlite3.Connection, key: tuple
     if held is not None and held[0] == generation:
         return held[1]
     query = "SELECT id, centroid_sum, face_count FROM groups WHERE model_id = ? ORDER BY id"
-    named = people.execute(query, (key[1],)).fetchall()
+    named, stale = _named_groups_as_indexed(people, index, key[1])
     unnamed = index.execute(query, (key[1],)).fetchall()
     held_ids = {int(row[0]) for row in named}
     # A group in both stores (a people store restored over a live face index) is the named one.
     rows = sorted([*named, *(row for row in unnamed if int(row[0]) not in held_ids)], key=lambda row: int(row[0]))
-    return _Centroids(rows, int(media_models.model_spec("face-embed")["dimensions"]), held_ids)
+    centroids = _Centroids(rows, int(media_models.model_spec("face-embed")["dimensions"]), held_ids)
+    centroids.dirty.update(stale)  # Written back with the next commit.
+    return centroids
 
 
-def next_group_id(people: sqlite3.Connection, index: sqlite3.Connection) -> int:
-    """The id for a new group: one past the largest in either store, so an id never names two groups."""
-    (named,) = people.execute("SELECT COALESCE(MAX(id), 0) FROM groups").fetchone()
-    (unnamed,) = index.execute("SELECT COALESCE(MAX(id), 0) FROM groups").fetchone()
-    return max(int(named), int(unnamed)) + 1
+def _named_groups_as_indexed(
+    people: sqlite3.Connection, index: sqlite3.Connection, model_id: str
+) -> tuple[list[tuple[int, bytes, int]], set[int]]:
+    """The people store's groups of this embedder, counted over the faces that the face index holds.
+
+    A named group's count and centroid match its faces in the face index after every write. A people store
+    restored from a backup, or a face index rebuilt under it, breaks that: a re-scan would add the same faces
+    again. A group whose faces the index lost keeps its direction with no face; a group whose faces differ
+    takes its centroid from those faces. Returns the rows and the ids of the groups that changed.
+    """
+    named = people.execute(
+        "SELECT id, centroid_sum, face_count FROM groups WHERE model_id = ? ORDER BY id", (model_id,)
+    ).fetchall()
+    wanted = json.dumps([int(row[0]) for row in named])
+    indexed = dict(index.execute(
+        "SELECT group_id, COUNT(*) FROM faces WHERE group_id IN (SELECT value FROM json_each(?)) GROUP BY group_id",
+        (wanted,),
+    ).fetchall())
+    stale = {int(group_id) for group_id, _, count in named if int(count) != indexed.get(group_id, 0)}
+    if not stale:
+        return named, stale
+    totals: dict[int, np.ndarray] = {}
+    for group_id, blob in index.execute(
+        "SELECT group_id, vector FROM faces WHERE group_id IN (SELECT value FROM json_each(?))",
+        (json.dumps(sorted(stale)),),
+    ):
+        vector = face_store.unpack_vector(blob)
+        totals[group_id] = totals[group_id] + vector if group_id in totals else vector
+    rows = [
+        (group_id, face_store.pack_vector(totals[group_id]) if group_id in totals else blob, indexed.get(group_id, 0))
+        if group_id in stale else (group_id, blob, count)
+        for group_id, blob, count in named
+    ]
+    return rows, stale
+
+
+def new_group_id(people: sqlite3.Connection, index: sqlite3.Connection) -> int:
+    """A random id that no group, and no face, of either store holds.
+
+    One past the largest id is not enough: a restored people store or a rebuilt face index can lower the
+    largest id while faces or names still hold the ids above it.
+    """
+    while True:
+        candidate = secrets.randbelow(_GROUP_ID_BOUND - 1) + 1
+        if not (
+            people.execute("SELECT 1 FROM groups WHERE id = ?", (candidate,)).fetchone()
+            or index.execute("SELECT 1 FROM groups WHERE id = ?", (candidate,)).fetchone()
+            or index.execute("SELECT 1 FROM faces WHERE group_id = ? LIMIT 1", (candidate,)).fetchone()
+        ):
+            return candidate
 
 
 class FacesStopped(RuntimeError):
@@ -395,7 +451,6 @@ def record_page(
         )
         excluded = _exclusions(writing, page)
         rows, groups = [], []
-        new_id = next_group_id(people, index)
         for face in kept:
             barred = {
                 group_id for group_id, frame_ts, region in excluded
@@ -404,7 +459,7 @@ def record_page(
             group_id = centroids.nearest(face.vector, limits, barred)
             if group_id is None:
                 # A new group is unnamed, so it lives in the face index until the owner names it.
-                group_id, new_id = new_id, new_id + 1
+                group_id = new_group_id(people, index)
                 index.execute(
                     "INSERT INTO groups (id, model_id, centroid_sum, face_count) VALUES (?, ?, ?, 1)",
                     (group_id, model_id, face_store.pack_vector(face.vector)),

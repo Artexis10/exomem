@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 
 from . import face_store
-from .face_groups import Writing, next_group_id
+from .face_groups import Writing, new_group_id
 
 
 class NameRefused(ValueError):
@@ -193,7 +193,7 @@ def move_face_out(vault_root: Path, face_id: int) -> int:
                 "UPDATE groups SET centroid_sum = ?, face_count = ? WHERE id = ?",
                 (face_store.pack_vector(remaining), count, group_id),
             )
-        new_group = next_group_id(writing.people, index)
+        new_group = new_group_id(writing.people, index)
         index.execute(
             "INSERT INTO groups (id, model_id, centroid_sum, face_count) VALUES (?, ?, ?, 1)",
             (new_group, model_id, blob),
