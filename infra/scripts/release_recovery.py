@@ -216,6 +216,13 @@ def cloud_files(tag: str) -> dict[str, tuple[str, str]]:
         "openai.zip": "exomem-cloud-openai.zip",
         "release.json": "exomem-cloud-release.json",
     }
+    # An alias uploads an archive under its former name too, while a published link still
+    # uses that name; the change that moves the link removes the alias.
+    targets = [(name, target) for name, target in mapping.items()] + [
+        (name, alias)
+        for name, aliases in definition.get("release_asset_aliases", {}).items()
+        for alias in aliases
+    ]
     hashes = json.loads(metadata)["files"]
     return {
         target: (
@@ -226,7 +233,7 @@ def cloud_files(tag: str) -> dict[str, tuple[str, str]]:
                 subprocess.check_output(["git", "show", f"{tag}:{source}/{name}"])
             ).hexdigest(),
         )
-        for name, target in mapping.items()
+        for name, target in targets
     }
 
 

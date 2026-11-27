@@ -23,6 +23,9 @@
     "openai.zip": "evermatter-openai.zip",
     "release.json": "evermatter-release.json"
   },
+  "release_asset_aliases": {
+    "openai.zip": ["exomem-cloud-openai.zip"]
+  },
   "edition_identities": {
     "claude-hooks": {
       "listed": false,

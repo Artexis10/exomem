@@ -532,4 +532,13 @@ def check_packages(root: Path, output: Path | None = None) -> dict:
                 issues.append(f"missing: {built.relative_to(root).as_posix()}")
             elif built.read_bytes() != (expected_package / f"{edition}.zip").read_bytes():
                 issues.append(f"drift: {built.relative_to(root).as_posix()}")
+        # Release recovery uploads each named archive; a name for a file the build does
+        # not make would fail only when a release is cut.
+        definition = _definition(root)
+        for name in (
+            *definition.get("release_assets", {}),
+            *definition.get("release_asset_aliases", {}),
+        ):
+            if not (expected / name).is_file():
+                issues.append(f"release asset without a built file: {name}")
     return {"ok": not issues, "issues": issues}

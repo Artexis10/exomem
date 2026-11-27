@@ -90,7 +90,9 @@ definition or `plugins/cloud/evals/cases.json` changes. Release Please regenerat
 the Cloud packages on its release branch. GitHub release assets carry
 the names that `release_assets` in `plugins/cloud/definition.json` sets:
 `evermatter-claude.zip`, `evermatter-claude-hooks.zip`, `evermatter-openai.zip` and
-`evermatter-release.json`. Verify their digests against the tagged source before
+`evermatter-release.json`. `release_asset_aliases` also uploads an archive under a
+former name while a published download link still uses it; remove the alias once
+the link moves. Verify their digests against the tagged source before
 uploading them to a directory.
 
 ## Native acceptance
