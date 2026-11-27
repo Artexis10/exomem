@@ -17,7 +17,18 @@
 
 #### Scenario: A page the reader cannot take stops the read
 - **WHEN** the header repeats a name or has an empty cell, or the page is not UTF-8 or exceeds 262,144 bytes
-- **THEN** the read stops with a typed code and no row is committed
+- **THEN** the read stops with a typed code and no row is committed, and a header fault names its first bad cell, counted from 0, in `at`
+
+### Requirement: A Markdown row never loses a cell silently
+A `markdown-table` row with text in a cell beyond the header's width SHALL be rejected as `IMPORT_ROW_MALFORMED` in preview and in start, with `at` reading `row has N cells, header has M`. The reader SHALL take the cells beyond the header from the Markdown parser's own cell splitter, inside the row's container, and SHALL NOT count pipes itself. An extra cell with no text SHALL NOT reject its row.
+
+#### Scenario: A row with a fourth cell under a three-column header is rejected
+- **WHEN** a page's row has a text cell beyond its three-column header and other rows do not
+- **THEN** preview and the job reject that row with its row number and `row has 4 cells, header has 3`, and the other rows import
+
+#### Scenario: An empty extra cell does not reject its row
+- **WHEN** a row ends with an extra cell that holds no text
+- **THEN** the row imports as it would without that cell
 
 ### Requirement: Markdown import keeps the preserved-source contract
 Only a preserved Sources or Evidence file SHALL be a source of `records.import`. A `source_ref` that is not one SHALL be refused with one text, whether the ref is absent, unpreserved or withheld. That text SHALL tell the agent to preserve the file's bytes with `save_evidence` and pass the returned Evidence path as `source_ref`.

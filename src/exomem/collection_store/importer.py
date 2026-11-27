@@ -275,8 +275,11 @@ def contract() -> dict[str, Any]:
         ),
         "markdown_table": (
             "The page is parsed as GitHub-flavoured Markdown, so a row of fewer cells than the header reads "
-            "the missing cells as empty and a cell beyond the header is ignored; header cells name the columns "
-            "and must be unique and non-empty. A cell keeps its text as typed, inline markup included. An "
+            "the missing cells as empty. A row with text in a cell beyond the header is rejected as "
+            "IMPORT_ROW_MALFORMED, at 'row has N cells, header has M', so no cell is dropped silently; fix "
+            "the table, preserve the page again and import that Evidence path. Header cells name the columns "
+            "and must be unique and non-empty; a fault stops the read as IMPORT_SOURCE_MALFORMED at the "
+            "first bad cell, counted from 0. A cell keeps its text as typed, inline markup included. An "
             "empty cell is missing, as in csv. A cell for a number, integer or boolean field that does not "
             "parse rejects its row as IMPORT_VALUE_INVALID; preview names the row, column and original text. "
             "A cell for a date field that is not YYYY-MM-DD leaves the field missing and counts as unparsed; map "
@@ -1034,6 +1037,18 @@ class _CsvFrame:
         self.field -= count
 
 
+def _header_flaw(header: tuple[str, ...]) -> str | None:
+    """Where a markdown-table header cannot name the columns: its first empty or repeated cell, counted from 0."""
+    first: dict[str, int] = {}
+    for index, name in enumerate(header):
+        if not name:
+            return f"header cell {index} is empty"
+        if name in first:
+            return f"header cell {index} repeats cell {first[name]}"
+        first[name] = index
+    return None
+
+
 class _Reader:
     """Bounded incremental reader resuming at an exact byte offset and parser state."""
 
@@ -1237,13 +1252,20 @@ class _Reader:
             return self._row(0, error=("IMPORT_TABLE_NOT_FOUND", "mapping.table"), fatal=True)
         table = tables[self.table]
         header = table.header
-        if len(set(header)) != len(header) or not all(header):
-            return self._row(0, error=("IMPORT_SOURCE_MALFORMED", ""), fatal=True)
+        flaw = _header_flaw(header)
+        if flaw is not None:
+            return self._row(0, error=("IMPORT_SOURCE_MALFORMED", flaw), fatal=True)
         if self.ordinal >= len(table.rows):
             self.base = self.page_bytes
             return None
         found = table.rows[self.ordinal]
         self.base = found.end
+        if any(found.beyond):
+            # The parser drops a cell past the header; a row that held text there is not the whole row.
+            cells = len(header) + 1 + max(index for index, text in enumerate(found.beyond) if text)
+            return self._row(
+                found.start, error=("IMPORT_ROW_MALFORMED", f"row has {cells} cells, header has {len(header)}")
+            )
         return self._row(found.start, {name: cell for name, cell in zip(header, found.cells, strict=True) if cell != ""})
 
     def _csv(self) -> Row | None:

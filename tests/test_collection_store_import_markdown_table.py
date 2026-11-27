@@ -142,6 +142,61 @@ def test_a_table_index_past_the_page_is_reported_with_the_tables_it_has(store):
     assert [found["table"] for found in preview["source"]["tables"]] == [0, 1]
 
 
+WIDE = """| Ref | Counterparty | Amount |
+|-----|--------------|-------:|
+| W-01 | Ada Quill | 10 |
+| W-02 | Boris Fenn | 20 | spare 5 |
+| W-03 | Ada Quill | 30 | |
+| W-04 | Boris Fenn | 40 |
+"""
+WIDE_MAPPING = {
+    "fields": {"ref": "Ref", "counterparty": "Counterparty", "amount": {"from": "Amount", "type": "number"}},
+    "on_invalid": "skip",
+    "coverage": {name: {"classification": None} for name in ("Ref", "Counterparty", "Amount")},
+}
+
+
+def test_a_row_with_text_beyond_the_header_is_rejected_not_silently_cut(store):
+    """Defect: the parser drops a cell past the header, so a ledger row lost its fourth cell with no trace."""
+    setup(store, b"", title="Ledger", fields=LEDGER_FIELDS)
+    owner = owner_principal(surface="mcp")
+    with request_scope(owner):
+        kept = commands.op_preserve_evidence(store.root, "ledger", "wide", "wide.md", WIDE)
+
+    preview = _agent(store, owner, mode="preview", source_ref=kept["path"], format="markdown-table",
+                     mapping=WIDE_MAPPING, check_sum={"field": "amount"})
+
+    rejected = preview["would_reject"]["IMPORT_ROW_MALFORMED"]
+    assert rejected["rows"] == 1
+    assert [(found["row"], found["at"]) for found in rejected["first"]] == [(1, "row has 4 cells, header has 3")]
+    assert (preview["would_insert"], preview["check_sum"]["total"]) == (3, 80)  # the empty extra cell of W-03 holds nothing
+
+    job = _agent(store, owner, mode="start", source_ref=kept["path"], format="markdown-table", mapping=WIDE_MAPPING)
+    for _ in range(8):
+        run(store)
+        if _agent(store, owner, mode="status", continuation=job["continuation"])["state"] != "running":
+            break
+    done = _agent(store, owner, mode="status", continuation=job["continuation"])
+    assert (done["state"], done["rows"]["imported"]) == ("complete", 3)
+    assert [(found["row"], found["code"], found["at"]) for found in done["rejections"]] == [
+        (1, "IMPORT_ROW_MALFORMED", "row has 4 cells, header has 3")]
+    assert sorted(values["ref"] for _, values in typed_storage.collection_values(store.connection, CID)) == [
+        "W-01", "W-03", "W-04"]
+
+
+def test_a_header_that_cannot_name_the_columns_is_reported_at_its_cell(store):
+    """Defect: a repeated or empty header cell stopped the read with no position to fix."""
+    setup(store, b"", title="Ledger", fields=LEDGER_FIELDS)
+    owner = owner_principal(surface="mcp")
+    with request_scope(owner):
+        kept = commands.op_preserve_evidence(
+            store.root, "ledger", "header", "header.md", "| Ref | Amount | Ref |\n|---|---|---|\n| a | 1 | b |\n")
+    preview = _agent(store, owner, mode="preview", source_ref=kept["path"], format="markdown-table",
+                     mapping=WIDE_MAPPING)
+    assert [(error["code"], error["at"]) for error in preview["errors"]] == [
+        ("IMPORT_SOURCE_MALFORMED", "header cell 2 repeats cell 0")]
+
+
 def test_a_page_that_is_not_preserved_evidence_is_refused_with_the_save_evidence_route(store):
     """Defect: the refusal named no tool the agent can call, so it hand-built bulk_upsert payloads."""
     setup(store, b"", title="Ledger", fields=LEDGER_FIELDS)

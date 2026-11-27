@@ -9,6 +9,8 @@
 - [x] 1.3 Report per-column cell counts, the rejected cell's text and `check_sum` in preview; verify the counts and per-group sums.
 - [x] 1.4 Refuse a non-preserved source with the `save_evidence` route and keep the refusal identical for an absent, an unpreserved and a withheld ref.
       Evidence: `test_a_page_that_is_not_preserved_evidence_is_refused_with_the_save_evidence_route`, and the existing withheld-as-absent test in `tests/test_collection_store_importer.py`.
+- [x] 1.5 Reject a row with text beyond the header's width, with its cell count, and report a header fault at its cell; verify through preview, start and status.
+      Evidence: `test_a_row_with_text_beyond_the_header_is_rejected_not_silently_cut`, `test_a_header_that_cannot_name_the_columns_is_reported_at_its_cell`.
 
 ## 2. Teaching
 
