@@ -70,6 +70,14 @@ class NativeLayout(Layout):
     def value_columns(self) -> tuple[str, ...]:
         return ("values_bytes", *self.mask_columns, *(f"v{ordinal}" for ordinal in range(len(self.fields))))
 
+    def cell_sql(self, name: str, alias: str) -> tuple[str, str]:
+        """A top-level field's stored cell over ``alias``, and the SQL test that the row lacks the field.
+
+        Two rows whose cells are equal hold the same value, so a reader may group by the cell and decode one per group.
+        """
+        ordinal = self.fields.index(name)
+        return f"{alias}.v{ordinal}", f"(({alias}.m{ordinal // MASK_BITS} & {1 << (ordinal % MASK_BITS)}) != 0)"
+
     @property
     def current_table(self) -> str:
         if not self.current:

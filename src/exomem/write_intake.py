@@ -36,7 +36,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -1107,6 +1107,12 @@ class Admission:
     #: The refusal that the arguments alone are certain to get. A save that would queue raises it
     #: instead, because a queued receipt for it would only fail later, at the replay.
     refusal: Exception | None = None
+    #: The same, for a refusal that needs a read of the vault's declarations. Only a save that is
+    #: about to queue runs it (`certain_refusal`), so a save that never meets contention reads nothing.
+    declared_refusal: Callable[[], Exception | None] | None = None
+    #: The call's arguments, whose own references the terminal filter leaves as sent.
+    arguments: Mapping[str, Any] = field(default_factory=dict)
+    _released: bool = field(default=False, init=False, repr=False)
 
     def run(self, call: Callable[[], Any]) -> Any:
         """Run the save, or queue it when the boundary stays busy.
@@ -1145,13 +1151,55 @@ class Admission:
             if in_flight:
                 self.drainer.end_accept(self.origin)
 
+    def certain_refusal(self) -> Exception | None:
+        """The refusal this save is certain to get, read once and only for a save about to queue.
+
+        It is raised in place of the call, outside `invoke_command`'s terminal filter, so it leaves through
+        that filter here, as the same refusal from the call does. An argument refusal quotes only the
+        caller's own arguments, so a filter fault still raises it, as before the declared check existed. A
+        declared refusal quotes the vault's own declaration, so one that the filter cannot release is
+        dropped: the save goes on as if none were known, and its own refusal comes from the call or the
+        replay.
+        """
+        if self.refusal is not None:
+            if not self._released:
+                self._released = True
+                self._filter(self.refusal)
+            return self.refusal
+        if self.declared_refusal is not None:
+            read, self.declared_refusal = self.declared_refusal, None
+            try:
+                declared = read()
+            except Exception:  # noqa: BLE001 - a declaration that cannot be read leaves the save queueable
+                log.debug("write intake could not read the declarations of a %s save", self.command.name,
+                          exc_info=True)
+                declared = None
+            if declared is not None and self._filter(declared):
+                self._released = True
+                self.refusal = declared
+        return self.refusal
+
+    def _filter(self, refusal: Exception) -> bool:
+        """Pass `refusal` through the terminal egress filter in place; False when the filter faults."""
+        from .governance import egress
+
+        try:
+            egress.postfilter_error(
+                self.command.name, refusal, self.drainer.vault_root, request_kwargs=self.arguments
+            )
+        except Exception:  # noqa: BLE001 - the caller decides what an unfiltered refusal does
+            log.warning("write intake could not filter the refusal of a %s save", self.command.name,
+                        exc_info=True)
+            return False
+        return True
+
     def _run_in_flight(self, call: Callable[[], Any], started: float, deadline: float) -> Any:
         try:
             backlog = self.drainer.has_backlog()
         except Exception:  # noqa: BLE001 - an intake fault must not stop an ordinary save
             log.warning("write intake could not read its queue", exc_info=True)
             backlog = False
-        if backlog and self.refusal is not None:
+        if backlog and self.certain_refusal() is not None:
             # Refused whether it runs after the queue or never: waiting would only delay the answer.
             raise self.refusal
         if backlog:
@@ -1169,7 +1217,7 @@ class Admission:
         except OpError as error:
             if error.code not in ACCEPTED_REFUSALS or error.details.get("committed") is not False:
                 raise
-            if self.refusal is not None:
+            if self.certain_refusal() is not None:
                 raise self.refusal from error
             try:
                 # The refusal's cause when it names one (a spent call budget, a moved auxiliary), so
@@ -1347,7 +1395,12 @@ def admission(command: Any, injected: tuple[Any, ...], kwargs: Mapping[str, Any]
     if drainer is None:
         return None
     from . import writer_lease
-    from .commands import busy_intake_applies, invocation_is_read_only, refusal_before_queueing
+    from .commands import (
+        busy_intake_applies,
+        declared_refusal_before_queueing,
+        invocation_is_read_only,
+        refusal_before_queueing,
+    )
     from .governance import principal as principal_module
     from .governance.egress import SelectorCoverageError
 
@@ -1395,6 +1448,8 @@ def admission(command: Any, injected: tuple[Any, ...], kwargs: Mapping[str, Any]
         origin=origin[0],
         origin_ttl=origin[1],
         refusal=refusal_before_queueing(command, jsonable),
+        declared_refusal=lambda: declared_refusal_before_queueing(command, jsonable, drainer.vault_root),
+        arguments=jsonable,
     )
 
 
@@ -1489,6 +1544,38 @@ def _summary_line(state_counts: Mapping[str, int]) -> str:
     queued = state_counts.get(QUEUED, 0) + state_counts.get(APPLYING, 0)
     failed = state_counts.get(FAILED, 0)
     return f"{queued} queued save(s) waiting, {failed} failed save(s) to review."
+
+
+def may_change_declaration(
+    vault_root: Path, *, rewriting: Sequence[str], manifest_command: str, manifest_field: str, seconds: float
+) -> bool | None:
+    """Whether a save that still waits or applies may change a declaration before a later save replays.
+
+    A save of a command in `rewriting` may, whichever page it names: only its own resolution, when it
+    applies, decides which page that is. A save of `manifest_command` may when its `manifest_field` holds a
+    value other than null; MCP stores a field the caller left unset as null. One EXISTS query over the open
+    rows decides it inside SQLite, so no queued arguments reach Python. A query that has not answered within
+    `seconds` stops: None, unknown, as for a queue that cannot be read.
+    """
+    if seconds <= 0:
+        return None
+    deadline = time.monotonic() + seconds
+    try:
+        with _store(vault_root, mode="read") as conn:
+            # A row costs a handful of steps and only a `manifest_command` row is parsed, so the deadline is read often.
+            conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 100)
+            (found,) = conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM intake WHERE state IN (?, ?) AND ("
+                "command IN (SELECT value FROM json_each(?)) "
+                "OR (command = ? AND json_extract(arguments, '$.' || ?) IS NOT NULL)))",
+                (*_OPEN_STATES, _json(list(rewriting)), manifest_command, manifest_field),
+            ).fetchone()
+        return bool(found)
+    except FileNotFoundError:
+        return False
+    except Exception:  # noqa: BLE001 - a queue that cannot be read is an unknown, never an empty one
+        log.debug("write intake could not read its open saves", exc_info=True)
+        return None
 
 
 def read(vault_root: Path, ref: str | None = None, limit: int | None = None) -> dict[str, Any]:

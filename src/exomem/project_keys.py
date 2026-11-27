@@ -25,7 +25,6 @@ from pathlib import Path
 
 import yaml
 
-from .held_fs import name_variants
 from .kbdir import managed_join
 from .vault import (
     FILENAME_STYLES,
@@ -35,7 +34,9 @@ from .vault import (
     UnparseableFilenameStyleError,
     batch_atomic_write,
     corrected_title_name,
+    folder_variants,
     kb_root,
+    managed_root_rel,
     read_bytes_without_pinning,
     read_guarded_text,
 )
@@ -310,14 +311,24 @@ def _fallback_registry() -> ProjectRegistry:
 
 
 def reuse_folder_spelling(folder: str, existing: Iterable[str]) -> str:
-    """The existing folder name that shares `folder`'s `vault_name_key`, else `folder`.
+    """The existing folder name that shares `folder`'s `folder_lookalike_key`, else `folder`.
 
-    An exact match wins; among variants the first in sorted order is stable.
+    An exact match wins; among variants the first in sorted order is stable. `existing` holds
+    folder names, so a name that differs only by case or separators is the same folder.
     """
     names = set(existing)
     if folder in names:
         return folder
-    return next(iter(name_variants(names, folder)), folder)
+    return next(iter(folder_variants(names, folder)), folder)
+
+
+# The managed-root path of the folder that holds each registered project's research folder.
+RESEARCH_PARENT = ("Notes", "Research")
+
+
+def research_parent_rel() -> str:
+    """The vault-relative folder that holds each registered project's research folder."""
+    return "/".join((managed_root_rel(), *RESEARCH_PARENT))
 
 
 def child_folder_names(directory: Path) -> list[str]:
@@ -332,7 +343,7 @@ def child_folder_names(directory: Path) -> list[str]:
 def _title_case_slug(key: str, existing: Iterable[str] = ()) -> str:
     """Auto-derive a folder name from a slug key (`project-alpha` → `Project Alpha`).
 
-    A name in `existing` with the same `vault_name_key` is reused as spelled.
+    A name in `existing` with the same `folder_lookalike_key` is reused as spelled.
     """
     return reuse_folder_spelling(" ".join(part.capitalize() for part in key.split("-")), existing)
 
@@ -474,7 +485,7 @@ def plan_project_keys(
     introductions: list[ProjectKeyIntroduction] = []
     replay_by_key = {item.key: item for item in replay_introductions}
     seen: set[str] = set()
-    known_folders = sorted(set(proposed_folders.values()) | set(child_folder_names(kb_root(root) / "Notes" / "Research")))
+    known_folders = sorted(set(proposed_folders.values()) | set(child_folder_names(kb_root(root).joinpath(*RESEARCH_PARENT))))
     for raw in keys:
         if type(raw) is not str or not _SLUG_RE.fullmatch(raw):
             raise ValueError(
@@ -505,7 +516,7 @@ def plan_project_keys(
         if variant != folder_name:
             raise ValueError(
                 f"PATH_VARIANT_EXISTS: project folder {folder_name!r} matches the "
-                f"existing folder {variant!r} apart from case or Unicode form; "
+                f"existing folder {variant!r} apart from case, Unicode form or separators; "
                 "use that spelling"
             )
         known_folders.append(folder_name)
@@ -533,7 +544,7 @@ def plan_project_keys(
             f"    category: {item.category}\n"
         )
     project_directories = tuple(
-        kb_root(root) / "Notes" / "Research" / item.folder
+        kb_root(root).joinpath(*RESEARCH_PARENT, item.folder)
         for item in introductions
     )
     write = PlannedWrite(
@@ -578,6 +589,6 @@ def register_project_key(
         return key, plan.registry.folder_for(key) or folder or _title_case_slug(key), False
     batch_atomic_write(plan.writes, vault_root=vault_root)
     introduction = plan.introductions[0]
-    folder_path = kb_root(vault_root) / "Notes" / "Research" / introduction.folder
+    folder_path = kb_root(vault_root).joinpath(*RESEARCH_PARENT, introduction.folder)
     folder_path.mkdir(parents=True, exist_ok=True)
     return key, introduction.folder, True

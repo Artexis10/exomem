@@ -28,7 +28,7 @@ import os
 import re
 import shlex
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from contextlib import ExitStack, nullcontext, suppress
 from dataclasses import dataclass, replace
 from functools import partial, wraps
@@ -7220,28 +7220,39 @@ def _search_notice(envelope: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _cite_packet_leads(vault_root: Path, packet: dict[str, Any]) -> None:
+def _packet_leads(packet: dict[str, Any]) -> list[dict[str, Any]]:
+    """The first ten page leads of a served packet: the turn slice's anchors, or the rollback packet's `anchors`."""
+    if packet.get("abstained"):
+        return []
+    slice_items = (packet.get("turn_slice") or {}).get("items") or []
+    return [lead for lead in (slice_items or packet.get("anchors") or [])[: _page_citations().RECALL_HITS]
+            if isinstance(lead, dict)]
+
+
+def _cite_packet_leads(vault_root: Path, packet: dict[str, Any],
+                       listed: Mapping[str, Collection[tuple[str, str]]] | None = None) -> None:
     """Give each of the first ten page leads of a served packet its citations, charged to the packet's budget.
 
-    The leads are the turn slice's anchors, or the rollback packet's `anchors`; each is cited by the memory
-    ref it already carries, so no path lookup runs here. A lead keeps the citations that fit under
-    `limit_chars`, counted at their serialized length; one that does not fit keeps its count, and one whose
-    count does not fit is left as it was. Never raises: a citation never breaks an activation.
+    Each lead (`_packet_leads`) is cited by the memory ref it already carries, so no path lookup runs here.
+    A lead keeps the citations that fit under `limit_chars`, counted at their serialized length; one that
+    does not fit keeps its count, and one whose count does not fit is left as it was. ``listed`` maps a lead
+    to the (collection, link field) pairs whose rows its ledger entry (`subject_records`) already lists: the
+    citation read counts them and lists the lead's citations from every other field. Never raises: a
+    citation never breaks an activation.
     """
     try:
-        if packet.get("abstained"):
+        leads = _packet_leads(packet)
+        if not leads:
             return
-        slice_items = (packet.get("turn_slice") or {}).get("items") or []
-        leads = [lead for lead in (slice_items or packet.get("anchors") or [])[: _page_citations().RECALL_HITS]
-                 if isinstance(lead, dict)]
-        found = _page_citations().for_hits([lead.get("ref") for lead in leads], vault_root)
+        found = _page_citations().for_hits([lead.get("ref") for lead in leads], vault_root, unlisted=listed)
         budget = packet.setdefault("budget", {})
         for lead in leads:
             added = found.get(lead.get("ref"))
             if not added:
                 continue
             # The full citations first, then the count alone, then nothing.
-            for candidate in (added, {key: value for key, value in added.items() if key != "cited_by"}):
+            count = {key: value for key, value in added.items() if key != "cited_by"}
+            for candidate in (added, count) if "cited_by" in added else (count,):
                 size = len(json.dumps(candidate))
                 if int(budget.get("used_chars") or 0) + size <= int(budget.get("limit_chars") or 0):
                     lead.update(candidate)
@@ -7543,7 +7554,12 @@ def op_activate_context(
                         sensed_model.for_packet(vault_root, packet)
                         # The citations are decided under the purpose the request declared, as its leads were.
                         with principal_module.declared_purpose_scope(purpose):
-                            _cite_packet_leads(vault_root, packet)
+                            # A named page's ledger rides its lead, so a starved task context cannot drop it,
+                            # and it is charged before the leads' citations, so a full packet cannot either.
+                            from . import subject_records
+
+                            listed = subject_records.for_packet(vault_root, packet, turn, _packet_leads(packet))
+                            _cite_packet_leads(vault_root, packet, listed)
                         from . import due_state as due_state_module
 
                         # Guarded material supplies relevance; the agent decides whether to raise it.
@@ -16179,6 +16195,43 @@ def refusal_before_queueing(command: Command, arguments: Mapping[str, Any]) -> E
     return None
 
 
+#: How long a busy save's declared check may read: the declaration, then the queue. It only buys an earlier
+#: refusal, so a slow read gives the save up to the queue it would have joined, which is what its caller was
+#: already going to wait on.
+_DECLARED_REFUSAL_SECONDS = 0.5
+
+
+def declared_refusal_before_queueing(
+    command: Command, arguments: Mapping[str, Any], vault_root: Path
+) -> Exception | None:
+    """The refusal that a save's values get from what the vault declares, or None.
+
+    `refusal_before_queueing` reads nothing. This one reads a declaration (a collection's manifest),
+    so the intake runs it only for a save that is about to queue. The refusal holds only while no open
+    queued save can change that declaration before this one replays: a save of a command that declares
+    `Command.sets_any_frontmatter_field`, whichever page it names, or a Records save that carries a
+    manifest's text. A declaration change made outside the queue and not committed at this check, such
+    as a direct revise that holds the boundary, is not seen: the check refuses a value that the change
+    adds, and the refusal tells the caller to send it again once that change has committed.
+    """
+    if command.name != operation_entries.RECORDS.command:
+        return None
+    from . import request_budget, write_intake
+
+    budget = request_budget.RequestBudget(seconds=_DECLARED_REFUSAL_SECONDS)
+    refusal = record_memory_module.value_refusal(vault_root, arguments, budget)
+    if refusal is None:
+        return None
+    changing = write_intake.may_change_declaration(
+        vault_root,
+        rewriting=tuple(item.name for item in PRODUCT_COMMANDS if item.sets_any_frontmatter_field),
+        manifest_command=operation_entries.RECORDS.command,
+        manifest_field=operation_entries.MANIFEST_TEXT_FIELD,
+        seconds=budget.remaining(),
+    )
+    return refusal if changing is False else None
+
+
 _MCRC = frozenset({"mcp", "rest", "cli"})
 _RC = frozenset({"rest", "cli"})
 # `get_video_frames` returns MCP image content blocks (a FastMCP ToolResult) —
@@ -16418,7 +16471,8 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "path",
         _MCRC,
         ("edit",),
-        {"public_title": "Edit a knowledge note", "preferred_name": "edit_note", "surface": "primary", "actions": ("update",), "first_run_safe": False},
+        {"public_title": "Edit a knowledge note", "preferred_name": "edit_note", "surface": "primary", "actions": ("update",), "first_run_safe": False,
+         "sets_any_frontmatter_field": True},
     ),
     (
         "observe_memory",
@@ -17041,6 +17095,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 outcome_verb=_COMMAND_OUTCOME_VERBS.get(name),
                 names_pages=name in _PAGE_NAMING_COMMANDS,
                 busy_intake=name in _BUSY_INTAKE_COMMANDS,
+                sets_any_frontmatter_field=bool(meta.get("sets_any_frontmatter_field", False)),
                 prepare_arguments=meta.get("prepare_arguments"),
             )
         )
