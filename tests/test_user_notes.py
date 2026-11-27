@@ -285,7 +285,7 @@ def test_a_file_name_cannot_start_a_workflow_command_of_its_own(notes, repo, cap
 
 
 # --------------------------------------------------------------------------
-# scripts/release_notes_asset.py: one release's notes file and the start of its page
+# scripts/release_notes_asset.py: what one release publishes of its notes
 # --------------------------------------------------------------------------
 
 
@@ -300,17 +300,24 @@ def asset(monkeypatch):
     return module
 
 
-def test_a_releases_file_holds_that_release_alone_and_the_cells_reader_accepts_it(asset, repo, tmp_path):
+def notes_file_text(*notes: dict) -> str:
+    entry = {"version": "1.3.0", "released_on": "2026-02-02", "notes": list(notes)}
+    return json.dumps({"schema": 2, "releases": [entry] if notes else []})
+
+
+def test_a_releases_file_holds_the_notes_its_own_tag_has_and_no_other_release(asset, repo):
+    """The file of 1.3.0 is built after 1.4.0 exists and edited a note of 1.3.0: it must still hold the note as 1.3.0 shipped it."""
     repo.commit("2026-01-10", {"user-notes/older.md": note_file("Older", "Older change.")})
     repo.tag("v1.2.0")
     repo.commit("2026-02-01", {"user-notes/first.md": note_file("First", "First change.")})
     repo.commit("2026-02-02", {"user-notes/second.md": note_file(None, "Second change.")})
     repo.tag("v1.3.0")
-    output = tmp_path / "release-notes.json"
+    repo.commit("2026-03-01", {"user-notes/first.md": note_file("First", "First change, reworded."), "user-notes/new.md": note_file("New", "New change.")})
+    repo.tag("v1.4.0")
 
-    assert asset.main(["file", "--repo", str(repo.path), "--version", "1.3.0", "--output", str(output)]) == 0
+    document = asset.release_document(repo.path, "v1.3.0")
 
-    assert json.loads(output.read_text("utf-8")) == {
+    assert document == {
         "schema": 2,
         "releases": [
             {
@@ -320,64 +327,166 @@ def test_a_releases_file_holds_that_release_alone_and_the_cells_reader_accepts_i
             }
         ],
     }
-    assert [r.version for r in release_notes_format.parse_document(output.read_text("utf-8"))] == ["1.3.0"]
+    assert [r.version for r in release_notes_format.parse_document(json.dumps(document))] == ["1.3.0"]
 
 
-def test_a_release_without_notes_gets_an_empty_list_that_the_cells_reader_accepts(asset, repo, tmp_path):
+def test_a_release_without_notes_gets_an_empty_list_that_the_cells_reader_accepts(asset, repo):
     """The file must exist for such a release: a missing file has to mean the notes are missing."""
     repo.commit("2026-01-10", {"user-notes/older.md": note_file("Older", "Older change.")})
     repo.tag("v1.2.0")
     repo.commit("2026-01-20", {"code": "a"})
     repo.tag("v1.2.1")
-    output = tmp_path / "release-notes.json"
 
-    assert asset.main(["file", "--repo", str(repo.path), "--version", "1.2.1", "--output", str(output)]) == 0
+    document = asset.release_document(repo.path, "v1.2.1")
 
-    assert json.loads(output.read_text("utf-8")) == {"schema": 2, "releases": []}
-    assert release_notes_format.parse_document(output.read_text("utf-8")) == ()
+    assert document == {"schema": 2, "releases": []}
+    assert release_notes_format.parse_document(json.dumps(document)) == ()
 
 
 def test_the_page_starts_with_whats_new_and_shows_a_note_without_a_title_by_its_sentence(asset):
-    notes_file = json.dumps(
-        {
-            "schema": 2,
-            "releases": [
-                {
-                    "version": "1.3.0",
-                    "released_on": "2026-02-02",
-                    "notes": [{"title": "Photos keep their date", "text": "Imported photos keep the day they were taken."},
-                              {"title": None, "text": "Searches find more."}],
-                }
-            ],
-        }
+    notes_file = notes_file_text(
+        {"title": "Photos keep their date", "text": "Imported photos keep the day they were taken."},
+        {"title": None, "text": "Searches find more."},
     )
 
     body = asset.page_body("## 1.3.0\n\n* a technical change\n", notes_file)
 
     assert body.splitlines()[:3] == [asset.PAGE_MARKER, "", "## What's new"]
-    assert body.index("**Photos keep their date**") < body.index("Imported photos keep the day they were taken.")
-    assert "- Searches find more." in body.splitlines()  # no title: the sentence alone
+    assert body.index("**Photos keep their date**") < body.index("Imported photos keep the day they were taken")
+    assert "- Searches find more\\." in body.splitlines()  # no title: the sentence alone
     assert body.endswith("## 1.3.0\n\n* a technical change\n")  # the changelog follows, untouched
 
 
 def test_a_release_without_notes_leaves_its_page_alone(asset):
     changelog = "## 1.2.1\n\n* a technical change\n"
 
-    assert asset.page_body(changelog, json.dumps({"schema": 2, "releases": []})) == changelog
+    assert asset.page_body(changelog, notes_file_text()) == changelog
 
 
-def test_a_second_run_on_the_same_page_adds_no_second_section(asset, repo, tmp_path):
-    """A recovery run builds the page again from the same file; the page must still hold one section."""
+def test_a_page_that_has_the_marker_is_left_as_it_is_and_a_page_without_it_gets_one_section(asset):
+    notes_file = notes_file_text({"title": "First", "text": "First change."})
+    changelog = "## 1.3.0\r\n\r\n* a technical change\r\n"
+
+    first = asset.page_body(changelog, notes_file)
+    second = asset.page_body(first, notes_file)
+
+    assert first != changelog and first.count(asset.PAGE_MARKER) == 1
+    assert first.endswith(changelog)  # the changelog's own line endings survive
+    assert second == first
+
+
+def test_note_text_reads_as_plain_letters_whatever_it_holds(asset):
+    """GitHub must show a sentence as written: CommonMark finds no syntax in it, and `@` and `#` are broken up
+    so GitHub's own linking of names and issue numbers (which a backslash does not stop) finds nothing."""
+    from markdown_it import MarkdownIt
+
+    text = "Ask @someone about #123 at https://example.com or me@example.com, use * freely, _a_ <b>x</b> [y](z) `c` $5 & $6."
+
+    shown = asset._plain(text)
+
+    tokens = MarkdownIt("commonmark").parse(shown)
+    assert [token.type for token in tokens] == ["paragraph_open", "inline", "paragraph_close"]
+    assert {child.type for child in tokens[1].children} == {"text"}
+    assert "".join(child.content for child in tokens[1].children) == text.replace("@", "@\u200b").replace("#", "#\u200b")
+
+
+def releases(*rows):
+    """GitHub's release list as `_published_releases` returns it: (tag, assets, draft) rows, newest first."""
+    return [{"tag": tag, "assets": assets, "draft": draft} for tag, assets, draft in rows]
+
+
+def test_a_run_checks_the_newest_twenty_published_releases_that_have_assets_and_lack_the_file(asset):
+    file = asset.NOTES_ASSET
+    listing = releases(
+        ("v2.0.0", [], True),  # a draft is not published and does not count toward the twenty
+        ("v1.9.0", [], False),  # publication has not started: the release controller still reads this page
+        ("v1.8.0", ["sample.whl"], False),  # lacks the file
+        ("v1.7.0", ["sample.whl", file], False),  # has it
+        ("v1.6.0-rc.1", ["sample.whl"], False),  # not vX.Y.Z: the notes format cannot name it
+        ("v1.5.0", ["sample.whl"], False),  # lacks the file
+        ("v1.4.0", ["sample.whl"], False),  # beyond the limit
+    )
+
+    assert asset.newest_missing(listing, limit=5) == ["v1.8.0", "v1.5.0"]
+
+
+class FakeGitHub:
+    """`gh` and the upload command, recorded: the release page as it is and what each call did to it."""
+
+    def __init__(self, body: str) -> None:
+        self.body = body
+        self.calls: list[str] = []
+
+    def __call__(self, *command: str) -> str:
+        if command[:3] == ("gh", "release", "view"):
+            return json.dumps({"body": self.body})
+        if command[:3] == ("gh", "release", "edit"):
+            self.calls.append("edit page")
+            self.body = Path(command[command.index("--notes-file") + 1]).read_text("utf-8")
+        elif "upload-file" in command:
+            self.calls.append("upload file")
+        else:
+            raise AssertionError(f"unexpected call {command}")
+        return ""
+
+
+@pytest.fixture
+def released(repo):
     repo.commit("2026-02-01", {"user-notes/first.md": note_file("First", "First change.")})
     repo.tag("v1.3.0")
-    notes_file, changelog = tmp_path / "release-notes.json", tmp_path / "changelog.md"
-    first, second = tmp_path / "first.md", tmp_path / "second.md"
-    changelog.write_bytes(b"## 1.3.0\r\n\r\n* a technical change\r\n")
-    asset.main(["file", "--repo", str(repo.path), "--version", "1.3.0", "--output", str(notes_file)])
+    return repo
 
-    asset.main(["page", "--notes", str(notes_file), "--body", str(changelog), "--output", str(first)])
-    asset.main(["page", "--notes", str(notes_file), "--body", str(first), "--output", str(second)])
 
-    assert first.read_bytes() != changelog.read_bytes()
-    assert second.read_bytes() == first.read_bytes()
-    assert first.read_bytes().endswith(changelog.read_bytes())  # the changelog's own line endings survive
+def test_the_page_is_written_before_the_file_is_uploaded(asset, released, tmp_path, monkeypatch):
+    """A release that has the file must have its section: the file is the sweep's proof that the release is done."""
+    github = FakeGitHub("## 1.3.0\n\n* a technical change\n")
+    monkeypatch.setattr(asset, "_run", github)
+
+    message = asset.publish_release(released.path, "v1.3.0", tmp_path / "out", dry_run=False)
+
+    assert github.calls == ["edit page", "upload file"]
+    assert github.body.startswith(asset.PAGE_MARKER) and "First change" in github.body
+    assert "now starts with What's new" in message
+
+
+def test_a_release_that_has_its_page_section_is_not_edited_again_but_still_gets_its_file(asset, released, tmp_path, monkeypatch):
+    first = FakeGitHub("## 1.3.0\n\n* a technical change\n")
+    monkeypatch.setattr(asset, "_run", first)
+    asset.publish_release(released.path, "v1.3.0", tmp_path / "out", dry_run=False)
+    second = FakeGitHub(first.body)  # the page as the first run left it, the upload having failed
+    monkeypatch.setattr(asset, "_run", second)
+
+    asset.publish_release(released.path, "v1.3.0", tmp_path / "out", dry_run=False)
+
+    assert second.calls == ["upload file"]
+    assert second.body.count(asset.PAGE_MARKER) == 1
+
+
+def test_a_dry_run_builds_the_file_and_changes_nothing_on_github(asset, released, tmp_path, monkeypatch):
+    github = FakeGitHub("## 1.3.0\n\n* a technical change\n")
+    monkeypatch.setattr(asset, "_run", github)
+
+    message = asset.publish_release(released.path, "v1.3.0", tmp_path / "out", dry_run=True)
+
+    assert github.calls == []
+    assert (tmp_path / "out" / "v1.3.0" / asset.NOTES_ASSET).is_file()
+    assert "nothing written to GitHub" in message
+
+
+def test_one_releases_failure_does_not_stop_the_others_and_fails_the_run(asset, released, tmp_path, monkeypatch, capsys):
+    released.commit("2026-03-01", {"code": "b"})
+    released.tag("v1.4.0")
+    github = FakeGitHub("## changelog\n")
+
+    def run(*command):
+        if "v1.3.0" in command and "upload-file" in command:
+            raise subprocess.CalledProcessError(1, command, stderr="immutable release asset differs")
+        return github(*command)
+
+    monkeypatch.setattr(asset, "_run", run)
+
+    status = asset.publish(released.path, ["v1.3.0", "v1.4.0"], tmp_path / "out", dry_run=False)
+
+    assert status == 1
+    assert github.calls == ["edit page", "upload file"]  # v1.3.0's page, then v1.4.0's file: the first release's failure stopped nothing
+    assert "release notes failed for v1.3.0" in capsys.readouterr().err

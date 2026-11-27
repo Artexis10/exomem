@@ -1,14 +1,14 @@
 ## 1. Build the notes file and the page section
 
-- [x] 1.1 Build the one-entry file for a release from `generate`, so the notes and date match the image's notes.
-- [x] 1.2 Build the "What's new" section from the notes file, with a marker so a second run changes nothing.
+- [x] 1.1 Build the one-entry file for a release from `generate`, read at the release's own tag, so the notes and date match the image's notes.
+- [x] 1.2 Build the "What's new" section from the notes file, escaped for GitHub, with a marker so a second run changes nothing.
 
-## 2. Publish through the release job
+## 2. Publish through the release workflow
 
-- [x] 2.1 Build `release-notes.json` in `build-artifacts` after the Cloud archives, on a clone with the full history and tags, also in a dry run.
-- [x] 2.2 Write the section to the release page before the upload, in a real run only, so the file's presence shows that the page was written.
-- [x] 2.3 Upload the file through `release_recovery.py upload`, which fails when the file is missing, and count it in the release plan's asset check for a tag that carries its builder.
-- [x] 2.4 Describe the asset and the page section in `docs/release.md`.
+- [x] 2.1 Add the `release-notes` job: after `build-artifacts`, needed by no other job, one run at a time.
+- [x] 2.2 Check the 20 newest published releases that have assets and lack the file, build each from its own tag and publish it; a dry run builds its own tag and writes nothing.
+- [x] 2.3 Write the section before the upload, upload through `release_recovery.py upload-file`, and let one release's failure leave the others to finish before the job fails.
+- [x] 2.4 Describe the job, the asset and the page section in `docs/release.md`; name the outside reader in the format module.
 
 ## 3. Acceptance
 

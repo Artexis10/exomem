@@ -5,7 +5,6 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -211,7 +210,7 @@ def test_upload_publishes_release_assets_without_build_metadata(tmp_path, monkey
     cloud_names = ("sample-claude.zip", "sample-openai.zip", "sample-release.json")
     expected = {
         name: name.encode()
-        for name in ("sample-1.2.3-py3-none-any.whl", "sample-1.2.3.tar.gz", *cloud_names, recovery.NOTES_ASSET)
+        for name in ("sample-1.2.3-py3-none-any.whl", "sample-1.2.3.tar.gz", *cloud_names)
     }
     for name, data in {**expected, ".gitignore": b"*", "unrelated.txt": b"build metadata"}.items():
         (tmp_path / name).write_bytes(data)
@@ -234,75 +233,44 @@ def test_upload_publishes_release_assets_without_build_metadata(tmp_path, monkey
     assert uploaded == expected
 
 
-def test_upload_stops_before_publishing_anything_when_the_release_notes_file_was_not_built(tmp_path, monkeypatch):
-    """The notes file is a required asset: a job that built none must fail, not publish a release without it."""
-    (tmp_path / "sample-1.2.3.tar.gz").write_bytes(b"sdist")
-    monkeypatch.setattr(recovery, "project", lambda tag: {"name": "sample", "version": "1.2.3"})
-    monkeypatch.setattr(recovery, "cloud_files", lambda tag: {})
-    monkeypatch.setattr(
-        "sys.argv", ["release-recovery", "upload", "--tag", "v1.2.3", "--directory", str(tmp_path)]
-    )
-    monkeypatch.setattr(recovery, "run", lambda *args: pytest.fail("uploaded a partial release"))
-
-    with pytest.raises(SystemExit, match=recovery.NOTES_ASSET):
-        recovery.main()
-
-
-@pytest.mark.parametrize(
-    ("carries_builder", "notes_uploaded", "assets"),
-    [
-        (True, False, "missing"),  # the release a failed upload left without its notes: a later push must heal it
-        (True, True, "present"),
-        (False, False, "present"),  # a tag cut before the builder existed never had the file and stays complete
-    ],
-)
-def test_release_plan_counts_the_notes_file_for_a_tag_that_carries_its_builder(
-    monkeypatch, carries_builder, notes_uploaded, assets
-):
-    wheel, sdist = "sample-1.2.3-py3-none-any.whl", "sample-1.2.3.tar.gz"
-    names = [wheel, sdist, *([recovery.NOTES_ASSET] if notes_uploaded else [])]
+def _upload_file(monkeypatch, tmp_path, *, published):
+    """Run `upload-file` for a notes file with the release's assets as given: a name to its bytes."""
+    notes = tmp_path / "release-notes.json"
+    notes.write_bytes(b'{"schema": 2, "releases": []}\n')
+    monkeypatch.setattr(recovery, "release_assets", lambda tag: [{"name": name} for name in published])
 
     def download(tag, names, directory):
         for name in names:
-            (directory / name).write_bytes(name.encode())
+            (directory / name).write_bytes(published[name])
 
-    monkeypatch.setattr(recovery, "project", lambda tag: {"name": "sample", "version": "1.2.3"})
-    monkeypatch.setattr(recovery, "release_assets", lambda tag: [{"name": name} for name in names])
-    monkeypatch.setattr(recovery, "cloud_files", lambda tag: {})
     monkeypatch.setattr(recovery, "download_release", download)
+    # An older tag has no Cloud archives or other files this command may need to read.
+    monkeypatch.setattr(recovery, "project", lambda tag: pytest.fail("upload-file read the tag's distributions"))
+    monkeypatch.setattr(recovery, "cloud_files", lambda tag: pytest.fail("upload-file read the tag's Cloud archives"))
     monkeypatch.setattr(
-        recovery,
-        "release_pypi_files",
-        lambda packages, version: [
-            {"filename": name, "digests": {"sha256": recovery.hashlib.sha256(name.encode()).hexdigest()}}
-            for name in (wheel, sdist)
-        ],
+        "sys.argv",
+        ["release-recovery", "upload-file", "--tag", "v1.2.3", "--directory", str(tmp_path / "dist"), "--file", str(notes)],
     )
-    monkeypatch.setattr(recovery, "carries_notes_builder", lambda tag: carries_builder)
-
-    assert recovery.asset_status("v1.2.3") == {"assets": assets, "pypi": "present"}
+    return notes
 
 
-def test_a_tag_carries_the_notes_builder_only_when_its_own_tree_has_the_script(tmp_path, monkeypatch):
-    def git(*args):
-        subprocess.run(
-            ["git", "-c", "user.name=t", "-c", "user.email=t@example.test", *args],
-            cwd=tmp_path, check=True, capture_output=True,
-        )
+def test_upload_file_adds_a_missing_notes_file_without_reading_the_tags_other_artifacts(tmp_path, monkeypatch):
+    notes = _upload_file(monkeypatch, tmp_path, published={})
+    uploaded = []
+    monkeypatch.setattr(recovery, "run", lambda *args: uploaded.append(args))
 
-    git("init", "-q")
-    git("commit", "-q", "--allow-empty", "-m", "before the builder")
-    git("tag", "v1.0.0")
-    builder = tmp_path / recovery.NOTES_BUILDER
-    builder.parent.mkdir()
-    builder.write_text("# builder\n")
-    git("add", "-A")
-    git("commit", "-q", "-m", "add the builder")
-    git("tag", "v1.1.0")
-    monkeypatch.chdir(tmp_path)
+    recovery.main()
 
-    assert not recovery.carries_notes_builder("v1.0.0")
-    assert recovery.carries_notes_builder("v1.1.0")
+    assert uploaded == [("gh", "release", "upload", "v1.2.3", str(notes))]
+
+
+def test_upload_file_refuses_to_replace_a_published_file_with_other_bytes(tmp_path, monkeypatch):
+    """The refusal that keeps published bytes fixed also stops a notes job, and only that job."""
+    _upload_file(monkeypatch, tmp_path, published={"release-notes.json": b"published earlier"})
+    monkeypatch.setattr(recovery, "run", lambda *args: pytest.fail("replaced a published file"))
+
+    with pytest.raises(ValueError, match="immutable release asset differs: release-notes.json"):
+        recovery.main()
 
 
 def test_partial_release_receipts_can_be_completed_from_original_artifact(tmp_path):

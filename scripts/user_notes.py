@@ -336,11 +336,11 @@ def _release_tags(repo: Path) -> dict[Version, int]:
     return tags
 
 
-def _add_commits(repo: Path) -> dict[str, tuple[str, int]]:
+def _add_commits(repo: Path, head: str) -> dict[str, tuple[str, int]]:
     """For each note path: the commit that added it and that commit's time. The newest add counts."""
     log = _git(
         repo, "-c", "core.quotepath=off", "log", "--no-renames", "--diff-filter=A", "--name-only",
-        "--format=%x01%H %ct", "HEAD", "--", NOTES_DIR,
+        "--format=%x01%H %ct", head, "--", NOTES_DIR,
     )
     added: dict[str, tuple[str, int]] = {}
     commit: tuple[str, int] | None = None
@@ -363,8 +363,8 @@ def _date(stamp: int) -> str:
     return datetime.fromtimestamp(stamp, UTC).date().isoformat()
 
 
-def generate(repo: Path, version: str) -> dict:
-    """The notes of every release, newest first, from the notes in `repo`'s HEAD and its tags.
+def generate(repo: Path, version: str, head: str = "HEAD") -> dict:
+    """The notes of every release, newest first, from the notes in `repo`'s `head` (its HEAD by default) and its tags.
 
     `version` is the release being built: it receives the notes that no tag contains yet. Within a
     release the newest note comes first, so a reader that wants one note takes the first. A note
@@ -379,12 +379,12 @@ def generate(repo: Path, version: str) -> dict:
     if _git(repo, "rev-parse", "--is-shallow-repository").strip() == "true":
         raise SystemExit("generate: this clone is shallow; fetch the full history and the tags first")
     tags = _release_tags(repo)
-    added = _add_commits(repo)
-    paths = [p for p in _git(repo, "ls-tree", "-r", "--name-only", "-z", "HEAD", "--", NOTES_DIR).split("\0") if is_note_path(p)]
+    added = _add_commits(repo, head)
+    paths = [p for p in _git(repo, "ls-tree", "-r", "--name-only", "-z", head, "--", NOTES_DIR).split("\0") if is_note_path(p)]
     releases: dict[Version, list[_Note]] = {}
     containing: dict[str, Version | None] = {}
     for path in sorted(paths):
-        text = _decode(_blob(repo, "HEAD", path))
+        text = _decode(_blob(repo, head, path))
         if path not in added or text is None or not text.strip():
             _warning(path, "left out of the release notes: no readable text, or no commit that added it")
             continue
@@ -397,7 +397,7 @@ def generate(repo: Path, version: str) -> dict:
             containing[commit] = _earliest_release_containing(repo, commit)
         release = containing[commit] or building
         releases.setdefault(release, []).append(_Note(path, title, body, stamp))
-    head_time = int(_git(repo, "log", "-1", "--format=%ct", "HEAD").strip())
+    head_time = int(_git(repo, "log", "-1", "--format=%ct", head).strip())
     newest_first = sorted(releases, reverse=True)[:KEEP_RELEASES]
     document = fmt.document(
         fmt.Release(

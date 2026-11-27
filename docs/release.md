@@ -422,16 +422,18 @@ tag. It publishes missing enabled artifacts. Python qualification runs after
 whole workflow conclusion. A skipped PyPI job can qualify when complete matching
 distributions were already present.
 
-`build-artifacts` also publishes the release's user notes. It builds
-`release-notes.json` from the tag's history with `scripts/release_notes_asset.py`: the file holds
-only this release's entry from `scripts/user_notes.py generate`, in the notes file format of
-`src/exomem/release_notes_format.py`, and an empty `releases` list when the release has no notes.
-A missing file therefore means the notes are missing, never that there are none. The file is a
-required asset. A job that cannot build it fails, `release_recovery.py upload` refuses to run without
-it, and the release plan counts it for any tag whose tree carries the builder, so a later push heals a
-release that lacks it. The same step starts the release page with a "What's new" section, written
-before the upload and marked by a comment, so a rerun adds no second copy. A release with no notes
-gets no section.
+The `release-notes` job publishes each release's user notes. Nothing waits for it: when it fails,
+that job is red and no package, image or rollout stops. Every run checks the 20 newest published
+releases, and for each one that has no `release-notes.json` it builds the file from that release's own
+tag with `scripts/release_notes_asset.py`. The file holds only that release's entry from
+`scripts/user_notes.py generate`, in the notes file format of `src/exomem/release_notes_format.py`, and
+an empty `releases` list when the release has no notes. A missing file therefore means the notes are
+missing, never that there are none. The job writes a "What's new" section at the top of the release page
+before it uploads the file, so a release that has the file has its page. A marker comment makes the write
+happen whenever the marker is absent. The upload is `release_recovery.py upload-file`, which adds the
+file when it is missing and refuses to replace a published file with other bytes; that refusal fails only
+this job. A dry run builds the notes of its own tag and writes nothing to GitHub. `released_on` is the date
+of the release tag; a consumer places a release in a month by its GitHub publish time.
 
 The `python-qualification-RUN-ATTEMPT` artifact and job summary identify the tag,
 source, exact producer artifact, wheel and sdist hashes, and qualification time.

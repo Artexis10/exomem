@@ -1,53 +1,90 @@
-"""What one release publishes of its user notes: the `release-notes.json` asset and the start of its page.
+"""What each release publishes of its user notes: the `release-notes.json` asset and the start of its page.
 
 The notes come from the same two definitions as the cell image's notes file: `scripts/user_notes.py`
 gives each note to the first release that contains it, and `src/exomem/release_notes_format.py` is the
 file format. This script adds no second assignment and no second serialiser. Two subcommands:
 
-  file  Writes the notes file of one release: the entry `generate` gives that release alone, or an
-        empty list when the release has no notes. A reader then reads a missing file as notes
-        missing, never as no notes.
-  page  Reads that file and the release page's body, and writes a body that starts with a
-        "What's new" section: each note's title, then its sentence. A body that has the section, or
-        a release with no notes, comes back unchanged, so a rerun adds no second copy.
+  missing  Prints the tags of the newest published releases that have no `release-notes.json`, one per line.
+  publish  For each tag given, builds that release's notes from its own tag, starts its page with a
+           "What's new" section when it has notes, then uploads the file. Page first, so a release that
+           has the file has its page. A tag that fails does not stop the others; the run then fails.
+           `--dry-run` builds and reads, and writes nothing to GitHub.
 
-`file` needs the full history and the version tags, as `generate` does, and imports what it imports
-(markdown-it-py and PyYAML read the note shape). `page` needs only the standard library.
+A release's file holds that release alone: the entry `generate` gives it, or an empty list when it has no
+notes, so a missing file always means the notes are missing and never that there are none.
+
+`publish` needs the full history and the version tags, as `generate` does, and imports what it imports
+(markdown-it-py and PyYAML read the note shape). `missing` needs only the standard library and `gh`.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import string
+import subprocess
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 import user_notes  # the sibling script: a script run by path finds its own directory first
 
-#: The first line of a release page's section. A comment shows nothing on the page, and a rerun finds
-#: its own section by it, so no code reads the heading's words.
+NOTES_ASSET = "release-notes.json"
+#: How many of the newest published releases a run checks, so a release that a failed run left without its notes heals.
+SWEEP_RELEASES = 20
+#: The first line of a release page's section. A comment shows nothing on the page, and a run finds its own
+#: section by it, so no code reads the heading's words.
 PAGE_MARKER = "<!-- evermatter-whats-new -->"
+RECOVERY = Path(__file__).resolve().parents[1] / "infra" / "scripts" / "release_recovery.py"
+GH_TIMEOUT_SECONDS = 300
+ZERO_WIDTH_SPACE = "\u200b"
 
 
-def release_document(repo: Path, version: str) -> dict:
-    """The notes file of release `version`: its own entry, or an empty list when it has no notes.
+def _run(*command: str) -> str:
+    return subprocess.run(
+        command, check=True, capture_output=True, text=True, encoding="utf-8", timeout=GH_TIMEOUT_SECONDS
+    ).stdout
 
-    `repo` is checked out at the release's tag, so `generate` ranks that release first among those
-    with notes and its 20-release limit never cuts it off. Older releases are dropped here.
+
+def release_document(repo: Path, tag: str) -> dict:
+    """The notes file of the release at `tag`: its own entry, or an empty list when it has no notes.
+
+    `generate` reads the notes of the tag's own tree, so a release gets the notes it shipped with, and
+    ranks that release first among those with notes, so its 20-release limit never cuts it off. The
+    older releases it also returns are dropped here.
     """
     fmt = user_notes._notes_format()
-    everything = user_notes.generate(repo, version)  # it refuses a version that is not X.Y.Z, and a shallow clone
-    own = fmt.version_text(fmt.parse_version(version))
+    everything = user_notes.generate(repo, tag.removeprefix("v"), head=f"refs/tags/{tag}")  # it refuses a shallow clone
+    own = fmt.version_text(fmt.parse_version(tag.removeprefix("v")))
     return {**everything, "releases": [entry for entry in everything["releases"] if entry["version"] == own]}
+
+
+def _plain(text: str) -> str:
+    """`text` as GitHub shows it letter for letter, whatever a note or title holds.
+
+    CommonMark lets any ASCII punctuation mark take a backslash (a set the specification fixes), so no
+    character reads as emphasis, a link, an autolink, HTML or math. GitHub links `@name`, `#123` and an
+    address after it has read the Markdown, and a backslash does not stop that, so a zero-width space follows
+    each `@` and `#`. The notes file keeps the original text; only the page is escaped.
+    """
+    escaped = "".join(f"\\{char}" if char in string.punctuation else char for char in text)
+    return escaped.replace("@", "@" + ZERO_WIDTH_SPACE).replace("#", "#" + ZERO_WIDTH_SPACE)
 
 
 def whats_new_section(release) -> str:
     """The section for one release of the notes format: the marker, a heading and one list item per note."""
-    items = [f"- **{note.title}**\n\n  {note.text}" if note.title else f"- {note.text}" for note in release.notes]
+    items = [
+        f"- **{_plain(note.title)}**\n\n  {_plain(note.text)}" if note.title else f"- {_plain(note.text)}"
+        for note in release.notes
+    ]
     return "\n\n".join([PAGE_MARKER, "## What's new", *items])
 
 
 def page_body(body: str, notes_text: str) -> str:
-    """`body` with the What's new section of the notes file on top, or `body` itself when it needs none."""
+    """`body` with the What's new section of the notes file on top, or `body` itself when it needs none.
+
+    The section is written whenever the marker is absent, so a section that someone deleted comes back.
+    """
     releases = user_notes._notes_format().parse_document(notes_text)  # the cell's reader: a file it refuses starts no page
     if not releases or PAGE_MARKER in body:
         return body
@@ -55,32 +92,95 @@ def page_body(body: str, notes_text: str) -> str:
     return f"{section}\n\n{body}" if body.strip() else f"{section}\n"
 
 
+def newest_missing(releases: Sequence[dict], limit: int = SWEEP_RELEASES) -> list[str]:
+    """The tags, newest first, of the `limit` newest published releases that have no notes file.
+
+    `releases` are GitHub's, newest first, each with `tag`, `draft` and `assets` (the asset names). A draft is not
+    published and never counts toward the limit. A tag that is not `vX.Y.Z` cannot name a release in the
+    notes format, so it is left alone. A release with no asset has not started publication: the release
+    controller writes the changelog entry from its page, and dispatches the publisher only after that
+    (scripts/release_cuts.py), so an edit of the page before then would change what the controller writes.
+    """
+    published = [release for release in releases if not release["draft"]][:limit]
+    return [
+        release["tag"]
+        for release in published
+        if release["assets"]
+        and NOTES_ASSET not in release["assets"]
+        and user_notes._tag_version(release["tag"]) is not None
+    ]
+
+
+def _published_releases() -> list[dict]:
+    listing = json.loads(_run("gh", "api", "repos/{owner}/{repo}/releases?per_page=100"))  # the repository: GH_REPO
+    return [
+        {"tag": r["tag_name"], "draft": r["draft"], "assets": [a["name"] for a in r["assets"]]} for r in listing
+    ]
+
+
+def publish_release(repo: Path, tag: str, directory: Path, *, dry_run: bool) -> str:
+    """Build the notes of the release at `tag`, start its page and upload its file. Says what it did."""
+    document = release_document(repo, tag)
+    notes_file = directory / tag / NOTES_ASSET
+    user_notes.write_notes_file(notes_file, document)
+    # JSON, not text, so the body's own line endings survive the read.
+    body = json.loads(_run("gh", "release", "view", tag, "--json", "body"))["body"]
+    new_body = page_body(body, notes_file.read_text(encoding="utf-8"))
+    body_file = notes_file.with_name("release-body.md")
+    body_file.write_bytes(new_body.encode("utf-8"))
+    count = sum(len(entry["notes"]) for entry in document["releases"])
+    changes_page = new_body != body
+    if dry_run:
+        page = "would start with What's new" if changes_page else "needs no What's new change"
+        return f"dry run, {tag}: {count} note(s); the page {page}; nothing written to GitHub"
+    if changes_page:
+        _run("gh", "release", "edit", tag, "--notes-file", str(body_file))
+    # The upload is the existing release upload path: it adds a missing file and refuses to replace a published one with other bytes.
+    _run(sys.executable, str(RECOVERY), "upload-file", "--tag", tag, "--file", str(notes_file))
+    page = "now starts with What's new" if changes_page else "needs no What's new change"
+    return f"{tag}: {count} note(s); the page {page}; {NOTES_ASSET} is published"
+
+
+def _why(error: BaseException) -> str:
+    """One line for the log: a failed command's last line of output (its traceback's last line names the cause)."""
+    if isinstance(error, subprocess.CalledProcessError):
+        lines = (error.stderr or error.stdout or "").strip().splitlines()
+        return lines[-1] if lines else f"exit status {error.returncode}"
+    return str(error.code if isinstance(error, SystemExit) else error)
+
+
+def publish(repo: Path, tags: Sequence[str], directory: Path, *, dry_run: bool) -> int:
+    failures = []
+    for tag in tags:
+        try:
+            print(publish_release(repo, tag, directory, dry_run=dry_run), flush=True)
+        # One release's failure must not keep the others from their notes; the run still fails below.
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError, SystemExit) as error:
+            failures.append(f"{tag}: {_why(error)}")
+    for failure in failures:
+        print(f"release notes failed for {failure}", file=sys.stderr)
+    return 1 if failures else 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
 
-    build = commands.add_parser("file", help="write the notes file of one release")
-    build.add_argument("--repo", type=Path, default=Path("."), help="a full clone with the version tags")
-    build.add_argument("--version", required=True, help="the release, as X.Y.Z")
-    build.add_argument("--output", type=Path, required=True, help="where to write the notes file")
+    find = commands.add_parser("missing", help="print the newest published releases that have no notes file")
+    find.add_argument("--limit", type=int, default=SWEEP_RELEASES, help="how many of the newest releases to check")
 
-    page = commands.add_parser("page", help="write a release page body that starts with What's new")
-    page.add_argument("--notes", type=Path, required=True, help="the release's notes file")
-    page.add_argument("--body", type=Path, required=True, help="the release page body as it is now")
-    page.add_argument("--output", type=Path, required=True, help="where to write the body")
+    build = commands.add_parser("publish", help="publish the notes of the given releases")
+    build.add_argument("tags", nargs="+", help="release tags, vX.Y.Z")
+    build.add_argument("--repo", type=Path, default=Path("."), help="a full clone with the version tags")
+    build.add_argument("--directory", type=Path, default=Path("release-notes"), help="where to build each release's files")
+    build.add_argument("--dry-run", action="store_true", help="build and read; write nothing to GitHub")
 
     args = parser.parse_args(argv)
-    if args.command == "file":
-        document = release_document(args.repo, args.version)
-        user_notes.write_notes_file(args.output, document)
-        entries = document["releases"]
-        print(f"Wrote {len(entries[0]['notes']) if entries else 0} note(s) of release {args.version} to {args.output}")
+    if args.command == "missing":
+        for tag in newest_missing(_published_releases(), args.limit):
+            print(tag)
         return 0
-    # Bytes in and out keep a body's line endings exactly, so an unchanged body is byte-identical.
-    body = page_body(args.body.read_bytes().decode("utf-8"), args.notes.read_text(encoding="utf-8"))
-    args.output.write_bytes(body.encode("utf-8"))
-    print(f"Wrote the release page body to {args.output}")
-    return 0
+    return publish(args.repo, args.tags, args.directory, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
