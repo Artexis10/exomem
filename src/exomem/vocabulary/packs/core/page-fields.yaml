@@ -5,7 +5,9 @@ registry: page-fields
 # append-only tree. Every other field there keeps its captured bytes. A field with a
 # `writer` changes on such a page only through that operation: `reclassify` relocates the
 # source and records its classification history, `custody` checks the raw file's identity,
-# and `closure` writes the back-reference when a compiled page cites the source. A field
+# `closure` writes the back-reference when a compiled page cites the source, and `classify`
+# records the page's sensitivity classes after checking them against the `sensitivity-classes`
+# registry. A field
 # that `carries: project-key` holds project keys, so a value it gains registers that key and
 # a relocation rewrites it. A field with `shape: list` holds a list of values; any other
 # field holds one. A `provenance` field records where an imported file came from: filing
@@ -54,3 +56,6 @@ entries:
   item-created:
     label: Item created
     attributes: {field: item_created, role: provenance, source: item-time}
+  sensitivity:
+    label: Sensitivity
+    attributes: {field: sensitivity, role: pointer, writer: classify, shape: list}

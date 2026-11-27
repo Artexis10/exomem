@@ -1238,6 +1238,9 @@ class CollectionManifest:
     subject: SubjectDeclaration | None = None
     #: Why the manifest's `subject` value was ignored, for a create or revise to refuse (`require_valid_subject`).
     subject_refusal: CollectionError | None = field(default=None, compare=False, repr=False)
+    #: The sensitivity classes the definition declares as a floor for every row. Only a store collection can
+    #: carry it, in its rows' governance metadata, so a file collection refuses it.
+    sensitivity: tuple[str, ...] = ()
     #: `items` (default) renders a view per row; `summary` keeps rows store-only.
     view_mode: str = "items"
     #: A derived summary collection takes rows only from imports and rebuilds them from its import log.
@@ -2290,7 +2293,20 @@ def _manifest_from_frontmatter(
         view_mode=view_mode,
         derived=derived,
         ignored_recipes=ignored_recipes,
+        sensitivity=_parse_sensitivity(frontmatter.get("sensitivity")),
     )
+
+
+def _parse_sensitivity(value: object) -> tuple[str, ...]:
+    """`sensitivity: [class, ...]`: the shape only. The registry that holds the class keys checks them on create and revise."""
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise CollectionError(
+            "INVALID_COLLECTION_MANIFEST", "sensitivity must be a list of class keys",
+            {"field": "sensitivity", "received": value, "example": "sensitivity: [health]"},
+        )
+    return tuple(value)
 
 
 def _parse_derived(value: object, view_mode: str) -> bool:

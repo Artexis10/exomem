@@ -50,6 +50,7 @@ from . import (
     originals,
     privacy_log,
     semantic_contract,
+    sensitivity_classes,
     source_taxonomy,
     temporal,
 )
@@ -241,6 +242,8 @@ class PreserveResult:
     content_type: str | None = None
     adoption: dict[str, object] | None = None
     document_container: dict | None = None
+    #: The classes the page records, their basis and the disclosure in force (`sensitivity_classes.report`).
+    sensitivity: dict[str, Any] | None = None
 
     def as_dict(self) -> dict:
         out = {
@@ -267,6 +270,8 @@ class PreserveResult:
             out["document_container"] = self.document_container
         if self.adoption is not None:
             out["adoption"] = self.adoption
+        if self.sensitivity is not None:
+            out["sensitivity"] = self.sensitivity
         return out
 
 
@@ -600,6 +605,7 @@ def preserve(
     media_pending: bool = False,
     diarize: bool | None = None,
     defer_fanout_to_terminal: bool = False,
+    sensitivity: Sequence[str] | None = None,
     _allocation: Mapping[str, str | None] | None = None,
     _prepare: Callable[[dict], None] | None = None,
     _validate_inputs: Callable[[], None] | None = None,
@@ -616,6 +622,9 @@ def preserve(
 
     `diarize` records an explicit speaker-label choice on an audio or video sidecar.
 
+    `sensitivity` is the caller's list of sensitivity classes for the page (`sensitivity_classes`). A caller that
+    gives none gets the default of the sidecar's source kind. The bytes are kept in full either way.
+
     `staged` is a binary that an upload door already copied, hashed and fsynced into a private stage
     (`upload_stage.StagedUpload`) before it took the mutation boundary. It stands in for
     `content_stream`: nothing is copied here, and the batch renames the stage into place.
@@ -626,6 +635,8 @@ def preserve(
     """
     if text_origin not in ("upload", "client"):
         raise ValueError("text_origin must be 'upload' or 'client'")
+    # Before anything hashes or writes: an unknown class refuses the whole capture.
+    declared_sensitivity = None if sensitivity is None else sensitivity_classes.validated(vault_root, sensitivity)
     # Before anything hashes or writes them: a kept text never holds a card number or a labelled credential.
     content, description, text, redaction_warnings = redact_capture_text(
         content=content, description=description, text=text,
@@ -888,6 +899,10 @@ def preserve(
             )
             parts = _parts_module()
             pieces = parts.split(text_clean) if text_clean else []
+            kind = source_taxonomy.load_taxonomy(vault_root).kinds.get(_sidecar_kind(inspection))
+            classification = sensitivity_classes.classify_capture(
+                vault_root, declared_sensitivity, kind_default=kind.sensitivity if kind else (),
+            )
             sidecar_md = _render_sidecar(
                 artifact_name=filename_safe,
                 scope=scope_safe,
@@ -916,6 +931,7 @@ def preserve(
                     if text_clean and text_origin == "client"
                     else None
                 ),
+                sensitivity=classification.classes,
             )
             if raw_protection:
                 sidecar_md = raw_guard.protect(
@@ -1150,6 +1166,7 @@ def preserve(
         content_type=content_type_effective,
         adoption=adoption_receipt,
         document_container=container_metadata,
+        sensitivity=sensitivity_classes.report(vault_root, classification, rel_path=sidecar_rel),
     )
 
 
@@ -1172,6 +1189,7 @@ def preserve_stream(
     media_pending: bool = False,
     diarize: bool | None = None,
     defer_fanout_to_terminal: bool = False,
+    sensitivity: Sequence[str] | None = None,
 ) -> PreserveResult:
     """Capture a binary STREAM to Evidence/ — the entrypoint for HTTP /upload.
 
@@ -1205,6 +1223,7 @@ def preserve_stream(
         media_pending=media_pending,
         diarize=diarize,
         defer_fanout_to_terminal=defer_fanout_to_terminal,
+        sensitivity=sensitivity,
     )
 
 
@@ -1402,6 +1421,11 @@ def artifact_location(relative_path: str) -> tuple[str, str, str]:
     return tree, scope, category
 
 
+def _sidecar_kind(inspection: Inspection | None) -> str:
+    """The source kind a sidecar carries: a dataset card names its format, every other sidecar is unclassified."""
+    return "dataset-export" if inspection is not None and inspection.dataset_format else source_taxonomy.UNCLASSIFIED_KIND
+
+
 def _render_sidecar(
     *,
     artifact_name: str,
@@ -1428,6 +1452,7 @@ def _render_sidecar(
     inspection: Inspection | None = None,
     transcription_of: Mapping[str, object] | None = None,
     parts: Layout | None = None,
+    sensitivity: Sequence[str] = (),
 ) -> str:
     """Sidecar .md describing a preserved binary artifact.
 
@@ -1464,12 +1489,10 @@ def _render_sidecar(
     label = _ARTIFACT_TREE_LABELS.get(tree, "Evidence")
     display_title = f"{label}: {artifact_name}"
     lines.append(f"title: {yaml_scalar(display_title)}")
-    lines.append(
-        "source_type: dataset-export"
-        if dataset_format
-        else f"source_type: {source_taxonomy.UNCLASSIFIED_KIND}"
-    )
+    lines.append(f"source_type: {_sidecar_kind(inspection)}")
     lines.append(f"captured: {date_iso}")
+    if sensitivity:
+        lines.append(f"{sensitivity_classes.FIELD}: " + yaml_flow_list(sensitivity))
     if inspection is not None:
         lines.append(f"inspection_status: {inspection.status}")
     if dataset_format:

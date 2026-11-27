@@ -184,9 +184,9 @@ def test_a_device_mapper_root_names_the_devices_under_it(tmp_path):
 
 
 def _with_start(cpu_seconds, mode="full"):
-    """The report as it stands after the notes folder's `start` call took `cpu_seconds` of its busiest thread."""
+    """The report as it stands after the notes folder's `start` call took `cpu_seconds` of `command.body` thread CPU."""
     return {**OUT, "mode": mode,
-            "folders": {"notes": {"start_call": {"busiest_thread_cpu_seconds": cpu_seconds},
+            "folders": {"notes": {"start_call": {"command_body_thread_cpu_seconds": cpu_seconds},
                                   "pages": [{"page": 1, "file_seconds": 40.0}, {"page": 2, "file_seconds": 10.0}]},
                         "media": {"pages": [{"page": 1, "file_seconds": 30.0}]}}}
 

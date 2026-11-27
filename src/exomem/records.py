@@ -263,6 +263,46 @@ def validate_new_row(
         _validate_body(body)
 
 
+def _registered_classes(
+    root: Path, manifest: collections.CollectionManifest, values: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    """The row with its own `sensitivity` classes in canonical form, or a refusal naming the registered keys.
+
+    Every collection, file or store, takes the same check that a page capture applies, so a row never keeps a
+    class that a policy would read as unclassified.
+    """
+    from . import sensitivity_classes
+    from .collection_store import governance
+
+    own = governance._own_classes(manifest.schema, values)
+    if not own:
+        return values
+    try:
+        canonical = sensitivity_classes.validated(root, own)
+    except sensitivity_classes.SensitivityError as error:
+        issue = {"field": governance.SENSITIVITY, "code": error.code, "reason": error.reason}
+        raise collections.CollectionError(
+            error.code, error.reason, {"field": governance.SENSITIVITY, "issues": [issue]}) from error
+    return {**values, governance.SENSITIVITY: list(canonical)}
+
+
+def _with_row_sensitivity(
+    root: Path, manifest: collections.CollectionManifest, values: Mapping[str, Any], result: dict[str, Any],
+    *, rel_path: str,
+) -> dict[str, Any]:
+    """A committed row's result with its own classes, as a page capture reports them. The classes are the
+    canonical ones `_registered_classes` already checked, so nothing is validated after the write; a row
+    without classes reports nothing, and a store collection's own report stays as it is."""
+    from . import sensitivity_classes
+    from .collection_store import governance
+
+    own = governance._own_classes(manifest.schema, values)
+    if not own or "sensitivity" in result:
+        return result
+    found = sensitivity_classes.Classification(tuple(own), sensitivity_classes.BASIS_DECLARED)
+    return {**result, "sensitivity": sensitivity_classes.report(root, found, rel_path=rel_path)}
+
+
 def append_record(
     vault_root: Path,
     collection: str | Path | collections.CollectionManifest,
@@ -295,6 +335,7 @@ def append_record(
     supplied_manifest = record_governance.resolve_collection_for_mutation(root, collection)
     if supplied_manifest.storage.strategy == "dataset":
         record_formats.load_adapter(root, supplied_manifest).refuse_mutation("append")
+    overrides = _registered_classes(root, supplied_manifest, overrides)
     key = (
         _validate_item_key(item_key, manifest=supplied_manifest, candidate=overrides)
         if item_key
@@ -608,6 +649,7 @@ def append_record(
     )
     sweep = _capture_sweep_carrier(root, after_manifest, key=key)
     committed = {"due_state": advisory, **committed} if advisory else committed
+    committed = _with_row_sensitivity(root, after_manifest, values, committed, rel_path=committed_path)
     return {"capture_sweep": sweep, **committed} if sweep else committed
 
 
@@ -1181,9 +1223,15 @@ def _bulk_sources_field(manifest: collections.CollectionManifest) -> bool:
 
 
 def _bulk_row_values(
-    manifest: collections.CollectionManifest, item: Mapping[str, Any], source_rel: str
+    manifest: collections.CollectionManifest, item: Mapping[str, Any], source_rel: str, *, root: Path | None
 ) -> dict[str, Any]:
-    """A bulk row's validated values: its item plus, where declared, a link to its source."""
+    """A bulk row's validated values: its item plus, where declared, a link to its source.
+
+    The row's own `sensitivity` classes take the registry check, so the file bulk path, the store bulk path, an
+    import batch and its preview refuse the same rows. A derived collection skips it: its rows keep no governance
+    metadata, and a rebuild replays the import log, which a class retired since the import must not refuse. Its
+    rebuild has no vault ``root`` to pass, so ``root`` may be ``None`` only for a derived manifest.
+    """
     values = dict(item)
     if _bulk_sources_field(manifest):
         link = _bulk_source_link(source_rel)
@@ -1192,7 +1240,8 @@ def _bulk_row_values(
             values["sources"] = [link]
         elif isinstance(listed, list) and link not in listed:
             values["sources"] = [*listed, link]
-    return _validate_values(manifest, values)
+    validated = _validate_values(manifest, values)
+    return validated if manifest.derived else dict(_registered_classes(root, manifest, validated))
 
 
 def resolve_preserved_source(
@@ -1422,7 +1471,7 @@ def bulk_upsert_records(
                     )
                     continue
                 source_rel, source_guard_row = resolved.path, resolved.guard
-                values = _bulk_row_values(manifest, raw["item"], source_rel)
+                values = _bulk_row_values(manifest, raw["item"], source_rel, root=root)
             except collections.CollectionError as error:
                 outcomes.append(_bulk_error_row(index, error))
                 continue
@@ -1910,6 +1959,7 @@ def update_record(
                 "INVALID_RECORD_PRESENTATION", "collection has no presentation recipe"
             )
         record_governance.require_mutation_visibility(root, manifest)
+        changes = _registered_classes(root, manifest, changes)
         adapter = record_formats.load_adapter(root, manifest)
         if not adapter.mutable:
             adapter.refuse_mutation("update")
@@ -4818,7 +4868,15 @@ def _refuse_excluded_authored_names(names: object) -> None:
 
 
 def _refuse_store_only_features(manifest: collections.CollectionManifest) -> None:
-    """A file collection is one view per row; summary rows and row references live only in a store collection."""
+    """A file collection is one view per row; summary rows, row references and a class floor live only in a store collection."""
+    if manifest.sensitivity:
+        raise collections.CollectionError(
+            "INVALID_COLLECTION_MANIFEST",
+            "a file collection keeps no row governance metadata to carry a sensitivity floor; only a store "
+            "collection can declare one",
+            {"field": "sensitivity", "received": list(manifest.sensitivity),
+             "expected": "a collection whose rows live in the store", "example": "remove the sensitivity declaration"},
+        )
     if found := collections.declared_references(manifest.schema):
         raise collections.CollectionError(
             "INVALID_FIELD_REFERENCE",

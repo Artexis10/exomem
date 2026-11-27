@@ -727,7 +727,7 @@ def test_a_managed_runtime_abstains_with_index_warming_and_warms_once(
     packet = working_set_runtime.serve(seeded, turn="the cargo sled", max_chars=2000)
 
     assert packet["abstained"] is True
-    assert packet["abstention"] == {"reason": "index_warming"}
+    assert packet["abstention"]["reason"] == "index_warming"
     assert packet["units"] == []
     assert len(scheduled) == 1
 
@@ -785,7 +785,7 @@ def test_cold_activation_abstains_before_starting_retrieval(
         seeded, turn="the cargo sled", continuity="old-token", include_timings=True
     )
 
-    assert packet["abstention"] == {"reason": "index_warming"}
+    assert packet["abstention"]["reason"] == "index_warming"
     assert retrieval_calls == [], "a warming response must not load hybrid resources"
     assert scheduled == [seeded]
     assert packet["units"] == []

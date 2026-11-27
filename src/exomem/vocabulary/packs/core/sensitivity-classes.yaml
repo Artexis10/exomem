@@ -1,0 +1,16 @@
+schema_version: 1
+registry: sensitivity-classes
+# What kinds of sensitive material a page holds. A class is a label an agent records beside the
+# page; it never leaves the material out, and it restricts nothing by itself: a governance policy
+# decides who reads a page of a class. These shipped classes are fixed. A vault adds a class in
+# `_Schema/sensitivity-classes.yaml` through a deliberate save, because a policy names classes.
+entries:
+  identity:
+    label: Identity
+    description: an identity document or a government identifier, such as a passport, an ID card, a licence or a tax number
+  health:
+    label: Health
+    description: a medical or health record, such as a diagnosis, a prescription or a test result
+  financial:
+    label: Financial
+    description: a financial statement or account record, such as a bank statement, a tax return or an invoice

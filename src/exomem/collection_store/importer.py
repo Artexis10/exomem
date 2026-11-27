@@ -2887,21 +2887,21 @@ def _rejected_at(outcome: Mapping[str, Any]) -> str:
 
 
 def _identify(
-    manifest, values: Mapping[str, Any], source_ref: str
+    manifest, values: Mapping[str, Any], source_ref: str, *, root: Path | None
 ) -> tuple[str | None, dict[str, Any] | None, tuple[str, str, dict[str, Any]] | None]:
     """One mapped row's natural key and stored values by the writer's own rule, or its refusal data.
 
     A batch and the whole-source preview both prepare rows here, so they cannot disagree.
     """
     try:
-        stored = records._bulk_row_values(manifest, values, source_ref)
+        stored = records._bulk_row_values(manifest, values, source_ref, root=root)
         return collections.derived_item_key(manifest, stored), stored, None
     except collections.CollectionError as error:
         return None, None, (error.code, error.reason, error.details)
 
 
 def _collapse(
-    rows: list[tuple[Row, dict[str, Any]]], manifest, source_ref: str, *, logged: bool = False
+    rows: list[tuple[Row, dict[str, Any]]], manifest, source_ref: str, *, root: Path | None, logged: bool = False
 ) -> tuple[list[tuple[Row, dict[str, Any]]], int, list[_PreparedRow]]:
     """Keep each natural key's last occurrence in a batch, by the writer's own identity rule.
 
@@ -2913,7 +2913,7 @@ def _collapse(
     if not (manifest.schema.natural_key or logged):
         return rows, 0, []
     prepared = [
-        _PreparedRow(*_identify(manifest, values, source_ref), _preparation_token(values))
+        _PreparedRow(*_identify(manifest, values, source_ref, root=root), _preparation_token(values))
         for _, values in rows
     ]
     if not manifest.schema.natural_key:
@@ -3650,7 +3650,7 @@ def _batch(root: Path, writer, job: _Job) -> str:
         return "authority_lost"
     sequence = job.checkpoint["batch"]
     logged = "members" in job.binding["source"]  # an export member's log hashes every row
-    kept, superseded, prepared = _collapse(batch.rows, manifest, proof.ref, logged=logged)
+    kept, superseded, prepared = _collapse(batch.rows, manifest, proof.ref, logged=logged, root=root)
     version = manifest.schema.version
     boundary = writer_lease.active_manager()._mutation_coordinator_for(root)
     held = mutation_lock.last_mutation_timing(boundary)
@@ -3731,7 +3731,7 @@ def _derived_apply(conn, goal, batch: Batch, manifest, source_ref: str, shas: li
     The entries are each batch row in source order with its item key and payload hash, from
     which the member's counts and digest are extended exactly as a store import logs them.
     """
-    kept, superseded, prepared = _collapse(batch.rows, manifest, source_ref, logged=True)
+    kept, superseded, prepared = _collapse(batch.rows, manifest, source_ref, logged=True, root=None)
     items, refused = _derived_items(batch, kept, prepared, manifest, source_ref, shas)
     outcomes = derived_rows.apply(conn, goal, items, scope=scope, undo=undo)
     entries = _logged(batch, kept, {"rows": [*outcomes, *refused]}, prepared, manifest.schema.version)
@@ -4613,7 +4613,7 @@ class _Survey:
             self._reject(row, code, at)
         fresh: list[str] = []
         for row, values in batch.rows:
-            key, _, refusal = _identify(self.manifest, values, self.source_ref)
+            key, _, refusal = _identify(self.manifest, values, self.source_ref, root=self.writer.root)
             if refusal is not None:
                 self._reject(row, refusal[0], refusal[2].get("field") if isinstance(refusal[2], Mapping) else None)
             elif key is None:

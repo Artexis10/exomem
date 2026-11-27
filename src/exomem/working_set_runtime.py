@@ -61,6 +61,7 @@ from typing import Any, NamedTuple, NoReturn
 
 from . import (
     activation_conventions,
+    build_record,
     context_roles,
     freshness,
     lifecycle_statuses,
@@ -291,9 +292,16 @@ def first_turn_warm_wait_seconds() -> float:
     return max(0.0, min(FIRST_TURN_WARM_WAIT_SECONDS, budget.seconds / 4, budget.remaining() / 2))
 
 
+def background_build_state(vault_root: Path) -> dict[str, object]:
+    """The state of the build in a vault's background slot, for a warming diagnostic."""
+    return _BUILD_RECORD.state(Path(vault_root).absolute(), ready=False)
+
+
 _CACHE_LOCK = threading.Lock()
 _PACKET_CACHE: OrderedDict[tuple, tuple[dict[str, Any], tuple[str, str]]] = OrderedDict()
 _BUILDS: dict[Path, threading.Thread] = {}
+#: When the build in a vault's slot started, which job it runs, and how the last ones failed.
+_BUILD_RECORD = build_record.BuildRecord()
 _BUILD_SHUTDOWNS: dict[Path, threading.Event] = {}
 #: One inline-build lock per vault root. The managed path single-flights through
 #: `_BUILDS` and a background thread; the unmanaged path has no thread to join,
@@ -1151,12 +1159,16 @@ def ensure_index(
             # vault warms in seconds; every other caller abstains at once.
             reserved_paths.schedule_identity_catalogue_warm(root)
             if warm_wait is None or not reserved_paths.await_identity_catalogue_warm(root, warm_wait()):
+                build_record.note_warming(
+                    build_record.WAITING_ON_IDENTITY_INVENTORY, reserved_paths.identity_catalogue_warm_state(root)
+                )
                 return WARMING, None, False
     if not index.readable():
         return UNAVAILABLE, None, False
     if not index.anchors():
         if _managed():
             _schedule_build(root, freshness_stamp=freshness_stamp)
+            build_record.note_warming(build_record.WAITING_ON_ACTIVATION_INDEX, background_build_state(root))
             return WARMING, None, False
         with _inline_lock(root.absolute()):
             # Re-check under the lock: the thread that held it may have built the
@@ -2709,10 +2721,15 @@ def _schedule_build(
                     _warm_index(root, freshness_stamp, stop)
                 else:
                     job()
+            _BUILD_RECORD.succeeded(root, job=label)
         except foreground_priority.BulkCancelled:
-            pass
-        except Exception:  # noqa: BLE001 - the optional stage stays soft-failing
+            _BUILD_RECORD.ended(root)
+        except Exception as error:  # noqa: BLE001 - the optional stage stays soft-failing
+            _BUILD_RECORD.failed(root, error, job=label)
             log.warning("%s background build failed", label, exc_info=True)
+        except BaseException:
+            _BUILD_RECORD.ended(root)
+            raise
         finally:
             with _CACHE_LOCK:
                 _BUILDS.pop(root, None)
@@ -2724,9 +2741,12 @@ def _schedule_build(
         if (stop is not None and stop.is_set()) or root in _BUILDS:
             return
         _BUILDS[root] = thread
+        # Recorded when the slot is taken, so a reader never sees a scheduled build as not started.
+        _BUILD_RECORD.started(root, job=label)
         try:
             thread.start()
-        except Exception:  # noqa: BLE001 - a thread-start failure cannot fail a read
+        except Exception as error:  # noqa: BLE001 - a thread-start failure cannot fail a read
+            _BUILD_RECORD.failed(root, error, job=label)
             _BUILDS.pop(root, None)
             log.warning("%s background build could not start", label, exc_info=True)
 
