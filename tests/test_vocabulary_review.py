@@ -90,6 +90,34 @@ def test_empty_projection_initialization_copies_preexisting_origin_disposition(t
     }
 
 
+def test_a_review_state_file_number_above_the_sqlite_range_still_publishes(tmp_path, monkeypatch):
+    """Windows reports 64-bit unsigned file numbers; one above 2**63 - 1 must not stop a review write."""
+    from pathlib import Path
+
+    from exomem import review_state
+
+    real_lstat = Path.lstat
+
+    class LargeFileNumber:
+        def __init__(self, stat):
+            self._stat = stat
+            self.st_ino = (1 << 64) - 5
+
+        def __getattr__(self, name):
+            return getattr(self._stat, name)
+
+    def lstat(path):
+        stat = real_lstat(path)
+        return LargeFileNumber(stat) if path.name == review_state.STATE_FILENAME else stat
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    owner = review_state.ReviewStateStore(tmp_path)
+    owner.set_disposition("entity_recurrence", "off", why="intentional: stop suggestions")
+    owner.set_disposition("vocabulary_entity_instances", "normal")
+
+    assert review_state.disposition_for("entity_recurrence", payload=owner.load()) == "off"
+
+
 def test_legacy_projection_requires_rebuild_before_serving_origin_dispositions(tmp_path, monkeypatch):
     from exomem import deferred_index, review_state
 
