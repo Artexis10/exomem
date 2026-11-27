@@ -275,6 +275,32 @@ def test_turning_faces_off_drops_the_face_vectors_held_in_memory(doors, vault) -
     assert not any(key[0] == people_key for key in face_groups._CACHE)
 
 
+def test_a_face_step_in_flight_loads_no_model_and_creates_no_store_after_off_or_delete(vault, monkeypatch) -> None:
+    """Catches a picture already in the media worker bringing faces back after the owner stopped or erased them."""
+    loads = []
+
+    def load_while_the_owner_turns_faces_off():
+        loads.append(True)
+        # The owner turns faces off while the models load; `turn_off` then waits to unload them.
+        with closing(face_store.connect_index(vault)) as index:
+            face_store.record_opt_out(index)
+        return object()
+
+    monkeypatch.setattr(face_models, "load", load_while_the_owner_turns_faces_off)
+    turn_on(vault)
+    face_scan.unload()
+
+    assert face_scan.models(vault) is None  # Off during the load: nothing stays loaded.
+    assert face_scan.models(vault) is None and len(loads) == 1  # Off before the next step: nothing loads.
+
+    turn_on(vault)
+    face_operations.delete(vault)
+    assert face_scan.models(vault) is None
+    assert face_scan.commit(vault, "Photos/garden.jpg", [face(0)], mtime=1.0) is False
+    assert not face_store.store_dir(vault).exists()
+    assert len(loads) == 1
+
+
 def seed_two_people_and_strangers(vault: Path) -> None:
     """Five pictures: two named people (one in two pictures, with a stranger) and two unnamed groups."""
     turn_on(vault)

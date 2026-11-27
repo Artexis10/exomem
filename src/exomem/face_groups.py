@@ -335,14 +335,17 @@ class Writing:
     def __enter__(self) -> Writing:
         _WRITE_LOCK.acquire()
         try:
-            if not face_store.index_path(self.vault_root).is_file():
-                raise FacesStopped("the face store does not exist")
-            self.people = face_store.connect_people(self.vault_root)
+            # The face index first and never created: a delete in another process may have removed it. The
+            # people store starts with the first name, inside the directory the face index holds.
             try:
-                self.index = face_store.connect_index(self.vault_root)
-            except BaseException:
-                self.people.close()
-                raise
+                self.index = face_store.connect_index(self.vault_root, create=False)
+            except sqlite3.OperationalError as error:
+                if face_store.index_path(self.vault_root).is_file():
+                    raise
+                raise FacesStopped("the face store does not exist") from error
+            self.people = face_store.connect_people(
+                self.vault_root, create=not face_store.people_path(self.vault_root).is_file()
+            )
             self.people.execute("BEGIN IMMEDIATE")
             self.index.execute("BEGIN IMMEDIATE")
             if self.require_on and not self.index.execute("SELECT enabled FROM face_setting WHERE id = 1").fetchone()[0]:

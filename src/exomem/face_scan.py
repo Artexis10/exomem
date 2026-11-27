@@ -46,13 +46,15 @@ _UNAVAILABLE: str | None = None
 
 
 def models(vault_root: Path) -> face_models.FaceModels | None:
-    """The face models, loaded once per process, or None when they cannot run here.
+    """The face models, loaded once per process, or None when they cannot run here or faces are off.
 
-    The first attempt records the outcome in the face index, which `faces.status` reports. Call it only
-    while faces are on: it acquires and loads both pinned models.
+    The first attempt records the outcome in the face index, which `faces.status` reports. A face step
+    that started before the owner turned faces off or deleted them loads nothing and creates no store.
     """
     global _MODELS, _UNAVAILABLE
     with _LOCK:
+        if not face_store.active(vault_root):
+            return None
         if _MODELS is not None or _UNAVAILABLE is not None:
             return _MODELS
         try:
@@ -60,8 +62,12 @@ def models(vault_root: Path) -> face_models.FaceModels | None:
         except face_models.FacesUnavailable as error:
             _UNAVAILABLE = str(error)
             log.warning("faces unavailable: %s", error)
+        if not face_store.active(vault_root):
+            # Turned off or deleted during the load; `unload` waits on this lock, so drop what it would.
+            _MODELS = _UNAVAILABLE = None
+            return None
         try:
-            with closing(face_store.connect_index(vault_root)) as index:
+            with closing(face_store.connect_index(vault_root, create=False)) as index:
                 face_store.record_availability(index, _UNAVAILABLE)
         except (sqlite3.Error, OSError):
             log.warning("faces: the face index could not record model availability", exc_info=True)
