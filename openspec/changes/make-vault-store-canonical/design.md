@@ -313,7 +313,7 @@ From that release:
 
 1. Native Windows acceptance passes in store mode (6.3).
 2. Every Cloud cell has migrated (6.2, 7.4). A cell's backup carries its store database, a restore of a cell backup has been proven, and the backup size and cost per cell have been measured.
-3. The owner has decided the multi-host question below.
+3. Multi-host writer-lease support has been removed (task 10.10).
 4. Two minor releases have shipped since step 1, and both releases' notes name the release that ends file mode.
 
 The migration, the lexical builder and the migration's sidecar copy stay after 8.1; 8.1 deletes only the sync machinery that keeps sidecars in step. Where a file-mode lexical sidecar exists, the migration copies it as D8 step 3 says, keeping unit revisions. Where none exists, such as an export moved to a fresh machine, the migration builds the lexical rows cold, and unit revisions start fresh. A build after step 2 that finds a file-mode vault, for example one that no managed upgrade reached, migrates it at its first start: backup first, then the verified migration. If the migration refuses at any step, including its preflight, it refuses to serve, names the refusal and names the last release that serves file mode.
@@ -322,7 +322,7 @@ After step 2, a backup restore is the undo for a store-mode vault. "Export to a 
 
 **Outside edits after either step.** D5 stays: a clean edit imports, an edit that races an Exomem change is held, and an outside delete is held. In addition, each outside-edit import runs the vocabulary and folder steps of `one-write-pipeline` as advice. A folder name they would steer, or a term that needs a vocabulary decision, raises a review item that names the registered spelling. Like the collection edit-back, the advice waits for 2 s of stable bytes, and one item is kept per path and suggested spelling, so an autosave adds nothing new. The import keeps the person's bytes. Exomem never holds an edit only for a name, because a hold would hide the owner's own edit for a variant that the audit finds anyway.
 
-**Open question for the owner.** A vault under a multi-host writer lease cannot run store mode. Retiring file mode ends support for those setups unless the store gains a replica. Should step 2 end multi-host support, with one host owning each vault?
+**Multi-host setups (owner, 2026-11-27).** Each vault is owned by one machine; other machines reach it through the connector. Multi-host writer-lease support and the in-vault collection replica that serves it are removed. The removal is its own step and does not wait for step 2 (task 10.10).
 
 ## Estimate
 

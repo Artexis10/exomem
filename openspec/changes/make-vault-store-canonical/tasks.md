@@ -342,4 +342,6 @@ Moved to the change `adopt-root-vault-layout`, which never gates 7.4.
 - [ ] 10.8 Migrate a file-mode vault at first start on a build after D15 step 2; when the migration refuses at any step, refuse to serve, naming the refusal and the last file-mode release. Keep the migration, the lexical builder and the sidecar copy through 8.1.
 - [ ] 10.9 Prove a Cloud cell backup carries the store database and restores it; measure the backup size and cost per cell.
 - [ ] 10.5 State in the result of "export to a Markdown vault" that a fresh migration of the export starts a new audit trail and carries no held corrections.
-- [ ] 10.6 Owner decision: whether D15 step 2 ends multi-host writer-lease support.
+- [x] 10.6 Owner decision: whether D15 step 2 ends multi-host writer-lease support.
+  - Done (2026-11-27): one machine per vault; remove multi-host writer-lease support and its replica, without waiting for step 2.
+- [ ] 10.10 Remove multi-host writer-lease support and the in-vault collection replica that serves it. Before removing, find every live install and Cloud cell that uses either, and migrate it to one owning machine.
