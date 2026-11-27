@@ -28,8 +28,10 @@ from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 
-#: How long the arm's reconcile and the wait for its graph may take, each.
-READY_SECONDS = 120.0
+#: How long the arm's reconcile and the wait for its graph may take, each. A ceiling, not a wait: both return as soon
+#: as they finish. A seed of about 1,750 pages took 140-170 s to reconcile on an idle desktop and over 120 s under disk
+#: contention, so the ceiling leaves room for a seed of that size on a loaded machine.
+READY_SECONDS = 900.0
 READY_INTERVAL = 2.0
 
 
