@@ -31,4 +31,4 @@ The description of the shipped skill SHALL say that a practical question about a
 
 #### Scenario: A job at the user's home in a client that shows only skill descriptions
 - **WHEN** the user asks what to check before tradespeople finish a job at their home, and memory records what was agreed for it
-- **THEN** the description the agent holds tells it that this is the user's own case, so it recalls before it advises
+- **THEN** the description the agent holds names a job under way for the user as their own case

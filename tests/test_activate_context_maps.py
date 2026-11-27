@@ -26,6 +26,7 @@ from test_working_set_index import _seed_structure
 from test_working_set_withheld_twins import _withhold
 
 from exomem import (
+    capabilities,
     capture_carrier,
     commands,
     context_catalogue,
@@ -246,6 +247,33 @@ def test_no_later_turns_move_where_it_does_not_apply(
     vault: Path, monkeypatch: pytest.MonkeyPatch, surface: str, level: str, caller
 ) -> None:
     assert "later_turns" not in _first_recall(vault, monkeypatch, surface=surface, level=level, caller=caller)
+
+
+def test_no_later_turns_move_names_a_call_the_surface_hides(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A surface that exposes recall but not search must not be told to search."""
+    recall_only = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="product", tier2_enabled=True, product_commands=("activate_context",), tool_shape="public"
+    )
+    with capabilities.active_surface(recall_only):
+        packet = _first_recall(vault, monkeypatch, surface="claude-ai", level="balanced")
+
+    assert "later_turns" not in packet
+
+
+def test_a_small_first_recall_keeps_its_map_and_the_move_rides_only_on_room_left(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Holding the move's characters back from a small packet emptied its map; the map comes first."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    monkeypatch.setenv("EXOMEM_SURFACE", "claude-ai")
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "balanced")
+    _world(vault, with_w=True)
+    _seed_structure(vault)
+    _built(vault).close()
+    packet = _activate(vault, principal.owner_principal(surface="mcp"), turn="", max_chars=800)  # holds one map item, but not one item plus the held-back move
+
+    assert packet["map"]["items"] and packet["budget"]["used_chars"] <= 800
+    assert ("later_turns" in packet) != ("later_turns_unavailable" in packet.get("diagnostics", []))
 
 
 def _topic_titles(packet: dict) -> set[str]:
