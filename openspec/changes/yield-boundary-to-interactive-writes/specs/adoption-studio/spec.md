@@ -116,6 +116,26 @@ An item loop of `plan`, of the removal of staged copies in `finish`, and of the 
 - **THEN** it returns `stop_reason: finish_check_next_call` and no recall check
 - **AND** the next `finish` call runs the checks with the hold's whole room and completes the run
 
+### Requirement: A Finish Starts A Search Only Within Its Room
+
+`finish` SHALL start the recall check and each search of its recall sample only while its budget covers the delivery reserve. It SHALL end the sample at the first search that the index cannot answer yet, and it SHALL report a search that the index cannot answer yet, or that it did not reach, as `pending`, never as `failed`.
+
+#### Scenario: The search index is warming
+
+- **WHEN** the search index answers a `finish` search with its warming refusal
+- **THEN** the recall check is `pending` and the sample starts no further search
+- **AND** the searches the sample did not reach count as `pending`, not as missed or failed
+
+### Requirement: The Cell's Filer Parks A Stage That Moves Nothing
+
+The cell's filer SHALL stop calling `file` on a stage once `adoption_run.FILING_STALL_CALLS` `working` replies in a row have repeated the counts and the page position of the reply before them. It SHALL park the stage with the stop `IMPORT_FILING_STALLED` and a reason that names the number of calls, and a later `file` call SHALL list the stage again.
+
+#### Scenario: A stage cannot move
+
+- **WHEN** the filer's `file` calls on a stage return `working` with the same counts and page position, for the stall limit
+- **THEN** the stage is parked with `IMPORT_FILING_STALLED` and the filer makes no further call on it
+- **AND** an agent's `file` call lists it again with its full count of calls
+
 ### Requirement: A File Call Reads An App Export As A Step Of Its Own
 
 When a stage holds app exports, a `file` call SHALL read their conversations as a step that ends the call. It SHALL run a scan step (`start`, `rescan`) only as the first step of a call. The first call of a stage SHALL find the exports before its scan and SHALL NOT read their items.
@@ -124,7 +144,7 @@ When a stage holds app exports, a `file` call SHALL read their conversations as 
 
 - **WHEN** a `file` call has read conversations of an export of the stage
 - **THEN** the call returns `filing: working` and no scan has run in it
-- **AND** the next call runs the scan as its first step
+- **AND** each next call reads more of the export until it has been read to its end, and the call after the last of them runs the scan as its first step
 
 #### Scenario: The reading ends for a waiting write
 

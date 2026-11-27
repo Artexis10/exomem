@@ -49,6 +49,8 @@ STOP_LOGIN_ENDED = "IMPORT_FILING_LOGIN_ENDED"
 STOP_NOT_REPLAYABLE = "IMPORT_FILING_LOGIN_NOT_REPLAYABLE"
 #: The `file` reply could not be read as a reply.
 STOP_REPLY_UNREADABLE = "IMPORT_FILING_REPLY_UNREADABLE"
+#: The stage's `working` replies showed no movement for `adoption_run.FILING_STALL_CALLS` calls in a row; a new `file` call resumes it.
+STOP_STALLED = "IMPORT_FILING_STALLED"
 #: The mutation protocol's final answer for an identity: its outcome will never be known, so the next call has a new one.
 _OUTCOME_UNKNOWN = "MUTATION_OUTCOME_UNKNOWN"
 #: A continuation that `file` no longer knows: the next call names the stage alone and carries on its newest scan.
@@ -131,7 +133,7 @@ def _fresh_record(
         "version": RECORD_VERSION, "import_id": import_id, "state": WORKING, "principal": principal,
         "surface": surface, "collection": collection, "seq": 0, "call": None, "next_action": None, "continuation": None,
         "total": total, "progress": None, "left_out": None, "stop": None, "needs": [], "person": [],
-        "calls": [[time.time(), 0]] if baseline else [], "busy": [], "as_of": _now(),
+        "mark": None, "unmoved": 0, "calls": [[time.time(), 0]] if baseline else [], "busy": [], "as_of": _now(),
     }
 
 
@@ -502,9 +504,17 @@ class Filer:
         left_out = _left_out(self.vault_root, import_id) if filing == _REPLY_DONE else None
         needs = _stopped_needs(self.vault_root, reply, person) if filing == _REPLY_STOPPED else []
         total = _stage_total(self.vault_root, import_id)  # filing derives members from an app export, so the total grows
+        from . import adoption_run
+
+        # The mark of a `working` reply, as the Cloud CLI reads it: the same counts and position twice is no movement.
+        mark = adoption_run.filing_mark(reply.get("progress")) if filing == _REPLY_WORKING else None
+        stored_mark = None if mark is None else [list(mark[0]), mark[1]]
 
         def change(record: dict) -> None:
             record.update(call=None, progress=counts, left_out=left_out, needs=needs, person=person, busy=[])
+            repeated = stored_mark is not None and record.get("mark") == stored_mark
+            record["unmoved"] = record.get("unmoved", 0) + 1 if repeated else 0
+            record["mark"] = stored_mark
             if total is not None:
                 record["total"] = total
             record["state"] = {_REPLY_WORKING: WORKING, _REPLY_STOPPED: PARKED, _REPLY_DONE: DONE}[filing]
@@ -514,10 +524,17 @@ class Filer:
                 handled = counts["filed"] + counts["skipped_duplicates"]
                 record["calls"] = [*record["calls"], [time.time(), handled]][-_RATE_CALLS:]
 
-        _update(self.vault_root, import_id, change)
+        record = _update(self.vault_root, import_id, change)
         if filing == _REPLY_DONE:
             return None
         if filing == _REPLY_WORKING:
+            if record is not None and record["unmoved"] >= adoption_run.FILING_STALL_CALLS:
+                # Calling again at once would repeat this for ever, and keep the boundary busy while it does.
+                self._park(
+                    import_id, STOP_STALLED,
+                    f"filing made no progress in {record['unmoved']} calls in a row; it stays staged on the cell",
+                    person=[], needs=[{"need": NEED_SUPPORT}])
+                return None
             from .writer_lease import get_manager
 
             # The call released the boundary, and the next one asks for it at once. A writer that polls for it, above
@@ -591,6 +608,7 @@ class Filer:
     ) -> None:
         def change(record: dict) -> None:
             record.update(state=PARKED, stop={"code": code, "reason": reason}, needs=needs, person=person)
+            record.update(mark=None, unmoved=0)  # a stage woken from a park gets its full count of calls again
             if clear_call:
                 record["call"] = None
         _update(self.vault_root, import_id, change)

@@ -253,6 +253,32 @@ def test_a_read_only_cell_parks_the_stage_for_a_later_check_and_files_it_when_th
     assert len(_sources(vault)) == len(FILES)
 
 
+def test_a_stage_whose_calls_move_nothing_is_parked_with_its_reason_after_the_stall_limit(vault: Path, monkeypatch) -> None:
+    """Catches a filer that calls again at once for ever on a stage that cannot move, and keeps the boundary busy doing it."""
+    plans: list[int] = []
+    monkeypatch.setattr(adoption_run, "plan", lambda root, **_options: plans.append(1))  # a plan that makes no progress
+    import_id = _stage(vault)
+    filer = import_filing.Filer(vault)
+    filer.register(import_id, principal=_owner(), surface=None)
+
+    delays = []
+    while len(delays) < 20 and (delay := filer.run_once(import_id)) is not None:
+        delays.append(delay)
+    parked = import_filing.read_view(vault, import_id)
+
+    assert len(plans) == adoption_run.FILING_STALL_CALLS + 1, plans
+    assert parked["state"] == "parked" and parked["stop"]["code"] == import_filing.STOP_STALLED
+    assert str(adoption_run.FILING_STALL_CALLS) in parked["stop"]["reason"] and parked["needs"] == [{"need": "support"}]
+
+    # An agent's own `file` call lists the stage again, and the stage gets its full count of calls once more.
+    filer.register(import_id, principal=_owner(), surface=None)
+    while filer.run_once(import_id) is not None:
+        pass
+
+    assert len(plans) == 2 * (adoption_run.FILING_STALL_CALLS + 1), plans
+    assert import_filing.read_view(vault, import_id)["stop"]["code"] == import_filing.STOP_STALLED
+
+
 def test_a_vault_with_no_knowledge_base_is_created_by_the_filer_and_the_stage_is_filed_once(vault: Path) -> None:
     """A first Home import on a new cell has no Knowledge Base: `file` refuses it, and no one is there to start."""
     shutil.rmtree(vault / "Knowledge Base")

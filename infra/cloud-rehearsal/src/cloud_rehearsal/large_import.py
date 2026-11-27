@@ -49,6 +49,8 @@ INDEX_LAPS = {"notes": 1, "media": 3}
 GATEWAY_REQUIRED = "CLOUD_GATEWAY_REQUIRED"  # the cell's documented refusal of a control-plane tool
 APP_LOG_TAIL_BYTES = 20 << 20  # kept per file of the cell's app log; the pod's /tmp holds at most 64 MiB
 TRANSIENT_ATTEMPTS = 8
+MUTATION_BUSY = "MUTATION_BUSY"  # a write that the vault's write boundary refused; the call may be repeated
+BUSY_RETRIES = 30  # refusals of one call before the run calls it a livelock and fails it
 CELL_COLLECTION = {"notes": "Imported notes", "media": "Imported media"}
 
 # Everything below runs inside the cell's pod, against its volume, with the cell's own interpreter.
@@ -95,6 +97,26 @@ sources = {}
 for entry in index:
     sources.setdefault(entry.imported_from, []).append(entry.original_sha256)
 print(json.dumps({'laps': laps, 'entries': len(index), 'sources': sources}))
+"""
+# The cell's mutation journal, one row per mutation attempt: how many rows it holds and how many refused writes
+# (`MUTATION_BUSY`) it recorded, by command. The row names no cause (`holder_overdue`); the agent's own refusals do.
+REFUSAL_SCRIPT = """import json
+from exomem import mutation_journal
+busy, rows = {}, 0
+try:
+    with open(mutation_journal.journal_path(), encoding='utf-8') as handle:
+        for line in handle:
+            rows += 1
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get('error_code') == 'MUTATION_BUSY':
+                name = row.get('command') or 'unknown'
+                busy[name] = busy.get(name, 0) + 1
+except FileNotFoundError:
+    pass
+print(json.dumps({'rows': rows, 'busy_by_command': busy}))
 """
 # The queues that hold files still to be indexed. A reading that fails is None, never 0.
 DRAIN_SCRIPT = """import json
@@ -383,6 +405,36 @@ def decide_verdict(folders: Mapping[str, Mapping[str, Sequence[str]] | None], vo
     return "smoke_only" if smoke or not proves_one_copy_only else "pass"
 
 
+def refusal_counts(refusals: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """The refused writes of the agent's own calls: how many, by the cause the cell named, and the longest wait."""
+    waits = [item["waited_ms"] for item in refusals if isinstance(item.get("waited_ms"), (int, float))]
+    causes: dict[str, int] = {}
+    for item in refusals:
+        causes[str(item.get("cause"))] = causes.get(str(item.get("cause")), 0) + 1
+    return {"count": len(refusals), "by_cause": causes, "longest_wait_ms": max(waits) if waits else None}
+
+
+def journal_refusals(before: Mapping[str, Any] | None, after: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The refused writes (`MUTATION_BUSY`) that the cell's mutation journal gained between two readings.
+
+    Every caller's write is in the journal: the agent's `file` calls, the cell's filer and any other writer. A
+    reading that failed, or a journal that rotated between the two (fewer rows after than before), leaves the
+    count unknown (None), never 0.
+    """
+    if before is None or after is None or after["rows"] < before["rows"]:
+        return {"count": None, "by_command": None}
+    by_command = {name: count - before["busy_by_command"].get(name, 0)
+                  for name, count in after["busy_by_command"].items() if count > before["busy_by_command"].get(name, 0)}
+    return {"count": sum(by_command.values()), "by_command": by_command}
+
+
+def file_seconds_by_page(pages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The `file` calls of every page: how many, their seconds in all, and the longest one's round trip."""
+    return [{"page": page["page"], "calls": len(page["file_steps"]), "file_seconds": page["file_seconds"],
+             "longest_call_seconds": max((step["seconds"] for step in page["file_steps"]), default=None)}
+            for page in pages]
+
+
 # --- the person's agent --------------------------------------------------------------------
 
 
@@ -394,13 +446,15 @@ class Agent:
         self.client = client
         self.retries: list[str] = []
         self.seconds: dict[str, list[float]] = {}
+        self.refusals: list[dict[str, Any]] = []
 
     async def call(self, name: str, arguments: dict[str, Any], *, kind: str = "",
                    tolerated: frozenset[str] = frozenset()) -> tuple[dict, float]:
         """One tool call; an error code in `tolerated` comes back as `{"error_code": ...}` instead of failing."""
         label = f"{name}.{kind}" if kind else name
         last = "no attempt"
-        for attempt in range(TRANSIENT_ATTEMPTS):
+        attempt = busy = 0
+        while attempt < TRANSIENT_ATTEMPTS:
             try:
                 async with self.client.mcp() as session:
                     result = await session.call(name, arguments)
@@ -408,10 +462,22 @@ class Agent:
                 last = f"{type(innermost(error)).__name__}: {str(innermost(error))[:200]}"
                 self.retries.append(f"{label}: {last}")
                 await asyncio.sleep(min(30, 2**attempt))
+                attempt += 1
                 continue
             if result.error_code == "MUTATION_WARMING":
                 self.retries.append(f"{label}: MUTATION_WARMING")
                 await asyncio.sleep(max(0.1, (result.structured.get("error") or {}).get("retry_after_ms", 500) / 1000))
+                attempt += 1
+                continue
+            if result.error_code == MUTATION_BUSY and busy < BUSY_RETRIES:
+                # The write was refused, not committed, so the call is repeated as it was. Each refusal is counted
+                # with the cause the cell gave (`holder_overdue`, `capture_wait_exhausted`); a call refused
+                # `BUSY_RETRIES` times is a livelock and fails below.
+                error = result.structured.get("error") or {}
+                details = error.get("details") or {}
+                busy += 1
+                self.refusals.append({"call": label, "cause": details.get("cause"), "waited_ms": details.get("waited_ms")})
+                await asyncio.sleep(max(1.0, error.get("retry_after_ms", 1000) / 1000))
                 continue
             if result.error_code in tolerated:
                 return {"error_code": result.error_code}, result.seconds
@@ -429,6 +495,7 @@ class Agent:
     def stats(self) -> dict[str, Any]:
         return {
             "retries": len(self.retries), "retry_examples": self.retries[:10],
+            "refusals": refusal_counts(self.refusals),
             "calls": {label: {"count": len(values), "total_seconds": round(sum(values), 1),
                               "p50_seconds": percentile(values, 0.5), "p95_seconds": percentile(values, 0.95),
                               "max_seconds": max(values)} for label, values in sorted(self.seconds.items())},
@@ -724,6 +791,7 @@ async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder) -> dic
               f"{len(page['file_steps'])} file calls in {page['file_seconds']}s ({page['files_per_second']} files per call second), "
               f"consumed {page['consumed']}", flush=True)
     folder.report["pages"] = list(pages.values())
+    folder.report["file_seconds_by_page"] = file_seconds_by_page(list(pages.values()))
     folder.residual = (reply.get("filed") or {}).get("residual")
     folder.consumed = consumed
     folder.report["residual_by_reason_files"] = fixture.residual_files_by_reason(folder.residual)
@@ -823,6 +891,14 @@ async def keep_cell_app_logs(ctx: Context, label: str) -> dict[str, Any]:
         return await asyncio.to_thread(save_cell_app_logs, ctx, label)
     except Exception as error:  # noqa: BLE001 - reported in the result, as an unread value stays unknown
         return {"error": f"{type(error).__name__}: {str(error)[:300]}"}
+
+
+async def read_refusal_journal(ctx: Context) -> dict[str, Any] | None:
+    """The cell's mutation journal counts now, or None when the pod could not answer."""
+    try:
+        return await asyncio.to_thread(exec_json, ctx, REFUSAL_SCRIPT, attempts=2)
+    except StepFailure:
+        return None
 
 
 async def wait_import_state(ctx: Context, import_id: str, state: str, timeout: float) -> dict:
@@ -928,7 +1004,15 @@ async def run_folder(ctx: Context, agent: Agent, plan: LargeImportPlan, out: dic
     with phase("stage_proof"):
         criteria["manifest_proof"] = await prove_stage(ctx, agent, folder, row)
     with phase("paging"):
+        refused_before, journal_before = len(agent.refusals), await read_refusal_journal(ctx)
         paging = await file_pages(agent, plan, folder)
+        # What the vault's write boundary refused while the stage was paged: the whole cell's journal, and the
+        # agent's own calls with their cause. The run counts them; it does not require none.
+        folder.report["paging_refusals"] = {
+            "journal": journal_refusals(journal_before, await read_refusal_journal(ctx)),
+            "agent_calls": refusal_counts(agent.refusals[refused_before:]),
+            "what": "MUTATION_BUSY refusals of every write between the first and the last `file` call of the folder",
+        }
     await asyncio.to_thread(enospc_count, ctx, space)
     folder.report["pod_after_paging"] = await asyncio.to_thread(pod_health, ctx)
     criteria["manifest_proof"] += paging["manifest_proof"]

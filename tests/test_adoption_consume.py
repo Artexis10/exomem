@@ -5,6 +5,7 @@ import datetime as dt
 import errno
 import hashlib
 import json
+import time
 import types
 import uuid
 from pathlib import Path
@@ -404,6 +405,63 @@ def test_a_finish_that_removed_copies_leaves_its_checks_to_the_next_call_which_h
     checking = adoption_run.finish(vault, run_id=run_id, today=TODAY)
 
     assert "stop_reason" not in checking and checking["finish"]["recall_check"] and checking["finish"]["consumed"] == 3
+
+
+def _twelve_filed_notes(tmp_path: Path) -> tuple[Path, str]:
+    vault = _vault(tmp_path)
+    notes = {f"note-{n:02d}.md": f"# Note {n}\n\nInvented note {n}.\n".encode() for n in range(12)}
+    run_id, _plan_id, _reply = _adopt(vault, _stage(tmp_path, vault, notes)["start_path"])
+    return vault, run_id
+
+
+def test_a_finish_whose_search_index_is_warming_answers_pending_after_one_search_and_not_failed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Catches a tail that runs ten more searches against an index that cannot answer yet, and reports a warming index as failed."""
+    from exomem import find as find_module
+
+    vault, run_id = _twelve_filed_notes(tmp_path)
+    searches: list[str] = []
+
+    def warming(root: Path, *, query: str, **_options: object) -> list:
+        searches.append(query)
+        raise find_module.RetrievalIndexWarming(site="projection_unavailable")
+
+    monkeypatch.setattr(find_module, "find", warming)
+
+    finish = _finish(vault, run_id)["finish"]
+
+    assert len(searches) == 1, searches
+    check, sample = finish["recall_check"], finish["coverage"]["recall"]
+    assert (check["ok"], check["status"], check["warming"]["components"]) == (None, "pending", ["projection_unavailable"])
+    assert (sample["status"], sample["sampled"], sample["pending"], sample["failed"]) == ("pending", 10, 10, 0)
+    assert finish["indexing"]["state"] == "pending" and "first_question" not in finish
+
+
+def test_a_finish_starts_no_search_once_its_room_is_spent_and_counts_the_searches_it_did_not_reach_as_pending(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Catches a recall sample that starts all ten searches whatever room is left, and so holds the boundary past its limit."""
+    from exomem import find as find_module
+
+    vault, run_id = _twelve_filed_notes(tmp_path)
+    searches: list[str] = []
+
+    def slow_miss(root: Path, *, query: str, **_options: object) -> list:
+        searches.append(query)
+        time.sleep(0.3)
+        return []
+
+    monkeypatch.setattr(find_module, "find", slow_miss)
+    monkeypatch.setattr(request_budget, "DELIVERY_RESERVE_SECONDS", 0.5)
+    adoption_run.finish(vault, run_id=run_id, today=TODAY)  # removes the copies; the tail is the next call
+
+    with request_budget.bound_to(1.0):  # room for the check's search and two sampled ones
+        finish = adoption_run.finish(vault, run_id=run_id, today=TODAY)["finish"]
+
+    sample = finish["coverage"]["recall"]
+    assert 2 <= len(searches) <= 3, searches
+    assert sample["status"] == "pending" and sample["sampled"] == 10
+    assert sample["pending"] == 10 - (len(searches) - 1) and sample["failed"] == 0
+    assert sample["evaluated"] == len(sample["missed"]) == len(searches) - 1
     assert adoption_run.AdoptionRunStore(vault).load(run_id)["phase"] == "done"
 
 

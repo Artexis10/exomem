@@ -270,6 +270,8 @@ def test_each_file_call_keeps_its_counts_and_the_page_shows_files_per_call_and_p
     (page,) = folder.report["pages"]
     assert [(step["files"], step["filing"]) for step in page["file_steps"]] == [(40, "working"), (60, "done")]
     assert page["files_per_second"] == 100.0  # 100 files over two calls of 0.5 s
+    assert folder.report["file_seconds_by_page"] == [
+        {"page": 1, "calls": 2, "file_seconds": 1.0, "longest_call_seconds": 0.5}]
 
 
 def test_a_deadline_that_stops_filing_still_reports_the_calls_made():
@@ -352,6 +354,38 @@ def test_a_warming_mutation_is_retried_after_the_wait_it_names(no_waiting):
     body, _ = asyncio.run(agent.call("manage_memory", {}))
 
     assert body == {"ok": True} and agent.retries == ["manage_memory: MUTATION_WARMING"]
+
+
+def _busy(cause):
+    return _reply({"error": {"code": "MUTATION_BUSY", "details": {"cause": cause, "waited_ms": 5100}}}, is_error=True)
+
+
+def test_a_refused_write_is_repeated_and_counted_with_the_cause_the_cell_gave(no_waiting):
+    agent = large_import.Agent(Client([_busy("holder_overdue"), _busy("holder_overdue"), _reply({"ok": True})]))
+
+    body, _ = asyncio.run(agent.call("manage_memory", {}, kind="file"))
+
+    assert body == {"ok": True}
+    assert large_import.refusal_counts(agent.refusals) == {
+        "count": 2, "by_cause": {"holder_overdue": 2}, "longest_wait_ms": 5100}
+
+
+def test_a_call_that_the_boundary_refuses_every_time_fails_the_run_instead_of_waiting_for_ever(no_waiting):
+    agent = large_import.Agent(Client([_busy("holder_overdue") for _ in range(large_import.BUSY_RETRIES + 1)]))
+
+    with pytest.raises(StepFailure, match="MUTATION_BUSY"):
+        asyncio.run(agent.call("manage_memory", {}, kind="file"))
+    assert len(agent.refusals) == large_import.BUSY_RETRIES
+
+
+def test_the_journal_count_is_the_refusals_it_gained_and_unknown_when_it_cannot_say():
+    before = {"rows": 10, "busy_by_command": {"adoption_studio": 1}}
+    after = {"rows": 40, "busy_by_command": {"adoption_studio": 3, "create_note": 2}}
+
+    assert large_import.journal_refusals(before, after) == {
+        "count": 4, "by_command": {"adoption_studio": 2, "create_note": 2}}
+    assert large_import.journal_refusals(before, None)["count"] is None
+    assert large_import.journal_refusals(after, before)["count"] is None  # the journal rotated: fewer rows than before
 
 
 def test_a_refusal_from_the_tool_is_not_retried(no_waiting):

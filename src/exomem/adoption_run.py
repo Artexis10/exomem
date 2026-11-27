@@ -4090,6 +4090,10 @@ def _find_paths(root: Path, query: str) -> tuple[list[str] | None, list[str]]:
             root, query=query, mode="keyword", limit=5, graph=False,
             degraded_out=degraded,
         )
+    except find_module.RetrievalIndexWarming as warming:
+        # The index that the import just wrote to has not caught up. That is a state to wait out, not a search
+        # that failed, so the recall check reports it as pending with what is warming.
+        return [], [*degraded, warming.site]
     except Exception:  # noqa: BLE001 - recall failure never blocks finish
         return None, degraded
     return [str(getattr(hit, "path", "")) for hit in hits], degraded
@@ -4109,7 +4113,7 @@ def _applied_items(run: dict) -> list[tuple[dict, dict]]:
     ]
 
 
-def _recall_check(root: Path, run: dict) -> dict:
+def _recall_check(root: Path, run: dict, budget: request_budget.RequestBudget) -> dict:
     # A text note names itself in a question; a media file's title is its file name.
     applied = sorted(
         _applied_items(run),
@@ -4122,6 +4126,10 @@ def _recall_check(root: Path, run: dict) -> dict:
     else:
         packs = run.get("pack_suggestions") or []
         title, target = (packs[0].get("name") if packs else "") or "", ""
+    if title and not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS):
+        # A search that starts without the reserve would hold the boundary past the hold's room; the check stays open.
+        budget.note_skipped("finish.recall_check")
+        return {"query": title, "ok": None, "hits": [], "status": "pending"}
     paths, degraded = _find_paths(root, title) if title else ([], [])
     ok = bool(target) and any(_same_page(path, target) for path in paths or [])
     result: dict = {"query": title, "ok": ok, "hits": paths or []}
@@ -4135,8 +4143,13 @@ def _recall_check(root: Path, run: dict) -> dict:
     return result
 
 
-def _recall_sample(root: Path, run: dict) -> dict:
-    """Search for a spread of imported notes: one per top-level folder, then the next of each."""
+def _recall_sample(root: Path, run: dict, budget: request_budget.RequestBudget, *, recall: dict) -> dict:
+    """Search for a spread of imported notes: one per top-level folder, then the next of each.
+
+    A search starts only while the budget covers the delivery reserve, and the sample ends at the first search that
+    the index cannot answer yet, or when the recall check already got that answer: the next searches would meet the
+    same index, and each costs seconds on a cold one. The picks it did not reach count as pending.
+    """
     groups: dict[str, list[tuple[dict, dict]]] = {}
     for item, outcome in sorted(_applied_items(run), key=lambda pair: pair[0]["collection_path"]):
         folder = item["collection_path"].split("/", 1)[0] if "/" in item["collection_path"] else ""
@@ -4153,7 +4166,13 @@ def _recall_sample(root: Path, run: dict) -> dict:
     missed: list[str] = []
     pending, failed = 0, 0
     degraded: list[str] = []
-    for item, outcome in picks:
+    waiting = recall.get("status") == "pending"
+    for reached, (item, outcome) in enumerate(picks):
+        if waiting or not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS):
+            if not waiting:
+                budget.note_truncated("finish.recall_sample")
+            pending += len(picks) - reached
+            break
         paths, incomplete = _find_paths(root, item.get("title") or item["original_path"])
         if paths is not None and any(_same_page(path, outcome["target_path"]) for path in paths):
             found += 1
@@ -4162,6 +4181,7 @@ def _recall_sample(root: Path, run: dict) -> dict:
         elif incomplete:
             pending += 1
             degraded.extend(incomplete)
+            waiting = True
         else:
             missed.append(outcome["target_path"])
     result: dict = {"sampled": len(picks), "found": found, "missed": missed}
@@ -4243,7 +4263,7 @@ def _extraction_state(content: str, media_type: str, job: object) -> str:
     return "unknown" if job is None else "pending"
 
 
-def _coverage(root: Path, run: dict, budget: request_budget.RequestBudget) -> dict:
+def _coverage(root: Path, run: dict, budget: request_budget.RequestBudget, *, recall: dict) -> dict:
     """What the run did with every file it was pointed at, and what it did not read."""
     plan = run.get("plan") or {}
     selection = run.get("selection") or {}
@@ -4283,7 +4303,7 @@ def _coverage(root: Path, run: dict, budget: request_budget.RequestBudget) -> di
             "resolved": sum(len((item.get("links") or {}).get("resolved") or []) for item in applied_text),
             "unresolved": sum(len((item.get("links") or {}).get("unresolved") or []) for item in applied_text),
         },
-        "recall": _recall_sample(root, run),
+        "recall": _recall_sample(root, run, budget, recall=recall),
     }
 
 
@@ -4366,8 +4386,8 @@ def finish(
             # `finish` (the `file` chain re-runs it) resumes.
             store.save(run)
             return _present(root, run, stop_reason=stop)
-        recall = _recall_check(root, run)
-        coverage = _coverage(root, run, budget)
+        recall = _recall_check(root, run, budget)
+        coverage = _coverage(root, run, budget, recall=recall)
         # Empty folders go only for a run that consumes; the residual is reported for any recorded stage.
         removed_folders = adoption_consume.remove_empty_folders(root, run) if run.get("consume", True) else 0
         stage_residual = adoption_consume.residual(root, run, _APPLIED_STATUSES, _earlier_pages(store, run))
@@ -4462,6 +4482,22 @@ def _write_run_manifest(
 FILING_STATES = ("working", "stopped", "done")  # nosemgrep: ep-word-set -- the closed states of a `file` reply.
 FILING_COUNTS = ("filed", "skipped_duplicates", "failed", "remaining", "pages_done")  # nosemgrep: ep-word-set -- the closed counts of a `file` reply.
 _WORKING, _STOPPED, _DONE = FILING_STATES
+# A driver of `file` (the Cloud CLI, the cell's resident filer) gives up on a stage whose `working` replies show no
+# movement this many calls in a row: no count moved and the page's position stayed the same (`filing_mark`).
+FILING_STALL_CALLS = 5
+
+
+def filing_mark(progress: object) -> tuple[tuple[int, ...], str] | None:
+    """What a `working` reply shows of movement: its counts and its page's position, or None when it carries neither.
+
+    A driver compares two marks whole. The position is compared as the cell reports it, so a field that the cell
+    adds to it later counts as movement without the driver changing.
+    """
+    if not isinstance(progress, dict) or any(type(progress.get(name)) is not int for name in FILING_COUNTS):
+        return None
+    return tuple(progress[name] for name in FILING_COUNTS), json.dumps(progress.get("page"), sort_keys=True)
+
+
 # The driver's own steps that publish: a reconciling call runs only the apply that its identity stored.
 _APPLY_STEPS = ("apply", "retry")  # nosemgrep: ep-word-set -- the `file` driver's closed step names that call `apply`.
 # The driver's own steps that open a page: the first page of a scan, a later page, or a new scan of a finished one.

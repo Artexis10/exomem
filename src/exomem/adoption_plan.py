@@ -361,6 +361,9 @@ def _refresh_import_index(
     pages: dict[str, _SourcePage] = {}
     index: list[EarlierImport] = []
     complete, read = True, 0
+    # A page the process knows costs one `lstat` and is never a stop point: a pass that ended here gives no index, so the
+    # call would plan nothing and the next call would walk the same pages again. The walk's cost per call is the
+    # follow-up change's to bound (design D1a, "What a writer waits for").
     for page in _source_pages(root):
         rel = page.relative_to(root).as_posix()
         try:
