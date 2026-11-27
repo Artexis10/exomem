@@ -760,3 +760,13 @@ def test_an_unparsed_history_reports_the_depth_check_as_unknown(
         vault_root, _rows(2, start=10), expected_container_hash=result["after_container_hash"]
     )
     assert "depth_check" not in healthy
+
+
+def test_the_taught_bulk_example_has_the_row_shape_the_writer_accepts() -> None:
+    """read_instructions teaches the row shape by example; a drifted example teaches bare rows again."""
+    from exomem import commands
+    from exomem.public_surface import help_for
+
+    taught = help_for("records.bulk_upsert", commands.PRODUCT_COMMANDS)["examples"][0]["arguments"]
+    assert taught["rows"] and all("item" in row for row in taught["rows"])
+    assert records.bulk_argument_refusals(taught["rows"], taught["source"]) == []

@@ -684,7 +684,7 @@ def parse_manifest_contract(*, store_mode: bool = False, store_vault: bool = Fal
     # A served vault answers describe in file mode too, so both modes carry the store's writer rule.
     return {
         **manifest_authoring_contract(store=store_mode or store_vault),
-        "bulk_upsert": _bulk_upsert_contract(store_mode=store_mode),
+        "bulk_upsert": bulk_upsert_contract(store_mode=store_mode),
         "history": _history_contract(),
         "writer_lease": UNSUPPORTED_WRITERS,
     }
@@ -722,7 +722,7 @@ def _history_contract() -> dict[str, Any]:
     }
 
 
-def _bulk_upsert_contract(*, store_mode: bool = False) -> dict[str, Any]:
+def bulk_upsert_contract(*, store_mode: bool = False) -> dict[str, Any]:
     """The `bulk_upsert` action's contract, from the writer's own constants."""
     contract = {
         "why": (
@@ -908,6 +908,18 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
         _invalid_arguments("; ".join(parts))
     if action == "history":
         _require_one_history_selector(values)
+    if action == "bulk_upsert" and values["on_reject"] in {None, "abort"} and isinstance(values["rows"], list | tuple):
+        # Under abort one rejected row writes nothing, so a row its arguments condemn fails the call now,
+        # not after a wait for the vault.
+        refusals = records.bulk_argument_refusals(values["rows"], values["source"])
+        if refusals:
+            named = "; ".join(f"row {row['index']}: {row['code']}" for row in refusals[:5])
+            more = f" and {len(refusals) - 5} more" if len(refusals) > 5 else ""
+            _invalid_arguments(
+                f"{len(refusals)} of {len(values['rows'])} rows would be rejected and on_reject=abort saves "
+                f"nothing ({named}{more}); {records.INVALID_BULK_ROW_MESSAGE}, e.g. "
+                '{"item": {...}, "source": "<preserved Sources or Evidence page>"}'
+            )
     if action == "append" and values["item"] is None and values["held"] is None:
         _invalid_arguments("append requires item or held")
     if (

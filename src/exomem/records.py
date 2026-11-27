@@ -1154,6 +1154,34 @@ def _bulk_reject(index: int, code: str, message: str, **extra: Any) -> dict[str,
     return {"index": index, "outcome": "rejected", "code": code, "message": message, **extra}
 
 
+INVALID_BULK_ROW_MESSAGE = (
+    "a row is an object of item, optional body and source; a source is required on the row or once for the batch"
+)
+
+
+def bulk_row_shape_refusal(index: int, raw: object) -> dict[str, Any] | None:
+    """The rejection a row earns from its shape alone, before any vault read."""
+    if not isinstance(raw, Mapping) or set(raw) - _BULK_ROW_KEYS or not isinstance(raw.get("item"), Mapping):
+        return _bulk_reject(index, "INVALID_BULK_ROW", INVALID_BULK_ROW_MESSAGE)
+    return None
+
+
+def bulk_argument_refusals(rows: Sequence[object], source: object) -> list[dict[str, Any]]:
+    """The row rejections that the arguments alone decide: a malformed row, or a row with no source.
+
+    Every other rejection reads the vault (the source page, the schema, the stored rows), so it
+    stays with the write.
+    """
+    refusals = []
+    for index, raw in enumerate(rows):
+        refusal = bulk_row_shape_refusal(index, raw)
+        if refusal is None and (raw.get("source") if isinstance(raw, Mapping) else None) is None and source is None:
+            refusal = _bulk_reject(index, "SOURCE_REQUIRED", "a row needs a preserved source reference")
+        if refusal is not None:
+            refusals.append(refusal)
+    return refusals
+
+
 def _bulk_error_row(index: int, error: collections.CollectionError, **extra: Any) -> dict[str, Any]:
     details = error.details if isinstance(error.details, Mapping) else {}
     fields = details.get("issues")
@@ -1379,19 +1407,11 @@ def bulk_upsert_records(
         source_guards: dict[str, vault.PathGuard] = {}
 
         for index, raw in enumerate(rows):
-            if (
-                not isinstance(raw, Mapping)
-                or set(raw) - _BULK_ROW_KEYS
-                or not isinstance(raw.get("item"), Mapping)
-            ):
-                outcomes.append(
-                    _bulk_reject(
-                        index,
-                        "INVALID_BULK_ROW",
-                        "a row is an object of item, optional body and source; a source is required on the row or once for the batch",
-                    )
-                )
+            shape = bulk_row_shape_refusal(index, raw)
+            if shape is not None:
+                outcomes.append(shape)
                 continue
+            assert isinstance(raw, Mapping)
             body = raw.get("body")
             reference = raw["source"] if "source" in raw and raw["source"] is not None else source
             try:

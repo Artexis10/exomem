@@ -95,6 +95,8 @@ _OTHER_OWNER_POLL_SECONDS = 5.0
 #: An idle drainer waits for an acceptance; this read-only re-check only covers a missed one.
 _IDLE_RECHECK_SECONDS = 300.0
 _OUTCOME_LIMIT_BYTES = 16 * 1024
+#: Rejected rows a failed bulk save keeps in its refusal: enough to show the pattern, bounded in size.
+_REJECTED_ROWS_SHOWN = 10
 _LIST_LIMIT = 50
 _STABLE_READ_ATTEMPTS = 3
 #: How long a resend waits for an in-flight acceptance of its own origin; the acceptance itself is
@@ -989,7 +991,37 @@ def _replay(vault_root: Path, claim: _Claim, *, stop: threading.Event | None = N
             replay.closed = True
             stack.close()
         _REPLAY.reset(token)
+    refusal = _rejected_rows(result)
+    if refusal is not None:
+        return (FAILED, refusal["code"], refusal)
     return (APPLIED, result)
+
+
+def _rejected_rows(result: Any) -> dict[str, Any] | None:
+    """The refusal of a replay that returned normally but saved nothing because it rejected rows.
+
+    A bulk write under `on_reject=abort` answers with `committed: false` and per-row rejections
+    instead of raising (the bulk receipt protocol's `counts`), so it is a failed save, not an
+    applied one. A replay that committed nothing and rejected nothing changed nothing; it is applied.
+    """
+    if not isinstance(result, Mapping) or result.get("committed") is not False:
+        return None
+    counts = result.get("counts")
+    rejected = counts.get("rejected") if isinstance(counts, Mapping) else None
+    if not isinstance(rejected, int) or rejected <= 0:
+        return None
+    rows = [row for row in result.get("rows") or () if isinstance(row, Mapping) and row.get("outcome") == "rejected"]
+    total = sum(value for value in counts.values() if isinstance(value, int))
+    return {
+        "code": str(rows[0].get("code") or "ROWS_REJECTED") if rows else "ROWS_REJECTED",
+        "message": f"nothing was saved: {rejected} of {total} rows were rejected",
+        "remediation": "Correct the rejected rows and send the save again; its arguments are below.",
+        "committed": False,
+        "rejected_rows": [
+            {key: row[key] for key in ("index", "code", "message", "fields", "source") if key in row}
+            for row in rows[:_REJECTED_ROWS_SHOWN]
+        ],
+    }
 
 
 @contextmanager
@@ -1480,9 +1512,18 @@ def _view(row: sqlite3.Row, *, full: bool, position: int | None) -> dict[str, An
         view["finished_at"] = _iso(row["finished_at"])
         if full:
             view["outcome"] = json.loads(row["outcome"]) if row["outcome"] else None
-    if full and row["arguments"] is not None:
+    if full and row["state"] == FAILED and row["arguments"] is not None:
+        # Only a failed save needs its text back, to correct and send again; an open save's text is
+        # the caller's own, and echoing it on every status check costs the caller its context.
         view["arguments"] = json.loads(row["arguments"])
     return view
+
+
+def _rejected_count(outcome: Any) -> int:
+    """Rows a committed bulk save rejected (`on_reject=skip`), from the bulk receipt protocol's counts."""
+    counts = outcome.get("counts") if isinstance(outcome, Mapping) else None
+    rejected = counts.get("rejected") if isinstance(counts, Mapping) else None
+    return rejected if isinstance(rejected, int) and rejected > 0 else 0
 
 
 def _summary_line(state_counts: Mapping[str, int]) -> str:
@@ -1524,6 +1565,12 @@ def read(vault_root: Path, ref: str | None = None, limit: int | None = None) -> 
             FAILED: "Not saved: the queued save failed. Its arguments are below; correct and send it again.",
         }
         summary = summaries[view["state"]]
+        rejected = _rejected_count(view.get("outcome"))
+        if view["state"] == APPLIED and rejected:
+            summary = (
+                f"Partly saved: the queued save was applied, but {rejected} row(s) were rejected and not "
+                "saved; the outcome lists them."
+            )
         if view["state"] == FAILED and view.get("error", {}).get("code") == "MUTATION_OUTCOME_UNKNOWN":
             summary = (
                 "Not confirmed: the service stopped while applying this save, so it may have landed. "
