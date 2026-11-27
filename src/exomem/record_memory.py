@@ -17,6 +17,7 @@ from . import (
     record_governance,
     record_history,
     records,
+    request_budget,
     structured_collections,
     writer_lease,
 )
@@ -961,36 +962,55 @@ def _require_one_history_selector(given: Mapping[str, Any]) -> None:
 
 #: The argument that carries a manifest's text. A save that sends it can change what a collection declares.
 _MANIFEST_ARGUMENT = "manifest_text"
+#: How long the read of a declaration may run. The check only buys an earlier refusal, so a slow read gives
+#: the save up to the queue it would have joined, which is what its caller was already going to wait on.
+_DECLARATION_READ_SECONDS = 0.5
 _RESEND_WITH_A_DECLARED_VALUE = (
     "Nothing was saved and nothing is held. Send the call again with a value the collection declares."
 )
 
 
+def _declared_manifest(vault_root: Path, collection: str) -> structured_collections.CollectionManifest | None:
+    """The Records manifest that `collection` names, as a request thread reads it now, or None where that is unknown.
+
+    A title, path, UUID or reference resolves as a read resolves it. A collection that the store owns is read
+    from the store's last commit beside the store thread (`read_served`): it never queues behind that thread
+    and never reads the projected `_collection.md`, which can lag the store. The read stops at
+    `_DECLARATION_READ_SECONDS` and answers None for any refusal, such as a busy or unserved store.
+    """
+    from .collection_store import runtime as store_runtime
+
+    def read() -> structured_collections.CollectionManifest:
+        path = collection_refs.resolve_collection(vault_root, collection, profile="records")
+        return record_governance.require_records_profile(
+            record_governance.resolve_collection_without_receipt(vault_root, path)
+        )
+
+    budget = request_budget.RequestBudget(seconds=_DECLARATION_READ_SECONDS)
+    try:
+        with request_budget.checking(request_budget.ReadCheckpoint(budget)):
+            return store_runtime.read_served(vault_root, read)
+    except request_budget.ReadBudgetExhausted:
+        return None
+    except Exception:  # noqa: BLE001 - an unknown, withheld or unreadable collection keeps the replay's own refusal
+        return None
+
+
 def value_refusal(vault_root: Path, arguments: Mapping[str, Any]) -> OpError | None:
     """The refusal that the collection's declared fields give an append's `item` or an update's `changes`, or None.
 
-    The busy intake raises it instead of queueing a save whose replay would refuse the same value.
-    It reads one manifest by its path and takes no lock. Whatever is not certain answers None and
-    the save queues as before: a title, UUID or reference (each resolves by a sweep of the vault's
-    manifests), a collection the store owns (only the store's thread reads it), a manifest that this
-    caller may not see, and any queued save that carries a manifest text, because it may change what
-    the collection declares before this save replays.
+    The busy intake raises it instead of queueing a save whose replay would refuse the same value. It takes no
+    lock and no store writer. Whatever is not certain answers None and the save queues as before: a collection
+    this thread cannot read now, a manifest that the caller may not see, and any queued save that carries a
+    manifest text, because it may change what the collection declares before this save replays.
     """
     action = arguments.get("action")
     values = arguments.get("item") if action == "append" else arguments.get("changes") if action == "update" else None
     collection = arguments.get("collection")
-    if (
-        not isinstance(values, Mapping)
-        or not values
-        or type(collection) is not str
-        or not collection_refs.names_a_manifest_path(collection)
-    ):
+    if not isinstance(values, Mapping) or not values or type(collection) is not str:
         return None
-    try:
-        manifest = record_governance.require_records_profile(
-            record_governance.resolve_collection_for_mutation(vault_root, collection)
-        )
-    except Exception:  # noqa: BLE001 - an unknown, withheld or unreadable collection keeps the replay's own refusal
+    manifest = _declared_manifest(Path(vault_root), collection)
+    if manifest is None:
         return None
     refusal = records.supplied_value_refusal(manifest, values)
     if refusal is None:

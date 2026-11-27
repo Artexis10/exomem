@@ -37,18 +37,6 @@ def names_a_manifest(selector: str) -> bool:
     )
 
 
-def names_a_manifest_path(selector: str) -> bool:
-    """Whether `selector` spells a vault-relative manifest path, which one read resolves.
-
-    A title, a UUID or a reference resolves by a sweep of the vault's manifests instead.
-    """
-    return (
-        names_a_manifest(selector)
-        and memory_refs.parse_memory_ref(selector) is None
-        and memory_refs.normalize_id(selector) is None
-    )
-
-
 def resolve_collection(
     vault_root: Path, selector: str | None, *, profile: str, unserved: Callable[[], str | None] | None = None,
     certain: bool = False,

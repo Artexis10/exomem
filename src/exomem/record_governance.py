@@ -1646,6 +1646,20 @@ def resolve_collection_for_mutation(
         return _resolve_released_collection(root, selector, receipt=False)
 
 
+def resolve_collection_without_receipt(
+    vault_root: Path, selector: str | Path | collections.CollectionManifest
+) -> collections.CollectionManifest:
+    """Resolve a collection as a read does, recording no release.
+
+    For a caller that reads a declaration only to decide, and answers nothing from it that its own
+    refusal does not already carry: it reads a store collection through the bound snapshot, so it
+    runs under `read_served`, and it never touches a routed collection's projected view.
+    """
+    root = Path(vault_root)
+    with state_paths.resolution_scope():
+        return _resolve_released_collection(root, selector, receipt=False)
+
+
 def _resolve_released_collection(
     root: Path,
     selector: str | Path | collections.CollectionManifest,
