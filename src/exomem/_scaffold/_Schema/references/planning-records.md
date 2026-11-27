@@ -87,6 +87,38 @@ guards, and never replay an obsolete intent blindly.
 - Renaming, retyping or removing a field, a merge, a deletion and a migration of a collection are confirmed
   `revise` or `rebaseline` calls.
 
+**Migrating a Markdown table into Records.** A page that holds a table of past entries, such as a ledger,
+imports as rows without retyping a cell. `read_instructions(topic="records.import")` gives the full contract.
+
+1. Save the page's own bytes with `save_evidence`. A note page, pasted text and a URL are not sources, and
+   `records.import` refuses them.
+2. Preview with the request below. The `columns` count shows each mapped column's parsed, missing, unparsed and
+   rejected cells. `would_reject` names the row, column and original text of each refused cell. `check_sum` gives
+   the total, so you can compare it with the total the page states.
+3. Read the preview to the person before you start. An unparseable number rejects its row and is never stored as
+   null. A date such as `2025-??-??` leaves the date field missing, and a second field mapped to the same column
+   keeps the original text.
+4. Start the same request without `check_sum`, then poll `mode: "status"` until the job is complete.
+
+```json
+{"mode": "preview", "source_ref": "<the Evidence path save_evidence returned>", "format": "markdown-table",
+ "mapping": {"table": 0, "on_invalid": "skip",
+   "fields": {"ref": "Ref", "entry_date": {"from": "Date", "type": "date"}, "entry_date_text": "Date",
+              "counterparty": "Counterparty", "amount": {"from": "Amount", "type": "number"}},
+   "coverage": {"Ref": {"classification": null}, "Date": {"classification": null},
+                "Counterparty": {"classification": null}, "Amount": {"classification": null}}},
+ "check_sum": {"field": "amount", "group_by": "counterparty"}}
+```
+
+The page behind it:
+
+```
+| Ref  | Date       | Counterparty | Amount |
+|------|------------|--------------|-------:|
+| L-01 | 2025-01-15 | Ada Quill    | 120.50 |
+| L-02 | 2025-??-?? | Ada Quill    |  80.00 |
+```
+
 Speak to users in simple actions first. Do not ask the user to choose `Sources`, `Notes`, `Entities`, `Evidence`,
 graph sidecars, schema blocks or supersession internals, unless that detail changes what will happen.
 

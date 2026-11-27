@@ -74,6 +74,7 @@ from . import (
     derived_rows,
     governance,
     import_document,
+    import_markdown,
     import_recommendations,
     import_time,
     index_migrations,
@@ -82,14 +83,19 @@ from . import (
     takeover,
     tokens,
 )
+from .import_modes import HEADER_FORMATS, MODES, READ_ONLY_MODES  # noqa: F401 - MODES, READ_ONLY_MODES: public names
 from .import_modes import MODE_FIELDS as _MODE_FIELDS
-from .import_modes import MODES, READ_ONLY_MODES  # noqa: F401 - the importer's public mode names
 
 log = logging.getLogger(__name__)
 
 # nosemgrep: ep-word-set -- The import request grammar fixes these source formats.
-FORMATS = ("ndjson", "json-array", "csv", "json-document")
+FORMATS = ("ndjson", "json-array", "csv", "json-document", "markdown-table")
 MAX_ROW_BYTES = 1 << 20
+# A Markdown page is parsed whole, so its size is capped: 256 KiB parses in about 0.15 s on the store
+# thread, and a larger table belongs in a csv file, which streams.
+MAX_TABLE_SOURCE_BYTES = 256 << 10
+MAX_TABLES_LISTED = 20
+CELL_TEXT_CHARS = 200
 MAX_DEPTH = 32
 MAX_BATCH_ROWS = 500
 MAX_BATCH_BYTES = 4 << 20
@@ -111,6 +117,8 @@ MAX_LISTED_MEMBERS = 256
 MAX_SAVED_IMPORTS = 16
 # nosemgrep: ep-word-set -- The scalar kinds a CSV cell coerces to; a subset of SCALAR_TYPES.
 CSV_TYPES = ("string", "integer", "number", "boolean")
+# nosemgrep: ep-word-set -- A markdown-table cell coerces to a CSV kind or to a date; a subset of SCALAR_TYPES.
+TABLE_TYPES = (*CSV_TYPES, "date")
 # nosemgrep: ep-word-set -- JSON Schema fixes these kinds; number includes integer and finite float.
 JSON_TYPES = ("number", "string", "boolean", "null", "object", "array")
 _CHUNK = 1 << 16
@@ -123,6 +131,7 @@ _BOM = b"\xef\xbb\xbf"
 _START = {"row": 0, "byte": 0, "state": {}}
 _RESUMABLE = ("authority_lost", "time_cap")
 _SESSION_STORE = "IMPORT_SESSION_STORE_UNAVAILABLE"
+_INVALID_VALUE = "IMPORT_VALUE_INVALID"
 # Fixed writer/store protocol refusals a later tick outlives; other batch errors fail the job.
 STORE_STATE = writer_lease.TRANSIENT_WRITER_CODES | frozenset(
     {takeover.BUSY, takeover.SYNC_PENDING, takeover.DIVERGED, takeover.CUSTODY_LOST, _SESSION_STORE}
@@ -141,11 +150,18 @@ def contract() -> dict[str, Any]:
             "mode": "preview, start, status or cancel",
             "source_ref": (
                 "vault path of a preserved Sources or Evidence file, or of an export manifest, "
-                "which preserve_artifacts returns for a held zip with archive=members; preview and start"
+                "which preserve_artifacts returns for a held zip with archive=members; preview and start. "
+                "Pasted text, a URL and a note page are not sources: preserve the file's own bytes with "
+                "save_evidence (an original with save_source) and pass the path that returns"
             ),
             "format": (
                 f"{', '.join(FORMATS)}; csv is RFC 4180 UTF-8 with a header row; json-document "
-                "is one JSON document whose rows mapping.rows names"
+                "is one JSON document whose rows mapping.rows names; markdown-table is one preserved "
+                "Markdown page whose table mapping.table names (see markdown_table)"
+            ),
+            "check_sum": (
+                "preview only: {field, group_by?}. field is a number or integer target field; the preview "
+                "sums it over the rows it counts as importing, per group_by value when given, in decimal"
             ),
             "members": (
                 f"with an export manifest: a glob over member paths, or 1 to {MAX_LISTED_MEMBERS} "
@@ -161,10 +177,16 @@ def contract() -> dict[str, Any]:
                     "a[].b, takes the object there: one row per element of the last array crossed. "
                     "$ makes the whole document one row. $index needs a path that crosses an array"
                 ),
+                "table": (
+                    "markdown-table only: the 0-based index of the table in the page, default 0. An unmapped "
+                    "preview lists each table's index, columns and row count in source.tables"
+                ),
                 "fields": (
                     f"1 to {MAX_MAPPED_FIELDS} declared target fields, each a dotted source path "
-                    "(a csv column name), {from, type?, scale?, source_type?} or {const}; type converts csv text "
-                    f"only: {', '.join(CSV_TYPES)}; source_type guards JSON by kind without conversion: "
+                    "(a csv or markdown-table column name, taken whole: a dot is part of the name), "
+                    "{from, type?, scale?, source_type?} or {const}; type converts csv and markdown-table text "
+                    f"only: {', '.join(CSV_TYPES)}, and for markdown-table {', '.join(TABLE_TYPES[len(CSV_TYPES):])}; "
+                    "source_type guards JSON by kind without conversion: "
                     f"{', '.join(JSON_TYPES)}. Nonmatching targets stay absent; every present guarded "
                     "path must match a declared kind or the row is rejected. Scale multiplies a number. In json-document a "
                     "path is relative to the row, $.a.b reads the document and $.a[].b the current "
@@ -242,11 +264,25 @@ def contract() -> dict[str, Any]:
             "findings, row identity and recommended_declarations. With a valid mapping, every row then goes "
             "through the job's own mapping, validation and identity rule, as if on_invalid were skip: "
             "rows_total, would_insert, would_match_stored (null on a derived collection), would_reject by "
-            "code with its first coordinates, and would_collapse with sample keys. coverage is full when "
+            "code with its first coordinates, and would_collapse with sample keys. A markdown-table preview "
+            "adds columns (per mapped column: parsed, missing, unparsed and rejected cells) and names the "
+            "rejected cell's column and text in would_reject. check_sum adds the sum report: rows, missing "
+            "(rows with no number), total, and groups with their rows and sums. coverage is full when "
             "every row was read and sampled when the mapping is not valid. It is partial when a row stopped "
             f"the read, or when the read reached the {PREVIEW_HOLD_SECONDS:g} s preview budget between rows; "
             "survey then gives rows_read and the counts so far as partial_counts. Only full carries the "
-            "source's counts"
+            "source's counts; columns and check_sum are null unless coverage is full"
+        ),
+        "markdown_table": (
+            "The page is parsed as GitHub-flavoured Markdown, so a row of fewer cells than the header reads "
+            "the missing cells as empty and a cell beyond the header is ignored; header cells name the columns "
+            "and must be unique and non-empty. A cell keeps its text as typed, inline markup included. An "
+            "empty cell is missing, as in csv. A cell for a number, integer or boolean field that does not "
+            "parse rejects its row as IMPORT_VALUE_INVALID; preview names the row, column and original text. "
+            "A cell for a date field that is not YYYY-MM-DD leaves the field missing and counts as unparsed; map "
+            "the same column to a string field to keep the original text. Rows commit with the page as their "
+            f"source. The page is read whole, so it may not exceed {MAX_TABLE_SOURCE_BYTES} bytes; members is "
+            "refused. Check a table against its own totals with preview's check_sum before start"
         ),
         "states": {
             "running": (
@@ -267,6 +303,7 @@ def contract() -> dict[str, Any]:
             "depth": MAX_DEPTH,
             "batch_rows": MAX_BATCH_ROWS,
             "batch_bytes": MAX_BATCH_BYTES,
+            "table_source_bytes": MAX_TABLE_SOURCE_BYTES,
         },
         "run_window": (
             "a job runs until it finishes while the login that started it stays valid, and status shows "
@@ -308,7 +345,12 @@ def _source_not_found() -> Never:
         "source is not a released preserved Sources or Evidence file",
         at="import_request.source_ref",
         expected="vault path of a preserved Sources or Evidence file",
-        repair="preserve the export with preserve_evidence or capture_source and pass its returned path",
+        # One text for an absent, an unpreserved and a withheld ref, so the refusal reveals which applied.
+        repair=(
+            "preserve the file's own bytes first, with save_evidence (or save_source for an original), "
+            "then pass the Evidence or Sources path it returns as source_ref; page text, a URL and a "
+            "vault note path are not sources"
+        ),
     )
 
 
@@ -383,8 +425,7 @@ class _Request:
     members: str | tuple[str, ...] | None = None
     reimport: str | None = None
     saved: str | None = None
-
-
+    check_sum: tuple[str, str | None] | None = None
 
 
 def _parse_request(raw: Any) -> _Request:
@@ -400,7 +441,8 @@ def _parse_request(raw: Any) -> _Request:
             "import_request is too large",
             expected=f"<= {MAX_REQUEST_BYTES} bytes",
         )
-    keys = ["continuation", "format", "mapping", "members", "mode", "reimport", "source_ref"]
+    # nosemgrep: ep-word-set -- The import request grammar fixes these keys.
+    keys = ["check_sum", "continuation", "format", "mapping", "members", "mode", "reimport", "source_ref"]
     unknown = sorted(set(raw) - set(keys))
     if unknown:
         _invalid(f"import_request.{unknown[0]}", "unknown import_request key", allowed=keys)
@@ -442,8 +484,19 @@ def _parse_request(raw: Any) -> _Request:
         job_id = matched[1]
     return _Request(
         mode, raw.get("source_ref"), raw.get("format"), raw.get("mapping"), job_id, members,
-        raw.get("reimport"),
+        raw.get("reimport"), check_sum=_check_sum(raw["check_sum"]) if "check_sum" in supplied else None,
     )
+
+
+def _check_sum(raw: Any) -> tuple[str, str | None]:
+    """``{field, group_by?}``: the number field whose sum preview reports, and the field that groups it."""
+    names = ("field", "group_by")  # nosemgrep: ep-word-set -- The check_sum request grammar fixes these keys.
+    if not isinstance(raw, Mapping) or "field" not in raw or set(raw) - set(names):
+        _invalid("import_request.check_sum", "check_sum is {field, group_by?}", expected={"field": "amount"})
+    for name in names:
+        if name in raw and (type(raw[name]) is not str or not raw[name] or len(raw[name].encode()) > _PATH_BYTES):
+            _invalid(f"import_request.check_sum.{name}", f"check_sum.{name} names a target field", expected="string")
+    return raw["field"], raw.get("group_by")
 
 
 def _selector(raw: Any, at: str = "import_request.members") -> str | tuple[str, ...]:
@@ -984,13 +1037,17 @@ class _CsvFrame:
 class _Reader:
     """Bounded incremental reader resuming at an exact byte offset and parser state."""
 
-    def __init__(self, handle, fmt: str, checkpoint: Mapping[str, Any]) -> None:
+    def __init__(self, handle, fmt: str, checkpoint: Mapping[str, Any], table: int = 0) -> None:
         self.handle, self.fmt = handle, fmt
         self.base = int(checkpoint["byte"])
         self.ordinal = int(checkpoint["row"])
         self.state = dict(checkpoint["state"])
         self.buffer = bytearray()
         self.eof = False
+        self.table = table  # markdown-table only: which table of the page holds the rows
+        self.page: tuple[import_markdown.Table, ...] | None = None
+        self.page_bytes = 0
+        self.fault: str | None = None
         handle.seek(self.base)
 
     def position(self) -> dict[str, Any]:
@@ -1029,11 +1086,33 @@ class _Reader:
             self.buffer += chunk
 
     def at_end(self) -> bool:
+        if self.fmt == "markdown-table":
+            tables = self.tables() or ()
+            return self.table >= len(tables) or self.ordinal >= len(tables[self.table].rows)
         if self.fmt == "json-array" and self.state.get("array") in {"first", "next"}:
             return self._peek() == 0x5D
         return self._peek() is None
 
+    def tables(self) -> tuple[import_markdown.Table, ...] | None:
+        """A markdown-table page's tables, parsed whole once; None when the page is over its cap or not UTF-8."""
+        if self.page is None:
+            self.handle.seek(0)
+            data = bytearray()
+            while len(data) <= MAX_TABLE_SOURCE_BYTES and (chunk := self.handle.read(_CHUNK)):
+                data += chunk
+            self.page_bytes = len(data)
+            try:
+                if len(data) > MAX_TABLE_SOURCE_BYTES:
+                    raise import_markdown.PageError("IMPORT_SOURCE_TOO_LARGE")
+                self.page = import_markdown.read_tables(bytes(data))
+            except import_markdown.PageError as error:
+                self.fault = error.code
+                self.page = ()
+        return None if self.fault else self.page
+
     def next(self) -> Row | None:
+        if self.fmt == "markdown-table":
+            return self._markdown_table()
         self._bom()
         if self.fmt == "ndjson":
             return self._ndjson()
@@ -1148,6 +1227,24 @@ class _Reader:
             return self._row(start, error=("IMPORT_ROW_TOO_LARGE", ""))
         value, error = _decode_object(data)
         return self._row(start, value, error)
+
+    def _markdown_table(self) -> Row | None:
+        """The chosen table's next body row: header cells name the columns, an empty cell is absent, as in csv."""
+        tables = self.tables()
+        if tables is None:
+            return self._row(0, error=(self.fault, ""), fatal=True)
+        if self.table >= len(tables):
+            return self._row(0, error=("IMPORT_TABLE_NOT_FOUND", "mapping.table"), fatal=True)
+        table = tables[self.table]
+        header = table.header
+        if len(set(header)) != len(header) or not all(header):
+            return self._row(0, error=("IMPORT_SOURCE_MALFORMED", ""), fatal=True)
+        if self.ordinal >= len(table.rows):
+            self.base = self.page_bytes
+            return None
+        found = table.rows[self.ordinal]
+        self.base = found.end
+        return self._row(found.start, {name: cell for name, cell in zip(header, found.cells, strict=True) if cell != ""})
 
     def _csv(self) -> Row | None:
         while True:
@@ -1578,6 +1675,7 @@ class Plan:
     rows: _Rows | None = None
     source_types: dict[_Path, tuple[str, ...]] = field(default_factory=dict, compare=False)
     local_datetime: str | None = None
+    table: int = 0  # markdown-table only: which table of the page holds the rows, counted from 0
 
     @property
     def zoned(self) -> bool:
@@ -1606,7 +1704,10 @@ class Plan:
             if spec.scale is not None and found is not None and found is not _ABSENT:
                 found = _scaled(found, spec.scale)
             if found is _ABSENT:
-                return None, ("IMPORT_VALUE_INVALID", f"mapping.fields.{spec.target}")
+                if spec.kind == "date":
+                    # Text that is no ISO date leaves the field missing; a string field mapped to the column keeps it.
+                    continue
+                return None, (_INVALID_VALUE, f"mapping.fields.{spec.target}")
             out[spec.target] = found
         return out, None
 
@@ -1659,6 +1760,12 @@ def _coerce(text: Any, kind: str) -> Any:
         return _ABSENT
     if kind == "string":
         return text
+    if kind == "date":
+        try:
+            dt.date.fromisoformat(text)
+        except ValueError:
+            return _ABSENT
+        return text if _DATE.fullmatch(text) else _ABSENT  # fromisoformat also reads other ISO spellings
     if kind == "boolean":
         return {"true": True, "false": False}.get(text, _ABSENT)
     if _INTEGER.fullmatch(text):
@@ -1750,7 +1857,7 @@ def _zone_minutes(utc: dt.datetime, where) -> int | None:
 def _path(raw: Any, at: str, fmt: str) -> tuple[str, ...]:
     if type(raw) is not str or not raw or len(raw.encode()) > _PATH_BYTES:
         _mapping_invalid(at, "a source path is a non-empty string", expected="string")
-    parts = (raw,) if fmt == "csv" else tuple(raw.split("."))
+    parts = (raw,) if fmt in HEADER_FORMATS else tuple(raw.split("."))
     if not all(parts):
         _mapping_invalid(at, "a dotted source path has an empty segment", expected="a.b.c")
     return parts
@@ -1825,6 +1932,12 @@ def _row_path(raw: Any) -> _Rows:
     return _Rows(raw, tuple(routes), prefixes, tuple({} for _ in routes), bool(keys))
 
 
+def _table(raw: Any) -> int:
+    if type(raw) is not int or raw < 0:
+        _mapping_invalid("mapping.table", "table is the 0-based index of a table in the page", expected="0, 1, 2, ...")
+    return raw
+
+
 def _target(raw: Any, at: str, declared: Mapping[str, Any], used: set[str]) -> str:
     if type(raw) is not str or raw not in declared:
         _mapping_invalid(at, "target is not a declared collection field", allowed=sorted(declared))
@@ -1838,7 +1951,7 @@ def _field(target: str, spec: Any, at: str, fmt: str, rows: _Rows | None) -> tup
     """One field mapping: a source path, ``{from, type?, scale?, source_type?}`` or ``{const}``."""
     if not isinstance(spec, Mapping):
         path = _path(spec, at, fmt)
-        kind = "string" if fmt == "csv" else None
+        kind = "string" if fmt in HEADER_FORMATS else None
         return _Field(target, path, kind, _source(spec, at, fmt, rows)), {"from": list(path), "type": kind}
     if "const" in spec:
         if set(spec) != {"const"}:
@@ -1848,16 +1961,19 @@ def _field(target: str, spec: Any, at: str, fmt: str, rows: _Rows | None) -> tup
         _mapping_invalid(f"{at}.{key}", "unknown field mapping key", allowed=["const", "from", "scale", "source_type", "type"])
     kind = None
     if "type" in spec:
-        if fmt != "csv":
-            _mapping_invalid(f"{at}.type", "only csv text is converted; JSON values keep their type", expected=None)
-        if spec["type"] not in CSV_TYPES:
-            _mapping_invalid(f"{at}.type", "unsupported csv type", allowed=list(CSV_TYPES))
+        if fmt not in HEADER_FORMATS:
+            _mapping_invalid(
+                f"{at}.type", "only csv and markdown-table text is converted; JSON values keep their type", expected=None
+            )
+        cell_types = TABLE_TYPES if fmt == "markdown-table" else CSV_TYPES
+        if spec["type"] not in cell_types:
+            _mapping_invalid(f"{at}.type", "unsupported cell type", allowed=list(cell_types))
         kind = spec["type"]
-    elif fmt == "csv":
+    elif fmt in HEADER_FORMATS:
         kind = "string"
     source_type = spec.get("source_type")
     if "source_type" in spec:
-        if fmt == "csv":
+        if fmt in HEADER_FORMATS:
             _mapping_invalid(f"{at}.source_type", "source_type guards JSON values only", expected=None)
         if type(source_type) is not str or source_type not in JSON_TYPES:
             _mapping_invalid(f"{at}.source_type", "unsupported JSON source type", allowed=list(JSON_TYPES))
@@ -1963,7 +2079,10 @@ def compile_mapping(raw: Any, manifest: collections.CollectionManifest, fmt: str
     declared = manifest.schema.fields
     if not isinstance(raw, Mapping):
         _mapping_invalid("mapping", "mapping must be an object", expected="object")
-    keys = ["coverage", "fields", "on_invalid", "time", *(["rows"] if fmt == "json-document" else [])]
+    keys = [
+        "coverage", "fields", "on_invalid", "time",
+        *(["rows"] if fmt == "json-document" else []), *(["table"] if fmt == "markdown-table" else []),
+    ]
     for key in sorted(set(raw) - set(keys)):
         _mapping_invalid(f"mapping.{key}", "unknown mapping key", allowed=sorted(keys))
     rows = None
@@ -1971,6 +2090,7 @@ def compile_mapping(raw: Any, manifest: collections.CollectionManifest, fmt: str
         if "rows" not in raw:
             _mapping_invalid("mapping.rows", "a json-document mapping names its row path", expected="a[].b[]")
         rows = _row_path(raw["rows"])
+    table = _table(raw.get("table", 0)) if fmt == "markdown-table" else 0
     coverage = raw.get("coverage", {})
     if not isinstance(coverage, Mapping) or len(coverage) > 256:
         _mapping_invalid("mapping.coverage", "coverage must be a bounded source-path map")
@@ -2068,6 +2188,7 @@ def compile_mapping(raw: Any, manifest: collections.CollectionManifest, fmt: str
         "format": fmt,
         "coverage": dict(coverage),
         **({"rows": rows.text} if rows is not None else {}),
+        **({"table": table} if fmt == "markdown-table" else {}),
     }
     source_types: dict[_Path, tuple[str, ...]] = {}
     for spec in fields:
@@ -2085,6 +2206,7 @@ def compile_mapping(raw: Any, manifest: collections.CollectionManifest, fmt: str
         rows,
         source_types,
         local_datetime,
+        table,
     )
 
 
@@ -2107,7 +2229,7 @@ _GAP = "TIME_LOCAL_GAP"
 
 
 def _next_batch(reader, plan: Plan, pending: list[Row], order: import_time.Fold | None, *,
-                limit: int | None = None, deadline: float | None = None) -> Batch:
+                limit: int | None = None, deadline: float | None = None, cells: _Cells | None = None) -> Batch:
     """The next batch of rows; a ``deadline`` (``time.monotonic``) also closes it, after at least one row."""
     limit = MAX_BATCH_ROWS if limit is None else limit
     begin = reader.position()["byte"] if not pending else pending[0].start
@@ -2131,6 +2253,8 @@ def _next_batch(reader, plan: Plan, pending: list[Row], order: import_time.Fold 
         error = row.error
         values = None
         if error is None:
+            if cells is not None:
+                cells.observe(row)  # before the row's value is released
             values, error = plan.apply(row.value, order)
             row.value = None
         if error is not None and (row.fatal or (plan.on_invalid == "stop" and error[0] != _GAP)):
@@ -2160,7 +2284,7 @@ def iter_batches(
         reader = _Streams((_Stream(None, 0, lambda: (handle, None)),), fmt, plan.rows, checkpoint)
     else:
         checkpoint = checkpoint or _START
-        reader = _Reader(handle, fmt, checkpoint)
+        reader = _Reader(handle, fmt, checkpoint, plan.table)
     order = import_time.Fold(checkpoint.get("fold")) if plan.ordered else None
     pending = getattr(reader, "pending", [])
     while True:
@@ -3447,7 +3571,7 @@ def _batch(root: Path, writer, job: _Job) -> str:
             guards = reader.guards()
         else:
             with _open_source(proof) as handle:
-                reader = _Reader(handle, fmt, job.checkpoint)
+                reader = _Reader(handle, fmt, job.checkpoint, plan.table)
                 batch = _next_batch(reader, plan, [], order, deadline=time.monotonic() + BATCH_SECONDS)
     except (_Lost, OSError, vault.PathGuardError):
         return "authority_lost"
@@ -3881,6 +4005,15 @@ def _require_members(manifest, request: _Request) -> None:
         )
 
 
+def _require_page(request: _Request) -> None:
+    """Refuse export members for a markdown-table import, in preview and start alike: it reads one page."""
+    if request.format == "markdown-table" and request.members is not None:
+        _invalid(
+            "import_request.members", "markdown-table reads one preserved page, not an export's members",
+            expected="no members",
+        )
+
+
 def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, Any]:
     """Bind a new job, or return the live one an identical start already bound."""
     who = principal_module.effective_principal()
@@ -3894,6 +4027,7 @@ def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, 
     with writer.read_snapshot():
         row, manifest, _ = writer._collection(collection, facade_profile="records")
         request = _resolved(writer, row, manifest, request)
+        _require_page(request)
         _require_members(manifest, request)
         if request.reimport is not None and request.members is None:
             _invalid("import_request.reimport", "reimport applies to an export's members", expected="members")
@@ -4232,7 +4366,7 @@ def _sampled(sample: _Sample, reader, order: import_time.Fold | None) -> bool:
 
 
 @contextmanager
-def _row_reader(root: Path, source: Source, members, size: int, fmt: str, rows: _Rows | None):
+def _row_reader(root: Path, source: Source, members, size: int, fmt: str, rows: _Rows | None, table: int = 0):
     """A fresh reader over the proven source from its first row, closed on exit."""
     if members or fmt == "json-document":
         streams = tuple(
@@ -4246,19 +4380,101 @@ def _row_reader(root: Path, source: Source, members, size: int, fmt: str, rows: 
             reader.close()
     else:
         with _open_source(source) as handle:
-            yield _Reader(handle, fmt, _START)
+            yield _Reader(handle, fmt, _START, table)
 
 
 # Why a preview counted fewer rows than the source holds.
 _UNREAD_BUDGET, _UNREAD_MAPPING = "time_budget", "no_valid_mapping"
 
 
+MAX_CHECK_GROUPS = 100
+
+
+class _Cells:
+    """Per mapped column: how many cells parsed, were missing, were present but not a date (stored missing),
+    or were rejected, whichever way their row ends. Each cell converts through the plan's own pipeline, one
+    field at a time, so the counts cannot disagree with what a job writes."""
+
+    def __init__(self, plan: Plan) -> None:
+        self.alone = [(spec, dataclasses.replace(plan, fields=(spec,), bases=())) for spec in plan.fields if spec.path]
+        self.counts = {
+            spec.target: {"column": spec.path[0], "parsed": 0, "missing": 0, "unparsed": 0, "rejected": 0}
+            for spec, _ in self.alone
+        }
+        self.rejected: dict[int, dict[str, str]] = {}  # row ordinal -> its first rejected cell, for the first rows
+
+    def observe(self, row: Row) -> None:
+        first = None
+        for spec, alone in self.alone:
+            values, error = alone.values(row.value)
+            tally = self.counts[spec.target]
+            if error is not None:
+                tally["rejected"] += 1
+                first = first or {"column": spec.path[0], "text": spec.source.read(row.value)[:CELL_TEXT_CHARS]}
+            elif spec.target in values:
+                tally["parsed"] += 1
+            else:
+                tally["missing" if spec.source.read(row.value) is _ABSENT else "unparsed"] += 1
+        if first is not None and len(self.rejected) < _LISTED:
+            self.rejected[row.ordinal] = first
+
+
+class _Sums:
+    """check_sum: one number field's sum over the rows a preview counts as importing, in decimal so a
+    ledger's cents add without binary noise. A later row with the same natural key replaces the earlier one."""
+
+    def __init__(self, field: str, group_by: str | None) -> None:
+        self.field, self.group_by = field, group_by
+        self.keyed: dict[int, tuple[Any, decimal.Decimal | None]] = {}  # by natural-key digest: the last row wins
+        self.keyless: list[tuple[Any, decimal.Decimal | None]] = []  # an incomplete natural key: always a new row
+
+    def add(self, digest: int | None, values: Mapping[str, Any]) -> None:
+        number = values.get(self.field)
+        held = (
+            values.get(self.group_by) if self.group_by is not None else None,
+            None if number is None else decimal.Decimal(repr(number)),
+        )
+        if digest is None:
+            self.keyless.append(held)
+        else:
+            self.keyed[digest] = held
+
+    def report(self) -> dict[str, Any]:
+        total, missing = decimal.Decimal(0), 0
+        groups: dict[Any, list[Any]] = {}
+        held = [*self.keyed.values(), *self.keyless]
+        for group, number in held:
+            missing += number is None
+            total += number or 0
+            entry = groups.setdefault(group, [0, decimal.Decimal(0)])
+            entry[0] += 1
+            entry[1] += number or 0
+        ordered = sorted(groups.items(), key=lambda item: (item[0] is None, str(item[0])))
+        return {
+            "field": self.field,
+            "group_by": self.group_by,
+            "rows": len(held),
+            "missing": missing,
+            "total": _number(total),
+            "groups": None if self.group_by is None else [
+                {"group": group, "rows": rows, "sum": _number(amount)} for group, (rows, amount) in ordered[:MAX_CHECK_GROUPS]
+            ],
+            "groups_total": None if self.group_by is None else len(ordered),
+        }
+
+
+def _number(total: decimal.Decimal) -> int | float:
+    return int(total) if total == total.to_integral_value() else float(total)
+
+
 class _Survey:
     """Every row of the source through a batch's own preparation, holding no row: counts, the first
     coordinates of each rejection code, and one 8-byte digest per natural key."""
 
-    def __init__(self, writer, manifest, source_ref: str, collection_id: str) -> None:
+    def __init__(self, writer, manifest, source_ref: str, collection_id: str, *,
+                 cells: _Cells | None = None, sums: _Sums | None = None) -> None:
         self.writer, self.manifest, self.source_ref, self.collection_id = writer, manifest, source_ref, collection_id
+        self.cells, self.sums = cells, sums
         self.rows = self.inserts = self.matched = self.collapsed = 0
         self.rejects: dict[str, dict[str, Any]] = {}
         self.sample_keys: list[dict[str, Any]] = []
@@ -4270,7 +4486,8 @@ class _Survey:
         found = self.rejects.setdefault(code, {"rows": 0, "first": []})
         found["rows"] += 1
         if len(found["first"]) < _LISTED:
-            found["first"].append({"row": row.ordinal, "byte": row.start, "at": at or None})
+            cell = self.cells.rejected.get(row.ordinal) if self.cells is not None and code == _INVALID_VALUE else None
+            found["first"].append({"row": row.ordinal, "byte": row.start, "at": at or None, **(cell or {})})
 
     def _stored(self, keys: list[str]) -> int:
         """How many of these item keys the collection already holds, read in its own short snapshot."""
@@ -4292,8 +4509,12 @@ class _Survey:
                 self._reject(row, refusal[0], refusal[2].get("field") if isinstance(refusal[2], Mapping) else None)
             elif key is None:
                 self.inserts += 1  # an incomplete natural key takes a generated identity: always new
+                if self.sums is not None:
+                    self.sums.add(None, values)
             else:
                 digest = int.from_bytes(hashlib.blake2b(key.encode(), digest_size=8).digest(), "big")
+                if self.sums is not None:
+                    self.sums.add(digest, values)  # a later row with this key replaces the earlier one, as in the job
                 if digest in self.digests:
                     self.collapsed += 1
                     if len(self.sample_keys) < _LISTED:
@@ -4312,6 +4533,39 @@ class _Survey:
             self.rows += 1
             self.stopped = {"row": row.ordinal, "byte": row.start, "code": code, "at": at or None}
 
+    def reported(self) -> dict[str, Any]:
+        """The per-column and check_sum reports a preview asked for."""
+        return {
+            **({"columns": self.cells.counts} if self.cells is not None else {}),
+            **({"check_sum": self.sums.report()} if self.sums is not None else {}),
+        }
+
+
+def _check_sum_plan(manifest, asked: tuple[str, str | None]) -> _Sums:
+    """The sum a preview reports, refused up front when its field is not a number or its group is not a field."""
+    field_name, group_by = asked
+    fields = manifest.schema.fields
+    if field_name not in fields or fields[field_name].type not in ("number", "integer"):
+        _invalid(
+            "import_request.check_sum.field", f"{field_name!r} is not a number field of the collection",
+            expected=sorted(name for name, spec in fields.items() if spec.type in ("number", "integer")),
+        )
+    if group_by is not None and (group_by not in fields or fields[group_by].type not in scalars.SCALAR_TYPES):
+        _invalid(
+            "import_request.check_sum.group_by", f"{group_by!r} is not a single-value field of the collection",
+            expected=sorted(name for name, spec in fields.items() if spec.type in scalars.SCALAR_TYPES),
+        )
+    return _Sums(field_name, group_by)
+
+
+def _table_listing(reader) -> list[dict[str, Any]] | None:
+    """A markdown-table page's tables as the agent picks one by `table`: place, columns and row count."""
+    tables = reader.tables() if isinstance(reader, _Reader) and reader.fmt == "markdown-table" else None
+    return None if tables is None else [
+        {"table": index, "columns": list(found.header), "rows": len(found.rows)}
+        for index, found in enumerate(tables[:MAX_TABLES_LISTED])
+    ]
+
 
 def _surveyed(survey: _Survey, plan: Plan, reader, deadline: float) -> None:
     """Read the source as a job running ``on_invalid: skip`` would, writing nothing, until it ends, a row
@@ -4320,7 +4574,7 @@ def _surveyed(survey: _Survey, plan: Plan, reader, deadline: float) -> None:
     order = import_time.Fold() if plan.ordered else None
     pending = getattr(reader, "pending", [])
     while True:
-        batch = _next_batch(reader, skipping, pending, order, deadline=deadline)
+        batch = _next_batch(reader, skipping, pending, order, deadline=deadline, cells=survey.cells)
         survey.take(batch)
         if batch.stop is not None or batch.eof:
             return
@@ -4329,7 +4583,7 @@ def _surveyed(survey: _Survey, plan: Plan, reader, deadline: float) -> None:
             return
 
 
-def _coverage(survey: _Survey | None, sampled: int, policy: str | None) -> dict[str, Any]:
+def _coverage(survey: _Survey | None, sampled: int, policy: str | None, reports: tuple[str, ...]) -> dict[str, Any]:
     """The preview's whole-source keys. Only a full read carries the source's counts; a read that a row or
     the budget stopped gives its counts so far apart, as ``partial_counts``."""
     counts = None if survey is None else {
@@ -4337,12 +4591,14 @@ def _coverage(survey: _Survey | None, sampled: int, policy: str | None) -> dict[
         "would_match_stored": None if survey.manifest.derived else survey.matched,
         "would_reject": survey.rejects,
         "would_collapse": {"rows": survey.collapsed, "sample_keys": survey.sample_keys},
+        **survey.reported(),
     }
     full = survey is not None and survey.stopped is None and not survey.out_of_time
     return {
         "coverage": "full" if full else "sampled" if survey is None else "partial",
         "rows_total": survey.rows if full else None,
-        **(counts if full else dict.fromkeys(("would_insert", "would_match_stored", "would_reject", "would_collapse"))),
+        **(counts if full else dict.fromkeys(
+            ("would_insert", "would_match_stored", "would_reject", "would_collapse", *reports))),
         "survey": {
             "rows_read": sampled if survey is None else survey.rows,
             "budget_seconds": PREVIEW_HOLD_SECONDS,
@@ -4372,6 +4628,7 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
         if not writer._operation.field_plan(manifest).owner:
             _source_not_found()
         request = _resolved(writer, row, manifest, request)
+        _require_page(request)
         _require_members(manifest, request)
         source, sha256, size = resolve_source(root, writer._operation, request.source_ref)
         members = () if request.members is None else _export(root, source.ref, sha256, request.members)
@@ -4391,14 +4648,20 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
                 rows = _row_path(request.mapping.get("rows") if isinstance(request.mapping, Mapping) else None)
             except collections.CollectionError:
                 rows = None
+        sums = None if request.check_sum is None else _check_sum_plan(manifest, request.check_sum)
+        reports = (*(("columns",) if request.format == "markdown-table" else ()), *(("check_sum",) if sums else ()))
+        # The page's table to read: the mapping's, else the first; an unmapped preview lists the tables to choose from.
+        table = 0 if plan is None else plan.table
+        tables = None
         sample = _Sample(plan, manifest)
         order = import_time.Fold() if plan is not None and plan.ordered else None
         if request.format == "json-document" and rows is None:
             complete = False
         else:
             try:
-                with _row_reader(root, source, members, size, request.format, rows) as reader:
+                with _row_reader(root, source, members, size, request.format, rows, table) as reader:
                     complete = _sampled(sample, reader, order) and reader.at_end()
+                    tables = _table_listing(reader)
             except (_Lost, OSError, vault.PathGuardError):
                 _source_not_found()
         encoding = writer.connection.execute(
@@ -4411,9 +4674,12 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
     # The whole-source pass holds no snapshot of its own; the hold budget bounds how long it reads.
     survey = None
     if plan is not None:
-        survey = _Survey(writer, manifest, source.ref, row["collection_id"])
+        survey = _Survey(
+            writer, manifest, source.ref, row["collection_id"],
+            cells=_Cells(plan) if request.format == "markdown-table" else None, sums=sums,
+        )
         try:
-            with _row_reader(root, source, members, size, request.format, rows) as reader:
+            with _row_reader(root, source, members, size, request.format, rows, plan.table) as reader:
                 _surveyed(survey, plan, reader, deadline)
         except (_Lost, OSError, vault.PathGuardError):
             _source_not_found()
@@ -4448,6 +4714,7 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
                 if members
                 else {}
             ),
+            **({"tables": tables} if tables is not None else {}),
         },
         "rows": {
             "sampled": sample.rows,
@@ -4455,7 +4722,7 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
             "invalid": sample.rows - sample.valid,
             "complete": complete,
         },
-        **_coverage(survey, sample.rows, None if plan is None else plan.on_invalid),
+        **_coverage(survey, sample.rows, None if plan is None else plan.on_invalid, reports),
         "fields": {path: sorted(kinds) for path, kinds in sample.paths.items()},
         "nested": sample.nested,
         "truncated": sample.truncated,
