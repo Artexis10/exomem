@@ -23,7 +23,7 @@
 - **THEN** the call runs until its request budget or the end of the plan, as before
 - **AND** the reply carries no `stop_reason`
 
-### Requirement: Every Import Step Yields For A Waiting Interactive Write And Releases The Boundary Before It Is Overdue
+### Requirement: Every Import Step Yields For A Waiting Interactive Write And Stops Starting Work Before It Is Overdue
 
 `plan`, `finish` and each step of a `file` call SHALL end their call at the next item or step boundary when an interactive writer waits for the vault boundary and the call has handled one item or step. Each SHALL stop starting items once the room left to its hold under the overdue limit cannot cover the delivery reserve, whatever the request budget. A call that ends for a waiting writer SHALL carry `stop_reason: interactive_write_waiting`; the next call SHALL resume without repeating an item.
 
@@ -71,7 +71,7 @@
 - **WHEN** a `finish` call has removed some staged copies and an interactive writer waits, or its budget cannot cover the delivery reserve
 - **THEN** the call returns with the run still in its phase, reports none of the copies it did not reach as unverified, and carries `stop_reason: interactive_write_waiting` or `call_budget_spent`
 - **AND** a later `finish` removes the remaining copies, each once, and completes the run
-- **AND** the recall check, the coverage and the manifest run only in a call that still has the reserve after the removals
+- **AND** the recall check, the coverage and the manifest run only in a call that removed no copy
 
 #### Scenario: Work that no step can split runs to its end
 
@@ -90,3 +90,54 @@
 - **WHEN** a call of the cell's import filer ends and an interactive writer, in this process or another, waits for the boundary
 - **THEN** the filer's next call does not start until that writer has committed, within the foreground-priority cap
 - **AND** the filer's own wait for the boundary does not count as an interactive writer's, so an agent's `file` call or the owner's write does not end early for it
+
+### Requirement: Each Call Of An Import Step Moves Its Page On
+
+An item loop of `plan`, of the removal of staged copies in `finish`, and of the reading of an app export SHALL work for a turn of at least one second before a waiting interactive writer ends its call, unless the call's budget is spent. Two callers that file one stage SHALL each move its page on in every call, and the stage SHALL reach its end.
+
+#### Scenario: An agent and the cell's filer file one stage
+
+- **WHEN** an agent's `file` calls and the cell's filer's `file` calls plan one page of many items in turn
+- **THEN** each call plans at least a turn of items
+- **AND** the page is planned in a bounded number of calls, each item once
+
+#### Scenario: Two agents file one stage
+
+- **WHEN** two agents call `file` on one stage and each call finds the other waiting
+- **THEN** each call plans at least a turn of items and the page is planned in a bounded number of calls
+
+### Requirement: A Finish That Removed Staged Copies Leaves Its Checks To The Next Call
+
+`finish` SHALL run its recall check, coverage, residual and manifest only in a call that removed no staged copy. A call that removed copies SHALL end with `stop_reason: finish_check_next_call` and the run in its phase, and the next call SHALL run the checks.
+
+#### Scenario: The removals and the checks take two calls
+
+- **WHEN** a `finish` call removes the staged copies of a page
+- **THEN** it returns `stop_reason: finish_check_next_call` and no recall check
+- **AND** the next `finish` call runs the checks with the hold's whole room and completes the run
+
+### Requirement: A File Call Reads An App Export As A Step Of Its Own
+
+When a stage holds app exports, a `file` call SHALL read their conversations as a step that ends the call. It SHALL run a scan step (`start`, `rescan`) only as the first step of a call. The first call of a stage SHALL find the exports before its scan and SHALL NOT read their items.
+
+#### Scenario: A call that read an export ends before it scans
+
+- **WHEN** a `file` call has read conversations of an export of the stage
+- **THEN** the call returns `filing: working` and no scan has run in it
+- **AND** the next call runs the scan as its first step
+
+#### Scenario: The reading ends for a waiting write
+
+- **WHEN** an interactive writer waits while a `file` call reads an export
+- **THEN** the call ends after a turn of conversations and the writer commits
+- **AND** the next call goes on from the conversations already read
+
+### Requirement: A Source Page Refused For Now Ends A Read Of The Earlier Imports
+
+A `plan` or `apply` read of the earlier imports that meets a Source page which the filesystem refuses for now (`CAPABILITY_UNAVAILABLE`, `IDENTITY_CHANGED`) SHALL end as an incomplete read and SHALL NOT take the page as one with no imports. The next call SHALL read the page again.
+
+#### Scenario: A page is refused during a plan
+
+- **WHEN** a `plan` meets a Source page that the held filesystem refuses for now
+- **THEN** the read ends incomplete and the plan files no item against a partial index
+- **AND** a later call reads the page again and plans from the whole index

@@ -204,7 +204,7 @@ def test_an_expansion_that_outlasts_one_call_resumes_and_files_each_item_once(va
     def one_item_a_call(root, import_id, *, keep_going, rewalk=False):
         """The call's budget is spent after its first item, so every call yields."""
         calls_that_expanded.append(1)
-        expand(root, import_id, keep_going=lambda: False, rewalk=rewalk)
+        return expand(root, import_id, keep_going=lambda: False, rewalk=rewalk)
 
     monkeypatch.setattr(export_expansion, "expand", one_item_a_call)
     import_id = stage_export(vault, [claude_conversation(number) for number in range(6)])
@@ -390,7 +390,10 @@ def test_a_staged_file_at_a_name_the_expansion_would_use_is_never_overwritten(va
     folder = "conversations items"
     sender = {f"{folder}/{item_id}.md": b"The sender's own note, first.\n", f"{folder}/{item_id}-2.md": b"The sender's own note, second.\n"}
 
-    view = file_to_done(vault, stage_export(vault, export, beside=sender))
+    import_id = stage_export(vault, export, beside=sender)
+    # A first call scans before it reads the export, and filing consumes the sender's notes; expanding first meets the clash.
+    export_expansion.expand(vault, import_id, keep_going=lambda: True)
+    view = file_to_done(vault, import_id)
 
     pages = source_pages(vault).values()
     texts = [text for _frontmatter, text in pages]

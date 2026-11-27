@@ -206,6 +206,7 @@ def scaled_boundary(vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         mutation_lock.VaultMutationCoordinator.__init__.__kwdefaults__, "long_holder_seconds", OVERDUE_SECONDS
     )
     monkeypatch.setattr(request_budget, "DELIVERY_RESERVE_SECONDS", RESERVE_SECONDS)
+    monkeypatch.setattr(adoption_run, "TURN_SECONDS", OVERDUE_SECONDS / 30)
     writer_lease.reset_managers_for_tests()
     yield logs
     writer_lease.reset_managers_for_tests()
@@ -416,6 +417,9 @@ def test_a_finish_call_ends_for_a_waiting_write_and_the_next_call_removes_the_re
             note = await client.call_tool(*public_call("create_note", _remember("agent")), raise_on_error=False)
             first = (await finishing).structured_content
             _settle(monkeypatch, threading.Event())
+            # The call that removes the rest leaves the checks to the call after it.
+            removing = await client.call_tool(*public_call("import_memory", finish_args), raise_on_error=False)
+            assert removing.structured_content["stop_reason"] == adoption_run.STOP_FOR_TAIL, removing.structured_content
             second = await client.call_tool(*public_call("import_memory", finish_args), raise_on_error=False)
             return first, note.structured_content, second.structured_content
 
@@ -471,7 +475,10 @@ def test_a_file_call_ends_an_export_expansion_for_a_waiting_write_and_the_next_c
 
     async def journey() -> tuple[dict, dict, dict, int]:
         async with Client(server.build_server(require_auth=False)) as client:
-            filing = asyncio.create_task(_file(client, "file-0", staged))
+            # The first call scans the stage and leaves the export unread: reading it is the next call's work.
+            opened = await _file(client, "file-0", staged)
+            assert not running.is_set() and opened["filing"] == "working", opened
+            filing = asyncio.create_task(_file(client, "file-1", staged, opened["continuation"]))
             assert await asyncio.to_thread(running.wait, 30), "the import never reached a conversation"
             note = await client.call_tool(*public_call("create_note", _remember("agent")), raise_on_error=False)
             first = await filing
@@ -483,11 +490,47 @@ def test_a_file_call_ends_an_export_expansion_for_a_waiting_write_and_the_next_c
 
     assert "MUTATION_BUSY" not in json.dumps([first, note, done]), (first, note, done)
     assert len(_notes_titled(vault, "agent")) == 1
-    # The first call stopped as soon as the writer waited: one more conversation at most, not the room of the call.
+    # The call stopped as soon as the writer waited: one more conversation at most, not the room of the call.
     assert 0 < read <= 3 and first["filing"] == "working", (read, first)
     assert done.get("filing") == "done" and done["progress"]["filed"] == len(conversations) + 1, done
 
 
+def test_a_file_call_that_read_an_export_ends_before_it_scans_so_the_scan_has_a_hold_of_its_own(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a scan that runs in the hold of the call that read the export, on top of the room that reading used."""
+    conversations = [claude_conversation(number) for number in range(5)]
+    staged = _stage(vault, {"conversations.json": json.dumps(conversations).encode(), "note.md": b"# Note\n\nA note.\n"})
+    import_id = staged.rsplit("/", 1)[1]
+    scans: list[int] = []  # the items read when each scan began, and in which call
+    real_start = adoption_run.start
+    call = 0
+
+    def watching_start(*args, **kwargs):
+        scans.append(call)
+        return real_start(*args, **kwargs)
+
+    monkeypatch.setattr(adoption_run, "start", watching_start)
+    # Each call reads one conversation at most, so the export takes several calls.
+    real_expand = export_expansion.expand
+    monkeypatch.setattr(
+        export_expansion, "expand",
+        lambda root, stage_id, *, keep_going, rewalk=False: real_expand(root, stage_id, keep_going=lambda: False, rewalk=rewalk),
+    )
+    read_in_call: dict[int, int] = {}
+    continuation = None
+    for call in range(1, 40):
+        before = len((import_stage.read_expansion(vault, import_id) or {"rows": []})["rows"])
+        reply = adoption_run.file(vault, path=staged, continuation=continuation)
+        after = len(import_stage.read_expansion(vault, import_id)["rows"])
+        read_in_call[call] = after - before
+        if reply["filing"] != "working":
+            break
+        continuation = reply["continuation"]
+
+    assert reply["filing"] == "done" and reply["progress"]["filed"] == len(conversations) + 2, reply
+    assert sum(read_in_call.values()) == len(conversations)
+    assert not any(read_in_call.get(call) for call in scans), (scans, read_in_call)
 def test_an_apply_whose_sources_seal_broke_ends_its_full_read_for_a_waiting_write_and_the_next_call_goes_on(
     vault: Path, scaled_boundary: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -667,3 +710,106 @@ def test_the_import_filer_waits_for_a_waiting_writer_before_it_calls_again(
         thread.join(60)
 
     assert order == ["writer holds the boundary", "filer calls again"], order
+
+
+# --------------------------------------------------------------------------- #
+# Two importers on one stage
+# --------------------------------------------------------------------------- #
+PLANNED_FILES = 60
+PLAN_ITEM_SECONDS = 0.05
+# What every call pays before its first item, scaled down from the rehearsal's 0.8 s read of the earlier imports.
+SETUP_SECONDS = 0.4
+# The turn of items that a call keeps the boundary for before it yields to a waiting writer: as long as the call's
+# set-up, as on a rehearsal's page, where 1 s of items follow 0.8 s to 2.5 s of set-up.
+TURN_SECONDS = 0.4
+# Two callers that each take a turn of about 8 items plan the page in about 11 calls, whereas callers that yield to
+# each other after one item need 60.
+CALLS_TO_PLAN_THE_PAGE = 20
+
+
+class _TwoImporters:
+    """A stage whose plan costs what a rehearsal page's costs, scaled down, and the two callers that file it."""
+
+    def __init__(self, vault: Path, import_id: str, planned: list[int]) -> None:
+        self.vault, self.import_id, self.planned = vault, import_id, planned
+        self.calls = [0, 0]
+
+    def agent(self):
+        """An agent's loop on `file`: each call carries the continuation of its last reply."""
+        state = {"continuation": None}
+
+        def call() -> None:
+            arguments = {"continuation": state["continuation"]} if state["continuation"] else {}
+            state["continuation"] = filing_tests._file_call(self.vault, self.import_id, **arguments).get("continuation")
+
+        return call
+
+    def filer(self):
+        """The resident filer's loop: `run_once` on the stage, as its thread does."""
+        filer = import_filing.Filer(self.vault)
+        assert filer.register(self.import_id, principal=filing_tests._owner(), surface=None)
+        return lambda: filer.run_once(self.import_id)
+
+    def file_until_planned(self, callers: list) -> int:
+        """Each caller calls at once after its last reply, in its own thread, until the page is planned; the calls made."""
+        done = threading.Event()
+        failures: list[BaseException] = []
+
+        def drive(index: int) -> None:
+            try:
+                while not done.is_set() and sum(self.calls) < 2 * CALLS_TO_PLAN_THE_PAGE:
+                    callers[index]()
+                    self.calls[index] += 1
+                    if self.planned[0] >= PLANNED_FILES:
+                        done.set()
+            except BaseException as error:  # noqa: BLE001 - reported by the test thread below
+                failures.append(error)
+                done.set()
+
+        threads = [threading.Thread(target=drive, args=(index,)) for index in range(len(callers))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(180)
+        assert not failures and not any(thread.is_alive() for thread in threads), failures
+        return sum(self.calls)
+
+
+@pytest.fixture
+def two_importers(
+    vault: Path, scaled_boundary: Path, private_journal: None, monkeypatch: pytest.MonkeyPatch
+) -> _TwoImporters:
+    monkeypatch.setattr(adoption_run, "TURN_SECONDS", TURN_SECONDS)
+    planned = [0]
+    real_plan_item = adoption_plan.plan_item
+
+    def counted(*args, **kwargs):
+        planned[0] += 1
+        return real_plan_item(*args, **kwargs)
+
+    monkeypatch.setattr(adoption_plan, "plan_item", counted)
+    never = threading.Event()
+    _slowed(monkeypatch, adoption_plan, "plan_item", PLAN_ITEM_SECONDS, running=threading.Event(), settled=never)
+    _slowed(monkeypatch, adoption_plan, "read_import_index_until", SETUP_SECONDS, running=threading.Event(), settled=never)
+    import_id = filing_tests._stage(
+        vault, files={f"note{number}.md": f"# Note {number}\n\nInvented text {number}.\n".encode() for number in range(PLANNED_FILES)})
+    return _TwoImporters(vault, import_id, planned)
+
+
+def test_an_agent_and_the_cell_filer_filing_one_stage_move_its_page_on_each_turn(
+    scaled_boundary: Path, two_importers: _TwoImporters
+) -> None:
+    """Catches two importers that each yield to the other after one item, so the page crawls one item per call."""
+    calls = two_importers.file_until_planned([two_importers.agent(), two_importers.filer()])
+
+    assert calls <= CALLS_TO_PLAN_THE_PAGE, (calls, two_importers.calls, two_importers.planned)
+
+
+def test_two_agents_filing_one_stage_move_its_page_on_each_turn(
+    scaled_boundary: Path, two_importers: _TwoImporters
+) -> None:
+    """Catches two foreground importers that each yield to the other after one item, so the page crawls."""
+    calls = two_importers.file_until_planned([two_importers.agent(), two_importers.agent()])
+
+    assert [row for row in _journal(scaled_boundary) if row["error_code"] == "MUTATION_BUSY"] == []
+    assert calls <= CALLS_TO_PLAN_THE_PAGE, (calls, two_importers.calls, two_importers.planned)

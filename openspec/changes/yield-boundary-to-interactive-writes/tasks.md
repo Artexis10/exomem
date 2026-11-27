@@ -6,9 +6,12 @@
 - [x] 1.4 Run the reconcile unit-sidecar and embedding phases in short holds that end for a waiting writer; name each hold by its phase.
 - [x] 1.5 Leave the Windows waiter signal process-local and say so in the design.
 - [x] 1.6 End an import `plan`, a `finish` and the steps of a `file` call at an item or step boundary for a waiting interactive writer, and bind each call's budget cut to the room its hold has left under the overdue limit as the current budget.
-- [x] 1.7 Make `finish` resume after a stop for a waiting writer or a short budget, with its tail in the call that completes it; apply the Sources read floor to the first step of a call only; stop `apply`'s full Sources read for a waiting writer.
+- [x] 1.7 Make `finish` resume after a stop for a waiting writer or a short budget, with its tail in a call that removed no copy; apply the Sources read floor to the first step of a call only; stop `apply`'s full Sources read for a waiting writer.
 - [x] 1.8 Make the cell's filer wait for a waiting writer between its calls, and wait for the boundary as background work.
 - [x] 1.9 Remember each Source page's entries per process, and record the cache's invalidation, memory and cost in the design.
+- [x] 1.10 Give an item loop (`plan`, the removal of staged copies in `finish`, the reading of an app export) a turn of `TURN_SECONDS` before a waiting writer ends its call, so each call of two importers on one stage moves its page on.
+- [x] 1.11 Read a stage's app exports as a step of its own that ends the call, so a scan step (`start`, `rescan`) runs only as the first step of a call.
+- [x] 1.12 End a plan's or an apply's read of the earlier imports as incomplete when the filesystem refuses a Source page for now, and read the page again in the next call.
 
 ## 2. Replay marker
 
@@ -21,9 +24,11 @@
 - [x] 3.1 End-to-end: an import apply is running; an agent write and a CLI write each commit once with no `MUTATION_BUSY` and no counter movement; the import returns a continuation and finishes every item once.
 - [x] 3.2 Unit: interactive waiter count; the handoff wait bound; a maintenance phase lets a waiting writer in within one batch and applies every item once; the replay marker; the NFC digest.
 - [x] 3.3 End-to-end: a slowed `plan` meets a waiting `create_note` and CLI write, and a waiting `file`; a `file` call ends between steps for a waiting writer; a call with no waiter ends before the scaled overdue limit, with and without a bound request budget; a `finish`, an export expansion and the reads of the Sources end for a waiting writer; the filer lets a CLI write in between its calls.
+- [x] 3.4 End-to-end at scaled limits: an agent and the cell's filer, and two agents, file one stage and plan its page in at most 20 calls, where the code before the turn rule needed 49; a `finish` that removed copies leaves its checks to the next call; a `file` call that read an export ends before it scans; a refused Source page ends the read and the next call reads it again.
 
 ## 4. Closure
 
+- [ ] 4.0 A rehearsal of a large import (a stage of about 69,300 notes in pages of 5,000) files every page with no livelock: the planning calls of a page after the first move its cursor, and the whole import ends inside its deadline.
 - [ ] 4.1 After the release is live, the caller-visible refusal journal of the personal service shows no `MUTATION_BUSY` caused by an import apply, a maintenance job or a reconcile phase. (Moved from `absorb-transient-write-busy` task 4.2.)
 - [ ] 4.2 On a disposable vault with its own state root, a second process holds the boundary for 4 s while clients write over MCP (no explicit key), REST with an `Idempotency-Key`, a Studio action, the CLI, `/upload` and tus: no busy refusal, and every write committed once. A REST write without a key is refused with a retryable `MUTATION_BUSY` after one bounded acquire wait, with one refusal-journal row. (Moved from `absorb-transient-write-busy` task 4.1. `tests/test_write_reaches_a_maintenance_job_in_another_process.py` covers the MCP write only.)
 - [ ] 4.3 Archive this change with `openspec archive yield-boundary-to-interactive-writes` after tasks 4.1 and 4.2, and run `openspec validate --all --strict` before and after.

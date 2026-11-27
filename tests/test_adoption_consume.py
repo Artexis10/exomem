@@ -154,6 +154,14 @@ def _apply(vault: Path, run_id: str, plan_id: str, **options) -> dict:
     return reply
 
 
+def _finish(vault: Path, run_id: str) -> dict:
+    """`finish` until it is done: a call that removed staged copies leaves the checks of its tail to the next call."""
+    reply = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    while reply.get("stop_reason") == adoption_run.STOP_FOR_TAIL:
+        reply = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    return reply
+
+
 def _adopt(vault: Path, start_path: str, *, consume: bool = True) -> tuple[str, str, dict]:
     """start, select everything, plan and apply to the end; returns the run id, its plan id and the last reply."""
     run_id, plan_id = _plan(vault, start_path, consume=consume)
@@ -212,7 +220,7 @@ def test_finish_removes_the_text_it_filed_and_offers_no_review_when_nothing_is_u
     staged = _stage(tmp_path, vault, {"plan.md": note, "paper.pdf": PDF})
     run_id, _plan_id, _reply = _adopt(vault, staged["start_path"])
 
-    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    finished = _finish(vault, run_id)
 
     residual = finished["finish"]["residual"]
     assert not _staged(vault, staged, "plan.md").exists()
@@ -230,7 +238,7 @@ def test_a_text_copy_stays_when_its_source_no_longer_holds_the_text(tmp_path: Pa
     source = vault / _outcome(reply, staged, "plan.md")["target_path"]
     source.write_text(source.read_text(encoding="utf-8").replace("Invented plan", "Edited plan"), encoding="utf-8")
 
-    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    finished = _finish(vault, run_id)
 
     assert _staged(vault, staged, "plan.md").read_bytes() == kept
     assert not _staged(vault, staged, "menu.md").exists()
@@ -251,7 +259,7 @@ def test_a_text_copy_edited_after_it_was_planned_stays_and_is_reported_as_change
     edited = kept + b"A line the person added later.\n"
     _staged(vault, staged, "plan.md").write_bytes(edited)
 
-    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    finished = _finish(vault, run_id)
 
     assert _staged(vault, staged, "plan.md").read_bytes() == edited
     assert not _staged(vault, staged, "menu.md").exists() and finished["finish"]["consumed"] == 1
@@ -277,7 +285,7 @@ def test_a_note_that_cites_a_crlf_text_source_leaves_its_text_exact_so_finish_re
     page = source.read_bytes().decode("utf-8")
     assert "ingested_into" in page and cited.path.removesuffix(".md") in page
     assert adopt.text_source_body(page).encode("utf-8") == crlf
-    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    finished = _finish(vault, run_id)
 
     assert not _staged(vault, staged, "plan.md").exists()
     assert finished["finish"]["consumed"] == 1 and finished["finish"]["residual"]["unfiled"]["files"] == 0
@@ -294,7 +302,7 @@ def test_a_text_item_that_still_owes_its_note_keeps_its_staged_copy_through_a_pa
     run["phase"] = "partial"
     store.save(run)
 
-    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    finished = _finish(vault, run_id)
 
     assert _staged(vault, staged, "plan.md").read_bytes() == owed
     assert not _staged(vault, staged, "menu.md").exists()
@@ -333,7 +341,7 @@ def test_a_finish_that_stopped_after_a_removal_reads_the_item_as_consumed_on_rep
     real_save = adoption_run.AdoptionRunStore.save
 
     def stop_when_finish_saves(self, run):
-        if run.get("phase") == "done":
+        if run.get("phase") == "applied":  # the save that follows the removals
             raise OSError("the call stopped before it saved")
         return real_save(self, run)
 
@@ -345,7 +353,7 @@ def test_a_finish_that_stopped_after_a_removal_reads_the_item_as_consumed_on_rep
 
     stored = adoption_run.AdoptionRunStore(vault).load(run_id)
     assert adoption_run.probe_staleness(vault, stored) == []
-    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    finished = _finish(vault, run_id)
 
     assert finished["finish"]["consumed"] == 1 and finished["finish"]["residual"]["files"] == 0
 
@@ -371,11 +379,32 @@ def test_finish_stops_starting_removals_when_its_budget_runs_low_and_the_next_ca
     assert stopped["stop_reason"] == adoption_run.STOP_FOR_BUDGET and run["phase"] == "applied" and run["finish"] is None
     assert len(left) == 2 and adoption_run._consumed_count(run["outcomes"]) == 1
 
-    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    finished = _finish(vault, run_id)
 
     residual = finished["finish"]["residual"]
     assert not any(_staged(vault, staged, name).exists() for name in notes) and finished["finish"]["consumed"] == 3
     assert residual["files"] == 0 and "unchecked" not in residual["by_reason"]
+
+
+def test_a_finish_that_removed_copies_leaves_its_checks_to_the_next_call_which_has_the_whole_room(
+        tmp_path: Path) -> None:
+    """Catches a tail that runs in what the removals left of the call: a search then answers pending for a searchable page."""
+    vault = _vault(tmp_path)
+    notes = {f"note-{n}.md": f"# Note {n}\n\nInvented note {n}.\n".encode() for n in range(3)}
+    staged = _stage(tmp_path, vault, notes)
+    run_id, _plan_id, _reply = _adopt(vault, staged["start_path"])
+
+    removing = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+
+    run = adoption_run.AdoptionRunStore(vault).load(run_id)
+    assert removing["stop_reason"] == adoption_run.STOP_FOR_TAIL and run["phase"] == "applied" and run["finish"] is None
+    assert not any(_staged(vault, staged, name).exists() for name in notes)
+    assert adoption_run._consumed_count(run["outcomes"]) == 3
+
+    checking = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+
+    assert "stop_reason" not in checking and checking["finish"]["recall_check"] and checking["finish"]["consumed"] == 3
+    assert adoption_run.AdoptionRunStore(vault).load(run_id)["phase"] == "done"
 
 
 def test_a_run_started_with_consume_false_keeps_every_staged_copy(tmp_path: Path) -> None:
@@ -401,7 +430,7 @@ def test_nothing_is_removed_from_a_folder_under_imports_that_has_no_manifest(tmp
     (folder / "plan.md").write_bytes(note)
 
     run_id, _plan_id, reply = _adopt(vault, str(folder.parent.relative_to(vault)))
-    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    finished = _finish(vault, run_id)
 
     assert {o["status"] for o in reply["outcomes"].values()} == {"applied"} and reply["consumed"] == 0
     assert (folder / "paper.pdf").read_bytes() == PDF
@@ -598,7 +627,7 @@ def test_finish_removes_the_folders_consuming_emptied_and_reports_what_still_sit
     applied = _apply(vault, run_id, plan_id)
     assert _outcome(applied, staged, "changed.pdf")["status"] == "failed"
 
-    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    finished = _finish(vault, run_id)
 
     residual = finished["finish"]["residual"]
     assert finished["finish"]["consumed"] == 3 and not _staged(vault, staged, "sub").exists()
@@ -619,7 +648,7 @@ def test_finish_removes_the_whole_stage_when_nothing_is_left_and_names_the_cloud
     emptied = _cloud_stage(vault, {"paper.pdf": PDF})
     run_id, _plan_id, _reply = _adopt(vault, f"_Imports/{emptied}")
 
-    residual = adoption_run.finish(vault, run_id=run_id, today=TODAY)["finish"]["residual"]
+    residual = _finish(vault, run_id)["finish"]["residual"]
 
     assert not (vault / "_Imports" / emptied).exists()
     assert (residual["files"], residual["discard"]) == (0, None)
@@ -630,7 +659,7 @@ def test_finish_removes_the_whole_stage_when_nothing_is_left_and_names_the_cloud
     hidden.write_bytes(b"hidden bytes")
     run_id, _plan_id, _reply = _adopt(vault, f"_Imports/{with_hidden}")
 
-    residual = adoption_run.finish(vault, run_id=run_id, today=TODAY)["finish"]["residual"]
+    residual = _finish(vault, run_id)["finish"]["residual"]
 
     assert residual["by_reason"] == {"ineligible": {"files": 1, "bytes": len(b"hidden bytes")}}
     assert "transfer_memory" in residual["discard"] and "import_discard" in residual["discard"]
@@ -644,7 +673,7 @@ def test_finish_leaves_every_folder_and_file_of_a_run_started_with_consume_false
     _staged(vault, staged, "empty").mkdir()
     run_id, _plan_id, _reply = _adopt(vault, staged["start_path"], consume=False)
 
-    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    finished = _finish(vault, run_id)
 
     residual = finished["finish"]["residual"]
     assert _staged(vault, staged, "sub/inner.pdf").read_bytes() == IMAGE and _staged(vault, staged, "empty").is_dir()

@@ -66,7 +66,7 @@ def _file_all_but(vault: Path, import_id: str, *left: str) -> str:
         vault, run_id=run_id, include=[start_path], exclude=[f"{start_path}/{path}" for path in left])
     plan_id = adoption_run.plan(vault, run_id=run_id, today=consume.TODAY)["plan"]["plan_id"]
     consume._apply(vault, run_id, plan_id)
-    adoption_run.finish(vault, run_id=run_id, today=consume.TODAY)
+    consume._finish(vault, run_id)
     return run_id
 
 
@@ -115,7 +115,7 @@ def test_a_discard_lists_a_renamed_member_whose_replay_was_refused_once_the_pers
     run_id, plan_id = _stop_after_the_rename_of(vault, monkeypatch, import_id)
     (vault / KB_SCAN).write_bytes(PDF + b"changed since the rename")
     consume._apply(vault, run_id, plan_id)
-    adoption_run.finish(vault, run_id=run_id, today=consume.TODAY)
+    consume._finish(vault, run_id)
     with pytest.raises(ArchiveRefused) as refused:
         cloud_import_job.discard(vault, import_id)
     assert refused.value.code == "IMPORT_RENAMES_PENDING"
@@ -349,7 +349,7 @@ def test_a_plain_discard_after_a_walk_writes_no_empty_record_over_the_walk(vault
     import_id = _job_stage(vault, {"filed.pdf": PDF})
     run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}", consume=False)
     consume._apply(vault, run_id, plan_id)
-    adoption_run.finish(vault, run_id=run_id, today=consume.TODAY)
+    consume._finish(vault, run_id)
     _walk_then_make_the_receipt_readable_again(vault, import_id)
 
     cloud_import_job.discard(vault, import_id)

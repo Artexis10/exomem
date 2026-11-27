@@ -88,6 +88,14 @@ APPLY_CHUNK_BUDGET_SHARE = 0.1
 STOP_FOR_WAITING_WRITE = "interactive_write_waiting"
 # The `stop_reason` of a `finish` that ended with work left because its budget could not cover the delivery reserve.
 STOP_FOR_BUDGET = "call_budget_spent"
+# The `stop_reason` of a `finish` that removed staged copies and left its checks (recall, coverage, manifest) to the next call.
+STOP_FOR_TAIL = "finish_check_next_call"
+# An item loop (`plan`, the removal of staged copies in `finish`) that a waiting writer interrupts first works this
+# long. A call pays a fixed cost before its first item (the read of the earlier imports, the saved run, the reply), and
+# an item costs milliseconds, so two import calls that yield to each other after one item each would pay that cost
+# for every item and the page would not move. A writer's own wait for the boundary is 5 s (`EXOMEM_MUTATION_TIMEOUT`),
+# so a turn of one second serves it well within that and puts real work behind each call's fixed cost.
+TURN_SECONDS = 1.0
 # What a call assumes before it has timed a chunk: seconds per item, and per media
 # artifact for its extraction request (both pessimistic starts).
 INITIAL_ITEM_SECONDS = 0.5
@@ -258,16 +266,22 @@ def _writer_waits(root: Path) -> bool:
     return bool(active_manager().writers_waiting(root))
 
 
-def _stop_now(root: Path, budget: request_budget.RequestBudget, part: str | None = None) -> str | None:
+def _stop_now(
+    root: Path, budget: request_budget.RequestBudget, part: str | None = None, *, turn_began: float | None = None
+) -> str | None:
     """Why a step that has handled an item ends its call here: its budget cannot cover the delivery reserve, or a writer waits.
 
     The budget it is given is the hold's (`_within_hold`), so a call that stops here releases the boundary
     before it is overdue. A stop for the budget records `part`, when given, as what the call left undone.
+    A loop of cheap items passes the time its turn began (`TURN_SECONDS`): a waiting writer ends the call only
+    once the turn has run, so each call, whoever waits for it, moves its cursor by a turn of items.
     """
     if not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS):
         if part is not None:
             budget.note_truncated(part)
         return STOP_FOR_BUDGET
+    if turn_began is not None and time.monotonic() - turn_began < TURN_SECONDS:
+        return None
     return STOP_FOR_WAITING_WRITE if _writer_waits(root) else None
 
 
@@ -2129,10 +2143,11 @@ def plan(
         seen = adoption_plan.seen_in_plan(draft["items"])
 
         handled = 0
+        turn_began = time.monotonic()
         stop_reason = STOP_FOR_WAITING_WRITE if entries is None and _writer_waits(root) else None
         with lexstore.shared_reads(root), call_spans.span("adoption.plan_items", {}) as measured:
             while entries is not None and draft["next"] < len(selected):
-                if handled and (why := _stop_now(root, budget)) is not None:
+                if handled and (why := _stop_now(root, budget, turn_began=turn_began)) is not None:
                     # The reply names a waiting writer; a stop for the budget is the ordinary continuation.
                     stop_reason = why if why == STOP_FOR_WAITING_WRITE else None
                     break
@@ -4284,10 +4299,11 @@ def _consume_filed_text(
     and `copy_changed` when the copy is no longer the file that the manifest and the plan describe. A copy that is
     already gone (a `finish` stopped after its removal) is settled through its Source.
 
-    It returns the copies it handled and, when it stopped with copies left, the reason (`_stop_now`): the budget
+    It returns the copies it removed and, when it stopped with copies left, the reason (`_stop_now`): the budget
     runs low or a writer waits. A call handles at least one copy before it stops, so each makes progress, and the
     marks it made are kept: the next `finish` carries on from them, and no copy it did not reach is reported as
-    unverified until the last call has run.
+    unverified until the last call has run. A copy that stays, or one that is gone already, is handled but removed
+    nothing, so it does not hold the checks of `finish` back.
     """
     if not run.get("consume", True):
         return 0, None
@@ -4296,7 +4312,8 @@ def _consume_filed_text(
     if stage is None:
         return 0, None
     outcomes = run.get("outcomes") or {}
-    handled = 0
+    handled = removed = 0
+    turn_began = time.monotonic()
     for planned in (run.get("plan") or {}).get("items") or []:
         outcome = outcomes.get(planned["original_path"])
         if (
@@ -4304,8 +4321,8 @@ def _consume_filed_text(
             or outcome.get("status") not in _APPLIED_STATUSES
         ):
             continue
-        if handled and (stop := _stop_now(root, budget, "finish.consume_text")) is not None:
-            return handled, stop
+        if handled and (stop := _stop_now(root, budget, "finish.consume_text", turn_began=turn_began)) is not None:
+            return removed, stop
         handled += 1
         if os.path.lexists(root / planned["original_path"]):
             if not _text_source_holds(root, outcome.get("target_path") or planned["target_path"], planned):
@@ -4314,9 +4331,10 @@ def _consume_filed_text(
                 outcome["stays"] = "copy_changed"
             else:
                 outcome["consumed"] = True
+                removed += 1
         elif _filed_and_gone(root, run, reads, planned) is not None:
             outcome["consumed"] = True
-    return handled, None
+    return removed, None
 
 
 @_within_hold
@@ -4337,13 +4355,15 @@ def finish(
                 "INVALID_PHASE", f"finish requires phase 'applied' or 'partial', got {run['phase']!r}"
             )
         budget = _call_budget()
-        handled, stop = _consume_filed_text(root, run, budget)
-        if stop is None and handled:
-            # The tail below (recall check, coverage, manifest) needs the reserve that removing copies may have spent.
-            stop = _stop_now(root, budget, "finish.tail")
+        removed, stop = _consume_filed_text(root, run, budget)
+        if stop is None and removed:
+            # The tail below (recall check, coverage, manifest) runs in a call that removed no copy, so it has the
+            # hold's whole room: a search that ran in what the removals left would answer "indexing pending" for a
+            # page that is searchable. It costs the page one more call.
+            stop = STOP_FOR_TAIL
         if stop is not None:
-            # Copies remain, or the tail has no room: keep the marks made so far and leave the phase, so the next
-            # `finish` (the `file` chain re-runs it) resumes, and the tail runs once, in a call that can afford it.
+            # Copies remain, or the tail is next: keep the marks made so far and leave the phase, so the next
+            # `finish` (the `file` chain re-runs it) resumes.
             store.save(run)
             return _present(root, run, stop_reason=stop)
         recall = _recall_check(root, run)
@@ -4674,14 +4694,12 @@ def _file_step(
     that progress already, so its read ends as soon as the call has no room.
     """
     index_floor = None if first else 0
-    if step == "rescan" or (step == "start" and run is None):
-        # A scan lists the stage as it is, so the exports are expanded first and the scan meets their transcripts.
-        # A scan that continues a paged one does not expand: new files would move the pages under it.
-        stage_id = _stage_id_of(run["source_root"] if run is not None else path)
+    if step == "start" and run is None:
+        # The first scan leaves out the exports that expansion has not read, so they are found before it. It reads no
+        # item: reading is a step of its own (`_expand_exports`), which a call that follows runs before it scans again.
+        stage_id = _stage_id_of(path)
         if stage_id is not None:
-            held = _call_budget()
-            export_expansion.expand(
-                root, stage_id, keep_going=lambda: _stop_now(root, held) is None, rewalk=step == "rescan")
+            export_expansion.find_exports(root, stage_id)
     if step == "start":
         if run is None:
             # Read here, not as a default argument, so a test or an operator can change the page size.
@@ -4733,6 +4751,22 @@ def _file_step(
     return store.load(run_id)
 
 
+def _expand_exports(root: Path, run: dict, budget: request_budget.RequestBudget) -> bool:
+    """Read the stage's app exports for the scan that follows; True when this call read from one or found one.
+
+    A scan lists the stage as it is, so the exports are expanded before it and it meets their transcripts. The
+    reading is a step of the `file` chain, as `plan` is: it ends its call at an item boundary when a writer waits or
+    the hold's room is spent, and the scan that follows is the first step of the next call, with a hold of its own.
+    """
+    stage_id = _stage_id_of(run["source_root"])
+    if stage_id is None:
+        return False
+    turn_began = time.monotonic()
+    return export_expansion.expand(
+        root, stage_id, rewalk=True, keep_going=lambda: _stop_now(root, budget, turn_began=turn_began) is None
+    )
+
+
 @_within_hold
 def file(
     root: Path,
@@ -4747,9 +4781,9 @@ def file(
     Every step is the module function of that name, chosen from the saved phase of the newest page, so a call
     carries on from wherever the run stands, however it got there. A page with failed files retries them once
     with `apply`, then finishes, or is closed when every file failed, and the scan goes on to the next page.
-    A call ends after an `apply` or `finish`, when `plan` needs another call, when the next step is `start`
-    of another page and the call has run a step, when the budget cannot cover the delivery reserve, or when a
-    writer waits for the boundary and the call has run a step. The
+    A call ends after an `apply`, a `finish` or a reading of the stage's app exports, when `plan` needs another
+    call, when the next step is `start` of another page and the call has run a step, when the budget cannot cover
+    the delivery reserve, or when a writer waits for the boundary and the call has run a step. The
     reply's `continuation` is fresh each time: a call that repeats an earlier one's arguments gets that call's
     stored answer and does no work.
 
@@ -4786,6 +4820,8 @@ def file(
             if step in _APPLY_STEPS and reconciling:
                 # Only the identity's own held apply may run under reconciliation; this attempt published nothing.
                 break
+            if step == "rescan" and _expand_exports(root, run, budget):
+                break  # the reading is this call's step: the scan that meets its transcripts is the next call's first
             run = _file_step(root, store, run, step, path=path, collection=collection, today=today, first=not steps)
             steps += 1
             if step in _APPLY_STEPS or step == "finish" or (step == "plan" and run["phase"] == "selecting"):

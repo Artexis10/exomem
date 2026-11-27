@@ -17,7 +17,10 @@ A retry after a lost reply replays the original commit, but the reply is the sam
 - An import apply ends its call at a chunk boundary when an interactive writer waits and the call has committed at least one chunk. It returns the existing continuation and a visible `stop_reason`. It never releases the boundary mid-call and adds no run lease.
 - An import `plan`, a `finish` and the steps of a `file` call end at an item or step boundary for a waiting interactive writer too. Each stops starting items when the room left to its hold no longer covers the delivery reserve, whether or not the call binds a request budget. The hold ends before it turns overdue, except for the pieces of work that no step can split, which the design names with their cost.
 - The call's budget is cut to the hold's room and bound as the current one, so the readers a step calls (`find`, the lexical store, the wait for an in-flight path) stop with it.
-- A `finish` that stops for a waiting writer or a short budget keeps the removals it made and resumes in its next call. The recall check, the coverage and the manifest run once, in a call that still has the reserve.
+- A `finish` that stops for a waiting writer or a short budget keeps the removals it made and resumes in its next call. The recall check, the coverage and the manifest run once, in a call that removed no copy, so they have the hold's whole room. A call that removed copies ends with `stop_reason: finish_check_next_call`.
+- An item loop (`plan`, the removal of staged copies, the reading of an app export) works for a turn of 1 s before a waiting writer ends its call, so two importers that file one stage each move its page on at every call and both finish. A rehearsal of a 69,300-note stage showed the livelock, in which two callers took turns at one item per call.
+- The reading of a stage's app exports is a step of its own, which ends the call, so the scan that meets the transcripts has a hold of its own.
+- A Source page that the filesystem refuses for now ends a plan's read of the earlier imports as incomplete. It is no longer read as a page with no imports.
 - The cell's filer waits between its calls while a writer waits, and its calls wait for the boundary as background work, which no writer yields to.
 - `plan` remembers the earlier imports of each Source page for the life of the process, per vault, and reads again only the pages that changed. A call that has no room reads a first floor of 2,000 pages and moves the read on at each call. The design records the cache's invalidation, memory and cost.
 - A waiter counts for yielding only when it is interactive. A machine hold, a maintenance job and a borrower of a lent boundary do not count. The keyed writes queued behind the head of the capture line do count. A waiter in another process counts.
@@ -32,13 +35,13 @@ No wait is lengthened, no governed write is queued, the boundary is not lent to 
 ### Modified Capabilities
 
 - `hosted-mutation-safety`: background holders step aside for interactive waiters only and hand the boundary over; maintenance phases hold in short holds.
-- `adoption-studio`: an import apply, plan, finish and the steps of a `file` call end for a waiting interactive write, inside the overdue limit.
+- `adoption-studio`: an import apply, plan, finish and the steps of a `file` call end for a waiting interactive write, and stop starting work before the hold is overdue; two importers on one stage each move it on at every call.
 - `retry-safe-mutations`: a replay says so; the implicit window is stated as 600 s; the digest is Unicode-normalised.
 
 ## Impact
 
-- Code: `adoption_run.py`, `adoption_plan.py`, `request_budget.py`, `import_filing.py`, `mutation_lock.py`, `foreground_priority.py`, `maintenance_jobs.py`, `reconcile.py`, `derived_drain.py`, `writer_lease.py`, `mutation_terminal.py`.
-- Behaviour: an import call may return after one chunk, item or copy when writers wait, so a large import takes more calls. A `finish` stops with `stop_reason` and resumes. A replayed reply gains `replayed`.
+- Code: `adoption_run.py`, `adoption_plan.py`, `export_expansion.py`, `request_budget.py`, `import_filing.py`, `mutation_lock.py`, `foreground_priority.py`, `maintenance_jobs.py`, `reconcile.py`, `derived_drain.py`, `writer_lease.py`, `mutation_terminal.py`.
+- Behaviour: an import call may return after one chunk, a turn of items or a turn of copies when writers wait, so a large import takes more calls. A `finish` that removed copies takes one call more for its checks, and a stage with app exports takes about two calls and one scan more. A `finish` stops with `stop_reason` and resumes. A replayed reply gains `replayed`.
 - Memory: the Source-page cache holds about 1.6 KB per single-entry Source, for the life of the process, for at most 4 vaults.
 - Windows: the cross-process waiter signal stays process-local, as before.
 - Undo: revert the change. No stored file format changes. The request digest of a write whose text is not in Unicode NFC changes, so the design lists two residuals for the first 24 hours after the upgrade.

@@ -82,3 +82,28 @@ def test_a_read_that_stops_keeps_the_pages_it_parsed_so_each_call_moves_on_by_it
     assert (first, second) == (None, None)
     assert len(reads) == 5 and len(set(reads)) == 5
     assert _originals(third) == [f"Legacy/{number}.md" for number in range(5)]
+
+
+def test_a_source_page_that_the_filesystem_refuses_for_now_ends_the_read_and_is_read_again_next_time(
+    tmp_path: Path, reads: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a refused read that counts as a page with no imports: the plan would file a duplicate of that Source."""
+    vault = _vault(tmp_path)
+    for number in range(3):
+        _source(vault, f"page-{number}", f"Legacy/{number}.md")
+    real = adoption_plan.page_import_entries
+    refusing = [True]
+
+    def refused(root: Path, page: Path):
+        if refusing[0] and page.name == "page-1.md":
+            raise adoption_plan.reserved_paths.ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
+        return real(root, page)
+
+    monkeypatch.setattr(adoption_plan, "page_import_entries", refused)
+
+    first = adoption_plan.read_import_index_until(vault, lambda: False, floor=0)
+    refusing[0] = False
+    second = adoption_plan.read_import_index_until(vault, lambda: False, floor=0)
+
+    assert first is None  # not an index that lacks the page
+    assert second is not None and _originals(second) == ["Legacy/0.md", "Legacy/1.md", "Legacy/2.md"]

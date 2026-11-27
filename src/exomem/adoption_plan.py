@@ -332,6 +332,16 @@ _SOURCE_PAGES_LOCK = threading.Lock()
 INDEX_READ_FLOOR = 2_000
 
 
+# The held filesystem's own refusals that say the read could not happen now, not that the page holds nothing: it
+# cannot be acquired (for example while the vault's identity catalogue is still being built), or the file changed under
+# the read. They belong to the boundary's closed set of codes.
+_REFUSED_FOR_NOW = frozenset({"CAPABILITY_UNAVAILABLE", "IDENTITY_CHANGED"})  # nosemgrep: ep-word-set -- the held filesystem's closed refusal codes.
+
+
+def _refused_for_now(refusal: Exception) -> bool:
+    return getattr(refusal, "code", None) in _REFUSED_FOR_NOW
+
+
 def _refresh_import_index(
     root: Path, stop: Callable[[], bool] | None, floor: int | None = None
 ) -> tuple[list[EarlierImport], bool]:
@@ -340,8 +350,8 @@ def _refresh_import_index(
     Reading every Source page on every plan call cost the Sources the vault holds each time, which a plan that
     ends for a waiting writer pays again at each continuation. The signature rule is the note index's (`NoteIndex`).
     With `stop`, the pass ends before a read when it returns True and gives no index (`[]`, `False`): the pages it
-    did read stay remembered, so the next pass carries on from them. It reads `floor` pages (default
-    `INDEX_READ_FLOOR`) before it asks.
+    did read stay remembered, so the next pass carries on from them. It ends the same way at a page that the held
+    filesystem refuses for now (`_REFUSED_FOR_NOW`). It reads `floor` pages (default `INDEX_READ_FLOOR`) before it asks.
     """
     floor = INDEX_READ_FLOOR if floor is None else floor
     key = os.path.realpath(root)
@@ -369,7 +379,12 @@ def _refresh_import_index(
             settled = max(info.st_mtime_ns, info.st_ctime_ns) < settled_before
             try:
                 seen = _SourcePage(signature if settled else None, tuple(page_import_entries(root, page)))
-            except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+            except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError) as refusal:
+                if stop is not None and _refused_for_now(refusal):
+                    # The page was not read, so a pass that went on would call it a page with no imports and a plan
+                    # would file a duplicate of what it records. The pass ends as a stopped one does; the next retries.
+                    complete = False
+                    break
                 seen = _SourcePage(None, ())
         pages[rel] = seen
         index.extend(seen.entries)

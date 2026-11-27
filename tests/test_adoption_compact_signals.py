@@ -25,6 +25,14 @@ async def _import(client, kind: str, **fields) -> dict:
     return reply
 
 
+async def _finish(client, run_id: str) -> dict:
+    """`finish` until it is done: a call that removed staged copies leaves the checks of its tail to the next call."""
+    reply = await _import(client, "finish", run_id=run_id, write_manifest=False)
+    while reply.get("stop_reason") == adoption_run.STOP_FOR_TAIL:
+        reply = await _import(client, "finish", run_id=run_id, write_manifest=False)
+    return reply
+
+
 def test_a_compact_apply_names_only_this_pages_committed_paths_and_replays_them(
     vault, build, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -110,7 +118,7 @@ def test_a_compact_finish_reply_reports_what_stays_staged_and_how_it_is_discarde
         while applied.get("continuation"):
             applied = await _import(
                 client, "apply", run_id=run_id, plan_id=plan_id, continuation=applied["continuation"])
-        return await _import(client, "finish", run_id=run_id, write_manifest=False)
+        return await _finish(client, run_id)
 
     reply = _session(build(), scenario)
 
@@ -134,7 +142,7 @@ def test_a_compact_finish_reply_of_an_import_that_filed_everything_has_removed_t
         while applied.get("continuation"):
             applied = await _import(
                 client, "apply", run_id=run_id, plan_id=plan_id, continuation=applied["continuation"])
-        return await _import(client, "finish", run_id=run_id, write_manifest=False)
+        return await _finish(client, run_id)
 
     reply = _session(build(), scenario)
 

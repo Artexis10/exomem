@@ -98,23 +98,41 @@ def read(root: Path, import_id: str) -> Reading:
         files=len(record["rows"]), unfiled=tuple(unfiled))
 
 
-def expand(root: Path, import_id: str, *, keep_going: Callable[[], bool], rewalk: bool = False) -> None:
-    """Derive transcripts from the stage's recognised exports until each is read or `keep_going` says the call is out of budget.
+def find_exports(root: Path, import_id: str, *, rewalk: bool = False) -> bool:
+    """Record the stage's recognised exports as `working`, so a scan leaves each out until it is read; True when it found one.
 
-    A call walks the stage to find its exports when it has none yet, and `rewalk` walks it again for an export that
-    came after, such as one that a rerun of a local import copied. A stage with no recognised export is left with no
-    record. Each call resumes the export that is `working` at its recorded position, and always handles one item,
-    so a call that starts with no budget left still moves on. An export that cannot be read to its end is `partial`,
-    and the transcripts read before the fault stay.
+    It walks the stage when the record holds no export yet, and `rewalk` walks it again for an export that came
+    after, such as one that a rerun of a local import copied. It reads no export item. A stage with no recognised
+    export is left with no record.
     """
     record = _record(root, import_id)
+    return _register(root, import_id, record, rewalk)
+
+
+def _register(root: Path, import_id: str, record: dict, rewalk: bool) -> bool:
     if (rewalk or not record["exports"]) and _walk(root, import_id, record):
         import_stage.write_expansion(root, import_id, record)
+        return True
+    return False
+
+
+def expand(root: Path, import_id: str, *, keep_going: Callable[[], bool], rewalk: bool = False) -> bool:
+    """Derive transcripts from the stage's recognised exports until each is read or `keep_going` says the call is out of budget.
+
+    It finds the exports as `find_exports` does. Each call resumes the export that is `working` at its recorded
+    position, and always handles one item, so a call that starts with no budget left still moves on. An export that
+    cannot be read to its end is `partial`, and the transcripts read before the fault stay. It returns whether the
+    call did work: it found an export or read from one. A call that returns False changed nothing.
+    """
+    record = _record(root, import_id)
+    worked = _register(root, import_id, record, rewalk)
     for export, state in record["exports"].items():
         if state.get("state") != WORKING:
             continue
+        worked = True
         if not _slice(root, import_id, record, export, state, keep_going):
-            return
+            break
+    return worked
 
 
 def _walk(root: Path, import_id: str, record: dict) -> bool:
