@@ -21,22 +21,6 @@ The system SHALL detect a successful mutation repeated through MCP by the same a
 - **THEN** the system returns the persisted batch terminal with `derived_sync="pending"` rather than `MUTATION_OUTCOME_UNKNOWN`
 - **AND** no file is fetched or written again
 
-### Requirement: A replayed reply says it is a replay
-The system SHALL add `replayed: true` at the top level of a compact or full reply that answers a retry with an earlier call's stored result. The first call's reply SHALL carry no such field, and `mutated`, `request_id` and `receipt_id` SHALL stay as the first call set them. A reply that defines its own `replayed` field SHALL keep it.
-
-#### Scenario: Lost acknowledgement is retried
-- **WHEN** an authenticated MCP client repeats an identical successful mutation within the retry window
-- **THEN** the compact reply carries `replayed: true`
-- **AND** the first call's reply carries no `replayed` field
-
-#### Scenario: Replay reads the same under full detail
-- **WHEN** the repeated call asks for `response_detail="full"`
-- **THEN** the reply carries `replayed: true` and the original `request_id`
-
-#### Scenario: Replay under legacy detail
-- **WHEN** the repeated call asks for `response_detail="legacy"`
-- **THEN** the reply is the raw leaf result with no `replayed` field, as the mutation terminal contract requires
-
 ### Requirement: Implicit retry detection is narrowly scoped and bounded
 The system MUST scope implicit retry detection to the authenticated caller when available, MUST compare canonical command arguments, and MUST expire implicit completed entries after 60 seconds. Calls from another authenticated principal or after the window SHALL execute normally.
 
