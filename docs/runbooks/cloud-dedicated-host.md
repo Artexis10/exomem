@@ -843,7 +843,7 @@ CA. `--force` skips K3s's own checks, so the helper first checks that the new
 key matches its certificate. The new key never leaves the server. K3s keeps it in
 its datastore, encrypted with the escrowed server token, as it keeps the client
 CA it replaces. The `Cloud k3s-link rehearsal` workflow rehearses steps 3 to 7
-on a disposable cluster. In place of the everyday operator certificate, it
+on a disposable cluster. In place of the probe certificate, it
 presents a copy of the agent's kubelet client certificate before and after.
 
 Only the client CA changes. The join token's CA hash, the agent token,
@@ -859,8 +859,8 @@ ServiceAccount tokens and the CA that pods trust stay the same. These change:
   cell because its node is NotReady.
 - K3s rewrites the admin kubeconfig, `/etc/rancher/k3s/k3s.yaml`, when the
   server restarts. A copy taken before the rotation is refused.
-- The everyday operator certificate and every break-glass certificate are
-  refused from step 4. Step 9 issues a new everyday operator certificate.
+- Every client certificate, break-glass included, is refused from step 4.
+  The routine reader's token is not a certificate and keeps working.
 - An etcd snapshot taken before the rotation holds the old client CA. A
   restore from one brings the old client CA back: follow the warning in
   [Restore etcd from an older snapshot](cloud-node-loss.md#restore-etcd-from-an-older-snapshot).
@@ -875,17 +875,47 @@ Preconditions:
   token. Otherwise the disk's token gets certificates from the new client CA.
 - Every node is Ready, and `ansible k3s_agents -m ansible.builtin.ping`, run in
   `infra/ansible`, reaches every agent.
-- The everyday operator certificate on the server is not expired. Step 1 uses
-  it as a certificate from before the rotation. If it has expired, issue it
-  again as in
-  [cloud-operator-access.md](cloud-operator-access.md#issue-the-everyday-operator-certificate).
 
 Steps:
 
-1. On the server, present the everyday operator certificate, which the old client CA signed. Expect the node list:
+1. On the server as root, issue a one-hour probe certificate from the old client CA. It has no group and no binding, so it can only ask who it is. Expect `exomem-client-ca-probe`:
 
    ```bash
-   ssh exomem-admin@<server> 'sudo k3s kubectl --kubeconfig /root/.kube/exomem-operator.kubeconfig get nodes'
+   (
+   set -euo pipefail
+   umask 077
+   admin() { k3s kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml "$@"; }
+   probe=/root/.kube/client-ca-probe.kubeconfig
+   work=$(mktemp -d)
+   trap 'rm -rf -- "$work"' EXIT
+   openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$work/key.pem"
+   openssl req -new -key "$work/key.pem" -subj "/CN=exomem-client-ca-probe" -out "$work/csr.pem"
+   csr="exomem-client-ca-probe-$(date -u +%Y%m%dt%H%M%S)"
+   admin apply -f - <<EOF
+   apiVersion: certificates.k8s.io/v1
+   kind: CertificateSigningRequest
+   metadata:
+     name: ${csr}
+   spec:
+     request: $(base64 -w0 < "$work/csr.pem")
+     signerName: kubernetes.io/kube-apiserver-client
+     expirationSeconds: 3600
+     usages: [digital signature, client auth]
+   EOF
+   admin certificate approve "$csr"
+   for _ in $(seq 30); do
+     certificate=$(admin get csr "$csr" -o jsonpath='{.status.certificate}')
+     [ -n "$certificate" ] && break
+     sleep 1
+   done
+   printf '%s' "$certificate" | base64 -d > "$work/cert.pem"
+   admin config view --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d > "$work/ca.pem"
+   k3s kubectl --kubeconfig "$probe" config set-cluster exomem --server="$(admin config view --raw -o jsonpath='{.clusters[0].cluster.server}')" --certificate-authority="$work/ca.pem" --embed-certs=true >/dev/null
+   k3s kubectl --kubeconfig "$probe" config set-credentials probe --client-certificate="$work/cert.pem" --client-key="$work/key.pem" --embed-certs=true >/dev/null
+   k3s kubectl --kubeconfig "$probe" config set-context probe --cluster=exomem --user=probe >/dev/null
+   k3s kubectl --kubeconfig "$probe" config use-context probe >/dev/null
+   k3s kubectl --kubeconfig "$probe" auth whoami -o jsonpath='{.status.userInfo.username}'; echo
+   )
    ```
 
 2. Take an etcd snapshot now, and record the name it prints: `ssh exomem-admin@<server> 'sudo k3s etcd-snapshot save --name pre-client-ca-rotation'`.
@@ -904,13 +934,10 @@ the API server refuses that agent's kubelet. Do steps 4 to 6 without a pause.
 6. Restart K3s on every agent at once: `cd infra/ansible && ansible k3s_agents --forks 20 -m ansible.builtin.systemd_service -a 'name=k3s-agent state=restarted'`.
 7. Check that every node is Ready, with the admin kubeconfig on the server: `ssh exomem-admin@<server> 'sudo k3s kubectl get nodes'`.
 
-   The everyday operator certificate does not work here: the server refuses it from step 4 until step 9 issues a new one.
+8. Present the probe certificate again: `ssh exomem-admin@<server> 'sudo k3s kubectl --kubeconfig /root/.kube/client-ca-probe.kubeconfig auth whoami'`. Then delete it: `ssh exomem-admin@<server> 'sudo rm -f /root/.kube/client-ca-probe.kubeconfig'`.
+9. When you accept the rotation, delete the directory that step 3 printed, which holds the old client CA's key, and the local copy of the step 2 snapshot, which scheduled pruning never removes: `ssh exomem-admin@<server> 'sudo rm -rf <directory> && sudo rm -f /var/lib/rancher/k3s/server/db/snapshots/<name>'`. Check that `<name>` is the full name step 2 printed: the second command removes one file only.
 
-8. Present the everyday operator certificate again, as in step 1.
-9. Issue a new everyday operator certificate, as in [cloud-operator-access.md](cloud-operator-access.md#issue-the-everyday-operator-certificate).
-10. When you accept the rotation, delete the directory that step 3 printed, which holds the old client CA's key, and the local copy of the step 2 snapshot, which scheduled pruning never removes: `ssh exomem-admin@<server> 'sudo rm -rf <directory> && sudo rm -f /var/lib/rancher/k3s/server/db/snapshots/<name>'`. Check that `<name>` is the full name step 2 printed: the second command removes one file only.
-
-Expected result: step 1 lists the nodes. Step 2 logs `Snapshot <name> saved.`
+Expected result: step 1 prints `exomem-client-ca-probe`. Step 2 logs `Snapshot <name> saved.`
 twice with the same name: once for the local copy and once for the S3 copy. One
 line means the S3 upload failed and only the local copy exists. Step 3 prints the SHA-256 fingerprints of the old and
 the new client CA, and the directory that keeps the old pair. Step 4 prints
@@ -936,9 +963,8 @@ step 2. The agents have not
 restarted yet, so they still hold certificates from the old client CA.
 
 To undo the rotation after step 7, load the old pair again, then repeat steps
-4 to 7 and step 9. The cluster then accepts the old client CA's certificates
-again, the lost disk's among them. It refuses an everyday operator certificate
-that step 9 issued on the new client CA, which is why step 9 runs again:
+4 to 7. The cluster then accepts the old client CA's certificates again, the
+lost disk's among them:
 
 ```bash
 ssh exomem-admin@<server> 'sudo /usr/local/sbin/exomem-k3s-rotate-client-ca --restore <directory>'

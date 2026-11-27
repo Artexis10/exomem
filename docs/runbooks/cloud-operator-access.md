@@ -16,12 +16,13 @@ Source delivery does not establish hardware presence, off-node retention or a pr
 
 Use the least identity that does the job.
 
-- **Everyday operator (`exomem-operator`).** The default for every procedure.
+- **Routine reader (`exomem-routine-reader`).** The default for every procedure.
   It reads workload status, current node/pod CPU and memory usage, events, endpoint and isolation-policy metadata,
   and the content-free logs cells and controllers emit. It cannot read any Secret, and it cannot exec, attach,
-  port-forward, proxy or add an ephemeral container. The platform chart's
-  `exomem-operator-read` ClusterRole grants this to group `exomem:operators`.
-  The certificate lasts 30 days.
+  port-forward, proxy, add an ephemeral container or write. The platform chart's
+  `exomem-operator-read` ClusterRole grants this to the ServiceAccount
+  `exomem-platform/exomem-routine-reader`. Its token works from the operator's machine over NetBird,
+  has no expiry, and is revoked by deleting its Secret.
 
 - **Chart administration (the K3s admin kubeconfig, `/etc/rancher/k3s/k3s.yaml`).** Root
   only. Use it for scripted Helm and apply procedures, and for approving the
@@ -36,83 +37,105 @@ The metrics API grant is read-only (`get`/`list` for `metrics.k8s.io` nodes and
 pods). Use its observations with declared reservations for capacity checks;
 one sample reports current usage, not a warmed-workload or lifetime peak.
 
-The marked certificate procedures run on the node as root with shell tracing off.
+The marked issue, revoke, break-glass and canary procedures run on the node as root with shell tracing off.
 They use `k3s kubectl`, because `kubectl` is not on that node's PATH.
-After the workstation migration, routine checks use the workstation's `kubectl` without a node login.
+Routine checks use the operator machine's `kubectl` with the reader, without a node login.
 The admin kubeconfig stays on the node; nothing below prints a private key.
 
-## Issue the everyday operator certificate
+## Issue the routine reader
 
-Run this at first install, and again before the current certificate expires.
-It writes a fresh key and certificate, then replaces the kubeconfig in one
-rename.
+Run this at first install, and to re-issue the reader. Issuing deletes the
+reader's old token Secret first, so it also revokes the token that the
+operator's machines hold until they install the new one.
 
-<!-- rehearsed: issue-operator -->
+It runs on the node as root, in an admin session. Feed it the chart's
+`infra/helm/platform/templates/routine-reader.yaml` from the release checkout
+on standard input. The block applies the ServiceAccount and its binding with
+the Helm release's ownership metadata, so the next platform upgrade adopts
+them. It prints the credential once, as one line of JSON (`{"token": ...}`),
+and its progress goes to standard error. Send that line straight into the
+secret store; do not let it reach a terminal or a file.
+
+<!-- rehearsed: issue-reader -->
 ```bash
 (
 set -euo pipefail
 umask 077
 ADMIN_KUBECONFIG="${ADMIN_KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
-OPERATOR_KUBECONFIG="${OPERATOR_KUBECONFIG:-/root/.kube/exomem-operator.kubeconfig}"
 admin() { k3s kubectl --kubeconfig "$ADMIN_KUBECONFIG" "$@"; }
-work=$(mktemp -d)
-trap 'rm -rf -- "$work"' EXIT
-mkdir -p "$(dirname "$OPERATOR_KUBECONFIG")"
-openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$work/key.pem"
-openssl req -new -key "$work/key.pem" -subj "/O=exomem:operators/CN=exomem-operator" -out "$work/csr.pem"
-csr="exomem-operator-$(date -u +%Y%m%dt%H%M%S)"
-admin apply -f - <<EOF
-apiVersion: certificates.k8s.io/v1
-kind: CertificateSigningRequest
+namespace=exomem-platform
+reader=exomem-routine-reader
+secret="$reader-token"
+admin apply -f - >&2
+for kind in serviceaccount/"$reader" clusterrolebinding/"$reader"; do
+  admin annotate --namespace "$namespace" --overwrite "$kind" \
+    meta.helm.sh/release-name=exomem-platform meta.helm.sh/release-namespace="$namespace" >&2
+  admin label --namespace "$namespace" --overwrite "$kind" app.kubernetes.io/managed-by=Helm >&2
+done
+admin delete secret --namespace "$namespace" "$secret" --ignore-not-found >&2
+admin apply -f - >&2 <<EOT
+apiVersion: v1
+kind: Secret
+type: kubernetes.io/service-account-token
 metadata:
-  name: ${csr}
-spec:
-  request: $(base64 -w0 < "$work/csr.pem")
-  signerName: kubernetes.io/kube-apiserver-client
-  expirationSeconds: 2592000
-  usages: [digital signature, client auth]
-EOF
-admin certificate approve "$csr"
-certificate=""
+  name: ${secret}
+  namespace: ${namespace}
+  annotations:
+    kubernetes.io/service-account.name: ${reader}
+EOT
+token=""
 for _ in $(seq 30); do
-  certificate=$(admin get csr "$csr" -o jsonpath='{.status.certificate}')
-  [ -n "$certificate" ] && break
+  token=$(admin get secret --namespace "$namespace" "$secret" -o jsonpath='{.data.token}')
+  [ -n "$token" ] && break
   sleep 1
 done
-test -n "$certificate"
-printf '%s' "$certificate" | base64 -d > "$work/cert.pem"
-admin config view --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d > "$work/ca.pem"
-server=$(admin config view --raw -o jsonpath='{.clusters[0].cluster.server}')
-next="$OPERATOR_KUBECONFIG.next"
-rm -f -- "$next"
-k3s kubectl --kubeconfig "$next" config set-cluster exomem --server="$server" \
-  --certificate-authority="$work/ca.pem" --embed-certs=true >/dev/null
-k3s kubectl --kubeconfig "$next" config set-credentials exomem-operator \
-  --client-certificate="$work/cert.pem" --client-key="$work/key.pem" --embed-certs=true >/dev/null
-k3s kubectl --kubeconfig "$next" config set-context exomem-operator --cluster=exomem --user=exomem-operator >/dev/null
-k3s kubectl --kubeconfig "$next" config use-context exomem-operator >/dev/null
-chmod 600 "$next"
-mv -f -- "$next" "$OPERATOR_KUBECONFIG"
-openssl x509 -in "$work/cert.pem" -noout -subject -enddate
+test -n "$token"
+printf '{"token":"%s"}\n' "$(printf '%s' "$token" | base64 -d)"
+echo "issued $secret for $reader" >&2
 )
 ```
 
-Check the new identity before relying on it. Each `can-i` must answer `no`:
+## Install the reader on the operator's machine
 
-<!-- rehearsed: check-operator -->
+The secret store holds only the credential. The operator's machine builds the
+kubeconfig around it from public settings:
+
+- `server`: `https://<the server node's NetBird address>:6443`;
+- `certificate-authority-data`: the cluster CA, from the admin kubeconfig's
+  cluster entry;
+- `tls-server-name: kubernetes`, a name in the K3s serving certificate by
+  default, because the NetBird address is not;
+- `proxy-url: socks5://127.0.0.1:21080`, the workstation's NetBird listener.
+  TLS runs end to end through it, so the listener never sees the token.
+
+The NetBird account policy admits TCP 6443 only from the administrator group to
+the server, and UFW on the server admits 6443 only on `wt0` (the K3s role's
+`Evermatter K3s API over NetBird` rule). Do not expose the API publicly or turn
+off certificate checks to make the steps below pass.
+
+1. Install the kubeconfig with mode `600`, owned by the workstation user; other users cannot read it.
+2. Select it in the shell; routine commands then use the reader.
+
+```bash
+export KUBECONFIG="$READER_KUBECONFIG"
+```
+
+3. Check the reader from the operator's machine. Each check prints nothing and exits 0.
+
+<!-- rehearsed: check-reader -->
 ```bash
 (
 set -euo pipefail
-OPERATOR_KUBECONFIG="${OPERATOR_KUBECONFIG:-/root/.kube/exomem-operator.kubeconfig}"
-op() { k3s kubectl --kubeconfig "$OPERATOR_KUBECONFIG" "$@"; }
-test "$(stat -c '%a %U' "$OPERATOR_KUBECONFIG")" = "600 $(id -un)"
-op auth whoami
-op get nodes >/dev/null
+reader() { kubectl --kubeconfig "$READER_KUBECONFIG" "$@"; }
+test "$(stat -c '%a %U' "$READER_KUBECONFIG")" = "600 $(id -un)"
+test "$(reader auth whoami -o jsonpath='{.status.userInfo.username}')" = system:serviceaccount:exomem-platform:exomem-routine-reader
+reader get nodes >/dev/null
+reader get pods --all-namespaces >/dev/null
 # A subresource needs --subresource: `can-i create pods/exec` asks about a pod
 # named "exec".
 while read -r -a check; do
-  if op auth can-i "${check[@]}" --all-namespaces >/dev/null; then
-    echo "operator identity can ${check[*]}" >&2
+  if reader auth can-i "${check[@]}" --all-namespaces >/dev/null; then
+    echo "routine reader can ${check[*]}" >&2
     exit 1
   fi
 done <<'CHECKS'
@@ -132,79 +155,40 @@ create certificatesigningrequests
 update certificatesigningrequests --subresource=approval
 impersonate users
 impersonate groups
+delete pods
+create pods
 CHECKS
 )
 ```
 
-## Make the operator identity the default
+Keep the admin kubeconfig on the node, owned by root with mode `600`.
+Full Helm changes and CSR approval remain admin actions; the reader cannot do either.
 
-The prepared profile keeps the routine kubeconfig on the operator's workstation.
-It keeps the admin kubeconfig on the node.
-Select this migration in the operational window; source and sandbox work does not perform it.
-First qualify a private workstation route to the API with certificate validation and no node login.
-The node-issued kubeconfig can name a loopback endpoint; copying it alone does not create that route.
-The current node firewall admits the API from cluster peers, not arbitrary workstations.
-Record the selected endpoint and its TLS name in private operational evidence before the migration.
-Do not expose the API publicly or disable certificate validation to make these checks pass.
+## Revoke or re-issue the reader
 
-1. Transfer only the routine kubeconfig through the approved private channel; the workstation holds the routine credential.
-2. Set its owner to the workstation user and its mode to `600`; other users cannot read it.
-3. Select that file in the workstation shell; routine commands use the routine identity.
+The token has no expiry. Re-issue it when:
 
-Use the configured workstation location:
+- a machine that holds it is retired;
+- access to the secret store changes;
+- anyone suspects a leak;
+- etcd is restored from a snapshot: the snapshot holds the token Secret as it
+  was then, so a restore brings back a token that was revoked after it.
 
+To re-issue, run "Issue the routine reader" again and replace the stored
+credential. To revoke without a new token, run this on the node as root:
+
+<!-- rehearsed: revoke-reader -->
 ```bash
-export OPERATOR_KUBECONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/exomem/operator.kubeconfig"
+(
+set -euo pipefail
+ADMIN_KUBECONFIG="${ADMIN_KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
+k3s kubectl --kubeconfig "$ADMIN_KUBECONFIG" delete secret --namespace exomem-platform exomem-routine-reader-token --ignore-not-found
+)
 ```
 
-```bash
-export KUBECONFIG="$OPERATOR_KUBECONFIG"
-```
-
-```bash
-kubectl auth whoami
-```
-
-```bash
-kubectl get nodes
-```
-
-```bash
-kubectl get namespaces --selector=exomem.io/cloud-cell
-```
-
-```bash
-kubectl get pods --all-namespaces
-```
-
-4. Check the routine permissions from the workstation; Secret and connect access remain denied.
-
-```bash
-test "$(kubectl auth can-i get secrets --all-namespaces)" = no
-```
-
-```bash
-test "$(kubectl auth can-i create pods --subresource=exec --all-namespaces)" = no
-```
-
-```bash
-test "$(kubectl auth can-i create certificatesigningrequests)" = no
-```
-
-5. Remove the routine kubeconfig from the node after those checks; no routine credential remains there.
-
-Keep the admin kubeconfig owned by root with mode `600`.
-Full Helm changes and CSR approval remain admin actions.
-The new scoped deploy credential does not authorize either action.
-
-## Re-issue before expiry
-
-Read the current expiry, and rerun the issue block with at least a week to
-spare. An expired certificate fails closed to no access, not to admin.
-
-```bash
-kubectl --kubeconfig "$OPERATOR_KUBECONFIG" config view --raw -o jsonpath='{.users[0].user.client-certificate-data}' | base64 -d | openssl x509 -noout -enddate
-```
+The API server caches a successful token check for about ten seconds, so new
+requests fail within that time. A watch that opened earlier keeps streaming
+until it closes.
 
 ## Prepare the access record and scoped deploy profile
 
@@ -421,12 +405,12 @@ grep -F -e '"username":"exomem-break-glass"' -e '"exomem:break-glass"' "$AUDIT_L
 )
 ```
 
-Everyday-identity requests appear the same way under
-`"username":"exomem-operator"`.
+Routine-reader requests appear the same way under
+`"username":"system:serviceaccount:exomem-platform:exomem-routine-reader"`.
 
 ## Proving logs are content-free
 
-The everyday identity reads `pods/log` in every namespace, because RBAC cannot
+The routine reader reads `pods/log` in every namespace, because RBAC cannot
 exclude cell namespaces created at runtime. So the promise that the operator
 cannot see content by accident rests on what cells, cellctl and the gateway
 write to their logs. This procedure checks it with a unique canary string.
@@ -435,7 +419,7 @@ Run it after any change to the cell image, cellctl or the gateway.
 The search covers:
 
 - every pod in the cell namespaces and export scratch namespaces, and the
-  cellctl and gateway pods, through `kubectl logs` as the operator identity;
+  cellctl and gateway pods, through `kubectl logs` as the routine reader;
 - the kubelet's own log files for those namespaces under `/var/log/pods/`, as
   root on the node, rotated and gzipped files included, because
   `kubectl logs` returns only a container's current file;
@@ -488,8 +472,9 @@ print only counts:
 
 <!-- rehearsed: canary-scan-define -->
 ```bash
-OPERATOR_KUBECONFIG="${OPERATOR_KUBECONFIG:-/root/.kube/exomem-operator.kubeconfig}"
-op() { k3s kubectl --kubeconfig "$OPERATOR_KUBECONFIG" "$@"; }
+ADMIN_KUBECONFIG="${ADMIN_KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
+# The scan reads as the routine reader, whose token never sits on the node.
+op() { k3s kubectl --kubeconfig "$ADMIN_KUBECONFIG" --as=system:serviceaccount:exomem-platform:exomem-routine-reader "$@"; }
 CANARY_PODS=0 CANARY_STREAMS=0 CANARY_UNREADABLE=0 CANARY_HITS=0 CANARY_FILES=0 CANARY_FILE_HITS=0
 # The canary and its base64 alignments: for 0, 1 or 2 bytes before it, the
 # encoded characters that depend on the canary alone.

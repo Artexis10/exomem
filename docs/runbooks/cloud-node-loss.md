@@ -76,9 +76,7 @@ snapshot's client CA:
 cd infra/ansible && ansible k3s_agents --forks 20 -m ansible.builtin.systemd_service -a 'name=k3s-agent state=restarted'
 ```
 
-Then issue a new everyday operator certificate, as in
-[cloud-operator-access.md](cloud-operator-access.md#issue-the-everyday-operator-certificate),
-and rotate the client CA again.
+Then rotate the client CA again.
 
 5. Start K3s: `systemctl start k3s`. Expect the agents to rejoin within a few minutes.
 6. As soon as the API answers, pause cellctl. It restarts with the snapshot's state:
@@ -176,6 +174,7 @@ etcd snapshots are taken every 30 minutes. A restore loses the cluster objects o
    ```
 
    A re-adopted cell starts on its own volume, and a cell with a recorded backup never initialises an empty one. Accept each cell with recall, governance status and a governed write. Then remove the `exomem.io/volume-lost` marks: `kubectl annotate namespace "exo-cell-$CELL_ID" exomem.io/volume-lost-`.
+7. Re-issue the routine reader, as in [cloud-operator-access.md](cloud-operator-access.md#issue-the-routine-reader), and replace the stored credential. The snapshot holds the reader's token Secret as it was then, so a token revoked after the snapshot works again until you do.
 
 ## Row error codes
 

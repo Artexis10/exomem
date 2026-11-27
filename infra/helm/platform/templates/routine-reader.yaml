@@ -3,13 +3,14 @@
 # its token from their own machines (docs/runbooks/cloud-operator-access.md).
 # The admin creates the token Secret at issue time and deletes it to revoke;
 # the chart never creates it, so an upgrade cannot revive a revoked token.
-# This template stands alone: the issue procedure applies it before the next
-# platform upgrade, which then adopts both objects.
+# This template is plain YAML in the release namespace, so the issue procedure
+# applies the file itself before the next platform upgrade, which adopts both
+# objects.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: exomem-routine-reader
-  namespace: {{ .Release.Namespace }}
+  namespace: exomem-platform
 automountServiceAccountToken: false
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -23,4 +24,4 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: exomem-routine-reader
-    namespace: {{ .Release.Namespace }}
+    namespace: exomem-platform
