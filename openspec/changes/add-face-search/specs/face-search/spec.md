@@ -24,16 +24,28 @@ Face detection, grouping and the person restriction SHALL be off for every accou
 #### Scenario: The owner turns faces on in the CLI
 
 - **WHEN** the owner runs `exomem faces on` and types the confirmation
-- **THEN** faces are on, the consent time and surface `cli` are recorded, and existing pictures are queued
+- **THEN** faces are on, the consent time and surface `cli` are recorded, and the command scans the existing pictures
+- **AND** if the command ends before the scan finishes, the service resumes the scan at its next start
+
+#### Scenario: No terminal
+
+- **WHEN** `exomem faces on` runs without a terminal, as in an agent's shell call
+- **THEN** it refuses with `CONFIRMATION_REQUIRED` and faces stay off
 
 ### Requirement: Hosted deployments need the operator's switch
 
-On a Cloud or hosted deployment, faces SHALL be unavailable for every account unless the deployment setting `EXOMEM_FACES_HOSTED` is `1`. One function SHALL decide availability for status, turn-on, detection and the person restriction. A self-hosted deployment SHALL NOT need the setting.
+On a Cloud or hosted deployment, faces SHALL be unavailable for every account unless the deployment setting `EXOMEM_FACES_HOSTED` is `1`. One function SHALL decide availability for status, turn-on, detection and the person restriction. A self-hosted deployment SHALL NOT need the setting. On Evermatter Cloud, cellctl SHALL render it only into the cells the operator lists, never cluster-wide.
 
 #### Scenario: A hosted deployment without the switch
 
 - **WHEN** an owner on a hosted deployment without the setting runs `exomem faces on` or searches with `people`
 - **THEN** both are refused with `FACES_UNAVAILABLE`, which says the operator has not enabled faces on this deployment
+
+#### Scenario: The operator lists one Cloud cell
+
+- **WHEN** the operator lists one cell for faces
+- **THEN** only that cell receives the setting and restarts, and every other cell keeps faces unavailable
+- **AND** a cluster-wide model environment entry for the setting is refused
 
 ### Requirement: Only the owner reaches face data
 
@@ -219,7 +231,7 @@ Search results, deep context, explain traces, query logs and hosted logs SHALL c
 
 ### Requirement: Face data stays inside the owner's account
 
-Face rows, groups, names, settings and the consent record SHALL live only in the account's face store, a private directory under its state directory. It holds a face index (faces, settings, consent) and a people store (groups, centroids, names). They SHALL NOT be written to a vault page, sidecar, extracted text, index, graph, vocabulary registry, projection or catalogue. They SHALL NOT reach another account, tenant, cell or principal.
+Face rows, groups, names, settings and the consent record SHALL live only in the account's face store, a private directory under its state directory. It holds a face index (faces, unnamed groups, settings, consent) and a people store (people, named groups with their centroids). They SHALL NOT be written to a vault page, sidecar, extracted text, index, graph, vocabulary registry, projection or catalogue. They SHALL NOT reach another account, tenant, cell or principal.
 
 #### Scenario: Detection and naming leave the vault unchanged
 
