@@ -97,8 +97,9 @@ echo "issued $secret for $reader" >&2
 
 ## Install the reader on the operator's machine
 
-The secret store holds only the credential. The operator's machine builds the
-kubeconfig around it from public settings:
+The secret store holds only the credential. The operator's workstation tooling
+builds the kubeconfig around it from settings that are not secret, though the
+NetBird address stays private:
 
 - `server`: `https://<the server node's NetBird address>:6443`;
 - `certificate-authority-data`: the cluster CA, from the admin kubeconfig's
@@ -113,11 +114,12 @@ the server, and UFW on the server admits 6443 only on `wt0` (the K3s role's
 `Evermatter K3s API over NetBird` rule). Do not expose the API publicly or turn
 off certificate checks to make the steps below pass.
 
-1. Install the kubeconfig with mode `600`, owned by the workstation user; other users cannot read it.
-2. Select it in the shell; routine commands then use the reader.
+1. Let the workstation tooling install the kubeconfig with mode `600`, owned by the workstation user; other users cannot read it.
+2. Set `READER_KUBECONFIG` to the installed file's path, then select it; routine commands then use the reader, not `~/.kube/config`.
 
 ```bash
-export KUBECONFIG="$READER_KUBECONFIG"
+export READER_KUBECONFIG=<path of the installed reader kubeconfig>
+export KUBECONFIG="${READER_KUBECONFIG:?}"
 ```
 
 3. Check the reader from the operator's machine. Each check prints nothing and exits 0.

@@ -93,6 +93,8 @@ Then reconcile the volumes, below.
 
 etcd snapshots are taken every 30 minutes. A restore loses the cluster objects of every volume created or relocated since, while the volumes themselves, and the only copy of those writes, are still on the agents' disks. Nothing here may delete a TopoLVM `LogicalVolume` object: on a node whose TopoLVM plugin runs, that destroys the volume, even with its finalizer removed.
 
+First, as soon as the API answers, re-issue the routine reader, as in [cloud-operator-access.md](cloud-operator-access.md#issue-the-routine-reader), and replace the stored credential. The snapshot holds the reader's token Secret as it was then, so a token revoked after the snapshot works again until you do.
+
 1. Check that cellctl is paused, so it neither recreates claims nor records volumes while you work:
 
    ```bash
@@ -174,7 +176,6 @@ etcd snapshots are taken every 30 minutes. A restore loses the cluster objects o
    ```
 
    A re-adopted cell starts on its own volume, and a cell with a recorded backup never initialises an empty one. Accept each cell with recall, governance status and a governed write. Then remove the `exomem.io/volume-lost` marks: `kubectl annotate namespace "exo-cell-$CELL_ID" exomem.io/volume-lost-`.
-7. Re-issue the routine reader, as in [cloud-operator-access.md](cloud-operator-access.md#issue-the-routine-reader), and replace the stored credential. The snapshot holds the reader's token Secret as it was then, so a token revoked after the snapshot works again until you do.
 
 ## Row error codes
 
