@@ -258,13 +258,14 @@ def test_a_slow_store_decision_stops_at_the_request_deadline_and_withholds_the_s
 
     def slow_decisions(self, read, vault_root, calls):  # noqa: ANN001, ANN202
         def slow_read(*args, **kwargs):  # noqa: ANN202
-            time.sleep(0.5)
+            time.sleep(1.0)
             return read(*args, **kwargs)
 
         real_init(self, slow_read, vault_root, calls)
 
     monkeypatch.setattr(preview._Decide, "__init__", slow_decisions)
-    budget = request_budget.RequestBudget(seconds=3)
+    # A 9 s budget leaves a 4 s read allowance after the delivery reserve, so the stop falls inside a batch.
+    budget = request_budget.RequestBudget(seconds=9)
     token = request_budget.set_current(budget)
     started = time.monotonic()
     try:
@@ -273,8 +274,9 @@ def test_a_slow_store_decision_stops_at_the_request_deadline_and_withholds_the_s
         request_budget.reset_current(token)
     elapsed = time.monotonic() - started
 
-    assert elapsed < 6.0, f"the activation ran {elapsed:.1f} s on a 3 s budget"
+    assert elapsed < 9.0, f"the activation ran {elapsed:.1f} s on a 9 s budget"
     assert not set(_refs(packet)) & {_store_ref(index) for index in range(PAGE_COUNT)}
+    assert packet["generation"]["collection_store"] == "unavailable"
 
 
 @pytest.mark.timeout(180)

@@ -409,6 +409,10 @@ def note_checked_hash(path, digest):
         checked[path] = digest
 
 
+class _DeadlinePassed(Exception):
+    """The request's store read reached its completion deadline before it decided every page."""
+
+
 class _Decide:
     """The work of one store request: each page asked, answered as its own call would be."""
 
@@ -416,6 +420,8 @@ class _Decide:
         self.read, self.vault_root, self.calls = read, vault_root, calls
         #: The pages this request decides, for the observability span (`StoreServer.call`).
         self.pages = len(calls)
+        #: When a request's read must stop deciding pages (``StoreServer.read_deadline``); None outside a request.
+        self.deadline = None
 
     def __call__(self):
         from ..cli_ops import OpError
@@ -425,6 +431,8 @@ class _Decide:
         try:
             for path, (args, kwargs) in self.calls.items():
                 request_budget.checkpoint()
+                if self.deadline is not None and time.monotonic() >= self.deadline:
+                    raise _DeadlinePassed()
                 try:
                     kind, payload = "value", self.read(self.vault_root, *args, **kwargs)
                 except (CollectionStoreError, OpError) as error:
@@ -448,8 +456,15 @@ def _request(server, decisions, work):
     """
     from ..cli_ops import OpError
 
+    if request_budget.current() is not None or request_budget.current_checkpoint() is not None:
+        # A read beside the store thread runs on the request's own thread: it stops deciding pages where a
+        # queued read would have been refused, so the pages it has not decided are withheld together.
+        work.deadline = server.read_deadline()
     try:
-        return server.read_beside(work, initial=None, progress=False)
+        try:
+            return server.read_beside(work, initial=None, progress=False)
+        except _DeadlinePassed:
+            raise server.missed_read() from None
     except (CollectionStoreError, OpError) as error:
         if decisions is not None:
             decisions.refusals.setdefault(server, error)

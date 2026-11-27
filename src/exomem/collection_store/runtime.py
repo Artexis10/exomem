@@ -1685,8 +1685,7 @@ class StoreServer:
             checkpoint()
         if not completed and read_only:
             # A read changes nothing, so a missed deadline is a retryable refusal, not an uncertain commit.
-            raise self._busy_refusal(
-                "the collection store did not finish this read within its completion deadline")
+            raise self.missed_read()
         if not completed:
             # Accepted work survives the wait deadline so its outcome and replay remain owned.
             raise refuse(OpError(
@@ -1720,16 +1719,14 @@ class StoreServer:
         on_path = call_spans.MCP_CALL_TOKEN.get() is not None
         name = (f"store.read_beside@{_call_site(sys._getframe(1))}"[:call_spans.NAME_MAX_CHARS] if on_path
                 else "store.read_beside")
-        started = time.monotonic()
         with call_spans.span(name, fields):
             try:
-                return self._read_beside(
-                    work, initial=initial, collection=collection, progress=progress, queue=queue, started=started)
+                return self._read_beside(work, initial=initial, collection=collection, progress=progress, queue=queue)
             except BaseException:
                 fields["refused"] = 1
                 raise
 
-    def _read_beside(self, work, *, initial, collection, progress, queue, started):
+    def _read_beside(self, work, *, initial, collection, progress, queue):
         from ..cli_ops import OpError
         from ..governance import policy
         from . import capability, derived_rows, ownership
@@ -1779,29 +1776,18 @@ class StoreServer:
             # One read transaction, so the job row and every check of it read the same commit.
             reader.execute("BEGIN")
             try:
-                return self._within_deadline(work, started)
+                return work()
             finally:
                 if reader.in_transaction:
                     reader.execute("ROLLBACK")
 
-    def _within_deadline(self, work, started):
-        """Run a read beside the store thread to the deadline its queued read would have (``call``).
+    def read_deadline(self):
+        """When a read that starts now must finish: the completion deadline a queued read gets (``call``)."""
+        return self._deadlines(time.monotonic(), request_budget.current_checkpoint())[1]
 
-        A caller that binds a read checkpoint owns its own stop, and work outside a request (a background
-        index build) has no request to outrun. Any other read gets a checkpoint at the completion deadline
-        ``call`` computes, and a read it stops is the retryable refusal a missed read gets there, so the pages
-        it had yet to decide are withheld together instead of running past the request.
-        """
-        if request_budget.current_checkpoint() is not None or request_budget.current() is None:
-            return work()
-        completion = self._deadlines(started, None)[1]
-        allowance = request_budget.RequestBudget(seconds=max(0.0, completion - started), entry=started)
-        try:
-            with request_budget.checking(request_budget.ReadCheckpoint(allowance)):
-                return work()
-        except request_budget.ReadBudgetExhausted:
-            raise self._busy_refusal(
-                "the collection store did not finish this read within its completion deadline") from None
+    def missed_read(self):
+        """The retryable refusal of a read that did not finish within its completion deadline."""
+        return self._busy_refusal("the collection store did not finish this read within its completion deadline")
 
     def _busy_refusal(self, message):
         """The retryable refusal for a request this store thread did not serve in time."""
