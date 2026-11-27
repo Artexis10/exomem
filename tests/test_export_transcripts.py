@@ -156,10 +156,10 @@ def test_a_stream_that_ends_inside_an_item_yields_the_complete_items_before_it_a
     seen = []
 
     with pytest.raises(export_transcripts.ExportFault):
-        for index, result in export_transcripts.read(CLAUDE, cut):
-            seen.append((index, result.item_id))
+        for after, result in export_transcripts.read(CLAUDE, cut):
+            seen.append((after, result.item_id))
 
-    assert seen == [(0, "u-5")]
+    assert seen == [(1, "u-5")]  # the position that follows the item: where a resume starts
 
 
 def test_a_vendor_id_becomes_one_plain_file_name() -> None:

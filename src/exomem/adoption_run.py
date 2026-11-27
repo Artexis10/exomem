@@ -1937,8 +1937,8 @@ def unfiled_members(root: Path, import_id: str, runs: tuple[dict, ...] | None = 
         for path, size, reason in adoption_consume.stage_reasons(import_id, list(files.items()), pages, _APPLIED_STATUSES)
         if not adoption_consume.is_filed(reason) and path != import_stage.SERIES_FILE
     ]
-    # An item that could not be read and an export that was read in part have no staged file: the expansion record lists them.
-    return [*unfiled, *export_expansion.read(root, import_id).unfiled]
+    # An item that could not be read or was left out and an export that was read in part have no staged file: the expansion record lists them.
+    return [*unfiled, *export_expansion.unfiled(root, import_id)]
 
 
 def _earlier_page_unapplied(store: AdoptionRunStore, run: dict) -> str | None:
@@ -4685,19 +4685,42 @@ def file(
     return _filing_reply(root, store, run)
 
 
-def _filing_state(root: Path, store: AdoptionRunStore, run: dict) -> tuple[str, dict | None]:
-    """`done`, `stopped` for space with why, or `working`, from the newest page and its stage."""
-    if _filing_step(root, store, run) == "done":
-        return _DONE, None
+def _filing_state(root: Path, store: AdoptionRunStore, run: dict) -> tuple[str, dict | None, dict | None]:
+    """`done`, `stopped` for space with why, or `working`, from the newest page and its stage; the third value is the space stop, which says what to do."""
+    step = _filing_step(root, store, run)
+    if step == "done":
+        return _DONE, None, None
+    space = _space_stop(root, run, step)
+    if space is not None:
+        return _STOPPED, {"code": space["code"], "reason": space["reason"]}, space
+    return _WORKING, None, None
+
+
+def _space_stop(root: Path, run: dict, step: str) -> dict | None:
+    """The stop on free space that holds the import: apply's, or the expansion's when the next step would read the export again.
+
+    The expansion's counts only when the next step is the rescan that retries it, so apply work that is left never waits an hour for room.
+    """
     stop = run.get("apply_stop")
     if stop:
-        free = stop["free_bytes"]
-        return _STOPPED, {
+        return {
             "code": stop["code"],
             "reason": f"The next chunk needs {stop['chunk_bytes']} bytes and a reserve of {stop['reserve_bytes']} bytes; "
-                      f"{free} bytes are free.",
+                      f"{stop['free_bytes']} bytes are free.",
+            "next": stop["next"],
         }
-    return _WORKING, None
+    stage_id = _stage_id_of(run["source_root"])
+    halt = export_expansion.read(root, stage_id).stop if stage_id is not None and step == "rescan" else None
+    if not halt:
+        return None
+    free = halt.get("free_bytes")
+    return {
+        "code": halt["code"],
+        "reason": f"Reading {halt.get('export')} stopped because the vault's volume is full"
+                  + (f"; {free} bytes are free." if isinstance(free, int) else "."),
+        "next": "Stop. The continuation reads the export again from the item that did not fit, once the vault's volume has room. "
+                "Free space and tell the person, then repeat the call with its continuation.",
+    }
 
 
 def _page_remaining(run: dict) -> int:
@@ -4753,7 +4776,7 @@ def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict 
     if stop is not None:
         # A step that raised may have saved the page before it did: only the stored page says where it stands.
         run = store.load(run["run_id"])
-    filing, derived = _filing_state(root, store, run)
+    filing, derived, space = _filing_state(root, store, run)
     if stop is not None:
         filing, derived = _STOPPED, stop
     scans = sorted(store.tallies_at(run["source_root"], current=run), key=lambda tally: tally.created)
@@ -4774,8 +4797,8 @@ def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict 
         remaining += len(expansion.held) if expansion else 0  # an export still being read stays unfiled until its last item
     pages_done = sum(1 for tally in scans if tally.phase in _FINISHED_PHASES)
     person: list[dict] = []
-    if stop is None and filing == _STOPPED and run.get("apply_stop"):
-        person.append({"need": "free_space", "text": run["apply_stop"]["next"]})
+    if stop is None and filing == _STOPPED and space is not None:
+        person.append({"need": "free_space", "text": space["next"]})
     if stop is not None and stop["code"] == "IMPORT_RECOVERY_UNRESOLVED":
         person.append({"need": "report_to_operator", "text": stop["reason"]})
     reply: dict = {
@@ -4808,7 +4831,7 @@ def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict 
         for action in _residual_actions(residual, where="filed.residual"):
             person.append({"need": action["action"].replace("-", "_"), "text": action["description"]})
     reply["person"] = person
-    if filing == _WORKING or (filing == _STOPPED and run.get("apply_stop") and stop is None):
+    if filing == _WORKING or (filing == _STOPPED and space is not None and stop is None):
         with _LOCK:
             latest = store.load_for_update(run["run_id"])
             token = _issue_cursor(latest, "file")

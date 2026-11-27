@@ -38,10 +38,10 @@ from . import (
 from .cell_init import _ensure_private_directory
 from .cloud_cell import CELL_ID_PATTERN
 from .cloud_import import (
-    DEFAULT_MAX_MEMBERS,
     RETRY_OWNER,
     ArchiveRefused,
     flush_to_disk,
+    max_members_from_env,
     reserve_bytes_from_env,
     unpack_stream,
 )
@@ -221,7 +221,7 @@ def run_import(
                     result = unpack_stream(
                         process.stdout, staging, max_bytes=request.declared_bytes,
                         expect_bytes=request.declared_bytes, expect_files=request.declared_files,
-                        max_members=int(os.environ.get("EXOMEM_IMPORT_MAX_MEMBERS", DEFAULT_MAX_MEMBERS)),
+                        max_members=max_members_from_env(),
                         reserve_bytes=reserve_bytes_from_env(),
                         on_file=record_member if request.kind == "adopt" else None,
                     )

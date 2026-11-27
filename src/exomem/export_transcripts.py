@@ -1,10 +1,11 @@
 """Read an app export one item at a time and render each item as a Markdown transcript.
 
 Which export is which, and how a transcript labels each author role, is registry data (`source_formats`).
-This module knows only how to read each closed `parser`. The export is untrusted content: a reader keeps
-its text as data and never follows a link in it, runs it or sends it to a model.
+This module holds what every parser shares (the item types, names and the JSON readers); the Evernote and mailbox
+parsers sit in `export_notes` and `export_mail`, and `export_parsers` lists them all. The export is untrusted content:
+a reader keeps its text as data and never follows a link in it, runs it or sends it to a model.
 
-No vendor documents these shapes. The readers follow what the exports carried in 2026 and treat every field
+No vendor documents the JSON shapes. The readers follow what the exports carried in 2026 and treat every field
 as optional but the item keys that the registry declares: a missing field degrades the transcript and never
 fails the item. Only an item whose message structure has the wrong type is unreadable.
 """
@@ -12,44 +13,90 @@ fails the item. Only an item whose message structure has the wrong type is unrea
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import mimetypes
+import unicodedata
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, BinaryIO
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, BinaryIO, NamedTuple
 
 import ijson
+
+from .media_types import media_type_for
 
 if TYPE_CHECKING:
     from .source_formats import SourceFormat
 
-#: The `reason` of an item that cannot be read; the filing view reports it with the item.
+#: The `reason` code of an item that cannot be read; the filing view reports it with the item.
 UNREADABLE_ITEM = "IMPORT_ITEM_UNREADABLE"
+#: An item that two other items' names leave no free name for; it is not unreadable, so it has a code of its own.
+NAME_TAKEN_ITEM = "IMPORT_ITEM_NAME_TAKEN"
+#: A message that the entry's `skip_labels` leaves out: the cell read it and filed nothing, by the entry's own rule.
+SKIPPED_LABEL_ITEM = "IMPORT_ITEM_SKIPPED_LABEL"
 _MAX_ID_CHARS = 96
 _MAX_TITLE_CHARS = 200
 #: The C0 controls but tab and newline: a NUL makes the file read as binary, and no other one is text.
 _NO_CONTROLS = {code: None for code in range(0x20) if code not in (0x09, 0x0A)}
+_MAX_NAME_BYTES = 255
+#: The extension of a staged file that the media pipeline reads: the longest one that a vendor's name keeps.
+_MAX_EXTENSION_CHARS = 16
+
+
+@dataclass(frozen=True, slots=True)
+class Part:
+    """One attachment that a reader keeps for an item: the file it becomes in the stage, and where its bytes wait.
+
+    `name` is final: the reader names every part of an item through `part_names` before it renders the transcript,
+    so the transcript can name them. `data` is the bytes, or a hidden file that the expander moves into place.
+    """
+
+    name: str
+    data: bytes | Path
+    size: int
+    sha256: str
 
 
 @dataclass(frozen=True, slots=True)
 class Transcript:
-    """One readable item: the file stem it is named by, its title, its own times and the Markdown that files as its Source."""
+    """One readable item: the file stem it is named by, its title, its own times, the Markdown that files as its Source and its attachments."""
 
     item_id: str
     title: str
     created: str | None  # ISO 8601 in UTC, as the item states it
     updated: float | None  # seconds since the epoch, as the item states it
     text: str
+    parts: tuple[Part, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class Unreadable:
-    """One item that cannot be read: the name it would have had, and what is wrong with it."""
+    """One item that cannot be read: the id that lists it (the vendor's, else its position), and what is wrong with it."""
 
     item_id: str
     reason: str
 
 
+@dataclass(frozen=True, slots=True)
+class Skipped:
+    """One item that the cell read and left out by the registry entry's own rule: the id that lists it, and what it matched."""
+
+    item_id: str
+    reason: str
+
+
+Item = Transcript | Unreadable | Skipped
+
+
 class ExportFault(Exception):
-    """The export's stream ends early or is not JSON; the items before it were read."""
+    """The export's stream ends early or is not the format it declared; the items before it were read."""
+
+
+class ReadItem(NamedTuple):
+    """One item as a reader yields it: the export position that follows it (to resume from), and the item."""
+
+    after: int
+    item: Item
 
 
 def _plain_name(value: object, fallback: str) -> str:
@@ -63,6 +110,76 @@ def _plain_name(value: object, fallback: str) -> str:
 
 def _printable(text: str) -> str:
     return text.translate(_NO_CONTROLS)
+
+
+def printable_line(value: object, limit: int) -> str:
+    """A header-like value as one printable line of at most `limit` characters; empty when it is not text."""
+    return " ".join(_printable(value).split())[:limit] if isinstance(value, str) else ""
+
+
+def hashed_stem(*pieces: str | bytes) -> str:
+    """The file stem of an item that its export gives no id: a hash of the pieces that make the item, each length-framed."""
+    digest = hashlib.sha256()
+    for piece in pieces:
+        data = piece.encode("utf-8", errors="replace") if isinstance(piece, str) else piece
+        digest.update(len(data).to_bytes(8, "big"))
+        digest.update(data)
+    return digest.hexdigest()[:32]
+
+
+# A closed table of the MIME types that the standard library's own tables know; no system file is read, so a name is the same on every host.
+_MIME = mimetypes.MimeTypes()
+
+
+def _clean_stem(stem: str) -> str:
+    """Letters of any script, digits, and a few joining marks; everything else, such as a path separator or a control, becomes a dash."""
+    kept = "".join(char if char.isalnum() or char in " ._-()" else "-" for char in unicodedata.normalize("NFC", stem))
+    return " ".join(kept.split()).lstrip(".-_ ").rstrip(".-_ ")
+
+
+def _fit(stem: str, suffix: str) -> str:
+    """The stem cut so that `stem + suffix` is at most 255 bytes, on a character boundary."""
+    room = _MAX_NAME_BYTES - len(suffix.encode("utf-8"))
+    while len(stem.encode("utf-8")) > room:
+        stem = stem[:-1]
+    return stem
+
+
+def part_names(parts: list[tuple[str, str]]) -> list[str]:
+    """The final file name of each part of one item, from its vendor name and MIME type, in order.
+
+    A name keeps its stem's letters in any script and its extension, or takes the extension of its MIME type
+    when it has none. It is NFC-normalised, at most 255 bytes, never starts with a dot and is unique within the
+    item's folder without regard to case, as a volume that folds case would see it. A part with no usable name
+    is called `part-<number>`.
+    """
+    taken: set[str] = set()
+    names = []
+    for number, (raw, media_type) in enumerate(parts, 1):
+        base = unicodedata.normalize("NFC", raw).replace("\\", "/").rsplit("/", 1)[-1]
+        stem, dot, extension = base.rpartition(".")
+        if not dot or not stem.strip(". "):  # no extension, or only a leading dot: the whole name is the stem
+            stem, extension = base, ""
+        extension = "".join(char for char in extension if char.isascii() and char.isalnum())[:_MAX_EXTENSION_CHARS]
+        if not extension:
+            extension = (_MIME.guess_extension(media_type.split(";")[0].strip().lower()) or "").lstrip(".")
+        suffix = f".{extension}" if extension else ""
+        stem = _clean_stem(stem) or f"part-{number}"
+        count = 1
+        while True:
+            tag = f" ({count})" if count > 1 else ""
+            name = _fit(stem, tag + suffix) + tag + suffix
+            if name.casefold() not in taken:
+                break
+            count += 1
+        taken.add(name.casefold())
+        names.append(name)
+    return names
+
+
+def indexable(name: str) -> bool:
+    """Whether the media pipeline reads a file of this name, which it decides by the extension."""
+    return media_type_for(name) is not None
 
 
 def _stamp(moment: dt.datetime) -> str:
@@ -166,8 +283,17 @@ def _chatgpt_text(content: object) -> str:
     return "\n\n".join(kept for piece in pieces if (kept := _keep(piece)))
 
 
+def _positional_id(index: int) -> str:
+    """The id of an item that carries none: its position in the export."""
+    return f"item-{index + 1:06d}"
+
+
+def _chatgpt_id(item: Mapping[str, Any], index: int) -> str:
+    return _plain_name(item.get("conversation_id") or item.get("id"), _positional_id(index))
+
+
 def _chatgpt(item: Mapping[str, Any], fmt: SourceFormat, index: int) -> Transcript | Unreadable:
-    item_id = _plain_name(item.get("conversation_id") or item.get("id"), f"item-{index + 1:06d}")
+    item_id = _chatgpt_id(item, index)
     mapping = item.get("mapping")
     if not isinstance(mapping, Mapping):
         return Unreadable(item_id, "its message tree is not an object")
@@ -215,8 +341,12 @@ def _attachments(message: Mapping[str, Any], fmt: SourceFormat) -> list[str]:
     return blocks
 
 
+def _claude_id(item: Mapping[str, Any], index: int) -> str:
+    return _plain_name(item.get("uuid"), _positional_id(index))
+
+
 def _claude(item: Mapping[str, Any], fmt: SourceFormat, index: int) -> Transcript | Unreadable:
-    item_id = _plain_name(item.get("uuid"), f"item-{index + 1:06d}")
+    item_id = _claude_id(item, index)
     messages = item.get("chat_messages")
     if not isinstance(messages, list):
         return Unreadable(item_id, "its message list is not a list")
@@ -236,26 +366,46 @@ def _claude(item: Mapping[str, Any], fmt: SourceFormat, index: int) -> Transcrip
         _transcript(title, shown))
 
 
-#: The reader of each closed `parser` value; the keys are the only `parser` values that the `source-formats` registry accepts.
-READERS: Mapping[str, Callable[[Mapping[str, Any], SourceFormat, int], Transcript | Unreadable]] = {
-    "chatgpt-conversations": _chatgpt,
-    "claude-conversations": _claude,
+class _Json(NamedTuple):
+    """What a JSON-array parser knows of its items: the id that lists one, and how one reads."""
+
+    id_of: Callable[[Mapping[str, Any], int], str]
+    read: Callable[[Mapping[str, Any], SourceFormat, int], Transcript | Unreadable]
+
+
+#: The JSON-array parsers by their closed `parser` value; `export_parsers` lists them with the other containers.
+READERS: Mapping[str, _Json] = {
+    "chatgpt-conversations": _Json(_chatgpt_id, _chatgpt),
+    "claude-conversations": _Json(_claude_id, _claude),
 }
 
 
-def _read_item(
-    reader: Callable[[Mapping[str, Any], SourceFormat, int], Transcript | Unreadable],
-    item: Mapping[str, Any], fmt: SourceFormat, index: int,
-) -> Transcript | Unreadable:
-    """One item through its reader. An item is untrusted, so a fault that no reader foresaw fails that item and no other."""
+def _read_item(reader: _Json, item: Mapping[str, Any], fmt: SourceFormat, index: int) -> Transcript | Unreadable:
+    """One item through its reader. An item is untrusted, so a fault that no reader foresaw fails that item and no other.
+
+    The failure lists the item by the vendor's id when it has one, as a reader that finished would have.
+    """
     try:
-        return reader(item, fmt, index)
+        return reader.read(item, fmt, index)
     except Exception as error:  # noqa: BLE001 -- one item of a stranger's file must never stop the items after it
-        return Unreadable(f"item-{index + 1:06d}", f"it could not be read ({type(error).__name__})")
+        try:
+            item_id = reader.id_of(item, index)
+        except Exception:  # noqa: BLE001 -- an item too damaged to name is listed by its position
+            item_id = _positional_id(index)
+        return Unreadable(item_id, f"it could not be read ({type(error).__name__})")
 
 
-def read(fmt: SourceFormat, stream: BinaryIO, *, start: int = 0) -> Iterator[tuple[int, Transcript | Unreadable]]:
-    """Each item of the export from position `start`, as (position, transcript or unreadable), one item in memory at a time.
+def recognise_json(stream: BinaryIO, fmt: SourceFormat) -> bool:
+    """Whether the stream is a JSON array whose first item carries every key of the entry's `item_keys`."""
+    try:
+        first = next(ijson.items(stream, "item", use_float=True), None)
+    except (ijson.JSONError, OSError, ValueError):
+        return False
+    return isinstance(first, dict) and all(key in first for key in fmt.item_keys)
+
+
+def read(fmt: SourceFormat, stream: BinaryIO, *, start: int = 0, workdir: Path | None = None) -> Iterator[ReadItem]:
+    """Each item of the JSON-array export from position `start`, one item in memory at a time; its position is the item's index.
 
     Raises `ExportFault` after the last item that it could read when the stream ends early or is not JSON.
     """
@@ -265,8 +415,8 @@ def read(fmt: SourceFormat, stream: BinaryIO, *, start: int = 0) -> Iterator[tup
             if index < start:
                 continue
             if isinstance(item, Mapping):
-                yield index, _read_item(reader, item, fmt, index)
+                yield ReadItem(index + 1, _read_item(reader, item, fmt, index))
             else:
-                yield index, Unreadable(f"item-{index + 1:06d}", "it is not an object")
+                yield ReadItem(index + 1, Unreadable(_positional_id(index), "it is not an object"))
     except (ijson.JSONError, UnicodeDecodeError, OSError) as error:
         raise ExportFault(type(error).__name__) from None
