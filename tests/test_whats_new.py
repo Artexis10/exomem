@@ -31,7 +31,7 @@ RELEASES = [
         "notes": [note("Newest change.", "Newest"), note("Second change.", "Second")],
     },
     {"version": "1.2.1", "released_on": "2026-11-10", "notes": [note("Third change.", "Third")]},
-    {"version": "1.2.0", "released_on": "2026-11-01", "notes": [note("Old change.")]},  # no title: an older tree
+    {"version": "1.2.0", "released_on": "2026-11-01", "notes": [note("Old change.")]},  # a note merged without the check: no title
 ]
 
 

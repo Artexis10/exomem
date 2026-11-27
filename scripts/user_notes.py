@@ -19,7 +19,7 @@ A note file is front matter between two `---` lines, then the sentence:
     Asking your assistant to move or rename a batch of pages now finishes.
 
 PyYAML reads the front matter, so both jobs that run this script install it. `generate` accepts a file
-with no front matter (a note from an older tree) and gives it a null title.
+with no front matter (a note merged without the check) and gives it a null title.
 
 Run `check` from the trusted base revision and read the pull request only as data.
 `generate` needs the full history and the version tags: a shallow clone would date every
@@ -42,6 +42,7 @@ NOTES_DIR = "user-notes"
 NOTE_MAX_CHARS = 200
 TITLE_MAX_CHARS = 48
 FRONT_MATTER_FENCE = "---"
+QUOTE_ADVICE = 'put the title in double quotes: `title: "Your title"`'
 #: The front-matter keys a note may carry. A later key (a kind, new or fixed) joins this set.
 FRONT_MATTER_KEYS = frozenset({"title"})
 KEEP_RELEASES = 20
@@ -124,6 +125,7 @@ class ParsedNote:
     fields: dict | None
     body: str
     problems: tuple[str, ...] = ()
+    raw: dict[str, str] | None = None  # each top-level key's text as written after its colon
 
 
 def parse_note(text: str) -> ParsedNote:
@@ -140,20 +142,37 @@ def parse_note(text: str) -> ParsedNote:
     try:
         fields = yaml.safe_load("\n".join(lines[1:closing]))
     except yaml.YAMLError:
-        return ParsedNote(None, body, ("the front matter is not valid YAML; write `title: Your title` between the `---` lines",))
+        return ParsedNote(None, body, (f"the front matter is not valid YAML; {QUOTE_ADVICE}",))
     if fields is None:
         fields = {}
     if not isinstance(fields, dict):
         return ParsedNote(None, body, ("the front matter is not a list of `key: value` lines; write `title: Your title`",))
-    return ParsedNote(fields, body)
+    # The text as written, so a title that YAML reads differently from what the author typed can be caught.
+    raw = {}
+    for line in lines[1:closing]:
+        key, colon, value = line.partition(":")
+        if colon and key == key.lstrip() and key.strip():
+            raw.setdefault(key.strip(), value.strip())
+    return ParsedNote(fields, body, raw=raw)
 
 
-def title_problems(title: object) -> list[str]:
-    """What is wrong with a note's title, in the words an author reads."""
-    if not isinstance(title, str) or not title.strip():
-        return ["the title is empty or not text; write `title:` and a few plain words"]
+def title_problems(title: object, raw: str | None = None) -> list[str]:
+    """What is wrong with a note's title, in the words an author reads.
+
+    `raw` is the title as written after `title:`. YAML cuts a plain value at ` #`, reads `Yes`, `On` and
+    numbers as other types, and a quoted value is decoded exactly, so only an unquoted value must read back as written.
+    """
+    if title is None:
+        return ['the title is empty; write `title: "Your title"`']
+    if not isinstance(title, str):
+        return [f"YAML reads the title as {title!r}, not as text; {QUOTE_ADVICE}"]
     title = title.strip()
+    if not title:
+        return ['the title is empty; write `title: "Your title"`']
     problems = []
+    quoted = raw is not None and len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'"
+    if raw is not None and not quoted and "\n" not in title and title != raw:
+        problems.append(f"YAML reads the title as {title!r}, not as written; {QUOTE_ADVICE}")
     if len(title) > TITLE_MAX_CHARS:
         problems.append(f"the title has {len(title)} characters; the limit is {TITLE_MAX_CHARS}")
     if "\n" in title:
@@ -184,7 +203,7 @@ def note_problems(text: str, *, require_title: bool = True) -> tuple[list[str], 
     """`(problems, title, body)` for a note file, the problems in the words an author reads.
 
     The check requires the title. `generate` passes `require_title=False`, so a note from an older
-    tree, written without front matter, still ships with a null title.
+    file that was merged without the check, and so has no front matter, still ships with a null title.
     """
     parsed = parse_note(text)
     problems = list(parsed.problems)
@@ -195,7 +214,7 @@ def note_problems(text: str, *, require_title: bool = True) -> tuple[list[str], 
             allowed = ", ".join(sorted(FRONT_MATTER_KEYS))
             problems.append(f"the front matter has unknown key(s) {', '.join(unknown)}; remove them (allowed: {allowed})")
         if "title" in parsed.fields:
-            problems.extend(title_problems(parsed.fields["title"]))
+            problems.extend(title_problems(parsed.fields["title"], (parsed.raw or {}).get("title")))
             if isinstance(parsed.fields["title"], str):
                 title = parsed.fields["title"].strip()
         elif require_title:

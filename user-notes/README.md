@@ -25,7 +25,7 @@ title: Batch moves and renames finish
 Asking your assistant to move or rename a batch of pages now finishes, instead of stopping partway and repeating itself.
 ```
 
-The title is about four or five words and says what the person gets. The front matter takes no other key. The assistant's one-time line after an update uses the sentence only.
+The title is about four or five words and says what the person gets. The front matter takes no other key. If the title has a colon, a `#`, or starts with a word such as Yes, On or a quote or `@`, put it in double quotes, for example `title: "Imports: faster"`. The check tells you when a title needs quotes. The assistant's one-time line after an update uses the sentence only.
 
 ## When to add no note
 

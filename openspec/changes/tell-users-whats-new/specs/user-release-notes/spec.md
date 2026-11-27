@@ -43,7 +43,7 @@ The release build SHALL assign each note to the earliest version tag whose histo
 
 #### Scenario: A note without front matter
 
-- **WHEN** a note file from an older tree has no front matter
+- **WHEN** a note file merged without the check has no front matter
 - **THEN** the file lists it with a null `title` and its text
 
 #### Scenario: A note that skipped the check

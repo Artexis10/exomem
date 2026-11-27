@@ -80,7 +80,7 @@ def test_each_note_goes_to_the_earliest_release_that_contains_it_and_a_new_note_
     repo.commit("2026-02-02", {"user-notes/second-new.md": note_file("Second new", "Second new change.")})
     repo.tag("v1.3.0")
     repo.commit("2026-02-05", {"user-notes/older.md": note_file("Older, reworded", "Older change, reworded.")})
-    repo.commit("2026-03-01", {"user-notes/unreleased.md": "Not released yet.\n"})  # an older tree's note: no front matter
+    repo.commit("2026-03-01", {"user-notes/unreleased.md": "Not released yet.\n"})  # a note merged without the check: no front matter
     output = tmp_path / "out" / "notes.json"
 
     assert notes.main(["generate", "--repo", str(repo.path), "--version", "1.4.0", "--output", str(output)]) == 0
@@ -192,15 +192,19 @@ def test_a_note_that_breaks_the_shape_rule_fails_whatever_the_pull_request_type(
     [
         (SENTENCE + "\n", "the note has no title"),
         (f"---\nkind: fixed\n---\n{SENTENCE}\n", "the front matter has no title"),
-        (f"---\ntitle:\n---\n{SENTENCE}\n", "the title is empty or not text"),
-        (f"---\ntitle: 2026\n---\n{SENTENCE}\n", "the title is empty or not text"),
+        (f"---\ntitle:\n---\n{SENTENCE}\n", "the title is empty"),
+        (f"---\ntitle: 2026\n---\n{SENTENCE}\n", "not as text; put the title in double quotes"),
+        # YAML would turn these into a comment, a boolean and a syntax error: each must say to quote the title.
+        (f"---\ntitle: Search tags #work again\n---\n{SENTENCE}\n", "not as written; put the title in double quotes"),
+        (f"---\ntitle: Yes\n---\n{SENTENCE}\n", "not as text; put the title in double quotes"),
+        (f"---\ntitle: @mentions work\n---\n{SENTENCE}\n", "put the title in double quotes"),
         (note_file("A" * 49, SENTENCE), "the title has 49 characters; the limit is 48"),
         (note_file("Photos keep their date.", SENTENCE), "remove the full stop at the end of the title"),
         (note_file("Photos **keep** their date", SENTENCE), "the title uses Markdown syntax"),
         (note_file("Photos [keep](x) dates", SENTENCE), "the title uses Markdown syntax"),
         (f"---\ntitle: |\n  two\n  lines\n---\n{SENTENCE}\n", "write the title on one line"),
         (f"---\ntitle: Photos keep their date\nkind: fixed\n---\n{SENTENCE}\n", "unknown key(s) kind"),
-        (f"---\ntitle: Photos: dates\n---\n{SENTENCE}\n", "the front matter is not valid YAML"),
+        (f"---\ntitle: Photos: dates\n---\n{SENTENCE}\n", "the front matter is not valid YAML; put the title in double quotes"),
         (f"---\ntitle: Photos keep their date\n{SENTENCE}\n", "never closes"),
     ],
 )
@@ -208,6 +212,14 @@ def test_a_note_whose_title_breaks_the_rules_fails_and_says_what_to_change(notes
     errors = verdict(notes, "feat: x", "", changed(notes, text))
 
     assert any(message in error for error in errors)
+
+
+def test_a_quoted_title_may_hold_a_colon_a_hash_or_a_word_yaml_would_read_as_a_boolean(notes):
+    """Quoting is the way out the messages point to, so it has to pass."""
+    for title in ("Imports: faster", "Search tags #work again", "Yes"):
+        quoted = f'---\ntitle: "{title}"\n---\n{SENTENCE}\n'
+
+        assert verdict(notes, "feat: x", "", changed(notes, quoted)) == [], title
 
 
 def test_a_plain_sentence_and_title_with_ordinary_punctuation_pass(notes):
