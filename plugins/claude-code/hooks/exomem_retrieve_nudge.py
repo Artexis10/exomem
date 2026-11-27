@@ -440,6 +440,14 @@ def _is_placement(alias: str) -> bool:
     return alias[len("EVERMATTER_") :] in _PLACEMENT_SETTINGS
 
 
+def _skips_turn(conflicts: list[str], *, home_decided: bool) -> bool:
+    """Whether a conflict skips the turn: a placement one does, unless a flag already decided the hook home."""
+    return any(
+        _is_placement(name) and not (home_decided and name == "EVERMATTER_HOOK_HOME")
+        for name in conflicts
+    )
+
+
 def _conflict_pairs(names: list[str]) -> str:
     """The variables in conflict, each EVERMATTER_ name with its EXOMEM_ name; never their values."""
     return "; ".join(f"{name} and EXOMEM_{name[len('EVERMATTER_'):]}" for name in names)
@@ -4191,7 +4199,7 @@ def main(argv: list[str] | None = None) -> int:
         if value is not None:
             os.environ[name] = value
     if conflicts:
-        placement = any(_is_placement(name) for name in conflicts)
+        placement = _skips_turn(conflicts, home_decided=args.hook_home is not None)
         _log_conflict(conflicts, skipped=placement)
         if placement:  # never guess where data lives: skip this turn's nudge
             return 0

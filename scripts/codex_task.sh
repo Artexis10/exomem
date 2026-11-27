@@ -119,7 +119,10 @@ preflight_sandbox() {
   local preflight_localappdata="$wt/.task/preflight-localappdata"
   local preflight_state="$wt/.task/preflight-state"
   local preflight_pytest="$wt/.task/preflight-pytest"
+  # The lane's shell may name the state root under another spelling; two names for one
+  # setting that differ are refused, so the probe drops them and forces the one name.
   if out=$(cd "$wt" && \
+    env -u EVERMATTER_STATE_ROOT -u KB_MCP_STATE_ROOT \
     XDG_STATE_HOME="$preflight_xdg" \
     LOCALAPPDATA="$preflight_localappdata" \
     EXOMEM_STATE_ROOT="$preflight_state" \

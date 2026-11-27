@@ -239,7 +239,7 @@ async def check_import_growth(drill: Drill, record: StepRecord) -> None:
         import_baseline = drill.filesystem(cell)
         await asyncio.to_thread(run, ["docker", "run", "--rm", *docker_labels(drill.stack.run_id), "--network=none",
             "--user", f"{os.getuid()}:{os.getgid()}", "--mount", f"type=bind,source={fixture},target=/fixture",
-            "--env", "EXOMEM_CLOUD_RESOURCE_POLICY=legacy", "--entrypoint=python3", drill.cell_tag,
+            "--env", "EVERMATTER_CLOUD_RESOURCE_POLICY=legacy", "--entrypoint=python3", drill.cell_tag,
             "-c", ENCRYPT, key["recipient"]], timeout=180)
         ciphertext = fixture / "archive.age"
         digest, size = hashlib.sha256(ciphertext.read_bytes()).hexdigest(), ciphertext.stat().st_size

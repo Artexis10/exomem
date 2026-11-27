@@ -75,8 +75,8 @@ capture -> mine -> tune -> review -> adopt -> restart
 When `find()` is called without an explicit `config` (the live server path), it
 resolves the active `RankingConfig` in this order:
 
-1. `EXOMEM_DISABLE_RANKING_CONFIG` set -> `DEFAULT_RANKING` (the test suite sets this).
-2. `EXOMEM_RANKING_CONFIG=<path>` -> that file.
+1. `EVERMATTER_DISABLE_RANKING_CONFIG` set -> `DEFAULT_RANKING` (the test suite sets this).
+2. `EVERMATTER_RANKING_CONFIG=<path>` -> that file.
 3. repo-root `ranking_config.json` -> that file.
 4. otherwise -> `DEFAULT_RANKING`.
 
@@ -95,9 +95,9 @@ gitignored desk-side artifacts.
 
 | var | effect |
 |---|---|
-| `EXOMEM_RANKING_CONFIG` | Override the adopted-config path (tests / per-box). |
-| `EXOMEM_DISABLE_RANKING_CONFIG` | Force `DEFAULT_RANKING` (set in the test suite). |
-| `EXOMEM_DISABLE_EMBEDDINGS` | Unset for the desk-side eval/tune (tests force it off). |
+| `EVERMATTER_RANKING_CONFIG` | Override the adopted-config path (tests / per-box). |
+| `EVERMATTER_DISABLE_RANKING_CONFIG` | Force `DEFAULT_RANKING` (set in the test suite). |
+| `EVERMATTER_DISABLE_EMBEDDINGS` | Unset for the desk-side eval/tune (tests force it off). |
 
 ## Pure substrate
 
