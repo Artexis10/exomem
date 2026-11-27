@@ -38,7 +38,7 @@ The release workflow keeps `continue-on-error` on the generate step, because a n
 
 ## Rollout
 
-- The pull request that carries this amendment fails its own "User note decision" run. The workflow runs the base revision's checker, which reads the front matter as a second paragraph of the note. Later pull requests run the new checker.
+- The note check runs the base revision's checker, which reads front matter as a second paragraph. So the change ships in two pull requests: the first adds the checker, the release build and the payload, and changes no note file; the second gives every existing note its title and runs the new checker.
 
 ## Risks
 
