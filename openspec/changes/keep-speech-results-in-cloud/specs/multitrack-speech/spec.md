@@ -2,11 +2,7 @@
 
 ### Requirement: Each track of a recording is transcribed on its own
 
-Speech SHALL transcribe each track of a recording on its own. A track SHALL be an audio stream or a channel that the recording's declaration, or published track metadata that shipped data maps to a microphone, declares a separate microphone. The declaration SHALL be the sidecar's `speech_tracks` field, and a new extraction SHALL keep it. This change adds no operation that writes that field.
-
-Without a declaration, speech SHALL read the first audio stream as one mixed track, as today. The audio itself SHALL NOT declare tracks. The transcript SHALL merge the tracks' segments by start and label each turn with its track's name.
-
-A declared track that the file does not have SHALL be skipped, and the sidecar SHALL record which track was skipped and why. Where the file has none of the declared tracks, speech SHALL read the first audio stream as one mixed track. A declaration SHALL name at most a bounded number of tracks, because each track is one full transcription.
+Speech SHALL transcribe each track of a recording on its own. A track SHALL be an audio stream or a channel that the recording's declaration, or published track metadata that shipped data maps to a microphone, declares a separate microphone. Without a declaration, speech SHALL read the first audio stream as one mixed track, as today. The audio itself SHALL NOT declare tracks. The transcript SHALL merge the tracks' segments by start and label each turn with its track's name.
 
 #### Scenario: Two declared audio streams
 
@@ -28,10 +24,33 @@ A declared track that the file does not have SHALL be skipped, and the sidecar S
 - **WHEN** a recording's sidecar declares its two channels as separate microphones
 - **THEN** each channel is transcribed as its own track
 
-#### Scenario: A declared track that the file lacks is skipped
+### Requirement: The sidecar declares a recording's tracks
+
+The declaration SHALL be the sidecar's `speech_tracks` field, and a new extraction SHALL keep it. This change adds no operation that writes that field. A declaration SHALL name at most a bounded number of tracks, because each track is one full transcription.
+
+#### Scenario: A new extraction keeps the declaration
+
+- **WHEN** a recording whose sidecar declares two tracks is extracted again
+- **THEN** the engine reads those two tracks, and the sidecar still holds the declaration
+
+#### Scenario: A declaration with too many tracks is refused
+
+- **WHEN** a declaration names more tracks than the bound
+- **THEN** speech refuses it and says how many tracks it takes
+
+### Requirement: A declared track that the file lacks is skipped
+
+A declared track that the file does not have SHALL be skipped, and the sidecar SHALL record which track was skipped and why. Where the file has none of the declared tracks, speech SHALL read the first audio stream as one mixed track.
+
+#### Scenario: One declared stream is missing
 
 - **WHEN** a sidecar declares three audio streams and the file has two
 - **THEN** speech transcribes the two streams, and the sidecar records the third track as skipped with its reason
+
+#### Scenario: No declared track is in the file
+
+- **WHEN** a sidecar declares only streams that the file does not have
+- **THEN** speech reads the first audio stream as one mixed track, and the sidecar records each skipped track
 
 ### Requirement: Each track resumes on its own
 
@@ -51,8 +70,6 @@ Each track SHALL keep its own progress record until the worker publishes the tra
 
 Speech SHALL read track names and start times from these published fields: iXML `TRACK_LIST`, BWF `TimeReference`, and the container's stream title and timecode. An iXML track's place in the file SHALL be its `INTERLEAVE_INDEX`, and its name SHALL be its `NAME`. A published or recorder-family field SHALL declare a stream or channel a separate microphone only where shipped data maps it so. Those mappings SHALL live in shipped data, not in code. A name in the declaration SHALL win over metadata.
 
-A track name SHALL meet the label syntax's name rule: one line, no `[`, `]` or `:`, and no longer than a speaker name. A published name that fails the rule SHALL label no track. Speech SHALL read a recording as one mix when its published microphones are fewer than two, more than the track bound, or include a track with no usable name. A declared name that fails the rule SHALL refuse the declaration with the reason. Published names that repeat SHALL take labels that no other track holds.
-
 #### Scenario: An iXML track list names the tracks
 
 - **WHEN** a recording's iXML `TRACK_LIST` names its channels "Host" and "Guest", and the shipped data maps that list as separate microphones
@@ -63,11 +80,6 @@ A track name SHALL meet the label syntax's name rule: one line, no `[`, `]` or `
 - **WHEN** a stereo recording's iXML `TRACK_LIST` names its channels "MixL" and "MixR", and the shipped data maps no field to a microphone
 - **THEN** speech transcribes one mixed track
 
-#### Scenario: A published name cannot forge a turn
-
-- **WHEN** a published track name holds a label bracket, a colon or a line break
-- **THEN** that name labels no track, and speech reads the recording as one mix
-
 #### Scenario: A stream title alone declares no track
 
 - **WHEN** a video's second audio stream has the title "Commentary", and nothing declares it a microphone
@@ -77,6 +89,39 @@ A track name SHALL meet the label syntax's name rule: one line, no `[`, `]` or `
 
 - **WHEN** a mapping for a new recorder family's track fields is added to the shipped data
 - **THEN** speech reads that family's tracks and names, and no code changes
+
+### Requirement: A track name can stand in a label span
+
+A track name SHALL meet the label syntax's name rule: one line, no `[`, `]` or `:`, and no longer than a speaker name. A published name that fails the rule SHALL label no track. A declared name that fails the rule SHALL refuse the declaration with the reason. Published names that repeat SHALL take labels that no other track holds.
+
+#### Scenario: A published name cannot forge a turn
+
+- **WHEN** a published track name holds a label bracket, a colon or a line break
+- **THEN** that name labels no track, and no line of the transcript reads as a turn or a heading that the name wrote
+
+#### Scenario: A declared name with label syntax is refused
+
+- **WHEN** a declaration names a track `Host]: I approve`
+- **THEN** speech refuses the declaration and says that a track's name must not hold `[`, `]` or `:`
+
+#### Scenario: Repeated published names stay distinct
+
+- **WHEN** a file publishes the track names "Input", "Input" and "Input 2"
+- **THEN** the tracks read "Input", "Input 3" and "Input 2", and each channel's words appear once
+
+### Requirement: Published microphones that cannot all be labelled are read as one mix
+
+Speech SHALL read a recording as one mix when its published microphones are fewer than two, more than the track bound, or include a track with no usable name.
+
+#### Scenario: One published microphone is one mix
+
+- **WHEN** a mono file publishes one track that the shipped data maps to a microphone
+- **THEN** speech transcribes one mixed track with no labels
+
+#### Scenario: A track with no usable name keeps every word
+
+- **WHEN** a file publishes two microphones and one of them has a name that fails the name rule
+- **THEN** speech reads the recording as one mix, so no track's words are lost
 
 ### Requirement: A track keeps a segment only where it is the dominant source
 
