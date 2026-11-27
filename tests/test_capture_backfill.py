@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 from pathlib import Path
 
@@ -59,12 +60,13 @@ def _jpeg(
 
 
 def _file(
-    vault: Path, name: str, data: bytes, *, text: str = "A harbour at dusk.", extension: str = "jpg"
+    vault: Path, name: str, data: bytes, *, text: str = "A harbour at dusk.", extension: str = "jpg",
+    scope: str = "Photos",
 ) -> tuple[str, str]:
     """A photo filed and extracted before capture metadata existed: its page has text and no capture fields."""
     with library_scope():
         filed = preserve.preserve_bytes(
-            vault, scope="Photos", category="image", filename=f"{name}.{extension}", data=data,
+            vault, scope=scope, category="image", filename=f"{name}.{extension}", data=data,
             content_type="image/jpeg",
         )
         preserve.update_sidecar_extraction(vault, vault / filed.sidecar_path, text=text, engine="ocr")
@@ -256,3 +258,205 @@ def test_a_camera_raw_on_a_host_without_the_raw_decoder_is_skipped_not_counted_a
 
     assert (preview["would_update"], preview["no_capture_metadata"]) == (0, 0)
     assert preview["skipped"] == {capture_backfill.READER_UNAVAILABLE: 1}
+
+
+def test_saves_while_the_census_reads_are_read_again_and_a_write_never_overwrites_a_moved_page(vault, monkeypatch):
+    """Catches a backfill that fails, or plans a stale or doubled page, whenever the owner saves while it reads.
+
+    A live vault takes saves during every daytime run. A page saved mid-read is read again after the walk: a photo
+    is planned once from its new text, an ordinary note is not counted, a removed page is dropped, and only a page
+    that changes again during that read is skipped. A page saved between the write's census and its commit keeps
+    the save.
+    """
+    from contextlib import contextmanager
+
+    from exomem import maintenance_jobs, reserved_paths
+    from exomem.kbdir import managed_join, managed_root_rel
+
+    _original, photo = _file(vault, "phone", _jpeg(taken="2024:06:01 14:03:22", gps=HELSINKI))
+    replaced, removed, restless = (
+        managed_join(f"zz-{name}-meanwhile.md") for name in ("replaced", "removed", "restless")
+    )
+    for page in (replaced, removed, restless):
+        (vault / page).write_text("---\ntitle: An ordinary note\n---\nText.\n", encoding="utf-8")
+    saved: list[str] = []
+
+    def replace_atomically(page: str) -> None:
+        staged = vault / f"{page}.staged"
+        staged.write_text("---\ntitle: An ordinary note\n---\nRewritten.\n", encoding="utf-8")
+        staged.replace(vault / page)
+
+    def save_after_the_photo_is_read() -> None:
+        """What the live service does while the census still holds the photo's page: five ordinary saves."""
+        saved.append(photo)
+        (vault / managed_join("Notes/added-meanwhile.md")).write_text("---\ntitle: New\n---\nNew.\n", encoding="utf-8")
+        replace_atomically(replaced)
+        replace_atomically(restless)
+        with (vault / photo).open("a", encoding="utf-8") as edited:
+            edited.write("\nEdited in place.\n")
+        (vault / removed).unlink()
+
+    real_walk, real_open = reserved_paths.open_generic_tree, reserved_paths.open_generic_binary
+
+    @contextmanager
+    def census_walk(vault_root, value, **options):
+        with real_walk(vault_root, value, **options) as entries:
+            def interleaved():
+                for entry in entries:
+                    yield entry
+                    if value == managed_root_rel() and not saved and managed_join(entry.relative_path) == photo:
+                        save_after_the_photo_is_read()
+            yield interleaved()
+
+    @contextmanager
+    def second_read(vault_root, value, **options):
+        with real_open(vault_root, value, **options) as source:
+            if value == restless and saved and restless not in saved:
+                saved.append(restless)
+                with (vault / restless).open("a", encoding="utf-8") as edited:
+                    edited.write("Saved again.\n")
+            yield source
+
+    monkeypatch.setattr(reserved_paths, "open_generic_tree", census_walk)
+    monkeypatch.setattr(reserved_paths, "open_generic_binary", second_read)
+
+    preview = _backfill(vault)
+
+    assert saved == [photo, restless]
+    assert preview["skipped"] == {capture_backfill.CHANGED_WHILE_READ: 1}
+    assert preview["skipped_listed"] == [{"path": restless, "reason": capture_backfill.CHANGED_WHILE_READ}]
+    assert preview["would_update"] == 1  # the photo, planned once from the text it has now
+
+    real_commit = maintenance_jobs.commit_pages
+
+    def commit_after_a_save(root, operation, entries, *args, **kwargs):
+        with (vault / photo).open("a", encoding="utf-8") as edited:
+            edited.write("\nThe owner's own line.\n")
+        return real_commit(root, operation, entries, *args, **kwargs)
+
+    monkeypatch.setattr(maintenance_jobs, "commit_pages", commit_after_a_save)
+
+    report = _backfill(vault, dry_run=False, plan_id=preview["plan_id"])
+
+    kept = (vault / photo).read_text(encoding="utf-8")
+    assert (report["updated"], report["skipped_changed"]) == (0, 1)
+    assert "Edited in place." in kept and "The owner's own line." in kept and "capture_time" not in kept
+
+
+def test_a_photo_folder_linked_into_the_vault_stops_the_preview_instead_of_leaving_its_photos_out(vault, tmp_path):
+    """Catches a preview that silently reads past a linked folder and reports a partial vault as the whole."""
+    _original, page = _file(vault, "phone", _jpeg(taken="2024:06:01 14:03:22", gps=HELSINKI))
+    folder = (vault / page).parent
+    folder.rename(tmp_path / "elsewhere")
+    folder.symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+
+    with pytest.raises(OpError) as refused:
+        _backfill(vault)
+
+    assert refused.value.code == "UNSAFE_PATH"
+    assert "linked file or folder" in refused.value.message
+
+
+@pytest.mark.parametrize("which", ["page", "photo"])
+def test_a_hard_linked_photo_page_stops_the_preview_instead_of_leaving_it_out(vault, tmp_path, which):
+    """Catches a preview that silently drops a file with a second name and reports a partial vault as the whole.
+
+    The walk reads such a file once more after it ends, because a save gives a new page a second name for a moment;
+    a page or a photo that keeps the second name still stops the preview.
+    """
+    _file(vault, "phone", _jpeg(taken="2024:06:01 14:03:22", gps=HELSINKI))
+    photo, page = _file(vault, "second", _jpeg(taken="2024:06:02 09:00:00"))
+    os.link(vault / (page if which == "page" else photo), tmp_path / "second-copy")
+
+    with pytest.raises(OpError) as refused:
+        _backfill(vault)
+
+    assert refused.value.code == "UNSAFE_PATH"
+    assert "linked file or folder" in refused.value.message
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows publishes a new page by rename, so its page never has two names")
+def test_a_page_published_while_the_preview_lists_its_folder_is_read_again_instead_of_stopping_it(vault, monkeypatch):
+    """Catches a preview that stops when a new page is saved while it lists that page's folder.
+
+    A page publication links the new file to the page's name before it drops the staged name, so for a moment the
+    page has two names. The preview finishes and plans the photo.
+    """
+    from exomem import _held_fs_posix, held_fs
+
+    _photo, page = _file(vault, "phone", _jpeg(taken="2024:06:01 14:03:22", gps=HELSINKI))
+    folder = (vault / page).parent
+    published, staged = folder / "published-meanwhile.md", folder / held_fs.publish_temporary_name()
+    real_children = _held_fs_posix.PosixHeldFilesystem.children
+    saved: list[str] = []
+
+    def children_during_a_publication(self, parent, *, name_filter=None):
+        if saved or Path(page).name not in os.listdir(parent.descriptor):
+            return real_children(self, parent, name_filter=name_filter)
+        saved.append(published.name)
+        staged.write_text("---\ntitle: New\n---\nNew.\n", encoding="utf-8")
+        os.link(staged, published)
+        try:
+            return real_children(self, parent, name_filter=name_filter)
+        finally:
+            staged.unlink()
+
+    monkeypatch.setattr(_held_fs_posix.PosixHeldFilesystem, "children", children_during_a_publication)
+
+    preview = _backfill(vault)
+
+    assert saved == [published.name]
+    assert (preview["would_update"], preview["skipped"]) == (1, {})
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the removal is injected between the POSIX listing's read of names and its stat")
+def test_a_page_removed_while_the_preview_lists_its_folder_is_left_out_instead_of_stopping_it(vault, monkeypatch):
+    """Catches a preview that stops when a page is removed after its folder's names were read but before its entry was."""
+    from exomem import _held_fs_posix
+
+    _photo, page = _file(vault, "phone", _jpeg(taken="2024:06:01 14:03:22", gps=HELSINKI))
+    removed = (vault / page).parent / "removed-meanwhile.md"
+    removed.write_text("---\ntitle: An ordinary note\n---\nText.\n", encoding="utf-8")
+    real_stat = _held_fs_posix._stat
+
+    def stat_after_a_removal(name, *args, **kwargs):
+        if name == removed.name and removed.exists():
+            removed.unlink()
+        return real_stat(name, *args, **kwargs)
+
+    monkeypatch.setattr(_held_fs_posix, "_stat", stat_after_a_removal)
+
+    preview = _backfill(vault)
+
+    assert not removed.exists()
+    assert (preview["would_update"], preview["skipped"]) == (1, {})
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the move is injected into the POSIX folder open")
+@pytest.mark.parametrize("scope", ["Photos", "Trip.md"])
+def test_a_folder_moved_while_the_preview_reads_is_listed_as_a_skip_instead_of_dropped(vault, monkeypatch, scope):
+    """Catches a preview that leaves out the photos of a folder renamed during the run and reports the rest as whole.
+
+    A folder whose name looks like a page's is still a folder.
+    """
+    from exomem import _held_fs_posix
+
+    pages = [_file(vault, name, _jpeg(taken="2024:06:01 14:03:22"), scope=scope)[1] for name in ("one", "two", "three")]
+    folder = next(parent for parent in (vault / pages[0]).parents if parent.name == scope)
+    real_parent = _held_fs_posix.PosixHeldFilesystem.parent
+    moved: list[str] = []
+
+    def parent_after_a_rename(self, relative, *args, **kwargs):
+        if not moved and (vault / str(relative)) == folder:
+            moved.append(str(relative))
+            folder.rename(folder.with_name(f"{folder.name}-renamed"))
+        return real_parent(self, relative, *args, **kwargs)
+
+    monkeypatch.setattr(_held_fs_posix.PosixHeldFilesystem, "parent", parent_after_a_rename)
+
+    preview = _backfill(vault)
+
+    assert moved
+    assert preview["skipped"] == {capture_backfill.FOLDER_MOVED: 1}
+    assert preview["skipped_listed"] == [{"path": folder.relative_to(vault).as_posix(), "reason": capture_backfill.FOLDER_MOVED}]
+    assert preview["would_update"] == 0

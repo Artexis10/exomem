@@ -7583,9 +7583,8 @@ def _validate_batch_write_access(
             try:
                 rel = target.resolve().relative_to(vault_resolved).as_posix()
             except (ValueError, OSError) as error:
-                raise ValueError(
-                    f"WRITE_REFUSED: {target} resolves outside the vault root"
-                ) from error
+                # No host path: callers copy this text into replies an agent reads.
+                raise ValueError("WRITE_REFUSED: target is unavailable") from error
             if target == write.path:
                 if roles.get(rel) == "compiled-history":
                     from . import compiled_history

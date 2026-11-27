@@ -72,6 +72,8 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from exomem.env_compat import SETTING_PREFIXES
+
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -86,7 +88,7 @@ LIVE_PORTS = (8765, 8770)
 #: The environment that a child may inherit: lookup of executables and the locale, nothing else.
 PASS_THROUGH = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ")
 #: What the in-interpreter check compares with the environment that the run passed.
-GUARDED_PREFIXES = ("EXOMEM_", "KB_MCP_", "XDG_")
+GUARDED_PREFIXES = (*SETTING_PREFIXES, "XDG_")
 GUARDED_NAMES = ("HOME", "TMPDIR", "PYTHONPATH")
 LEASE_VAULT_ID = "store-rehearsal"
 LEASE_REPLICA_ID = "rehearsal-service"

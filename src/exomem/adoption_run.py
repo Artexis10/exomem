@@ -19,8 +19,10 @@ from __future__ import annotations
 import contextlib
 import copy
 import datetime as dt
+import functools
 import hashlib
 import json
+import logging
 import os
 import posixpath
 import secrets
@@ -66,6 +68,8 @@ from . import overview as overview_module
 from .adopt import _TEXT_IMPORT_SUFFIXES
 from .governance import raw_protection
 from .kbdir import is_in_managed_root, managed_join, managed_root
+from .log_events import log_event
+from .mutation_terminal import as_reused
 from .vault import (
     MISSING_CONTENT_HASH,
     ContentHashMismatchError,
@@ -95,8 +99,32 @@ APPLY_CHUNK_ITEMS = 250
 APPLY_CHUNK_BYTES = 64 * 1024 * 1024
 # A chunk is also cut so its predicted cost stays at most this share of the call's budget.
 APPLY_CHUNK_BUDGET_SHARE = 0.1
+# A chunk is at most this many times the largest chunk the pacer has timed. Its price is a fit through the chunks it
+# timed, and a fit through a 1-item and a 16-item chunk priced a 253-item chunk at a fraction of the 19.6 s that chunk
+# took, which held the boundary for 30.7 s (2026-11-27 rehearsal).
+APPLY_CHUNK_GROWTH = 2
 # The `stop_reason` of a call that ended after a chunk because a write waited for the boundary.
 STOP_FOR_WAITING_WRITE = "interactive_write_waiting"
+# The `stop_reason` of a `finish` that ended with work left because its budget could not cover the delivery reserve.
+STOP_FOR_BUDGET = "call_budget_spent"
+# The `stop_reason` of a `finish` that removed staged copies and left its checks (recall, coverage, manifest) to the next call.
+STOP_FOR_TAIL = "finish_check_next_call"
+
+
+def _unfinished_sentence(action: str) -> str:
+    """The lead of a `plan` or `finish` reply that ended before its end, which the agent repeats to the person.
+
+    It states the outcome only, in place of the generic "Saved" lead; the call to make again is in `next_actions`.
+    """
+    return f"The import's {action} step has not finished yet."
+
+
+# An item loop (`plan`, the removal of staged copies in `finish`) that a waiting writer interrupts first works this
+# long. A call pays a fixed cost before its first item (the read of the earlier imports, the saved run, the reply), and
+# an item costs milliseconds, so two import calls that yield to each other after one item each would pay that cost
+# for every item and the page would not move. A writer's own wait for the boundary is 5 s (`EXOMEM_MUTATION_TIMEOUT`),
+# so a turn of one second serves it well within that and puts real work behind each call's fixed cost.
+TURN_SECONDS = 1.0
 # The `apply_stop` code of a chunk that the vault's volume has no room for; the person frees space.
 # One literal with the expansion's own full-volume stop, which has the same code and one remedy.
 _SPACE_STOP = export_expansion.CODE_SPACE
@@ -156,6 +184,8 @@ _NOTE_PRICE_FRESH_SECONDS = 300.0
 # A carried price sizes a call's first batch at this share of the room, so notes that cost
 # up to twice the carried price still fit; the call re-prices from that batch.
 _CARRIED_PRICE_ROOM_SHARE = 0.5
+# The key, on the plan draft and on the run, for how many Source pages a read that a stop ended has read so far.
+_SOURCES_READ = "sources_read"
 # The run-object key for the item-chunk timings of the run's last call that filed, with the wall-clock time
 # they were recorded. The next call starts from them while they are as fresh as a carried note price.
 _APPLY_PACE = "apply_pace"
@@ -195,6 +225,7 @@ _REASONS = {
 }
 
 _LOCK = threading.Lock()
+_log = logging.getLogger(__name__)
 
 
 class AdoptionRunError(Exception):
@@ -229,15 +260,88 @@ def _call_budget() -> request_budget.RequestBudget:
     """This call's deadline, which `plan` and `apply` pace themselves against.
 
     Over MCP, stdio and HTTP alike, the dispatcher binds one `RequestBudget` per
-    request (`request_budget.MCP_REQUEST_BUDGET_SECONDS`, 50 s unless the operator
-    sets `EXOMEM_MCP_REQUEST_BUDGET_SECONDS`) and `current()` returns it, with the
-    time the request has already spent. The REST and CLI doors bind none, so they
-    get a fresh budget of the same length that starts here. Either way the call
-    stops starting work `request_budget.DELIVERY_RESERVE_SECONDS` before the end.
+    request, and `plan` and `apply` read it so that they stop with time to spare. A
+    step of an import (`plan`, `apply`, `finish`, `file`) binds it again through
+    `_within_hold`, cut to the room that the hold of the vault's boundary has
+    left, so the budget that these read is nearer than the request's whenever a
+    writer that waits would be refused sooner. The REST and CLI doors bind none, so they get a fresh
+    budget of the same length that starts here. Either way the call stops
+    starting work `request_budget.DELIVERY_RESERVE_SECONDS` before the end.
     """
     return request_budget.current() or request_budget.RequestBudget(
         seconds=request_budget.budget_seconds()
     )
+
+
+def _within_hold(step: Callable[..., dict]) -> Callable[..., dict]:
+    """Run an import step under the budget of its hold's room.
+
+    A writer that waits for the vault's boundary is refused once the hold has run `long_holder_seconds`,
+    which is sooner than the request's budget runs out. The step's budget ends there instead, and it is the
+    bound one (`request_budget.bound_to`), so the readers a step calls (`find`, the lexical store, a wait for
+    a build) stop at the same time and the step's own loops need no second copy of the limit. A step that no
+    boundary hold encloses keeps the call's own budget.
+    """
+
+    @functools.wraps(step)
+    def bounded(root: Path, *args: object, **kwargs: object) -> dict:
+        from .writer_lease import active_manager
+
+        with request_budget.bound_to(active_manager().hold_room(root)):
+            return step(root, *args, **kwargs)
+
+    return bounded
+
+
+def _log_apply_opening(
+    index_seconds: float | None, *, items: int, prework_ms: int, chunk_seconds: float, pending: int, writer_waited: bool
+) -> None:
+    """Log what the opening of an `apply` call cost: the Sources read, the first chunk's size, its preparation and its commit.
+
+    The cell filer's calls leave no spans in the call ledger, so this line in the cell log is the one record of why such a
+    call held the boundary as long as it did. A call that ended before any chunk logs `first_chunk_items=0`.
+    """
+    log_event(
+        _log, logging.INFO, "adoption_apply_opening",
+        fields={
+            "index_read_ms": None if index_seconds is None else round(index_seconds * 1000),
+            "first_chunk_items": items,
+            "first_chunk_prework_ms": prework_ms,
+            "first_chunk_ms": round(chunk_seconds * 1000),
+            "pending_items": pending,
+            "writer_waited": writer_waited,
+        },
+    )
+
+
+def _writer_waits(root: Path) -> bool:
+    """Whether an interactive writer waits for the vault's boundary now.
+
+    An item loop that has handled an item ends its call when one does: the draft or cursor it saves lets
+    the next call resume, and the writer commits when this call releases the boundary.
+    """
+    from .writer_lease import active_manager
+
+    return bool(active_manager().writers_waiting(root))
+
+
+def _stop_now(
+    root: Path, budget: request_budget.RequestBudget, part: str | None = None, *, turn_began: float | None = None
+) -> str | None:
+    """Why a step that has handled an item ends its call here: its budget cannot cover the delivery reserve, or a writer waits.
+
+    The budget it is given is the hold's (`_within_hold`), so a call that stops here releases the boundary
+    before it is overdue. A stop for the budget records `part`, when given, as what the call left undone.
+    A loop of cheap items passes the time its turn began (`TURN_SECONDS`): a waiting writer ends the call only
+    once the turn has run, so each call, whoever waits for it, moves its cursor by a turn of items.
+    """
+    if not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS):
+        if part is not None:
+            budget.note_truncated(part)
+        return STOP_FOR_BUDGET
+    if turn_began is not None and time.monotonic() - turn_began < TURN_SECONDS:
+        return None
+    return STOP_FOR_WAITING_WRITE if _writer_waits(root) else None
 
 
 # --------------------------------------------------------------------------- #
@@ -1151,8 +1255,8 @@ def _materialize_selection(
     overrides: list[str],
     include_junk: bool,
     taxonomy: source_taxonomy.SourceTaxonomy | None,
-) -> tuple[list[str], dict[str, dict], list[dict]]:
-    """Materialize the concrete file set from folder rules, validating per-path.
+) -> tuple[list[str], dict[str, dict], list[dict], int]:
+    """Materialize the concrete file set from folder rules, validating per-path; the last value counts the files that wait for the sidecar pass.
 
     Include/exclude entries are subtree (or exact-file) rules applied in
     ascending path depth, so a deeper rule always overrides its ancestor —
@@ -1209,10 +1313,13 @@ def _materialize_selection(
     accepted: list[str] = []
     classification_of: dict[str, dict] = {}
     held = _sidecar_hold(root, run)
+    waiting = 0
     for p in sorted(chosen):
         row = files[p]
         # A Takeout sidecar never files, and a photo waits until the stage's sidecars are read; neither is a rejection to report.
-        if held is not None and held.code(p.removeprefix(held.prefix), row.get("bytes") or 0) is not None:
+        code = held.code(p.removeprefix(held.prefix), row.get("bytes") or 0) if held is not None else None
+        if code is not None:
+            waiting += code == export_sidecars.CODE_WAITING
             continue
         if not row.get("eligible"):
             rejected.append(_reject(p, row.get("reason") or "UNSUPPORTED_IMPORT_TYPE"))
@@ -1223,14 +1330,14 @@ def _materialize_selection(
             if chosen[p]:
                 classification_of[p] = chosen[p]
     unique = {(r["path"], r["code"]): r for r in rejected}
-    return accepted, classification_of, [unique[key] for key in sorted(unique)]
+    return accepted, classification_of, [unique[key] for key in sorted(unique)], waiting
 
 
 # --------------------------------------------------------------------------- #
 # presentation helpers
 # --------------------------------------------------------------------------- #
 # Run-object keys that drive the lifecycle but are not part of what a caller reads.
-_INTERNAL_KEYS = frozenset({"plan_draft", "cursors", "inflight", "scope", "apply_invocations", _NOTE_PRICE, "sources_seal", _APPLY_PACE, _INDEX_OWED, _RECORD_INTENT, _GENERATION})  # nosemgrep: ep-word-set -- run-object keys that this module writes, not a vocabulary
+_INTERNAL_KEYS = frozenset({"plan_draft", "cursors", "inflight", "scope", "apply_invocations", _NOTE_PRICE, "sources_seal", _SOURCES_READ, _APPLY_PACE, _INDEX_OWED, _RECORD_INTENT, _GENERATION})  # nosemgrep: ep-word-set -- run-object keys that this module writes, not a vocabulary
 
 
 def _plan_warning_lines(run: dict) -> list[str]:
@@ -1329,10 +1436,17 @@ def _next_actions(run: dict) -> list[dict]:
                                 "apply with the run_id, plan_id and continuation resumes it."}
             )
     elif phase in _FINISH_PHASES:
-        actions.append(
-            {"action": "finish", "status": "available",
-             "description": "Prove recall and get a ready-to-run first question."}
-        )
+        if _open_cursor(run, "finish"):
+            actions.append(
+                {"action": "finish", "status": "available",
+                 "description": "Finish stopped before its end; call finish again with the continuation, yourself, "
+                                "until the reply reports phase done. The residual is in finish.residual only then."}
+            )
+        else:
+            actions.append(
+                {"action": "finish", "status": "available",
+                 "description": "Prove recall and get a ready-to-run first question."}
+            )
         if phase == "partial":
             actions.append(
                 {"action": "apply", "status": "available",
@@ -1984,7 +2098,7 @@ def select(
             if any(not isinstance(entry, str) for entry in include or [])
             else None
         )
-        accepted, classification, rejected = _materialize_selection(
+        accepted, classification, rejected, waiting = _materialize_selection(
             root, run, include or [], exclude or [], overrides or [], include_junk, taxonomy
         )
         run["selection"] = {
@@ -1998,6 +2112,8 @@ def select(
             },
             "classification": classification,
             "rejected_counts": dict(Counter(row["code"] for row in rejected)),
+            # The files left out until the stage's sidecars are read; once the pass ends, a new scan files them.
+            "waiting_for_sidecars": waiting,
             "updated": _now_iso(),
         }
         # A selection call always invalidates any existing plan, and any plan in progress.
@@ -2302,18 +2418,22 @@ def _pair_kept_page(
     }, None
 
 
+@_within_hold
 def plan(
     root: Path,
     *,
     run_id: str,
     continuation: str | None = None,
     today: dt.date | None = None,
+    index_floor: int | None = None,
 ) -> dict:
     """Preview every import: read, hash, freeze destinations, resolve links.
 
     Bounded by the request budget: a call that runs short saves its draft in the
     run object and returns a ``continuation``; the plan exists, and the phase is
-    ``planned``, only after the last item.
+    ``planned``, only after the last item. `index_floor` is the pages of the Sources it reads before it
+    asks whether to stop (`adoption_plan.read_import_index_until`); the `file` chain passes 0 to a step
+    that follows another one.
     """
     from . import client_artifacts
 
@@ -2387,7 +2507,15 @@ def plan(
         # Each photo that a Takeout sidecar pairs with, by its path in the stage, with the caption that sidecar gives it.
         sidecar_facts = export_sidecars.photo_facts(export_sidecars.read(root, stage_id)) if stage_id is not None else {}
         stage_prefix = f"{IMPORT_STAGE_DIR}/{stage_id}/"
-        index = adoption_plan.read_import_index(root)
+        budget = _call_budget()
+        with call_spans.span("adoption.plan_index", {}) as measured:
+            # The first read of a large vault is long, so it ends like an item loop does and the next call resumes it.
+            entries = adoption_plan.read_import_index_until(
+                root, lambda: _stop_now(root, budget) is not None, floor=index_floor
+            )
+            measured["entries"] = len(entries or ())
+        _note_sources_read(root, draft, entries is None)
+        index = adoption_plan.ImportIndex(entries or ())
         notes = adoption_plan.NoteIndex(root)
         destinations = adoption_plan.Destinations.frozen_by(root, draft["items"])
         seen = adoption_plan.seen_in_plan(draft["items"])
@@ -2396,11 +2524,14 @@ def plan(
         # Artifacts plan before text, so a recording is planned by the time its sidecar-named page is.
         recordings = {item["original_path"]: item for item in draft["items"] if item["form"] == "artifact"}
 
-        budget = _call_budget()
         handled = 0
-        with lexstore.shared_reads(root):
-            while draft["next"] < len(selected):
-                if handled and not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS):
+        turn_began = time.monotonic()
+        stop_reason = STOP_FOR_WAITING_WRITE if entries is None and _writer_waits(root) else None
+        with lexstore.shared_reads(root), call_spans.span("adoption.plan_items", {}) as measured:
+            while entries is not None and draft["next"] < len(selected):
+                if handled and (why := _stop_now(root, budget, turn_began=turn_began)) is not None:
+                    # The reply names a waiting writer; a stop for the budget is the ordinary continuation.
+                    stop_reason = why if why == STOP_FOR_WAITING_WRITE else None
                     break
                 rel = selected[draft["next"]]
                 kept_item, awaiting = _pair_kept_page(
@@ -2436,6 +2567,7 @@ def plan(
                     draft["items"].append(result[0])
                     if result[0]["form"] == "artifact":
                         recordings[rel] = result[0]
+            measured["items"] = handled
 
         progress = {
             "planned": draft["next"],
@@ -2444,7 +2576,9 @@ def plan(
         }
         if draft["next"] < len(selected):
             token = _issue_cursor(run, "plan")
-            reply = {"progress": progress, "continuation": token}
+            reply = {"progress": progress, "continuation": token, "outcome": _unfinished_sentence("plan")}
+            if stop_reason is not None:
+                reply["stop_reason"] = stop_reason
             if entry is not None:
                 entry["state"], entry["reply"] = "used", reply
             run["plan_draft"] = draft
@@ -2840,8 +2974,13 @@ class _ApplyPacer:
             - self._owed_after_loop(chunk, self._deferred_artifacts + self._media(chunk))
         )
 
-    def next_chunk(self, pending: list[dict], *, first: bool) -> list[dict]:
-        """The next chunk, trimmed to fit; empty when none fits. The first is never empty."""
+    def next_chunk(self, pending: list[dict], *, first: bool, writer_waits: bool = False) -> list[dict]:
+        """The next chunk, trimmed to fit; empty when none fits. The first is never empty.
+
+        While a writer waits for the boundary, a chunk lasts one turn (`TURN_SECONDS`), or up to twice its fixed
+        commit part when that is longer: the call's first chunk runs before any check for a waiting writer, so its
+        size is the writer's wait.
+        """
         share = max(APPLY_CHUNK_BUDGET_SHARE * self._budget.seconds, 2 * self._commit_seconds)
         limit = APPLY_CHUNK_ITEMS
         timed = {size for size, _ in self._item_chunks}
@@ -2849,6 +2988,10 @@ class _ApplyPacer:
             # A second size, twice the first, so the fit can tell the fixed part from the per-item rate.
             limit = min(APPLY_CHUNK_ITEMS, 2 * next(iter(timed)))
             share = float("inf")
+        elif timed:
+            limit = min(APPLY_CHUNK_ITEMS, APPLY_CHUNK_GROWTH * max(timed))
+        if writer_waits:
+            share = min(share, max(TURN_SECONDS, 2 * self._commit_seconds))
         chunk = _take_chunk(pending, limit)
         cost, allowed = self._cost(chunk), min(share, self._room(chunk))
         while len(chunk) > 1 and cost > allowed:
@@ -3135,17 +3278,29 @@ class _CallReads:
             self._arrivals = _Arrivals(root)
         return self._arrivals
 
-    def open_sources(self, root: Path, run: dict) -> None:
-        """List the Sources once, and read them in full only when the run's seal no longer holds."""
+    def open_sources(
+        self, root: Path, run: dict, *, stop: Callable[[], bool] | None = None, floor: int | None = None
+    ) -> bool:
+        """List the Sources once, and read them in full only when the run's seal no longer holds.
+
+        With `stop`, a full read that `stop` ends gives False and leaves the reads unopened, so the call
+        ends before it files anything and the next one resumes the read (`adoption_plan.read_import_index_until`).
+        """
         if self.pages is not None:
-            return
-        self.pages = adoption_plan.source_page_paths(root)
+            return True
+        pages = adoption_plan.source_page_paths(root)
         seal = run.get("sources_seal")
-        self.sealed = seal is not None and adoption_plan.sources_seal(self.pages) == seal
-        if not self.sealed and self.index is None:
+        sealed = seal is not None and adoption_plan.sources_seal(pages) == seal
+        index = self.index
+        if not sealed and index is None:
             # No seal (a plan made before the seal existed), or a Source was filed or removed by
             # someone else since the plan or the run's last call: only the walk can answer.
-            self.index = adoption_plan.read_import_index(root)
+            if stop is None:
+                index = adoption_plan.read_import_index(root)
+            elif (index := adoption_plan.read_import_index_until(root, stop, floor=floor)) is None:
+                return False
+        self.pages, self.sealed, self.index = pages, sealed, index
+        return True
 
     def earlier_imports(self, root: Path, run: dict, planned: dict) -> list[adoption_plan.EarlierImport]:
         """The earlier imports that can decide this pending original: all of them, or its own page."""
@@ -3566,9 +3721,9 @@ def _apply_chunk(
                 item.artifact.placed = True
                 placed[path] = moved
             survivors.append((planned, item))
-    call_spans.record_span(
-        "adoption.prework", (time.monotonic() - prework_started) * 1000.0, {"items": len(chunk)}
-    )
+    prework_ms = (time.monotonic() - prework_started) * 1000.0
+    call_spans.record_span("adoption.prework", prework_ms, {"items": len(chunk)})
+    stats["prework_ms"] += int(prework_ms)
     landed = _file_survivors(
         root, store, run, survivors, stage=stage, placed=placed, run_date=run_date, ceiling=ceiling, reads=reads,
         page_final=page_final,
@@ -4138,6 +4293,7 @@ def _legacy_apply_invocation(
     return invocation
 
 
+@_within_hold
 def apply(
     root: Path,
     *,
@@ -4147,12 +4303,15 @@ def apply(
     retry_failed: bool = False,
     only_paths: list[str] | None = None,
     today: dt.date | None = None,
+    index_floor: int | None = None,
 ) -> dict:
     """Commit the previewed imports in chunks, bounded by the request budget.
 
     A call that runs out of budget returns a ``continuation``; the next call,
     carrying it, resumes at the first item without an outcome. Nothing is written
     twice: every item is checked against the earlier imports before it is copied.
+    `index_floor` is `plan`'s: the pages of the Sources it reads before it asks whether to stop, when the
+    run's seal no longer holds and the index must be read in full first.
     """
     from . import client_artifacts
     from .writer_lease import active_manager, active_mutation_recovery_identity
@@ -4285,20 +4444,32 @@ def apply(
         ceiling = client_artifacts.adoption_ceiling()
         written: list[str] = []
         pending = _pending(run)
+        opened = True
+        index_seconds: float | None = None
         if pending:
             # Held in memory until a chunk commits it: a call whose every source drifted
             # refuses below with nothing written, as before.
             run["phase"] = "applying"
             run["inflight"] = True
             # Read once here, before the first chunk's timer, so the pacer does not price it into items.
-            reads.open_sources(root, run)
+            index_started = time.monotonic()
+            # A recovery replays the frozen chunk under the identity that was interrupted: a stop here would end the
+            # call with the chunk unreplayed and its reply stored, and the guard above would then ignore the chunk.
+            recovering = reconciling or bool(invocation and invocation.get("publication"))
+            opened = reads.open_sources(
+                root, run, stop=None if recovering else lambda: _stop_now(root, budget) is not None, floor=index_floor
+            )
+            index_seconds = time.monotonic() - index_started
+            _note_sources_read(root, run, not opened)
 
         pacer = _ApplyPacer(root, budget, carried=run.get(_APPLY_PACE))
-        stopped = False
-        stop_reason: str | None = None
+        # A call whose read of the Sources ended for time files nothing: the next resumes the read.
+        stopped = not opened
+        stop_reason = STOP_FOR_WAITING_WRITE if stopped and _writer_waits(root) else None
         chunks = 0
-        while pending:
-            if chunks and active_manager().writers_waiting(root):
+        while pending and opened:
+            waiting = _writer_waits(root)
+            if chunks and waiting:
                 # Each chunk is committed whole, so the call may end here: the writer that waits commits
                 # when this call releases the boundary, and the continuation resumes the import.
                 stopped, stop_reason = True, STOP_FOR_WAITING_WRITE
@@ -4317,7 +4488,7 @@ def apply(
                 if len(chunk) != len(members):
                     raise AdoptionRunError("IMPORT_RECOVERY_UNRESOLVED", "the frozen chunk's pending membership changed")
             else:
-                chunk = pacer.next_chunk(pending, first=not chunks)
+                chunk = pacer.next_chunk(pending, first=not chunks, writer_waits=waiting)
             if not chunk:
                 stopped = True
                 break
@@ -4332,14 +4503,25 @@ def apply(
                 budget=budget, stats=stats, written=written, reads=reads, pacer=pacer,
                 page_final=len(chunk) == len(pending),
             )
-            pacer.record(chunk, time.monotonic() - started, extractions)
+            chunk_seconds = time.monotonic() - started
+            pacer.record(chunk, chunk_seconds, extractions)
             completed_paths = {item["original_path"] for item in chunk}
             pending = [item for item in pending if item["original_path"] not in completed_paths]
             chunks += 1
+            if chunks == 1:
+                _log_apply_opening(
+                    index_seconds, items=len(chunk), prework_ms=stats["prework_ms"], chunk_seconds=chunk_seconds,
+                    pending=len(pending) + len(chunk), writer_waited=waiting,
+                )
             if stats["notes_deferred"]:
                 stopped = True
                 break
 
+        if not chunks and index_seconds is not None:
+            _log_apply_opening(
+                index_seconds, items=0, prework_ms=0, chunk_seconds=0.0, pending=len(pending),
+                writer_waited=_writer_waits(root),
+            )
         if reads.held and "apply_stop" not in run:
             # A held page has no outcome: the continuation comes back to it once its recording is stored.
             run["apply_stop"] = _hold_stop(reads.held)
@@ -4512,6 +4694,10 @@ def _find_paths(root: Path, query: str) -> tuple[list[str] | None, list[str]]:
             root, query=query, mode="keyword", limit=5, graph=False,
             degraded_out=degraded,
         )
+    except find_module.RetrievalIndexWarming as warming:
+        # The index that the import just wrote to has not caught up. That is a state to wait out, not a search
+        # that failed, so the recall check reports it as pending with what is warming.
+        return [], [*degraded, warming.site]
     except Exception:  # noqa: BLE001 - recall failure never blocks finish
         return None, degraded
     return [str(getattr(hit, "path", "")) for hit in hits], degraded
@@ -4531,7 +4717,7 @@ def _applied_items(run: dict) -> list[tuple[dict, dict]]:
     ]
 
 
-def _recall_check(root: Path, run: dict) -> dict:
+def _recall_check(root: Path, run: dict, budget: request_budget.RequestBudget) -> dict:
     # A text note names itself in a question; a media file's title is its file name.
     applied = sorted(
         _applied_items(run),
@@ -4544,6 +4730,10 @@ def _recall_check(root: Path, run: dict) -> dict:
     else:
         packs = run.get("pack_suggestions") or []
         title, target = (packs[0].get("name") if packs else "") or "", ""
+    if title and not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS):
+        # A search that starts without the reserve would hold the boundary past the hold's room; the check stays open.
+        budget.note_skipped("finish.recall_check")
+        return {"query": title, "ok": None, "hits": [], "status": "pending"}
     paths, degraded = _find_paths(root, title) if title else ([], [])
     ok = bool(target) and any(_same_page(path, target) for path in paths or [])
     result: dict = {"query": title, "ok": ok, "hits": paths or []}
@@ -4557,8 +4747,13 @@ def _recall_check(root: Path, run: dict) -> dict:
     return result
 
 
-def _recall_sample(root: Path, run: dict) -> dict:
-    """Search for a spread of imported notes: one per top-level folder, then the next of each."""
+def _recall_sample(root: Path, run: dict, budget: request_budget.RequestBudget, *, recall: dict) -> dict:
+    """Search for a spread of imported notes: one per top-level folder, then the next of each.
+
+    A search starts only while the budget covers the delivery reserve, and the sample ends at the first search that
+    the index cannot answer yet, or when the recall check already got that answer: the next searches would meet the
+    same index, and each costs seconds on a cold one. The picks it did not reach count as pending.
+    """
     groups: dict[str, list[tuple[dict, dict]]] = {}
     for item, outcome in sorted(_applied_items(run), key=lambda pair: pair[0]["collection_path"]):
         folder = item["collection_path"].split("/", 1)[0] if "/" in item["collection_path"] else ""
@@ -4575,7 +4770,13 @@ def _recall_sample(root: Path, run: dict) -> dict:
     missed: list[str] = []
     pending, failed = 0, 0
     degraded: list[str] = []
-    for item, outcome in picks:
+    waiting = recall.get("status") == "pending"
+    for reached, (item, outcome) in enumerate(picks):
+        if waiting or not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS):
+            if not waiting:
+                budget.note_truncated("finish.recall_sample")
+            pending += len(picks) - reached
+            break
         paths, incomplete = _find_paths(root, item.get("title") or item["original_path"])
         if paths is not None and any(_same_page(path, outcome["target_path"]) for path in paths):
             found += 1
@@ -4584,6 +4785,7 @@ def _recall_sample(root: Path, run: dict) -> dict:
         elif incomplete:
             pending += 1
             degraded.extend(incomplete)
+            waiting = True
         else:
             missed.append(outcome["target_path"])
     result: dict = {"sampled": len(picks), "found": found, "missed": missed}
@@ -4615,7 +4817,12 @@ def _extraction_states(root: Path, run: dict, budget: request_budget.RequestBudg
         jobs = media_jobs.MediaJobStore(root)
     except Exception:  # noqa: BLE001 - an unreadable ledger is "unknown", not a failed finish
         return {"unknown": len(media)}
-    for artifact, media_type in media:
+    for reached, (artifact, media_type) in enumerate(media):
+        if not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS):
+            # An artifact the call had no time to read is unknown, so the hold stays under the overdue limit.
+            budget.note_truncated("finish.extraction_states")
+            counts["unknown"] += len(media) - reached
+            break
         try:
             page = f"{artifact}.md"
             with reserved_paths.open_generic_binary(root, page, physical=True) as source:
@@ -4660,7 +4867,7 @@ def _extraction_state(content: str, media_type: str, job: object) -> str:
     return "unknown" if job is None else "pending"
 
 
-def _coverage(root: Path, run: dict, budget: request_budget.RequestBudget) -> dict:
+def _coverage(root: Path, run: dict, budget: request_budget.RequestBudget, *, recall: dict) -> dict:
     """What the run did with every file it was pointed at, and what it did not read."""
     plan = run.get("plan") or {}
     selection = run.get("selection") or {}
@@ -4702,11 +4909,13 @@ def _coverage(root: Path, run: dict, budget: request_budget.RequestBudget) -> di
             "resolved": sum(len((item.get("links") or {}).get("resolved") or []) for item in applied_text),
             "unresolved": sum(len((item.get("links") or {}).get("unresolved") or []) for item in applied_text),
         },
-        "recall": _recall_sample(root, run),
+        "recall": _recall_sample(root, run, budget, recall=recall),
     }
 
 
-def _consume_filed_text(root: Path, run: dict, budget: request_budget.RequestBudget) -> None:
+def _consume_filed_text(
+    root: Path, run: dict, budget: request_budget.RequestBudget
+) -> tuple[int, str | None]:
     """Remove the staged copy of each filed text item whose Source page still holds its text, and mark it consumed.
 
     `apply` keeps a text item's copy, because the item may still owe its note. By `finish` an item that is
@@ -4714,27 +4923,37 @@ def _consume_filed_text(root: Path, run: dict, budget: request_budget.RequestBud
     and the held, hash-checked removal of `adoption_consume.remove_staged` passes. A copy stays and its outcome records
     why in `stays`: `source_differs` when the Source page does not hold the text, so the copy is the only exact one,
     and `copy_changed` when the copy is no longer the file that the manifest and the plan describe. A copy that is
-    already gone (a `finish` stopped after its removal) is settled through its Source. The call stops starting
-    removals when its budget runs low, and the copies it did not reach stay unverified in the residual.
+    already gone (a `finish` stopped after its removal) is settled through its Source.
+
+    It returns the copies it removed and, when it stopped with copies left, the reason (`_stop_now`): the budget
+    runs low or a writer waits. A call handles at least one copy before it stops, so each makes progress, and the
+    marks it made are kept: the next `finish` carries on from them, and no copy it did not reach is reported as
+    unverified until the last call has run. A copy that is gone already is handled but removed nothing, so it does
+    not hold the checks of `finish` back. A copy marked `stays` is decided: no later call reads or hashes it again,
+    so a writer that always waits cannot hold the calls on the same kept copies.
     """
     if not run.get("consume", True):
-        return
+        return 0, None
     reads = _CallReads()
     stage = reads.recorded_stage(root, run)
     if stage is None:
-        return
+        return 0, None
     outcomes = run.get("outcomes") or {}
+    handled = removed = 0
+    turn_began = time.monotonic()
     for planned in (run.get("plan") or {}).get("items") or []:
         outcome = outcomes.get(planned["original_path"])
+        # A copy that `stays` is final for the run: one held by a for-now filesystem refusal makes the person review a
+        # file that is fine, as when `finish` ran once.
         if (
-            planned["form"] != "text" or outcome is None or outcome.get("consumed")
+            planned["form"] != "text" or outcome is None or outcome.get("consumed") or outcome.get("stays")
             or outcome.get("status") not in _APPLIED_STATUSES
             or outcome.get("kept_speech")  # a page whose result went to its recording's Source has no text Source to check
         ):
             continue
-        if not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS):
-            budget.note_truncated("finish.consume_text")
-            return
+        if handled and (stop := _stop_now(root, budget, "finish.consume_text", turn_began=turn_began)) is not None:
+            return removed, stop
+        handled += 1
         if os.path.lexists(root / planned["original_path"]):
             if not _text_source_holds(root, outcome.get("target_path") or planned["target_path"], planned):
                 outcome["stays"] = "source_differs"
@@ -4742,30 +4961,69 @@ def _consume_filed_text(root: Path, run: dict, budget: request_budget.RequestBud
                 outcome["stays"] = "copy_changed"
             else:
                 outcome["consumed"] = True
+                removed += 1
         elif _filed_and_gone(root, run, reads, planned) is not None:
             outcome["consumed"] = True
+    return removed, None
 
 
+@_within_hold
 def finish(
     root: Path,
     *,
     run_id: str,
     write_manifest: bool = True,
+    continuation: str | None = None,
     today: dt.date | None = None,
 ) -> dict:
+    """Prove recall, report coverage and the residual, and close the page.
+
+    A call that removed staged copies, or that a waiting writer or the budget stopped, returns a ``continuation``
+    and leaves the phase: the agent on the step path calls `finish` again with it until the phase is ``done``, as it
+    does `plan` and `apply`. The `file` chain re-runs `finish` itself and reads the phase.
+    """
     root = Path(root)
     run_date = _today(today)
     store = AdoptionRunStore(root)
     with _LOCK:
         run = store.load_for_update(run_id)
+        if run["phase"] == "done":
+            # A retry of the call that finished the page (a new key, or after the replay window) and a bare `finish` on a
+            # finished page get the recorded result; nothing runs again, so repeating the call costs nothing. It is marked
+            # as a reuse that wrote nothing, so the MCP reply keeps the finishing reply's compact shape and leads with
+            # "Already saved" instead of the whole run document with no lead for the person.
+            return as_reused(_present(root, run, coverage=(run.get("finish") or {}).get("coverage")))
         if run["phase"] not in _FINISH_PHASES:
             raise AdoptionRunError(
                 "INVALID_PHASE", f"finish requires phase 'applied' or 'partial', got {run['phase']!r}"
             )
-        recall = _recall_check(root, run)
+        entry = None
+        if continuation:
+            entry = _cursor_entry(run, "finish", continuation)
+            if entry["state"] == "used":
+                return _present(root, run, **(entry.get("reply") or {}))
+        else:
+            _supersede_cursors(run, "finish")
         budget = _call_budget()
-        coverage = _coverage(root, run, budget)
-        _consume_filed_text(root, run, budget)
+        removed, stop = _consume_filed_text(root, run, budget)
+        if stop is None and removed:
+            # The tail below (recall check, coverage, manifest) runs in a call that removed no copy, so it has the
+            # hold's whole room: a search that ran in what the removals left would answer "indexing pending" for a
+            # page that is searchable. It costs the page one more call.
+            stop = STOP_FOR_TAIL
+        if stop is not None:
+            # Copies remain, or the tail is next: keep the marks made so far and leave the phase. The reply's
+            # continuation sends the agent on the step path back; the `file` chain re-runs `finish` without it.
+            reply = {
+                "stop_reason": stop, "continuation": _issue_cursor(run, "finish"),
+                "outcome": _unfinished_sentence("finish"),
+            }
+            if entry is not None:
+                entry["state"], entry["reply"] = "used", reply
+            store.save(run)
+            return _present(root, run, **reply)
+        recall = _recall_check(root, run, budget)
+        coverage = _coverage(root, run, budget, recall=recall)
         # Empty folders go only for a run that consumes; the residual is reported for any recorded stage.
         removed_folders = adoption_consume.remove_empty_folders(root, run) if run.get("consume", True) else 0
         stage_residual = _stage_residual(root, run, (run, *_earlier_pages(store, run)))
@@ -4807,6 +5065,8 @@ def finish(
             "manifest_path": manifest_path,
         }
         run["phase"] = "done"
+        if entry is not None:
+            entry["state"], entry["reply"] = "used", {}
         store.save(run)
     return _present(root, run, coverage=coverage)
 
@@ -4860,6 +5120,23 @@ def _write_run_manifest(
 FILING_STATES = ("working", "stopped", "done")  # nosemgrep: ep-word-set -- the closed states of a `file` reply.
 FILING_COUNTS = ("filed", "skipped_duplicates", "failed", "remaining", "pages_done")  # nosemgrep: ep-word-set -- the closed counts of a `file` reply.
 _WORKING, _STOPPED, _DONE = FILING_STATES
+# A driver of `file` (the Cloud CLI, the cell's resident filer) stops calling at once on a stage whose `working` replies
+# show no movement this many calls in a row: no count moved and the page's position stayed the same (`filing_mark`).
+# The CLI leaves the stage staged on the cell; the filer waits and tries again.
+FILING_STALL_CALLS = 5
+
+
+def filing_mark(progress: object) -> tuple[tuple[int, ...], str] | None:
+    """What a `working` reply shows of movement: its counts and its page's position, or None when it carries neither.
+
+    A driver compares two marks whole. The position is compared as the cell reports it, so a field that the cell
+    adds to it later counts as movement without the driver changing.
+    """
+    if not isinstance(progress, dict) or any(type(progress.get(name)) is not int for name in FILING_COUNTS):
+        return None
+    return tuple(progress[name] for name in FILING_COUNTS), json.dumps(progress.get("page"), sort_keys=True)
+
+
 # The driver's own steps that publish: a reconciling call runs only the apply that its identity stored.
 _APPLY_STEPS = ("apply", "retry")  # nosemgrep: ep-word-set -- the `file` driver's closed step names that call `apply`.
 # The driver's own steps that open a page: the first page of a scan, a later page, or a new scan of a finished one.
@@ -5033,6 +5310,39 @@ def _reading_sidecars(root: Path, run: dict) -> bool:
     return stage_id is not None and export_expansion.read(root, stage_id).sidecars == export_sidecars.WORKING
 
 
+def _released_exports(root: Path, store: AdoptionRunStore, run: dict) -> bool:
+    """Whether an app export that a page of the scan left out while it was being read has been read since.
+
+    The export's derived transcripts bring a new scan on their own (`_unscanned`); an export that derived none has no
+    such file, and only a new scan files the export itself, as it does when the stage is read in one call.
+    """
+    stage_id = _stage_id_of(run["source_root"])
+    if stage_id is None:
+        return False
+    reading = export_expansion.read(root, stage_id)
+    prefix = f"{IMPORT_STAGE_DIR}/{stage_id}/"
+    released = {f"{prefix}{export}" for export in reading.exports if export not in reading.held}
+    if not released:
+        return False
+    return any(
+        path in released
+        for page in (run, *_earlier_pages(store, run))
+        for path in ((page.get("selection") or {}).get("rules") or {}).get("exclude") or ()
+    )
+
+
+def _released_sidecars(root: Path, store: AdoptionRunStore, run: dict) -> bool:
+    """Whether a page of the scan left files out for the stage's sidecar pass and the pass has ended since.
+
+    The pass reads in calls of its own (`_expand_exports`), so the scan that met the held photos ran before it ended,
+    and only a new scan files them.
+    """
+    stage_id = _stage_id_of(run["source_root"])
+    if stage_id is None or export_expansion.read(root, stage_id).sidecars in (None, export_sidecars.WORKING):
+        return False
+    return any(((page.get("selection") or {}).get("waiting_for_sidecars") or 0) > 0 for page in (run, *_earlier_pages(store, run)))
+
+
 def _filing_step(root: Path, store: AdoptionRunStore, run: dict) -> str:
     """The step that moves the import on: the page's own step, or `rescan` when its scan is done and missed staged files.
 
@@ -5043,7 +5353,13 @@ def _filing_step(root: Path, store: AdoptionRunStore, run: dict) -> str:
     step = _next_filing_step(run)
     if step == "start" and _reading_sidecars(root, run):
         return "rescan"
-    return "rescan" if step == "done" and (_unscanned(root, store, run) or _reading_exports(root, run)) else step
+    if step != "done":
+        return step
+    rescan = (
+        _unscanned(root, store, run) or _reading_exports(root, run) or _released_exports(root, store, run)
+        or _released_sidecars(root, store, run)
+    )
+    return "rescan" if rescan else step
 
 
 def _held_apply(store: AdoptionRunStore, run: dict, identity_digest: str) -> tuple[str, dict] | None:
@@ -5099,18 +5415,21 @@ def _export_rules(root: Path, run: dict) -> tuple[list[str | dict], list[str]]:
 
 def _file_step(
     root: Path, store: AdoptionRunStore, run: dict | None, step: str, *,
-    path: str, collection: str | None, today: dt.date | None, budget: request_budget.RequestBudget | None = None,
+    path: str, collection: str | None, today: dt.date | None, first: bool = True,
 ) -> dict:
-    """Run one lifecycle step through its own function and return the page it leaves."""
-    if step == "rescan" or (step == "start" and run is None):
-        # A scan lists the stage as it is, so the exports are expanded first and the scan meets their transcripts.
-        # A scan that continues a paged one does not expand: new files would move the pages under it.
-        stage_id = _stage_id_of(run["source_root"] if run is not None else path)
+    """Run one lifecycle step through its own function and return the page it leaves.
+
+    `first` is whether it is the call's first step. Only that one reads the Sources' index for at least
+    `adoption_plan.INDEX_READ_FLOOR` pages whatever its budget (progress for the call); a later step has
+    that progress already, so its read ends as soon as the call has no room.
+    """
+    index_floor = None if first else 0
+    if step == "start" and run is None:
+        # The first scan leaves out the exports that expansion has not read, so they are found before it. It reads no
+        # item: reading is a step of its own (`_expand_exports`), which a call that follows runs before it scans again.
+        stage_id = _stage_id_of(path)
         if stage_id is not None:
-            held = budget or _call_budget()
-            export_expansion.expand(
-                root, stage_id, keep_going=lambda: held.can_afford(request_budget.DELIVERY_RESERVE_SECONDS),
-                rewalk=step == "rescan")
+            export_expansion.find_exports(root, stage_id)
     if step == "start":
         if run is None:
             # Read here, not as a default argument, so a test or an operator can change the page size.
@@ -5139,14 +5458,21 @@ def _file_step(
             page = store.load(run_id)
         return page
     if step == "plan":
-        plan(root, run_id=run_id, continuation=_open_cursor(run, "plan") if run.get("plan_draft") else None, today=today)
+        plan(
+            root, run_id=run_id, continuation=_open_cursor(run, "plan") if run.get("plan_draft") else None,
+            today=today, index_floor=index_floor,
+        )
     elif step == "apply":
         apply(
             root, run_id=run_id, plan_id=run["plan"]["plan_id"],
             continuation=_open_cursor(run, "apply") if run["phase"] == "applying" else None, today=today,
+            index_floor=index_floor,
         )
     elif step == "retry":
-        apply(root, run_id=run_id, plan_id=run["plan"]["plan_id"], retry_failed=True, today=today)
+        apply(
+            root, run_id=run_id, plan_id=run["plan"]["plan_id"], retry_failed=True, today=today,
+            index_floor=index_floor,
+        )
     elif step == "close":
         # The failed outcomes stay on the page, so `progress` counts them and the residual lists their staged files.
         cancel(root, run_id=run_id, why="every file on this page failed, also when retried once")
@@ -5155,6 +5481,23 @@ def _file_step(
     return store.load(run_id)
 
 
+def _expand_exports(root: Path, run: dict, budget: request_budget.RequestBudget) -> bool:
+    """Read the stage's app exports for the scan that follows; True when this call read from one or found one.
+
+    A scan lists the stage as it is, so the exports are expanded before it and it meets their transcripts. The
+    reading is a step of the `file` chain, as `plan` is: it ends its call at an item boundary when a writer waits or
+    the hold's room is spent, and the scan that follows is the first step of the next call, with a hold of its own.
+    """
+    stage_id = _stage_id_of(run["source_root"])
+    if stage_id is None:
+        return False
+    turn_began = time.monotonic()
+    return export_expansion.expand(
+        root, stage_id, rewalk=True, keep_going=lambda: _stop_now(root, budget, turn_began=turn_began) is None
+    )
+
+
+@_within_hold
 def file(
     root: Path,
     *,
@@ -5168,8 +5511,9 @@ def file(
     Every step is the module function of that name, chosen from the saved phase of the newest page, so a call
     carries on from wherever the run stands, however it got there. A page with failed files retries them once
     with `apply`, then finishes, or is closed when every file failed, and the scan goes on to the next page.
-    A call ends after an `apply` or `finish`, when `plan` needs another call, when the next step is `start`
-    of another page and the call has run a step, or when the budget cannot cover the delivery reserve. The
+    A call ends after an `apply`, a `finish` or a reading of the stage's app exports, when `plan` needs another
+    call, when the next step is `start` of another page and the call has run a step, when the budget cannot cover
+    the delivery reserve, or when a writer waits for the boundary and the call has run a step. The
     reply's `continuation` is fresh each time: a call that repeats an earlier one's arguments gets that call's
     stored answer and does no work.
 
@@ -5201,12 +5545,14 @@ def file(
             step = "start" if run is None else _filing_step(root, store, run)
             if step == "done":
                 break
-            if steps and (step in _SCAN_STEPS or not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS)):
+            if steps and (step in _SCAN_STEPS or _stop_now(root, budget) is not None):
                 break
             if step in _APPLY_STEPS and reconciling:
                 # Only the identity's own held apply may run under reconciliation; this attempt published nothing.
                 break
-            run = _file_step(root, store, run, step, path=path, collection=collection, today=today, budget=budget)
+            if step == "rescan" and _expand_exports(root, run, budget):
+                break  # the reading is this call's step: the scan that meets its transcripts is the next call's first
+            run = _file_step(root, store, run, step, path=path, collection=collection, today=today, first=not steps)
             steps += 1
             if step in _APPLY_STEPS or step == "finish" or (step == "plan" and run["phase"] == "selecting"):
                 break
@@ -5283,11 +5629,40 @@ def _page_number(run: dict) -> int:
     return (run.get("paging") or {}).get("page", 1)
 
 
+def _note_sources_read(root: Path, holder: dict, stopped: bool) -> None:
+    """Keep in `holder` (the plan draft or the run) how far a stopped read of the Sources has reached, else drop it.
+
+    A read of Sources this process has not read yet takes many calls under a waiting writer and changes no count
+    meanwhile. The number is the page position's proof that the read moves (`_page_position`).
+    """
+    if stopped:
+        holder[_SOURCES_READ] = adoption_plan.sources_remembered(root)
+    else:
+        holder.pop(_SOURCES_READ, None)
+
+
+def _copies_settled(run: dict) -> int:
+    """The staged copies that `finish` has settled for a page: removed (`consumed`) or kept with a reason (`stays`)."""
+    return sum(1 for o in (run.get("outcomes") or {}).values() if o.get("consumed") or o.get("stays"))
+
+
 def _page_position(run: dict) -> dict:
-    """Where the newest page stands: its number, its phase and how many selected files `plan` has read so far."""
+    """Where the newest page stands: its number, its phase and how many selected files `plan` has read so far.
+
+    A step that moves with no count changing adds what it has done, so a caller that calls again can tell a step
+    that goes on from one that is stuck (`filing_mark`): the Sources a stopped read has read (`sources_read`, by
+    `plan` or `apply`), the copies `finish` has settled (`copies_settled`), and the items that an export read has left
+    out (`set_aside`, added by `_filing_reply`, which holds the expansion). A field is there only while its step is the
+    one running.
+    """
     draft = run.get("plan_draft")
     planned = draft["next"] if draft else len((run.get("selection") or {}).get("paths") or []) if run.get("plan") else 0
-    return {"number": _page_number(run), "phase": run["phase"], "planned": planned}
+    position = {"number": _page_number(run), "phase": run["phase"], "planned": planned}
+    if (read := (draft or run).get(_SOURCES_READ)) is not None:
+        position["sources_read"] = read
+    if run["phase"] in _FINISH_PHASES:
+        position["copies_settled"] = _copies_settled(run)
+    return position
 
 
 def _files(count: int) -> str:
@@ -5341,6 +5716,10 @@ def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict 
     if expansion is not None and expansion.sidecars == export_sidecars.WORKING:
         remaining += export_sidecars.waiting(root, stage_id)  # a photo waits for the sidecars, so it is not filed and not left out
     pages_done = sum(1 for tally in scans if tally.phase in _FINISHED_PHASES)
+    position = _page_position(run)
+    if expansion is not None and expansion.held:
+        # An item that the entry's rule leaves out derives no file and changes no count, so only this shows that the read goes on.
+        position["set_aside"] = expansion.skipped
     person: list[dict] = []
     if stop is None and filing == _STOPPED and space is not None and space["code"] == _SPACE_STOP:
         person.append({"need": "free_space", "text": space["next"]})
@@ -5352,7 +5731,7 @@ def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict 
         "filing": filing,
         "progress": {
             **dict(zip(FILING_COUNTS, (filed, skipped, failed, remaining, pages_done), strict=True)),
-            "page": _page_position(run),
+            "page": position,
         },
         "summary": _filing_summary(filing, filed, skipped, failed, remaining, expansion.partial if expansion else 0),
     }

@@ -260,6 +260,7 @@ def append_to_file(
             )
         except semantic_writes.SemanticWriteError as error:
             raise AppendError(error.code, error.reason) from error
+        warnings.extend(committed.review_field_warnings())
         semantic = committed.as_dict()
     else:
         writes = [*log_plan.writes, PlannedWrite(abs_path, new_text, guard=primary_guard)]

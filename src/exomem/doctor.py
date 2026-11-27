@@ -2972,7 +2972,11 @@ def _check_remote_env() -> list[DoctorCheck]:
     return checks
 
 
-_REMOTE_OWNER_LINE = "EXOMEM_OWNER_OAUTH_SUBJECT=github:<the value of EXOMEM_GITHUB_USER_ID>"
+_REMOTE_OWNER_LINE = (
+    "EVERMATTER_OWNER_OAUTH_SUBJECT=github:<the value of EVERMATTER_GITHUB_USER_ID>, replacing "
+    "any EXOMEM_ or KB_MCP_ line for it (in a clone, `uv run --no-sync python "
+    "scripts/set-env.py EVERMATTER_OWNER_OAUTH_SUBJECT <value>` does that)"
+)
 
 
 def _check_remote_owner_binding() -> DoctorCheck:
@@ -3858,6 +3862,160 @@ def _check_latency() -> DoctorCheck:
     return _check("latency", "warn" if incomplete else "pass", message, details=details)
 
 
+#: The census window, the most rows one doctor run reads for it, and the most
+#: client and revision pairs its one-line message names (the rest are counted, and
+#: all of them are in `details`).
+_CLIENT_CENSUS_WINDOW_SECONDS = 24 * 60 * 60
+_CLIENT_CENSUS_MAX_ROWS = 50_000
+_CLIENT_CENSUS_LISTED_PAIRS = 10
+
+
+def _printable(value: object) -> str:
+    """Text for one terminal line: every non-printable character shown as its escape.
+
+    A client chooses its name and extension ids, and the doctor message reaches a terminal.
+    """
+    return "".join(
+        char if char.isprintable() else char.encode("unicode_escape").decode("ascii")
+        for char in str(value)
+    )
+
+
+def _check_mcp_clients() -> DoctorCheck:
+    """Which protocol revision and extensions each client declared, per tool call, in the last 24 hours.
+
+    Reads the live ledger and its archived generations newest first and stops at the first
+    row older than the window or at the row bound, so the read does not grow with the ledger.
+    When the rows do not reach the window's start, the message says from when it counts.
+    Informational: an unreadable ledger is a warning, never a failure of the install.
+    """
+    import datetime as dt
+    import itertools
+
+    from . import activity, call_ledger, latency_watch
+
+    if not call_ledger.enabled():
+        return _check(
+            "mcp_clients", "pass",
+            "The call ledger is disabled, so declared protocol features are not recorded.",
+        )
+    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=_CLIENT_CENSUS_WINDOW_SECONDS)
+    calls: dict[tuple[str, str], dict[str, object]] = {}
+    read = 0
+    oldest: dt.datetime | None = None
+    reached_floor = False
+    archive_unreadable = False
+    try:
+        # A failed append left a call with no row, so the count starts after it. Only the
+        # failure marker counts: the doctor is a new process, and its own start says nothing
+        # about when the cell's writer began, which the activity feed uses for its bound.
+        failed_at = call_ledger.last_append_failure()
+        failure_in_window = failed_at is not None and failed_at > cutoff
+        floor = failed_at if failure_in_window else cutoff
+        try:
+            archives = latency_watch.archive_generations_newest_first(call_ledger.archive_dir())
+        except OSError:
+            archives, archive_unreadable = [], True
+        for line in itertools.chain.from_iterable(
+            activity.lines_newest_first(path) for path in [call_ledger.ledger_path(), *archives]
+        ):
+            if not line.strip():
+                continue
+            if read >= _CLIENT_CENSUS_MAX_ROWS:
+                break  # the row bound: the result covers only back to `oldest`
+            read += 1
+            try:
+                row = json.loads(line)
+                at = dt.datetime.fromisoformat(row["ts_utc"])
+            except (ValueError, KeyError, TypeError):
+                continue  # a damaged row names no time; the chain check reports it, not this census
+            at = at if at.tzinfo else at.replace(tzinfo=dt.UTC)
+            if at <= floor:
+                reached_floor = True
+                break
+            oldest = at
+            key = (
+                _printable(row.get("client_name") or "unknown client"),
+                _printable(row.get("protocol_version") or "unknown revision"),
+            )
+            entry = calls.setdefault(key, {
+                "calls": 0, "capabilities": None, "extensions": None, "other": 0, "cut": 0,
+            })
+            entry["calls"] += 1
+            # None is "no row said": a list, even an empty one, is what a client declared.
+            for field, name in (("capabilities", "client_capabilities"), ("extensions", "client_extensions")):
+                declared = row.get(name)
+                if isinstance(declared, list):
+                    entry[field] = (entry[field] or set()) | {_printable(item) for item in declared}
+            if isinstance(row.get("client_extensions"), list):
+                for field, name in (("other", "client_extensions_other"), ("cut", "client_extensions_truncated")):
+                    count = row.get(name)
+                    if isinstance(count, int):
+                        entry[field] = max(entry[field], count)
+    except OSError as error:
+        return _check(
+            "mcp_clients", "warn", f"The call ledger could not be read: {type(error).__name__}.",
+            "Check the call ledger directory and its permissions.",
+        )
+    # Complete only when the read reached the start of the window, or the failed append that
+    # starts it. Otherwise the history starts inside the window (a new install) or the row bound
+    # stopped the read, and the census says from when it counts instead of claiming 24 hours.
+    # The count holds only rows later than `covered_since`, so the label and the count agree.
+    covered_since: dt.datetime | None = None
+    reason: str | None = None
+    if not reached_floor:
+        covered_since = oldest
+        if read >= _CLIENT_CENSUS_MAX_ROWS:
+            reason = f"stopped at {_CLIENT_CENSUS_MAX_ROWS} rows"
+        elif archive_unreadable:
+            reason = "the archived ledger could not be listed"
+        elif oldest is not None:
+            reason = "the ledger starts there"
+    if failure_in_window and (reached_floor or oldest is None):
+        covered_since, reason = failed_at, "a call before then may have left no row"
+    if reason is None:
+        window = "in the last 24 hours"
+    elif covered_since is None:
+        window = f"in the last 24 hours (partial: {reason})"
+    else:
+        window = f"since {covered_since.strftime('%Y-%m-%d %H:%M')} UTC (partial: {reason})"
+    details_window = {
+        "window_hours": 24, "complete": reason is None,
+        "covered_since": None if covered_since is None else covered_since.isoformat(),
+    }
+    if not calls:
+        return _check(
+            "mcp_clients", "pass", f"No tool calls {window}.", details={"clients": [], **details_window}
+        )
+    clients = []
+    listed = []
+    for (client, revision), entry in sorted(calls.items(), key=lambda item: (-item[1]["calls"], item[0])):
+        capabilities = None if entry["capabilities"] is None else sorted(entry["capabilities"])
+        extensions = None if entry["extensions"] is None else sorted(entry["extensions"])
+        said = []
+        if capabilities is not None:
+            said.append(f"capabilities: {', '.join(capabilities)}" if capabilities else "no capabilities")
+        if extensions is not None:
+            named = [*extensions, *([f"+{entry['other']} other"] if entry["other"] else []),
+                     *([f"+{entry['cut']} cut"] if entry["cut"] else [])]
+            said.append(f"extensions: {', '.join(named)}" if named else "no extensions")
+        listed.append(f"{client} on {revision} ({'; '.join(said) or 'not recorded'})")
+        clients.append({
+            "client": client, "protocol_version": revision, "tool_calls": entry["calls"],
+            "client_capabilities": capabilities, "client_extensions": extensions,
+            "client_extensions_other": entry["other"] if extensions is not None else None,
+            "client_extensions_truncated": entry["cut"] if extensions is not None else None,
+        })
+    shown = listed[:_CLIENT_CENSUS_LISTED_PAIRS]
+    if len(listed) > len(shown):
+        shown.append(f"+{len(listed) - len(shown)} more")
+    total = sum(int(entry["calls"]) for entry in calls.values())
+    return _check(
+        "mcp_clients", "pass", f"{total} tool call(s) {window}: " + "; ".join(shown),
+        details={"clients": clients, "rows_read": read, **details_window},
+    )
+
+
 def _check_observability() -> DoctorCheck:
     """Log directory writability, active/rotated file sizes, JSONL
     tail-parseability, the NSSM `service.*` rotation pile, and
@@ -4368,6 +4526,7 @@ def _doctor_report(vault_root, vault_check, *, profile, probe, replica_urls):
     checks.extend(_check_edge_ingress(probe=probe))
     checks.append(_check_observability())
     checks.append(_check_latency())
+    checks.append(_check_mcp_clients())
     checks.append(_check_recall_canary())
     checks.append(_check_idempotency_store())
     checks.append(_check_managed_hook_refresh())

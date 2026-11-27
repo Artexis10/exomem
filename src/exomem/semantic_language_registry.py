@@ -1603,6 +1603,7 @@ def _parse_definitions(
             "traits": _traits(value.get("traits", []), span, findings),
         }
         if definition_type is KindDefinition:
+            common["traits"] = _without_shipped_only_traits(common["traits"], span, findings)
             common["heading_aliases"] = tuple(
                 normalize_label(item)
                 for item in _strings(
@@ -1858,6 +1859,31 @@ def _traits(raw: Any, span: str, findings: list[RegistryFinding]) -> frozenset[s
             )
         )
     return frozenset(names) - set(unknown)
+
+
+# Traits that only the shipped pack may give a kind. `dated_default` names the one kind a dated
+# observation takes when the caller names none; the shipped carrier is always admitted, so a vault
+# kind carrying it too would leave two carriers and refuse every dated save.
+# nosemgrep: ep-word-set -- a trait is a closed code-implemented set, not vocabulary
+_SHIPPED_ONLY_TRAITS = frozenset({"dated_default"})
+
+
+def _without_shipped_only_traits(
+    traits: frozenset[str], span: str, findings: list[RegistryFinding]
+) -> frozenset[str]:
+    """`traits` less the ones a vault may not declare, each reported as a warning so the vault
+    still loads."""
+    ignored = sorted(traits & _SHIPPED_ONLY_TRAITS)
+    if ignored:
+        findings.append(
+            _finding(
+                "trait_ignored",
+                f"{span}.traits",
+                f"{ignored} are set by the shipped kinds only and are ignored here",
+                severity="warning",
+            )
+        )
+    return traits - _SHIPPED_ONLY_TRAITS
 
 
 def _strings(value: Any, path: str, findings: list[RegistryFinding]) -> list[str]:

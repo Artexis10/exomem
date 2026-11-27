@@ -142,6 +142,7 @@ _KB_WRITES = (
     "manage_memory:episodes.prepare",
     "manage_memory:episodes.resume",
     "manage_memory:files.append",
+    "manage_memory:files.classify",
     "manage_memory:files.create",
     "manage_memory:files.delete",
     "manage_memory:files.move",
@@ -219,6 +220,14 @@ _PLACEMENT_SETTINGS = frozenset({"VAULT_PATH", "STATE_ROOT", "HOSTED_STATE_ROOT"
 def _is_placement(alias: str) -> bool:
     """Whether the conflicting EVERMATTER_ name sets a placement setting, which skips the turn."""
     return alias[len("EVERMATTER_") :] in _PLACEMENT_SETTINGS
+
+
+def _skips_turn(conflicts: list[str], *, home_decided: bool) -> bool:
+    """Whether a conflict skips the turn: a placement one does, unless a flag already decided the hook home."""
+    return any(
+        _is_placement(name) and not (home_decided and name == "EVERMATTER_HOOK_HOME")
+        for name in conflicts
+    )
 
 
 def _conflict_pairs(names: list[str]) -> str:
@@ -1371,7 +1380,7 @@ def main(argv: list[str] | None = None) -> int:
         if value is not None:
             os.environ[name] = value
     if conflicts:
-        placement = any(_is_placement(name) for name in conflicts)
+        placement = _skips_turn(conflicts, home_decided=args.hook_home is not None)
         _log_conflict(conflicts, skipped=placement)
         if placement:  # never guess where data lives: skip this turn's nudge
             return 0

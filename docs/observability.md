@@ -10,7 +10,7 @@ HTTP request, or a mutation.
 ## Files
 
 All under the resolved log directory (`logging_config.resolve_log_dir()`):
-`$EXOMEM_LOG_DIR` when set (the Docker image sets it to `/data/logs`), else
+`$EVERMATTER_LOG_DIR` when set (the Docker image sets it to `/data/logs`), else
 `<checkout>/logs` when running from a genuine source checkout, else a
 per-platform location for a packaged (wheel) install with no override:
 `%ProgramData%\exomem\logs` on Windows (machine-wide, since the service
@@ -36,12 +36,12 @@ directory independently.
 | `ledger.gap`             | Empty; its mtime marks the latest call whose row failed to append. |
 | `archive/exomem-*.log`   | Prior sessions' `exomem.log`, archived (not deleted) on restart.  |
 
-Each JSONL file rotates at a size cap (`EXOMEM_JSONL_MAX_MB`, default 64MB),
+Each JSONL file rotates at a size cap (`EVERMATTER_JSONL_MAX_MB`, default 64MB),
 keeping exactly one prior generation (`<file>.1`). `usage.py` and `exomem
 trace`/`exomem logs` read both the live file and that generation. `ledger.jsonl`
 rotates differently — see below.
 `exomem.log`/`exomem-cli.log`/`exomem-media.log` use Python's standard
-`RotatingFileHandler` (`EXOMEM_LOG_MAX_MB` default 5MB, `EXOMEM_LOG_BACKUPS`
+`RotatingFileHandler` (`EVERMATTER_LOG_MAX_MB` default 5MB, `EVERMATTER_LOG_BACKUPS`
 default 5).
 
 Windows cannot share a single `RotatingFileHandler` across processes, which is
@@ -217,7 +217,8 @@ it with `exomem logs verify`.
 `session_id`, `client_name`, `client_version`, `transport`,
 `caller_principal_hash`, `principal_kind`, `tool`, `arg_names`, `args`,
 `target_paths`, `outcome`, `error_code`, `duration_ms`, `total_ms`,
-`request_bytes`, `truncated`, `access`, `item_count`.
+`request_bytes`, `truncated`, `access`, `item_count`, and, when the request says,
+`protocol_version` and `client_extensions`.
 
 - **Latency, on every call — read, write, success, refusal.** `duration_ms` is
   the tool leaf, the number the prose trace and `exomem_tool_duration_ms` have
@@ -265,15 +266,37 @@ it with `exomem logs verify`.
   identity. A stateless request carries no handshake; there the name comes
   from `User-Agent`. On a cloud cell, the gateway's `x-exomem-oauth-client`
   header comes first, because the gateway forwards no `User-Agent`.
+- **`protocol_version` / `client_capabilities` / `client_extensions`** say which
+  MCP revision the call used, which capabilities the client set and which
+  extensions it declared. The SDK reads them from the initialize handshake, or
+  on 2026-07-28 from each request's own envelope. `client_capabilities` names
+  the set top-level capabilities (`roots`, `sampling`, `tasks` and so on) and
+  `elicitation.<mode>` for each declared mode (`elicitation: {}` counts as
+  `elicitation.form`). `client_extensions` is the sorted extension ids, official
+  ones first, at most 16 of 64 characters each; a longer list records the dropped
+  count in `client_extensions_truncated`. `[]` is a client that declares nothing.
+  The fields are absent when the request does not say (a stateless call on an
+  older revision keeps no handshake, and a server-side call has no client) and
+  on rows written before the census. Extension ids are client-chosen text, and
+  rows cannot be scrubbed once chained, so content-private logging keeps only the
+  ids that the installed MCP packages name and records the number of the rest as
+  `client_extensions_other`. It also keeps `protocol_version` only when it has
+  the shape of a date. Capability names are fields of the SDK's own model, so it
+  keeps them. `exomem doctor` reads the last 24 hours of these rows, from the
+  live ledger and its archive, and prints one line that names each client and
+  revision with its capabilities and extensions, counted per tool call. It says
+  "partial" and from when it counts when the history is shorter than a day, the
+  read hit its row bound, or a failed append left a call without a row. After a
+  failed append it counts only the calls later than that failure.
 - **`principal_kind`** says which kind of caller that is: `owner` (stdio, the
   CLI or the REST key), `owner-oauth` (a remote sign-in the host bound as the
-  owner with `EXOMEM_OWNER_OAUTH_SUBJECT`), `principal`, or `unresolved`. An
+  owner with `EVERMATTER_OWNER_OAUTH_SUBJECT`), `principal`, or `unresolved`. An
   `owner-oauth` row keeps the remote identity's `caller_principal_hash`, so an
   owner action taken from a remote connector stays traceable to that door.
 - **`args`** is `{name: {len, sha256}}` and **never a value**. Note bodies,
   query text, and credentials are reduced to a length and a hash by
   construction, not by a downstream filter — `privacy_log`'s process-wide
-  redactor is gated on `EXOMEM_HOSTED_CELL` and is off for local installs.
+  redactor is gated on `EVERMATTER_HOSTED_CELL` and is off for local installs.
   Identical arguments hash identically on purpose: that is what answers "is this
   client retrying the same call?".
 - **`target_paths`** records the page a call addresses, verbatim. A path is
@@ -314,7 +337,7 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `advisory.best_cosine` | The advisory's cosine sweep. On the encoding surface `texts`/`chars` say what was encoded. A note write's post-commit sweep adds `reused`: how many draft chunks took the vector its own commit had just published instead of being encoded again, so `texts=0 reused=N` is a sweep that encoded nothing. On every span `reused` counts only chunks whose vector came from the page's own published rows. `recalled`, disjoint from `reused`, counts draft chunks that took a vector a sweep had encoded moments before for text no row holds: an edit's sweep of the page's previous paragraphs. A sweep that recalled everything it did not reuse reads `texts=0` with `reused` plus `recalled` equal to its chunk count. `texts=0` with a `vectors` count and no `chars` is a surface that reuses published vectors and encodes nothing: the deferred write advisory, and the recall pack's proximity pass, which adds `pages` for how many packed pages had exact stored rows. |
 | `advisory.overlap_groups` | Grouping and emitting that sweep's candidates — a ref batch and a review-state read per candidate. |
 | `preflight.contract_eval`, `preflight.corpus_context`, `preflight.page_states`, `preflight.read_guarded`, `preflight.registries`, `preflight.relation_review`, `preflight.validity_token` | The write's preflight stages, from the per-stage collector (`MutationTimings`). |
-| `commit.boundary_acquire`, `commit.creation_lock`, `commit.embedding_prewarm`, `commit.locked_commit`, `commit.manifest`, `commit.resolver_prime`, `commit.revalidate`, `commit.stamp_check` | Its commit stages, from the same collector. These are emitted into every row regardless of `EXOMEM_WRITE_TIMINGS`; that flag governs only whether the *caller* is handed a timing envelope on its response. |
+| `commit.boundary_acquire`, `commit.creation_lock`, `commit.embedding_prewarm`, `commit.locked_commit`, `commit.manifest`, `commit.resolver_prime`, `commit.revalidate`, `commit.stamp_check` | Its commit stages, from the same collector. These are emitted into every row regardless of `EVERMATTER_WRITE_TIMINGS`; that flag governs only whether the *caller* is handed a timing envelope on its response. |
 | `writer.resolver_snapshot` | The wikilink resolver a writer prepares its draft with. One field names the route: `forked` from the warm resolver cache, `corpus_entries` from the current corpus context, or `disk`, a full read of the vault's titles. A caller that must not walk the vault, such as the due-state write delta, gets no resolver when both cheap routes decline and records `disk_declined` instead. A `changed_during_proof` decline means a write or an external edit landed during the proof; the writer then tries the corpus route once more, so one span can carry that decline together with `corpus_entries`, or with a second `declined_<reason>` and `disk` or `disk_declined`. When the corpus route declines, a `declined_<reason>` field says why: `external_pending`, `events_not_live`, `checkpoint_absent`, `freshness_differs`, `corpus_absent`, `checkpoint_differs`, `proof_failed`, `identity_changed`, `changed_during_proof` or `unkeyable`. |
 | `preflight.creation` | A page creation's preflight, before the commit. `structural_ms` is its structural evaluation and `relation_review_ms` its relation review when the page needs one, both in whole milliseconds; the commit reuses that relation review while its validity stamp stays current. |
 | `commit.source_closure`, `commit.relation_review_prepare`, `commit.catalog_prepare`, `commit.relation_review`, `commit.relation_review_attempt` | A page creation's commit stages, recorded directly. Before the guard: the source closure, the relation-review preparation and the model warm-up (`commit.embedding_prewarm`). Inside it: the catalog preparation and the relation-review commit. `commit.relation_review_attempt` is the commit's in-lock revalidation, with one field for its outcome: `reused`, `revalidated` or `unavailable`. `commit.relation_review_prepare` carries the same field for the preliminary attempt before the guard, which is offered the preflight's relation review: `reused` means the commit did not repeat it. |
@@ -387,6 +410,7 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `read.prepare.resolve_path` | Check the literal and shortcut paths, then resolve the canonical vault path. Exclusion checks follow this phase. |
 | `read.prepare.resolve_physical`, `read.prepare.inspect`, `read.prepare.held_read` | Resolve the physical spelling, inspect its identity, then acquire the held byte snapshot. These intervals include nested identity work. |
 | `reserved.identity.baseline_build`, `reserved.identity.baseline_wait` | Build the cold baseline catalogue, or wait on another caller's build. These spans carry no flight or holder identity. A background builder without a call token emits no request span. |
+| `reserved.identity.warm_wait` | A recall turn in a fresh process waits, up to its warm-up deadline, for the background build of the baseline catalogue. |
 
 Spans are aggregated by name within a call, so a phase entered once per changed
 path reports a count and a total rather than hundreds of rows. Instrumentation
@@ -490,8 +514,8 @@ These lines are not per-call: they carry `operation`, `holder_kind` and
 background thread, so a burst next to a slow write is not necessarily that
 write's. Two knobs, neither changed by default:
 
-- `EXOMEM_LOG_MAX_MB` (default `5`) and `EXOMEM_LOG_BACKUPS` (default `5`) size
-  the rotation. Raising `EXOMEM_LOG_MAX_MB` to `50` before reproducing a latency
+- `EVERMATTER_LOG_MAX_MB` (default `5`) and `EVERMATTER_LOG_BACKUPS` (default `5`) size
+  the rotation. Raising `EVERMATTER_LOG_MAX_MB` to `50` before reproducing a latency
   incident keeps the whole window in one file.
 - Setting the `exomem.mutation_lock` logger to `WARNING` drops the routine
   acquisitions while keeping the long-holder warnings, which is the right trade
@@ -541,8 +565,8 @@ which is exactly the visibility that makes the unsynced append safe.
 ### Rotation
 
 Unlike `queries.jsonl` and its siblings, the ledger keeps a bounded live file:
-past `EXOMEM_CALL_LEDGER_ROTATE_BYTES` (default 8MB) the oldest rows beyond
-`EXOMEM_CALL_LEDGER_KEEP_ROWS` (default 2000) move byte-exact into a
+past `EVERMATTER_CALL_LEDGER_ROTATE_BYTES` (default 8MB) the oldest rows beyond
+`EVERMATTER_CALL_LEDGER_KEEP_ROWS` (default 2000) move byte-exact into a
 content-addressed `ledger-archive/ledger-<hash>.jsonl`. `sequence` does not
 reset and the chain spans the boundary. Archive filenames are content-addressed,
 so they say nothing about age — every reader orders segments by the `sequence`
@@ -561,9 +585,9 @@ the rows carry. Archives are not pruned automatically.
 
 ### Configuration
 
-`EXOMEM_DISABLE_CALL_LEDGER=1` turns it off. `EXOMEM_CALL_LEDGER_DIR` moves it
-off the log directory. `EXOMEM_CALL_LEDGER_ROTATE_BYTES` and
-`EXOMEM_CALL_LEDGER_KEEP_ROWS` size the live file. Every ledger operation
+`EVERMATTER_DISABLE_CALL_LEDGER=1` turns it off. `EVERMATTER_CALL_LEDGER_DIR` moves it
+off the log directory. `EVERMATTER_CALL_LEDGER_ROTATE_BYTES` and
+`EVERMATTER_CALL_LEDGER_KEEP_ROWS` size the live file. Every ledger operation
 soft-fails: a failure to build, hash, append, or rotate a row never raises into
 the call path and never changes a call's result.
 
@@ -572,7 +596,7 @@ the call path and never changes a call's result.
 `src/exomem/metrics.py` is one process-wide registry (counters + fixed-bucket
 histograms) exposed at `GET /metrics.json` (beside `/health/ready`,
 unauthenticated, `Cache-Control: no-store`). It persists to the writer-lease
-state directory every `EXOMEM_METRICS_SNAPSHOT_SECONDS` (default 60; `0`
+state directory every `EVERMATTER_METRICS_SNAPSHOT_SECONDS` (default 60; `0`
 disables the snapshotter thread) so counts survive a restart. Key metrics:
 
 - `exomem_tool_calls_total{tool,outcome}`, `exomem_tool_failures_total{tool,code}`,
@@ -600,7 +624,7 @@ disables the snapshotter thread) so counts survive a restart. Key metrics:
   writer-lease coordination. An `acquire` with outcome `reused` is a collection-store
   write nested in an operation that kept the operation's grant instead of
   asking the coordinator again. A non-preferred replica also voluntarily releases
-  an idle lease after `EXOMEM_WRITER_LEASE_IDLE_SECONDS` (default tracks the
+  an idle lease after `EVERMATTER_WRITER_LEASE_IDLE_SECONDS` (default tracks the
   TTL: `max(60, TTL)`; `0` disables; preferred replicas never idle-release). Under
   the single-host topology the default is `0`, because no other replica can take
   the lease; an explicit value still applies.
@@ -611,7 +635,7 @@ disables the snapshotter thread) so counts survive a restart. Key metrics:
 - `exomem_log_write_errors_total{where}` — a logging/journal write that failed
   (itself never fatal).
 
-`EXOMEM_DISABLE_METRICS=1` turns the registry off entirely (`/metrics.json`
+`EVERMATTER_DISABLE_METRICS=1` turns the registry off entirely (`/metrics.json`
 returns 404; counters stop accumulating).
 
 ## Tracing a request
@@ -681,6 +705,25 @@ neither a ceiling nor a release.
 
 ## Recall availability
 
+### Why recall still answers `index_warming`
+
+An `index_warming` answer from `activate_context` carries `abstention.diagnostics`, set by the check that decided warming.
+The agent repeats only `abstention.reason`; the diagnostics are for the operator.
+
+- `waiting_on` names the warm-up the turn waited on:
+  - `recall_seed` is the boot-time seed of the recall registry.
+  - `identity_inventory` is the in-memory walk of private identities.
+  - `activation_index` is the activation index build. Its slot is shared with the context catalogue fold.
+  - `context_catalogue` is the context catalogue fold, which a maps turn needs. It is also the cause when the catalogue lags by work a restricted caller cannot be told about, or moved while a profile was built.
+  - `context_lane` is a profile lane that failed, so the turn answers warming instead of serving the omission.
+  - `recall_registry` is a refusal by the recall registry. `site` names the gate that refused.
+- `build` is that warm-up's state in this process:
+  - `state`: `building`, `failed`, `not_started` or `ready`.
+  - `seconds` is how long a running build has run. `job` names the work in a shared slot.
+  - `last_failure` holds the exception class, `seconds_ago` and `failures`, the consecutive failures since the last success. It never holds the message, because a message can name a private path.
+
+A warm-up that fails on every retry shows `failures` growing. A hung build shows `building` with `seconds` growing.
+
 The packaged MCP canary checks private cases through `search_memory`,
 `recall_context` and `read_page`.
 On a schema mismatch, the attempt can retain `schema_failure` with the validator
@@ -710,8 +753,8 @@ service or change runtime state.
 ## Environment variables
 
 See the "Observability" block in `env.example` for the full list
-(`EXOMEM_LOG_DIR`, `EXOMEM_LOG_LEVEL`, `EXOMEM_LOG_MAX_MB`,
-`EXOMEM_LOG_BACKUPS`, `EXOMEM_JSONL_MAX_MB`, `EXOMEM_METRICS_SNAPSHOT_SECONDS`,
-`EXOMEM_DISABLE_ACCESS_LOG`, `EXOMEM_DISABLE_METRICS`,
-`EXOMEM_DISABLE_CALL_LEDGER`, `EXOMEM_CALL_LEDGER_DIR`,
-`EXOMEM_CALL_LEDGER_ROTATE_BYTES`, `EXOMEM_CALL_LEDGER_KEEP_ROWS`).
+(`EVERMATTER_LOG_DIR`, `EVERMATTER_LOG_LEVEL`, `EVERMATTER_LOG_MAX_MB`,
+`EVERMATTER_LOG_BACKUPS`, `EVERMATTER_JSONL_MAX_MB`, `EVERMATTER_METRICS_SNAPSHOT_SECONDS`,
+`EVERMATTER_DISABLE_ACCESS_LOG`, `EVERMATTER_DISABLE_METRICS`,
+`EVERMATTER_DISABLE_CALL_LEDGER`, `EVERMATTER_CALL_LEDGER_DIR`,
+`EVERMATTER_CALL_LEDGER_ROTATE_BYTES`, `EVERMATTER_CALL_LEDGER_KEEP_ROWS`).

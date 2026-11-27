@@ -267,6 +267,30 @@ def settle(reading: Reading, photo_filing: Callable[[str], str]) -> tuple[dict[s
     return codes, counts
 
 
+def open_pass(root: Path, record: Record, *, listing: list[tuple[str, int]], skip: Callable[[str], bool]) -> bool:
+    """Open the stage's pass, reading no file, when it holds a JSON file that the pass may read; True when it opened one.
+
+    A scan that runs before the pass's first read then already holds the photos and every unexamined JSON file, so no
+    sidecar files as a Source. A stage with no such file keeps no pass, as `advance` leaves it.
+    """
+    if record.sidecars is not None or not _candidates(listing, "", skip, photo_formats(root)):
+        return False
+    record.sidecars = new_entry(None)
+    record.save(root)
+    return True
+
+
+def _candidates(
+    listing: list[tuple[str, int]], cursor: str, skip: Callable[[str], bool], known: tuple[source_formats.SourceFormat, ...],
+) -> list[str]:
+    """The staged paths after `cursor` that the pass reads: a name that a sidecar format may have, within the size bound."""
+    return [
+        path for path, size in listing
+        if path > cursor and size <= export_photos.MAX_BYTES and not skip(path)
+        and any(fmt.names(PurePosixPath(path).name) for fmt in known)
+    ]
+
+
 def advance(
     root: Path, record: Record, *, listing: list[tuple[str, int]], skip: Callable[[str], bool], keep_going: Callable[[], bool],
 ) -> bool:
@@ -281,11 +305,7 @@ def advance(
     if entry is not None and entry["state"] != WORKING:
         return True
     cursor = entry["cursor"] if entry is not None else ""
-    candidates = [
-        path for path, size in listing
-        if path > cursor and size <= export_photos.MAX_BYTES and not skip(path)
-        and any(fmt.names(PurePosixPath(path).name) for fmt in known)
-    ]
+    candidates = _candidates(listing, cursor, skip, known)
     if entry is None and not candidates:
         return True  # a stage with no JSON file to read has no pass, and so no record
     base = root / import_stage.STAGE_DIR / record.import_id

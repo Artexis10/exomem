@@ -422,6 +422,31 @@ tag. It publishes missing enabled artifacts. Python qualification runs after
 whole workflow conclusion. A skipped PyPI job can qualify when complete matching
 distributions were already present.
 
+The `release-notes` job publishes each release's user notes. Nothing waits for it: when it fails, the
+job and the workflow run are red and no package, image or rollout stops. A red run counts toward the
+plan's failed hand-off runs for its tag only when it is a dispatch run on that tag, which a push starts
+only when the tag misses another artifact. Every real run gives its notes to each release published since
+the start of the previous UTC month that has no `release-notes.json`: it reads the release list 100 a page
+until a page holds only releases published before that start (the list is in version order, not in publish
+order), and builds only the releases that lack the file. One run handles at most 40 releases, to keep the
+repository's shared GitHub token budget: the release a dispatch names first, then the oldest first. It says
+how many wait, and the next run takes them. A `workflow_dispatch` run also takes its `tag` input, whatever
+its age, which heals one named older release; the run says why when it leaves that release alone. For each
+release the job reads the notes from the release tag's tree and writes the file with the code of the run
+that heals it: a run on main has main's code and a run on the release tag has that tag's code, so a healed
+file has the schema of that run's code, not always the newest. The file holds only that release's entry from
+`scripts/user_notes.py generate`, in the notes file format of `src/exomem/release_notes_format.py`, and an
+empty `releases` list when the release has no notes. A missing file therefore means the notes are missing,
+never that there are none. The job writes a "What's new" section at the top of the release page before it
+uploads the file, so a release that has the file has its page. A marker comment makes the write happen
+whenever the marker is absent. The upload is `release_recovery.py upload-file`, which adds the file when it
+is missing and refuses to replace a published file with other bytes; that refusal fails this job and stops no other. A
+run writes to GitHub only when the plan's `notes_publish` output is true: the run is not a dry run and
+runs on main or on the release tag. A dispatch from any other ref builds the notes of its own tag and
+writes nothing, as a dry run does, so code that no review has passed uploads no file. Runs that write
+nothing and runs that write use separate concurrency groups. `released_on` is the date of the release tag; a consumer places a release in a month by
+its GitHub publish time.
+
 The `python-qualification-RUN-ATTEMPT` artifact and job summary identify the tag,
 source, exact producer artifact, wheel and sdist hashes, and qualification time.
 The build job records its original attempt as an output. Qualification keeps

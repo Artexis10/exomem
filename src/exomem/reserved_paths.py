@@ -30,7 +30,7 @@ from typing import IO, TYPE_CHECKING
 
 from rpds import HashTrieMap, HashTrieSet
 
-from . import call_spans, foreground_priority, held_fs, request_budget
+from . import build_record, call_spans, foreground_priority, held_fs, request_budget
 from .cli_ops import OpError
 from .kbdir import managed_join, managed_root_rel, managed_split_parts
 
@@ -322,6 +322,12 @@ class ReservedPathLeafError(Exception):
 
     def __str__(self) -> str:
         return self.code
+
+
+#: The codes of a walk or read whose entry was replaced, moved or removed while it was read: a change, not a refusal.
+CHANGE_CODES = frozenset({"IDENTITY_CHANGED", "MISSING"})
+#: How many times a walk that takes changes lists one folder before a listing that keeps changing ends the walk.
+_LISTING_ATTEMPTS = 3
 
 
 class SqliteIdentityBusyError(RuntimeError):
@@ -2706,6 +2712,7 @@ def _list_candidate_records(
     descend: Callable[[str], bool] | None = None,
     checkpoint: request_budget.ReadCheckpoint | None = None,
     leave_out: Callable[[str], bool] | None = None,
+    entry_changed: Callable[[str, str], None] | None = None,
 ) -> tuple[held_fs.SagaRecord, ...]:
     """Walk safe ordinary children without following or exposing aliases.
 
@@ -2713,9 +2720,23 @@ def _list_candidate_records(
     walk enters it. A folder it refuses is still listed as a child of its parent; nothing below it is.
     `leave_out` receives each entry's path, relative to the walked folder, before the walk takes the
     entry's identity: an entry it names is never stat'ed or opened. A complete census omits it.
+    `entry_changed` keeps a complete census's refusal of every omission, such as an alias, and takes a
+    change instead of refusing it: a name that came or went while the folder was listed, a listing that a
+    save interrupted, and a file with a second name. It receives each changed entry's path, relative to the
+    walked folder, and its kind ("file" or "directory"), so its caller reads a file again and accounts for a
+    folder that left; a file that keeps its second name is refused there.
     """
 
+    tolerate_change = entry_changed is not None
     records: list[held_fs.SagaRecord] = []
+
+    def list_children(directory: held_fs.HeldDirectory, name_filter: Callable[[str], bool]):
+        """The folder's children; a walk that takes changes lists again when a save interrupts the listing."""
+        for _attempt in range(_LISTING_ATTEMPTS if tolerate_change else 1):
+            listed = filesystem.children(directory, name_filter=name_filter)
+            if listed.ok or listed.error is None or listed.error.code not in CHANGE_CODES:
+                break
+        return listed
 
     def walk(directory: held_fs.HeldDirectory, prefix: str) -> None:
         if checkpoint is not None:
@@ -2739,15 +2760,27 @@ def _list_candidate_records(
         names = None
         if require_complete:
             names = {name for name in filesystem.iter_names(directory) if admit_name(name)}
-        children = (filesystem.children(directory, name_filter=admit_name)
+        children = (list_children(directory, admit_name)
                     if require_complete or checkpoint is not None or leave_out is not None
                     else filesystem.children(directory))
         if not children.ok:
             code = children.error.code if children.error is not None else "IO_REFUSED"
             raise ReservedPathLeafError(code)
         observed = children.require()
-        if names is not None and names != {record.relative_path for record in observed}:
-            raise ReservedPathLeafError("UNSAFE_PATH")
+        listed = {record.relative_path for record in observed}
+        if names is not None and names != listed:
+            if not tolerate_change:
+                raise ReservedPathLeafError("UNSAFE_PATH")
+            # A name the folder still lists but the walk cannot open is an alias; one that came or went is a change.
+            missing = names - listed
+            again = list_children(directory, lambda name: name in missing and admit_name(name))
+            if not again.ok:
+                raise ReservedPathLeafError(again.error.code if again.error is not None else "IO_REFUSED")
+            found = again.require()
+            opened = {record.relative_path for record in found}
+            if any(name in missing and name not in opened for name in filesystem.iter_names(directory)):
+                raise ReservedPathLeafError("UNSAFE_PATH")
+            observed = sorted((*observed, *found), key=lambda record: record.relative_path)
         for record in observed:
             if checkpoint is not None:
                 checkpoint()
@@ -2756,7 +2789,6 @@ def _list_candidate_records(
                 if prefix
                 else record.relative_path
             )
-            records.append(held_fs.SagaRecord(relative, record.identity))
             child = (
                 relative
                 if source_relative == "."
@@ -2764,10 +2796,13 @@ def _list_candidate_records(
             )
             classification = classify_logical(child)
             descriptor_id = identities.descriptor_for(record.identity) if identities else None
-            if require_complete and (
-                classification.disposition is PathDisposition.INVALID
-                or (descriptor_id is None and record.identity.kind == "file" and record.identity.link_count != 1)
-            ):
+            linked = descriptor_id is None and record.identity.kind == "file" and record.identity.link_count != 1
+            if require_complete and tolerate_change and linked and classification.disposition is not PathDisposition.INVALID:
+                # A save links its new file to the page's name before it drops the staged name; the caller reads it again.
+                entry_changed(relative, "file")
+                continue
+            records.append(held_fs.SagaRecord(relative, record.identity))
+            if require_complete and (classification.disposition is PathDisposition.INVALID or linked):
                 raise ReservedPathLeafError("UNSAFE_PATH")
             blocked = (
                 classification.blocked
@@ -2782,13 +2817,19 @@ def _list_candidate_records(
             retained = filesystem.parent(child)
             if not retained.ok:
                 code = retained.error.code if retained.error is not None else "IO_REFUSED"
+                if tolerate_change and code == "MISSING":
+                    entry_changed(relative, "directory")  # the folder left since the listing, perhaps under another name
+                    continue
                 raise ReservedPathLeafError(code)
             with retained.require() as child_directory:
                 if child_directory.identity != record.identity:
                     raise ReservedPathLeafError("IDENTITY_CHANGED")
                 _require_current_generic_directory(filesystem, child_directory)
                 walk(child_directory, relative)
-        if names is not None and names != {name for name in filesystem.iter_names(directory) if admit_name(name)}:
+        if (
+            names is not None and not tolerate_change
+            and names != {name for name in filesystem.iter_names(directory) if admit_name(name)}
+        ):
             raise ReservedPathLeafError("IDENTITY_CHANGED")
         _require_current_generic_directory(filesystem, directory)
 
@@ -2976,6 +3017,7 @@ def open_generic_tree(
     descend: Callable[[str], bool] | None = None,
     markdown_header_limit: int | None = None,
     markdown_header_failed: Callable[[str, Exception], None] | None = None,
+    entry_changed: Callable[[str, str], None] | None = None,
     checkpoint: request_budget.ReadCheckpoint | None = None,
     leave_out: Callable[[str], bool] | None = None,
 ):
@@ -2989,6 +3031,14 @@ def open_generic_tree(
     A Markdown header that cannot be read, decoded or prepared within its own budget ends the walk,
     unless the caller passes `markdown_header_failed`: then the walk reports that entry's relative
     path and error to it, yields no entry for it and goes on. The completeness check still covers it.
+
+    A file that is replaced, removed or edited while the walk holds it also ends the walk, unless the
+    caller passes `entry_changed`: then the walk reports that entry's relative path and kind ("file" or
+    "directory") to it and goes on.
+    It yields no entry for a file that changed before its yield, and reports one that changed while the
+    caller held it when the caller asks for the next entry. A census (`require_complete`) that passes it
+    still refuses every omission, such as a linked file or folder, and takes only change: a name that
+    came or went between listings, and an entry replaced, removed or edited. It skips the final re-list.
     """
     with (request_budget.checking(checkpoint) if checkpoint is not None else nullcontext()), \
             _generic_identity_catalogue_scope(vault_root, value, identities=identities) as current:
@@ -2996,7 +3046,7 @@ def open_generic_tree(
             vault_root, value, recursive=recursive, identities=current,
             select=select, require_complete=require_complete, descend=descend,
             markdown_header_limit=markdown_header_limit, markdown_header_failed=markdown_header_failed,
-            checkpoint=checkpoint, leave_out=leave_out,
+            entry_changed=entry_changed, checkpoint=checkpoint, leave_out=leave_out,
         )
         try:
             yield entries
@@ -3050,6 +3100,7 @@ def _iter_generic_tree_held(
     descend: Callable[[str], bool] | None = None,
     markdown_header_limit: int | None = None,
     markdown_header_failed: Callable[[str, Exception], None] | None = None,
+    entry_changed: Callable[[str, str], None] | None = None,
     checkpoint: request_budget.ReadCheckpoint | None = None,
     leave_out: Callable[[str], bool] | None = None,
 ) -> Iterator[GenericTreeEntry]:
@@ -3077,6 +3128,7 @@ def _iter_generic_tree_held(
                     identities=identities,
                     require_complete=require_complete,
                     recursive=recursive, descend=descend, checkpoint=checkpoint, leave_out=leave_out,
+                    entry_changed=entry_changed,
                 )
             else:
                 enumerated = filesystem.children(
@@ -3157,23 +3209,26 @@ def _iter_generic_tree_held(
 
                 parent_result = filesystem.parent(parent_path)
                 if not parent_result.ok:
-                    raise ReservedPathLeafError(
-                        parent_result.error.code
-                        if parent_result.error is not None
-                        else "IO_REFUSED"
-                    )
+                    code = parent_result.error.code if parent_result.error is not None else "IO_REFUSED"
+                    if entry_changed is not None and code == "MISSING":
+                        entry_changed(record.relative_path, "file")  # its folder left since the listing
+                        continue
+                    raise ReservedPathLeafError(code)
                 with parent_result.require() as parent:
                     file_result = filesystem.file(parent, leaf)
                     if not file_result.ok:
-                        raise ReservedPathLeafError(
-                            file_result.error.code
-                            if file_result.error is not None
-                            else "IO_REFUSED"
-                        )
+                        code = file_result.error.code if file_result.error is not None else "IO_REFUSED"
+                        if entry_changed is not None and code == "MISSING":
+                            entry_changed(record.relative_path, "file")  # removed since the listing
+                            continue
+                        raise ReservedPathLeafError(code)
                     with file_result.require() as file:
                         _require_current_generic_directory(filesystem, parent)
                         if file.identity != record.identity:
-                            raise ReservedPathLeafError("IDENTITY_CHANGED")
+                            if entry_changed is None:
+                                raise ReservedPathLeafError("IDENTITY_CHANGED")
+                            entry_changed(record.relative_path, "file")  # replaced since the listing
+                            continue
                         descriptor = getattr(file, "descriptor", None)
                         if not isinstance(descriptor, int):
                             raise ReservedPathLeafError("IO_REFUSED")
@@ -3188,6 +3243,20 @@ def _iter_generic_tree_held(
                             with filesystem.file(parent, leaf).require() as current:
                                 if current.version() != version:
                                     raise ReservedPathLeafError("IDENTITY_CHANGED")
+
+                        def unchanged(*, relative=record.relative_path) -> bool:
+                            """Whether the file is still the version read; a change ends the walk unless `entry_changed` takes it."""
+                            if entry_changed is None:
+                                require_current()
+                                return True
+                            try:
+                                require_current()
+                            except (ReservedPathLeafError, held_fs.HeldFsError) as error:
+                                if error.code not in CHANGE_CODES:
+                                    raise
+                                entry_changed(relative, "file")
+                                return False
+                            return True
 
                         try:
                             info = os.fstat(descriptor)
@@ -3215,15 +3284,17 @@ def _iter_generic_tree_held(
                                 except (ValueError, runtime_resources.PreparationBudgetExceeded) as error:
                                     if markdown_header_failed is None:
                                         raise
-                                    require_current()  # A header that changed while it was read is the walk's failure.
-                                    markdown_header_failed(record.relative_path, error)
+                                    # A header that changed while it was read is a change, never the file's own failure.
+                                    if unchanged():
+                                        markdown_header_failed(record.relative_path, error)
                                     continue
-                                require_current()
+                                if not unchanged():
+                                    continue
                                 yield GenericTreeEntry(
                                     record.relative_path, "file", record.identity, info.st_size,
                                     info.st_mtime, markdown,
                                 )
-                                require_current()
+                                unchanged()
                                 del text, frontmatter, markdown
                             continue
                         if leaf.casefold().endswith(".md"):
@@ -3235,7 +3306,8 @@ def _iter_generic_tree_held(
                                     else "IO_REFUSED"
                                 )
                             markdown = read_result.require()
-                        require_current()
+                        if not unchanged():
+                            continue
                         yield GenericTreeEntry(
                             record.relative_path,
                             "file",
@@ -3244,8 +3316,9 @@ def _iter_generic_tree_held(
                             info.st_mtime,
                             markdown,
                         )
-                        require_current()
-            if require_complete:
+                        unchanged()
+            # A walk that takes changes has reported each one; a re-list would refuse what it already took.
+            if require_complete and entry_changed is None:
                 current_records = _list_candidate_records(
                     filesystem, source_directory, relative, identities=identities,
                     require_complete=True, recursive=recursive, descend=descend, checkpoint=checkpoint,
@@ -3605,6 +3678,8 @@ class _BaselineFlight:
 
 
 _BASELINE_IDENTITY_FLIGHTS: dict[str, _BaselineFlight] = {}
+#: When the running build started and how the last ones failed, for a warming diagnostic.
+_IDENTITY_BUILDS = build_record.BuildRecord()
 
 #: How long a follower may wait on the one build already running.  Deliberately
 #: NOT the mutation-gate budget: a follower waits on an in-process Event, which
@@ -3689,6 +3764,53 @@ def identity_catalogue_ready(vault_root: Path) -> bool:
     """Whether a private-identity inventory is available without building one."""
 
     return _warm_baseline_identity_catalogue(vault_root) is not None
+
+
+def identity_catalogue_warm_state(vault_root: Path) -> dict[str, object]:
+    """The inventory build's state for a warming diagnostic (`build_record.BuildRecord.state`)."""
+
+    return _IDENTITY_BUILDS.state(_vault_identity_key(vault_root), ready=identity_catalogue_ready(vault_root))
+
+
+#: How often a reader looks for the background build before that build has registered its flight.
+_WARM_FLIGHT_POLL_SECONDS = 0.05
+
+
+@call_spans.timed("reserved.identity.warm_wait")
+def await_identity_catalogue_warm(vault_root: Path, timeout: float) -> bool:
+    """Wait at most ``timeout`` seconds for the background inventory build; True once one is ready.
+
+    A fresh process has no inventory until its first warm finishes, which takes seconds on a small
+    vault. Waiting that long lets the first turn get its context instead of a warming outcome. The
+    reader only waits on the build already scheduled: it never starts or leads one. For a reader that
+    holds no boundary.
+    """
+
+    if _identity_coordination_active(vault_root):
+        # The build needs the identity coordination this caller holds: waiting would only run out the clock.
+        return identity_catalogue_ready(vault_root)
+    vault_key = _vault_identity_key(vault_root)
+    deadline = time.monotonic() + max(0.0, timeout)
+    # The build registers its flight on its own thread, so it can be absent for a moment after scheduling.
+    followed = False
+    # The caller is a read holding no boundary, so it leaves the in-flight count rather than releasing
+    # every bulk pass: other requests keep their priority while it waits.
+    with foreground_priority.outside_foreground():
+        while not identity_catalogue_ready(vault_root):
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return False
+            with _PUBLISHED_IDENTITY_LOCK:
+                flight = _BASELINE_IDENTITY_FLIGHTS.get(vault_key)
+            if flight is not None:
+                followed = True
+                flight.done.wait(left)
+            elif followed:
+                # The build ended without an inventory (it failed or was stopped): nothing more is coming.
+                return False
+            else:
+                time.sleep(min(_WARM_FLIGHT_POLL_SECONDS, left))
+    return True
 
 
 def revalidate_identity_catalogue_generation(vault_root: Path) -> bool:
@@ -3897,9 +4019,14 @@ def _baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
         # This task already holds identity coordination, so it cannot wait on
         # another task's build: the leader needs the same boundary to prove its
         # snapshot.  Build inline under the boundary already held instead.
-        return _install_baseline_identity_catalogue(
-            vault_key, _build_baseline_identity_catalogue(vault_root)
-        )
+        try:
+            built = _build_baseline_identity_catalogue(vault_root)
+        except BaseException as error:
+            if not isinstance(error, foreground_priority.BulkCancelled):
+                _IDENTITY_BUILDS.failed(vault_key, error)
+            raise
+        _IDENTITY_BUILDS.succeeded(vault_key)
+        return _install_baseline_identity_catalogue(vault_key, built)
 
     # A follower's budget is one deadline across its waits, set when it first follows. When the leader's
     # own stop ended the build, a follower with no request budget (a background caller) claims the
@@ -3925,6 +4052,7 @@ def _baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
                         raise ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
                     leading = True
                     _BASELINE_IDENTITY_FLIGHTS[vault_key] = flight
+                    _IDENTITY_BUILDS.started(vault_key)
                 else:
                     flight = running
 
@@ -3940,14 +4068,17 @@ def _baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
             flight.catalogue = _install_baseline_identity_catalogue(
                 vault_key, _build_baseline_identity_catalogue(vault_root)
             )
+            _IDENTITY_BUILDS.succeeded(vault_key)
         except BaseException as error:
             # A leader's stop is its own: it is a BaseException that a follower's caller may not
             # handle, and it says nothing about the inventory. Followers build it themselves.
             if leading:
                 if isinstance(error, foreground_priority.BulkCancelled):
                     flight.cancelled = True
+                    _IDENTITY_BUILDS.ended(vault_key)
                 else:
                     flight.error = error
+                    _IDENTITY_BUILDS.failed(vault_key, error)
             raise
         finally:
             if leading:

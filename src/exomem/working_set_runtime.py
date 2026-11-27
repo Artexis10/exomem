@@ -61,6 +61,7 @@ from typing import Any, NamedTuple, NoReturn
 
 from . import (
     activation_conventions,
+    build_record,
     context_roles,
     freshness,
     lifecycle_statuses,
@@ -270,9 +271,37 @@ CONTINUITY_THREAD_MAX_NS = 7 * 24 * 3600 * 1_000_000_000
 
 READY = "ready"
 
+#: The longest a recall waits for a fresh process's in-memory warm-up (the identity inventory, the
+#: recall seed) before it answers warming. A small vault warms within it; a mature one keeps warming in
+#: the background and the turn abstains as before.
+FIRST_TURN_WARM_WAIT_SECONDS = 10.0
+
+
+def first_turn_warm_wait_seconds() -> float:
+    """How long this recall may wait for the warm-up, all waits together.
+
+    None without a request budget: the boot warm, background passes and the CLI never wait. With one,
+    the cap, at most a quarter of the budget, so a short door budget keeps most of its time, and at
+    most half of what remains, so the recall the wait makes possible still has time to run.
+    """
+    from . import request_budget
+
+    budget = request_budget.current()
+    if budget is None:
+        return 0.0
+    return max(0.0, min(FIRST_TURN_WARM_WAIT_SECONDS, budget.seconds / 4, budget.remaining() / 2))
+
+
+def background_build_state(vault_root: Path) -> dict[str, object]:
+    """The state of the build in a vault's background slot, for a warming diagnostic."""
+    return _BUILD_RECORD.state(Path(vault_root).absolute(), ready=False)
+
+
 _CACHE_LOCK = threading.Lock()
 _PACKET_CACHE: OrderedDict[tuple, tuple[dict[str, Any], tuple[str, str]]] = OrderedDict()
 _BUILDS: dict[Path, threading.Thread] = {}
+#: When the build in a vault's slot started, which job it runs, and how the last ones failed.
+_BUILD_RECORD = build_record.BuildRecord()
 _BUILD_SHUTDOWNS: dict[Path, threading.Event] = {}
 #: One inline-build lock per vault root. The managed path single-flights through
 #: `_BUILDS` and a background thread; the unmanaged path has no thread to join,
@@ -1091,8 +1120,12 @@ def ensure_index(
     recall_checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
     visible: Callable[[str], bool] | None = None,
     registry_visible: bool = True,
+    warm_wait: Callable[[], float] | None = None,
 ) -> tuple[str, working_set_index.WorkingSetIndex | None, bool]:
     """Return a usable, current index — or say why there is not one yet.
+
+    `warm_wait` gives the seconds a cold process may wait for its identity inventory before it
+    answers warming. Only the recall turn passes one; it is called only when the inventory is cold.
 
     The third element is `index_stale`: True when the catalogue is behind the
     request's freshness key and this runtime could not bring it forward inside
@@ -1121,15 +1154,21 @@ def ensure_index(
         if not reserved_paths.identity_catalogue_ready(root):
             # A cold private-identity inventory is built by a whole-vault walk
             # under the all-domain identity gate, and every governed read below
-            # needs it. An interactive turn abstains and the walk runs in the
-            # background.
+            # needs it. The walk runs in the background. A caller that passes
+            # `warm_wait` (the recall turn) waits that long for it, since a small
+            # vault warms in seconds; every other caller abstains at once.
             reserved_paths.schedule_identity_catalogue_warm(root)
-            return WARMING, None, False
+            if warm_wait is None or not reserved_paths.await_identity_catalogue_warm(root, warm_wait()):
+                build_record.note_warming(
+                    build_record.WAITING_ON_IDENTITY_INVENTORY, reserved_paths.identity_catalogue_warm_state(root)
+                )
+                return WARMING, None, False
     if not index.readable():
         return UNAVAILABLE, None, False
     if not index.anchors():
         if _managed():
             _schedule_build(root, freshness_stamp=freshness_stamp)
+            build_record.note_warming(build_record.WAITING_ON_ACTIVATION_INDEX, background_build_state(root))
             return WARMING, None, False
         with _inline_lock(root.absolute()):
             # Re-check under the lock: the thread that held it may have built the
@@ -2682,10 +2721,15 @@ def _schedule_build(
                     _warm_index(root, freshness_stamp, stop)
                 else:
                     job()
+            _BUILD_RECORD.succeeded(root, job=label)
         except foreground_priority.BulkCancelled:
-            pass
-        except Exception:  # noqa: BLE001 - the optional stage stays soft-failing
+            _BUILD_RECORD.ended(root)
+        except Exception as error:  # noqa: BLE001 - the optional stage stays soft-failing
+            _BUILD_RECORD.failed(root, error, job=label)
             log.warning("%s background build failed", label, exc_info=True)
+        except BaseException:
+            _BUILD_RECORD.ended(root)
+            raise
         finally:
             with _CACHE_LOCK:
                 _BUILDS.pop(root, None)
@@ -2697,9 +2741,12 @@ def _schedule_build(
         if (stop is not None and stop.is_set()) or root in _BUILDS:
             return
         _BUILDS[root] = thread
+        # Recorded when the slot is taken, so a reader never sees a scheduled build as not started.
+        _BUILD_RECORD.started(root, job=label)
         try:
             thread.start()
-        except Exception:  # noqa: BLE001 - a thread-start failure cannot fail a read
+        except Exception as error:  # noqa: BLE001 - a thread-start failure cannot fail a read
+            _BUILD_RECORD.failed(root, error, job=label)
             _BUILDS.pop(root, None)
             log.warning("%s background build could not start", label, exc_info=True)
 

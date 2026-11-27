@@ -526,13 +526,15 @@ def instructions() -> dict:
 
 
 def sources(vault: Path) -> dict:
-    """Every Source page, and every other page that cites Sources, as the arm's own code reads them.
+    """Every Source page, every Evidence page, and every other page that cites Sources, as the arm's
+    own code reads them.
 
     A Source row carries its frontmatter, the SHA-256 of the original it stores (None when it stores no
     original), whether a correction receipt exists for it (None when the arm cannot say), and its
     ``ingested_into`` as page keys. A citing page carries its ``sources`` as page keys and whether its
     status is live (None when the arm's status registry cannot classify it). Page keys are the arm's own
-    link resolution: a wikilink and the page it names have the same key.
+    link resolution: a wikilink and the page it names have the same key. An Evidence row carries its
+    frontmatter and the SHA-256 of the original beside it (None when there is none).
     """
     from exomem import lifecycle_statuses, media_store, reserved_paths, source_corrections
     from exomem.vault import (
@@ -566,10 +568,20 @@ def sources(vault: Path) -> dict:
             return None
 
     basis, sources_dir = lifecycle_statuses.Basis(vault), kb_root(vault) / "Sources"
-    source_rows, citing_rows = [], []
+    evidence_dir = kb_root(vault) / "Evidence"
+    source_rows, citing_rows, evidence_rows = [], [], []
     for page in walk_vault_md(vault):
         relative = page.relative_to(vault).as_posix()
         frontmatter, _, _ = parse_frontmatter(page.read_text(encoding="utf-8"))
+        if evidence_dir in page.parents and page.name != "index.md":
+            # An Evidence page describes the original beside it, named without the `.md`.
+            evidence_rows.append(
+                {
+                    "path": relative,
+                    "frontmatter": frontmatter,
+                    "original_sha256": original_digest(relative.removesuffix(".md")),
+                }
+            )
         if sources_dir in page.parents:
             if page.name == "index.md":
                 continue
@@ -605,7 +617,7 @@ def sources(vault: Path) -> dict:
                     "sources": keys(frontmatter["sources"]),
                 }
             )
-    return {"sources": source_rows, "citing": citing_rows}
+    return {"sources": source_rows, "citing": citing_rows, "evidence": evidence_rows}
 
 
 def mint(session: dict) -> dict:

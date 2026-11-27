@@ -41,6 +41,7 @@ from . import (
     recap_folder,
     request_budget,
     reserved_paths,
+    sensitivity_classes,
     source_coverage,
     source_taxonomy,
     temporal,
@@ -54,6 +55,7 @@ from .episode_recovery import EpisodeInputOwner
 from .find import RetrievalIndexWarming
 from .governance import egress
 from .governance.principal import effective_principal
+from .set_frontmatter_field import owned_field_route
 from .vault import (
     _FM_PATTERN,
     BatchWriteError,
@@ -337,8 +339,12 @@ def _write(
     recap: episode_capture.Recap,
     when: Any,
     audience: str,
-) -> tuple[dict[str, str], bool, list[str]]:
-    """The committed recap page for `recap`, writing it only when it is new, and the episode's recap paths.
+    declared: tuple[str, ...] | None,
+) -> tuple[dict[str, str], bool, list[str], dict[str, Any] | None]:
+    """The committed recap page for `recap`, writing it only when it is new, the episode's recap paths and its `sensitivity` report.
+
+    A new page records the `declared` classes. A revision keeps the classes its page holds, because the rewrite
+    changes only the recap's own fields; a different declaration refuses and names the classify route.
 
     An episode has one live page. The same digest as that page means a retry:
     nothing is written. A different recap rewrites the page in place
@@ -356,8 +362,20 @@ def _write(
             revision_counts["live_revisions"] = len(live)
         paths = [item.path for item in revisions]
         head = live[-1] if live else None
+        kept_report = None
+        if head is not None:
+            kept = sensitivity_classes.classes_of(head.frontmatter)
+            if declared is not None and set(declared) != set(kept):
+                raise EpisodeError(
+                    "EPISODE_INVALID",
+                    "this episode's page already records its sensitivity"
+                    + (f" ({', '.join(kept)})" if kept else " (none)")
+                    + "; a new recap revision keeps it. "
+                    + (owned_field_route(vault_root, sensitivity_classes.FIELD) or ""),
+                )
+            kept_report = sensitivity_classes.stored_report(vault_root, head.path, head.frontmatter)
         if head is not None and head.frontmatter.get("episode_digest") == recap.digest:
-            return _source(head.path, head.frontmatter), True, paths
+            return _source(head.path, head.frontmatter), True, paths, kept_report
         try:
             if head is not None:
                 revise_page(vault_root, recap, path=head.path, expected_hash=head.hash, when=when)
@@ -377,8 +395,10 @@ def _write(
                     today=when.replace(microsecond=0),
                     extra_frontmatter=recap.frontmatter,
                     defer_fanout_to_terminal=True,
+                    sensitivity=declared,
                 )
                 source = {"ref": result.ref, "path": result.path, "title": recap.subject}
+                kept_report = result.sensitivity
                 paths.append(result.path)
         except add_module.AddError as error:
             raise ValueError(f"{error.code}: {error.reason} (missing: {error.missing})") from error
@@ -387,7 +407,7 @@ def _write(
                 raise
             continue
         query_log.log_write_call(tool="episode_memory", written_path=source["path"], cited_sources=[])
-        return source, False, paths
+        return source, False, paths, kept_report
     raise AssertionError("unreachable")  # pragma: no cover
 
 
@@ -431,12 +451,15 @@ def record(
     said: Any = None,
     about: Any = None,
     client: Any = None,
+    sensitivity: Any = None,
 ) -> dict[str, Any]:
     """Write (or recognise) one recap revision and bind it to the caller's ledger."""
     vault_root = Path(vault_root)
     owner = EpisodeInputOwner(vault_root)
     # Before anything else, so an unresolved caller writes nothing at all.
     audience = owner._owner()  # noqa: SLF001 - the facade's own owner resolution
+    # An unknown class refuses before any page is planned.
+    declared = None if sensitivity is None else sensitivity_classes.validated(vault_root, sensitivity)
     # Microseconds kept for the filename's order token only; the Source writer
     # dates the page to the second, as it dates every page.
     when = dt.datetime.now().astimezone()
@@ -542,7 +565,9 @@ def record(
                 # Reject before the first revision read or any canonical effect.
                 if preparation is not None and not preparation.current(vault_root, diagnostics=diagnostics):
                     continue
-                source, idempotent, revision_paths = _write(vault_root, source_schema, recap, when, audience)
+                source, idempotent, revision_paths, sensitivity_report = _write(
+                    vault_root, source_schema, recap, when, audience, declared
+                )
                 revision: int | None
                 ledger_warnings: list[str] = []
                 try:
@@ -617,6 +642,7 @@ def record(
         "recovery": recovery,
         "ledger": ledger,
         "about_skipped": about_skipped,
+        **({"sensitivity": sensitivity_report} if sensitivity_report is not None else {}),
         **({"compile": compiled} if compiled else {}),
         **({"warnings": warnings} if warnings else {}),
     }

@@ -55,9 +55,9 @@ Before enabling the profile, have all of the following in place:
   the command can independently verify the exact CNAME target. See Cloudflare's
   [tunnel DNS routing documentation](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/routing-to-tunnel/dns/).
 - One stable public hostname, for example `https://kb.example.com`. It remains
-  the value of `EXOMEM_BASE_URL` and the existing connector URL on both hosts.
+  the value of `EVERMATTER_BASE_URL` and the existing connector URL on both hosts.
 - A local Evermatter readiness response configured with a public-safe,
-  non-secret `EXOMEM_INSTANCE_ID` unique to each host. It is the identity used to
+  non-secret `EVERMATTER_INSTANCE_ID` unique to each host. It is the identity used to
   prove the public hostname reached the intended origin.
 - A host-owned configuration JSON file outside the repository, plus a local
   journal path and a replicated desired-host-marker path outside `Knowledge Base/`.
@@ -80,15 +80,15 @@ and effective Evermatter `.env` file.
 
 Keep this effective identity contract identical on both hosts:
 
-- normalized `EXOMEM_BASE_URL` and stable OAuth callback;
+- normalized `EVERMATTER_BASE_URL` and stable OAuth callback;
 - GitHub OAuth client ID and client secret;
 - allowed GitHub login and numeric user ID; and
-- `EXOMEM_JWT_SIGNING_KEY`.
+- `EVERMATTER_JWT_SIGNING_KEY`.
 
 The command compares the named values in the configured service `.env` with the
 actual NSSM `AppEnvironmentExtra` snapshot used by the Windows service;
-it derives the callback as `<EXOMEM_BASE_URL>/auth/callback`, and requires that
-`EXOMEM_INSTANCE_ID` match the configured local host ID. It publishes and compares
+it derives the callback as `<EVERMATTER_BASE_URL>/auth/callback`, and requires that
+`EVERMATTER_INSTANCE_ID` match the configured local host ID. It publishes and compares
 only fingerprints of the shared values. A mismatch
 refuses activation and handoff; never “fix” it by copying a secret into a
 Syncthing folder or pasting it into terminal output.
@@ -274,7 +274,7 @@ the product while adopting this profile for one personal deployment.
 4. Run `Status` and all `-WhatIf` actions on both hosts. Prove each direct tunnel
    via a temporary hostname; do not alter the connector or stable hostname yet.
 5. Quiesce connector writes and stop the laptop service. Remove
-   `EXOMEM_WRITER_LEASE_*` and `EXOMEM_OAUTH_STORAGE_*` from the effective service
+   `EVERMATTER_WRITER_LEASE_*` and `EVERMATTER_OAUTH_STORAGE_*` from the effective service
    environments on both hosts. Preserve the stable base URL, GitHub OAuth settings,
    allowed identity, JWT signing key, and vault paths.
 6. Start the desktop in standalone mode. Detach the HA Worker's stable-hostname

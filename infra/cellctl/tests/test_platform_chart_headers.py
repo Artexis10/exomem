@@ -1449,6 +1449,18 @@ def test_an_additional_hostname_is_routed_certified_solved_and_accepted_after_th
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_site_origin_reaches_the_gateway_only_when_set_and_must_be_an_https_origin() -> None:
+    # A gateway serving an additional host under the site needs this value, or it refuses to start.
+    assert "EVERMATTER_SITE_ORIGIN" not in _container_env(_helm_template(*EVERY_ROUTE_ARGS), "exomem-cloud-gateway")
+    documents = _helm_template(*EVERY_ROUTE_ARGS, "--set-string", "cloudGateway.siteOrigin=https://new.example.test")
+    env = _container_env(documents, "exomem-cloud-gateway")
+    assert env["EVERMATTER_SITE_ORIGIN"]["value"] == "https://new.example.test"
+    result = _helm_template_result("--set-string", "cloudGateway.siteOrigin=https://new.example.test/")
+    assert result.returncode != 0
+    assert "siteOrigin" in result.stderr, result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
 def test_the_additional_hostnames_refuse_the_primary_hostname() -> None:
     result = _helm_template_result("--set-json", f'cloudGateway.additionalHostnames=["{OLD_HOST}"]')
     assert result.returncode != 0

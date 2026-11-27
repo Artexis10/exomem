@@ -325,8 +325,24 @@ These do not gate the owner's switch:
 ## 8. Retire file-mode sync machinery
 
 - [ ] 8.1 After the switch, delete the modules and paths listed in design D9 that only file mode uses, and the requirements that only describe them.
+  - Gate (2026-11-27): the four conditions of D15 step 2.
 - [ ] 8.2 Before archiving, refresh each MODIFIED requirement against later changes to the same requirement, such as `fix-startup-retrieval-liveness` on Lexical Index Synchronization.
 
 ## 9. Root layout and readable names (D12)
 
 Moved to the change `adopt-root-vault-layout`, which never gates 7.4.
+
+## 10. Store mode as the default (D15)
+
+- [ ] 10.1 Fold case in store paths as D15 step 1 defines it: one case-insensitive key per path; a case twin that reaches the store is refused with `CASE_COLLISION`, never redirected; a new page name that differs only by case keeps its numbered suffix; a migration preflight refuses a vault with case twins with `CASE_COLLISION`.
+- [ ] 10.2 Make `exomem init` create a new vault in store mode, with its collection store, on each platform where `store-mode migrate` admits store mode.
+- [ ] 10.3 Migrate a file-mode vault at managed upgrade: a product-backup snapshot first (no migration without a reachable target), the expected downtime measured and stated, the verified migration, a collection store created in the same step when absent, file mode kept with the reason on any refusal or failed verification, and an explicit option to decline.
+- [ ] 10.4 Run the `one-write-pipeline` vocabulary and folder steps on each outside-edit import as advice: after 2 s of stable bytes, raise one review item per path and suggested spelling that names the registered spelling, and keep the person's bytes.
+- [ ] 10.7 Serve each `PAGES` entry in `cli_fence.ACCESS` from the store or retire it.
+- [ ] 10.8 Migrate a file-mode vault at first start on a build after D15 step 2; when the migration refuses at any step, refuse to serve, naming the refusal and the last file-mode release. Keep the migration, the lexical builder and the sidecar copy through 8.1.
+- [ ] 10.9 Prove a Cloud cell backup carries the store database and restores it; measure the backup size and cost per cell.
+- [ ] 10.5 State in the result of "export to a Markdown vault" that a fresh migration of the export starts a new audit trail and carries no held corrections.
+- [x] 10.6 Owner decision: whether D15 step 2 ends multi-host writer-lease support.
+  - Done (2026-11-27): one machine per vault; remove multi-host writer-lease support and its replica, without waiting for step 2.
+- [ ] 10.10 Remove multi-host writer-lease support and its `multi-host-writer-lease` requirements. First find every live install and Cloud cell that uses it, and move each to one owning machine.
+- [ ] 10.11 Replace the in-vault collection replica's other jobs (the store-mode decision register that a second root reads, and the collection flush that Cloud export uses), then remove the replica.

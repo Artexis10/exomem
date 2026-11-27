@@ -12,6 +12,9 @@ sources is seen under one name.
 Renaming the process environment removes the alias names from it, `KB_MCP_*`
 included: a process that read `KB_MCP_X` before the package imported finds it
 gone afterwards and reads `EXOMEM_X`. A child process never sees a `KB_MCP_*` name.
+
+A writer persists `EVERMATTER_X` only (`emitted_name`), and removes the other spellings
+of a setting it rewrites (`names_for`), so no file holds one setting under two names.
 """
 
 from __future__ import annotations
@@ -63,13 +66,20 @@ class SettingsConflict(ValueError):
     The message names the variables, never their values: they may be secrets.
     """
 
-    def __init__(self, conflicts: Iterable[Conflict], source: str) -> None:
+    def __init__(
+        self,
+        conflicts: Iterable[Conflict],
+        source: str,
+        remedy: str = (
+            "Set each value once, under its EVERMATTER_ name, and remove or unset the other "
+            "name, then run it again."
+        ),
+    ) -> None:
         self.conflicts = tuple(conflicts)
         self.source = source
         pairs = "; ".join(f"{c.alias} and {c.canonical}" for c in self.conflicts)
         super().__init__(
-            f"{pairs} are set to different values in {source}, so it is unclear which to use. "
-            "Delete one name of each pair, then run it again."
+            f"{pairs} are set to different values in {source}, so it is unclear which to use. {remedy}"
         )
 
 
@@ -116,17 +126,33 @@ def rename_settings(settings: Mapping[str, V]) -> tuple[dict[str, V], list[Confl
     return renamed, conflicts
 
 
+def _setting_suffix(name: str) -> str | None:
+    """`name` without its setting prefix, or None when `name` is not a setting."""
+    return next((name[len(p) :] for p in SETTING_PREFIXES if name.startswith(p)), None)
+
+
 def names_for(name: str) -> tuple[str, ...]:
     """Every name that can set `name`, highest precedence first.
 
-    An `EXOMEM_X` name has its alias names too; any other name stands alone. A
-    writer that removes a setting removes all of them, or an alias line would
-    bring the removed value back.
+    A setting named under any of the three prefixes has the other two names too; any
+    other name stands alone. A writer that rewrites or removes a setting handles all of
+    them, or an alias line would bring the old value back.
     """
-    if not name.startswith(CANONICAL_PREFIX):
+    suffix = _setting_suffix(name)
+    if suffix is None:
         return (name,)
-    suffix = name[len(CANONICAL_PREFIX) :]
     return tuple(prefix + suffix for prefix in SETTING_PREFIXES)
+
+
+def emitted_name(name: str) -> str:
+    """The name a writer persists for `name`: `EVERMATTER_X` for a setting, else `name` itself.
+
+    Code reads `EXOMEM_X`, so a writer that holds an internal name maps it here before it
+    writes a file, a client configuration or an image. A command that a script starts
+    from its own environment is not persisted and still takes `EXOMEM_X`.
+    """
+    suffix = _setting_suffix(name)
+    return name if suffix is None else PUBLIC_PREFIX + suffix
 
 
 def settle_conflicts(
@@ -150,9 +176,12 @@ def _warn(conflict: Conflict) -> None:
         return
     _reported.add(conflict)
     log.warning(
-        "%s and %s are both set to different values; using %s",
+        "%s and %s are both set to different values; using %s. Set the value once, "
+        "under %s, and remove or unset %s.",
         conflict.alias,
         conflict.canonical,
+        conflict.canonical,
+        conflict.alias,
         conflict.canonical,
     )
 
@@ -286,7 +315,18 @@ def refuse_placement_conflicts_across(sources: Iterable[Mapping[str, str]], *, s
     _, conflicts = rename_settings(merged)
     refused = [c for c in conflicts if is_placement(c)]
     if refused:
-        raise SettingsConflict(refused, source)
+        # Each pair is set under one name in the supervisor's own environment, taken when the unit
+        # started, and under the other in a file, so deleting a line from the file may not settle it.
+        raise SettingsConflict(
+            refused,
+            source,
+            remedy=(
+                "Each pair is set under one name in the supervisor's own environment, taken "
+                "when the unit started, and under the other in a service environment file. "
+                "Restart the unit so that it takes the file's names, or change the file so "
+                "that its value matches."
+            ),
+        )
 
 
 def dotenv_settings(

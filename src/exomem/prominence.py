@@ -168,7 +168,7 @@ LEARNING_INSTRUCTION = (
     "claims as unverified. A file that proves something, such as a label, receipt or "
     "warranty, goes in Evidence in the same turn, cited in what you write about it. "
     "Files you work on in my own repositories are not handed files. Files that hold "
-    "secrets, such as keys, tokens, a .env file, a card number or a code, are not kept; "
+    "secrets, such as keys, tokens, a .env file, a payment card number or a security code, are not kept; "
     "ask me for a copy with the secret covered."
 )
 
@@ -270,14 +270,13 @@ CAPTURE_RULES_KEY = "rules"
 #: kind of claim the agent judges, never a word the server matches.
 _CAPTURE_RULES = (
     "Save what a later session will need, at its true strength: never write a claim more certain, more "
-    "general or more settled than its source made it. A held view, interpretation or working hypothesis "
-    "that the evidence does not settle is saved attributed to whoever holds it, with its uncertainty; a "
-    "remark made in passing is not a held view. A person's unsure report that later work could use is "
-    "saved as unsure and attributed, with its doubt, never as fact or as a baseline. A question the work "
-    "leaves open is saved as open, including whether something happened at all. Values a task settled, "
-    "such as times, prices, terms, contacts and limits, are saved in full, never as a pointer to a working "
-    "file. Trivia and one-offs get no note, because nothing later needs them. A write never mentions what "
-    "stays unwritten."
+    "general or more settled than its source made it. What the person tells you about their aims, "
+    "priorities, people they know, belongings and past is saved when said, even as an aside, whatever the task. A held view or "
+    "hypothesis the evidence does not settle is saved attributed to its holder, with its doubt. A person's unsure report that later work could use is saved as unsure, attributed, never "
+    "as fact or baseline. An open question the work leaves is saved as open, even whether something "
+    "happened. Values a task settled (times, prices, contacts, limits) are saved in full, never "
+    "as a pointer to a file. Trivia, one-offs and momentary reactions get no note: nothing later "
+    "needs them. A write never mentions what stays unwritten."
 )
 
 #: The recognition cue for recurring structured work, appended to `_CAPTURE_RULES` in the per-turn

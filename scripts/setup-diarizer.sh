@@ -4,7 +4,7 @@
 # The venv lives under the machine-local state root, keyed by the sidecar's lock
 # (see src/exomem/diarizer_sidecar.py). A managed service builds it with
 # `<release python> -m exomem.diarizer_sidecar`; scripts/upgrade.sh does that
-# after each switch while EXOMEM_DIARIZE is on.
+# after each switch while EVERMATTER_DIARIZE is on.
 #
 # Usage:
 #   sh scripts/setup-diarizer.sh

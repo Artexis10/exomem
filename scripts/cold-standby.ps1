@@ -33,6 +33,8 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+# The setting-name rule (EXOMEM_X, else EVERMATTER_X, else KB_MCP_X) lives in one place.
+. (Join-Path $PSScriptRoot '_service-common.ps1')
 $ForceAcknowledgement = 'I ACKNOWLEDGE SPLIT-BRAIN AND DATA-LOSS RISK'
 $script:ActiveAdapter = $null
 
@@ -208,6 +210,17 @@ function Read-DotenvMap {
     return $values
 }
 
+function Get-IdentitySetting {
+    # A configured name that carries a setting prefix reads the setting under any of its three
+    # names: the installer publishes the service environment as EVERMATTER_X while an operator's
+    # dotenv may still say EXOMEM_X, and both name one setting. Any other name is read as written.
+    param([hashtable]$Values, [string]$Name, [string]$Source)
+    $prefix = $script:ExomemSettingPrefixes | Where-Object { $Name.StartsWith($_, [StringComparison]::Ordinal) } | Select-Object -First 1
+    $canonical = if ($prefix) { 'EXOMEM_' + $Name.Substring($prefix.Length) } else { $Name }
+    $lookup = { param($literal) if ($Values.ContainsKey($literal)) { [string]$Values[$literal] } else { $null } }.GetNewClosure()
+    return Resolve-ExomemSetting -Name $canonical -Source $Source -Lookup $lookup
+}
+
 function Get-IdentityContract {
     param([hashtable]$Config, [hashtable]$Adapter, [switch]$AllowUnavailable)
     $names = $Config.identity_environment
@@ -225,8 +238,8 @@ function Get-IdentityContract {
     $drift = [System.Collections.Generic.List[string]]::new()
     foreach ($name in @('base_url', 'github_client_id', 'github_client_secret', 'github_username', 'github_user_id', 'jwt_signing_key', 'instance_id')) {
         $environmentName = [string]$names[$name]
-        $dotenvValue = if ($dotenv.ContainsKey($environmentName)) { [string]$dotenv[$environmentName] } else { $null }
-        $value = if ($serviceEnvironment.values.ContainsKey($environmentName)) { [string]$serviceEnvironment.values[$environmentName] } else { $null }
+        $dotenvValue = Get-IdentitySetting $dotenv $environmentName ([string]$names.dotenv_path)
+        $value = Get-IdentitySetting $serviceEnvironment.values $environmentName 'the service environment'
         if ($dotenvValue -ne $value) { $drift.Add($name) }
         if ([string]::IsNullOrWhiteSpace($value)) { $missing.Add($name) } else { $raw[$name] = $value.Trim() }
     }

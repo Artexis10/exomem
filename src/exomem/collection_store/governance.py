@@ -20,9 +20,10 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
-from .. import access, capabilities, find_corpus, vault
+from .. import access, capabilities, find_corpus, sensitivity_classes, vault
 from .. import structured_collections as collections
 from ..find_types import ParsedPage
+from ..vocabulary import registry
 from ..governance import authorization_session_authority as authority
 from ..governance import (
     authorization_session_lifecycle,
@@ -46,6 +47,9 @@ MAX_SUMMARY_ROW_DECISIONS = 100_000
 #: rows carry more is decided row by row instead, so a filter's cost stays within one read's budget.
 MAX_FILTER_METADATA = 1_000
 RELEASE_LIMIT = "COLLECTION_RELEASE_LIMIT"
+#: The optional key of a subject's governance metadata that holds its sensitivity classes. It is the item field
+#: and manifest key of the same name, and no membership selector reads it.
+SENSITIVITY = sensitivity_classes.FIELD
 #: The owner's refusal on a connection whose write the host's connector boundary limits. Its words
 #: depend only on the collection's manifest, so they show the connection no hidden row.
 CONNECTOR_LIMITED = "COLLECTION_CONNECTOR_LIMITED"
@@ -62,19 +66,27 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
-def manifest_metadata(text: str) -> str:
+def manifest_metadata(text: str, *, vault_root: Path | None = None) -> str:
+    """The manifest's governance metadata. A `vault_root` also checks the declared `sensitivity` floor against
+    the registry; stored manifests are read without it, because the registry may have retired a class since."""
     data, _, _ = vault.parse_frontmatter(text, strict=True)
     if not isinstance(data, dict):
         raise ValueError("canonical manifest metadata is invalid")
-    for name in ("tags", "classes"):
+    for name in ("tags", "classes", SENSITIVITY):
         if name in data and data[name] is not None and not isinstance(data[name], list):
             raise ValueError("canonical manifest metadata is invalid")
     page = ParsedPage(Path("_collection.md"), "_collection.md", data, "", "", 0)
-    return _json({
+    metadata: dict[str, list[str]] = {
         "projects": sorted({value.lower() for value in find_corpus.all_projects(data)}),
         "tags": sorted(set(page.tags)),
         "classes": sorted({str(value).lower() for value in (data.get("classes") or [])}),
-    })
+    }
+    if vault_root is not None and data.get(SENSITIVITY):
+        try:
+            sensitivity_classes.validated(vault_root, data[SENSITIVITY])
+        except sensitivity_classes.SensitivityError as error:
+            raise collections.CollectionError(error.code, error.reason) from error
+    return _json(_with_sensitivity(metadata, data.get(SENSITIVITY) or []))
 
 
 def row_metadata(schema: collections.ItemSchema, values: Mapping[str, Any], metadata: str) -> str:
@@ -88,8 +100,32 @@ def row_metadata(schema: collections.ItemSchema, values: Mapping[str, Any], meta
     classes = selected.get("classes") or []
     if not isinstance(classes, list):
         raise ValueError("canonical row classes must be a list")
-    return _json({"projects": projects, "tags": sorted(set(page.tags)),
-                  "classes": sorted({str(value).lower() for value in classes})})
+    sensitivity = [*floor_of(metadata), *_own_classes(schema, values)]
+    return _json(_with_sensitivity({"projects": projects, "tags": sorted(set(page.tags)),
+                                    "classes": sorted({str(value).lower() for value in classes})}, sensitivity))
+
+
+def require_registered(vault_root: Path, schema: collections.ItemSchema, values: Mapping[str, Any]) -> None:
+    """Refuse a row that names a `sensitivity` class the registry does not hold. A revision does not call this:
+    a stored row keeps a class that the registry has since retired."""
+    if own := _own_classes(schema, values):
+        try:
+            sensitivity_classes.validated(vault_root, own)
+        except sensitivity_classes.SensitivityError as error:
+            raise collections.CollectionError(error.code, error.reason) from error
+
+
+def classification(
+    row_json: str, schema: collections.ItemSchema, values: Mapping[str, Any]
+) -> sensitivity_classes.Classification:
+    """The classes a stored row carries and where they came from: its own field, else its collection's floor."""
+    classes = tuple(_metadata(row_json).get(SENSITIVITY, ()))
+    own = bool(_own_classes(schema, values))
+    if not classes:
+        return sensitivity_classes.Classification()
+    return sensitivity_classes.Classification(
+        classes, sensitivity_classes.BASIS_DECLARED if own else sensitivity_classes.BASIS_COLLECTION_FLOOR
+    )
 
 
 def held_metadata(schema: collections.ItemSchema, candidate: Mapping[str, Any], metadata: str,
@@ -108,16 +144,43 @@ def held_metadata(schema: collections.ItemSchema, candidate: Mapping[str, Any], 
 def reprojected(captured: str, metadata: str) -> str:
     """``captured`` metadata under a revised manifest: its own tags and classes, the manifest's projects.
 
-    A revise gives this to material it does not validate again, so its release follows the new projects.
+    A revise gives this to material it does not validate again, so its release follows the new projects. It
+    keeps the sensitivity classes it holds and adds the revised manifest's floor.
     """
     preserved = _metadata(captured)
     preserved["projects"] = _metadata(metadata)["projects"]
-    return _json(preserved)
+    return _json(_with_sensitivity(preserved, [*preserved.pop(SENSITIVITY, ()), *floor_of(metadata)]))
 
 
-def projects_changed(before: str, after: str) -> bool:
-    """Whether two manifest metadata values name different projects."""
-    return _metadata(before)["projects"] != _metadata(after)["projects"]
+def floor_of(metadata: str) -> tuple[str, ...]:
+    """The sensitivity classes that a manifest's governance metadata sets as every row's floor."""
+    return tuple(_metadata(metadata).get(SENSITIVITY, ()))
+
+
+def inherited_changed(before: str, after: str) -> bool:
+    """Whether two manifest metadata values differ in what every row inherits: its projects or its sensitivity floor."""
+    old, new = _metadata(before), _metadata(after)
+    return old["projects"] != new["projects"] or old.get(SENSITIVITY, []) != new.get(SENSITIVITY, [])
+
+
+def _own_classes(schema: collections.ItemSchema, values: Mapping[str, Any]) -> list[str]:
+    """The classes a row names in its `sensitivity` field. Only an array of strings is that field: a column of
+    the same name and another type is an ordinary column, and no class."""
+    spec = schema.fields.get(SENSITIVITY)
+    if spec is None or spec.type != "array" or spec.items is None or spec.items.type != "string":
+        return []
+    if values.get(SENSITIVITY) is None:
+        return []
+    collections.validate_field_value(SENSITIVITY, values[SENSITIVITY], spec)
+    return list(values[SENSITIVITY])
+
+
+def _with_sensitivity(metadata: dict[str, list[str]], classes: Iterable[object]) -> dict[str, list[str]]:
+    """``metadata`` with its `sensitivity` classes as registry keys, sorted. A subject without any keeps no key, so
+    metadata written before the field existed keeps its exact bytes. The key form is the registry's token form,
+    so `Tax ID` and `TAX_ID` store as the `tax-id` that a policy selecting the class names."""
+    normalized = sorted({registry.token(str(value)) for value in classes} - {""})
+    return {**metadata, SENSITIVITY: normalized} if normalized else metadata
 
 
 def _pass_release_limit(error: collections.CollectionError) -> None:
@@ -128,7 +191,7 @@ def _pass_release_limit(error: collections.CollectionError) -> None:
 
 def _metadata(raw: str) -> dict[str, list[str]]:
     data = json.loads(raw)
-    if not isinstance(data, dict) or set(data) != {"projects", "tags", "classes"}:
+    if not isinstance(data, dict) or set(data) - {SENSITIVITY} != {"projects", "tags", "classes"}:
         raise ValueError("canonical subject metadata is missing or invalid")
     for values in data.values():
         if not isinstance(values, list) or any(not isinstance(value, str) or value != value.lower()

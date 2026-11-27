@@ -36,6 +36,7 @@ Every page carries the first group. The `Set by` column says who writes the valu
 | `supersedes`, `superseded_by` | server | Set by `supersede_note`; `superseded_by` names the replacement |
 | `summary` | you | One line of context, at most 1024 characters: `fields={"summary": ...}` |
 | `topics` | you | Domain keys that file the page under topics: `fields={"topics": [...]}`. The server resolves aliases, replaces deprecated keys and registers a new key. Invalid keys and directory collisions refuse the write |
+| `sensitivity` | you | Registered sensitivity classes of what the page holds, such as `identity`, `health` or `financial`. See Sensitivity below |
 
 Pages written before second granularity carry a date-only `created` or `updated`. The server
 never rewrites them, because midnight would claim a precision the page never had. Readers accept
@@ -67,6 +68,38 @@ abandoned. The class decides how a page serves, so read the registry before usin
 - A production-log's status follows its lifecycle: planned, recorded, edited, published, then
   reflected. `dropped` and `archived` end it early. The registry holds no order, so this line is
   the only place that states it.
+
+### Sensitivity
+
+Keep identity documents, health records and financial statements in full, like any other
+material. Governance, not omission, decides who sees them, so never skip, cover or reduce one to
+a pointer to protect it. Only an authenticator is never kept: a payment card number, a security
+code, a password or a live credential. Ask for a copy with it covered, and say why.
+
+`sensitivity` lists the classes you judge the material to hold. The server never infers one from
+content. `save_source`, `save_evidence`, `create_note` and `save_episode` take it, and so does `add_record` when
+the collection's schema declares a `sensitivity` field.
+An unknown key refuses with `SENSITIVITY_CLASS_UNKNOWN`, names the registered keys and writes
+nothing. A Source kind may declare a default class for a Source or Evidence capture that gives
+none; a default key that the registry does not hold is skipped, never a refusal, and the result names
+it in `skipped_defaults`. A page without the field is unclassified.
+
+The class is metadata: it never changes the captured bytes. Each capture result reports
+`sensitivity: {classes, basis, disclosure}`. `basis` is `declared`, `kind-default` or `none`.
+`basis` `collection-floor` marks a row that takes its collection's floor. `disclosure` says what
+governs the page now. With no governance policy, every client signed in as
+the owner reads the page, so never tell the person it is protected unless `disclosure` names a
+policy.
+
+To change a kept page's classes later, preview with
+`inspect_memory(operation="files.classify", arguments={"path": ..., "sensitivity": [...], "reason": ...})`,
+then send the same arguments to `manage_memory(operation="files.classify", ...)`; `[]` clears
+them. Only `sensitivity` changes: the page keeps its path and every other byte. The result returns
+`pointer_write`; pass it back as `revert_record` to undo. An edit or a correction never changes
+`sensitivity` on a Source or Evidence page.
+
+A collection definition may declare `sensitivity` as a floor. Each row of a store collection
+carries those classes and may add more through its own `sensitivity` field, never fewer.
 
 ### Fields that do not exist
 
@@ -603,7 +636,7 @@ The file name is a stable machine address. `title:` and the canonical H1 are the
 identity, and a title can use any Unicode. By default a new note or entity takes its title as its file
 name, keeping case, diacritics and spaces and dropping only what a file system or a link cannot carry.
 A captured source keeps its dated lowercase slug name. A vault chooses a style with `filename_style`
-or `EXOMEM_FILENAME_STYLE`. The server does no language-aware transliteration, and it never renames an
+or `EVERMATTER_FILENAME_STYLE`. The server does no language-aware transliteration, and it never renames an
 existing page on upgrade or reconcile.
 
 Sources, experiments and production-logs carry a date because their value is partly temporal. Notes

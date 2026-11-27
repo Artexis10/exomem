@@ -27,6 +27,8 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from exomem.env_compat import SETTING_PREFIXES
+
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_PUBLIC_TOOLS = (
     "remember",
@@ -60,7 +62,7 @@ def _target_source_environment(server_root: Path) -> dict[str, str]:
     environment = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith("EXOMEM_") and key not in {"PYTHONPATH", "XDG_STATE_HOME"}
+        if not key.startswith(SETTING_PREFIXES) and key not in {"PYTHONPATH", "XDG_STATE_HOME"}
     }
     environment["PYTHONPATH"] = str(server_root / "src")
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -621,7 +623,7 @@ def benchmark_environment(state: Path, vault: Path, *, server_root: Path = ROOT)
     env = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith("EXOMEM_") and key not in {"PYTHONPATH", "XDG_STATE_HOME"}
+        if not key.startswith(SETTING_PREFIXES) and key not in {"PYTHONPATH", "XDG_STATE_HOME"}
     }
     env.update(
         {

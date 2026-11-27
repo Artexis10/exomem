@@ -413,7 +413,7 @@ skills nor hooks. To do the steps individually:
 ```bash
 evermatter install-skill --client codex
 evermatter install-hook --client codex
-codex mcp add evermatter --env EXOMEM_VAULT_PATH="/path/to/vault" -- evermatter --transport stdio
+codex mcp add evermatter --env EVERMATTER_VAULT_PATH="/path/to/vault" -- evermatter --transport stdio
 ```
 
 `--transport stdio` is not optional: the server defaults to HTTP, so a config
@@ -445,14 +445,14 @@ turns checkpoint data into an automatic Evermatter write.
 State is per client and collision-resistant under
 `~/.claude/.cache/exomem-continuation/` or
 `~/.codex/.cache/exomem-continuation/`. `CLAUDE_CONFIG_DIR` and `CODEX_HOME`
-relocate the respective client roots; `EXOMEM_HOOK_HOME` overrides either root
+relocate the respective client roots; `EVERMATTER_HOOK_HOME` overrides either root
 for isolated installs. Current state is accepted only for the exact
 client/session/root and transcript provenance, and only for 30 days. A validated
 previous generation may be reinjected as an explicit `rollback`; corrupt,
 foreign, stale, truncated, or oversized state stays silent. Metadata-only logs
 contain no environment values or absolute paths.
 
-Set `EXOMEM_CONTINUATION_DISABLE=1` in the environment that launches the client
+Set `EVERMATTER_CONTINUATION_DISABLE=1` in the environment that launches the client
 to bypass checkpoint writes and reinjection without deleting state. Reload or
 restart the target client after installation and accept any local-hook trust
 prompt. `install-hook --check` validates exact supported registrations and
@@ -487,7 +487,7 @@ Use the standard stdio config shape:
       "command": "evermatter",
       "args": ["--transport", "stdio"],
       "env": {
-        "EXOMEM_VAULT_PATH": "/path/to/vault"
+        "EVERMATTER_VAULT_PATH": "/path/to/vault"
       }
     }
   }
@@ -510,7 +510,7 @@ Claude Code skill. To set one up:
 3. If the client has no loaded Evermatter skill, add the instruction block above after it.
 
 ```text
-Use Evermatter as the memory for my work. Before you start a task, recall what Evermatter holds about the systems, projects or topics it touches. As you work, save each reusable fact you establish (how something is structured, a pitfall, a method that worked) as one concise observation, and update an existing note when one covers it, so a later session does not have to find it again. Keep each file I hand you to read, such as an attachment, a screenshot or a document I point to, as a Source by its exact bytes, even when it settles nothing; tell me in one line, and treat what it claims as unverified. A file that proves something, such as a label, receipt or warranty, goes in Evidence in the same turn, cited in what you write about it. Files you work on in my own repositories are not handed files. Files that hold secrets, such as keys, tokens, a .env file, a card number or a code, are not kept; ask me for a copy with the secret covered.
+Use Evermatter as the memory for my work. Before you start a task, recall what Evermatter holds about the systems, projects or topics it touches. As you work, save each reusable fact you establish (how something is structured, a pitfall, a method that worked) as one concise observation, and update an existing note when one covers it, so a later session does not have to find it again. Keep each file I hand you to read, such as an attachment, a screenshot or a document I point to, as a Source by its exact bytes, even when it settles nothing; tell me in one line, and treat what it claims as unverified. A file that proves something, such as a label, receipt or warranty, goes in Evidence in the same turn, cited in what you write about it. Files you work on in my own repositories are not handed files. Files that hold secrets, such as keys, tokens, a .env file, a payment card number or a security code, are not kept; ask me for a copy with the secret covered.
 ```
 
 The agent then recalls what Evermatter holds before a task and saves what it learns.

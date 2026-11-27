@@ -2196,7 +2196,7 @@ def test_existing_preflight_rejects_an_unknown_operation_before_mutation(
     assert not activation_manifest.manifest_path(tmp_path).exists()
 
 
-def test_existing_preflight_rejects_reviewed_none_for_inactive_result(
+def test_existing_preflight_drops_reviewed_none_for_inactive_result(
     tmp_path: Path,
 ) -> None:
     source = _source("Draft").replace("status: active", "status: draft")
@@ -2208,19 +2208,22 @@ def test_existing_preflight_rejects_reviewed_none_for_inactive_result(
         operation="edit",
     )
 
-    with pytest.raises(semantic_writes.SemanticWriteError) as exc:
-        semantic_writes.preflight_existing(
-            tmp_path,
-            path=_PAGE,
-            after_source=source.replace("Draft", "Still draft"),
-            operation="edit",
-            transition_token=preview.transition_token,
-            relation_disposition="reviewed_none",
-            relation_review_hash=preview.transition_hash,
-            relation_review_reason="Inactive pages do not receive review records",
-        )
+    dropped = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=source.replace("Draft", "Still draft"),
+        operation="edit",
+        transition_token=preview.transition_token,
+        relation_disposition="reviewed_none",
+        relation_review_hash=preview.transition_hash,
+        relation_review_reason="Inactive pages do not receive review records",
+    )
 
-    assert exc.value.code == "INVALID_RELATION_REVIEW"
+    # An inactive page takes no review, so the fields are reported dropped and no decision is requested.
+    assert dropped.requested_decision is None
+    assert dropped.ignored_review_fields == (
+        "relation_disposition", "relation_review_hash", "relation_review_reason",
+    )
     assert not relation_review.lifecycle_prepared_path(tmp_path, _ID).exists()
 
 

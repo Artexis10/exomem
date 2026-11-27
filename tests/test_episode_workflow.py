@@ -800,7 +800,7 @@ def test_an_unready_index_says_warming_instead_of_claiming_currentness(
         packet = commands.op_activate_context(vault, turn="What about Marsh Dyeworks?")
 
     assert packet["abstained"] is True
-    assert packet["abstention"] == {"reason": "index_warming"}
+    assert packet["abstention"]["reason"] == "index_warming"
 
 
 # --------------------------------------------------------------------------- #

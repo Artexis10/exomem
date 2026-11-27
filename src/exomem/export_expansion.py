@@ -217,30 +217,55 @@ def unfiled(root: Path, import_id: str) -> list[dict]:
     return members
 
 
-def expand(root: Path, import_id: str, *, keep_going: Callable[[], bool], rewalk: bool = False) -> None:
+def find_exports(root: Path, import_id: str, *, rewalk: bool = False) -> bool:
+    """Record the stage's recognised exports as `working`, so a scan leaves each out until it is read; True when it found one.
+
+    It walks the stage when the record holds no export yet or one has lost its format, and `rewalk` walks it again
+    for an export that came after, such as one that a rerun of a local import copied. It reads no export item.
+    It also opens the stage's Takeout sidecar pass, reading no file, so the scan already holds the photos that wait
+    for it (`export_sidecars.open_pass`). A stage with no recognised export and no JSON file is left with no record.
+    """
+    record = _load(root, import_id)
+    found = _register(root, record, rewalk)
+    if record.sidecars is None:
+        export_sidecars.open_pass(
+            root, record, listing=sorted(import_stage.staged_files(root, import_id)), skip=_derived_by(root, record)
+        )
+    return found
+
+
+def _register(root: Path, record: _Record, rewalk: bool) -> bool:
+    lost = any(entry["format"] is None for entry in record.exports.values())
+    if (rewalk or lost or not record.exports) and _walk(root, record.import_id, record):
+        _save(root, record)  # before the first row, so that a crash never leaves rows whose export has no format
+        return True
+    return False
+
+
+def expand(root: Path, import_id: str, *, keep_going: Callable[[], bool], rewalk: bool = False) -> bool:
     """Derive transcripts from the stage's recognised exports until each is read or `keep_going` says the call is out of budget.
 
-    A call walks the stage to find its exports when it has none yet, and `rewalk` walks it again for an export that
-    came after, such as one that a rerun of a local import copied. A stage with no recognised export is left with no
-    record. Each call resumes the export that is `working` at its recorded position, and always handles one item,
-    so a call that starts with no budget left still moves on. An export that cannot be read to its end is `partial`,
-    and the transcripts read before the fault stay. A full volume stops the call with the record's `stop`, and the
-    next call tries again from the same item.
+    It finds the exports as `find_exports` does. Each call resumes the export that is `working` at its recorded
+    position, and always handles one item, so a call that starts with no budget left still moves on. An export that
+    cannot be read to its end is `partial`, and the transcripts read before the fault stay. A full volume stops the
+    call with the record's `stop`, and the next call tries again from the same item. It returns whether the call did
+    work: it found an export or read from one. A call that returns False changed nothing.
     """
     record = _load(root, import_id)
     record.stop = None
-    lost = any(entry["format"] is None for entry in record.exports.values())
-    if (rewalk or lost or not record.exports) and _walk(root, import_id, record):
-        _save(root, record)  # before the first row, so that a crash never leaves rows whose export has no format
-    if (record.sidecars is None or record.sidecars["state"] == export_sidecars.WORKING) and not _read_sidecars(
-        root, record, keep_going
-    ):
-        return
+    worked = _register(root, record, rewalk)
+    if record.sidecars is None or record.sidecars["state"] == export_sidecars.WORKING:
+        reading = _read_sidecars(root, record, keep_going)
+        worked = worked or record.sidecars is not None  # a stage with no JSON file keeps no pass, and the call changed nothing
+        if not reading:
+            return worked
     for export, state in record.exports.items():
         if state.get("state") != WORKING:
             continue
+        worked = True
         if not _slice(root, record, export, state, keep_going):
-            return
+            break
+    return worked
 
 
 def _read_sidecars(root: Path, record: _Record, keep_going: Callable[[], bool]) -> bool:

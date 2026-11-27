@@ -1010,7 +1010,7 @@ SEND_PAGE_HTML = f"""<!doctype html><meta charset=utf-8>
 <style>body{{font:16px system-ui;max-width:34rem;margin:2rem auto;padding:0 1rem}}
 input,button{{font:inherit;margin-top:1rem}}#out{{margin-top:1rem;overflow-wrap:anywhere}}</style>
 <h1>Save a file as evidence</h1>
-<form id=f><label for=file>File. Cover any card number, security code or password first.</label><br>
+<form id=f><label for=file>File. Cover any payment card number, security code or password first.</label><br>
 <input id=file type=file name=file required><br><button type=submit>Save</button></form>
 <div id=out></div>
 <script>{_SEND_PAGE_SCRIPT}</script>"""
