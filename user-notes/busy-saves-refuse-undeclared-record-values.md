@@ -1,4 +1,4 @@
 ---
 title: Wrong record values refused when busy
 ---
-When your assistant saves a record with a value the collection does not allow while Evermatter is busy, it now hears the allowed values at once instead of a queued receipt.
+While Evermatter is busy, a record value that its collection does not allow is now refused at once with the allowed values, unless a note edit or collection change is still waiting to save.

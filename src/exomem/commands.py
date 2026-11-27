@@ -16004,11 +16004,11 @@ def declared_refusal_before_queueing(
 
     `refusal_before_queueing` reads nothing. This one reads a declaration (a collection's manifest),
     so the intake runs it only for a save that is about to queue. The refusal holds only while no open
-    queued save can change that declaration before this one replays: a save of a command that can
-    rewrite a page's frontmatter (`Command.rewrites_frontmatter`), whichever page it names, or a Records
-    save that carries a manifest's text. A direct revise that commits after this check, before the
-    replay would have run, is not seen: the check can refuse a value that the revised collection
-    accepts, and the caller sends it again.
+    queued save can change that declaration before this one replays: a save of a command that declares
+    `Command.sets_any_frontmatter_field`, whichever page it names, or a Records save that carries a
+    manifest's text. A declaration change made outside the queue and not committed at this check, such
+    as a direct revise that holds the boundary, is not seen: the check refuses a value that the change
+    adds, and the refusal tells the caller to send it again once that change has committed.
     """
     if command.name != operation_entries.RECORDS.command:
         return None
@@ -16020,7 +16020,7 @@ def declared_refusal_before_queueing(
         return None
     changing = write_intake.may_change_declaration(
         vault_root,
-        rewriting=tuple(item.name for item in PRODUCT_COMMANDS if item.rewrites_frontmatter),
+        rewriting=tuple(item.name for item in PRODUCT_COMMANDS if item.sets_any_frontmatter_field),
         manifest_command=operation_entries.RECORDS.command,
         manifest_field=operation_entries.MANIFEST_TEXT_FIELD,
         seconds=budget.remaining(),
@@ -16268,7 +16268,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         _MCRC,
         ("edit",),
         {"public_title": "Edit a knowledge note", "preferred_name": "edit_note", "surface": "primary", "actions": ("update",), "first_run_safe": False,
-         "rewrites_frontmatter": True},
+         "sets_any_frontmatter_field": True},
     ),
     (
         "observe_memory",
@@ -16290,8 +16290,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "old_path",
         _MCRC,
         ("replace",),
-        {"public_title": "Supersede a knowledge note", "preferred_name": "supersede_note", "surface": "primary", "actions": ("update",), "first_run_safe": False,
-         "rewrites_frontmatter": True},
+        {"public_title": "Supersede a knowledge note", "preferred_name": "supersede_note", "surface": "primary", "actions": ("update",), "first_run_safe": False},
     ),
     (
         "reserve_source_capture",
@@ -16892,7 +16891,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 outcome_verb=_COMMAND_OUTCOME_VERBS.get(name),
                 names_pages=name in _PAGE_NAMING_COMMANDS,
                 busy_intake=name in _BUSY_INTAKE_COMMANDS,
-                rewrites_frontmatter=bool(meta.get("rewrites_frontmatter", False)),
+                sets_any_frontmatter_field=bool(meta.get("sets_any_frontmatter_field", False)),
                 prepare_arguments=meta.get("prepare_arguments"),
             )
         )

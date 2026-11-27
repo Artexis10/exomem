@@ -1154,31 +1154,44 @@ class Admission:
     def certain_refusal(self) -> Exception | None:
         """The refusal this save is certain to get, read once and only for a save about to queue.
 
-        It is raised in place of the call, outside `invoke_command`'s terminal filter, and a declared
-        refusal quotes the vault's own declaration. So it leaves through that filter here, as the same
-        refusal from the call does. A refusal that the filter cannot release is dropped: the save goes
-        on as if none were known, and its own refusal comes from the call or the replay.
+        It is raised in place of the call, outside `invoke_command`'s terminal filter, so it leaves through
+        that filter here, as the same refusal from the call does. An argument refusal quotes only the
+        caller's own arguments, so a filter fault still raises it, as before the declared check existed. A
+        declared refusal quotes the vault's own declaration, so one that the filter cannot release is
+        dropped: the save goes on as if none were known, and its own refusal comes from the call or the
+        replay.
         """
-        if self.refusal is None and self.declared_refusal is not None:
+        if self.refusal is not None:
+            if not self._released:
+                self._released = True
+                self._filter(self.refusal)
+            return self.refusal
+        if self.declared_refusal is not None:
             read, self.declared_refusal = self.declared_refusal, None
             try:
-                self.refusal = read()
+                declared = read()
             except Exception:  # noqa: BLE001 - a declaration that cannot be read leaves the save queueable
                 log.debug("write intake could not read the declarations of a %s save", self.command.name,
                           exc_info=True)
-        if self.refusal is not None and not self._released:
-            from .governance import egress
-
-            self._released = True
-            try:
-                egress.postfilter_error(
-                    self.command.name, self.refusal, self.drainer.vault_root, request_kwargs=self.arguments
-                )
-            except Exception:  # noqa: BLE001 - an unfiltered refusal never leaves; the save runs or queues instead
-                log.warning("write intake could not filter the refusal of a %s save", self.command.name,
-                            exc_info=True)
-                self.refusal = None
+                declared = None
+            if declared is not None and self._filter(declared):
+                self._released = True
+                self.refusal = declared
         return self.refusal
+
+    def _filter(self, refusal: Exception) -> bool:
+        """Pass `refusal` through the terminal egress filter in place; False when the filter faults."""
+        from .governance import egress
+
+        try:
+            egress.postfilter_error(
+                self.command.name, refusal, self.drainer.vault_root, request_kwargs=self.arguments
+            )
+        except Exception:  # noqa: BLE001 - the caller decides what an unfiltered refusal does
+            log.warning("write intake could not filter the refusal of a %s save", self.command.name,
+                        exc_info=True)
+            return False
+        return True
 
     def _run_in_flight(self, call: Callable[[], Any], started: float, deadline: float) -> Any:
         try:

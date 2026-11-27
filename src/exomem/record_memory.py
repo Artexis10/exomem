@@ -964,7 +964,8 @@ def _require_one_history_selector(given: Mapping[str, Any]) -> None:
 
 
 _RESEND_WITH_A_DECLARED_VALUE = (
-    "Nothing was saved and nothing is held. Send the call again with a value the collection declares."
+    "Nothing was saved and nothing is held. Send the call again with a value the collection declares. If a change"
+    " that declares this value is still being saved, send the same value again once that change has committed."
 )
 
 
