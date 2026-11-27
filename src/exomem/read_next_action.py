@@ -41,7 +41,7 @@ def _later_turns(continuity: str | None) -> str | None:
     """The later-turns move for this call, or None when the call gets none.
 
     One recall at the start of a conversation left later questions answered from general
-    knowledge, although the user's recorded view existed (27 Nov incident replays). Only a
+    knowledge, although the user's recorded view existed (incidents of 2026-11-24 and 2026-11-25). Only a
     hookless conversation client lacks per-turn guidance, and only a level that recalls
     proactively asks for it; a conversation's first recall carries the move once.
     """
@@ -53,8 +53,7 @@ def _later_turns(continuity: str | None) -> str | None:
         return None
     if prominence.context_for_surface(prominence.detect_surface()) != prominence.CONVERSATION_CONTEXT:
         return None
-    # The levels that recall without being asked, over the closed CANON enum (as envelope.py gates capture).
-    if prominence.resolve() not in {"balanced", "maximal"}:
+    if not prominence.engages_any_subject(prominence.resolve()):
         return None
     if not (_callable("search_memory") and _callable("activate_context")):
         return None

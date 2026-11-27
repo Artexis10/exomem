@@ -279,7 +279,7 @@ def record_memory(
             return _append_creating(vault_root, values, new_collection)
         selected, result = preview.dispatch(vault_root, "records", action, values)
         if selected:
-            return _note_assigned_id(result, action, assigned_id)
+            return structured_collections.note_assigned_id(result, action, assigned_id)
         if action in {"import", "retract"} or query is not None or (action == "query" and item_key is not None):
             # Resolve under the caller's authority first: an absent or withheld selector
             # answers exactly as a sealed store-routed collection does, so the refusal
@@ -311,7 +311,7 @@ def record_memory(
             if collection is not None:
                 return records.validate_collection_revision(vault_root, collection, manifest_text)
             assert manifest_path is not None
-            return _note_assigned_id(
+            return structured_collections.note_assigned_id(
                 records.validate_collection_create(
                     vault_root,
                     manifest_path,
@@ -498,17 +498,6 @@ def record_memory(
 
         refusal = route.details(error)
         raise OpError(error.code, error.message, refusal["repair"], details=refusal) from error
-
-
-def _note_assigned_id(result: Any, action: str, assigned_id: str | None) -> Any:
-    """Tell a validate caller that the id it sees is a placeholder: create mints its own."""
-    if assigned_id is None or action != "validate" or not isinstance(result, dict):
-        return result
-    note = {
-        "code": "COLLECTION_ID_ASSIGNED_AT_CREATE",
-        "message": "the manifest names no exomem_id, so create assigns one and reports it as collection_id",
-    }
-    return {**result, "warnings": [*result.get("warnings", []), note]}
 
 
 def _append_creating(vault_root: Path, values: dict[str, Any], declared: dict[str, Any]) -> dict[str, Any]:

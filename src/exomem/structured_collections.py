@@ -260,7 +260,6 @@ def manifest_authoring_contract(*, store: bool = False) -> dict[str, Any]:
         "type": "object",
         "required": [
             "type",
-            "exomem_id",
             "title",
             "semantic_profile",
             "collection_version",
@@ -271,7 +270,11 @@ def manifest_authoring_contract(*, store: bool = False) -> dict[str, Any]:
         ],
         "properties": {
             "type": {"const": "collection"},
-            "exomem_id": {"type": "string", "format": "uuid"},
+            "exomem_id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Leave it out of a new collection: create assigns one and returns it as collection_id.",
+            },
             "title": {"type": "string", "minLength": 1},
             "semantic_profile": {"enum": profiles},
             "collection_version": {"enum": [COLLECTION_VERSION]},
@@ -513,7 +516,6 @@ def _manifest_authoring_examples(*, store: bool = False) -> dict[str, dict[str, 
     )
     minimal_text = f"""---
 type: collection
-exomem_id: 15dd81cd-9ae2-488c-bd9e-14771d86343e
 title: Observed events
 semantic_profile: records
 collection_version: 1
@@ -540,7 +542,6 @@ item_schema:
 """
     laboratory_text = f"""---
 type: collection
-exomem_id: 372ff95a-36f0-4859-9e11-9e487dd94f4b
 title: Laboratory panels
 semantic_profile: records
 collection_version: 1
@@ -575,7 +576,6 @@ Each panel is one observed event. Child analytes preserve reported values and pr
 """
     readable_text = """---
 type: collection
-exomem_id: 68297085-14fd-4c00-8a95-6814ea671c99
 title: Readable observations
 semantic_profile: records
 collection_version: 1
@@ -630,7 +630,6 @@ The frontmatter is canonical; the managed Markdown block is a readable projectio
 """
     state_ledger_text = f"""---
 type: collection
-exomem_id: a865a192-7c7a-4b7f-9b5d-03c807b205e2
 title: Observed state ledger
 semantic_profile: records
 collection_version: 1
@@ -1318,20 +1317,26 @@ _MANIFEST_PARSE_CACHE_CAP = 256
 def assign_missing_id(manifest_text: str) -> tuple[str, str | None]:
     """Give a new collection's manifest an exomem_id when it names none.
 
-    A client with no shell has no UUID source, so the server mints the id. Returns the text to
-    use and the assigned id, or the text unchanged and None when the manifest has no
-    frontmatter or names an id already: a malformed id stays the author's to fix.
+    A client with no shell has no UUID source, so create mints the id. Returns the text to use
+    and the assigned id, or the text unchanged and None when the manifest has no frontmatter or
+    names an id already: the parser then refuses a malformed id as before.
     """
     try:
-        frontmatter, _body, raw = vault.parse_frontmatter(manifest_text)
-    except vault.FrontmatterError:
+        rendered, identity = memory_refs.add_id_to_markdown(manifest_text)
+    except (memory_refs.ReferenceError, vault.FrontmatterError):
         return manifest_text, None
-    if raw is None or not isinstance(frontmatter, Mapping) or "exomem_id" in frontmatter:
-        return manifest_text, None
-    fence, newline, rest = manifest_text.partition("\n")
-    eol = "\r\n" if fence.endswith("\r") else "\n"
-    assigned = memory_refs.new_id()
-    return f"{fence}{newline}exomem_id: {assigned}{eol}{rest}", assigned
+    return (rendered, identity) if rendered != manifest_text else (manifest_text, None)
+
+
+def note_assigned_id(result: Any, action: str, assigned_id: str | None) -> Any:
+    """Tell a validate caller that the id it sees is a placeholder: create mints its own."""
+    if assigned_id is None or action != "validate" or not isinstance(result, dict):
+        return result
+    note = {
+        "code": "COLLECTION_ID_ASSIGNED_AT_CREATE",
+        "message": "the manifest names no exomem_id, so create assigns one and reports it as collection_id",
+    }
+    return {**result, "warnings": [*result.get("warnings", []), note]}
 
 
 def parse_manifest_bytes(
@@ -2092,7 +2097,7 @@ def _manifest_from_frontmatter(
     if collection_id is None:
         raise CollectionError(
             "INVALID_COLLECTION_ID",
-            "manifest exomem_id must be a UUID; leave the line out and create assigns one",
+            "manifest requires a UUID exomem_id",
             {
                 "field": "exomem_id",
                 "received": frontmatter.get("exomem_id"),
