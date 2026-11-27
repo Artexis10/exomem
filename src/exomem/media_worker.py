@@ -907,18 +907,20 @@ class MediaWorker:
             )
         if job.tracks_unreadable is not None:
             # The stored row is wrong, not the media: every retry reads the same row,
-            # so only a new declaration repairs it.
+            # so only a new declaration repairs it. The error names that remedy as well,
+            # because a reprocess over a complete transcript keeps only the error, on the job row.
+            unreadable = f"{job.tracks_unreadable}; {_TRACKS_ACTION}"
             committed = self._commit_processing_failure(
                 job,
                 expected_sidecar=expected_sidecar,
                 expected_evidence_version=expected_evidence_version,
                 expected_binary=expected_binary,
                 state=FAILED,
-                error=job.tracks_unreadable,
+                error=unreadable,
                 next_action=_TRACKS_ACTION,
                 retryable=False,
             )
-            return self._publication_outcome(committed, FAILED, job.tracks_unreadable)
+            return self._publication_outcome(committed, FAILED, unreadable)
         try:
             if job.diarize is not None and not media_engines.stage_enabled(job.media_type):
                 raise extract.EngineDisabled(media_engines.SPEECH, "the speech engine is switched off")

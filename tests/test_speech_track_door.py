@@ -401,6 +401,7 @@ def test_a_job_whose_stored_declaration_cannot_be_read_fails_alone_and_the_queue
     failed = parse_frontmatter(broken_page.read_text(encoding="utf-8"))[0]
     assert failed["processing_state"] == "failed"
     assert "declaration of tracks cannot be read" in failed["processing_error"]
+    assert failed["processing_error"].endswith("; reprocess the recording with its tracks")
     assert failed["processing_retryable"] is False
     assert failed["processing_next_action"] == "reprocess the recording with its tracks"
     assert preserve.extracted_text(following_page.read_text(encoding="utf-8")) == "[0:00] One voice."
