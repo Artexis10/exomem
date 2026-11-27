@@ -74,7 +74,7 @@ one exact ISO calendar date (`YYYY-MM-DD`) naming the day a claim should be
 revisited; it is filterable as the typed date field `unit.check_by`, so "what is
 due" is an ordered query rather than a scan. `verdict` records how the claim
 turned out — exactly one of `confirmed`, `refuted`, `qualified`, `inconclusive`,
-or `abandoned` — and is filterable as `unit.verdict`. Both appear on unit hits
+`abandoned` or `worsened` — and is filterable as `unit.verdict`. Both appear on unit hits
 when present and are omitted when absent, so an unjudged unit is distinguishable
 from a judged one.
 

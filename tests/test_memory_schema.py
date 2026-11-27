@@ -1419,7 +1419,7 @@ def test_the_categories_read_lists_each_accepted_verdict_and_a_save_keeps_the_va
     _seed_category_pages(vault)
     shipped = commands.op_schema_memory(vault, operation="infer", subject="categories")
     assert [item["key"] for item in shipped["verdicts"]] == [
-        "abandoned", "confirmed", "inconclusive", "qualified", "refuted",
+        "abandoned", "confirmed", "inconclusive", "qualified", "refuted", "worsened",
     ]
     assert all(item["shipped"] for item in shipped["verdicts"])
     # The other label registries are listed the same way, so an agent can read every accepted
