@@ -113,7 +113,9 @@ def status(vault_root: Path, *, page: str | None, limit: int | None, cursor: str
     on = setting is not None and setting.enabled
     unavailable = face_store.unavailable_reason(setting)
     counts = face_groups.counts(vault_root)
-    if not on:
+    if face_store.deployment_refusal() is not None:
+        outcome = f"Faces cannot run on this deployment: {unavailable}."
+    elif not on:
         outcome = "Faces are off." + (" Stored faces and names are kept." if counts.faces or counts.people else "")
     elif unavailable is not None:
         outcome = f"Faces are on but cannot run here: {unavailable}."
@@ -141,7 +143,11 @@ def status(vault_root: Path, *, page: str | None, limit: int | None, cursor: str
     if receipt is not None:
         result["last_deletion"] = receipt
         result["residues"] = list(RESIDUES)
-    if not on:
+    refusal = face_store.deployment_refusal()
+    if refusal is not None:
+        result["next_action"] = (f"Faces cannot run here: {refusal}. Its operator sets "
+                                 f"{face_store.HOSTED_SETTING}=1 to allow them.")
+    elif not on:
         result["next_action"] = f"To turn faces on, the owner runs `{TURN_ON_COMMAND}` in a terminal."
     if page is not None:
         faces = face_groups.page_faces(vault_root, page)
@@ -177,16 +183,16 @@ def _thresholds(vault_root: Path) -> dict[str, Any]:
 
 
 def _require_on(vault_root: Path) -> None:
-    """Refuse a change to groups, names or thresholds unless faces are on and may run on this deployment."""
+    """Refuse a change to groups, names or thresholds unless faces may run on this deployment and are on."""
+    refusal = face_store.deployment_refusal()
+    if refusal is not None:
+        raise face_search.faces_unavailable(refusal)
     setting = face_store.read_setting(vault_root)
     if setting is None or not setting.enabled:
         raise OpError(
             "FACES_OFF", "Faces are off for this account, so nothing changed.",
             f"The owner turns faces on with `{TURN_ON_COMMAND}` in a terminal.",
         )
-    refusal = face_store.deployment_refusal()
-    if refusal is not None:
-        raise face_search.faces_unavailable(refusal)
 
 
 def turn_on_answer() -> dict[str, Any]:
@@ -208,6 +214,9 @@ def change_setting(vault_root: Path, *, state: str | None, thresholds: Mapping[s
         raise OpError("INVALID_ARGUMENT", "faces.set needs a state or thresholds, so nothing changed.",
                       "Pass state off, or thresholds such as {\"join_margin\": 0.08}.")
     if state == "on":
+        refusal = face_store.deployment_refusal()
+        if refusal is not None:
+            raise face_search.faces_unavailable(refusal)
         if face_store.enabled(vault_root):
             return {"outcome": "Faces are already on.", "state": "on", "changed": False}
         return turn_on_answer()

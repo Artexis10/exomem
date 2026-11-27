@@ -24,6 +24,7 @@ from exomem import (
     face_groups,
     face_models,
     face_naming,
+    face_operations,
     face_scan,
     face_store,
     media_models,
@@ -211,6 +212,26 @@ def test_a_hosted_deployment_refuses_turn_on_without_its_operator_setting(vault,
 
     assert code == 1
     assert "FACES_UNAVAILABLE" in capsys.readouterr().err
+    assert not face_store.store_dir(vault).exists()
+
+
+def test_a_cloud_account_that_never_turned_faces_on_is_told_the_deployment_does_not_run_them(
+    doors, vault, monkeypatch
+) -> None:
+    """Catches a Cloud owner told to run `exomem faces on`, which this deployment would refuse anyway."""
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.delenv(face_store.HOSTED_SETTING, raising=False)
+
+    with library_scope(), pytest.raises(cli_ops.OpError) as search:
+        find_module.find(vault, query="", people=["Ada Fixture"], mode="keyword")
+    turn_on_reply = doors("manage_memory", "faces.set", {"state": "on"})
+    status = doors("inspect_memory", "faces.status", {})
+
+    assert search.value.code == "FACES_UNAVAILABLE"
+    assert "FACES_UNAVAILABLE" in str(turn_on_reply), turn_on_reply
+    assert status["available"] is False
+    assert face_operations.TURN_ON_COMMAND not in status["next_action"]
+    assert face_store.HOSTED_SETTING in status["next_action"]
     assert not face_store.store_dir(vault).exists()
 
 

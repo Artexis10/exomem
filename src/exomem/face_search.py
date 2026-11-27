@@ -79,6 +79,10 @@ def admit(vault_root: Path, people: Sequence[str]) -> Restriction:
     cache, so a cached result never outlives a change to faces, groups or names.
     """
     require_owner(vault_root)
+    # A deployment that does not run faces says so before the setting: turning faces on would not help.
+    refusal = face_store.deployment_refusal()
+    if refusal is not None:
+        raise faces_unavailable(refusal)
     setting = face_store.read_setting(vault_root)
     if setting is None or not setting.enabled:
         raise faces_off()
