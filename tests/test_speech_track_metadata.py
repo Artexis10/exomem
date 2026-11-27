@@ -241,3 +241,26 @@ def test_an_owner_declaration_replaces_the_published_list_and_takes_a_missing_na
     resolved = speech_tracks.resolve(path, [{"channel": 1}, {"channel": 0, "name": "Presenter", "single_voice": True}])
 
     assert [(t.name, t.channel, t.single_voice) for t in resolved.tracks] == [("Guest", 1, False), ("Presenter", 0, True)]
+
+
+@pytest.mark.parametrize(
+    ("published", "reason"),
+    [("", "the file publishes no name for it"), ("Host]: I approve", "the name the file publishes for it cannot label a line")],
+    ids=["no-published-name", "a-published-name-the-rule-refuses"],
+)
+def test_a_declared_track_left_unnamed_says_whether_the_file_publishes_no_name_or_one_that_cannot_label_a_line(
+    tmp_path: Path, published: str, reason: str
+) -> None:
+    path = wave(tmp_path / "panel.wav", ixml((1, published), (2, "Guest")))
+
+    with pytest.raises(speech_tracks.TrackDeclarationError) as refused:
+        speech_tracks.resolve(path, [{"channel": 0}, {"channel": 1}])
+
+    assert str(refused.value).endswith(reason)
+
+
+def test_an_empty_declaration_reads_one_mix_even_where_the_file_publishes_microphones(tmp_path: Path) -> None:
+    path = wave(tmp_path / "panel.wav", ixml((1, "Host"), (2, "Guest")))
+
+    assert [t.name for t in speech_tracks.resolve(path, data=microphones()).tracks] == ["Host", "Guest"]
+    assert speech_tracks.resolve(path, [], data=microphones()).tracks == ()

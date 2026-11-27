@@ -1518,7 +1518,6 @@ def reprocess_media(
     multilingual: bool = False,
     diarize: bool | None = None,
     tracks: tuple[speech_tracks.Track, ...] | None = None,
-    replace_labelled: bool = False,
     commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
     queue_guard: Callable[[], AbstractContextManager[object]] | None = None,
 ) -> ReconcileResult:
@@ -1527,12 +1526,11 @@ def reprocess_media(
     Only this call extracts over a completed transcript. The job keeps the old text
     on a page next to the sidecar when the new text is ready, and leaves the sidecar
     as it is when the new extraction fails. A file that is being processed right now
-    is refused, so the caller asks again when that run ends. A declaration of `tracks`
-    replaces speaker labels or names only with `replace_labelled` (`prior_extraction.replacement`).
+    is refused, so the caller asks again when that run ends.
     """
     return _queue_extraction(
         vault_root, binary_path, language, multilingual, commit_guard, reprocess=True,
-        queue_guard=queue_guard, diarize=diarize, tracks=tracks, replace_labelled=replace_labelled,
+        queue_guard=queue_guard, diarize=diarize, tracks=tracks,
     )
 
 
@@ -1580,7 +1578,6 @@ def _queue_extraction(
     reprocess: bool,
     diarize: bool | None = None,
     tracks: tuple[speech_tracks.Track, ...] | None = None,
-    replace_labelled: bool = False,
     queue_guard: Callable[[], AbstractContextManager[object]] | None = None,
 ) -> ReconcileResult:
     vault = Path(vault_root).resolve()
@@ -1607,19 +1604,6 @@ def _queue_extraction(
     unavailable = _runtime_unavailable(vault)
     if unavailable is not None:  # retry_media queues nothing in this state either
         raise MediaProcessingError("MEDIA_RUNTIME_UNAVAILABLE", f"{unavailable[0]}; {unavailable[1]}")
-    if reprocess and tracks is not None and media_type is not None:
-        from . import prior_extraction
-
-        current = _read_sidecar_text(vault, originals.sidecar_path(binary))
-        if current is not None and (
-            prior_extraction.replacement(current, media_type=media_type, replace_labelled=replace_labelled)
-            == prior_extraction.REFUSE
-        ):
-            raise MediaProcessingError(
-                "TRACKS_REPLACE_LABELS",
-                "the Source holds speaker labels or names; set replace_labelled to replace them with the declared "
-                "tracks, and the old result stays on a prior page",
-            )
     request = ExtractionRequest(hint, mode, reprocess, diarize, tracks)
     result = reconcile_media(
         vault, binary, commit_guard=commit_guard, request=request, queue_guard=queue_guard

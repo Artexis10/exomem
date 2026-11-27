@@ -103,7 +103,7 @@ _OPENAPI_TYPES = {
                 "mime_type": {"type": "string", "maxLength": 255},
                 "file_name": {"type": "string"},
                 "diarize": {"type": "boolean"},
-                "tracks": {"type": "array", "minItems": 1, "maxItems": MAX_TRACKS, "items": {"type": "object"}},
+                "tracks": {"type": "array", "maxItems": MAX_TRACKS, "items": {"type": "object"}},
             },
             "required": ["download_url", "file_id"],
         },

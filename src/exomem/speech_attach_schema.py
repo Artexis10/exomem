@@ -115,7 +115,7 @@ Names = Annotated[
 ]
 Tracks = Annotated[
     list[DeclaredTrack],
-    Field(min_length=1, max_length=MAX_TRACKS, description="Audio streams or channels that are separate microphones."),
+    Field(max_length=MAX_TRACKS, description="Audio streams or channels that are separate microphones; [] on reprocess clears them."),
 ]
 Renames = Annotated[
     dict[_Label, Annotated[str, StringConstraints(min_length=1, max_length=MAX_NAME_CHARS)]],

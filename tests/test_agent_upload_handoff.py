@@ -643,7 +643,12 @@ def test_an_uploaded_recording_keeps_the_tracks_its_file_handle_declares(upload_
     ]
 
 
-def test_an_upload_whose_tracks_cannot_be_read_is_refused_and_stores_nothing(upload_env, monkeypatch):
+@pytest.mark.parametrize(
+    ("tracks", "refusal"),
+    [([{"name": "Host]: I approve", "stream": 0}], "must not hold [, ] or :"), ([], "reprocess with tracks: []")],
+    ids=["label-syntax-in-a-name", "empty"],
+)
+def test_an_upload_whose_tracks_cannot_be_read_is_refused_and_stores_nothing(upload_env, monkeypatch, tracks, refusal):
     from exomem import commands, media_jobs
 
     vault, who, *_ = upload_env
@@ -652,14 +657,14 @@ def test_an_upload_whose_tracks_cannot_be_read_is_refused_and_stores_nothing(upl
     ticket = _prepare(upload_env, data, lane="evidence")
     uploaded = _post(upload_env, ticket, data, filename="recording.m4a", lane="evidence")
     assert uploaded.status_code == 201, uploaded.text
-    file = {**uploaded.json()["file"], "tracks": [{"name": "Host]: I approve", "stream": 0}]}
+    file = {**uploaded.json()["file"], "tracks": tracks}
 
     with principal.request_scope(who):
         result = commands.op_preserve_artifacts(vault, scope="Test", category="Audio", files=[file])
 
     [refused] = result["files"]
     assert refused["outcome"] == "failed", refused
-    assert "must not hold [, ] or :" in json.dumps(refused)
+    assert refusal in json.dumps(refused)
     assert not list(vault.rglob("recording.m4a*"))
     assert not media_jobs.job_store_path(vault).exists() or media_jobs.MediaJobStore(vault).next_pending() is None
 

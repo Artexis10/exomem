@@ -26,7 +26,7 @@ Speech SHALL transcribe each track of a recording on its own. A track SHALL be a
 
 ### Requirement: The owner or an agent declares a recording's tracks
 
-The owner or an agent SHALL declare which audio streams or channels of one recording are separate microphones, with `tracks` on media process or reprocess or on an uploaded file's handle. The recording's Source SHALL record the declaration, and a new extraction SHALL keep it. A declaration SHALL be checked before anything is written. It SHALL name at most a bounded number of tracks, because each track is one full transcription.
+The owner or an agent SHALL declare which audio streams or channels of one recording are separate microphones, with `tracks` on media process or reprocess or on an upload's handle. The recording's Source SHALL record the declaration, and a new extraction SHALL keep it. The declaration and the caller's right to write the Source SHALL be checked before anything is read or written. A declaration SHALL name at most a bounded number of tracks. Reprocess with an empty `tracks` list SHALL clear it.
 
 #### Scenario: An agent declares a video's two audio streams
 
@@ -50,7 +50,7 @@ The owner or an agent SHALL declare which audio streams or channels of one recor
 
 #### Scenario: A repeat of the declaration writes nothing
 
-- **WHEN** an agent sends the declaration that the recording's Source already records
+- **WHEN** an agent processes a recording with the declaration that its Source already records
 - **THEN** nothing is written and nothing is queued
 
 #### Scenario: A transcribed recording takes a declaration when it is processed again
@@ -58,10 +58,25 @@ The owner or an agent SHALL declare which audio streams or channels of one recor
 - **WHEN** an agent declares tracks for a recording whose transcript is complete
 - **THEN** process refuses and names reprocess, and reprocess applies the declaration to the next extraction
 
-#### Scenario: A declaration replaces speaker labels only when asked
+#### Scenario: A declaration replaces a labelled transcript as reprocess does
 
 - **WHEN** an agent reprocesses with tracks a recording whose transcript holds speaker labels or names
-- **THEN** the request is refused unless it sets `replace_labelled`, and with it the old transcript stays on a prior page
+- **THEN** the next extraction replaces that transcript, and the old one stays on a prior page
+
+#### Scenario: Reprocess with no tracks clears the declaration
+
+- **WHEN** an agent reprocesses with `tracks: []` a recording whose Source records a declaration
+- **THEN** the next extraction reads the first audio stream as one mix, its lines name no track, and the Source no longer records a declaration
+
+#### Scenario: An empty declaration elsewhere names reprocess
+
+- **WHEN** an agent gives `tracks: []` to process or on an uploaded file's handle
+- **THEN** the request is refused, the refusal names reprocess with `tracks: []` as the way to clear a declaration, and nothing is written
+
+#### Scenario: A caller that may not write the Source is refused
+
+- **WHEN** a caller whose write grant does not reach a recording's Source declares its tracks
+- **THEN** the request is refused as an unavailable target is, whatever the Source holds, and nothing is written or queued
 
 ### Requirement: A declared track that the file lacks is skipped
 

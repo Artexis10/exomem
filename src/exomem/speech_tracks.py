@@ -59,12 +59,13 @@ class Track:
 
 @dataclass(frozen=True)
 class PublishedTrack:
-    #: None where the file publishes a name that cannot stand in a label span.
+    #: None where the file publishes no name, or one that cannot stand in a label span (`name_refused`).
     name: str | None
     stream: int
     channel: int | None
     declares_microphone: bool
     single_voice: bool
+    name_refused: bool = False
 
 
 @dataclass(frozen=True)
@@ -122,13 +123,17 @@ def _riff_chunks(path: Path) -> dict[bytes, bytes]:
     return found
 
 
-def _published_name(text: str) -> str | None:
-    """A published name that can label a track, or None."""
+def _published_track(text: str, stream: int, channel: int | None, family: Mapping[str, Any]) -> PublishedTrack:
+    """A track that one published field lists; its name labels it only where the name rule admits it."""
     # `extract` imports this module, so the label grammar loads only when a name is checked.
     from .speaker_names import name_problem
 
     name = text.strip()
-    return name if name_problem(name) is None else None
+    usable = bool(name) and name_problem(name) is None
+    return PublishedTrack(
+        name if usable else None, stream, channel, bool(family["declares_microphone"]), bool(family["single_voice"]),
+        name_refused=bool(name) and not usable,
+    )
 
 
 def _ixml_tracks(ixml: bytes, family: Mapping[str, Any], channels: int | None) -> list[PublishedTrack]:
@@ -146,10 +151,7 @@ def _ixml_tracks(ixml: bytes, family: Mapping[str, Any], channels: int | None) -
         if not index.isdigit() or int(index) < 1 or (channels is not None and int(index) > channels):
             continue
         # iXML counts from one; a track names a channel from zero, as the decoder does.
-        found.append(PublishedTrack(
-            _published_name(entry.findtext(family["name"]) or ""), 0, int(index) - 1,
-            bool(family["declares_microphone"]), bool(family["single_voice"]),
-        ))
+        found.append(_published_track(entry.findtext(family["name"]) or "", 0, int(index) - 1, family))
     return found
 
 
@@ -194,10 +196,7 @@ def read_published(path: Path, data: Mapping[str, Any] | None = None) -> Publish
         elif family["kind"] == "stream_tag":
             for index, tags in enumerate(streams):
                 if text := _tag(tags, family["tag"]):
-                    listed.append(PublishedTrack(
-                        _published_name(text), index, None,
-                        bool(family["declares_microphone"]), bool(family["single_voice"]),
-                    ))
+                    listed.append(_published_track(text, index, None, family))
     # One entry per audio, the first to list it; one past the bound is enough to say the list is too long.
     tracks: dict[tuple[int, int | None], PublishedTrack] = {}
     for track in listed:
@@ -269,6 +268,7 @@ def declaration(value: object, published: Published | None = None) -> tuple[Trac
     if len(value) > MAX_TRACKS:
         raise TrackDeclarationError(f"declare at most {MAX_TRACKS} tracks; each track is one full transcription")
     named = {(t.stream, t.channel): t.name for t in (published.tracks if published else ()) if t.name is not None}
+    refused = {(t.stream, t.channel) for t in (published.tracks if published else ()) if t.name_refused}
     tracks: list[Track] = []
     for entry in value:
         if isinstance(entry, Track):
@@ -288,7 +288,11 @@ def declaration(value: object, published: Published | None = None) -> tuple[Trac
             raise TrackDeclarationError("`single_voice` is true or false")
         name = entry.get("name") or named.get((stream, channel))
         if not isinstance(name, str) or not name.strip():
-            unnamed = "" if published is None else "; the file publishes no name for it"
+            unnamed = (
+                "" if published is None
+                else "; the name the file publishes for it cannot label a line" if (stream, channel) in refused
+                else "; the file publishes no name for it"
+            )
             raise TrackDeclarationError(f"name the track on stream {stream} channel {channel}{unnamed}")
         if problem := name_problem(name.strip(), "a track's name"):
             raise TrackDeclarationError(f"{problem}; change the name of the track on stream {stream} channel {channel}")
@@ -316,13 +320,14 @@ def resolve(path: Path, declared: object = None, data: Mapping[str, Any] | None 
 
     A declaration replaces the published list whole and takes names from it only where it names none.
     No declaration and no published microphones leave no tracks: the first audio stream is read as one mix.
+    An empty declaration reads that mix too, whatever the file publishes.
     """
     published = read_published(path, data)
     tracks = declaration(declared, published)
     microphones = [t for t in published.tracks if t.declares_microphone]
     # One published microphone is the recording itself, and a track with no usable name cannot be labelled.
     # Either way the mix is read, which loses no track's words.
-    if not tracks and 2 <= len(microphones) <= MAX_TRACKS and all(t.name is not None for t in microphones):
+    if declared is None and 2 <= len(microphones) <= MAX_TRACKS and all(t.name is not None for t in microphones):
         tracks = tuple(Track(t.name, t.stream, t.channel, t.single_voice) for t in microphones if t.name is not None)
     return Resolved(tracks, published.start)
 

@@ -523,6 +523,8 @@ class MediaJob:
     preview_receipt_id: str | None = None
     # The failure to retain if a receipt-only claim proves there is no matching record.
     preview_finish_error: str | None = None
+    # Why the row's declaration of tracks cannot be read; the worker fails this job with it, and the queue goes on.
+    tracks_unreadable: str | None = None
 
 
 def _tracks_text(tracks: tuple[speech_tracks.Track, ...] | None) -> str | None:
@@ -3089,9 +3091,14 @@ class MediaJobStore:
             conn.close()
 
     def _row_to_job(self, row: Any) -> MediaJob:
-        # A row's tracks are a declaration that the door has read, so reading them back can only fail on a corrupt row.
         diarize = row["diarize"] if "diarize" in row.keys() else None
-        tracks = row["tracks"] if "tracks" in row.keys() else None
+        stored = row["tracks"] if "tracks" in row.keys() else None
+        tracks, unreadable = None, None
+        # The door read the declaration before it queued it, so only a corrupt row fails here; that fails its own job.
+        try:
+            tracks = None if stored is None else speech_tracks.declaration(json.loads(stored))
+        except (ValueError, TypeError) as error:  # TrackDeclarationError and JSONDecodeError are ValueErrors
+            unreadable = f"the job's declaration of tracks cannot be read ({error}); reprocess the recording with its tracks"
         return MediaJob(
             id=int(row["id"]),
             binary_path=self.vault_root / str(row["binary_rel"]),
@@ -3113,7 +3120,8 @@ class MediaJobStore:
             language=row["language"] if "language" in row.keys() else None,
             language_mode=row["language_mode"] if "language_mode" in row.keys() else None,
             diarize=None if diarize is None else bool(diarize),
-            tracks=None if tracks is None else speech_tracks.declaration(json.loads(tracks)),
+            tracks=tracks,
+            tracks_unreadable=unreadable,
             preview_sha256=row["preview_sha256"] if "preview_sha256" in row.keys() else None,
             preview_receipt_id=row["preview_receipt_id"] if "preview_receipt_id" in row.keys() else None,
             preview_finish_error=row["preview_finish_error"] if "preview_finish_error" in row.keys() else None,

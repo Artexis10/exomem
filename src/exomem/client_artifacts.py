@@ -530,7 +530,9 @@ def _declared_tracks(value: object) -> tuple[Track, ...] | None:
     except TrackDeclarationError as error:
         raise SafeFetchError("INVALID_FILE", str(error)) from error
     if not tracks:
-        raise SafeFetchError("INVALID_FILE", "declare at least one track, or omit tracks")
+        raise SafeFetchError(
+            "INVALID_FILE", "declare at least one track, or omit tracks; to clear a declaration, reprocess with tracks: []"
+        )
     return tracks
 
 

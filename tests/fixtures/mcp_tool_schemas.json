@@ -1351,7 +1351,6 @@
                   "type": "object"
                 },
                 "maxItems": 16,
-                "minItems": 1,
                 "type": "array",
                 "description": "Separate microphones, as media.process takes `tracks`: [{name, stream, channel}]."
               }
@@ -1433,7 +1432,6 @@
                   "type": "object"
                 },
                 "maxItems": 16,
-                "minItems": 1,
                 "type": "array",
                 "description": "Separate microphones, as media.process takes `tracks`: [{name, stream, channel}]."
               }

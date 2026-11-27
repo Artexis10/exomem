@@ -2,7 +2,7 @@
 name: evermatter-media
 description: 'Find, view, cite and keep media in Evermatter: PDFs, images, audio and video, with their transcripts, pages and frames. Use when the user asks about a recording, photo, scan or video, wants to look inside one, or shares media to keep.'
 metadata:
-  skill_contract: 9ccd836d7ab88222ff1b56b81c7101f490168da38b25d58917ccba2845b76062
+  skill_contract: d3a3842bf001f2c13e0c9fa487f8ca743610fe0a9fad3220355438dac5a91ffa
   version: "0.2.0"
 ---
 
@@ -34,7 +34,7 @@ The user asks about, views or shares a PDF, image, audio recording or video.
 When a recording's languages are unknown at ingest, ask the user once: "One language or several?" Several is slower, because the engine detects the language in every window. Declare it on the first processing with `manage_memory(operation="media.process", arguments={"path": ..., "language": <code>})`, or `"multilingual": true` for several.
 
 ## Separate microphones
-When each audio stream or channel of a recording holds one microphone, as in many interviews and podcasts, declare them once: `manage_memory(operation="media.process", arguments={"path": ..., "tracks": [{"name": "Host", "stream": 0}, {"name": "Guest", "stream": 1}]})`. Give `"channel"` for one channel of a stream, and `"single_voice": true` for a microphone that one person uses. Each transcript line then names its track. A transcribed recording takes the declaration with `media.reprocess`, which replaces speaker labels or names only with `"replace_labelled": true`, which the person asks for. A file handle for `save_source` or `save_evidence` takes the same `tracks`. A repeat writes nothing.
+When each audio stream or channel of a recording holds one microphone, as in many interviews and podcasts, declare them once: `manage_memory(operation="media.process", arguments={"path": ..., "tracks": [{"name": "Host", "stream": 0}, {"name": "Guest", "stream": 1}]})`. Give `"channel"` for one channel of a stream, and `"single_voice": true` for a microphone that one person uses. Each transcript line then names its track. A transcribed recording takes the declaration with `media.reprocess`, which keeps the old transcript on a prior page. Reprocess with `"tracks": []` to read the recording as one mix again and clear the declaration. A file handle for `save_source` or `save_evidence` takes the same `tracks`. A repeat on `media.process` writes nothing.
 
 ## Faulty transcripts
 Check the sidecar's `asr_language`, `asr_language_probability`, `asr_language_source`, `asr_language_mode` and `asr_speech_seconds` before trusting a transcript. A transcript in the wrong language, or one that repeats a line, is a processing fault, not content: fix it with `manage_memory(operation="media.reprocess", arguments={"path": ..., "language": <code>})`, or `"multilingual": true`. The old extraction stays on a linked prior page.

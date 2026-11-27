@@ -905,6 +905,8 @@ class MediaWorker:
                 committed, BLOCKED, self._asr_runtime_failure
             )
         try:
+            if job.tracks_unreadable is not None:  # fails as any unreadable input does, below
+                raise speech_tracks.TrackDeclarationError(job.tracks_unreadable)
             if job.diarize is not None and not media_engines.stage_enabled(job.media_type):
                 raise extract.EngineDisabled(media_engines.SPEECH, "the speech engine is switched off")
             kwargs = {"media_type": job.media_type, "vault_root": self._vault_root}

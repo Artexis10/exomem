@@ -204,7 +204,7 @@ class FileHandle(Wire):
         default=None, description="Request or skip speaker labels for this audio or video file."
     )
     # The shape lives once, on media.process (`speech_attach_schema.Tracks`); the server reads both with `speech_tracks.declaration`.
-    tracks: Annotated[list[dict[str, Any]], Field(min_length=1, max_length=MAX_TRACKS)] | None = Field(
+    tracks: Annotated[list[dict[str, Any]], Field(max_length=MAX_TRACKS)] | None = Field(
         default=None, description="Separate microphones, as media.process takes `tracks`: [{name, stream, channel}]."
     )
 

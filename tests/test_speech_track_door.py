@@ -25,11 +25,13 @@ from exomem import (
     media_worker,
     onnx_asr_runtime,
     preserve,
+    prior_extraction,
     speech_tracks,
     writer_lease,
 )
 from exomem import server as server_module
 from exomem.cli_ops import OpError
+from exomem.vault import parse_frontmatter
 
 RATE = 16000
 HOST_AND_GUEST = [{"name": "Host", "stream": 0}, {"name": "Guest", "stream": 1}]
@@ -164,6 +166,26 @@ def test_an_agent_declares_a_videos_two_audio_streams_and_each_line_of_the_next_
     assert pinned(sidecar) == PINNED
 
 
+@pytest.mark.frame_codecs
+def test_reprocess_with_no_tracks_reads_the_video_as_one_mix_again_and_its_source_records_no_declaration(
+    build, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    relative, binary, sidecar = recording(vault, "panel.mkv", data=b"")
+    container(binary, 0.25, 0.5)
+    monkeypatch.setattr(extract, "get_transcriber", lambda: Listener())
+    mcp = build()
+    door(mcp, "media.process", {"path": relative, "tracks": HOST_AND_GUEST})
+    work(vault)
+    assert pinned(sidecar) == PINNED
+
+    cleared = door(mcp, "media.reprocess", {"path": relative, "tracks": []})
+    work(vault)
+
+    assert "error" not in cleared, cleared
+    assert preserve.extracted_text(sidecar.read_text(encoding="utf-8")).splitlines() == ["[0:00] level 0.25"]
+    assert pinned(sidecar) is None
+
+
 @pytest.mark.parametrize("execution_mode", ["inline", "process"])
 def test_a_declaration_reaches_the_worker_and_the_published_page_keeps_it(
     vault: Path, engine: Engine, execution_mode: str
@@ -234,7 +256,33 @@ def test_a_declaration_on_a_transcribed_recording_takes_effect_when_it_is_proces
     assert preserve.extracted_text(sidecar.read_text(encoding="utf-8")).startswith("[0:00] [Host]: Welcome.")
 
 
-def test_a_declaration_replaces_speaker_labels_only_when_the_caller_says_so(vault: Path, engine: Engine) -> None:
+def test_a_declaration_replaces_a_labelled_transcript_as_reprocess_does_and_keeps_the_old_one_on_a_prior_page(
+    vault: Path, engine: Engine
+) -> None:
+    relative, _binary, sidecar = recording(vault, "interview.m4a")
+    engine.text = "[0:00] [Speaker A]: Welcome.\n[0:03] [Speaker B]: Thank you."
+    engine.speakers = [
+        {"speaker": "Speaker A", "start": 0.0, "end": 2.0, "text": "Welcome."},
+        {"speaker": "Speaker B", "start": 3.0, "end": 5.0, "text": "Thank you."},
+    ]
+    commands.op_process_media(vault, path=relative, operation="process")
+    work(vault)
+
+    engine.text, engine.speakers = "[0:00] [Host]: Welcome.\n[0:03] [Guest]: Thank you.", None
+    commands.op_process_media(vault, path=relative, operation="reprocess", tracks=HOST_AND_GUEST)
+    work(vault)
+
+    content = sidecar.read_text(encoding="utf-8")
+    [prior] = prior_extraction.links_of(content)
+    assert preserve.extracted_text(content).startswith("[0:00] [Host]: Welcome.")
+    assert "[Speaker A]: Welcome." in (vault / f"{prior}.md").read_text(encoding="utf-8")
+
+
+def test_a_caller_who_may_not_write_the_recordings_source_is_refused_before_anything_is_read_or_queued(
+    build, vault: Path, engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.governance import egress, membership, policy, principal
+
     relative, _binary, sidecar = recording(vault, "interview.m4a")
     engine.text = "[0:00] [Speaker A]: Welcome.\n[0:03] [Speaker B]: Thank you."
     engine.speakers = [
@@ -244,12 +292,97 @@ def test_a_declaration_replaces_speaker_labels_only_when_the_caller_says_so(vaul
     commands.op_process_media(vault, path=relative, operation="process")
     work(vault)
     page = sidecar.read_bytes()
+    # Any rule makes the policy non-empty, and a non-owner with no connector entry may then write nowhere.
+    governance = vault / "Knowledge Base" / "_Governance"
+    (governance / "scopes").mkdir(parents=True, exist_ok=True)
+    (governance / "rules").mkdir(parents=True, exist_ok=True)
+    (governance / "scopes" / "elsewhere.yaml").write_text(
+        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FC0\npaths: ["absent/**"]\n', encoding="utf-8"
+    )
+    (governance / "rules" / "elsewhere.yaml").write_text(
+        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FC1\nscope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FC0"]\n'
+        "audience: client-a\nceiling: 0\n",
+        encoding="utf-8",
+    )
+    policy._CACHE.clear()
+    membership.clear_memo()
+    egress.clear_decision_memo()
+    client_a = principal.RequestPrincipal(audience_id="client-a", surface="mcp", issuer_family="mcp-oauth:synthetic")
+    monkeypatch.setattr(principal, "resolve_mcp_principal", lambda: client_a)
+    mcp = build()
 
-    with pytest.raises(OpError) as refused:
-        commands.op_process_media(vault, path=relative, operation="reprocess", tracks=HOST_AND_GUEST)
-    assert "replace_labelled" in str(refused.value) and sidecar.read_bytes() == page
+    refusals = [
+        door(mcp, operation, {"path": relative, "tracks": [{"name": "Mallory", "stream": 0}], **extra})
+        for operation, extra in (
+            ("media.reprocess", {}),
+            ("media.reprocess", {"tracks": []}),
+            ("media.process", {}),  # the finished transcript would decide a different refusal
+        )
+    ]
+
+    assert [refused.get("error", {}).get("code") for refused in refusals] == ["WRITE_REFUSED"] * 3, refusals
+    assert len({refused["error"]["message"] for refused in refusals}) == 1, refusals
+    assert sidecar.read_bytes() == page
     assert media_jobs.MediaJobStore(vault).next_pending() is None
 
-    commands.op_process_media(vault, path=relative, operation="reprocess", tracks=HOST_AND_GUEST, replace_labelled=True)
+
+def test_an_excluded_recording_refuses_a_declaration_the_same_way_whether_or_not_its_transcript_is_labelled(
+    vault: Path, engine: Engine
+) -> None:
+    labelled, _, labelled_page = recording(vault, "labelled.m4a")
+    engine.text = "[0:00] [Speaker A]: Welcome.\n[0:03] [Speaker B]: Thank you."
+    engine.speakers = [
+        {"speaker": "Speaker A", "start": 0.0, "end": 2.0, "text": "Welcome."},
+        {"speaker": "Speaker B", "start": 3.0, "end": 5.0, "text": "Thank you."},
+    ]
+    commands.op_process_media(vault, path=labelled, operation="process")
+    work(vault)
+    plain, _, plain_page = recording(vault, "plain.m4a")
+    engine.text, engine.speakers = "[0:00] One voice.", None
+    commands.op_process_media(vault, path=plain, operation="process")
+    work(vault)
+    pages = labelled_page.read_bytes(), plain_page.read_bytes()
+    (vault / "Knowledge Base" / "_access.yaml").write_text("excluded:\n  - Evidence/Recordings\n", encoding="utf-8")
+
+    codes = []
+    for relative in (labelled, plain):
+        with pytest.raises(OpError) as refused:
+            commands.op_process_media(vault, path=relative, operation="reprocess", tracks=HOST_AND_GUEST)
+        codes.append(refused.value.code)
+
+    assert codes == ["MEDIA_PATH_ACCESS_DENIED"] * 2
+    assert (labelled_page.read_bytes(), plain_page.read_bytes()) == pages
+    assert media_jobs.MediaJobStore(vault).next_pending() is None
+
+
+def test_an_empty_declaration_on_process_names_reprocess_as_the_way_to_clear_one(build, vault: Path) -> None:
+    relative, _binary, sidecar = recording(vault, "interview.m4a")
+    commands.op_process_media(vault, path=relative, operation="process")
+    page, job = sidecar.read_bytes(), media_jobs.MediaJobStore(vault).next_pending()
+
+    refused = door(build(), "media.process", {"path": relative, "tracks": []})
+
+    assert "reprocess it with tracks: []" in json.dumps(refused["error"]), refused
+    assert sidecar.read_bytes() == page
+    assert media_jobs.MediaJobStore(vault).next_pending() == job
+
+
+def test_a_job_whose_stored_declaration_cannot_be_read_fails_alone_and_the_queue_goes_on(vault: Path, engine: Engine) -> None:
+    import sqlite3
+
+    broken, _, broken_page = recording(vault, "broken.m4a")
+    commands.op_process_media(vault, path=broken, operation="process", tracks=HOST_AND_GUEST)
+    following, _, following_page = recording(vault, "following.m4a")
+    commands.op_process_media(vault, path=following, operation="process")
+    with sqlite3.connect(media_jobs.job_store_path(vault)) as conn:
+        conn.execute("UPDATE jobs SET tracks = ? WHERE binary_rel = ?", ('[{"name": "Host]: forged", "stream": 0}]', broken))
 
     assert media_jobs.MediaJobStore(vault).next_pending() is not None
+    work(vault)
+    work(vault)
+
+    failed = parse_frontmatter(broken_page.read_text(encoding="utf-8"))[0]
+    assert failed["processing_state"] == "failed"
+    assert "declaration of tracks cannot be read" in failed["processing_error"]
+    assert preserve.extracted_text(following_page.read_text(encoding="utf-8")) == "[0:00] One voice."
+    assert engine.asked == [None]

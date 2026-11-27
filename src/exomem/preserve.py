@@ -2080,10 +2080,13 @@ def declared_speech_tracks(content: str) -> tuple[Track, ...] | None:
 def set_speech_tracks_pin(content: str, tracks: Sequence[Track] | None) -> str:
     """Record a declaration of tracks that `speech_tracks.declaration` has read; None keeps the one the sidecar holds.
 
-    Every path that writes the declaration writes it here. JSON is a YAML flow sequence, and quotes every name.
+    An empty declaration removes the field, so the Source records no declaration. Every path that writes the
+    declaration writes it here. JSON is a YAML flow sequence, and quotes every name.
     """
     if tracks is None:
         return content
+    if not tracks:
+        return _remove_frontmatter_fields(content, lambda key: key == _SPEECH_TRACKS_FIELD)
     from .speech_tracks import as_data
 
     return _set_frontmatter_field(content, _SPEECH_TRACKS_FIELD, json.dumps(as_data(tracks), ensure_ascii=False))
