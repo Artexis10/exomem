@@ -163,7 +163,8 @@ def _progress(record: dict) -> dict | None:
         return None
     total = record.get("total")
     left_out = (record.get("left_out") or {}).get("count", 0)
-    settled = left_out if record["state"] == DONE else counts["failed"]
+    # Before `done` an item that the entry's rule left out (`set_aside`) is already settled, as a failed one is: it will never file.
+    settled = left_out if record["state"] == DONE else counts["failed"] + (record.get("set_aside") or 0)
     remaining = None if total is None else max(0, total - counts["filed"] - counts["skipped_duplicates"] - settled)
     return {
         "total": total, "filed": counts["filed"], "skipped_duplicates": counts["skipped_duplicates"],
@@ -203,17 +204,26 @@ def _counts(progress: object) -> dict[str, int] | None:
 def _stage_total(vault_root: Path, import_id: str) -> int | None:
     """The members that the stage's receipt or record lists, but the series file, and what filing has derived from app exports; None when it lists none.
 
-    A derived transcript, an item that could not be read and an export read in part each count as one member, so the
-    total grows while an export is being read. The export file is a member that stays unfiled until it is read, so
+    A derived file, an item that could not be read or was left out, and an export read in part each count as one member,
+    so the total grows while an export is being read. The export file is a member that stays unfiled until it is read, so
     `remaining` is not zero before then.
     """
     from . import export_expansion
 
-    stage = import_stage.read(vault_root, import_id)
+    stage = import_stage.read(vault_root, import_id, derived=False)  # the counts come from the expansion state, not its rows
     if stage is None:
         return None
     reading = export_expansion.read(vault_root, import_id)
-    return sum(1 for path in stage.members if path != import_stage.SERIES_FILE) + reading.files + len(reading.unfiled)
+    return (
+        sum(1 for path in stage.members if path != import_stage.SERIES_FILE) + reading.files
+        + reading.failed + reading.skipped + reading.partial)
+
+
+def _set_aside(vault_root: Path, import_id: str) -> int:
+    """The items of the stage's app exports that the registry entry's own rule left out, from the expansion state."""
+    from . import export_expansion
+
+    return export_expansion.read(vault_root, import_id).skipped
 
 
 def _left_out(vault_root: Path, import_id: str) -> dict:
@@ -510,11 +520,13 @@ class Filer:
         left_out = _left_out(self.vault_root, import_id) if filing == _REPLY_DONE else None
         needs = _stopped_needs(self.vault_root, reply, person) if filing == _REPLY_STOPPED else []
         total = _stage_total(self.vault_root, import_id)  # filing derives members from an app export, so the total grows
+        set_aside = _set_aside(self.vault_root, import_id)
 
         def change(record: dict) -> None:
             record.update(call=None, progress=counts, left_out=left_out, needs=needs, person=person, busy=[])
             if total is not None:
                 record["total"] = total
+                record["set_aside"] = set_aside
             record["state"] = {_REPLY_WORKING: WORKING, _REPLY_STOPPED: PARKED, _REPLY_DONE: DONE}[filing]
             record["continuation"] = None if filing == _REPLY_DONE else continuation
             record["stop"] = stop if filing == _REPLY_STOPPED else None
