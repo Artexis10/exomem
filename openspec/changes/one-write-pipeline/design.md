@@ -48,7 +48,9 @@ It reads the current state and writes nothing. It takes neither the mutation bou
 - **Commit** calls the same function under its lock, then runs the checks that only a commit can make.
 - **Store mode.** Validation reads the store's availability, a read-only check. It returns the refusal that a commit would get for a diverged store or a pending takeover. `OFF_THREAD` describes where a commit runs, not the input, so validation never reports it.
 
-A refusal that depends on the input arrives at validation, because both steps run the same code. A refusal that depends on state that changes between the two calls, such as a concurrent write, can still arrive at commit, as it does today.
+**Vocabulary registry writes.** Today the access check defers the registry decision to the commit, because the vocabulary authority decides over staged files and holds a reservation for the batch (`vocabulary_gate.begin_batch`). Validation instead asks the authority for a read-only decision over the planned images, which `vocabulary_auxiliaries.planned_images` already computes. The reservation and its grant stay commit-only. A note create that registers a new project key is therefore decided at validation too.
+
+A refusal that depends on the input arrives at validation, because both steps run the same code. A refusal that depends on state that changes between the two calls can still arrive at commit, as it does today. Examples are a concurrent write and a reservation lost to a concurrent registry change.
 
 The note tools (`note.py`, `edit.py`, `replace.py`, `link.py`, `set_frontmatter_field.py`, `semantic_writes.py`) replace their early return with a call to the plan function. Seventeen files declare `validate_only` and 30 use it, the dispatcher modules included. Each leaf that writes owner pages moves.
 
@@ -88,7 +90,9 @@ The check passes the path that a planned move vacates, as `respell_new_path` tak
 
 ### D6. One parity test
 
-For each write command, the test runs one write and records the commit's plan. It then denies each planned path in turn through the access policy, and asserts that validation and commit return the same refusal code. The commands come from the tool registry. The three surfaces outside the registry (device intake, the import run and the cell import) are named in the test, with a one-line reason.
+For each write command, the test runs one write and records the commit's plan. It then denies each planned path in turn through the access policy, and asserts that validation and commit return the same refusal code. The commands come from the tool registry. Device intake, the one validating surface outside the registry, is named in the test with a one-line reason. The import run is not a parity surface: it files through the note tools, which the test covers.
+
+For a write that touches the vocabulary registry, the test also denies the registry decision and asserts the same code at both steps. The reservation is not denied in the test, because its refusal depends on a concurrent registry change, not on the input.
 
 The failure it catches is the one seen before: a planned write that validation never planned, such as the Planning log archive.
 

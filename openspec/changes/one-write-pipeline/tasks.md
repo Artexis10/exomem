@@ -2,6 +2,7 @@
 
 - [ ] 1.1 Move the lock-free part of the batch write into one plan function: complete the plan (leaf, log, navigation index, auxiliary, trash metadata and curation witness writes) and run the access check on every planned write. Both storage-mode branches and curation's preparation stop call it; delete the copy in `vault_store/batch.py`. Keep the heat registration in the commit.
 - [ ] 1.2 In store mode, make validation read the store's availability and return the refusal a commit would get for a diverged store or a pending takeover.
+- [ ] 1.3 Give the vocabulary authority a read-only decision over the planned images for validation; keep the reservation commit-only.
 
 ## 2. Validation through the plan function (D1, D3)
 

@@ -295,7 +295,11 @@ The owner decided on 2026-11-27 that the store is the source of truth and the Ma
 
 1. The owner's vault has switched (7.4).
 2. The restricted-caller read budgets of 3.2 pass, because other vaults have restricted callers.
-3. Store paths fold case (D4 names the need). Folding means: the store treats two paths that differ only by case as one key, a write that would create a case twin lands on the existing path, and a migration preflight refuses a vault that already holds case twins with `CASE_COLLISION`, naming each pair and the path-variants merge as the fix. Until this passes, the default changes only on case-sensitive file systems.
+3. Store paths fold case. D4 states the need ("two case variants of one path are still two keys"). Folding means one case-insensitive key per path:
+   - The names function of `one-write-pipeline` steers a new folder to its existing spelling before the write is planned.
+   - A new page whose name differs from an existing one only by case keeps its numbered suffix ("Store-mode names read the store").
+   - Any case twin that still reaches the store is refused with `CASE_COLLISION`; nothing is redirected or overwritten.
+   - A migration preflight refuses a vault that already holds case twins with `CASE_COLLISION`, naming each pair and the path-variants merge as the fix.
 4. The outcome evaluation (7.3) shows no case where store mode loses what file mode finds.
 5. Every `PAGES` entry in `cli_fence.ACCESS` is served from the store or retired. The entries that refuse on a store-mode vault today include `setup`, `init`, `personalize`, `import`, the cell commands, the collection commands, `index`, `relations` and `warm`.
 
@@ -304,7 +308,7 @@ A platform gets the new default only where `store-mode migrate` admits it. Windo
 From that release:
 
 - `exomem init` creates a new vault in store mode.
-- A managed upgrade migrates a file-mode vault. First it takes a complete snapshot with the product backup, to its configured target; with no configured or reachable target it does not migrate and says why. Then it runs the verified migration of D8, offline. The upgrade states the expected downtime before it starts; from the spike's numbers it is about 2.5 minutes on a vault of 14,000 pages.
+- A managed upgrade migrates a file-mode vault. First it takes a complete snapshot with the product backup, to its configured target; with no configured or reachable target it does not migrate and says why. Then it runs the verified migration of D8, offline. The upgrade states the expected downtime before it starts. It is estimated at about 2.5 minutes on a vault of 14,000 pages: the spike measured 12.3 s for loading and copying, without D8's two verifications, and the verifications are estimated at about a cold build each. Task 10.3 measures it.
 - D1's rule that store mode never creates a store as a side effect is amended: `init` and the upgrade's migration step create the collection store when a vault has none, and their results say so.
 - A migration that refuses at any step, including its preflight (platform, lease, `CASE_COLLISION`), or fails verification leaves the vault in file mode and reports the refusal or the differing tables.
 - An owner can decline the migration with an explicit option.
@@ -318,7 +322,7 @@ From that release:
 3. Multi-host writer-lease support has been removed (task 10.10).
 4. Two minor releases have shipped since step 1, and both releases' notes name the release that ends file mode.
 
-The migration, the lexical builder and the migration's sidecar copy stay after 8.1; 8.1 deletes only the sync machinery that keeps sidecars in step. Where a file-mode lexical sidecar exists, the migration copies it as D8 step 3 says, keeping unit revisions. Where none exists, such as an export moved to a fresh machine, the migration builds the lexical rows cold, and unit revisions start fresh. A build after step 2 that finds a file-mode vault, for example one that no managed upgrade reached, migrates it at its first start: backup first, then the verified migration. If the migration refuses at any step, including its preflight, it refuses to serve, names the refusal and names the last release that serves file mode.
+The migration, the lexical builder and the migration's sidecar copy stay after 8.1; 8.1 deletes only the sync machinery that keeps sidecars in step. Where a file-mode lexical sidecar exists, the migration copies it as D8 step 3 says, keeping unit revisions. Where none exists, such as an export moved to a fresh machine, the migration builds the lexical rows cold, and unit revisions start fresh. A build after step 2 that finds a file-mode vault, for example one that no managed upgrade reached, migrates it at its first start: backup first, then the verified migration. If the migration refuses at any step, including its preflight, it refuses to serve, names the refusal and names the last release that serves file mode. When the refusal is a missing backup target, it says to configure one.
 
 After step 2, a backup restore is the undo for a store-mode vault. "Export to a Markdown vault" writes the projected files for portability. A fresh migration can read that export, but it starts a new audit trail and carries no held corrections. That loss is stated in the export's result.
 
