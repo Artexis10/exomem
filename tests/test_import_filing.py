@@ -16,6 +16,7 @@ import test_adoption_consume as consume
 from test_adoption_series import _window
 
 from exomem import (
+    adoption_plan,
     adoption_run,
     cloud_import_job,
     import_filing,
@@ -174,8 +175,11 @@ def test_a_crash_after_the_cell_committed_a_call_repeats_it_under_its_identity_a
     assert len(adoption_run.AdoptionRunStore(vault).runs_at(f"_Imports/{import_id}")) == 1
 
 
-def test_an_agents_file_call_registers_the_stage_and_the_cell_finishes_it(vault: Path, one_step_calls) -> None:
+def test_an_agents_file_call_registers_the_stage_and_the_cell_finishes_it(
+    vault: Path, one_step_calls, monkeypatch
+) -> None:
     """The agent calls `file` once and goes away: with no registration the stage waits for a call that never comes."""
+    monkeypatch.setattr(import_filing, "AGENT_QUIET_SECONDS", 1.0)  # the agent never calls again, so the quiet window is the wait
     import_id = _stage(vault, filing=None)
     filer = import_filing.start(vault)
     try:
@@ -204,6 +208,104 @@ def test_a_foreground_file_call_and_the_filer_share_one_run_and_file_each_file_o
     assert reply["filing"] == "done" and view["state"] == "done"
     assert len(_sources(vault)) == len(FILES)
     assert len(adoption_run.AdoptionRunStore(vault).runs_at(f"_Imports/{import_id}")) == 1
+
+
+def test_the_filer_stands_aside_while_an_agent_files_the_stage_and_files_it_once_the_agent_stops(
+    vault: Path, one_step_calls, monkeypatch
+) -> None:
+    """Catches a filer that takes the boundary between an agent's calls: each of its calls ends after one turn for the
+    agent that waits, and pays the fixed cost of a call again, so the two together file slower than the agent alone.
+    It also catches a view that parks the stage for it, or stamps the record again for each wake of the filer."""
+    monkeypatch.setattr(import_filing, "AGENT_QUIET_SECONDS", 1.5)
+    import_id = _stage(vault, filing=None)
+    import_filing.start(vault)
+    try:
+        replies = [_file_call(vault, import_id), _file_call(vault, import_id)]
+        time.sleep(0.5)  # the filer was woken by each call, and would have taken the boundary by now
+        record = import_filing.read_record(vault, import_id)
+        view = import_filing.read_view(vault, import_id)
+        time.sleep(0.5)
+        later = import_filing.read_record(vault, import_id)
+        done = _wait_for(vault, import_id, "done", seconds=60)  # the agent stops calling; the quiet window passes
+        after = import_filing.read_record(vault, import_id)
+        finished = import_filing.read_view(vault, import_id)
+    finally:
+        import_filing.stop(vault)
+
+    assert [reply["filing"] for reply in replies] == ["working", "working"]
+    assert record["seq"] == 0  # the filer made no call while the agent filed
+    assert later["as_of"] == record["as_of"]  # and stamped no record for the wait
+    assert view["state"] == "working" and view["stop"] is None and view["needs"] == []
+    assert view["note"] == import_filing.AGENT_FILING_NOTE
+    # The agent's own counts are the view's: its reply, no staler than a filer call's would be.
+    expected = {key: replies[-1]["progress"][key] for key in ("filed", "skipped_duplicates", "failed")}
+    assert record["progress"] == expected
+    assert view["progress"]["filed"] == expected["filed"]
+    assert done["state"] == "done" and after["seq"] > 0  # then the cell carried the stage to its end
+    assert "note" not in finished  # and the view no longer says an agent files it
+    assert len(_sources(vault)) == len(FILES)
+    assert len(adoption_run.AdoptionRunStore(vault).runs_at(f"_Imports/{import_id}")) == 1
+
+
+def test_an_agents_hand_off_with_wait_false_is_filed_at_once_and_not_after_the_quiet_window(
+    vault: Path, one_step_calls, monkeypatch
+) -> None:
+    """Catches a hand-off that lands inside the window its earlier calls left: the filer would wait it out for nothing."""
+    monkeypatch.setattr(import_filing, "AGENT_QUIET_SECONDS", 600.0)
+    import_id = _stage(vault, filing=None)
+    import_filing.start(vault)
+    try:
+        _file_call(vault, import_id)
+        waiting = import_filing.read_view(vault, import_id)
+        _file_call(vault, import_id, wait=False)
+        done = _wait_for(vault, import_id, "done", seconds=30)
+    finally:
+        import_filing.stop(vault)
+
+    assert waiting["note"] == import_filing.AGENT_FILING_NOTE  # the stage was the agent's, for ten minutes
+    assert done["state"] == "done" and len(_sources(vault)) == len(FILES)
+
+
+def test_an_agent_that_repeats_an_earlier_call_does_not_take_the_views_counts_back_to_that_reply(vault: Path) -> None:
+    """Catches a repeat of an earlier `file` call, answered with its stored reply, that writes the older counts with a new `as_of`."""
+    import_id = _stage(vault, filing=None)
+    filer = import_filing.Filer(vault)
+    filer.register(import_id, principal=_owner(), surface=None)
+    older = {"filed": 2, "skipped_duplicates": 0, "failed": 0}
+    newer = {"filed": 5, "skipped_duplicates": 1, "failed": 0}
+    for counts in (older, newer):
+        filer.agent_began(import_id)
+        filer.agent_ended(import_id, working=True, counts=counts)
+    kept = import_filing.read_record(vault, import_id)
+
+    filer.agent_began(import_id)
+    filer.agent_ended(import_id, working=True, counts=older)  # the stored reply of the first call, answered again
+
+    repeated = import_filing.read_record(vault, import_id)
+    assert kept["progress"] == newer and repeated["progress"] == newer
+    assert repeated["as_of"] == kept["as_of"] and repeated["calls"] == kept["calls"]
+
+
+def test_the_filers_own_file_call_does_not_list_its_stage_with_itself_again(vault: Path) -> None:
+    """Catches a filer whose own `file` call listed the stage again: that reset its due time, so no back-off held."""
+    import_id = _stage(vault, filing=None)
+    path = f"_Imports/{import_id}"
+    principal = write_intake.restore_principal(_owner())
+    import_filing.start(vault)
+    try:
+        with principal_module.request_scope(principal), writer_lease.as_background_work():
+            with import_filing.agent_filing(vault, path):
+                pass
+        from_the_filer = import_filing.read_record(vault, import_id)
+        with principal_module.request_scope(principal):
+            with import_filing.agent_filing(vault, path):
+                pass
+        from_an_agent = import_filing.read_record(vault, import_id)
+    finally:
+        import_filing.stop(vault)
+
+    assert from_the_filer is None
+    assert from_an_agent is not None  # the same call from an agent lists the stage: the check above is not vacuous
 
 
 def test_a_free_space_stop_parks_the_stage_and_a_later_call_resumes_it(vault: Path, monkeypatch) -> None:
@@ -251,6 +353,102 @@ def test_a_read_only_cell_parks_the_stage_for_a_later_check_and_files_it_when_th
     done = import_filing.read_view(vault, import_id)
     assert done["state"] == "done" and done["stop"] is None and done["needs"] == []
     assert len(_sources(vault)) == len(FILES)
+
+
+def test_a_stage_whose_calls_move_nothing_waits_longer_and_tries_again_without_asking_for_support(
+    vault: Path, monkeypatch
+) -> None:
+    """Catches a filer that calls again at once for ever on a stage that cannot move, or one that gives up on it for good."""
+    stuck, plans = [True], []
+    real_plan = adoption_run.plan
+
+    def plan(root, **options):
+        plans.append(1)
+        return None if stuck[0] else real_plan(root, **options)  # a stuck plan makes no progress
+
+    monkeypatch.setattr(adoption_run, "plan", plan)
+    import_id = _stage(vault)
+    filer = import_filing.Filer(vault)
+    filer.register(import_id, principal=_owner(), surface=None)
+
+    waits = []
+    while len(waits) < 12:
+        delay = filer.run_once(import_id)
+        assert delay is not None, "a stall must not take the stage off the list"
+        if delay > 0:
+            waits.append(delay)
+    shown = import_filing.read_view(vault, import_id)
+
+    assert len(plans) == adoption_run.FILING_STALL_CALLS + 1 + len(waits) - 1, plans  # one call after each wait
+    assert waits[:4] == [60.0, 120.0, 240.0, 480.0] and set(waits[4:]) == {import_filing.STALL_MAX_BACKOFF_SECONDS}
+    assert shown["state"] == "parked" and shown["stop"]["code"] == import_filing.STOP_STALLED
+    assert shown["stop"]["reason"] == f"filing made no progress in {adoption_run.FILING_STALL_CALLS + len(waits) - 1} calls; it will try again"
+    assert shown["needs"] == []  # a stall is not a fault the person can mend
+
+    stuck[0] = False  # the step moves on at a retry, and nothing needed waking
+    while filer.run_once(import_id) is not None:
+        pass
+    done = import_filing.read_view(vault, import_id)
+
+    assert done["state"] == "done" and done["stop"] is None and done["needs"] == []
+    assert len(_sources(vault)) == len(FILES)
+
+
+def _every_call_ends_for_a_waiting_writer(monkeypatch) -> None:
+    """Make each step end at its first item boundary, as a writer that waits does, and the turn last no time."""
+    monkeypatch.setattr(adoption_run, "_writer_waits", lambda root: True)
+    monkeypatch.setattr(adoption_run, "TURN_SECONDS", 0.0)
+
+
+def _file_to_done_without_a_stall(vault: Path, import_id: str, *, calls: int = 120) -> int:
+    """Call the filer until the stage leaves the list; return the most calls in a row that moved nothing."""
+    filer = import_filing.Filer(vault)
+    filer.register(import_id, principal=_owner(), surface=None)
+    unmoved = 0
+    for _ in range(calls):
+        if filer.run_once(import_id) is None:
+            break
+        unmoved = max(unmoved, import_filing.read_record(vault, import_id)["unmoved"])
+    assert import_filing.read_view(vault, import_id)["state"] == "done"
+    return unmoved
+
+
+def test_a_read_of_many_unread_sources_under_a_waiting_writer_is_not_a_stall(vault: Path, monkeypatch) -> None:
+    """Catches a filer that parks a plan whose cold read of the Sources takes more calls than the stall limit.
+
+    The read moves no count and no planned file until it ends, so only the pages it has read show that it goes on.
+    """
+    sources = vault / "Knowledge Base" / "Sources"
+    for number in range(adoption_run.FILING_STALL_CALLS + 4):
+        page = sources / f"earlier-{number}.md"
+        page.write_text(
+            f"---\nimported_from: Elsewhere/earlier-{number}.md\noriginal_sha256: {number:064x}\ncaptured: 2026-10-27\n---\n# E\n",
+            encoding="utf-8")
+    # A page whose change time is within the racy window is read again at every pass, and `os.utime` cannot move the
+    # change time, so the window is closed for the test: each page read is a page the process remembers.
+    monkeypatch.setattr(adoption_plan, "_RACY_NS", 0)
+    adoption_plan._SOURCE_PAGES.clear()  # a process that has read no Source yet
+    monkeypatch.setattr(adoption_plan, "INDEX_READ_FLOOR", 1)
+    _every_call_ends_for_a_waiting_writer(monkeypatch)
+
+    unmoved = _file_to_done_without_a_stall(vault, _stage(vault))
+
+    assert unmoved < adoption_run.FILING_STALL_CALLS, unmoved
+    assert len(_sources(vault)) == len(FILES) + adoption_run.FILING_STALL_CALLS + 4
+
+
+def test_a_finish_that_removes_its_staged_copies_over_many_calls_is_not_a_stall(vault: Path, monkeypatch) -> None:
+    """Catches a filer that parks a `finish` whose removals take more calls than the stall limit.
+
+    A removed copy changes no count and not the page's phase, so only the copies settled show that `finish` goes on.
+    """
+    files = {f"note-{number}.md": f"# Note {number}\n".encode() for number in range(adoption_run.FILING_STALL_CALLS + 3)}
+    _every_call_ends_for_a_waiting_writer(monkeypatch)
+
+    unmoved = _file_to_done_without_a_stall(vault, _stage(vault, files=files))
+
+    assert unmoved < adoption_run.FILING_STALL_CALLS, unmoved
+    assert len(_sources(vault)) == len(files)
 
 
 def test_a_vault_with_no_knowledge_base_is_created_by_the_filer_and_the_stage_is_filed_once(vault: Path) -> None:

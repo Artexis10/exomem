@@ -2596,13 +2596,20 @@ def _related_pages_projection(leaf: Any) -> list[Any] | None:
     return None
 
 
+def _is_adoption_leaf(leaf: Any) -> bool:
+    """Whether the leaf is an Adoption Studio call's reply, which carries its run's id."""
+    return isinstance(leaf, Mapping) and isinstance(leaf.get("run_id"), str) and leaf["run_id"].startswith("adr-")
+
+
 def _stated_outcome(leaf: Any) -> str | None:
-    """The sentence an approval leaf states itself.
+    """The sentence a leaf states itself in place of the generic "Saved" lead.
 
     An approval has no page `path` for `_user_summary` to name, and its outcome (approved, already
     approved, revoked, moved aside) depends on the ledger's state, so the leaf carries the sentence.
+    An import step that stopped before its end (`plan` or `finish` with a continuation) says so, because a
+    reader who stops at "Saved" never calls the step again.
     """
-    if not isinstance(leaf, Mapping) or leaf.get("operation") != "approve_procedure":
+    if not isinstance(leaf, Mapping) or not (leaf.get("operation") == "approve_procedure" or _is_adoption_leaf(leaf)):
         return None
     sentence = leaf.get("outcome")
     return sentence if isinstance(sentence, str) and sentence else None
@@ -2681,11 +2688,16 @@ def project_terminal(
             f"{user_summary}{_unfiled_record_clause(records_routing)} "
             f"({cloud_cell.store_identity()['name']})"
         )
-        # An update that dropped relations, or a compact observation whose source link went to the
-        # page, says so where the person reads, with the repair or the page field it cites.
+        # An update that dropped relations, a compact observation whose source link went to the
+        # page, or a dated observation that became a rich unit says so where the person reads,
+        # with the repair, the page field or the kind it cites.
         if (
             isinstance(leaf, Mapping)
-            and (leaf.get("relations_dropped") or leaf.get("relations_cited"))
+            and (
+                leaf.get("relations_dropped")
+                or leaf.get("relations_cited")
+                or leaf.get("kind_defaulted")
+            )
             and isinstance(leaf.get("outcome"), str)
         ):
             compact["user_summary"] += f". {leaf['outcome']}"
@@ -2815,11 +2827,7 @@ def project_terminal(
                 if key in leaf
             }
         )
-    elif (
-        isinstance(leaf, Mapping)
-        and isinstance(leaf.get("run_id"), str)
-        and str(leaf["run_id"]).startswith("adr-")
-    ):
+    elif _is_adoption_leaf(leaf):
         # An Adoption Studio call: the caller carries on with the run id, the plan id
         # and the continuation cursor, so these must survive the compact view. A `file`
         # reply is built small for this view: its state, summary, stop, person list and

@@ -134,12 +134,19 @@ def _send(command, vault: Path, kwargs: dict, *, scope: str | None = "principal:
 
 def _wait_for_state(vault: Path, ref: str, state: str) -> dict:
     deadline = time.monotonic() + _LAND_SECONDS
+    view: dict = {}
     while time.monotonic() < deadline:
-        view = write_intake.read(vault, ref=ref)["queued_write"]
-        if view["state"] == state:
-            return view
+        try:
+            view = write_intake.read(vault, ref=ref)["queued_write"]
+        except OpError as error:
+            # A read that meets the store's busy identity domain is a poll to repeat, not a failure.
+            if error.code != "MUTATION_BUSY":
+                raise
+        else:
+            if view["state"] == state:
+                return view
         time.sleep(0.1)
-    raise AssertionError(f"{ref} never reached {state}: {write_intake.read(vault, ref=ref)}")
+    raise AssertionError(f"{ref} never reached {state}: last read {view}")
 
 
 def _pages_titled(vault: Path, title: str) -> list[Path]:
@@ -443,12 +450,39 @@ def test_a_compact_save_with_governed_metadata_behind_the_queue_is_refused_at_on
         first = _send(observe, vault, plain)
     # The boundary is free, but the first save is still queued, so the next one would queue behind it.
     with pytest.raises(ValueError, match="COMPACT_METADATA_REQUIRES_RICH_KIND") as refused:
-        _send(observe, vault, {**plain, "content": "Dated constraint", "as_of": "2026-11-25"},
+        _send(observe, vault, {**plain, "content": "Checked constraint", "verdict": "confirmed"},
               scope="principal:session-b")
     assert [item["ref"] for item in write_intake.read(vault)["items"]] == [first["queued_write"]["ref"]]
     paused.set()
     _wait_for_state(vault, first["queued_write"]["ref"], "applied")
-    assert "as_of" in str(refused.value) and "`kind`" in str(refused.value)
+    assert "verdict" in str(refused.value) and "`kind`" in str(refused.value)
+
+
+def test_a_dated_save_behind_the_queue_is_queued_and_applied_as_a_record(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect: the intake refused a dated save before the page's registry could choose the default kind."""
+    _writer, holder = managers
+    observe = _command("observe_memory")
+    page = "Knowledge Base/Notes/Insights/percentage-based-feature-flag-rollout.md"
+    plain = {
+        "path": page, "operation": "add", "category": "operating_constraint",
+        "content": "A busy vault must not lose a save",
+    }
+    paused = threading.Event()
+    real_claim = write_intake._claim_head
+    monkeypatch.setattr(write_intake, "_claim_head", lambda root: 0.05 if not paused.is_set() else real_claim(root))
+    with _Hold(holder, vault):
+        first = _send(observe, vault, plain)
+    dated = _send(observe, vault, {**plain, "content": "Dated constraint", "as_of": "2026-11-25"},
+                  scope="principal:session-b")
+    assert dated["state"] == "queued"
+    paused.set()
+    _wait_for_state(vault, first["queued_write"]["ref"], "applied")
+    applied = _wait_for_state(vault, dated["queued_write"]["ref"], "applied")
+    text = (vault / page).read_text(encoding="utf-8")
+    assert "- as_of: 2026-11-25" in text and "Dated constraint" in text
+    assert "Saved with its date." in json.dumps(applied), applied
 
 
 def test_an_oversized_recap_behind_the_queue_is_refused_at_once_and_never_queued(
@@ -499,7 +533,7 @@ def test_a_record_call_with_arguments_its_action_refuses_behind_the_queue_is_nev
     _wait_for_state(vault, first["queued_write"]["ref"], "applied")
 
 
-def test_a_dated_save_with_relations_behind_a_backlog_is_told_only_the_exit_that_lands(
+def test_a_revisit_save_with_relations_behind_a_backlog_is_told_only_the_exit_that_lands(
     vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Dropping the date alone would meet the page's relations refusal, so only a rich kind is offered."""
@@ -517,14 +551,14 @@ def test_a_dated_save_with_relations_behind_a_backlog_is_told_only_the_exit_that
         first = _send(observe, vault, plain)
     with pytest.raises(ValueError, match="COMPACT_METADATA_REQUIRES_RICH_KIND") as refused:
         _send(observe, vault, {
-            **plain, "content": "Dated constraint", "as_of": "2026-11-25",
+            **plain, "content": "Constraint to revisit", "check_by": "2026-11-25",
             "relations": [{"kind": "supersedes", "target": "applied-export"}],
         }, scope="principal:session-b")
     paused.set()
     _wait_for_state(vault, first["queued_write"]["ref"], "applied")
 
     remediation = str(refused.value).partition(" Remediation: ")[2]
-    assert "omit as_of" not in remediation
+    assert "omit check_by" not in remediation
     assert "passing a rich kind" in remediation
 
 
