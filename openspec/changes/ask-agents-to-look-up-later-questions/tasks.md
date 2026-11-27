@@ -9,7 +9,7 @@
 
 ## 3. Proof
 
-- [ ] 3.1 Replay the incident cases on real models in the skills-only client: the whole set once, the three failing cases a second time, the engagement-off cases and two general-question cases.
+- [x] 3.1 Replay the incident cases on real models in the skills-only client against the same build without the change: the whole set once, the three failing cases three times, eight paired fresh cases, four general-question cases and the engagement-off cases.
 
 ## 4. Closure
 

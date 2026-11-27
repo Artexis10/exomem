@@ -1,11 +1,11 @@
 ## Why
 
-Some clients show the agent neither the server instructions nor a hook's per-turn context. One example is claude.ai with the connector and skills. In such a client, the agent recalls once at the start of a conversation, and only if the skill loads. Three recorded misses from 2026-11-24 and 2026-11-25 show two gaps:
+Some clients show the agent neither the server instructions nor a hook's per-turn context. One example is claude.ai with the connector and skills. In such a client, the agent recalls once at the start of a conversation, and only if the skill loads. Recorded misses from 2026-11-24 and 2026-11-25 show two gaps:
 
 - The agent did not load the skill for a practical question about a job under way at the user's home, so it made no memory call.
 - After the first recall, the agent answered later new questions from general knowledge, although the user had a recorded view on them.
 
-Replays in the skills-only client, on Sonnet, measured each lever. BASE_SENTENCE A sentence in the skill body alone did not move the later turns in two replays, and one in the `recall_context` description did not in one. A line in the first recall result alone did not move them in two replays. The body sentence together with the line moved the first later turn to a memory lookup in seven of seven replays; one of them read the note that the recall had mapped, instead of searching. The second later turn stays weak: one of three replays looked it up. The description sentence made the agent recall for the job question in four of six replays.
+Replays in the skills-only client, on Sonnet, measured each lever. On the same build without these changes, the agent made no memory call for the job question in two of two replays, and looked up neither later turn in two of two. A sentence in the skill body alone did not move the later turns in two replays, and one in the `recall_context` description did not in one. A line in the first recall result alone did not move them in two replays. The body sentence together with the line moved the first later turn to a memory lookup in seven of seven replays; one of them read the note that the recall had mapped, instead of searching. The second later turn stays weak: one of three replays read the relevant note, and none searched. The description sentence made the agent recall for the job question in four of six replays.
 
 ## What Changes
 
