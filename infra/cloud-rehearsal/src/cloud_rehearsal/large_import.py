@@ -826,17 +826,23 @@ def space_waits(log_text: str) -> dict[str, Any]:
 
     Public readiness shows only that a rebuild waits; the bytes it needed and found free are in the
     `lexical_repair_finished` event, which is where the report reads them. A line that is not JSON is skipped.
+    A stretch with no `lexical_repair_finished` event at all, such as a tail cut after the repairs, says nothing
+    about waits: its count and last are None (unknown), never 0.
     """
     waits: list[Mapping[str, Any]] = []
+    repairs_seen = False
     for line in log_text.splitlines():
         try:
             record = json.loads(line)
         except ValueError:
             continue
         fields = record.get("fields") if isinstance(record, dict) else None
-        if isinstance(fields, dict) and record.get("event") == "lexical_repair_finished" \
-                and fields.get("result") == "waiting_for_space":
-            waits.append(fields)
+        if isinstance(fields, dict) and record.get("event") == "lexical_repair_finished":
+            repairs_seen = True
+            if fields.get("result") == "waiting_for_space":
+                waits.append(fields)
+    if not repairs_seen:
+        return {"count": None, "last": None}
     return {"count": len(waits), "last": ({key: waits[-1].get(key) for key in ("space_needed_bytes", "space_free_bytes")}
                                           if waits else None)}
 

@@ -2096,6 +2096,48 @@ def test_a_rebuild_stops_when_the_volume_drops_below_the_reserve_while_it_runs(
     assert not list(store.path.parent.glob("*rebuild*")), "the declined build left its temp"
 
 
+def test_a_rebuild_that_a_filling_volume_stopped_waits_for_the_room_it_had_before_it_copies_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A build that adds pages to a smaller live catalogue grows its temp past one copy, so a volume can pass the
+    start check and still stop the build at the reserve. The retry must not copy the live catalogue again to stop
+    at the same place: it waits until the volume holds what the stopped build had written, plus the reserve."""
+    store = _a_catalogue_of_several_megabytes(tmp_path, pages=60)
+    _seed(tmp_path, [_a_page(tmp_path, n) for n in range(250)])
+    reserve = 200_000
+    monkeypatch.setenv("EXOMEM_IMPORT_RESERVE_BYTES", str(reserve))
+    live = _bytes_beside(store.path)
+    # Room for the start check's one extra copy, but not for the temp to reach the grown catalogue's size.
+    capacity = [reserve + 3 * live]
+    real_usage = shutil.disk_usage
+
+    def room_left_beside_the_catalogue(path: Any) -> Any:
+        return real_usage(path)._replace(free=max(0, capacity[0] - _bytes_beside(store.path)))
+
+    monkeypatch.setattr(lexstore.shutil, "disk_usage", room_left_beside_the_catalogue)
+    copies = []
+    real_connect = store._connect_build_temp
+
+    def counting_connect(temp_path: Path) -> Any:
+        copies.append(temp_path)
+        return real_connect(temp_path)
+
+    monkeypatch.setattr(store, "_connect_build_temp", counting_connect)
+
+    assert store.rebuild_atomic() is False
+    assert store._last_rebuild_result == "waiting_for_space"
+    assert len(copies) == 1, "the first attempt did not start a build and stop it mid-way"
+    needed, free = store._last_space_wait
+    assert needed > free
+
+    assert store.rebuild_atomic() is False
+    assert store._last_rebuild_result == "waiting_for_space"
+    assert len(copies) == 1, "the retry copied the catalogue again before the volume had more room"
+
+    capacity[0] += 10 * live
+    assert store.rebuild_atomic() is True
+
+
 def test_a_killed_build_leaves_no_rollback_journal_behind_after_the_next_sweep(tmp_path: Path) -> None:
     """The build's temp is in rollback-journal mode, so a killed build leaves a hot `-journal` beside its temp.
     The journal is as big as the pages the build rewrote, and the sweep takes it with the temp."""

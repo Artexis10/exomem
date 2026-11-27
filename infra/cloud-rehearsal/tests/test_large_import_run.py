@@ -441,6 +441,16 @@ def test_a_rebuild_waiting_for_space_shows_its_byte_figures_from_the_app_log_not
     assert kept["exomem.log"]["space_waits"] == {"count": 2, "last": {"space_needed_bytes": 900, "space_free_bytes": 400}}
 
 
+def test_a_log_tail_with_no_repair_event_reports_its_space_waits_as_unknown_not_zero(monkeypatch, tmp_path):
+    log = "\n".join([json.dumps({"event": "http_request", "fields": {"status": 200}}), "not json at all"]).encode()
+    ctx = SimpleNamespace(stack=SimpleNamespace(workdir=tmp_path))
+    monkeypatch.setattr(large_import, "exec_json", lambda *_args, **_kwargs: _log_in_the_pod(log))
+
+    kept = asyncio.run(large_import.keep_cell_app_logs(ctx, "end"))
+
+    assert kept["exomem.log"]["space_waits"] == {"count": None, "last": None}
+
+
 def test_the_ceiling_and_the_import_reserve_come_from_one_run_of_the_image(monkeypatch):
     calls = []
 
