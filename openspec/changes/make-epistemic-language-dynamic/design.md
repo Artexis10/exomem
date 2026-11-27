@@ -188,7 +188,12 @@ This prevents old parser summaries from becoming falsely authoritative empty ans
 A wrong refusal temporarily delays semantic readers while the existing background pass finishes.
 Raw pages, existence, path lists and complete inbound links remain available; ordinary registry lag retains its notice without a refusal.
 Status exposes the completed and required parser versions.
-The stored candidate now applies indexed proposals and exact selected membership to kinds, keys and families before lane caps. The vector lane reads a dimension's members within eight candidate windows; past that bound it ranks the newest members and the result carries a partial-coverage notice (`semantic_units_candidate_window`). Each exact scan, lexical or newest-member, stops after the same eight windows of nonmember rows and carries the same notice when that stop can shorten the result.
+The stored candidate now applies indexed proposals and exact selected membership to kinds, keys and families before lane caps.
+Exact dimension checks have a per-request work cap of eight candidate windows, for kinds, keys and families, in file mode and store mode.
+A lexical scan stops after that many rows fail the filter, and the vector lane's newest-member read stops after that many members.
+A stop is designed partial coverage, not a lane failure. It sets the `partial_coverage` marker (`dimension_scan_bound`), which stays out of `degraded`.
+So the result cache keeps the result with its marker, degradation counts ignore the stop, and the agent reads the dimension notice, not the failed-method notice.
+Index-exact kind and key predicates reject almost no proposed rows, so in practice only a sparse family reaches the cap.
 Family preparation uses neutral graph inputs and indexed target proofs under the same pinned snapshot.
 The file-mode family fallback retains its existing after-limit caveat until its own indexed path is delivered.
 The managed file runtime keeps its existing freshness and admission contract.
@@ -257,7 +262,7 @@ Explicit candidate batches prepare graph membership immediately before exact fil
 Ranking-statistics transport does not prepare dimensions: it can traverse every admitted parent before a request has query candidates.
 The admitted BM25 branch uses the same candidate preparation operation as other lexical and vector eligibility.
 Endpoint-first adjacency and candidate-name dependency lookups cover links revealed when a competing page is withheld.
-No resolver walk belongs on this path. The delivered family proposal still reads the family's edges once per request, so its cost grows with the family's edge count; the exact checks that follow stop after eight candidate windows of nonmember rows, so a sparse family's checks no longer grow with the corpus.
+No resolver walk belongs on this path. The delivered family proposal still reads the family's edges once per request, so its cost grows with the family's edge count; the exact checks that follow stop after eight candidate windows of rows that fail the filter, so a sparse family's check count no longer grows with the corpus. Hybrid latency still grows with the corpus, because each vector read admits every indexed parent of the proposed pages.
 
 Selected summaries and neutral dependencies supply authored targets without parsing an unreturned page.
 The producer and reader share target resolution, with destination existence and target summaries prefetched in batches.
@@ -287,7 +292,7 @@ The family operation supplies no retired-alias fallback. A retired alias names a
 
 Common page writes, deletion, replay and cold verification maintain the projection. Fold it into the readiness of unshipped lexical schema 20 and owner generation 5. Released-owner writers must tolerate its absence through explicit transaction-cached capabilities. Future key-normalization changes invalidate the existing derived generation; add no separate job or attestation.
 
-Prove full-resolver parity, lower-bound ambiguity diagnostics, hidden collision admission, incomplete negation, legacy-owner writes and cold parity. Prove author-selected private-family membership through public results before caps. Check retired aliases at the real endpoint boundary. Reuse the maintained load instrument for the recorded keyword and hybrid budgets. Its `dimension_filter` series covers key and kind dimensions in file mode only; the latency proof for stored family eligibility is a store-mode series with a relation family. The instrument builds only file-mode corpora without relations, so a generated store-mode probe, run base against head, stands in until it can build a store corpus.
+Prove full-resolver parity, lower-bound ambiguity diagnostics, hidden collision admission, incomplete negation, legacy-owner writes and cold parity. Prove author-selected private-family membership through public results before caps. Check retired aliases at the real endpoint boundary. Reuse the maintained load instrument for the recorded keyword and hybrid budgets. Its `dimension_filter` series covers key and kind dimensions in file mode only; the latency proof for stored family eligibility is a store-mode series with a relation family. The instrument builds only file-mode corpora without relations. A generated store-mode probe, run base against head, proves only that the exact check count stays bounded and how head compares with base. The 200 ms hybrid and 100 ms keyword budgets at 6,500 or more pages stay open under task 5.5 until the instrument can build a store corpus with a relation family.
 
 This applies the primary-source roster's [context engineering](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents), [tool design](https://www.anthropic.com/engineering/writing-tools-for-agents) and [outcome evaluation](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents) guidance.
 

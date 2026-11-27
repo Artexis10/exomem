@@ -1,11 +1,10 @@
 ## ADDED Requirements
 
 ### Requirement: Units Filter By Epistemic Dimension
-The structured-filter field registry SHALL accept `unit.dimension` as a closed field that takes a dimension key or a label in any language, with `$eq` for belonging to a dimension, `$in` for belonging to one of several, and `$ne` for not belonging to one. It SHALL reject every other operator and every operand that is not a string. A name that no dimension entry holds SHALL be rejected with the keys that exist. Membership SHALL come from the one membership rule of the dimension registry, so a dimension that a vault adds is filterable with no code change. A unit SHALL be an end of each edge that its own relation row starts and of each edge whose anchored link ends at it. An edge that starts or ends at a whole page, such as one written in frontmatter, in a page's relations section or as a link with no anchor, SHALL make every unit of that page an end. A dimension whose membership depends on typed edges SHALL read those edges in one graph read for the units it tests, SHALL admit an edge only when the caller may read both of its pages, and SHALL raise the typed warming outcome while the graph is missing or stale, never an empty answer. A served reader SHALL answer the field without a corpus scan. For a dimension without family members, the index SHALL propose occurrences from member kinds and authored governed-key presence. Selected interpretation SHALL decide actual carried-key membership against the original filter before each lane cap and the final limit. This SHALL hold under Boolean composition, including `$or`, `$not` and `$ne`, and SHALL fill the limit when enough eligible matches exist. Authored presence SHALL never substitute for a parsed value or become an unsafe complement. Registry edits SHALL require no corpus rebuild. The lexical owner SHALL derive, replace, delete and verify the same neutral row-key projection in file mode and store mode. The file-mode reader SHALL check dimensions with family members on its hits, with one graph read for the hit set. It SHALL accept such a predicate only as a top-level condition of the filter, alone or under a top-level `$and`, and SHALL refuse it under `$or` or `$not` with `UNSUPPORTED_FILTER_FIELD` and a message that says to move it to the top level. Because the limit applies before the check, the result's leading outcome SHALL say when the check dropped hits from a full ranking, and that more units in the dimension may exist.
+The structured-filter field registry SHALL accept `unit.dimension` as a closed field that takes a dimension key or a label in any language, with `$eq` for belonging to a dimension, `$in` for belonging to one of several, and `$ne` for not belonging to one. It SHALL reject every other operator and every operand that is not a string. A name that no dimension entry holds SHALL be rejected with the keys that exist. Membership SHALL come from the one membership rule of the dimension registry, so a dimension that a vault adds is filterable with no code change. A unit SHALL be an end of each edge that its own relation row starts and of each edge whose anchored link ends at it. An edge that starts or ends at a whole page, such as one written in frontmatter, in a page's relations section or as a link with no anchor, SHALL make every unit of that page an end. A dimension whose membership depends on typed edges SHALL read those edges in one graph read for the units it tests, SHALL admit an edge only when the caller may read both of its pages, and SHALL raise the typed warming outcome while the graph is missing or stale, never an empty answer. A served reader SHALL answer the field without a corpus scan. For a dimension without family members, the index SHALL propose occurrences from member kinds and authored governed-key presence. Selected interpretation SHALL decide actual carried-key membership against the original filter before each lane cap and the final limit. This SHALL hold under Boolean composition, including `$or`, `$not` and `$ne`, and SHALL fill the limit when enough eligible matches exist within the per-request bound on exact checks defined below. Authored presence SHALL never substitute for a parsed value or become an unsafe complement. Registry edits SHALL require no corpus rebuild. The lexical owner SHALL derive, replace, delete and verify the same neutral row-key projection in file mode and store mode. The file-mode reader SHALL check dimensions with family members on its hits, with one graph read for the hit set. It SHALL accept such a predicate only as a top-level condition of the filter, alone or under a top-level `$and`, and SHALL refuse it under `$or` or `$not` with `UNSUPPORTED_FILTER_FIELD` and a message that says to move it to the top level. Because the limit applies before the check, the result's leading outcome SHALL say when the check dropped hits from a full ranking, and that more units in the dimension may exist.
 
 Canonical-store catalogue plans SHALL propose family candidates through indexed neutral endpoints and authored target dependencies.
 They SHALL decide exact membership before every lexical or vector candidate cap and the final limit, including Boolean composition.
-Each exact scan SHALL stop after eight candidate windows of nonmember rows, and a stop that can shorten the result SHALL make it report that one search method may have missed results.
 The author's admitted registry SHALL determine terminal replacement, family and display behaviour before folding unit or page endpoints.
 The original filter SHALL remain authoritative, and the same eligible identities SHALL reach both lanes.
 Selected target resolution SHALL use complete zero/one-owner proofs or two admitted ambiguity witnesses, without claiming an exact ambiguity count.
@@ -14,8 +13,19 @@ Proposals consuming no family inputs SHALL NOT wait for that projection.
 The normalizer keys and ordinary-body witnesses SHALL remain neutral, maintained by the common lexical and graph owners.
 Registry changes SHALL require no corpus rebuild, and an endpoint outside the result's page filter SHALL still count when readable.
 
+A ranked lexical scan that carries a dimension predicate, whether its members are kinds, keys or families, in file mode or store mode, SHALL check each proposed row exactly within a per-request work bound.
+The bound SHALL be eight times the pass's candidate window. The window derives from the requested limit, and it doubles each time the search widens.
+The bound SHALL count the proposed rows that fail the filter, and the scan SHALL stop when that count reaches it.
+For a restricted caller, whose lexical lane ranks by admitted statistics, a unit with several eligible aliases SHALL be checked before scoring, outside the bound.
+The vector lane's read of a dimension's newest members SHALL stop at the same bound.
+A stop SHALL mark the result as partial coverage, never as a failed search method. The stop SHALL NOT keep the result out of the result cache, a cached result SHALL keep its marker, and the stop SHALL NOT count as a degradation.
+A result marked as partial coverage SHALL carry the notice that the dimension filter ran on the best matches only, so more matches in it may exist.
+A keyword result, which keeps the scan's recency order, SHALL carry that notice when its scan stopped and it holds fewer units than the limit, not counting units of superseded pages when the request prefers active ones.
+A hybrid result SHALL carry it when its lexical scan stopped, or when its vector lane ranked the newest members and that read stopped.
+A vector result SHALL carry it when its vector lane ranked the newest members and that read stopped, or when it fell back to a lexical scan that stopped.
+
 #### Scenario: Stored family members fill the requested limit before ranking
-- **WHEN** fewer better-ranked nonmembers than eight candidate windows precede enough admitted family members in a canonical-store catalogue request
+- **WHEN** fewer better-ranked nonmembers than the bound on exact checks precede enough admitted family members in a canonical-store catalogue request
 - **THEN** keyword, hybrid and vector results fill the requested limit with exact members
 - **AND** nested `$or`, `$not` and `$ne` keep the original predicate before candidate caps
 
@@ -65,19 +75,21 @@ Registry changes SHALL require no corpus rebuild, and an endpoint outside the re
 - **THEN** the request returns the units the offline reader returns for the same filter, and no corpus scan runs
 
 #### Scenario: Governed-key members fill the requested limit
-- **WHEN** better-ranked nonmembers precede enough units with valid member rows, including rows carried by an admitted vault kind
+- **WHEN** fewer better-ranked nonmembers than the bound on exact checks precede enough units with valid member rows, including rows carried by an admitted vault kind
 - **THEN** keyword, hybrid and vector retrieval return the requested number of eligible units without a corpus scan
 - **AND** authored rows with invalid values consume no lane slot
 
 #### Scenario: A broad dimension ranks its newest members within a bound
-- **WHEN** a hybrid or vector request filters by a dimension with more members than eight candidate windows, and other units of their pages outrank every member
+- **WHEN** a hybrid or vector request filters by a dimension with more members than the bound, and other units of their pages outrank every member
 - **THEN** the vector lane ranks the newest members within that bound and the result fills the requested limit
-- **AND** the result reports that one search method may have missed results
+- **AND** the result carries the partial-coverage notice and no failed search method
 
 #### Scenario: A sparse family bounds its exact checks
-- **WHEN** a canonical-store request filters by a relation family whose members are a small share of the proposed units and carry no query word
-- **THEN** each exact scan stops after eight candidate windows of nonmember rows, whatever the corpus size
-- **AND** a hybrid result, or a keyword result shorter than the limit, reports that one search method may have missed results
+- **WHEN** each page of a canonical-store vault holds eight units with the query word and one family member without it, and a request filters by that family's dimension
+- **THEN** the request makes the same number of exact checks on 8 pages and on 24 pages, for an owner and for a restricted caller
+- **AND** the hybrid result fills its limit with members, and the keyword result is empty, because no member holds the query word
+- **AND** both results carry the partial-coverage notice and no failed search method
+- **AND** an owner's repeat of a request that asks for no dimension groups is served from the cache with that notice
 
 #### Scenario: A complement keeps an invalid authored row
 - **WHEN** a served filter negates a governed-key dimension and an authored member row has no valid selected value
