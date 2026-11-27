@@ -320,9 +320,28 @@ def test_the_delete_result_and_status_name_what_the_delete_cannot_reach_and_when
     reply = doors("manage_memory", "faces.delete", {})
     status = doors("inspect_memory", "faces.status", {})
 
-    residues = [residue["residue"] for residue in reply["residues"]]
-    assert residues == ["older backups", "a running Cloud cell backup's volume snapshot", "freed disk blocks"]
-    assert all(residue["ends"] for residue in reply["residues"])
+    residues = {residue["residue"]: residue for residue in reply["residues"]}
+    assert set(residues) == {"older backups", "freed disk blocks"}  # A self-hosted account has no Cloud snapshot.
+    assert "keep settings" in residues["older backups"]["ends"]
+    assert "encryption protects" not in residues["freed disk blocks"]["ends"]
     assert status["state"] == "off"
     assert status["last_deletion"]["counts"] == reply["counts"]
     assert status["residues"] == reply["residues"]
+
+
+def test_a_cloud_cell_delete_also_names_the_running_backups_snapshot(doors, vault, monkeypatch) -> None:
+    """Catches a Cloud owner not told that a backup in progress still holds the deleted store."""
+    seed_two_people_and_strangers(vault)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv(face_store.HOSTED_SETTING, "1")
+
+    reply = doors("manage_memory", "faces.delete", {})
+
+    residues = [residue["residue"] for residue in reply["residues"]]
+    assert residues == ["older backups", "a running Cloud cell backup's volume snapshot", "freed disk blocks"]
+
+
+def test_the_disclosure_says_names_go_into_backups_and_outlive_a_delete() -> None:
+    """Catches a disclosure promising that face data never leaves the account, when backups carry names."""
+    assert "backups" in face_operations.DISCLOSURE
+    assert "never leaves this account" not in face_operations.DISCLOSURE

@@ -300,12 +300,12 @@ Turning faces off SHALL stop new detection, cancel queued face work, unload the 
 
 ### Requirement: A delete leaves no managed copy
 
-After a delete, no face data SHALL remain in any live store or export that Evermatter manages. Three residues MAY remain, and the delete result and status SHALL name each and when it ends: older backups that hold the people store, until their retention expires them; a volume snapshot that a running Cloud cell backup holds, until that backup ends; and freed disk blocks, which the volume's encryption protects until the filesystem reuses them.
+After a delete, no face data SHALL remain in any live store or export that Evermatter manages. The delete result and status SHALL name each residue that the deployment can hold and when it ends: older backups that hold the people store, until the deployment's retention expires them; on a Cloud cell, a volume snapshot that a running backup holds, until that backup ends; and freed disk blocks, until the filesystem reuses them.
 
 #### Scenario: The delete result names the residues
 
 - **WHEN** a delete completes
-- **THEN** the result states the three residues and when each ends
+- **THEN** the result states the residues of its deployment and when each ends
 
 ### Requirement: Removing a picture removes its faces
 

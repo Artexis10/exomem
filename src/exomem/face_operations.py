@@ -27,32 +27,54 @@ DISCLOSURE = (
     "Turning faces on finds the faces in your pictures and video keyframes and stores, for each face, its box "
     "and a face vector that can recognise the person. Similar faces form groups, and the names you give "
     "groups let a search show the pictures of a named person. All of it stays in this account's state "
-    "directory, outside the vault: it is never written into a page, an export or a search result, and it "
-    "never leaves this account. Only you, the owner, can read it or search by person. "
+    "directory, outside the vault: it is never written into a page, an export or a search result. "
+    "Only you, the owner, can read it or search by person. The names you give, with each named group's "
+    "averaged face vector, go into this account's backups, and a backup made before a delete keeps them "
+    "until its retention expires it. "
     "`exomem faces off` stops it and keeps what is stored; `exomem faces delete` erases it."
 )
 #: The text a person types at a terminal to turn faces on.
 CONFIRMATION = "turn faces on"
 TURN_ON_COMMAND = "exomem faces on"
-#: What a delete cannot reach, and when each ends (design D11). The delete result and status show them.
-RESIDUES = (
-    {
-        "residue": "older backups",
-        "holds": "the people store: named people and their groups' centroids",
-        "ends": "when backup retention expires the snapshots made before the delete: seven daily and four weekly "
-                "snapshots, about four weeks, on a Cloud cell",
-    },
-    {
-        "residue": "a running Cloud cell backup's volume snapshot",
-        "holds": "the state volume as it was when that backup started",
-        "ends": "when that backup ends and deletes its snapshot",
-    },
-    {
-        "residue": "freed disk blocks",
-        "holds": "the bytes of the removed files",
-        "ends": "when the filesystem reuses them; the volume's encryption protects them until then",
-    },
-)
+#: What a delete cannot reach on every deployment (design D11). `residues()` adds the backups this deployment keeps.
+_FREED_BLOCKS = {
+    "residue": "freed disk blocks",
+    "holds": "the bytes of the removed files",
+    "ends": "when the filesystem reuses them; whether they are encrypted until then depends on the disk",
+}
+
+
+def residues() -> list[dict[str, str]]:
+    """What a delete on this deployment cannot reach, and when each ends. The delete result and status show them.
+
+    Retention lives with each deployment's backup (the owner's keep settings, a Cloud cell's backup schedule),
+    so no count is repeated here.
+    """
+    from . import cloud_cell
+
+    people = "the people store: named people and their groups' centroids"
+    if cloud_cell.cloud_mode_enabled():
+        return [
+            {"residue": "older backups", "holds": people,
+             "ends": "when the Cloud cell's backup retention expires the backups made before the delete"},
+            {"residue": "a running Cloud cell backup's volume snapshot",
+             "holds": "the state volume as it was when that backup started",
+             "ends": "when that backup ends and deletes its snapshot"},
+            _FREED_BLOCKS,
+        ]
+    if cloud_cell.hosted_mode_enabled():
+        return [
+            {"residue": "older backups", "holds": people,
+             "ends": "when the operator's backup retention removes the backups made before the delete"},
+            _FREED_BLOCKS,
+        ]
+    return [
+        {"residue": "older backups", "holds": people,
+         "ends": "when the keep settings of the owner's backup prune the backups made before the delete"},
+        _FREED_BLOCKS,
+    ]
+
+
 #: Groups per status page by default, and at most.
 GROUPS_PER_PAGE, MAX_GROUPS_PER_PAGE = 20, 100
 SAMPLES_PER_GROUP = 3
@@ -142,7 +164,7 @@ def status(vault_root: Path, *, page: str | None, limit: int | None, cursor: str
     receipt = face_store.read_deletion_receipt(vault_root)
     if receipt is not None:
         result["last_deletion"] = receipt
-        result["residues"] = list(RESIDUES)
+        result["residues"] = residues()
     refusal = face_store.deployment_refusal()
     if refusal is not None:
         result["next_action"] = (f"Faces cannot run here: {refusal}. Its operator sets "
@@ -298,7 +320,7 @@ def delete(vault_root: Path) -> dict[str, Any]:
             "state": "off",
             "deletion": "already_deleted" if already else "nothing_stored",
             "last_deletion": earlier,
-            "residues": list(RESIDUES),
+            "residues": residues(),
         }
     # A repeat that finds no face index finishes an earlier partial delete: nothing was scanned since, so the
     # counts are the first attempt's. With a face index, faces were turned on again and the count is fresh.
@@ -335,7 +357,7 @@ def delete(vault_root: Path) -> dict[str, Any]:
         "deletion": deletion,
         "counts": counted,
         "remaining": remaining,
-        "residues": list(RESIDUES),
+        "residues": residues(),
         "next_action": f"Search by person stays off until the owner runs `{TURN_ON_COMMAND}` again.",
     }
 
