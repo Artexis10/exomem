@@ -2,7 +2,7 @@
 
 ### Requirement: Effective classes combine own, floor and inherited classes, minus a mask
 
-A page's effective classes SHALL be the union of its own `sensitivity` field, its `inherited_sensitivity` floor and its inherited classes, minus the classes in its `sensitivity_mask`. Its inherited classes SHALL be the union of the effective classes of the pages it derives from. Every governance decision that reads a class SHALL read the effective classes.
+A page's effective classes SHALL be its own `sensitivity` classes together with its `inherited_sensitivity` floor and its inherited classes, minus the classes in its `sensitivity_mask`. A mask SHALL NOT remove an own class. Its inherited classes SHALL be the union of the effective classes of the pages it derives from. Every governance decision that reads a class SHALL read the effective classes.
 
 #### Scenario: A note cites a classified Source
 
@@ -20,7 +20,7 @@ A row's effective classes SHALL be the union of its own classes, its collection 
 
 ### Requirement: An authored write carries the classes of what it drew on
 
-Every authored write SHALL call one pre-plan step that adds to `inherited_sensitivity` the effective classes of the pages it names in `sources`, the pages it names in `links` whose relation carries `inherits_sensitivity`, an episode's `about` refs and the page it edits. The step SHALL resolve each ref under the writer's visibility. The plan function SHALL refuse an authored write whose floor lacks a class that the step computes.
+Every authored write SHALL call one pre-plan step that adds to `inherited_sensitivity` the effective classes of every derivation ref the planned page holds after the write, a row's source refs, an episode's `about` refs and the page it edits. A derivation ref is a `sources` value, a frontmatter field mapped to an `inherits_sensitivity` relation, or a typed link with such a relation, however it arrived. The plan function SHALL refuse an authored write whose floor lacks a class that the step computes.
 
 #### Scenario: An observation links a classified page
 
@@ -32,10 +32,14 @@ Every authored write SHALL call one pre-plan step that adds to `inherited_sensit
 - **WHEN** an authored write reaches the plan function with a floor that lacks a class of a page it names in `sources`
 - **THEN** the plan function refuses the write and names the missing class
 
+### Requirement: Carry-over never reveals an unreadable page
+
+The carry-over step SHALL resolve each ref under the writer's visibility and SHALL treat a ref the writer cannot read exactly as a ref to no page.
+
 #### Scenario: A source the writer cannot read
 
 - **WHEN** a restricted writer names in `sources` a page withheld from it
-- **THEN** the write refuses as it would for a page that does not exist, and the result reports no class from that page
+- **THEN** the write keeps the ref unresolved with the warning it gives for a page that does not exist, and takes and reports no class from it
 
 ### Requirement: Record writes accept sources
 
@@ -57,12 +61,17 @@ Classify and mechanical rewrites, such as link repair after a rename, folder mer
 
 ### Requirement: The owner masks an inherited class on one page
 
-Classify SHALL set or clear `sensitivity_mask` on a page, with a required reason and a revert. A masked class SHALL leave the page's effective classes and SHALL NOT reach its dependents through it.
+Classify SHALL set or clear `sensitivity_mask` on a page, with a required reason and a revert. Setting a mask and clearing a floor SHALL require the owner principal. A mask SHALL name only a class the page holds now by floor or inheritance. A masked class SHALL leave the page's effective classes and SHALL NOT reach its dependents through it.
 
 #### Scenario: Masking a class on a note
 
 - **WHEN** a note inherits `health` from a cited Source and the owner masks `health` on the note
 - **THEN** the note's effective classes exclude `health`, and a page that cites only the note does not inherit `health`
+
+#### Scenario: A writer masks a class in advance
+
+- **WHEN** a non-owner writer, or the owner before the class arrives, asks to mask `health` on a note that does not hold `health`
+- **THEN** classify refuses and the note's bytes are unchanged
 
 ### Requirement: Inheritance follows derivation edges and stays current
 
@@ -80,7 +89,7 @@ The vault store SHALL hold a derived `page_sensitivity` object with each page's 
 
 ### Requirement: Governance caches key on the inheritance revision
 
-Every cache of a scope set or a governance decision SHALL key on the `page_sensitivity` revision as well as its existing inputs. Projected retrieval under a policy with a `sensitivity` scope SHALL check that scope against the current effective classes, not against scope ids stored at publish.
+Every cache entry for a scope set or a governance decision SHALL key on its page's generation and its scope parents' generations as well as its existing inputs. A change to one page's classes SHALL NOT invalidate entries for pages whose generations did not move. Projected retrieval under a policy with a `sensitivity` scope SHALL check that scope against the current effective classes, not against scope ids stored at publish.
 
 #### Scenario: A cached decision after a raise
 
@@ -107,16 +116,30 @@ Capture, classify and a plain edit SHALL refuse a class on a page the graph does
 
 ### Requirement: Uncurrent inheritance answers as missing
 
-When the active policy has a `sensitivity` scope and the caller is not the owner, a page SHALL be released only when its effective classes are current at the read's pinned snapshot. A page in the pending set or below it SHALL answer as a page that does not exist, in response shape and in timing. Owner reads SHALL NOT wait on inheritance work or pay this check.
+When the active policy has a `sensitivity` scope and the caller is not the owner, a page SHALL be released only when its effective classes are current at the read's pinned snapshot. The pending set SHALL hold pages with an underived intent, pages marked for inheritance work and the dependents of both. A page in it SHALL answer as a page that does not exist, in response shape and in timing, and projected retrieval SHALL remove it before ranking.
+
+#### Scenario: A page was classified a moment ago
+
+- **WHEN** the owner classifies a note `health` and a restricted caller reads it before the classify's intent derives
+- **THEN** the note answers as missing
 
 #### Scenario: A raise is still deriving
 
 - **WHEN** a hub Source gains `health` and a restricted caller searches while some dependents are still pending
 - **THEN** the pending dependents answer as missing, and the answer cannot be told apart from one where those pages do not exist
 
+### Requirement: Owner reads do not pay for inheritance
+
+Owner reads SHALL NOT wait on inheritance work or pay the currency check.
+
+#### Scenario: The owner reads during a hub raise
+
+- **WHEN** a hub Source gains a class and its dependents are still pending
+- **THEN** the owner's reads of those dependents return them without waiting on the recompute
+
 ### Requirement: A classified read asks the agent to name its sources
 
-A read result that releases a page with effective classes SHALL tell the agent, in one line, to name the page in `sources` if a write uses it.
+A read result that releases a page with effective classes SHALL tell the agent, in one line that names no class, to name the page in `sources` if a write uses it.
 
 #### Scenario: Reading a health page
 

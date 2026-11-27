@@ -26,14 +26,14 @@ Non-goals: audience and purpose registries, `restrict` and `unrestrict`, expiry,
 
 ```
 inherited(P) = ∪ effective(S) for each S that P derives from
-effective(P) = (own(P) ∪ floor(P) ∪ inherited(P)) − mask(P)
+effective(P) = own(P) ∪ ((floor(P) ∪ inherited(P)) − mask(P))
 ```
 
 | Set | Where it lives | Who changes it |
 |---|---|---|
 | own | `sensitivity` frontmatter (Phase A) | capture, classify, a plain edit of a compiled page |
 | floor | `inherited_sensitivity` frontmatter, a protocol-owned key held in `page_fields.py` | the carry-over step adds; classify clears |
-| mask | `sensitivity_mask` frontmatter, a pointer field with writer `classify` | classify only, with a reason |
+| mask | `sensitivity_mask` frontmatter, a pointer field with writer `classify` | classify by the owner, with a reason |
 | inherited, effective | `page_sensitivity` store object | the store thread only |
 
 `page_sensitivity(path PRIMARY KEY, effective, inherited, generation)` is a derived owner object. Every consumer reads `effective`: membership subjects, row decisions, the projection catalog and egress. A membership subject without a current `effective` value is `UNRESOLVED` for any scope with a `sensitivity` selector. That reuses the existing fail-closed `UNRESOLVED` contract of "Query-time scope membership". Page facts do not change, so `FACTS_VERSION` stays 1. The membership memo header gains the `page_sensitivity` revision.
@@ -42,22 +42,24 @@ A row's effective classes are its own classes, its collection floor, and the `ef
 
 A mask stops a class at that page: its dependents inherit `effective`, which excludes the masked class. A mask is the owner's remedy for over-restriction. Clearing a floor alone would not help while the class still arrives by inheritance.
 
+Setting a mask and clearing a floor need the owner principal, because each one can widen access. A mask may name only a class the page holds now, by floor or inheritance, so no writer can mask a class in advance of its arrival. A mask never removes the page's own classes.
+
 Rejected: a byte cascade that rewrites each dependent when a source gains a class. A restricted writer's out-of-ceiling side effects are skipped, so the cascade fails open for it. A raise on a 10,000-dependent hub would take about 22 minutes of projection (inferred from 7.5 files per second).
 
 ### D2. Carry-over at authored writes
 
-An authored write calls one pre-plan carry-over step, beside the names step of `one-write-pipeline` D4. The step adds to the floor the effective classes of:
+An authored write calls one pre-plan carry-over step, beside the names step of `one-write-pipeline` D4. The step reads the planned page, not only the tool's arguments. It adds to the floor the effective classes of:
 
-- the pages named in `sources` (`create_note`, `supersede_note`, and newly `add_record` and `edit_record`);
-- the pages named in `links` whose relation carries `inherits_sensitivity` (`add_observation`, `edit_note`);
+- every derivation ref the planned page holds after the write: its `sources` field, frontmatter fields that map to an `inherits_sensitivity` relation, and typed links with such a relation, however they arrived (`sources`, `links`, `set_fields` or body text);
+- a row's source refs (`add_record` and `edit_record` gain `sources`);
 - an episode's `about` refs;
 - the page the write edits.
 
-The step resolves each ref under the writer's own visibility. A ref the writer cannot read refuses as a missing page, and no result reports a class taken from a page the writer cannot read.
+The step resolves each ref under the writer's own visibility. A ref the writer cannot read is handled exactly like a ref to no page: the write keeps it unresolved with today's warning (`note._normalize_sources`) and takes no class from it. So neither a refusal nor a class reveals that the page exists.
 
 The plan function refuses an authored write whose floor lacks a class that the step computes. Classify and mechanical rewrites (link repair after a rename, folder merges, relocations) do not run the step and keep the floor they find. Otherwise a mechanical rewrite would freeze inherited classes into hundreds of floors, and a later clear could not flow down.
 
-The agent decides what a write drew on, as it decides a class in Phase A. A read result that releases a page with effective classes adds one line: if a write uses this page, name it in `sources`.
+The agent decides what a write drew on, as it decides a class in Phase A. A read result that releases a page with effective classes adds one line, which names no class: if a write uses this page, name it in `sources`.
 
 Rejected:
 - A separate `drew_on` argument. `sources` and `links` already mean "drew on".
@@ -69,7 +71,7 @@ Rejected:
 - **Edges.** Inheritance follows `graph_edges` whose relation carries a new closed behaviour `inherits_sensitivity`. The core pack assigns it to `derived_from`, `evidenced_by`, `cites`, `refines`, `duplicates` and `supersedes`; an extension relation inherits its parent's behaviours. Episode `about` gets a graph edge with the behaviour if it has none. When stored relationships (`make-vault-store-canonical` D10) land, they are an inheritance input from that release.
 - **Recompute.** A derivation that changes a page's own classes, floor, mask or one of its derivation edges marks the page's dependents pending in the same transaction. The store then recomputes them in derivation slices, walking dependents through the indexed `dst_page_key`. A cycle terminates because the walk keeps a set. A page's generation increases whenever its `effective` value changes.
 - **Rows.** `item_sources` gains an index on the source ref, restricted to current row versions, so an `effective` change finds the dependent rows.
-- **Caches.** Every cache that holds a scope set or a decision keys on the `page_sensitivity` revision: `admission_memo`, membership `_MEMO`, `_SNAPSHOT_MEMO` and `_PATH_MEMO`, the store-mode membership map (`make-vault-store-canonical` D13) and the collection view decisions (D14).
+- **Caches.** Every cache that holds a scope set or a decision keys each entry on its own page's generation and the generations of its scope parents (parts, frames): `admission_memo`, membership `_MEMO`, `_SNAPSHOT_MEMO` and `_PATH_MEMO`, the store-mode membership map (`make-vault-store-canonical` D13) and the collection view decisions (D14). A global revision in a map header would drop every kept entry whenever any page's classes changed, which is the corpus-wide work D13 avoids.
 - **Catalog.** Projected rows carry their page's generation. Projected retrieval under a policy with a `sensitivity` scope re-checks the sensitivity scopes against `effective` at query time, rather than trusting the scope ids stored at publish. Republish then catches up in the background.
 - **Owner reads.** Inheritance work is derivation, not a write intent, so owner reads do not wait on it.
 - **Version.** `page_sensitivity` takes the next owner version in `vault_store/rederive.py` (6; owner version is 5 today). Of this change and `make-vault-store-canonical` task 5.2, the second to merge rebases.
@@ -83,10 +85,12 @@ Clearing a class on a source recomputes inheritance, so dependents that hold the
 
 ### D5. The currency proof is one watermark
 
-The store keeps two revisions: the last revision that marked inheritance work pending, and the revision up to which `page_sensitivity` is complete. At a read's pinned snapshot:
+The store keeps two revisions: the last committed revision, and the revision up to which `page_sensitivity` is complete, including derivation of every committed intent. At a read's pinned snapshot:
 
-- When the second is at least the first, every page's `effective` is current. The check is O(1).
-- Otherwise the store computes the pending set once per snapshot: the pending pages and their dependents. Egress answers missing for those pages and decides the rest as usual.
+- When the second equals the first, every page's `effective` is current. The check is O(1).
+- Otherwise the store computes the pending set once per snapshot: pages with an underived intent, pages marked for inheritance work, and the dependents of both. Egress answers missing for those pages and decides the rest as usual. A page classified a moment ago is in the set until its intent derives, so it is never released under its old classes.
+
+Projected retrieval removes the pending set before ranking, so document frequency and ranks cannot reveal a withheld page.
 
 The check runs only when the active policy has a `sensitivity` scope and the caller is not the owner. For those callers it replaces the derived-behind notice of `make-vault-store-canonical` D2 and D3 with a missing answer, in the shape and timing of a page that does not exist. Owner reads keep D2 and D3 unchanged.
 
@@ -96,7 +100,7 @@ The check runs only when the active policy has a `sensitivity` scope and the cal
 
 Some facts leave without naming a path, and the postfilter cannot see them by path. Each one gets its own check, and task 4.1 lists them from the code: counts, stored rollups, aggregates, snippets, titles, link names and suggestion lists. Binary downloads decide by their Evidence page's `effective` value.
 
-The proof is behavioural. A test builds a synthetic vault with classified canaries: a direct page, a cited page, an episode `about` page, a row with a classified source, and a binary with a classified Evidence page. It runs every registered read operation under a restricted caller and fails when any canary's path, title, text or count appears in a result. The test enumerates operations from the command registry, so a new door joins it without anyone editing the test.
+The proof is behavioural. A test builds a synthetic vault with classified canaries: a direct page, a cited page, an episode `about` page, a row with a classified source, and a binary with a classified Evidence page. It runs every registered read operation under a restricted caller and fails when any canary's path, title, text or count appears in a result. The test enumerates operations from the command registry and the hand-registered MCP resources and prompts, so a new door joins it without anyone editing the test. A count is checked by comparing results with and without the canaries, not by string match.
 
 ### D7. The `sensitivity` selector restricts only
 
@@ -119,7 +123,7 @@ A binary from before this change refuses a policy that uses the selector. A proc
 - **Spread.** Inheritance is transitive. An entity page that takes observations from many sources can collect several classes and pass them on. Task 0.1 measures the spread on a read-only copy of the owner's graph before inheritance is built; a large spread reopens D1's transitive rule. Masks are the owner's per-page remedy.
 - **Granularity stays the page.** One cited figure from a health Source makes a note health. Finer granularity is out of scope.
 - **Uncited paraphrase.** A write that names no source carries no class. The read-result prompt and the instructions reduce this; the re-attack lane measures it. It remains an agent-judgement risk, as classification is in Phase A.
-- **Existence bits for confined writers.** A confined writer that creates, moves or links onto a path inside its writable scope can learn that a page it cannot read holds that path: `FILE_EXISTS`, `DEST_EXISTS`, `ENTITY_EXISTS`, `ARTIFACT_EXISTS`, a records key conflict, the names step's numbered suffix or a folder respelling. None of these reveals content, title or class. This change does not close them; the re-attack lane rates them, and Phase C decides before any confined writer gets a shared audience.
+- **Existence bits for confined writers.** A confined writer that creates, moves or links onto a path inside its writable scope can learn that a page it cannot read holds that path: `FILE_EXISTS`, `DEST_EXISTS`, `ENTITY_EXISTS`, `ARTIFACT_EXISTS`, a records key conflict, the names step's numbered suffix or a folder respelling. A folder respelling also returns the exact spelling of a withheld folder, and `FILE_EXISTS` or a numbered suffix confirms a guessed title. None reveals content or class. This change does not close them; the re-attack lane rates them, and Phase C decides before any confined writer gets a shared audience.
 - **Mixed versions.** Until every process restarts on this release, an older process keeps the previous policy.
 - **Derivation lag hides pages** from restricted callers during a hub raise. The owner never sees this.
 - **Owner reads are not receipted.** The receipt chain writes nothing for an ungoverned owner read (`disclosure-evidence`), and this change keeps that. Non-owner reads of classified pages are governed, so they are receipted.

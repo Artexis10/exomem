@@ -39,7 +39,7 @@ Path selectors and path exclusions SHALL match after casefolding both the patter
 
 ### Requirement: The egress decision reads effective classes
 
-The result postfilter that every surface's results pass SHALL decide membership on effective classes. A fact released without a path, such as a count, a rollup, a snippet, a title or a suggestion, SHALL be decided for the pages it derives from. A binary SHALL be decided by its Evidence page's effective classes. A test SHALL run every registered read operation under a restricted caller over synthetic classified pages and fail when any of their paths, titles, text or counts appears in a result.
+The result postfilter that every surface's results pass SHALL decide membership on effective classes. A fact released without a path, such as a count, a rollup, a snippet, a title or a suggestion, SHALL be decided for the pages it derives from. A binary SHALL be decided by its Evidence page's effective classes. A test SHALL run every registered read operation, MCP resource and prompt under a restricted caller over synthetic classified pages. It SHALL fail when any of their paths, titles or text appears in a result, or when a count differs from the same vault without them.
 
 #### Scenario: A new read operation
 
