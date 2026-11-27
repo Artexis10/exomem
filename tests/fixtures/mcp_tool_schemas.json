@@ -858,6 +858,7 @@
             "procedures.quarantine",
             "faces.set",
             "faces.name",
+            "faces.delete",
             "episodes.input",
             "episodes.prepare",
             "episodes.disposition",

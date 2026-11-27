@@ -25,6 +25,11 @@ def face(vector: np.ndarray, region=(0.1, 0.1, 0.2, 0.2), frame_ts=None) -> face
     return face_groups.PageFace(frame_ts, region, 64.0, 0.99, vector)
 
 
+def turn_on(vault: Path) -> None:
+    with closing(face_store.connect_index(vault)) as index:
+        face_store.record_opt_in(index, at="2026-01-05T10:00:00+00:00", surface="test")
+
+
 def faces_of(vault: Path, page: str) -> list[tuple[tuple[float, ...], int]]:
     with closing(sqlite3.connect(face_store.index_path(vault))) as index:
         return [
@@ -37,6 +42,7 @@ def faces_of(vault: Path, page: str) -> list[tuple[tuple[float, ...], int]]:
 
 def test_a_face_within_the_margin_of_two_groups_starts_a_new_group(vault: Path) -> None:
     """Catches a doubtful face merged into the wrong person."""
+    turn_on(vault)
     [first] = face_groups.record_page(vault, "Photos/first.jpg", [face(unit(1, 0))], model_id=MODEL)
     [second] = face_groups.record_page(vault, "Photos/second.jpg", [face(unit(0, 1))], model_id=MODEL)
 
@@ -62,6 +68,7 @@ def test_the_same_faces_in_the_same_order_give_identical_groups(tmp_path: Path) 
 
     def group_everything(vault: Path) -> list[tuple[str, list[int]]]:
         vault.mkdir()
+        turn_on(vault)
         return [(page, face_groups.record_page(vault, page, faces, model_id=MODEL)) for page, faces in pages]
 
     first_run = group_everything(tmp_path / "first")
@@ -69,8 +76,9 @@ def test_the_same_faces_in_the_same_order_give_identical_groups(tmp_path: Path) 
 
     assert first_run == second_run
     assert len({group for _, groups in first_run for group in groups}) >= 3
-    with closing(sqlite3.connect(face_store.people_path(tmp_path / "first"))) as one, closing(
-        sqlite3.connect(face_store.people_path(tmp_path / "second"))
+    # Nothing is named, so every group is in the face index.
+    with closing(sqlite3.connect(face_store.index_path(tmp_path / "first"))) as one, closing(
+        sqlite3.connect(face_store.index_path(tmp_path / "second"))
     ) as other:
         query = "SELECT id, centroid_sum, face_count FROM groups ORDER BY id"
         assert one.execute(query).fetchall() == other.execute(query).fetchall()
@@ -78,6 +86,7 @@ def test_the_same_faces_in_the_same_order_give_identical_groups(tmp_path: Path) 
 
 def test_a_face_moved_out_of_a_group_does_not_rejoin_it_when_more_faces_arrive(vault: Path) -> None:
     """Catches owner corrections undone by the next backfill."""
+    turn_on(vault)
     [group] = face_groups.record_page(vault, "Photos/garden.jpg", [face(unit(1, 0))], model_id=MODEL)
     face_groups.record_page(vault, "Photos/porch.jpg", [face(unit(1, 1), region=(0.5, 0.5, 0.2, 0.2))], model_id=MODEL)
     face_naming.name_group(vault, group, "Rowan Example")
@@ -92,6 +101,22 @@ def test_a_face_moved_out_of_a_group_does_not_rejoin_it_when_more_faces_arrive(v
     [(_, porch_group)] = faces_of(vault, "Photos/porch.jpg")
     assert porch_group == own_group != group
     assert later == group
+
+
+def test_a_named_persons_next_picture_keeps_the_name_after_their_only_picture_is_removed(vault: Path) -> None:
+    """Catches a name lost, or a stranger named, when a named group's last face goes and a new one arrives."""
+    turn_on(vault)
+    [group] = face_groups.record_page(vault, "Photos/garden.jpg", [face(unit(1, 0))], model_id=MODEL)
+    face_naming.name_group(vault, group, "Rowan Example")
+
+    face_groups.forget_pages(vault, ["Photos/garden.jpg"])
+    [later] = face_groups.record_page(vault, "Photos/lawn.jpg", [face(unit(1, 0.05))], model_id=MODEL)
+    [stranger] = face_groups.record_page(vault, "Photos/street.jpg", [face(unit(0, 1))], model_id=MODEL)
+
+    assert later == group
+    assert stranger != group
+    with closing(sqlite3.connect(face_store.people_path(vault))) as people:
+        assert people.execute("SELECT id, face_count FROM groups").fetchall() == [(group, 1)]
 
 
 def test_a_restored_people_store_names_rescanned_faces_once_faces_are_turned_on_again(vault: Path) -> None:
@@ -116,7 +141,8 @@ def test_a_restored_people_store_names_rescanned_faces_once_faces_are_turned_on_
     [(_, regrouped)] = faces_of(vault, "Photos/garden.jpg")
     with closing(sqlite3.connect(face_store.people_path(vault))) as people:
         [(name,)] = people.execute(
-            "SELECT p.display_name FROM groups g JOIN people p ON p.id = g.person_id WHERE g.id = ?", (regrouped,)
+            "SELECT p.display_name FROM group_people g JOIN people p ON p.id = g.person_id WHERE g.group_id = ?",
+            (regrouped,),
         ).fetchall()
     assert name == "Rowan Example"
 

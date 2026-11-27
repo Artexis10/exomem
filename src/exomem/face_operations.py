@@ -1,4 +1,4 @@
-"""The owner's face operations: `faces.status`, `faces.set` and `faces.name` (design D9).
+"""The owner's face operations: `faces.status`, `faces.set`, `faces.name` and `faces.delete` (design D9, D11).
 
 Each action first asks `face_search.require_owner`, which decides from the caller's principal alone, so
 no other caller ever opens the face store. Turning faces on happens only in `exomem faces on`, run by a
@@ -9,6 +9,7 @@ surface with that disclosure and the command, and changes nothing.
 from __future__ import annotations
 
 import math
+import sqlite3
 from collections.abc import Mapping
 from contextlib import closing
 from datetime import UTC, datetime
@@ -30,6 +31,25 @@ DISCLOSURE = (
 #: The text a person types, or passes with `--confirm`, to turn faces on.
 CONFIRMATION = "turn faces on"
 TURN_ON_COMMAND = "exomem faces on"
+#: What a delete cannot reach, and when each ends (design D11). The delete result and status show them.
+RESIDUES = (
+    {
+        "residue": "older backups",
+        "holds": "the people store: named people and their groups' centroids",
+        "ends": "when backup retention expires the snapshots made before the delete: seven daily and four weekly "
+                "snapshots, about four weeks, on a Cloud cell",
+    },
+    {
+        "residue": "a running Cloud cell backup's volume snapshot",
+        "holds": "the state volume as it was when that backup started",
+        "ends": "when that backup ends and deletes its snapshot",
+    },
+    {
+        "residue": "freed disk blocks",
+        "holds": "the bytes of the removed files",
+        "ends": "when the filesystem reuses them; the volume's encryption protects them until then",
+    },
+)
 #: Groups per status page by default, and at most.
 GROUPS_PER_PAGE, MAX_GROUPS_PER_PAGE = 20, 100
 SAMPLES_PER_GROUP = 3
@@ -55,6 +75,8 @@ def run(
         return status(vault_root, page=page, limit=limit, cursor=cursor)
     if action == "set":
         return change_setting(vault_root, state=state, thresholds=thresholds)
+    if action == "delete":
+        return delete(vault_root)
     return change_name(vault_root, group=group, person=person, face=face, name=name, clear=clear)
 
 
@@ -112,6 +134,10 @@ def status(vault_root: Path, *, page: str | None, limit: int | None, cursor: str
         "counts": {"faces": counts.faces, "groups": counts.groups, "people": counts.people},
         "thresholds": _thresholds(vault_root),
     }
+    receipt = face_store.read_deletion_receipt(vault_root)
+    if receipt is not None:
+        result["last_deletion"] = receipt
+        result["residues"] = list(RESIDUES)
     if not on:
         result["next_action"] = f"To turn faces on, the owner runs `{TURN_ON_COMMAND}` in a terminal."
     if page is not None:
@@ -230,6 +256,70 @@ def turn_off(vault_root: Path) -> dict[str, Any]:
         "outcome": "Faces are off. Stored faces and names are kept until the owner deletes them.",
         "state": "off",
         "changed": True,
+    }
+
+
+def delete(vault_root: Path) -> dict[str, Any]:
+    """Erase the face store: turn faces off, wait for face work in flight, count, then remove every file.
+
+    Removes both databases, their `-wal`, `-shm` and `-journal` files and the directory. A file that cannot
+    be removed makes the outcome `partial`, naming it; a repeat finishes the delete. The receipt keeps the
+    time and counts for `faces.status`, never face data.
+    """
+    from . import find
+
+    turn_off(vault_root)
+    # Faces may have been off already, with an earlier backfill still finishing its picture.
+    face_scan.stop_backfill(vault_root, timeout=30)
+    earlier = face_store.read_deletion_receipt(vault_root)
+    finishing = earlier is not None and earlier.get("deletion") == "partial"
+    if not face_store.store_dir(vault_root).exists() and not finishing:
+        already = earlier is not None
+        return {
+            "outcome": "The face store was already deleted; nothing remains." if already
+            else "Nothing to delete: this account has no face store.",
+            "state": "off",
+            "deletion": "already_deleted" if already else "nothing_stored",
+            "last_deletion": earlier,
+            "residues": list(RESIDUES),
+        }
+    # A repeat that finds no face index finishes an earlier partial delete: nothing was scanned since, so the
+    # counts are the first attempt's. With a face index, faces were turned on again and the count is fresh.
+    carried = finishing and not face_store.index_path(vault_root).is_file()
+    try:
+        found, remaining = face_groups.erase(vault_root)
+    except sqlite3.OperationalError:
+        raise OpError("FACES_BUSY", "Face work kept the face store busy, so nothing was deleted.",
+                      "Repeat faces.delete in a few seconds.", details={"retry_after_ms": 5000}) from None
+    # Cached searches by person hold pages found through faces. A new face store starts a new generation epoch.
+    find.reset_result_cache()
+    counted: dict[str, int] | str | None
+    if carried:
+        counted = earlier.get("counts")
+    elif found is None:
+        counted = "unknown"
+    else:
+        counted = {"faces": found.faces, "groups": found.groups, "people": found.people, "pages": found.pages}
+    deletion = "partial" if remaining else "deleted"
+    face_store.write_deletion_receipt(vault_root, {
+        "deleted_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "deletion": deletion,
+        "counts": counted,
+        "remaining": remaining,
+    })
+    if remaining:
+        sentence = (f"Faces are off, but the delete is partial: {', '.join(remaining)} could not be removed. "
+                    "Repeat faces.delete to finish it.")
+    else:
+        sentence = "Faces are off, and every face, group and name in this account's face store is deleted."
+    return {
+        "outcome": sentence,
+        "state": "off",
+        "deletion": deletion,
+        "counts": counted,
+        "remaining": remaining,
+        "residues": list(RESIDUES),
+        "next_action": f"Search by person stays off until the owner runs `{TURN_ON_COMMAND}` again.",
     }
 
 

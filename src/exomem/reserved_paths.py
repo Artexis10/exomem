@@ -56,6 +56,8 @@ CONNECTOR_BOUNDARY_REQUIREMENT_NAME = ".connector-boundary.json"
 FACES_DIRNAME = "faces"
 FACE_INDEX_PATH = f"{FACES_DIRNAME}/index.sqlite"
 FACE_PEOPLE_PATH = f"{FACES_DIRNAME}/people.sqlite"
+# The receipt of the last face store delete: its time and counts, no face data. It outlives the face store.
+FACE_DELETION_DIRNAME = "face-deletion"
 
 _SQLITE_SUFFIXES = ("", "-wal", "-shm", "-journal")
 #: A recall sidecar named for the vector space it holds (`index_paths.space_sidecar_name`).
@@ -512,6 +514,11 @@ _REGISTRY = (
         "face-people", "face_store", StatePlacement.EXTERNAL_STATE,
         rebuildable=False,
         exact=_sqlite_family(FACE_PEOPLE_PATH),
+    ),
+    InternalStateDescriptor(
+        "face-deletion", "face_store", StatePlacement.EXTERNAL_STATE,
+        rebuildable=False,
+        trees=(FACE_DELETION_DIRNAME,),
     ),
     InternalStateDescriptor(
         "source-custody", "source_custody", StatePlacement.VAULT_CANONICAL,

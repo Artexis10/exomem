@@ -118,12 +118,20 @@ def detect(vault_root: Path, path: Path, keyframes: Sequence[tuple[float, Any]] 
         return None
 
 
-def commit(vault_root: Path, page: str, faces: Sequence[PageFace] | None) -> bool:
-    """Store a picture's faces and group them, unless faces were turned off meanwhile. Never raises."""
-    if faces is None or not face_store.active(vault_root):
-        return False
+def commit(vault_root: Path, page: str, faces: Sequence[PageFace] | None, *, mtime: float | None = None) -> bool:
+    """Store a picture's faces and group them, unless faces were turned off meanwhile. Never raises.
+
+    `mtime` is the modification time of the bytes the faces came from. Without faces to store, a picture
+    whose stored faces came from other bytes loses them: its original changed.
+    """
     try:
-        face_groups.record_page(vault_root, page, faces, model_id=face_models.embedder_model_id())
+        if faces is None or not face_store.active(vault_root):
+            if mtime is not None:
+                face_groups.forget_changed(vault_root, page, mtime)
+            return False
+        face_groups.record_page(vault_root, page, faces, model_id=face_models.embedder_model_id(), mtime=mtime)
+    except face_groups.FacesStopped:
+        return False  # Turned off or deleted while this picture was in flight.
     except Exception:  # noqa: BLE001 - a face failure must never stop the picture's other media steps
         log.warning("face index write failed for %s", Path(page).name, exc_info=True)
         return False
@@ -173,7 +181,7 @@ def _scan_picture(vault_root: Path, clip_index: Any, page: str) -> bool:
         return False
     if (before.st_mtime_ns, before.st_size) != (after.st_mtime_ns, after.st_size):
         return False  # The picture changed; its new CLIP job runs the face step on the new bytes.
-    return commit(vault_root, page, faces)
+    return commit(vault_root, page, faces, mtime=after.st_mtime)
 
 
 def backfill_batch(vault_root: Path, *, after: str = "", limit: int = BATCH) -> tuple[int, str | None]:

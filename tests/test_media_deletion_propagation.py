@@ -9,6 +9,8 @@ no fan-out at all. See openspec/changes/fix-media-deletion-propagation/.
 from __future__ import annotations
 
 import datetime as dt
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import numpy as np
@@ -98,6 +100,61 @@ def test_delete_after_remove_clip_extra_absent_delete_still_succeeds(
     assert clip_outcome.outcome == "accepted"  # never breaks the delete
     assert clip_outcome.code == "clip_disabled"
     assert report.reconcile_required is False
+
+
+def _picture_with_a_face(vault: Path, rel: str) -> None:
+    from exomem import face_groups, face_models, face_store, media_models
+
+    with closing(face_store.connect_index(vault)) as index:
+        face_store.record_opt_in(index, at="2026-07-24T10:00:00+00:00", surface="test")
+    vector = _unit(0, int(media_models.model_spec("face-embed")["dimensions"]))
+    face = face_groups.PageFace(None, (0.1, 0.1, 0.2, 0.2), 64.0, 0.99, vector)
+    face_groups.record_page(vault, rel, [face], model_id=face_models.embedder_model_id())
+
+
+def _face_pages(vault: Path) -> list[str]:
+    from exomem import face_store
+
+    with closing(sqlite3.connect(face_store.index_path(vault))) as index:
+        return [page for (page,) in index.execute("SELECT DISTINCT page FROM faces")]
+
+
+def test_delete_after_remove_drops_the_pictures_face_rows_in_the_clip_step(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches faces of a removed photo still matching a person."""
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    removed, kept = "Knowledge Base/Evidence/Rental/photos/a.jpg", "Knowledge Base/Evidence/Rental/photos/b.jpg"
+    embeddings.ClipIndex(vault).upsert(removed, _unit(0), 1.0)
+    _picture_with_a_face(vault, removed)
+    _picture_with_a_face(vault, kept)
+
+    report = index_sync.delete_after_remove(vault, [removed])
+
+    assert _face_pages(vault) == [kept]
+    assert _outcome(report, "clip").outcome == "completed"
+
+
+def test_a_face_store_that_cannot_drop_the_rows_reports_the_clip_step_degraded(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a removal reported clean while the removed photo's faces stay in the face store."""
+    from exomem import face_groups
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    rel = "Knowledge Base/Evidence/Rental/photos/a.jpg"
+    embeddings.ClipIndex(vault).upsert(rel, _unit(0), 1.0)
+    _picture_with_a_face(vault, rel)
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(face_groups, "forget_pages", locked)
+    report = index_sync.delete_after_remove(vault, [rel])
+
+    assert _outcome(report, "clip").outcome == "degraded"
+    assert _face_pages(vault) == [rel]
+    assert not embeddings.ClipIndex(vault).has(rel)
 
 
 # ---- 2. Scene-frame cleanup -------------------------------------------------

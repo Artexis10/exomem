@@ -16,11 +16,16 @@ A face the owner moved out of a group (an exclusion) never joins that group agai
 A re-scanned page's faces leave their groups before they are assigned again. A group that loses its last
 face this way keeps its direction, so the same face, or its person in another picture, joins it again and
 its name stays attached. The first face to join it replaces that direction.
+
+A new group starts unnamed in the face index. Naming moves it into the people store with its id, centroid
+and exclusions (`face_naming`), so grouping reads the groups of both stores as one set. Group ids come from
+one sequence over both stores, so an id never names two groups.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from collections.abc import Sequence
@@ -34,6 +39,8 @@ from typing import Any
 import numpy as np
 
 from . import face_store, media_models
+
+log = logging.getLogger(__name__)
 
 #: Two detections of one face in one picture overlap at least this much (intersection over union). A rebuilt
 #: face index detects the same face with a slightly different box when the execution provider differs, and an
@@ -117,13 +124,15 @@ def same_face(frame_ts: float | None, region: Sequence[float], other_ts: float |
 class _Centroids:
     """The centroid sums of one embedder's groups, in id order, with their unit directions.
 
-    Rows grow by doubling, so a store of many single-face groups costs no copy per new group.
+    Holds the groups of both stores; `named` says which live in the people store. Rows grow by doubling, so
+    a store of many single-face groups costs no copy per new group.
     """
 
-    def __init__(self, rows: list[tuple[int, bytes, int]], width: int) -> None:
+    def __init__(self, rows: list[tuple[int, bytes, int]], width: int, named: set[int]) -> None:
         capacity = max(16, len(rows))
         self.ids: list[int] = []
         self.row_of: dict[int, int] = {}
+        self.named = named
         self.sums = np.zeros((capacity, width), dtype=np.float32)
         self.unit = np.zeros((capacity, width), dtype=np.float32)
         self.counts: list[int] = []
@@ -197,13 +206,17 @@ class _Centroids:
             return None
         return self.ids[int(order[0])]
 
-    def changed_rows(self) -> list[tuple[bytes, int, int]]:
-        rows = [
-            (face_store.pack_vector(self.sums[self.row_of[group_id]]), self.counts[self.row_of[group_id]], group_id)
-            for group_id in sorted(self.dirty)
-        ]
+    def changed_rows(self) -> tuple[list[tuple[bytes, int, int]], list[tuple[bytes, int, int]]]:
+        """The changed groups' (centroid sum, count, id) rows: the people store's, then the face index's."""
+        named: list[tuple[bytes, int, int]] = []
+        unnamed: list[tuple[bytes, int, int]] = []
+        for group_id in sorted(self.dirty):
+            row = self.row_of[group_id]
+            (named if group_id in self.named else unnamed).append(
+                (face_store.pack_vector(self.sums[row]), self.counts[row], group_id)
+            )
         self.dirty.clear()
-        return rows
+        return named, unnamed
 
 
 #: Per people store and embedder, the centroids as of a face index generation. A record that finds the
@@ -218,10 +231,24 @@ def _centroids(people: sqlite3.Connection, index: sqlite3.Connection, key: tuple
     held = _CACHE.pop(key, None)
     if held is not None and held[0] == generation:
         return held[1]
-    rows = people.execute(
-        "SELECT id, centroid_sum, face_count FROM groups WHERE model_id = ? ORDER BY id", (key[1],)
-    ).fetchall()
-    return _Centroids(rows, int(media_models.model_spec("face-embed")["dimensions"]))
+    query = "SELECT id, centroid_sum, face_count FROM groups WHERE model_id = ? ORDER BY id"
+    named = people.execute(query, (key[1],)).fetchall()
+    unnamed = index.execute(query, (key[1],)).fetchall()
+    held_ids = {int(row[0]) for row in named}
+    # A group in both stores (a people store restored over a live face index) is the named one.
+    rows = sorted([*named, *(row for row in unnamed if int(row[0]) not in held_ids)], key=lambda row: int(row[0]))
+    return _Centroids(rows, int(media_models.model_spec("face-embed")["dimensions"]), held_ids)
+
+
+def next_group_id(people: sqlite3.Connection, index: sqlite3.Connection) -> int:
+    """The id for a new group: one past the largest in either store, so an id never names two groups."""
+    (named,) = people.execute("SELECT COALESCE(MAX(id), 0) FROM groups").fetchone()
+    (unnamed,) = index.execute("SELECT COALESCE(MAX(id), 0) FROM groups").fetchone()
+    return max(int(named), int(unnamed)) + 1
+
+
+class FacesStopped(RuntimeError):
+    """The face store was deleted, or faces were turned off, before this write took the store lock."""
 
 
 class Writing:
@@ -230,14 +257,21 @@ class Writing:
     Every writer takes the two locks in this order, so two writers never wait on each other. A crash
     between the two commits leaves a centroid that counts faces the face index lost; the page stays
     unscanned and its next scan adds them again, which moves no centroid's direction.
+
+    A write never creates the face store: turning faces on creates it, and a delete removes it under the
+    same lock. With `require_on`, the write also checks inside its transaction that faces are still on, so
+    face work that was in flight when the owner turned faces off stores nothing. Raises `FacesStopped`.
     """
 
-    def __init__(self, vault_root: Path) -> None:
+    def __init__(self, vault_root: Path, *, require_on: bool = True) -> None:
         self.vault_root = vault_root
+        self.require_on = require_on
 
     def __enter__(self) -> Writing:
         _WRITE_LOCK.acquire()
         try:
+            if not face_store.index_path(self.vault_root).is_file():
+                raise FacesStopped("the face store does not exist")
             self.people = face_store.connect_people(self.vault_root)
             try:
                 self.index = face_store.connect_index(self.vault_root)
@@ -246,6 +280,8 @@ class Writing:
                 raise
             self.people.execute("BEGIN IMMEDIATE")
             self.index.execute("BEGIN IMMEDIATE")
+            if self.require_on and not self.index.execute("SELECT enabled FROM face_setting WHERE id = 1").fetchone()[0]:
+                raise FacesStopped("faces are off")
         except BaseException:
             for name in ("index", "people"):
                 connection = getattr(self, name, None)
@@ -269,21 +305,60 @@ class Writing:
             _WRITE_LOCK.release()
 
 
-def _exclusions(people: sqlite3.Connection, page: str) -> list[tuple[int, float | None, tuple[float, ...]]]:
+def erase(vault_root: Path) -> tuple[Counts | None, list[str]]:
+    """Count what the face store holds, then remove both databases, their side files and the directory.
+
+    Holds this process's write lock throughout and first takes both stores' write locks, so face work in
+    flight in any process finishes before the count; work that starts later finds the store gone or faces
+    off (`Writing`). The caller turned faces off first. Returns the counts, None when a damaged store
+    could not be counted, and what could not be removed. Raises `sqlite3.OperationalError` when another
+    writer holds a store past the busy timeout; nothing is removed then.
+    """
+    with _WRITE_LOCK:
+        held = []
+        try:
+            # Both write locks, in the order every writer takes them, then let go: nothing writes after this.
+            for path in (face_store.people_path(vault_root), face_store.index_path(vault_root)):
+                if path.is_file():
+                    connection = sqlite3.connect(path, timeout=face_store.BUSY_TIMEOUT_MS / 1000)
+                    held.append(connection)
+                    connection.execute("BEGIN IMMEDIATE")
+            found: Counts | None = counts(vault_root)
+        except sqlite3.DatabaseError as error:
+            if getattr(error, "sqlite_errorcode", None) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                raise
+            # A damaged store is still erased; its counts are unknown, never zero.
+            log.warning("faces: the face store could not be counted before its delete", exc_info=True)
+            found = None
+        finally:
+            for connection in reversed(held):
+                connection.rollback()
+                connection.close()
+        people_key = str(face_store.people_path(vault_root))
+        for key in [key for key in _CACHE if key[0] == people_key]:
+            del _CACHE[key]  # The centroids held in memory are face data too.
+        return found, face_store.remove_store(vault_root)
+
+
+def _exclusions(writing: Writing, page: str) -> list[tuple[int, float | None, tuple[float, ...]]]:
+    """The faces moved out of a group on one page, from the groups of both stores."""
+    query = "SELECT group_id, frame_ts, x, y, width, height FROM exclusions WHERE page = ?"
     return [
         (group_id, frame_ts, (x, y, width, height))
-        for group_id, frame_ts, x, y, width, height in people.execute(
-            "SELECT group_id, frame_ts, x, y, width, height FROM exclusions WHERE page = ?", (page,)
-        )
+        for store in (writing.people, writing.index)
+        for group_id, frame_ts, x, y, width, height in store.execute(query, (page,))
     ]
 
 
-def record_page(vault_root: Path, page: str, faces: Sequence[PageFace], *, model_id: str) -> list[int]:
+def record_page(
+    vault_root: Path, page: str, faces: Sequence[PageFace], *, model_id: str, mtime: float | None = None
+) -> list[int]:
     """Replace a page's faces with `faces` and group each one that the settings keep.
 
-    `page` is the picture's vault-relative path, as the CLIP index keys it. The page's earlier faces leave
-    their groups' centroids first, so a re-scan counts each face once. The page is recorded as scanned
-    even when it holds no face. Returns the group id of each stored face, in storage order.
+    `page` is the picture's vault-relative path, as the CLIP index keys it, and `mtime` the modification
+    time of the bytes scanned. The page's earlier faces leave their groups' centroids first, so a re-scan
+    counts each face once. The page is recorded as scanned even when it holds no face. Returns the group
+    id of each stored face, in storage order. Raises `FacesStopped` when faces were turned off or deleted.
     """
     key = (str(face_store.people_path(vault_root)), model_id)
     with Writing(vault_root) as writing:
@@ -299,8 +374,9 @@ def record_page(vault_root: Path, page: str, faces: Sequence[PageFace], *, model
             (face for face in faces if face.score >= limits.min_detection_score and face.side >= limits.min_face_side),
             key=lambda face: (-1.0 if face.frame_ts is None else face.frame_ts, face.region),
         )
-        excluded = _exclusions(people, page)
+        excluded = _exclusions(writing, page)
         rows, groups = [], []
+        new_id = next_group_id(people, index)
         for face in kept:
             barred = {
                 group_id for group_id, frame_ts, region in excluded
@@ -308,10 +384,12 @@ def record_page(vault_root: Path, page: str, faces: Sequence[PageFace], *, model
             }
             group_id = centroids.nearest(face.vector, limits, barred)
             if group_id is None:
-                group_id = people.execute(
-                    "INSERT INTO groups (model_id, centroid_sum, face_count) VALUES (?, ?, 1)",
-                    (model_id, face_store.pack_vector(face.vector)),
-                ).lastrowid
+                # A new group is unnamed, so it lives in the face index until the owner names it.
+                group_id, new_id = new_id, new_id + 1
+                index.execute(
+                    "INSERT INTO groups (id, model_id, centroid_sum, face_count) VALUES (?, ?, ?, 1)",
+                    (group_id, model_id, face_store.pack_vector(face.vector)),
+                )
                 centroids.add_group(group_id, face.vector)
             else:
                 centroids.join(group_id, face.vector)
@@ -319,15 +397,17 @@ def record_page(vault_root: Path, page: str, faces: Sequence[PageFace], *, model
             rows.append((
                 page, face.frame_ts, *face.region, face.score, model_id, face_store.pack_vector(face.vector), group_id,
             ))
-        people.executemany("UPDATE groups SET centroid_sum = ?, face_count = ? WHERE id = ?", centroids.changed_rows())
+        named, unnamed = centroids.changed_rows()
+        people.executemany("UPDATE groups SET centroid_sum = ?, face_count = ? WHERE id = ?", named)
+        index.executemany("UPDATE groups SET centroid_sum = ?, face_count = ? WHERE id = ?", unnamed)
         index.executemany(
             "INSERT INTO faces (page, frame_ts, x, y, width, height, score, model_id, vector, group_id) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         index.execute(
-            "INSERT OR REPLACE INTO scanned_pages (page, model_id, face_count) VALUES (?, ?, ?)",
-            (page, model_id, len(rows)),
+            "INSERT OR REPLACE INTO scanned_pages (page, model_id, face_count, mtime) VALUES (?, ?, ?, ?)",
+            (page, model_id, len(rows), mtime),
         )
         generation = face_store.advance_generation(index)
         # Held only once both commits succeed; `Writing` commits on leaving this block.
@@ -335,11 +415,102 @@ def record_page(vault_root: Path, page: str, faces: Sequence[PageFace], *, model
     return groups
 
 
+def _drop_faces(writing: Writing, pages: Sequence[str]) -> int:
+    """Remove these pages' faces from the face index and their groups' centroids. Returns the faces removed.
+
+    A group the removal empties keeps its direction, as on a re-scan, so its name stays attached.
+    """
+    index, wanted = writing.index, json.dumps(sorted(set(pages)))
+    rows = index.execute(
+        "SELECT group_id, vector FROM faces WHERE page IN (SELECT value FROM json_each(?)) AND group_id IS NOT NULL",
+        (wanted,),
+    ).fetchall()
+    leaving: dict[int, tuple[np.ndarray, int]] = {}
+    for group_id, blob in rows:
+        total, count = leaving.get(group_id, (0.0, 0))
+        leaving[group_id] = (total + face_store.unpack_vector(blob), count + 1)
+    group_ids = json.dumps(sorted(leaving))
+    for store in (writing.people, index):
+        changed = []
+        for group_id, blob, count in store.execute(
+            "SELECT id, centroid_sum, face_count FROM groups WHERE id IN (SELECT value FROM json_each(?))", (group_ids,)
+        ).fetchall():
+            total, gone = leaving[group_id]
+            left = max(0, int(count) - gone)
+            changed.append((face_store.pack_vector(face_store.unpack_vector(blob) - total) if left else blob, left, group_id))
+        store.executemany("UPDATE groups SET centroid_sum = ?, face_count = ? WHERE id = ?", changed)
+    removed = index.execute("DELETE FROM faces WHERE page IN (SELECT value FROM json_each(?))", (wanted,)).rowcount
+    index.execute("DELETE FROM scanned_pages WHERE page IN (SELECT value FROM json_each(?))", (wanted,))
+    return int(removed)
+
+
+def forget_pages(vault_root: Path, pages: Sequence[str]) -> int:
+    """Drop the faces of removed pictures, in the derived cleanup that drops their CLIP rows.
+
+    Runs whether faces are on or off, and never creates the face store. `pages` are the removed vault paths
+    the CLIP step receives, which name a removed picture by its own path. The pictures' exclusions go too,
+    because they name a removed file. Returns the faces removed.
+    """
+    path = face_store.index_path(vault_root)
+    keys = sorted({page for page in pages if page})
+    if not keys or not path.is_file():
+        return 0
+    wanted = json.dumps(keys)
+    # A read first: most removals hold no picture with faces, and they should not wait for the write lock.
+    with closing(face_store.connect_read_only(path)) as index:
+        held = index.execute(
+            "SELECT EXISTS (SELECT 1 FROM faces WHERE page IN (SELECT value FROM json_each(?1))) "
+            "OR EXISTS (SELECT 1 FROM scanned_pages WHERE page IN (SELECT value FROM json_each(?1))) "
+            "OR EXISTS (SELECT 1 FROM exclusions WHERE page IN (SELECT value FROM json_each(?1)))",
+            (wanted,),
+        ).fetchone()[0]
+    people_file = face_store.people_path(vault_root)
+    if not held and people_file.is_file():
+        with closing(face_store.connect_read_only(people_file)) as people:
+            held = people.execute(
+                "SELECT EXISTS (SELECT 1 FROM exclusions WHERE page IN (SELECT value FROM json_each(?)))", (wanted,)
+            ).fetchone()[0]
+    if not held:
+        return 0
+    try:
+        with Writing(vault_root, require_on=False) as writing:
+            removed = _drop_faces(writing, keys)
+            for store in (writing.people, writing.index):
+                store.execute("DELETE FROM exclusions WHERE page IN (SELECT value FROM json_each(?))", (wanted,))
+            face_store.advance_generation(writing.index)
+    except FacesStopped:
+        return 0  # Deleted meanwhile: nothing is left to drop.
+    return removed
+
+
+def forget_changed(vault_root: Path, page: str, mtime: float) -> bool:
+    """Drop a picture's faces when they were found in other bytes than the current `mtime`'s.
+
+    The CLIP step calls it when it stores new CLIP rows for a picture without storing faces: faces are off,
+    or the face step failed. Faces of unchanged bytes stay. Returns whether faces were dropped.
+    """
+    path = face_store.index_path(vault_root)
+    if not path.is_file():
+        return False
+    with closing(face_store.connect_read_only(path)) as index:
+        row = index.execute("SELECT mtime FROM scanned_pages WHERE page = ?", (page,)).fetchone()
+    if row is None or row[0] == mtime:
+        return False
+    try:
+        with Writing(vault_root, require_on=False) as writing:
+            _drop_faces(writing, [page])
+            face_store.advance_generation(writing.index)
+    except FacesStopped:
+        return False
+    return True
+
+
 def scanned(vault_root: Path, pages: Sequence[str], *, model_id: str) -> set[str]:
     """Which of `pages` the face index records as scanned with this embedder. One query for the whole list."""
-    if not pages or not face_store.index_path(vault_root).is_file():
+    path = face_store.index_path(vault_root)
+    if not pages or not path.is_file():
         return set()
-    with closing(face_store.connect_index(vault_root)) as index:
+    with closing(face_store.connect_read_only(path)) as index:
         index.execute("CREATE TEMP TABLE IF NOT EXISTS wanted (page TEXT PRIMARY KEY)")
         index.executemany("INSERT OR IGNORE INTO temp.wanted (page) VALUES (?)", ((page,) for page in pages))
         return {
@@ -352,9 +523,10 @@ def scanned(vault_root: Path, pages: Sequence[str], *, model_id: str) -> set[str
 
 def scanned_count(vault_root: Path, *, model_id: str) -> int:
     """How many pages the face index records as scanned with this embedder."""
-    if not face_store.index_path(vault_root).is_file():
+    path = face_store.index_path(vault_root)
+    if not path.is_file():
         return 0
-    with closing(face_store.connect_index(vault_root)) as index:
+    with closing(face_store.connect_read_only(path)) as index:
         return int(index.execute("SELECT COUNT(*) FROM scanned_pages WHERE model_id = ?", (model_id,)).fetchone()[0])
 
 
@@ -373,7 +545,7 @@ def person_pages(vault_root: Path, folded_names: Sequence[str]) -> dict[str, set
         return {}
     with closing(face_store.connect_read_only(people_file)) as people:
         owners = people.execute(
-            "SELECT g.id, p.folded_name FROM people p JOIN groups g ON g.person_id = p.id "
+            "SELECT l.group_id, p.folded_name FROM people p JOIN group_people l ON l.person_id = p.id "
             "WHERE p.folded_name IN (SELECT value FROM json_each(?))",
             (json.dumps(list(folded_names)),),
         ).fetchall()
@@ -423,23 +595,32 @@ class Group:
 @dataclass(frozen=True)
 class Counts:
     faces: int
+    #: Groups that hold a face, named or not.
     groups: int
     people: int
+    #: Pictures and videos with at least one face.
+    pages: int
 
 
 def counts(vault_root: Path) -> Counts:
-    """How many faces, non-empty groups and people the stores hold; zero for a store that does not exist."""
+    """How many faces, non-empty groups, people and pictures with faces the stores hold.
+
+    Zero for a store that does not exist. Four statements whatever the store's size.
+    """
     people_file, index_file = face_store.people_path(vault_root), face_store.index_path(vault_root)
-    faces = groups = people_count = 0
+    faces = unnamed = named = people_count = pages = 0
     if index_file.is_file():
         with closing(face_store.connect_read_only(index_file)) as index:
-            (faces,) = index.execute("SELECT COUNT(*) FROM faces").fetchone()
+            faces, pages, unnamed = index.execute(
+                "SELECT (SELECT COUNT(*) FROM faces), (SELECT COUNT(DISTINCT page) FROM faces), "
+                "(SELECT COUNT(*) FROM groups WHERE face_count > 0)"
+            ).fetchone()
     if people_file.is_file():
         with closing(face_store.connect_read_only(people_file)) as people:
-            groups, people_count = people.execute(
+            named, people_count = people.execute(
                 "SELECT (SELECT COUNT(*) FROM groups WHERE face_count > 0), (SELECT COUNT(*) FROM people)"
             ).fetchone()
-    return Counts(int(faces), int(groups), int(people_count))
+    return Counts(int(faces), int(named) + int(unnamed), int(people_count), int(pages))
 
 
 def _samples(index: sqlite3.Connection, group_ids: Sequence[int], per_group: int) -> dict[int, list[Sample]]:
@@ -459,24 +640,34 @@ def _samples(index: sqlite3.Connection, group_ids: Sequence[int], per_group: int
 def groups_by_size(
     vault_root: Path, *, limit: int, after: tuple[int, int] | None, per_group: int
 ) -> list[Group]:
-    """One page of non-empty groups, largest first, each with its person and up to `per_group` samples.
+    """One page of non-empty groups, named and unnamed, largest first, each with its person and samples.
 
-    `after` is the last listed group's (face_count, group id). Two statements whatever the store's size.
+    `after` is the last listed group's (face_count, group id). Three statements whatever the store's size:
+    one page from each store, merged, and the samples of the groups kept.
     """
     people_file, index_file = face_store.people_path(vault_root), face_store.index_path(vault_root)
-    if not people_file.is_file() or not index_file.is_file():
+    if not index_file.is_file():
         return []
     count, last = after if after is not None else (None, None)
-    with closing(face_store.connect_read_only(people_file)) as people:
-        rows = people.execute(
-            "SELECT g.id, g.face_count, p.display_name FROM groups g LEFT JOIN people p ON p.id = g.person_id "
-            "WHERE g.face_count > 0 AND (? IS NULL OR g.face_count < ? OR (g.face_count = ? AND g.id > ?)) "
-            "ORDER BY g.face_count DESC, g.id LIMIT ?",
-            (count, count, count, last, limit),
-        ).fetchall()
-    if not rows:
-        return []
+    window = "WHERE g.face_count > 0 AND (? IS NULL OR g.face_count < ? OR (g.face_count = ? AND g.id > ?)) "
+    bounds = (count, count, count, last)
+    rows: list[tuple[int, int, str | None]] = []
+    if people_file.is_file():
+        with closing(face_store.connect_read_only(people_file)) as people:
+            rows += people.execute(
+                "SELECT g.id, g.face_count, p.display_name FROM groups g "
+                "JOIN group_people l ON l.group_id = g.id JOIN people p ON p.id = l.person_id "
+                + window + "ORDER BY g.face_count DESC, g.id LIMIT ?",
+                (*bounds, limit),
+            ).fetchall()
     with closing(face_store.connect_read_only(index_file)) as index:
+        rows += index.execute(
+            "SELECT g.id, g.face_count, NULL FROM groups g " + window + "ORDER BY g.face_count DESC, g.id LIMIT ?",
+            (*bounds, limit),
+        ).fetchall()
+        rows = sorted(rows, key=lambda row: (-int(row[1]), int(row[0])))[:limit]
+        if not rows:
+            return []
         samples = _samples(index, [int(row[0]) for row in rows], per_group)
     return [Group(int(group_id), int(size), person, tuple(samples[int(group_id)])) for group_id, size, person in rows]
 
@@ -497,8 +688,8 @@ def page_faces(vault_root: Path, page: str) -> list[tuple[Sample, int | None, st
     if group_ids and people_file.is_file():
         with closing(face_store.connect_read_only(people_file)) as people:
             persons = dict(people.execute(
-                "SELECT g.id, p.display_name FROM groups g JOIN people p ON p.id = g.person_id "
-                "WHERE g.id IN (SELECT value FROM json_each(?))",
+                "SELECT l.group_id, p.display_name FROM group_people l JOIN people p ON p.id = l.person_id "
+                "WHERE l.group_id IN (SELECT value FROM json_each(?))",
                 (json.dumps(group_ids),),
             ).fetchall())
     return [

@@ -398,6 +398,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "lexical-store",
         "lexical-staged",
         "lexical-staged-lock",
+        "face-deletion",
         "face-index",
         "face-people",
         "maintenance-jobs-store",
@@ -455,6 +456,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         (voice_profiles.voice_profiles_path(root), "voice-profile-store"),
         (face_store.index_path(root), "face-index"),
         (face_store.people_path(root), "face-people"),
+        (face_store.deletion_receipt_path(root), "face-deletion"),
         (procedure_approval.key_path(root), "procedure-approval-key"),
         (
             procedure_approval.entry_path(

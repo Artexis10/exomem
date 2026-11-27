@@ -78,8 +78,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # computed and naming the speakers after the fact, added 41 B to the write door's enum on 2026-11-25
 # (keep-speech-results-in-cloud).
 # Search by person added 205 B on 2026-11-27 (add-face-search): `search_memory.people` 165 B, and the owner's door
-# operations `faces.status`, `faces.set` and `faces.name` 40 B to the two door enums. The wire measures 31,948 B.
-TOTAL_BUDGET = 31_950
+# operations `faces.status`, `faces.set` and `faces.name` 40 B to the two door enums. `faces.delete`, which erases
+# the face store, added 15 B to the write door's enum the same day. The wire measures 31,963 B.
+TOTAL_BUDGET = 31_965
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
@@ -99,7 +100,7 @@ TOOL_CEILINGS: dict[str, int] = {
     # (add-face-search) took it to 2,265 B.
     "inspect_memory": 2300,
     "list_review_items": 750,
-    # faces.set and faces.name joined the write door on 2026-11-27 (add-face-search): 2,664 B.
+    # faces.set, faces.name and faces.delete joined the write door on 2026-11-27 (add-face-search): 2,679 B.
     "manage_memory": 2700,
     "query_plan_items": 1050,
     # `options` names `query`, the typed version-1 query that a derived collection also answers, added 32 B on

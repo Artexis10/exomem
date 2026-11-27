@@ -9,7 +9,15 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from exomem import face_store, reserved_paths, vault_backup
+from exomem import (
+    face_groups,
+    face_models,
+    face_naming,
+    face_store,
+    media_models,
+    reserved_paths,
+    vault_backup,
+)
 
 
 def test_a_personal_backup_stages_the_people_store_and_no_face_index_file(vault: Path, tmp_path: Path) -> None:
@@ -40,6 +48,36 @@ def test_a_personal_backup_stages_the_people_store_and_no_face_index_file(vault:
     with closing(sqlite3.connect(stage / reserved_paths.FACE_PEOPLE_PATH)) as copy:
         assert copy.execute("SELECT display_name FROM people").fetchall() == [("Rowan Example",)]
     assert staged >= 1
+
+
+def test_a_personal_backup_stages_only_the_named_groups_in_the_people_store(vault: Path, tmp_path: Path) -> None:
+    """Catches a stranger's one-face centroid in a restic snapshot."""
+    model = face_models.embedder_model_id()
+    width = int(media_models.model_spec("face-embed")["dimensions"])
+
+    def face(axis: int) -> face_groups.PageFace:
+        vector = np.zeros(width, dtype=np.float32)
+        vector[axis] = 1.0
+        return face_groups.PageFace(None, (0.1, 0.2, 0.3, 0.3), 96.0, 0.99, vector)
+
+    with closing(face_store.connect_index(vault)) as index:
+        face_store.record_opt_in(index, at="2026-01-05T10:00:00+00:00", surface="test")
+    groups = [face_groups.record_page(vault, f"Photos/guest-{axis}.jpg", [face(axis)], model_id=model)[0]
+              for axis in range(5)]
+    [named, renamed_then_cleared, *strangers] = groups
+    face_naming.name_group(vault, named, "Rowan Example")
+    face_naming.name_group(vault, renamed_then_cleared, "Sky Example")
+    face_naming.clear_group(vault, renamed_then_cleared)
+    stage = tmp_path / "stage"
+
+    vault_backup.stage_state(vault, stage)
+
+    with closing(sqlite3.connect(stage / reserved_paths.FACE_PEOPLE_PATH)) as copy:
+        assert copy.execute("SELECT id FROM groups").fetchall() == [(named,)]
+        assert copy.execute("SELECT display_name FROM people").fetchall() == [("Rowan Example",)]
+    with closing(sqlite3.connect(face_store.index_path(vault))) as index:
+        unnamed = {row[0] for row in index.execute("SELECT id FROM groups")}
+    assert unnamed == {renamed_then_cleared, *strangers}
 
 
 def test_the_cell_backup_excludes_every_face_index_file_and_keeps_the_people_store(

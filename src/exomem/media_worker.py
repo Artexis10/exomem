@@ -2033,7 +2033,7 @@ class MediaWorker:
                 self._clip_index.upsert(rel, vec, mtime)
                 log.info("CLIP-indexed %s", job.binary_path.name)
             # Under the same identity check as the CLIP rows, so faces never describe changed media.
-            face_scan.commit(self._vault_root, rel, faces)
+            face_scan.commit(self._vault_root, rel, faces, mtime=mtime)
         if persist_scene_frames:
             # The frames take their own hold once the projection guard is released: encoding them
             # runs with no boundary held, and only the commit of their files holds it.

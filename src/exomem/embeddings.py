@@ -3009,7 +3009,23 @@ def delete_clip_after_remove(
     Gated by `clip_enabled()` (EXOMEM_DISABLE_CLIP), not EXOMEM_DISABLE_EMBEDDINGS
     -- CLIP deletion never touches the heavy torch/sentence-transformers import,
     only sqlite, so a lean (no `embeddings` extra) install still purges cleanly.
+
+    The removed pictures' faces go in the same step, whether CLIP or faces are on or off: a face row of a
+    removed picture would still match its person. A face store failure reports this step degraded, so
+    source erasure counts the face store among the owners that must acknowledge.
     """
+    from . import face_groups
+
+    try:
+        face_groups.forget_pages(vault_root, removed_rel_paths)
+    except Exception:  # noqa: BLE001 - reported below; the CLIP rows still go
+        log.warning("face rows of removed pictures could not be dropped", exc_info=True)
+        status = _delete_clip_rows(vault_root, removed_rel_paths)
+        return EmbeddingSyncStatus("degraded", "face_delete_failed", status.eligible_count)
+    return _delete_clip_rows(vault_root, removed_rel_paths)
+
+
+def _delete_clip_rows(vault_root: Path, removed_rel_paths: list[str]) -> EmbeddingSyncStatus:
     eligible_count = len(removed_rel_paths)
     if not clip_enabled():
         return EmbeddingSyncStatus("disabled", "clip_disabled", eligible_count)

@@ -281,7 +281,7 @@ def seed_faces(vault: Path, count: int) -> None:
     turn_on(vault)
     with face_groups.Writing(vault) as writing:
         for _group in range(3):
-            writing.people.execute(
+            writing.index.execute(  # A new group starts unnamed, in the face index.
                 "INSERT INTO groups (model_id, centroid_sum, face_count) VALUES (?, ?, ?)",
                 (MODEL, b"", count // 3),
             )

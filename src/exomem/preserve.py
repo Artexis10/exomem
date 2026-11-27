@@ -366,11 +366,16 @@ def _artifact_name(
     return safe, protected
 
 
+def _sidecar_name(name: str, *, protected: bool) -> str:
+    """The file name of the page beside an artifact: `<name>.md`, or `<stem>-notes.md` for an unprotected `.md`."""
+    if name.lower().endswith(".md") and not protected:
+        return f"{name[:-3]}-notes.md"
+    return f"{name}.md"
+
+
 def _sidecar_path(artifact: Path, *, protected: bool) -> Path:
-    """The page beside an artifact: `<name>.md`, or `<stem>-notes.md` for an unprotected `.md`."""
-    if artifact.name.lower().endswith(".md") and not protected:
-        return artifact.with_name(f"{artifact.name[:-3]}-notes.md")
-    return artifact.with_name(f"{artifact.name}.md")
+    """The page beside an artifact."""
+    return artifact.with_name(_sidecar_name(artifact.name, protected=protected))
 
 
 def _refuse_reserved_capture(vault_root: Path, paths: tuple[Path, ...]) -> None:

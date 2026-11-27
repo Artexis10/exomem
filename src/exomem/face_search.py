@@ -108,4 +108,4 @@ def pages(vault_root: Path, restriction: Restriction, people: Sequence[str]) -> 
             details={"named_people": named},
         )
     both = set.intersection(*found.values()) if found else set()
-    return {originals.sidecar_path(Path(picture)).as_posix() for picture in both}
+    return {originals.sidecar_key(picture) for picture in both}

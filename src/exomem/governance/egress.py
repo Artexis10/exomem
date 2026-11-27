@@ -7039,6 +7039,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "status": "structure",
         "set": "mutation",
         "name": "mutation",
+        "delete": "mutation",
     },
     ("configure_memory", "action"): {
         "inspect": "structure",

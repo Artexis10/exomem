@@ -3986,13 +3986,14 @@ def _install_hook_main(argv: list[str]) -> int:
 # Simple product actions (friendly CLI aliases over canonical registry commands)
 # --------------------------------------------------------------------------- #
 def _faces_main(argv: list[str]) -> int:
-    """`exomem faces on|off|status|set|name ...`: `on` here; the rest through the registry command `manage_faces`."""
+    """`exomem faces on|off|status|set|name|delete ...`: `on` here; the rest through the registry command `manage_faces`."""
     # nosemgrep: ep-word-set -- the help flags this CLI's parsers register.
     if not argv or argv[0] in {"-h", "--help"}:
         print(
-            "usage: exomem faces {on,off,status,set,name} ...\n\n"
+            "usage: exomem faces {on,off,status,set,name,delete} ...\n\n"
             "Search by person. `on` shows what it stores and asks you to confirm; `off` stops it and keeps what\n"
-            "is stored; `status`, `set` and `name` take the options of `exomem manage_faces --help`."
+            "is stored; `delete` erases every face, group and name; `status`, `set` and `name` take the options\n"
+            "of `exomem manage_faces --help`."
         )
         return 0 if argv else 2
     head, rest = argv[0], argv[1:]

@@ -23,11 +23,13 @@ from exomem import (
     commands,
     face_groups,
     face_models,
+    face_naming,
     face_scan,
     face_store,
     media_models,
     writer_lease,
 )
+from exomem import find as find_module
 from exomem import server as server_module
 from exomem.governance.principal import RequestPrincipal, library_scope, request_scope
 
@@ -200,3 +202,76 @@ def test_a_hosted_deployment_refuses_turn_on_without_its_operator_setting(vault,
     assert code == 1
     assert "FACES_UNAVAILABLE" in capsys.readouterr().err
     assert not face_store.store_dir(vault).exists()
+
+
+def seed_two_people_and_strangers(vault: Path) -> None:
+    """Five pictures: two named people (one in two pictures, with a stranger) and two unnamed groups."""
+    turn_on(vault)
+    [ada] = face_groups.record_page(vault, "Photos/ada.jpg", [face(0)], model_id=MODEL)
+    face_groups.record_page(vault, "Photos/ada-and-guest.jpg", [face(0), face(2, slot=1)], model_id=MODEL)
+    [ben] = face_groups.record_page(vault, "Photos/ben.jpg", [face(1)], model_id=MODEL)
+    face_groups.record_page(vault, "Photos/stranger.jpg", [face(3)], model_id=MODEL)
+    face_groups.record_page(vault, "Photos/empty.jpg", [], model_id=MODEL)
+    face_naming.name_group(vault, ada, "Ada Fixture")
+    face_naming.name_group(vault, ben, "Ben Fixture")
+
+
+def test_delete_removes_every_face_store_file_reports_what_it_held_and_turns_search_by_person_off(
+    doors, vault
+) -> None:
+    """Catches an erasure that leaves a WAL or a directory behind, or reports counts it did not delete."""
+    seed_two_people_and_strangers(vault)
+    # A reader holds the face index open, so its WAL and shared-memory files exist while the delete runs.
+    reader = sqlite3.connect(face_store.index_path(vault))
+    reader.execute("SELECT COUNT(*) FROM faces").fetchone()
+    assert Path(f"{face_store.index_path(vault)}-wal").is_file()
+
+    reply = doors("manage_memory", "faces.delete", {})
+    reader.close()
+
+    assert reply["deletion"] == "deleted", reply
+    assert reply["counts"] == {"faces": 5, "groups": 4, "people": 2, "pages": 4}
+    assert not face_store.store_dir(vault).exists()
+    with library_scope(), pytest.raises(cli_ops.OpError) as refusal:
+        find_module.find(vault, query="", people=["Ada Fixture"], mode="keyword")
+    assert refusal.value.code == "FACES_OFF"
+
+
+def test_a_delete_that_cannot_remove_a_file_reports_partial_and_a_repeat_finishes_it(
+    doors, vault, monkeypatch
+) -> None:
+    """Catches a partial delete reported as complete."""
+    seed_two_people_and_strangers(vault)
+    real_unlink = Path.unlink
+
+    def people_store_held(path, *args, **kwargs):
+        if path.name == "people.sqlite":
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", people_store_held)
+    first = doors("manage_memory", "faces.delete", {})
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    repeat = doors("manage_memory", "faces.delete", {})
+
+    assert first["deletion"] == "partial", first
+    assert first["remaining"] == ["faces/people.sqlite", "faces"]
+    assert "faces/people.sqlite" in first["outcome"]
+    assert repeat["deletion"] == "deleted", repeat
+    assert repeat["counts"] == first["counts"] == {"faces": 5, "groups": 4, "people": 2, "pages": 4}
+    assert not face_store.store_dir(vault).exists()
+
+
+def test_the_delete_result_and_status_name_what_the_delete_cannot_reach_and_when_it_ends(doors, vault) -> None:
+    """Catches a delete that lets the owner believe no copy of their face data remains anywhere."""
+    seed_two_people_and_strangers(vault)
+
+    reply = doors("manage_memory", "faces.delete", {})
+    status = doors("inspect_memory", "faces.status", {})
+
+    residues = [residue["residue"] for residue in reply["residues"]]
+    assert residues == ["older backups", "a running Cloud cell backup's volume snapshot", "freed disk blocks"]
+    assert all(residue["ends"] for residue in reply["residues"])
+    assert status["state"] == "off"
+    assert status["last_deletion"]["counts"] == reply["counts"]
+    assert status["residues"] == reply["residues"]

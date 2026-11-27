@@ -248,3 +248,88 @@ def test_the_pinned_face_models_find_no_face_in_a_photo_of_a_bicycle(tmp_path: P
     photo = Path(__file__).parent / "fixtures" / "clip" / "photo.jpg"
 
     assert face_scan.image_faces(models, photo) == []
+
+
+def red_square_photo(name: str) -> bytes:
+    from PIL import Image
+
+    picture = Image.new("RGB", (200, 200), (240, 240, 240))
+    picture.paste((230, 30, 30), (40, 40, 120, 120))
+    data = io.BytesIO()
+    picture.save(data, "JPEG", quality=95)
+    return data.getvalue()
+
+
+def test_turning_faces_off_during_a_backfill_processes_no_further_picture(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches detection continuing after the owner turned it off."""
+    import threading
+
+    from exomem import face_operations
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setattr(embeddings, "embed_image", lambda path: np.ones(embeddings.CLIP_DIM, dtype=np.float32))
+    worker = media_worker.MediaWorker(vault)
+    for number in range(4):
+        stored = preserve.preserve_bytes(
+            vault, scope="Rental", category="photos", filename=f"guest-{number}.jpg",
+            data=red_square_photo(f"guest-{number}"), text="guest",
+        )
+        worker._process(clip_job(vault, stored, "image"))  # Faces are off: only the CLIP index learns them.
+    second_picture_started = threading.Event()
+    owner_turned_faces_off = threading.Event()
+    detected: list[int] = []
+
+    class _SlowSecondPicture(_SquareFaces):
+        def faces(self, picture):
+            detected.append(len(detected))
+            if len(detected) == 2:
+                second_picture_started.set()
+                owner_turned_faces_off.wait(30)
+            return super().faces(picture)
+
+    monkeypatch.setattr(face_models, "load", _SlowSecondPicture)
+    turn_faces_on(vault)
+    face_scan.start_backfill(vault)
+    assert second_picture_started.wait(30)
+
+    turning_off = threading.Thread(target=face_operations.turn_off, args=(vault,))
+    turning_off.start()
+    while face_store.enabled(vault):
+        threading.Event().wait(0.01)
+    owner_turned_faces_off.set()
+    turning_off.join(30)
+
+    assert not face_scan.backfill_running(vault)
+    assert len(detected) == 2
+    assert len({row[0] for row in face_rows(vault)}) == 1  # The picture in flight stored nothing.
+
+
+def test_a_changed_original_drops_the_faces_of_its_old_bytes(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Catches faces of a replaced photo still matching a person after its new bytes hold none."""
+    import os
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setattr(embeddings, "embed_image", lambda path: np.ones(embeddings.CLIP_DIM, dtype=np.float32))
+    monkeypatch.setattr(face_models, "load", _SquareFaces)
+    turn_faces_on(vault)
+    stored = preserve.preserve_bytes(
+        vault, scope="Rental", category="photos", filename="porch.jpg", data=red_square_photo("porch"), text="porch"
+    )
+    worker = media_worker.MediaWorker(vault)
+    worker._process(clip_job(vault, stored, "image"))
+    assert len(face_rows(vault)) == 1
+
+    from exomem import media_processing
+
+    held = media_processing.held_path(vault, vault / stored.path)
+    with open(held, "r+b") as original:  # The same picture with one byte of its comment changed.
+        original.seek(-3, os.SEEK_END)
+        original.write(b"\x00")
+    os.utime(held, (held.stat().st_atime, held.stat().st_mtime + 5))
+    monkeypatch.setattr(embeddings, "embed_image", lambda path: np.full(embeddings.CLIP_DIM, 0.5, dtype=np.float32))
+    monkeypatch.setattr(face_scan, "detect", lambda *args, **kwargs: None)  # The face step fails on the new bytes.
+    worker._process(clip_job(vault, stored, "image"))
+
+    assert face_rows(vault) == []

@@ -1,13 +1,15 @@
 """The account's face store: two SQLite databases in one owner-only directory under its state directory.
 
-The face index holds what a re-scan recomputes: the faces found in each picture and keyframe, the pages
-scanned, and the account's face setting with its consent record and generation. Its registry family is
-rebuildable, so no backup carries it. A restored account therefore keeps faces off until the owner opts in
-again.
+The face index holds what a re-scan recomputes: the faces found in each picture and keyframe, the groups
+that no person names, the pages scanned, and the account's face setting with its consent record and
+generation. Its registry family is rebuildable, so no backup carries it. A restored account therefore keeps
+faces off until the owner opts in again.
 
-The people store holds what only the owner created: groups with their centroids, people and their names,
-group-to-person links, faces moved out of a group, and threshold overrides. Its family is not rebuildable,
-so backups keep it and a restore keeps names.
+The people store holds what only the owner created: people and their names, the groups linked to a person
+with their centroids, faces moved out of those groups, and threshold overrides. Its family is not
+rebuildable, so backups keep it and a restore keeps names. A group moves into the people store when the
+owner names it and back when the name is cleared, keeping its id: a one-face unnamed group's centroid is
+that face's embedding, so a stranger's face never reaches a backup.
 
 Both run with `secure_delete` on, so a removed row's bytes are overwritten in the file. Reading the
 setting never creates the store: an account that never turned faces on has no face directory at all.
@@ -15,6 +17,7 @@ setting never creates the store: an account that never turned faces on has no fa
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import sqlite3
@@ -29,6 +32,29 @@ from . import private_state, reserved_paths, state_paths
 
 SCHEMA_VERSION = 1
 BUSY_TIMEOUT_MS = 5000
+
+#: Groups and the faces moved out of them, in either store: the face index holds unnamed groups, the people
+#: store named ones. A group keeps its id when it moves, so face rows keep pointing at it.
+_GROUP_SCHEMA = """
+CREATE TABLE IF NOT EXISTS groups (
+    id INTEGER PRIMARY KEY,
+    model_id TEXT NOT NULL,
+    centroid_sum BLOB NOT NULL,
+    face_count INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS groups_by_size ON groups (face_count DESC, id);
+CREATE TABLE IF NOT EXISTS exclusions (
+    group_id INTEGER NOT NULL REFERENCES groups (id) ON DELETE CASCADE,
+    page TEXT NOT NULL,
+    frame_ts REAL,
+    x REAL NOT NULL,
+    y REAL NOT NULL,
+    width REAL NOT NULL,
+    height REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS exclusions_by_group ON exclusions (group_id, page);
+CREATE INDEX IF NOT EXISTS exclusions_by_page ON exclusions (page);
+"""
 
 _INDEX_SCHEMA = """
 CREATE TABLE IF NOT EXISTS face_setting (
@@ -58,9 +84,11 @@ CREATE INDEX IF NOT EXISTS faces_by_group ON faces (group_id, page);
 CREATE TABLE IF NOT EXISTS scanned_pages (
     page TEXT PRIMARY KEY,
     model_id TEXT NOT NULL,
-    face_count INTEGER NOT NULL
+    face_count INTEGER NOT NULL,
+    -- The picture's modification time when it was scanned; a changed original drops its faces.
+    mtime REAL
 );
-"""
+""" + _GROUP_SCHEMA
 
 _PEOPLE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS people (
@@ -68,31 +96,17 @@ CREATE TABLE IF NOT EXISTS people (
     display_name TEXT NOT NULL,
     folded_name TEXT NOT NULL UNIQUE
 );
-CREATE TABLE IF NOT EXISTS groups (
-    id INTEGER PRIMARY KEY,
-    model_id TEXT NOT NULL,
-    centroid_sum BLOB NOT NULL,
-    face_count INTEGER NOT NULL,
-    person_id INTEGER REFERENCES people (id) ON DELETE SET NULL
+-- A named group: the person it belongs to. Unnamed groups live in the face index without this table.
+CREATE TABLE IF NOT EXISTS group_people (
+    group_id INTEGER PRIMARY KEY REFERENCES groups (id) ON DELETE CASCADE,
+    person_id INTEGER NOT NULL REFERENCES people (id)
 );
-CREATE INDEX IF NOT EXISTS groups_by_person ON groups (person_id);
-CREATE INDEX IF NOT EXISTS groups_by_size ON groups (face_count DESC, id);
-CREATE TABLE IF NOT EXISTS exclusions (
-    group_id INTEGER NOT NULL REFERENCES groups (id) ON DELETE CASCADE,
-    page TEXT NOT NULL,
-    frame_ts REAL,
-    x REAL NOT NULL,
-    y REAL NOT NULL,
-    width REAL NOT NULL,
-    height REAL NOT NULL
-);
-CREATE INDEX IF NOT EXISTS exclusions_by_group ON exclusions (group_id, page);
-CREATE INDEX IF NOT EXISTS exclusions_by_page ON exclusions (page);
+CREATE INDEX IF NOT EXISTS group_people_by_person ON group_people (person_id);
 CREATE TABLE IF NOT EXISTS threshold_overrides (
     name TEXT PRIMARY KEY,
     value REAL NOT NULL
 );
-"""
+""" + _GROUP_SCHEMA
 # An exclusion names its face by page, keyframe and box, not by face row id: the face index is rebuilt with
 # new ids, and a moved face must still never rejoin its old group.
 
@@ -265,3 +279,56 @@ def pack_vector(vector: np.ndarray) -> bytes:
 
 def unpack_vector(blob: bytes) -> np.ndarray:
     return np.frombuffer(blob, dtype="<f4")
+
+
+def remove_store(vault_root: Path) -> list[str]:
+    """Remove every file of the face store, then its directory. Returns what remains, by state-relative name.
+
+    The caller has closed every connection. The face store's directory holds nothing but its two databases
+    and their `-wal`, `-shm` and `-journal` files, so everything in it goes. A file that cannot be removed
+    stays listed, and a repeat removes it.
+    """
+    directory = store_dir(vault_root)
+    try:
+        entries = sorted(directory.iterdir())
+    except FileNotFoundError:
+        return []
+    remaining = []
+    for entry in entries:
+        try:
+            entry.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            remaining.append(f"{reserved_paths.FACES_DIRNAME}/{entry.name}")
+    try:
+        directory.rmdir()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        remaining.append(reserved_paths.FACES_DIRNAME)
+    return remaining
+
+
+_DELETION_RECEIPT = "last"
+
+
+def deletion_receipt_path(vault_root: Path) -> Path:
+    """Where the last delete's receipt lives, outside the face store so the delete keeps it."""
+    return state_paths.vault_state_dir(vault_root) / reserved_paths.FACE_DELETION_DIRNAME / f"{_DELETION_RECEIPT}.json"
+
+
+def write_deletion_receipt(vault_root: Path, receipt: dict) -> None:
+    """Keep the last delete's receipt (time, outcome, counts, what remains) for `faces.status`. No face data."""
+    store = private_state.store(vault_root, reserved_paths.FACE_DELETION_DIRNAME)
+    private_state.write_record(store, _DELETION_RECEIPT, receipt, temp_suffix=".tmp", durable=True)
+    private_state.sync_directory(store)
+
+
+def read_deletion_receipt(vault_root: Path) -> dict | None:
+    """The last delete's receipt, or None when faces were never deleted here or it cannot be read."""
+    try:
+        receipt = json.loads(deletion_receipt_path(vault_root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return receipt if isinstance(receipt, dict) else None
