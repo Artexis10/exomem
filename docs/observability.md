@@ -217,7 +217,8 @@ it with `exomem logs verify`.
 `session_id`, `client_name`, `client_version`, `transport`,
 `caller_principal_hash`, `principal_kind`, `tool`, `arg_names`, `args`,
 `target_paths`, `outcome`, `error_code`, `duration_ms`, `total_ms`,
-`request_bytes`, `truncated`, `access`, `item_count`.
+`request_bytes`, `truncated`, `access`, `item_count`, and, when the request says,
+`protocol_version` and `client_extensions`.
 
 - **Latency, on every call — read, write, success, refusal.** `duration_ms` is
   the tool leaf, the number the prose trace and `exomem_tool_duration_ms` have
@@ -265,6 +266,19 @@ it with `exomem logs verify`.
   identity. A stateless request carries no handshake; there the name comes
   from `User-Agent`. On a cloud cell, the gateway's `x-exomem-oauth-client`
   header comes first, because the gateway forwards no `User-Agent`.
+- **`protocol_version` / `client_extensions`** say which MCP revision the call
+  used and which extensions the client declared. A 2026-07-28 request states
+  both in its own `_meta`; a stdio or other stateful call takes them from the
+  initialize handshake. They are protocol identifiers, so content-private
+  logging keeps them. `client_extensions` is the sorted extension ids plus one
+  `elicitation:<mode>` entry per declared mode, at most 16 entries of 64
+  characters each; a longer list records the dropped count in
+  `client_extensions_truncated`. `[]` is a client that declares nothing. The
+  field is absent when the request does not say (a stateless call on an older
+  revision keeps no handshake) and on rows written before the census.
+  `exomem doctor` reads the last 24 hours of these rows and prints one line
+  for each client name and revision with its declared extensions, counted per
+  tool call.
 - **`principal_kind`** says which kind of caller that is: `owner` (stdio, the
   CLI or the REST key), `owner-oauth` (a remote sign-in the host bound as the
   owner with `EXOMEM_OWNER_OAUTH_SUBJECT`), `principal`, or `unresolved`. An

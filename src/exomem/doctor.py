@@ -3858,6 +3858,81 @@ def _check_latency() -> DoctorCheck:
     return _check("latency", "warn" if incomplete else "pass", message, details=details)
 
 
+#: The census window, and the most rows one doctor run reads for it.
+_CLIENT_CENSUS_WINDOW_SECONDS = 24 * 60 * 60
+_CLIENT_CENSUS_MAX_ROWS = 50_000
+
+
+def _check_mcp_clients() -> DoctorCheck:
+    """Which protocol revision and extensions each client declared, per tool call, in the last 24 hours.
+
+    Reads the newest rows of the live ledger file and stops at the first row older than the
+    window or at the row bound, so the read does not grow with the ledger. Informational:
+    an unreadable ledger is a warning, never a failure of the install.
+    """
+    import datetime as dt
+    import json
+
+    from . import activity, call_ledger
+
+    if not call_ledger.enabled():
+        return _check(
+            "mcp_clients", "pass",
+            "The call ledger is disabled, so declared protocol features are not recorded.",
+        )
+    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=_CLIENT_CENSUS_WINDOW_SECONDS)
+    calls: dict[tuple[str, str], dict[str, object]] = {}
+    read = 0
+    try:
+        for line in activity.lines_newest_first(call_ledger.ledger_path()):
+            if not line.strip():
+                continue
+            if read >= _CLIENT_CENSUS_MAX_ROWS:
+                break
+            read += 1
+            try:
+                row = json.loads(line)
+                at = dt.datetime.fromisoformat(row["ts_utc"])
+            except (ValueError, KeyError, TypeError):
+                continue  # a damaged row names no time; the chain check reports it, not this census
+            if (at if at.tzinfo else at.replace(tzinfo=dt.UTC)) < cutoff:
+                break
+            client = row.get("client_name") or "unknown client"
+            revision = row.get("protocol_version") or "unknown revision"
+            declared = row.get("client_extensions")
+            entry = calls.setdefault(
+                (str(client), str(revision)), {"calls": 0, "extensions": set(), "known": False}
+            )
+            entry["calls"] += 1
+            if isinstance(declared, list):
+                entry["known"] = True
+                entry["extensions"].update(str(name) for name in declared)
+    except OSError as error:
+        return _check(
+            "mcp_clients", "warn", f"The call ledger could not be read: {type(error).__name__}.",
+            "Check the call ledger directory and its permissions.",
+        )
+    if not calls:
+        return _check("mcp_clients", "pass", "No tool calls in the last 24 hours.", details={"clients": []})
+    clients = []
+    lines = [f"{sum(int(e['calls']) for e in calls.values())} tool call(s) in the last 24 hours:"]
+    for (client, revision), entry in sorted(calls.items()):
+        extensions = sorted(entry["extensions"])
+        if not entry["known"]:
+            said = "declared extensions not recorded"
+        else:
+            said = ", ".join(extensions) if extensions else "no extensions"
+        lines.append(f"  {client} on {revision}: {said} ({entry['calls']} tool call(s))")
+        clients.append({
+            "client": client, "protocol_version": revision, "tool_calls": entry["calls"],
+            "client_extensions": extensions if entry["known"] else None,
+        })
+    return _check(
+        "mcp_clients", "pass", "\n".join(lines),
+        details={"clients": clients, "rows_read": read, "window_hours": 24},
+    )
+
+
 def _check_observability() -> DoctorCheck:
     """Log directory writability, active/rotated file sizes, JSONL
     tail-parseability, the NSSM `service.*` rotation pile, and
@@ -4368,6 +4443,7 @@ def _doctor_report(vault_root, vault_check, *, profile, probe, replica_urls):
     checks.extend(_check_edge_ingress(probe=probe))
     checks.append(_check_observability())
     checks.append(_check_latency())
+    checks.append(_check_mcp_clients())
     checks.append(_check_recall_canary())
     checks.append(_check_idempotency_store())
     checks.append(_check_managed_hook_refresh())

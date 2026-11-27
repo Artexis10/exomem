@@ -747,10 +747,16 @@ def _record_ledger_row(
     started = time.perf_counter()
     try:
         from . import call_ledger, request_budget
-        from .command_surface import current_rendering, mcp_caller_identity, mcp_retry_scope
+        from .command_surface import (
+            current_rendering,
+            mcp_caller_identity,
+            mcp_protocol_features,
+            mcp_retry_scope,
+        )
         from .governance.principal import resolve_mcp_principal
 
         identity = mcp_caller_identity()
+        features = mcp_protocol_features()
         try:
             principal_kind: str | None = resolve_mcp_principal().principal_kind
         except Exception:  # noqa: BLE001 - a missing label must not lose the row
@@ -775,6 +781,8 @@ def _record_ledger_row(
             client_version=identity.get("client_version"),
             transport=identity.get("transport"),
             session_id=identity.get("session_id"),
+            protocol_version=features["protocol_version"],
+            client_extensions=features["client_extensions"],
             spans=spans,
             activation_result=activation_result,
             budget=(
