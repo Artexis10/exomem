@@ -1227,10 +1227,10 @@ def _bulk_row_values(
 ) -> dict[str, Any]:
     """A bulk row's validated values: its item plus, where declared, a link to its source.
 
-    With a vault ``root`` the row's own `sensitivity` classes take the registry check, so the file bulk path, the
-    store bulk path, an import batch and its preview refuse the same rows. ``None`` is for a derived collection
-    only: its rows keep no governance metadata, and a rebuild replays the import log, which a class retired since
-    the import must not refuse.
+    The row's own `sensitivity` classes take the registry check, so the file bulk path, the store bulk path, an
+    import batch and its preview refuse the same rows. A derived collection skips it: its rows keep no governance
+    metadata, and a rebuild replays the import log, which a class retired since the import must not refuse. Its
+    rebuild has no vault ``root`` to pass, so ``root`` may be ``None`` only for a derived manifest.
     """
     values = dict(item)
     if _bulk_sources_field(manifest):
@@ -1241,7 +1241,7 @@ def _bulk_row_values(
         elif isinstance(listed, list) and link not in listed:
             values["sources"] = [*listed, link]
     validated = _validate_values(manifest, values)
-    return validated if root is None else dict(_registered_classes(root, manifest, validated))
+    return validated if manifest.derived else dict(_registered_classes(root, manifest, validated))
 
 
 def resolve_preserved_source(
