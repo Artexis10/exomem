@@ -2010,6 +2010,19 @@ def _move_call(vault_root: Path, args: Mapping[str, Any]) -> dict[str, Any]:
             "CURATION_STEP_INVALID",
             f"a move's fields patch sets only pointer fields, and {refused[0]!r} is not one",
         )
+    # The classify operation alone changes a page's class: it checks the classes against the registry and
+    # leaves one reason record to revert. A rehome that carried the field would skip both.
+    # (Fields owned by the reclassify, custody and closure writers pass here today: old debt, reported.)
+    classify_owned = sorted(
+        name for name, writer in page_fields.writers(vault_root).items()
+        if writer == page_fields.WRITER_CLASSIFY and name in fields
+    )
+    if classify_owned:
+        raise _error(
+            "CURATION_STEP_INVALID",
+            f"a move's fields patch cannot set {classify_owned[0]!r}. "
+            + (frontmatter.owned_field_route(vault_root, classify_owned[0]) or ""),
+        )
     destination = str(args["new_path"])
 
     def patch(text: str) -> str:

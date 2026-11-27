@@ -138,7 +138,7 @@ def test_an_empty_vault_returns_an_empty_map(vault: Path, monkeypatch: pytest.Mo
         refs=[TIDE], roles=[], thread="earlier-thread",
     )
     waiting = _activate(vault, turn="", continuity=previous)
-    assert waiting["abstention"] == {"reason": "index_warming"}
+    assert waiting["abstention"]["reason"] == "index_warming"
     assert waiting["next_action"]["state"] == "index_warming"
     assert waiting["next_action"]["tool"] == "search_memory"
     assert "map" not in waiting

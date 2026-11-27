@@ -1623,9 +1623,9 @@ def test_changed_mapped_content_uses_the_ordinary_validator_at_handoff(store, mo
             item.update(after)
         return result
 
-    def counted(*args):
+    def counted(*args, **kwargs):
         checked.append(1)
-        return validate(*args)
+        return validate(*args, **kwargs)
 
     monkeypatch.setattr(module, "_collapse", mutate)
     monkeypatch.setattr(records, "_bulk_row_values", counted)
@@ -1657,9 +1657,9 @@ def test_same_schema_version_manifest_change_uses_the_ordinary_validator_at_hand
         kwargs["expected_container_hash"] = self.inspect_collection(CID)["snapshot"]
         return bulk(self, collection, **kwargs)
 
-    def counted(*args):
+    def counted(*args, **kwargs):
         checked.append(args[0].manifest_version.hash)
-        return validate(*args)
+        return validate(*args, **kwargs)
 
     monkeypatch.setattr(CollectionWriter, "bulk_upsert_records", revise)
     monkeypatch.setattr(records, "_bulk_row_values", counted)
@@ -2340,3 +2340,24 @@ def test_a_session_store_that_stays_unreadable_is_retried_on_a_bounded_backoff(s
         lookups.append(waits())
     assert lookups[0] == importer().UNREADABLE_RETRY_SECONDS
     assert lookups == sorted(lookups) and lookups[-1] == importer().UNREADABLE_RETRY_MAX_SECONDS
+
+
+def test_an_import_rejects_a_row_with_an_unregistered_sensitivity_class_and_canonicalises_a_registered_one(store):
+    """An import that stores a free-text class on a row, which a row-by-row write refuses."""
+    fields = WORKOUT_FIELDS + "    sensitivity: {type: array, items: {type: string}}\n"
+    setup(store, ndjson([{"id": "a", "cls": ["passport-ish"]}, {"id": "b", "cls": ["Health"]}]), fields=fields)
+    mapping = {"fields": {"exercise_id": "id", "sensitivity": "cls"},
+               "coverage": {"id": {"classification": None}, "cls": {"classification": None}}, "on_invalid": "skip"}
+    preview = call(store, owner_principal(), mode="preview", source_ref=SOURCE, format="ndjson", mapping=mapping)
+    assert preview["would_insert"] == 1 and set(preview["would_reject"]) == {"SENSITIVITY_CLASS_UNKNOWN"}, preview
+
+    job = start(store, mapping=mapping)
+    run(store)
+    result = status(store, job)
+
+    assert result["state"] == "complete" and result["rows"]["imported"] == 1, result
+    assert [(entry["code"], entry["at"]) for entry in result["rejections"]] == [
+        ("SENSITIVITY_CLASS_UNKNOWN", "sensitivity")], result["rejections"]
+    stored = [json.loads(row[0]).get("sensitivity") for row in store.connection.execute(
+        "SELECT governance_json FROM items WHERE collection_id=?", (CID,))]
+    assert stored == [["health"]], stored

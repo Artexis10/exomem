@@ -260,6 +260,36 @@ def test_seeded_sources_and_a_citing_page_are_read_back_through_the_arms_own_cod
     assert incidents.compiled_with_backlinks(facts, digests, ["note.txt"]) is True
 
 
+def test_file_kept_sees_a_file_kept_as_evidence_and_its_class(tmp_path: Path) -> None:
+    """A file kept as Evidence that the check cannot see, so `equals: 0` passes on a kept file and a
+    `where` on the page's class fails on a classified one."""
+    root, work = tmp_path / "unit", tmp_path / "unit" / "work"
+    fresh_vault(root, ARM)
+    work.mkdir()
+    digests = build_files({"note.txt": SPECS["note.txt"]}, work)
+    keep = (
+        "import sys; from pathlib import Path; from exomem import commands; "
+        "from exomem.governance.principal import owner_principal, request_scope\n"
+        "with request_scope(owner_principal(surface='mcp')):\n"
+        "    commands.op_preserve_evidence(Path(sys.argv[1]), 'personal', 'cards', 'note.txt', "
+        "Path(sys.argv[2]).read_text(), sensitivity=['identity'])"
+    )
+    subprocess.run(
+        [sys.executable, "-c", keep, str(root / "vault"), str(work / "note.txt")],
+        env=child_env(root, ARM),
+        check=True,
+        capture_output=True,
+    )
+    facts = arm_side(root, "sources", str(root / "vault"))
+
+    identity = [{"field": "sensitivity", "op": "contains", "value": "identity"}]
+    assert incidents.file_kept(facts, digests, [{"file": "note.txt", "where": identity}])
+    assert not incidents.file_kept(facts, digests, [{"file": "note.txt", "equals": 0}])
+    assert not incidents.file_kept(
+        facts, digests, [{"file": "note.txt", "where": [{"field": "sensitivity", "op": "contains", "value": "health"}]}]
+    )
+
+
 @pytest.mark.parametrize("shared", [False, True], ids=["local", "shared"])
 def test_sources_reports_a_stored_originals_digest_in_either_storage(
     tmp_path: Path, shared: bool

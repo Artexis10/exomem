@@ -57,6 +57,7 @@ from . import (
     semantic_contract,
     semantic_units,
     semantic_writes,
+    sensitivity_classes,
     source_closure,
     source_coverage,
     tag_variants,
@@ -1504,6 +1505,7 @@ def _render_note(
     bridge_review: str | None = None,
     summary: str | None = None,
     topics: list[str] | None = None,
+    sensitivity: Sequence[str] = (),
     verbatim_body: bool = False,
 ) -> str:
     lines = ["---"]
@@ -1515,6 +1517,8 @@ def _render_note(
         lines.append(f"summary: {yaml_scalar(summary)}")
     if topics is not None:
         lines.append("topics: [" + ", ".join(yaml_scalar(topic) for topic in topics) + "]")
+    if sensitivity:
+        lines.append(f"{sensitivity_classes.FIELD}: {yaml_flow_list(sensitivity)}")
 
     # Type-specific required fields, ordered per fixture convention.
     if note_type == "research-note":
@@ -1975,6 +1979,7 @@ def note(
     vocabulary_decision: dict[str, Any] | None = None,
     summary: str | None = None,
     topics: str | list[str] | None = None,
+    sensitivity: Sequence[str] | None = None,
     _return_prepared: bool = False,
     _defer_navigation: bool = False,
     _supersedes_target: str | None = None,
@@ -1997,6 +2002,11 @@ def note(
         or (summary and summary.splitlines() != [summary])
     ):
         raise NoteError("INVALID_NOTE", ["summary"], "summary must be one line of at most 1024 characters")
+    # Before anything is planned: an unknown class refuses the whole write.
+    try:
+        classes = sensitivity_classes.validated(root, sensitivity)
+    except sensitivity_classes.SensitivityError as error:
+        raise NoteError(error.code, ["sensitivity"], error.reason) from error
     home_set = homes_module.load(root)
     home_warnings = _homes_warnings(home_set)
     topic_writes: tuple[PlannedWrite, ...] = ()
@@ -2226,6 +2236,7 @@ def note(
         bridge_review=bridge_review,
         summary=summary,
         topics=topics,
+        sensitivity=classes,
         verbatim_body=_verbatim_body,
     )
     if _supersedes_target is not None:

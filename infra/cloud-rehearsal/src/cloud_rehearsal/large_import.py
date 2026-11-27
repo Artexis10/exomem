@@ -128,6 +128,29 @@ except FileNotFoundError:
     pass
 print(json.dumps({'rows': rows, 'busy_by_command': busy, 'inode': inode}))
 """
+# The cell's call ledger (`ledger.jsonl`, one row per MCP tool call): its newest sequence number, and for each row the
+# thread CPU of its `command.body` span, the instrument of `REFERENCE_START_CPU_SECONDS`. A row with no such span, or a
+# line that is not whole yet (the ledger is being appended to), gives None or is skipped. The ledger keeps a bounded
+# number of rows, so reading the whole live file is cheap.
+LEDGER_SCRIPT = """import json
+from exomem import call_ledger
+head, rows = 0, []
+try:
+    with open(call_ledger.ledger_path(), encoding='utf-8') as handle:
+        for line in handle:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            body = next((span for span in row.get('spans') or [] if span.get('name') == 'command.body'), {})
+            sequence = int(row.get('sequence') or 0)
+            head = max(head, sequence)
+            rows.append({'sequence': sequence, 'outcome': row.get('outcome'),
+                         'command_body_thread_cpu_us': (body.get('fields') or {}).get('thread_cpu_us')})
+except FileNotFoundError:
+    pass
+print(json.dumps({'head': head, 'rows': rows}))
+"""
 # The queues that hold files still to be indexed. A reading that fails is None, never 0.
 DRAIN_SCRIPT = """import json
 from pathlib import Path
@@ -468,10 +491,12 @@ COUNTER_KEYS = ("cpu_pressure_some_usec", "io_pressure_some_usec", "io_pressure_
 
 
 def counter_growth(rows: Sequence[Mapping[str, Any]], label: str) -> dict[str, int | None]:
-    """How far each cgroup counter grew in the ticks labelled `label`; None where no such tick read it.
+    """How far each cgroup counter grew in the ticks labelled `label`; None where no such tick measured it.
 
-    A tick's share is the growth since the tick before it that read the counter, whatever its label; the first
-    reading counts from 0. A counter that fell is a restarted pod, and its new value counts from 0.
+    A tick's share is the growth since the tick before it that read the counter, whatever its label. The first
+    reading of a counter is its baseline: the pod served earlier steps, so what it counted before the run is no
+    phase's, and a phase whose only reading is the baseline has no growth to report. A counter that fell is a
+    restarted pod, and its new value counts from 0.
     """
     last: dict[str, int] = {}
     grown: dict[str, int] = {}
@@ -480,8 +505,8 @@ def counter_growth(rows: Sequence[Mapping[str, Any]], label: str) -> dict[str, i
             value = row.get(key)
             if value is None:
                 continue
-            if row["label"] == label:
-                before = last.get(key, 0)
+            if row["label"] == label and key in last:
+                before = last[key]
                 grown[key] = grown.get(key, 0) + (value - before if value >= before else value)
             last[key] = value
     return {key: grown.get(key) for key in COUNTER_KEYS}
@@ -837,27 +862,29 @@ async def read_run(agent: Agent, run_id: str) -> dict[str, Any]:
 
 
 def start_call_cpu(before: Mapping[str, Any] | None, after: Mapping[str, Any] | None, wall_seconds: float) -> dict[str, Any]:
-    """The CPU that the cell's threads used during the `start` call, read in the cell before and after it.
+    """The thread CPU of the cell's `start` call, from its row in the cell's call ledger.
 
-    The call is the same work on every host (one scan of the same stage), so its CPU seconds say how fast the
-    cell's own CPU ran it. They calibrate the file seconds, which the runner's zlib calibration does not follow
-    (it said 1.2 times between two runners that ran this call 1.38 times apart). Nothing else runs in the cell
-    during the call, the cell's filer standing aside for an agent that files, so the busiest thread is the call's.
-    A reading that failed leaves the CPU None, never 0.
+    `before` and `after` are readings of the ledger (`LEDGER_SCRIPT`) just before and just after the call. The call
+    is the one row that ran (`ok`) among those the ledger gained between them; a refused attempt that the agent
+    repeated leaves a row too. The CPU is the thread CPU of that row's `command.body` span, the instrument of
+    `REFERENCE_START_CPU_SECONDS`. The call is the same work on every host (one scan of the same stage), so its CPU
+    says how fast the cell's own CPU ran it. It calibrates the file seconds, which the runner's zlib calibration does not
+    follow (it said 1.2 times between two runners that ran this call 1.38 times apart). A reading that failed, no row
+    that ran or several (another caller's call in the window), or a row with no body span leaves the CPU None, never 0.
     """
-    ticks = [{"label": "before", "threads": (before or {}).get("threads")},
-             {"label": "start", "threads": (after or {}).get("threads")}]
-    by_thread = thread_cpu(ticks, "start") if all(tick["threads"] is not None for tick in ticks) else None
-    busiest = next(iter(by_thread.items()), None) if by_thread else None
+    gained = None
+    if before is not None and after is not None:
+        # `ok` is the ledger's own outcome for a call that ran; the other outcomes are refusals and errors.
+        gained = [row for row in after["rows"] if row["sequence"] > before["head"] and row["outcome"] == "ok"]
+    cpu_us = gained[0]["command_body_thread_cpu_us"] if gained is not None and len(gained) == 1 else None
     return {
         "wall_seconds": round(wall_seconds, 1),
-        "busiest_thread": busiest[0] if busiest else None,
-        "busiest_thread_cpu_seconds": busiest[1] if busiest else None,
-        "all_threads_cpu_seconds": round(sum(by_thread.values()), 1) if by_thread else None,
-        "cpu_seconds_by_thread": dict(list(by_thread.items())[:8]) if by_thread else None,
-        "what": "CPU seconds per thread name of the other processes in the cell's container between a reading just "
-                "before the `start` call and one just after it (the eight busiest names); the busiest one calibrates",
-        "source": "/proc/<pid>/task/<tid>/stat in the cell's pod, the same read as cpu_seconds_by_thread",
+        "ledger_rows_gained": None if gained is None else len(gained),
+        "command_body_thread_cpu_seconds": None if cpu_us is None else round(cpu_us / 1e6, 2),
+        "what": "the thread CPU of the `command.body` span of the `start` call's row in the cell's call ledger, "
+                "read from the ledger just before and just after the call; `ledger_rows_gained` is how many calls "
+                "that ran were in between (the CPU is known only when it is 1)",
+        "source": "ledger.jsonl in the cell's pod, the instrument of the reference run's figure",
     }
 
 
@@ -873,20 +900,20 @@ def record_paging(folder: Folder, pages: Mapping[str, dict[str, Any]], plan: Lar
 
 
 async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder,
-                     read_threads: Callable[[], Awaitable[dict[str, Any] | None]] | None = None) -> dict[str, list[str]]:
+                     read_ledger: Callable[[], Awaitable[dict[str, Any] | None]] | None = None) -> dict[str, list[str]]:
     """File the stage with `file` calls, each repeated with the continuation of the reply before, as an agent does.
 
     A cell with no Knowledge Base yet refuses `file`, so the first folder's first scan is a `start` that
-    bootstraps it; `file` then carries on that run. `read_threads` reads the cell's threads, to measure the CPU
+    bootstraps it; `file` then carries on that run. `read_ledger` reads the cell's call ledger, to measure the CPU
     of that `start` call (`start_call_cpu`). Returns the problems found, by criterion.
     """
     stage_path = f"{fixture.STAGE_DIR}/{folder.import_id}"
     collection = CELL_COLLECTION[folder.name]
     problems: dict[str, list[str]] = {"manifest_proof": [], "no_space_failure": [], "filing": [], "compact_reply": []}
     if folder.name == "notes":
-        before = await read_threads() if read_threads else None
+        before = await read_ledger() if read_ledger else None
         _, started_in = await agent.import_op("start", path=stage_path, collection=collection, initialize_kb=True)
-        folder.report["start_call"] = start_call_cpu(before, await read_threads() if read_threads else None, started_in)
+        folder.report["start_call"] = start_call_cpu(before, await read_ledger() if read_ledger else None, started_in)
     pages: dict[str, dict[str, Any]] = {}
     fields: dict[str, Any] = {"path": stage_path, "collection": collection}
     filed_before: int | None = 0
@@ -953,14 +980,14 @@ async def page_stage(ctx: Context, agent: Agent, plan: LargeImportPlan, folder: 
     """
     refused_before, journal_before = len(agent.refusals), await read_refusal_journal(ctx)
 
-    async def read_threads() -> dict[str, Any] | None:
+    async def read_ledger() -> dict[str, Any] | None:
         try:
-            return await asyncio.to_thread(read_cell, ctx)
+            return await asyncio.to_thread(exec_json, ctx, LEDGER_SCRIPT, attempts=1)
         except Exception:  # noqa: BLE001 - a reading that failed leaves the call's CPU unknown
             return None
 
     try:
-        return await file_pages(agent, plan, folder, read_threads)
+        return await file_pages(agent, plan, folder, read_ledger)
     finally:
         folder.report["paging_refusals"] = {
             "journal": journal_refusals(journal_before, await read_refusal_journal(ctx)),
@@ -1038,17 +1065,23 @@ def space_waits(log_text: str) -> dict[str, Any]:
 
     Public readiness shows only that a rebuild waits; the bytes it needed and found free are in the
     `lexical_repair_finished` event, which is where the report reads them. A line that is not JSON is skipped.
+    A stretch with no `lexical_repair_finished` event at all, such as a tail cut after the repairs, says nothing
+    about waits: its count and last are None (unknown), never 0.
     """
     waits: list[Mapping[str, Any]] = []
+    repairs_seen = False
     for line in log_text.splitlines():
         try:
             record = json.loads(line)
         except ValueError:
             continue
         fields = record.get("fields") if isinstance(record, dict) else None
-        if isinstance(fields, dict) and record.get("event") == "lexical_repair_finished" \
-                and fields.get("result") == "waiting_for_space":
-            waits.append(fields)
+        if isinstance(fields, dict) and record.get("event") == "lexical_repair_finished":
+            repairs_seen = True
+            if fields.get("result") == "waiting_for_space":
+                waits.append(fields)
+    if not repairs_seen:
+        return {"count": None, "last": None}
     return {"count": len(waits), "last": ({key: waits[-1].get(key) for key in ("space_needed_bytes", "space_free_bytes")}
                                           if waits else None)}
 
@@ -1084,10 +1117,15 @@ async def keep_cell_app_logs(ctx: Context, label: str) -> dict[str, Any]:
 
 
 async def read_refusal_journal(ctx: Context) -> dict[str, Any] | None:
-    """The cell's mutation journal counts now, or None when the pod could not answer."""
+    """The cell's mutation journal counts now, or None when the pod could not answer.
+
+    No failure of the read escapes: `page_stage` reads it in a `finally`, where a kubectl error would replace
+    the deadline or failure that ended the paging.
+    """
     try:
         return await asyncio.to_thread(exec_json, ctx, REFUSAL_SCRIPT, attempts=2)
-    except StepFailure:
+    except Exception as error:  # noqa: BLE001 - an unread journal leaves the refusal count unknown
+        print(f"[rehearsal] large-import: the refusal journal could not be read: {type(error).__name__}: {str(error)[:300]}", flush=True)
         return None
 
 
@@ -1227,8 +1265,12 @@ async def volume_state(ctx: Context) -> dict[str, Any]:
             "pvc_storage_class": pvc["spec"].get("storageClassName"), "cell_row_storage_gib": cell.get("storage_gib")}
 
 
-# The busiest thread's CPU seconds of the `start` call (`start_call_cpu`) on the notes folder of a full-size run: scale only.
-# Only the ratio of two runs' calls matters, so it fixes the unit of `file_seconds_per_start_calibration`.
+# The thread CPU of the notes folder's `start` call on a full-size run, read as `start_call_cpu` reads it: the
+# `command.body` span's `thread_cpu_us` (19271524) of the call's row in the cell's call ledger.
+# The reference run is GitHub Actions run 45964287999 (workflow "Cloud rehearsal") at commit
+# f18c2fea77ef33de1b4c73d8d85879bbfd7f0bdc; its row is sequence 2 of the ledger saved in its diagnostics as
+# `cell-app-end-ledger.jsonl`. Scale only: only the ratio of two runs' calls matters, so it fixes the unit of
+# `file_seconds_per_start_calibration`.
 REFERENCE_START_CPU_SECONDS = 19.27
 
 
@@ -1248,7 +1290,7 @@ def calibrated_timings(out: Mapping[str, Any], environment: Mapping[str, Any]) -
 
     # The `start` call of a smoke run scans a smaller stage, so only a full run's call matches the reference.
     start = (out["folders"].get("notes") or {}).get("start_call") or {}
-    start_cpu = start.get("busiest_thread_cpu_seconds") if out.get("mode") == "full" else None
+    start_cpu = start.get("command_body_thread_cpu_seconds") if out.get("mode") == "full" else None
 
     def per_start(seconds: float | None) -> float | None:
         return host_speed.per_calibration(seconds, start_cpu, REFERENCE_START_CPU_SECONDS)
@@ -1269,10 +1311,10 @@ def calibrated_timings(out: Mapping[str, Any], environment: Mapping[str, Any]) -
             "basis": "start_call_thread_cpu", "mode": out.get("mode"), "start_call_cpu_seconds": start_cpu,
             "reference_start_call_cpu_seconds": REFERENCE_START_CPU_SECONDS,
             "calibration_ratio": None if start_ratio is None else round(start_ratio, 3),
-            "what": "the CPU seconds that the cell's busiest thread used in the notes folder's `start` call, over the "
+            "what": "the thread CPU seconds of the `command.body` span of the notes folder's `start` call, over the "
                     "reference of a full-size run; None for a smoke run, whose stage is smaller, and when the reading failed. "
                     "The `file_seconds_per_start_calibration` values divide the raw file seconds by this ratio",
-            "source": "folders.notes.start_call, read in the cell's pod before and after the call",
+            "source": "folders.notes.start_call, read from the cell's call ledger before and after the call",
         },
         "page_file_seconds_per_start_calibration": {
             name: [{"page": page.get("page"), "file_seconds": page.get("file_seconds"),

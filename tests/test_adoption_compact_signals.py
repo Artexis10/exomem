@@ -149,3 +149,29 @@ def test_a_compact_finish_reply_of_an_import_that_filed_everything_has_removed_t
     assert not (vault / stage / "plan.md").exists()
     assert reply["finish"]["residual"]["files"] == 0 and reply["finish"]["residual"]["unfiled"]["files"] == 0
     assert "review-residual" not in {action["action"] for action in reply["next_actions"]}
+
+
+def test_a_second_finish_of_a_finished_page_keeps_the_lead_and_the_compact_shape_of_the_call_that_finished_it(vault, build) -> None:
+    """Catches a repeated `finish` that comes back as the whole run document with no lead for the person (no `user_summary`)."""
+    stage = paging._stage(vault, {"a.pdf": paging.PDF + b"a", "plan.md": b"# Field plan\n\nInvented plan for the week.\n"})
+
+    async def scenario(client):
+        run_id = (await _import(client, "start", path=stage))["run_id"]
+        await _import(client, "select", run_id=run_id, include=[stage])
+        plan_id = (await _import(client, "plan", run_id=run_id))["plan_id"]
+        applied = await _import(client, "apply", run_id=run_id, plan_id=plan_id)
+        while applied.get("continuation"):
+            applied = await _import(
+                client, "apply", run_id=run_id, plan_id=plan_id, continuation=applied["continuation"])
+        finished = await _finish(client, run_id)
+        # A new idempotency key: the call is not a replay of the one that finished the page.
+        again = await _call(client, "import_memory", {"operation": {"kind": "finish", "run_id": run_id}}, key="finish-again")
+        return finished, again
+
+    finished, again = _session(build(), scenario)
+
+    assert finished["phase"] == "done" and again["phase"] == "done", (finished, again)
+    # The lead says nothing new was written; the rest of the reply is what the finishing call's reply carried.
+    assert finished["user_summary"].startswith("Saved"), finished
+    assert again["user_summary"] == finished["user_summary"].replace("Saved", "Already saved", 1), again
+    assert sorted(again) == sorted(finished) and again["finish"] == finished["finish"], (sorted(again), sorted(finished))

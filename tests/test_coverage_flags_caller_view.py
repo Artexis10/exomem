@@ -1198,7 +1198,10 @@ def test_a_visible_write_holds_the_restricted_map_back_as_warming(mapped: Simple
         page.read_text(encoding="utf-8") + "\nAn added line.\n",
     )
 
-    assert _map_activation(mapped.vault)["abstention"] == {"reason": "index_warming"}
+    abstention = _map_activation(mapped.vault)["abstention"]
+    assert abstention["reason"] == "index_warming"
+    # The restricted caller waits on the catalogue to fold the write, and the answer says so.
+    assert abstention["diagnostics"]["waiting_on"] == "context_catalogue"
 
 
 def test_a_withheld_write_marks_the_owner_map_stale(mapped: SimpleNamespace) -> None:
@@ -1215,7 +1218,7 @@ def test_deleting_a_visible_page_holds_the_restricted_map_back_as_warming(
 
     _delete_as_the_service_does(mapped.vault, VISIBLE_HUB)
 
-    assert _map_activation(mapped.vault)["abstention"] == {"reason": "index_warming"}
+    assert _map_activation(mapped.vault)["abstention"]["reason"] == "index_warming"
 
 
 def test_deleting_a_page_held_as_withheld_leaves_the_restricted_map_served(
@@ -1263,7 +1266,7 @@ def test_a_released_registry_edit_holds_the_restricted_map_back_as_warming(
 
     _edit_registry(mapped.vault)
 
-    assert _map_activation(mapped.vault)["abstention"] == {"reason": "index_warming"}
+    assert _map_activation(mapped.vault)["abstention"]["reason"] == "index_warming"
 
 
 def test_a_stored_profile_keeps_one_revision_across_preparation_and_its_lanes(
