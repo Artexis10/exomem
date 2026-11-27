@@ -56,7 +56,7 @@ The zip caps stop a small archive from decompressing a thousandfold. Expanding a
 
 - **Derived bytes.** They are bounded by the export's own staged bytes plus 64 MiB.
 - **Entries.** They are bounded by the import member limit from the same setting the import Job reads (`EXOMEM_IMPORT_MAX_MEMBERS`). They are counted over transcripts and attachments, never over skipped or failed items.
-- **Peak disk.** On the cell's volume, the peak is the export, plus its derived files, plus the index growth. Filing renames into the Knowledge Base on the same volume, so it frees nothing. Admission's `space_factor` of 2 (from `publish-cloud-import-limits`) covers export plus derived up to the 64 MiB overhead; index growth comes on top, which the measurement (task 4.3) and the `free_space` stop cover. The large-import rehearsal measures the peak (task 4.3).
+- **Peak disk.** On the cell's volume, the peak is the export, plus its derived files, plus the index growth. Filing renames into the Knowledge Base on the same volume, so it frees nothing. Admission's `space_factor` of 2 (from `publish-cloud-import-limits`) covers export plus derived up to the 64 MiB overhead. Index growth comes on top: the large-import rehearsal measures the peak (task 4.3), and the `free_space` stop covers the rest.
 - **Full disk.** A full disk during expansion stops with the `free_space` need that apply already uses, not an internal error.
 
 ## Decision 4: an append-only record that resumes from its last row
@@ -118,7 +118,7 @@ Peak memory is a small multiple of the 64 MiB content bound plus the chunk size;
 - `en-todo` as `[ ]` or `[x]`;
 - each `en-media` as a reference to the resource with that MD5 hash, by its file name.
 
-A resource whose type the media pipeline cannot index is not written. Its decoded bytes are discarded, it stays in the kept `.enex`, and the transcript names it.
+A resource whose type the media pipeline cannot index is never kept as a staged file. Its decoded bytes are discarded, it stays in the kept `.enex`, and the transcript names it.
 
 **Kind.** Notes file as a new source kind `app-note` ("a note exported from a notes app"), added to the `source-kinds` pack. The key differs from the existing `note` page category.
 
