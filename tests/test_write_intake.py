@@ -1101,12 +1101,15 @@ def test_a_typed_mcp_edit_during_a_hold_is_queued_and_applied_after_it(
             result = await client.call_tool(*public_call("edit_note", edit), raise_on_error=False)
             hold.release.set()
             assert result.structured_content is not None
-            return result.structured_content
+            receipt = result.structured_content
+            assert receipt["state"] == "queued", receipt
+            # Wait inside the session: the server's shutdown stops the vault's drainer, and a replay
+            # that met the hold retries only after its back-off.
+            _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
+            return receipt
 
     with hold:
-        receipt = asyncio.run(send())
-    assert receipt["state"] == "queued", receipt
-    _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
+        asyncio.run(send())
     assert "1%, 10%, 50%, 100%" in (vault / page).read_text(encoding="utf-8")
 
 
