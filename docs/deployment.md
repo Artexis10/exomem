@@ -1518,6 +1518,12 @@ drops those lines before any lead or method line when its cap is tight. An incom
 discovery returns `partial` or `unavailable`; it does not establish that the
 knowledge is absent.
 
+A page becomes a method item in `task_context.methods` in three cases only: its
+owner approved its method units, a routed collection declares it as its capture
+method, or the optional method-fit judgment selects it. This holds in every
+method-fit state. Any other page that retrieval finds, a skill page included, stays
+a lead in `candidates`, and a skill lead says so with `kind` and `name`.
+
 A method projection binds the whole source version, including scope and exclusions
 outside a selected unit. Its `read_required` applicability requires the full source
 read before use. Current user instructions can adapt a method for one task.

@@ -273,7 +273,8 @@ def test_a_fenced_owner_connection_sees_two_states_and_no_finding(
     _edit_directly(vault, rel)
     assert _read(vault, rel)["approval"] == "stale"
     assert "approval" not in _read(vault, rel, limited)
-    assert _approval(_activate(vault, limited, turn=TURN, max_chars=8000), rel) == "unapproved"
+    fenced_packet = _activate(vault, limited, turn=TURN, max_chars=8000)
+    assert rel in _leads(fenced_packet) and rel not in _served_methods(fenced_packet)
     entry_file = next((vault / "Knowledge Base" / "_Approvals" / REF_ID).iterdir())
     entry_file.write_text("not json {")
     assert [finding["ref"] for finding in _read(vault, rel)["diagnostics"]["approval_findings"]] == [REF]

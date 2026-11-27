@@ -15,6 +15,7 @@ import pytest
 import yaml
 from test_activate_context_maps import _activate
 from test_context_catalogue import INSIGHTS, _built, _page
+from test_approved_procedure_serving import _approve
 from test_governance_egress import _external, write_rule, write_scope
 from test_task_context_links import _discover, _discover_packet, _lead, _linked
 
@@ -49,6 +50,14 @@ def _write(vault: Path, rel: str, text: str) -> None:
     path = vault / rel
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def _approved_method(vault: Path, name: str, index: int, body: str) -> str:
+    """A page whose method unit the owner approved, because only an approved page serves a method item."""
+    ref_id = f"6c1d0e2a-7b3f-4a58-9d46-0f1e2d3c4b{index:02d}"
+    rel = _page(vault, name, f"exomem_id: {ref_id}\n", body=body)
+    _approve(vault, rel, f"exomem://memory/{ref_id}")
+    return rel
 
 
 def _registry_overlay(vault: Path, extensions: dict) -> None:
@@ -339,7 +348,7 @@ def test_each_served_lead_keeps_its_first_connection_until_room_runs_out(vault: 
     """Leads are admitted with their first connection; the lead no room holds is cut, and methods are never displaced."""
     targets = [_linked(vault, f"reference-{index}") for index in range(3)]
     for index, target in enumerate(targets):
-        _page(vault, f"alignment-{index}", body=(
+        _approved_method(vault, f"alignment-{index}", index, (
             f"{LEAD_BODY}\n- [technique] Inspect the optical alignment. ^step{index}\n"
             f"- [[{target.removesuffix('.md')}]]\n"
         ))
@@ -392,7 +401,7 @@ def test_an_unreadable_reader_view_keeps_the_leads_and_reports_the_links_lane(va
 def test_a_leads_own_method_is_never_cut_while_its_link_is_served(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Across tight allowances the lead's method outranks the lead's first link."""
     target = _linked(vault, "reference-card")
-    _page(vault, "alignment-visit", body=(
+    _approved_method(vault, "alignment-visit", 0, (
         f"{LEAD_BODY}\n- [technique] Inspect the optical alignment. ^step\n- [[{target.removesuffix('.md')}]]\n"
     ))
     for max_chars in range(700, 1101, 50):
