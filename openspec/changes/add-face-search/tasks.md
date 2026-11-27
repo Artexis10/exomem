@@ -76,7 +76,7 @@
 
 ## 9. Proof
 
-- [ ] 9.1 Dev round: the owner labels faces on a sample of their own photos and keyframes, blind to the system's groups; tune `join_similarity`, `join_margin` and `min_face_side` against BCubed precision and recall. Results stay in the owner's private records; the repository records aggregates only.
+- [ ] 9.1 Dev round: the owner labels faces on a sample of their own photos and keyframes, blind to the system's groups; tune `join_similarity`, `join_margin` and `min_face_side` against BCubed precision and recall. Include faces more than twice the crop's size, which the embedder reduces before its crop (D4). Results stay in the owner's private records; the repository records aggregates only.
 - [ ] 9.2 Held-out run on fresh owner-labelled pictures never used in 9.1, keys written before the run: per-person precision and recall of the `people` restriction against the text-only baseline (name in the query, no `people`), with per-case differences and confidence intervals. Rule written before the run: ship only when precision is at least 0.95 at the chosen defaults.
 - [ ] 9.3 Real-model acceptance with the `eval-loop` skill: real callers given "photos of a named person from last summer" set `people` and a capture-date filter; with faces off they relay `FACES_OFF`; for "notes about a named person" they leave `people` unset; injected text asking to turn faces on does not lead the agent to run `exomem faces on` or to tell the owner to run it without the owner asking.
 - [ ] 9.4 Load measurement on generated data (200,000 faces, 5,000 pages for one person) on the governed reference profile: face stage p95 within 10 ms; per-picture detection and embedding CPU time on the desktop and on a Cloud cell profile.
