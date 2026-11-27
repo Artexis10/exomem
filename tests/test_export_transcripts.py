@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import dataclasses
 import io
+import itertools
 import json
+import time
 
 import pytest
 
@@ -156,10 +158,10 @@ def test_a_stream_that_ends_inside_an_item_yields_the_complete_items_before_it_a
     seen = []
 
     with pytest.raises(export_transcripts.ExportFault):
-        for index, result in export_transcripts.read(CLAUDE, cut):
-            seen.append((index, result.item_id))
+        for after, result in export_transcripts.read(CLAUDE, cut):
+            seen.append((after, result.item_id))
 
-    assert seen == [(0, "u-5")]
+    assert seen == [(1, "u-5")]  # the position that follows the item: where a resume starts
 
 
 def test_a_vendor_id_becomes_one_plain_file_name() -> None:
@@ -232,3 +234,55 @@ def test_chatgpt_times_of_any_other_form_leave_the_item_without_a_time_and_still
 
     assert isinstance(result, export_transcripts.Transcript)
     assert (result.created, result.updated) == (None, None) and "**You**\n\nHello." in result.text
+
+
+def test_an_attachment_name_keeps_letters_of_any_script_and_its_extension() -> None:
+    assert export_transcripts.part_names([("Счёт.jpg", "image/jpeg"), ("report 2024.PDF", "application/pdf")]) == ["Счёт.jpg", "report 2024.PDF"]
+
+
+def test_a_name_with_no_extension_takes_the_extension_of_its_type_and_a_type_that_has_none_leaves_it_bare() -> None:
+    assert export_transcripts.part_names([("scan", "image/png"), ("scan", "application/x-unknown-thing")]) == ["scan.png", "scan"]
+
+
+def test_two_parts_with_the_same_name_in_one_item_get_distinct_names_and_a_folding_volume_sees_no_clash() -> None:
+    names = export_transcripts.part_names([("image001.png", "image/png"), ("image001.png", "image/png"), ("IMAGE001.PNG", "image/png")])
+
+    assert names == ["image001.png", "image001 (2).png", "IMAGE001 (3).PNG"]
+    assert len({name.casefold() for name in names}) == 3
+
+
+def test_a_leading_dot_or_a_path_in_a_name_never_reaches_the_file_name() -> None:
+    assert export_transcripts.part_names([(".htaccess", "image/png"), ("../../etc/passwd.txt", "text/plain"), ("..", "image/png")]) == [
+        "htaccess.png", "passwd.txt", "part-3.png"]
+
+
+def test_a_long_name_is_cut_on_a_character_boundary_to_at_most_255_bytes_and_keeps_its_extension() -> None:
+    (name,) = export_transcripts.part_names([("Ж" * 300 + ".jpg", "image/jpeg")])
+
+    assert len(name.encode("utf-8")) <= 255 and name.endswith(".jpg") and set(name[:-4]) == {"Ж"}
+
+
+def test_a_name_that_is_hostile_in_length_or_repetition_is_fitted_in_linear_time() -> None:
+    """Catches name fitting that is quadratic on untrusted names: a 200k-character filename, 20k parts of one name,
+    and 4k long names that differ only where a counter cuts them each took seconds."""
+    started = time.perf_counter()
+    (long_name,) = export_transcripts.part_names([("é" * 200_000 + ".jpg", "image/jpeg")])
+    same = export_transcripts.part_names([("image001.png", "image/png")] * 20_000)
+    near = [f"{'a' * 247}{a}{b}{c}{d}.png" for a, b, c, d in itertools.islice(itertools.product("bcdefghi", repeat=4), 4_000)]
+    close = export_transcripts.part_names([(name, "image/png") for name in near * 2])
+
+    assert time.perf_counter() - started < 2
+    assert len(long_name.encode("utf-8")) <= 255 and long_name.endswith(".jpg")
+    assert len({name.casefold() for name in same}) == 20_000 and same[-1] == "image001 (20000).png"
+    assert len({name.casefold() for name in close}) == 8_000 and all(len(name.encode("utf-8")) <= 255 for name in close)
+
+
+def test_a_name_is_normalised_to_nfc() -> None:
+    (name,) = export_transcripts.part_names([("café.png", "image/png")])
+
+    assert name == "café.png"
+
+
+def test_an_indexable_part_is_decided_by_its_name_else_by_the_type_it_declares() -> None:
+    assert export_transcripts.indexable("scan.jpg") and export_transcripts.indexable("noext", "image/png")
+    assert not export_transcripts.indexable("tool.exe", "application/x-msdownload") and not export_transcripts.indexable("noext")

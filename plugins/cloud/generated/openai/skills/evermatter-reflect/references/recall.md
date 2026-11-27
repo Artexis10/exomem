@@ -1,363 +1,167 @@
 # Recall, semantic units, and retrieval diagnostics
 
+The short recall loop in `SKILL.md` covers ordinary recall. Read this for filtered, unit or media
+recall, for a packet that leaves the turn open, and for retrieval diagnostics.
+
 ## Search
 
-`search_memory` is the normal product command for recall. Underneath, `find` runs in
-**hybrid mode** by default: BM25 + local vector embeddings
-(a multilingual model on a personal server, `BAAI/bge-m3`, 1024-dim) fused via
-reciprocal rank fusion.
-Natural-language queries reach pages that don't contain the literal terms.
+`search_memory` runs hybrid search by default: lexical and vector lanes, plus graph neighbours,
+fused into one ranking. A natural-language query reaches pages that do not contain its words.
 
-Modes:
+- **Exact lookups.** For a name, a code identifier or an exact phrase, use
+  `search_memory(query="<term>", options={"mode": "keyword"})`. It returns no hit rather than a fuzzy one.
+  The `vector` mode is a diagnostic aid.
+- **Scope.** Search covers the Knowledge Base. `options={"scope": "vault"}` covers the whole vault,
+  and `options={"widen_outside_kb": true}` keeps some places for pages outside it. Neither overrides
+  governance.
+- **Records and Planning rows are not in search.** Search finds a collection, not its items. For an
+  event, a state or a planned item, use `query_records` or `query_plan_items`
+  ([Planning and Records](planning-records.md)). A search miss says nothing about a collection's rows.
+- **A miss is not absence.** It means "not found in what I searched". Try adjacent terms, the vault
+  scope, or `read_page` on a page you suspect. A refusal because the index is warming is not a miss.
+- **Filter-only lookups.** An empty query with `filters` lists the matching pages by recency.
 
-- `mode="hybrid"` (default) — BM25 + vector + graph + keyword fused via RRF. A
-  strict superset of keyword: hybrid never returns fewer results than keyword for
-  the same query. Falls back to BM25-only if the embedding sidecar is missing.
-- `mode="keyword"` — strict case-insensitive substring matching, sorted by
-  `updated:`. Use for precision-only lookups (exact phrase, entity name, code
-  identifier) where you'd rather get zero results than fuzzy ones.
-- `mode="vector"` — vector-only. Diagnostic aid.
+Use a rare knob only when its need is clear:
 
-Empty queries degrade to filtered-most-recent regardless of mode.
+| Need | Call |
+|---|---|
+| A superseded version, such as "what did I used to think" | `search_memory(query="<subject>", options={"prefer_active": false})` |
+| Raw Sources ahead of compiled notes | `options={"prefer_compiled": false}` |
+| One kind of file, or all but one | top-level `file_types`; `options={"exclude_file_types": ["<kind>"]}` |
+| Recordings where one person speaks | `options={"speakers": ["<name>"]}` |
+| Single claims instead of pages | `options={"result_level": "unit"}`, or `"mixed"`; `categories` and `kinds` narrow it |
+| Pages joined by one typed relation | `options={"relations": ["<relation>"]}` |
+| A packed evidence bundle to reason over | `search_memory(query="<question>", deep=true)`; add `options={"graph_enrich": true}` for typed neighbourhoods |
+| Precision at the cost of latency | `options={"rerank": true}`; `rerank_max_candidates` bounds the reranker's input, not its time |
+| Why a hit ranked where it did | `options={"explain": true}` |
+| Where the time went | `options={"include_timings": true}` |
 
-**Scope — the vault is bigger than the KB:**
-- `scope="kb"` (default) searches only `Knowledge Base/`.
-  For a non-empty query, `widen_outside_kb=true` reserves up to `limit - 1`
-  result slots for eligible sibling pages, even when KB matches fill `limit`.
-  Widened hits carry `outside_kb: true`.
-- `scope="vault"` searches eligible candidates across the whole vault.
-  `scope="kb-only"` stays inside the KB and ignores widening.
-  Scope does not override recall admission or governance.
-- **Records and Planning use structured recall.** Ordinary recall admits their
-  valid collection manifests, but excludes raw items, logs and derived summaries.
-  Neither `scope="vault"` nor `prefer_compiled=false` changes that boundary.
-  For an observed event, state or planned item, follow the collection
-  inspect/query route in [Planning and Records](planning-records.md#simple-front-door).
-  A missing ordinary hit does not establish that the collection lacks an item.
-- **Never report a search-miss as absence.** An empty result means *"not found in
-  what I searched,"* not *"it doesn't exist."* If you're sure something exists,
-  try `scope="vault"`, vary the query terms, or `read_page` a path you suspect.
-- **`RETRIEVAL_INDEX_WARMING` is a refusal, not a miss.** A maintained index is
-  not ready: retry the same call after `retry_after_ms`. With `relations=` or
-  `relation_of=`, the typed graph may be rebuilding: retry, or drop the filter.
+The `filters` field takes typed `page.*`, frontmatter and `unit.*` predicates.
+`read_instructions(topic="search_memory")` lists the fields.
 
-### Referents
+Read diagnostics with care:
 
-When recall returns a `referents` block, name only its `resolved` entities.
-For `partial`, say how many people remain unresolved; for `ambiguous`, ask the
-user to disambiguate; for `unresolved`, never guess. When the user supplies a
-missing identity, run `inspect_memory(operation="connections.resolve_entity")` first, then
-create the durable entity or use `edit_note` to add a reviewed alias.
+- Leave `rerank` unset in normal use. The service chooses by compute mode.
+- An `explain` value is not a confidence. A lane that did not take part has no score, not a zero.
+- Read timings with the compute mode, embedding backend, cache state and rerank flag the reply names.
+  One slow CPU rerank does not make the service slow. `read_instructions(profile="diagnostics")`
+  describes the compute setup.
+- A `budget` block means the deadline left no time for the stages it names. The result is complete
+  for every stage that ran. Ask again with fewer options when you need the rest.
+- A `latency` block on a `read_instructions` reply means this client's recent recalls were slow.
+  It names the stage responsible.
+- A relation filter can be refused while the typed graph rebuilds. Retry, or drop the filter.
+  A graph rebuild never stops ordinary recall.
 
-Additional knobs exposed through `search_memory`/`find`: `graph=true` (default; expands
-1-hop neighbours of strong matches through the typed graph sidecar when it is
-available — typed and provenance relations rank ahead of plain wikilinks, and a
-hit surfaced this way carries a `graph` annotation naming the relation type,
-direction, and the seed page it came from; without a sidecar the lane falls back
-to plain wikilink expansion, unannotated. The graph lane only adds neighbours and
-reorders, so a graph rebuild is not a recall outage),
-`rerank=true` (CrossEncoder re-sort, explicit precision spend),
-`prefer_compiled=true` (default; favours compiled types over raw `source`),
-`prefer_active=true` (default; soft-demotes superseded pages), `file_types` /
-`exclude_file_types` (scope to or drop artifact kinds: `note`, `pdf`, `image`,
-`audio`, `video`, `docx`, `xlsx`, `pptx`, `html`, `text`, `email`, `calendar`,
-`csv`, `json`, `tsv`), and `speakers` (restrict to diarized media whose
-`speakers:` frontmatter names a given person). Leaving `rerank` unset is
-mode-aware auto: CPU steady-state modes keep it off; accelerated/performance
-mode may auto-rerank when lanes strongly disagree or the query is long.
+### Media hits
 
-When reranking is enabled or selected automatically,
-`rerank_max_candidates` optionally bounds only the fused prefix sent to the
-reranker. It must be an integer from the effective normalized result `limit` up
-to 300. The retrieval profile reports `candidate_limit_requested`,
-`candidate_limit_effective`, `scorer_input_count`, and `unscored_tail_count`.
-The tail keeps fused order. A candidate count bounds scorer work, not wall-clock
-time; model warm-up, hardware, and text length still affect latency.
+A hit on a recording, image or document names the original file. Treat the file as the result and
+the matched transcript or text as the reason. A purely visual hit matched the picture, not text. A
+video hit names the time of the matching frame. To see it, call
+`inspect_memory(operation="media.video", arguments={"path": "<video>", "start_sec": 0, "end_sec": 30})`
+around that time, after one overview call. To see an image, use `media.image`. To give the person
+the original, see [tools](tools.md#recover-a-stored-original).
 
-A `budget` block on the response means the request deadline left no room for the
-stages it names under `skipped` and `truncated`: the result is complete for every
-stage that ran and is not an error, so re-ask with a narrower option set when you
-need what was left out.
+## Read what the packet leaves open
 
-A `latency` block on a `read_instructions` reply means this client's own recent recalls have been slower than the service's ceiling; its `dominant_spans` name the stage responsible, and it is absent when nothing is slow.
+Use relevant held context first. Activation selects bounded working context; its `roles`, `missing`
+and `budget` say what it left out. An omitted role does not show that the vault lacks the answer.
 
-Performance presets:
-- Normal lookup: `search_memory(detail="compact", rerank=false)`.
-- Reasoning context: `search_memory(deep=true)` when you need a compressed evidence bundle;
-  add `graph_enrich=true` only when you need typed graph neighborhoods alongside
-  the normal pack contract.
-- Diagnostics: `search_memory(include_timings=true)`; add `rerank=true` only when you are
-  intentionally measuring reranking or spending latency for precision. Interpret
-  timing output with the returned compute mode, embedding backend, cache state,
-  rerank flag, and search profile.
+- Use a focused `search_memory` for each remaining question, and `read_page` when a source's
+  qualifications or whole contents matter.
+- A unit read is not the whole page. To read a directory page, call `read_page(page="<page>")`
+  without `part="units"`.
+- Before you recommend an older action, check for newer outcomes of that action.
+- Keep the date of an event apart from the date its page was edited.
+- An unresolved conflict stays unresolved. Retrieval rank does not decide which claim is true.
+- When the user gives an identity that recall could not resolve, follow
+  [entity resolution](writing.md#entity-resolution).
 
-### Investigate what the packet leaves open
+## Semantic units
 
-Use relevant held context first. Activation selects bounded working context;
-`roles`, `missing` and `budget` describe its limits. An omitted role or skipped
-task lookup does not show that the vault lacks the answer. Restricted readers
-retain categorical baseline selection without supplemental task matching.
+Unit recall returns an exact unit id. `read_page(page="<page>", part="units")` lists the ids of one
+page; pass an id as `unit_ref` to `connections.context` for the graph around one claim. A compact
+observation's category does not imply a typed edge: traversal follows authored relations only.
+A category filter matches a rich unit by its heading when the unit names no category; with no alias
+for that heading, the unit's kind stands in. Category, kind, tags, context and relations are
+separate axes. Graph context comes back bounded. Check its truncation before you call it complete, and keep its
+`depth` small unless the user asks for more.
 
-Use focused `search_memory` for a remaining question. Use `deep=true` when a bounded
-evidence pack helps compare sources. Read a selected source when its qualifications
-or complete contents matter. A directory requires `read_page(page=<parent page>)`
-without `part="units"`. A unit read is not the whole page or directory. Read a
-listed connection when its reason bears on the answer.
+## Topic brief
 
-Before recommending an older action, reconcile newer supported outcomes about that
-action. Keep event time separate from the page's edit time. Treat an unresolved
-conflict as unresolved; retrieval rank does not decide which claim is true.
-Do not repeat an unchanged search or treat delivered text as proof of answer use.
+Use `read_page(page="<page or subject>", part="brief")` when the user wants the whole compiled body of
+one subject: what its notes conclude, which Sources they cite, and what stays open. A page fixes the
+subject. Free text picks the best compiled note and lists the other candidates; read one of them to
+switch subject.
 
-**Semantic units are first-class.** A compact observation uses
-`- [category] content #tags (context) ^anchor`; its governed kind is always
-`observation`, while category remains open vocabulary. Rich `## Kind` blocks use
-a governed non-observation kind and may carry typed relation metadata. Use
-`add_observation` (with `preview=true` for validation), and `edit_note` with `action="edit_observation"` or
-`"remove_observation"` and the unit id from `read_page(part="units")`, for one unit
-instead of brittle whole-page string surgery. The server checks the page and unit versions. Compact units cannot carry typed unit
-relations: select rich form or author one reviewed note-level relation under
-`## Relations`.
+The brief takes the compiled notes one link from the subject, and a few one link further. A cut is
+counted in `missing`, never silent. A superseded or closed claim is left out and counted. The server
+writes no summary: write the prose yourself from the brief. `changed_since` compares it with the
+last brief you read to its end.
 
-For a rich unit without explicit `- category:`, the heading supplies
-`category_raw` and the normalized `category_key` before reviewed category-alias
-resolution; without an applicable alias, the resolved category falls back to
-the governed kind. Rich comma-separated `tags` (without `#`) and single-line
-`context` are first-class retrieval fields. Category, kind, tags, context, and
-authored relations remain separate axes.
+## Context activation packets
 
-Recall semantic language through `result_level="page"|"unit"|"mixed"`.
-`categories` and `kinds` are convenience filters; use bounded `filters` for
-typed `page.*`, RFC-6901 frontmatter, and `unit.*` predicates. An empty query
-with filters is a filter-only lookup ordered by filtered recency, not a text
-match. Use `explain=true` only when ranking interpretation matters. Its bounded
-profile distinguishes raw BM25 values, cosine similarity, RRF contributions,
-reranker values, and final rank; none is confidence, and unavailable or
-nonparticipating lanes must never be invented as zero-valued hit evidence.
+Activation with `recall_context` is read-only and abstains rather than guessing. For a known gap
+after activation, use `search_memory` and then `read_page` on selected refs.
 
-Unit recall returns an exact unit id; `read_page(part="units")` lists the ids of a page. For authored graph
-context, pass that reference or category/kind filters to
-`inspect_memory(operation="connections.graph_context")`. Compact categories do not imply
-typed edges: traversal follows authored relations only.
+- **Epistemic status.** A page read or anchor may carry `epistemic_status`. Treat it as evidence for
+  review; it never authorizes a write. When the evidence is incomplete, its counts may be partial.
+- **Maps.** Read `exomem://map` for the paginated index and follow its domain maps for material
+  beyond the packet. A map lists what exists; it does not claim that its items fit the turn. A hook
+  shows the index once per generation and a pointer on later turns.
+- **Recorded positions.** A `positions` block holds the person's own recorded positions on the pages
+  in reach. When the turn bears on one, follow the block's `about` passage. An empty or unavailable
+  block does not mean that the person holds no position.
+- **Recent context.** `recent_context` leads every packet, abstained ones too. It is chosen by
+  recency, not by the turn. Its date marks the last contact, not the event. A recap entry carries its
+  `episode` key; open it with `read_page`. Pass `session` or `workspace` so that this conversation's
+  pages come first; without them, another conversation's work is never the referent.
+- **Abstention.** Call again with `anchor` set to the ref you mean. For an ambiguous packet the
+  choice is yours, and a guess is not a choice.
+- **Related pages.** Pages listed under `related` are listed, never loaded. Read one when it bears on
+  the turn.
+- **Carried anchors.** A turn that names nothing, such as "continue", resumes the thread of the
+  `continuity` token, else the latest work. A short follow-up carries one partial anchor. When the
+  turn's words reach several pages, nothing is carried: pass one of them as `anchor`.
+- **Continuity.** Echo the token unchanged. It lapses after six idle hours; a stale token is
+  answered as a new conversation, never refused. Neither continuity field alone proves that the
+  subject resolved.
+- **Episode reminder.** An `episode_due` block asks for a recap at the next stopping point. It is
+  advice, not permission ([engagement](engagement.md)).
+- **Learning.** A `learning` advisory is handled in
+  [engagement](engagement.md#activation-conventions-and-learning-from-corrections).
 
-## Topic brief (`read_page(part="brief")`)
+## Refresh within a turn
 
-Use when the user wants the whole compiled body of one subject: what its notes conclude,
-which Sources they cite and what stays open. Pass a page of the subject, or free text, as
-`page`. A page fixes the subject. Free text resolves to the best compiled-note hit and lists
-other hits as `related`; read one of them to switch subject.
+Refresh with `trigger="task_refresh"` only when new evidence or a task change makes held context
+incomplete. Keep the human `turn` verbatim and put the task in `conversation.focus`
+([engagement](engagement.md#passing-the-conversation-to-activation) gives the bounds). The packet
+follows that focus, and `intent_resolution` qualifies the human request separately. A focus is your
+cue: an ambiguous human referent stays ambiguous until you have evidence for a visible choice.
 
-The brief takes every compiled note one link from the subject page, in either direction, and
-at most five compiled notes one link further, those nearest the subject page first.
-`ranked_by` is `recency` when the service cannot measure nearness to the subject page, for
-example when the page has no stored vectors; the newest notes are then kept. With
-`similarity`, notes the service cannot score yet follow the scored ones, newest first. It serves three sections:
-`conclusions`, `sources` and `open_questions`. Each
-item carries its `ref`, `path` and `updated`. A cut shows in `missing` with a count and the
-reason `cap`; it is never silent. A superseded or closed unit is left out and counted on its
-note under `omitted`.
-
-`changed_since` compares the brief with the last one you read to its end: `first_read`,
-`new`, `changed`, `removed` and `new_units`. A brief that spans several pages moves that
-mark only when its last page is served. Write the prose from the brief yourself; the server
-makes no summary. A brief takes no `part="units"`, `options`, or unit reference.
-
-## Context activation packets (`recall_context`)
-
-Use for initial context when the live engagement policy from `read_instructions` warrants
-recall. Pass the current user's words verbatim, not a search query; skip if a hook
-already injected this turn's working set. For a known information gap, use
-`search_memory`, then `read_page` on selected refs. Activation is read-only and
-abstains rather than guessing.
-
-When sensing is enabled, a page read or activation anchor may carry
-`epistemic_status`. Activation carries compact counts and `evidence_complete`.
-Use `read_page` for released refinement and contradiction items with reading
-provenance. Treat status as evidence for review; it never authorizes a write.
-When completeness is false, counts may be partial.
-
-A packet may instead carry a map: an index of what exists, with titles, refs,
-descriptions and current state when available. Read the map and pull by ref
-with `read_page`, or query `search_memory`, before answering; cite the refs you use.
-Read `exomem://map` for the paginated index and follow its domain-map refs for
-material beyond the packet. A map is not a claim that its items fit the turn.
-Read an anchor's profile through its `profile` ref.
-The retrieve hook shows the index once per generation. Later turns with the
-same generation show a pointer to the map; a changed generation shows it again.
-
-### Recorded positions
-
-A maps packet may also carry `positions` as its first field. The block holds the
-person's own recorded positions, found on the pages its task context serves and
-on the pages those leads link to. Its `about` passage comes first. Each item
-gives the position's text, its date when it has one, its page title and its unit
-ref. When the turn bears on a recorded position, follow the block's `about`.
-Read an `overflow_refs` entry with `read_page` when the turn needs it. `omitted`
-counts the positions the block cannot name. The block is chosen for each turn,
-so an empty block means that no position was in reach and an `unavailable` block
-means that none could be served this turn. Neither says that the person holds
-none.
-
-An unresolved packet can mean an unidentified subject or missing facts about a
-known subject. Use the turn and relevant held context to distinguish them. For an
-unidentified subject, ask for clarification instead of surveying unrelated records.
-A retrieved candidate alone does not establish what the user meant. For a known
-subject, continue targeted recall; abstention does not prove that its facts are absent.
-
-Preserve each source's subject and scope when answering. If a record might concern
-an entity but does not establish that link, state the uncertainty. A past event
-alone does not establish a current condition, approval, or required procedure. Attribute
-such requirements only when the source supports them.
-
-An agent can refresh context within the same human turn when new evidence or
-a task change makes held context incomplete. Use the exposed
-`trigger="task_refresh"`, set `initiator="agent"`, keep the original human
-`turn`, and supply bounded `conversation.focus`. The task packet follows that
-focus; `intent_resolution` separately qualifies the human request. An
-ambiguous human referent remains ambiguous until the agent has evidence for
-a visible choice. The label describes the caller and grants no authority.
-
-Before consequential output or after continuation restoration, inspect the
-relevant held episode open items and Planning refs against newer closure
-evidence. Refresh only for a remaining gap. Memory responses and rephrased
-summaries alone do not justify another checkpoint. Reuse the `read_instructions` policy;
-request missing or changed sections instead of repeating full instructions.
-Follow the client's reported operation and context bounds. Tool-only clients
-have best-effort initiation; this guidance does not prove native enforcement.
-If refresh is unavailable, keep ordinary source inspection usable under its
-existing bounds and the action's own evidence requirements.
+Before consequential output, or after a continuation is restored, check held episode open items and
+Planning refs against newer closure evidence. Refresh only for a gap that remains. Memory replies
+and rephrased summaries never justify another refresh. Tool-only clients start refresh on a best
+effort; if refresh is unavailable, keep ordinary reads within their bounds.
 
 ### Native checkpoint controller
 
-Accounting requires an explicit profile-local memory MCP binding selected during
-hook installation. Legacy profiles retain their activation and reminder behavior.
-The hook reports its local controller arguments, opaque `scope_id`, limits, and
-coverage. Local command metadata does not verify a remote server's version.
+A hook installed with an explicit memory binding reports a checkpoint controller: its arguments, an
+opaque `scope_id`, the limits and the coverage.
 
-1. Submit the declaration through `controller.argv` plus `controller.declare_args` on standard input; expect a checkpoint association.
-2. Use associated memory reads for the gap; expect each covered native leaf to reserve its allowance before dispatch.
-3. Send `scope_id` and `checkpoint_id` through `controller.argv` plus `controller.end_args`; expect association to clear without renewing totals.
+1. Send the declaration on standard input through `controller.argv` and `controller.declare_args`.
+   Expect a checkpoint association.
+2. Make the memory reads the gap needs. Expect each covered read to reserve its allowance first.
+3. End with `scope_id` and `checkpoint_id` through `controller.argv` and `controller.end_args`.
+   Expect the association to clear; totals do not renew.
 
-The declaration is JSON with `schema_version: 1`, `kind: "checkpoint"`, the
-reported `scope_id`, an unsigned `task_revision`, `basis`, `boundary_ids`, and
-`source_versions`. Add no prompt, focus, summary, result, or conversation hash.
-Each of at most twelve source entries has `ref`, `version`, and `version_basis`.
-The basis is `content_hash`, `evidence_version`, `external_version`, or
-`unavailable`; unavailable versions use `null` and report partial deduplication.
-The end payload contains only `scope_id` and `checkpoint_id`.
+The declaration is JSON with `schema_version: 1`, `kind: "checkpoint"`, the `scope_id`, a
+`task_revision`, a `basis`, `boundary_ids` and at most twelve `source_versions`. Add no prompt,
+focus, summary or result. The basis is `external_evidence`, `source_correction`, `task_transition`
+or `continuation_restore`. Name only boundaries that the hook observed in this scope. A memory reply
+never creates an external boundary.
 
-The checkpoint basis is `external_evidence`, `source_correction`,
-`task_transition`, or `continuation_restore`. External and restoration boundaries
-must be IDs that the hook observed in this scope. A source correction names a
-caller-visible version. An increased task revision declares a transition; the
-controller cannot prove its meaning. Memory replies, including mixed-tool and
-unknown memory responses, cannot create external boundaries.
-
-The default cumulative scope allowance is eight associated static reads and
-three compiler-default activation character allowances. Installation can change
-the limits. Failed or missing receipts retain reservations. Repeating a
-declaration, ending an association, and declaring new evidence never renew totals.
-Compaction clears association and retains existing scope totals. A new native
-correlation creates another scope without proving human origin.
-
-An exhausted association denies only covered static reads and explains how to
-end it. Mixed operations, writes, imports, and ordinary inspection outside the
-association remain available. Missing metadata, unsafe state, and uncovered
-dispatch report unavailable accounting. They create no general action gate.
-Codex stock code-mode leaves use their native hook path; an outer wrapper does
-not count its children. External wrappers remain uncovered. Before-final checks
-remain agent guidance; these hooks do not create a Stop continuation gate.
-
-An optional `relevant_due_refs` candidate names due work on released current material.
-Judge relevance and raise at most one due item per maintained client conversation, remembering prior mentions through compaction and credential renewal.
-Use `inspect_memory(operation="review.item_context", arguments={'ref': ...})` before one applicable writer or one triage dismissal; see [engagement](engagement.md#relevant-due-advice).
-
-Only if needed to resolve the turn, pass relevant `conversation`: up to six
-recent excerpts and 2,400 characters total, `focus` up to 240 characters and
-`refs` up to twelve. Never send full history or unrelated personal data.
-Reuse held material before calling again. If the conversation establishes a
-follow-up's subject and another activation is needed, select its visible `anchor`.
-Otherwise, provide grounded subject cues through `conversation.focus` when exposed.
-Focus is an agent cue, not the user's words; it cannot settle ambiguity in the human turn.
-A continuity token alone does not select a subject. Keep `turn` verbatim.
-See the engagement reference for entry bounds and attachment cues.
-
-**`recent_context`** leads every packet, abstained ones included. Up to eight
-pages recently worked on (edited, read, captured as a session, recorded as a
-conversation recap, or left open in Planning), each with title, why it is recent
-(`why`), the contact date (`as_of` dates the contact, not the event described)
-and the page's own `status` or `summary` line when present. It is chosen by
-recency, not by the turn, so it never queries a Records collection the turn did
-not name; `current_state[]` carries governed state for resolved anchors. A recap
-entry (`why: "episode"`) is the newest revision of one conversation's
-`save_episode` and `inspect_memory` record and carries its `episode` key; follow it with
-`read_page`. With `session` or `workspace`, that conversation's pages come first.
-
-**Abstention.** `abstained: true` with a reason: `unresolved` (nothing resolved),
-`ambiguous` (two competing senses, listed under `ambiguity`, no role lane runs),
-`index_warming`, `disabled`. Resolve by calling again with `anchor` set to the ref
-you mean. `roles`, `units`, `pointers` and `current_state` are empty on an
-abstained packet; `anchors` (partial, `retrieval_named`, competing candidates),
-`related`, `ambiguity` and `missing` may still be filled.
-
-**`related`.** An `unresolved` turn that named no page may list up to three pages
-under `related[]` (`path`, `title`, `projects`, `evidence: ["retrieval",
-"vector_band"]`): current pages the turn's words reach and whose stored text is
-also semantically close to it. They are listed, never loaded: nothing is served
-for them, so `read_page` one if it bears on the turn. The list is for the owner
-only. `generation.related_evidence` says whether it ran: `ready`, or why not
-(`cold` or `space_mismatch` for the stored text, else the state that
-`generation.semantic_evidence` reports for a turn that was not encoded, such as
-`uncalibrated` or `audience_restricted`); a cut list adds `{"role": "related",
-"reason": "lane_truncated"}` to `missing`.
-
-**How an anchor was reached** (`generation.carried_by`, anchor `status`):
-- `agent_choice`, `status: "resolved"`: you named it with `anchor`.
-- `recency`: a turn naming nothing ("continue", "where were we") resumes the
-  thread your `continuity` token names, else the last work (picked with `anchor`
-  or named by a recorded episode), in this conversation first, then its
-  workspace, then the vault. Reads rank below writes; a maintenance batch counts
-  as nobody's work. A single ordinary page is `kind: "page"`, `status: "resolved"`,
-  evidence `["recency"]`; a tie abstains `ambiguous`. Without `session`,
-  `workspace` or `continuity`, other conversations' work orders `recent_context`
-  but is never the referent.
-- `follow_up`: a short follow-up naming nothing new ("and the results?") with one
-  page clearly ahead in this conversation's thread is carried as one `partial`
-  anchor; if two are close, both go under `ambiguity`.
-- `retrieval`: the turn's distinctive words reach one compiled page; the
-  continuity token names it. Named by its title it is `resolved`
-  (`lexical_overlap`, `retrieval`), else `retrieval_carried` (recall alone).
-  Entities its served units name and link are `partial`
-  (`carried_link`, `via` that page). Nothing distinctive abstains `unresolved`.
-- `retrieval_named`: several pages reached this way; nothing is carried, the
-  packet abstains `unresolved` and lists them under `anchors[]`. Pass one as
-  `anchor`.
-
-**`continuity`.** Every packet returns one token (abstentions too) identifying
-the conversation; only a salted hash is stored and it lapses after six idle
-hours. `generation.continuity` reports whether prior refs qualified this
-activation: `applied`, `stale` or `absent`. `stale` can mean that the refs did not
-contribute, even while `generation.continuity_thread` is `applied`.
-`generation.continuity_thread` separately reports whether the token identifies
-the conversation: `applied`, `stale` (answered as a new conversation, never
-refused) or `absent`. Neither field alone proves that the subject resolved.
-`generation.hot_profile` reports the recent-work projection `state` (`current`,
-`partial`, `seeded`, `behind`, `empty`) and `session_start`. Only salted hashes of
-`session`/`workspace` are stored, locally.
-
-**`episode_due`** (MCP door): after several activations with no `save_episode` and `inspect_memory`
-record from this caller, asks for one at the next decision or stopping point.
-Advice, at most once per half hour, absent when proactive capture is off.
-
-**`upkeep`** (at session start): at most one item the background pass proposed,
-such as two notes that could be connected. It carries its own `route`, a
-`context_route` to read first and a `dispose` route (`decide_review_item` dismiss or
-snooze). Consideration does not authorize mutation: act through the route under
-its own rules, or dispose of it.
-
-**`learning`** may ride on an `anchor` call whose turn never named the chosen
-page: an advisory naming the writer that would teach the vault the user's words
-(`edit_note` adding to `learned_aliases`, or `manage_memory(operation="schema.save_conventions")`
-adding a referential cue) with the hash it names, plus `turn_terms`.
-It writes nothing; act only if those words should reach that page, else dismiss
-its `review` ref with `decide_review_item`.
+An exhausted association refuses only covered reads and says how to end it. Writes, imports and
+reads outside the association stay available. Missing metadata reports accounting as unavailable;
+it creates no gate. The controller cannot prove what a task revision means or that a turn came
+from a person.

@@ -405,8 +405,8 @@ def test_openai_package_pins_every_install_line_to_the_release(tmp_path: Path) -
 
     importing = (package / "skills/evermatter/references/importing.md").read_text()
     assert f"uvx evermatter@{release}" in importing
-    routing = (package / "skills/evermatter/references/operation-routing.md").read_text()
-    assert f"pip install evermatter=={release}" in routing
+    tools = (package / "skills/evermatter/references/tools.md").read_text()
+    assert f"pip install evermatter=={release}" in tools
 
     offenders = [
         path.relative_to(package).as_posix()

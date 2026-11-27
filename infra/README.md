@@ -74,23 +74,16 @@ The versioned non-printing secret workflow is documented in
 `docs/runbooks/cloud-secrets.md`. Its destination matrix keeps the hosted
 scheduler in its exact two peers and global `CRON_SECRET` out of K3s.
 
-## Cloudflare API tokens and their expiry
+## Cloudflare API tokens
 
-Two Cloudflare tokens reach the product zones (`substratesystems.io` and
-`evermatter.ai`):
+The operator keeps each Cloudflare token's scope and expiry, with its renewal
+date, outside this repository. Two rules hold for these tokens:
 
-- The account API token that the foundation root uses. It holds DNS edit on
-  both zones, plus the Tunnel and Access permissions. It expires on 2027-07-30.
-  Renew or replace it before 2027-07-01, then update its secret-manager entry.
-  The foundation root reads it as the `cloudflare_api_token` variable. After
-  its expiry every foundation plan fails to authenticate.
-- The user API token behind the Cloud gateway's cert-manager DNS-01 issuer. It
-  holds Zone Read and DNS Edit on both zones and has no expiry. Every gateway
-  hostname's zone must be in its scope. A name outside its scope fails
-  issuance and stalls renewal of the whole gateway certificate. Its delivery
-  route is the `cloud_cloudflare_dns_token` row of
+- The token behind the cert-manager DNS-01 issuer must cover the zone of every
+  gateway hostname. A name outside its scope fails issuance and stalls renewal
+  of the whole gateway certificate. Its delivery route is the
+  `cloud_cloudflare_dns_token` row of
   `infra/contracts/secret-destinations-v1.json`.
-
-The foundation root also creates an Access service token with a one-year
-lifetime (`infra/terraform/foundation/cloudflare.tf`). This section does not
-cover it.
+- The foundation root reads its account token as the `cloudflare_api_token`
+  variable. When that token expires, every foundation plan fails to
+  authenticate.

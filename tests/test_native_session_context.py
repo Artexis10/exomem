@@ -289,7 +289,7 @@ def served_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[dict]:
     _seed(vault)
     schema = Path(stance.__file__).parent / "_scaffold/_Schema/references"
     _write(vault, "Knowledge Base/_Schema/SKILL.md", "# Memory schema\n")
-    for name in ("frontmatter.md", "page-types.md"):
+    for name in ("page-types.md",):
         _write(vault, f"Knowledge Base/_Schema/references/{name}", (schema / name).read_text(encoding="utf-8"))
     _page(vault, "global", "stance: true\n", body=f"- [rule] {RULE} ^source\n")
     initialize_vault_state_offline(vault, source="native session context")

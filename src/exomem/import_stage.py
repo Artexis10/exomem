@@ -10,14 +10,15 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, BinaryIO
 
 from . import private_state, state_migration, state_paths, vault
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
 
     from . import held_fs
 
@@ -38,6 +39,10 @@ RENAMES_PENDING_KEY = "renames_pending"
 # Where a discard that walked the stage writes its record, when the receipt could not be read.
 WALK_RECORDS = "cloud-import-walks"
 EXPANSION_RECORDS = "import-expansion"
+# The two files of a stage's expansion folder: the rows, appended one per item, and the state that caches what they say.
+EXPANSION_ROWS = "rows.jsonl"
+EXPANSION_STATE = "state.json"
+_TAIL_BLOCK = 64 * 1024
 # The code of a walked member: the receipt that would have said why it stayed was unreadable.
 UNREADABLE_CODE = "receipt_unreadable"
 # The file at a window's stage root that lists the whole series; it is never a member to file.
@@ -271,16 +276,16 @@ def _cloud_stage(import_id: str, receipt: dict) -> Stage | None:
     return Stage(import_id, CLOUD_PROOF, *manifest) if manifest is not None else None
 
 
-def read(vault_root: Path, import_id: str) -> Stage | None:
+def read(vault_root: Path, import_id: str, *, derived: bool = True) -> Stage | None:
     """The stage's manifest and what vouches for it, or None when it has none.
 
     Nothing here raises: a missing, unreadable or malformed manifest leaves the stage unrecorded,
     which only means adoption keeps its staged copies. The stage carries what the cell derived from its
-    app exports, read from the expansion record.
+    app exports, read from the expansion rows in one pass; a caller that needs only the manifest passes `derived=False`.
     """
     stage = _manifest_stage(vault_root, import_id)
-    if stage is None:
-        return None
+    if stage is None or not derived:
+        return stage
     return dataclasses.replace(stage, derived=derived_files(vault_root, import_id))
 
 
@@ -301,44 +306,138 @@ def _manifest_stage(vault_root: Path, import_id: str) -> Stage | None:
     return None
 
 
-def expansion_path(vault_root: Path, import_id: str) -> Path:
+def expansion_dir(vault_root: Path, import_id: str) -> Path:
     """Where the cell keeps what it derived from the stage's app exports; raises ValueError when the vault has no state placement."""
-    return state_paths.vault_state_dir(vault_root) / EXPANSION_RECORDS / f"{import_id}.json"
+    return state_paths.vault_state_dir(vault_root) / EXPANSION_RECORDS / import_id
 
 
-def read_expansion(vault_root: Path, import_id: str) -> dict | None:
-    """The stage's expansion record (see `export_expansion`), or None when it has none or cannot be read."""
+def _expansion_store(vault_root: Path, import_id: str) -> Path:
+    """The stage's expansion folder, created owner-only; raises OSError when it is not a plain folder of this user."""
+    if not vault.is_import_id(import_id):
+        raise ValueError(f"not an import id: {import_id!r}")
+    folder = private_state.store(vault_root, EXPANSION_RECORDS) / import_id
+    folder.mkdir(mode=0o700, exist_ok=True)
+    info = os.lstat(folder)
+    if not stat.S_ISDIR(info.st_mode):
+        raise OSError(f"the expansion record of {import_id} is not a folder")
+    return folder
+
+
+def read_expansion_state(vault_root: Path, import_id: str) -> dict | None:
+    """The stage's expansion state (see `export_expansion`), or None when it has none or cannot be read."""
     try:
-        return _load(expansion_path(vault_root, import_id))
+        return _load(expansion_dir(vault_root, import_id) / EXPANSION_STATE)
     except ValueError:
         return None
 
 
-def write_expansion(vault_root: Path, import_id: str, record: dict) -> None:
-    """Replace the expansion record whole and durably, as the Job writes a receipt."""
-    _store_record(vault_root, EXPANSION_RECORDS, import_id, record)
+def write_expansion_state(vault_root: Path, import_id: str, state: dict) -> None:
+    """Replace the expansion state whole and durably, as the Job writes a receipt."""
+    folder = _expansion_store(vault_root, import_id)
+    private_state.write_record(folder, EXPANSION_STATE.removesuffix(".json"), state, temp_suffix=".tmp", durable=True)
+    private_state.sync_directory(folder)
+
+
+def expansion_rows_size(vault_root: Path, import_id: str) -> int:
+    """The bytes of the stage's expansion rows file; zero when it has none."""
+    try:
+        return (expansion_dir(vault_root, import_id) / EXPANSION_ROWS).stat().st_size
+    except (OSError, ValueError):
+        return 0
+
+
+def read_expansion_rows(vault_root: Path, import_id: str, *, offset: int = 0) -> Iterator[tuple[int, dict]]:
+    """The complete rows of the stage's expansion from byte `offset`, each with the offset that follows it.
+
+    A last line that lacks its newline is a row that a crash cut in two, and is not read. A line that is not a JSON
+    object is left out: a file that no row vouches for is never consumed, so a damaged row only keeps its staged copy.
+    """
+    try:
+        stream = open(expansion_dir(vault_root, import_id) / EXPANSION_ROWS, "rb")  # noqa: SIM115 -- closed in the finally below
+    except (OSError, ValueError):
+        return
+    try:
+        stream.seek(offset)
+        position = offset
+        for line in stream:
+            if not line.endswith(b"\n"):
+                return
+            position += len(line)
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict):
+                yield position, row
+    finally:
+        stream.close()
+
+
+def append_expansion_rows(vault_root: Path, import_id: str, rows: list[dict]) -> int:
+    """Append rows to the stage's expansion and make them durable; the bytes of the file now.
+
+    A torn last line from an earlier crash is cut off first, so a row never starts in the middle of another.
+    """
+    folder = _expansion_store(vault_root, import_id)
+    path = folder / EXPANSION_ROWS
+    created = not path.exists()
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(descriptor, "r+b") as sink:
+        _cut_torn_row(sink)
+        sink.seek(0, os.SEEK_END)
+        sink.write(b"".join(json.dumps(row, separators=(",", ":")).encode("utf-8") + b"\n" for row in rows))
+        sink.flush()
+        os.fsync(sink.fileno())
+        size = sink.tell()
+    if created:
+        private_state.sync_directory(folder)
+    return size
+
+
+def _cut_torn_row(sink: BinaryIO) -> None:
+    """Truncate a rows file after its last newline, so that a row cut in two by a crash is gone."""
+    size = sink.seek(0, os.SEEK_END)
+    end = size
+    while end:
+        start = max(0, end - _TAIL_BLOCK)
+        sink.seek(start)
+        block = sink.read(end - start)
+        newline = block.rfind(b"\n")
+        if newline >= 0:
+            if start + newline + 1 != size:
+                sink.truncate(start + newline + 1)
+            return
+        end = start
+    if size:
+        sink.truncate(0)
 
 
 def derived_files(vault_root: Path, import_id: str) -> dict[str, Derived]:
-    """What the cell derived into the stage from its app exports, by path in the stage; empty when it derived nothing."""
-    return _derived_of(read_expansion(vault_root, import_id))
+    """What the cell derived into the stage from its app exports, by path in the stage; empty when it derived nothing.
 
-
-def _derived_of(record: dict | None) -> dict[str, Derived]:
-    """The derived files of an expansion record by their path in the stage; a row that is not well-formed is left out.
-
-    A file that no row vouches for is never consumed, so a damaged row only keeps its staged copy.
+    One pass over the rows. A path that two rows carry counts once, so a row that a crash repeated is no duplicate.
     """
     derived: dict[str, Derived] = {}
-    for row in (record or {}).get("rows") or ():
-        if not isinstance(row, dict):
+    for _after, row in read_expansion_rows(vault_root, import_id):
+        derived.update(derived_of(row))
+    return derived
+
+
+def derived_of(row: dict) -> dict[str, Derived]:
+    """The derived files of one row by their path in the stage; a file that is not well-formed is left out.
+
+    Every file of an item carries the item's own created time. A file that no row vouches for is never consumed.
+    """
+    created = row.get("created")
+    if row.get("status") != "derived" or not (created is None or isinstance(created, str)):
+        return {}
+    derived: dict[str, Derived] = {}
+    for file in row.get("files") or ():
+        if not isinstance(file, dict):
             continue
-        path, size, digest, created = row.get("path"), row.get("size"), row.get("sha256"), row.get("created")
-        if (
-            isinstance(path, str) and isinstance(size, int) and not isinstance(size, bool)
-            and isinstance(digest, str) and (created is None or isinstance(created, str))
-        ):
-            derived[path] = Derived(size, digest, created, row.get("timed") is True)
+        path, size, digest = file.get("path"), file.get("size"), file.get("sha256")
+        if isinstance(path, str) and isinstance(size, int) and not isinstance(size, bool) and isinstance(digest, str):
+            derived[path] = Derived(size, digest, created, file.get("timed") is True)
     return derived
 
 

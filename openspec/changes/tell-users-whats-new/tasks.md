@@ -35,5 +35,6 @@
   - Evidence: `release_notes.payload()`; `tests/test_whats_new.py` compares the section with `notes` as strings and `items` with titles (null for a note without one), and the update-notice cases still pass with the sentence in `say`.
 - [x] 5.3 The authors' README and the check describe the title rule.
   - Evidence: `user-notes/README.md` shows the example file, the title rules and how to quote a title.
-- [ ] 5.4 Every existing note has a title. A follow-up pull request adds them, because the note check runs the base revision's checker: titled notes pass only once this checker is on main.
+- [x] 5.4 Every existing note has a title. A follow-up pull request adds them, because the note check runs the base revision's checker: titled notes pass only once this checker is on main.
+  - Evidence: the 16 existing files under `user-notes/` start with front matter holding a title, and `user-notes/whats-new-titles.md` is this change's own note; all 17 pass `note_problems` with the checker that #3312 put on main.
 - [ ] 5.5 On a real Cloud cell after a rollout that carries titles, Home's What's new lists each title and opens its sentence.

@@ -274,7 +274,10 @@ def test_a_slow_store_decision_stops_at_the_request_deadline_and_withholds_the_s
         request_budget.reset_current(token)
     elapsed = time.monotonic() - started
 
-    assert elapsed < 9.0, f"the activation ran {elapsed:.1f} s on a 9 s budget"
+    # The contract: a call ends within its budget plus the delivery reserve. Without the stop, the twelve
+    # slow decisions alone run past it.
+    limit = budget.seconds + request_budget.DELIVERY_RESERVE_SECONDS
+    assert elapsed < limit, f"the activation ran {elapsed:.1f} s on a 9 s budget"
     assert not set(_refs(packet)) & {_store_ref(index) for index in range(PAGE_COUNT)}
     assert packet["generation"]["collection_store"] == "unavailable"
 

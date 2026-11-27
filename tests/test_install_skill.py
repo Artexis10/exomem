@@ -37,7 +37,7 @@ def test_install_skill_copies_into_target(tmp_path: Path) -> None:
     # skill by <target>/SKILL.md.
     assert (target / "SKILL.md").exists()
     assert (target / "references").is_dir()
-    assert (target / "references" / "operations.md").exists()
+    assert (target / "references" / "tools.md").exists()
     assert (target / "workflow-skills" / "index.yaml").exists()
 
     workflow_names = [s["name"] for s in report["workflow_skills"]]
@@ -200,8 +200,9 @@ def test_clean_filesystem_install_is_self_sufficient_without_personal_skills(
     assert concise in core
     assert (target / "references" / "page-types.md").is_file()
     for name in EXPECTED_WORKFLOW_SKILLS:
-        standalone = target.parent / name / "SKILL.md"
-        assert concise in standalone.read_text(encoding="utf-8")
+        standalone = target.parent / name
+        assert "references/semantic-authoring.md" in (standalone / "SKILL.md").read_text(encoding="utf-8")
+        assert concise in (standalone / "references" / "semantic-authoring.md").read_text(encoding="utf-8")
     installed_files = [path for path in target.parent.rglob("*") if path.is_file()]
     assert_public_artifacts_clean(
         installed_files,

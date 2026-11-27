@@ -15,13 +15,13 @@ On 2026-11-26 the Cloud fleet ran v0.201.0 and the platform was deployed at v0.2
 
 ## Capabilities
 
-### New Capabilities
+### Modified Capabilities
 
-- `cloud-release-automation`: one requirement for the fallback rollout. The capability is not canonical yet. It lives in the delta of `automate-cloud-releases`, so this change archives after that one and after `alert-cloud-release-lag`.
+- `cloud-release-automation`: adds one requirement for the fallback rollout.
 
 ## Impact
 
 - **CI:** `infra/scripts/cloud_deploy.py`, run by the `cloud-deploy` workflow.
 - **Docs:** `docs/runbooks/cloud-platform-deploy.md` and the header comment of `.github/workflows/cloud-deploy.yml`.
-- **Active changes:** the requirements and design D1 to D3 of `automate-cloud-releases`, and one scenario of `alert-cloud-release-lag`, said that the run acts only on the newest release and sets nothing when a gate stops it. They now name the fallback.
+- **Active changes and specs:** the requirements and design D1 to D3 of `automate-cloud-releases`, and one scenario that the archived `alert-cloud-release-lag` added to the canonical spec, said that the run acts only on the newest release and sets nothing when a gate stops it. They now name the fallback.
 - **Not changed:** the gate globs, the barrier file, the deploy token's scope, the `send_alert` contract and the body that the run sends to Substrate (`cellImage` and `release` only).

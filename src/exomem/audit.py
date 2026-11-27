@@ -3760,7 +3760,7 @@ def _check_tag_inconsistency(
 # ---------------- check: frontmatter_compliance ----------------
 
 
-# Required fields per page-type (per `_Schema/references/frontmatter.md`).
+# Required fields per page-type (per `_Schema/references/page-types.md`).
 # Optional / per-type-conditional fields aren't enforced — those depend on
 # subtype and can't be validated without parser-level type intent.
 _REQUIRED_FIELDS_BY_TYPE: dict[str, tuple[str, ...]] = {
@@ -3896,9 +3896,12 @@ def _check_frontmatter_compliance(
                             f"{page_type!r} page missing required frontmatter field(s): {missing}"
                     ),
                     proposed_fix=(
-                        "Add the missing field(s) via `set_frontmatter_field` "
-                        "or `edit`. See `_Schema/references/frontmatter.md` "
-                        "for the per-type required set."
+                        "Add the missing field(s) with `"
+                        + capabilities.active_call_text("edit_memory", {
+                            "path": page.rel_path, "why": "<why>",
+                            "operation": {"kind": "patch_frontmatter", "field": missing[0], "value": "<value>"},
+                        })
+                        + "`. `_Schema/references/page-types.md` lists the required fields of each type."
                     ),
                     )
                 )

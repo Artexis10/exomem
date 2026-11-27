@@ -14,6 +14,10 @@ entries:
     description: pasted conversation transcripts
     aliases: [sessions, transcript, transcripts]
     attributes: {path_label: Sessions}
+  app-note:
+    label: App note
+    description: a note exported from a notes app
+    attributes: {path_label: App notes}
   book:
     label: Book
     description: book notes or excerpts
