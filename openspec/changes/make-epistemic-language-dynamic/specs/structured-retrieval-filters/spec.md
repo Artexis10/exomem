@@ -18,11 +18,11 @@ The bound SHALL be eight times the pass's candidate window. The window derives f
 Two exact-check paths remain unbounded: a dimension predicate joined under `$and` to a `unit.kind` or `unit.category` seed, which reads every eligible seeded row, and a request without query text, which widens its prefix until it fills the limit.
 The bound SHALL count the proposed rows that fail the filter, and the scan SHALL stop when that count reaches it.
 For a restricted caller, whose lexical lane ranks by admitted statistics, a unit with several eligible aliases SHALL be checked before scoring, outside the bound.
-The vector lane's read of a dimension's newest members SHALL stop at the same bound.
+The vector lane's read of a dimension's newest members SHALL count against the same bound, and SHALL stop at the first page boundary after the bound, so its cost stays within the bound plus one page.
 A stop SHALL mark the result as partial coverage, never as a failed search method. The stop SHALL NOT keep the result out of the result cache, a cached result SHALL keep its marker, and the stop SHALL NOT count as a degradation.
 A result marked as partial coverage SHALL carry the notice that the dimension filter ran on the best matches only, so more matches in it may exist.
-A keyword result, which keeps the scan's recency order, SHALL carry that notice when its scan stopped and it holds fewer units than the limit, not counting units of superseded pages when the request prefers active ones.
-A hybrid result SHALL carry it when its lexical scan stopped, or when its vector lane ranked the newest members and that read stopped.
+A keyword result, which keeps the scan's recency order, SHALL carry that notice when its scan stopped and the result that release keeps holds fewer units than the caller's limit, not counting units of superseded pages when the request prefers active ones. Release SHALL decide this on its final hits, because an active policy or a tombstoned page makes the search fetch more than the caller's limit.
+A hybrid result SHALL carry it when its lexical scan stopped and its vector lane did not rank every member, or when its vector lane ranked the newest members and that read stopped.
 A vector result SHALL carry it when its vector lane ranked the newest members and that read stopped, or when it fell back to a lexical scan that stopped.
 
 #### Scenario: Stored family members fill the requested limit before ranking
@@ -92,6 +92,16 @@ A vector result SHALL carry it when its vector lane ranked the newest members an
 - **AND** the hybrid result fills its limit with members, and the keyword result is empty, because no member holds the query word
 - **AND** both results carry the partial-coverage notice and no failed search method
 - **AND** an owner's repeat of a request that asks for no dimension groups is served from the cache with that notice
+
+#### Scenario: One long page cannot hide its members from the vector lane
+- **WHEN** one page holds 300 units with the query word before three family members without it, and a hybrid request filters by that family's dimension with a limit of two
+- **THEN** the vector lane reads that page's members in one read and the result fills its limit with members
+- **AND** the result carries no partial-coverage notice, because the vector lane ranked every member
+
+#### Scenario: A keyword stop that leaves the limit filled carries no notice
+- **WHEN** an active policy makes release fetch more than the caller's limit, and a keyword scan filtered by a family's dimension stops after enough members for that limit
+- **THEN** the result holds the newest members, as a scan without a bound returns them, and carries no partial-coverage notice
+- **AND** when units of superseded pages take places in the released result, the result carries the notice
 
 #### Scenario: A complement keeps an invalid authored row
 - **WHEN** a served filter negates a governed-key dimension and an authored member row has no valid selected value
