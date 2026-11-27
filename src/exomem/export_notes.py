@@ -205,11 +205,10 @@ class _Target:
         self._blob: _Blob | None = None
         self.ready: list[ReadItem] = []
         self.root: str | None = None
-        self.expat: Any = None  # the underlying parser, set by `read`: its byte index says where the last event came from
-        self.seen = 0  # the byte index of the last event
+        self.events = 0  # how many events the parser has reported; a count, so no platform's index width matters
 
     def _event(self) -> None:
-        self.seen = self.expat.CurrentByteIndex
+        self.events += 1
 
     def comment(self, text: str) -> None:
         self._event()
@@ -382,18 +381,18 @@ def read(fmt: SourceFormat, stream: BinaryIO, *, start: int = 0, workdir: Path |
         raise ValueError("a notes reader needs a hidden folder for the resources that it keeps")
     target = _Target(fmt, start, workdir)
     parser = DefusedXMLParser(target=target, forbid_dtd=False)
-    target.expat = parser.parser
     fault: str | None = None
-    fed = 0
+    quiet = 0  # bytes fed since the parser last reported an event, give or take one chunk
     try:
         while True:
             chunk = stream.read(_CHUNK)
-            fed += len(chunk)
+            events = target.events
             try:
                 parser.feed(chunk) if chunk else parser.close()
             except (ParseError, ValueError, OSError) as error:  # a refused entity is a ValueError
                 fault = type(error).__name__
-            if fault is None and fed - target.seen > _MAX_QUIET_BYTES:
+            quiet = 0 if target.events != events else quiet + len(chunk)
+            if fault is None and quiet > _MAX_QUIET_BYTES:
                 fault = "a single comment, instruction or attribute value is longer than 64 MiB"
             yield from target.drain()
             if fault is not None or not chunk:

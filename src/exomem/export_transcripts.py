@@ -168,11 +168,14 @@ def part_names(parts: list[tuple[str, str]]) -> list[str]:
             extension = (_MIME.guess_extension(media_type.split(";")[0].strip().lower()) or "").lstrip(".")
         suffix = f".{extension}" if extension else ""
         stem = _clean_stem(stem[:_MAX_SCANNED_CHARS]) or f"part-{number}"
-        first = _fit(stem, suffix) + suffix
+        # Cut once to the room that the widest counter of this item needs, so a name and its numbered forms share one
+        # stem: names that differ only past that cut then share one counter, and no repeat walks another's numbers.
+        stem = _fit(stem, f" ({len(parts)})" + suffix)
+        first = stem + suffix
         count = used.get(first.casefold(), 0) + 1
         while True:
             tag = f" ({count})" if count > 1 else ""
-            name = first if count == 1 else _fit(stem, tag + suffix) + tag + suffix
+            name = stem + tag + suffix
             if name.casefold() not in taken:
                 break
             count += 1
