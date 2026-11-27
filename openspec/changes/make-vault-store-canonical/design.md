@@ -189,11 +189,19 @@ Both refusals name the offline rollback with `--export-held`.
 Migration runs offline:
 
 1. Load every text file's exact bytes and frontmatter.
-2. Copy the current lexical and graph rows.
-3. Verify that a fresh derivation from the loaded bytes equals the copied rows.
-4. Verify that a full projection reproduces every file byte for byte.
+2. Derive every owner's rows afresh from the files on disk, once.
+3. Stage the graph rows from that derivation, whole tables in its row order and with its row ids. Copy the current lexical rows, which keep the unit revisions that only a copy preserves. Copy the current reference rows as before; step 4 proves them, and taking them from the derivation is part of the follow-up below.
+4. Verify that the derivation equals every staged table. The graph rows equal it by construction, so this comparison guards the copy code; the lexical and reference rows are the proof of their copy.
+5. Verify that a full projection reproduces every file byte for byte.
+6. At install, recheck that no loaded file changed since step 1. This recheck is what ties the derived rows to the stored bytes, because the derivation read the files, not the loaded bytes.
 
-In the spike, loading and copying the real-vault copy (19,563 text files) took 12.3 s and produced a 1.56 GB database; the two verifications add about a cold build.
+The graph rows are never copied from the graph sidecar. The sidecar can keep an unchanged page's edges to a target that has left the catalogue, when the path that removed the target did not derive its linkers again; a copy carried them into the store, and two live migrations refused at step 4 for it. #3249 records one such path, a collection conversion that removes item files. The second refusal, frontmatter edges to files that still exist in a folder that left the catalogue, and one self-link row in the first are not traced yet; `maintain --reconcile --rebuild-graph` ran before the second attempt and did not clear its edges.
+
+The graph's `graph_meta` table keeps the sidecar's rows, because readers key on its schema stamp and instance; the registry stamps come from the current registry. Its other keys describe the sidecar's own sync state, and store mode reads none of them. Nothing outside the store's graph tables refers to a graph row id: a reader orders a page's edges by their row id within one query, the dependency census keeps its cursor under the store revision, and the store takes no publication tables.
+
+The apply compares the sidecar's graph rows with the derivation and reports how many rows differed, counted as rows present on one side only, with the first keys. The dry run derives nothing and says that it did not check. Before it stages, the apply drains the graph repair that a stopped service left queued, so that count names only what the sync missed, unless the drain stopped early, which its `left` count shows; the drain never refuses, because nothing it misses reaches the store, and rollback rebuilds the sidecar.
+
+In the spike, loading and copying the real-vault copy (19,563 text files) took 12.3 s and produced a 1.56 GB database; the derivation adds about a cold build. The inbound-link and admission tables are still derived a second time by staging, as before; task 1.9 takes them and the reference rows from the one derivation.
 
 Some data exists only in the store: the audit trail, queued projection intents, held corrections, held deletions and, in stage 2, canonicity records. Rollback therefore runs in this order:
 

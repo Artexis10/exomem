@@ -18,7 +18,7 @@ from pathlib import Path
 import httpx2
 import pytest
 
-from exomem import import_stage
+from exomem import extraction_parts, import_stage
 from exomem.cli_progress import Progress
 from exomem.cloud_import_client import CloudImportClientConfig, CloudImportError, _report_failure
 from exomem.cloud_import_windows import Cell, FilingUnavailable, import_folder
@@ -328,6 +328,51 @@ def test_three_times_the_budget_becomes_three_or_more_windows_each_within_the_bu
     assert len(rig.cloud.completed) >= 3
     assert all(rig.cloud.cost(import_id) <= 2000 for import_id in rig.cloud.completed)
     assert rig.cloud.all_sent() == sorted(f"a{n:02}.bin" for n in range(1, 10))
+
+
+SERIES_COST = 2 * 368  # the series file of a run in several windows, which the cell counts as text
+
+
+def _transcript(rig: Rig, name: str, parts: int, size: int) -> list[str]:
+    """A page and its further parts, as a long transcript lays them out in a folder; returns the paths."""
+    page = Path(f"{name}.md")
+    paths = [page.as_posix(), *(extraction_parts.part_path(page, number).as_posix() for number in range(2, parts + 1))]
+    for path in paths:
+        (rig.source / path).parent.mkdir(parents=True, exist_ok=True)
+        (rig.source / path).write_bytes(path.encode().ljust(size, b"."))
+    return paths
+
+
+def test_a_window_whose_budget_would_end_between_a_page_and_its_part_folder_takes_both_in_the_next_window(rig):
+    """Catches a split that files the page in one window and its parts in another, so the Source could not keep its parts."""
+    rig.files(a01__bin=800, a02__bin=800, a03__bin=800)
+    page, part = _transcript(rig, "talk", 2, 300)
+    # The whole folder is 16 bytes over one window (a lone import's series file is 83 bytes), and each window of
+    # several carries the longer series file, so the page fits after the recordings but its part does not.
+    budget = SERIES_COST + 3 * 800 + 600 + 14
+    rig.cell.budget = rig.cell.reachable = rig.cell.refill = budget
+
+    rig.run()
+
+    windows = [rig.cloud.sent(import_id) for import_id in rig.cloud.completed]
+    assert len(windows) == 2 and {page, part} in windows
+    assert all(rig.cloud.cost(import_id) <= budget for import_id in rig.cloud.completed)
+    assert rig.cloud.all_sent() == sorted(["a01.bin", "a02.bin", "a03.bin", page, part])
+
+
+def test_more_long_transcripts_than_one_window_carries_are_sent_in_whole_windows_of_page_and_parts(rig):
+    """Catches a window that ends inside one transcript when the folder holds many."""
+    rig.files(a01__bin=800)
+    transcripts = [_transcript(rig, f"t{number}", 3, 200) for number in range(1, 6)]
+    budget = SERIES_COST + 800 + 5400  # 13 of the 15 pages of 400 fit after the recording; four whole transcripts are 12
+    rig.cell.budget = rig.cell.reachable = rig.cell.refill = budget
+
+    rig.run()
+
+    windows = [rig.cloud.sent(import_id) for import_id in rig.cloud.completed]
+    assert len(windows) == 2
+    assert all(any(set(group) <= window for window in windows) for group in transcripts)
+    assert all(rig.cloud.cost(import_id) <= budget for import_id in rig.cloud.completed)
 
 
 def test_each_window_stays_within_the_published_admission_limit(rig):

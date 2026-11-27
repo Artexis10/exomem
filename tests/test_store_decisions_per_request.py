@@ -243,6 +243,60 @@ def test_a_command_asks_the_store_once_for_all_its_pages(
     assert all("collection_store" not in packet["generation"] for packet in (unresolved, phrase, titles, follow_up))
 
 
+def test_a_slow_store_decision_stops_at_the_request_deadline_and_withholds_the_store_pages(
+    service, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """On a starved host each store-owned page's decision took seconds, and the decisions read beside
+    the store thread ran on past the request's deadline. They stop where a queued read would, and
+    the pages they had yet to decide are withheld together."""
+    from exomem import request_budget
+    from exomem.collection_store import preview
+
+    root = service.root
+    _seed(root, "owner_with_policy")
+    real_init = preview._Decide.__init__
+
+    def slow_decisions(self, read, vault_root, calls):  # noqa: ANN001, ANN202
+        def slow_read(*args, **kwargs):  # noqa: ANN202
+            time.sleep(1.0)
+            return read(*args, **kwargs)
+
+        real_init(self, slow_read, vault_root, calls)
+
+    monkeypatch.setattr(preview._Decide, "__init__", slow_decisions)
+    # The slice's stages end a second before this 9 s budget, so the stop falls inside a batch.
+    budget = request_budget.RequestBudget(seconds=9)
+    token = request_budget.set_current(budget)
+    started = time.monotonic()
+    try:
+        packet = _activate(root, OWNER, turn=PHRASE + " " + TITLES)
+    finally:
+        request_budget.reset_current(token)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 9.0, f"the activation ran {elapsed:.1f} s on a 9 s budget"
+    assert not set(_refs(packet)) & {_store_ref(index) for index in range(PAGE_COUNT)}
+    assert packet["generation"]["collection_store"] == "unavailable"
+
+
+def test_the_activation_door_serves_store_pages_its_short_budget_has_time_for(
+    service, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """The service's activation door runs on a few seconds. Store pages decided well inside that budget are
+    served; the stop at the deadline never withholds them early."""
+    from exomem import readiness
+
+    root = service.root
+    _seed(root, "owner")
+    _activate(root, OWNER, turn=PHRASE + " " + TITLES)
+    monkeypatch.setattr(readiness, "_runtime_managed", True)
+
+    packet = _activate(root, OWNER, turn=PHRASE + " " + TITLES)
+
+    assert set(_refs(packet)) & {_store_ref(index) for index in range(PAGE_COUNT)}
+    assert "collection_store" not in packet["generation"]
+
+
 @pytest.mark.timeout(180)
 @pytest.mark.parametrize("caller", ["owner", "owner_with_policy", "external"])
 def test_a_read_that_reuses_the_due_state_memo_asks_the_store_once_for_its_pages(

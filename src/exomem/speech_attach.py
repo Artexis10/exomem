@@ -434,8 +434,8 @@ def attach(
             given_names=[dict(item) for item in result.names],
         )
         commit(writes)
-        _retire_parts(vault, surplus)
-        stage = _retire_speech_stage(vault, current)
+        retire_parts(vault, surplus)
+        stage = retire_speech_stage(vault, current)
         after, _ = read_guarded_text(vault, current.sidecar)
         links = prior_extraction.links_of(after)
         return reply(
@@ -463,7 +463,7 @@ def _require_replaceable(content: str, media_type: str, result: Result) -> bool:
     return verdict == prior_extraction.REPLACE
 
 
-def _retire_parts(vault: Path, surplus: tuple[Path, ...]) -> None:
+def retire_parts(vault: Path, surplus: tuple[Path, ...]) -> None:
     """Retire the part pages the new result no longer uses; a stored part that stays is logged, not raised."""
     from . import extraction_parts
 
@@ -472,7 +472,7 @@ def _retire_parts(vault: Path, surplus: tuple[Path, ...]) -> None:
         log.info("%s", extraction_parts.kept_note(kept))
 
 
-def _retire_speech_stage(vault: Path, source: Source) -> str:
+def retire_speech_stage(vault: Path, source: Source) -> str:
     """End the queued speech work of this recording, and only that stage: a video keeps its frame-vector stage.
 
     A running job keeps going; its result is stale against the new page, and the worker drops it.

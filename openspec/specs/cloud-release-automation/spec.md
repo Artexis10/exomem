@@ -1,4 +1,10 @@
-## ADDED Requirements
+# cloud-release-automation Specification
+
+## Purpose
+
+Moves each successful Exomem release into Cloud's `cell_image` without an operator step, unless the release needs a platform upgrade or crosses an upgrade barrier, and then moves the newest older release that the platform carries. It alerts the operator when a rollout stops.
+
+## Requirements
 
 ### Requirement: The release automation reports a lagging fleet daily
 
@@ -6,7 +12,7 @@ The `cloud-deploy` workflow SHALL run once a day on `main`. After it reads the r
 
 #### Scenario: The fleet stays behind several releases
 
-- **WHEN** the newest release is 2 hours old, the fleet lacks four releases, the oldest of them was published longer ago than the threshold, and a platform upgrade is still needed
+- **WHEN** the newest release is 2 hours old, the fleet lacks four releases, the oldest of them was published longer ago than the threshold, a platform upgrade is still needed, and no older release that the platform carries qualifies
 - **THEN** the run sends `cloud-release-behind` as active, and it then stops with `cloud-release-platform-needed`
 
 #### Scenario: The fleet missed only a young release

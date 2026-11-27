@@ -56,13 +56,13 @@ A new workflow, `.github/workflows/cloud-deploy.yml`, runs on a dispatch on `mai
 
 The release workflow's tag run starts from a dispatch with `github.token`, and GitHub starts no other workflow from such a run's completion. The first design used a `workflow_run` trigger. Tags v0.172.0, v0.173.0 and v0.174.0 started no `cloud-deploy` run (2026-11-11 to 2026-11-12), so the trigger was replaced by the explicit dispatch. GitHub starts a run from a `workflow_dispatch` that `github.token` sends.
 
-Each run acts only on the newest published release. Steps:
+Each run targets the newest published release, or the newest older release that the platform carries when step 5 stops the newest one. Steps:
 
 1. Read the cell image digest that the newest release published.
 2. Verify the digest's attestation with `gh attestation verify`. The signer must be this repository's release workflow, on the release tag. This is the identity that the deploy tier checks (`make-cloud-cells-operator-resistant` D6).
 3. Read the rollout view. If the rollout is paused, set nothing, and fail with the pause's error code (D8). A re-run for the release that the rollout paused on fails too.
 4. If the view's `cell_image` equals the digest, or its `release` equals the tag, set nothing and succeed.
-5. Apply the platform gate (D2) and the barrier check (D3).
+5. Apply the platform gate (D2) and the barrier check (D3). If either stops the newest release, send its alert and print its code and detail. Then find the newest published release that is newer than the fleet's, older than the newest and stopped by neither check. Run steps 1, 2, 6 and 7 for it: a release with no published image is skipped, a failed attestation fails the run, and the run prints `COVERED_RELEASE <tag>` before step 6. An unreadable release list, a fleet release that is unknown, or no qualifying release sets nothing and fails with the code of the newest release's stop. The alert for the newest release stays active.
 6. Send `PUT cloud-release` with `{cellImage, release}`, where `release` is the verified tag. If Substrate answers `CELL_IMAGE_SEEN` or `CELL_RELEASE_OLDER`, the release is not newer than the fleet. The run then sets nothing, logs the code and succeeds.
 7. Poll the rollout view until its `canary_on_target` is true, which means that the canary runs the target and is Ready. Fail on a pause or on the poll timeout.
 
@@ -122,7 +122,8 @@ The platform Deployment records which release the platform runs.
 
 The include and exclude globs live in one configuration file beside the workflow script. They describe the repository's layout, a closed set that the repository fixes, and the script states that reason.
 - With no difference, cells may move.
-- With a difference, or with no platform Deployment, the workflow sets nothing. It raises `cloud-release-platform-needed` and fails.
+- With a difference, the workflow does not set that release. It raises `cloud-release-platform-needed`, falls back as D1 step 5 says, and fails only when no older release qualifies.
+- With no platform Deployment, the workflow sets nothing. It raises `cloud-release-platform-needed` and fails.
 - After a person upgrades the platform, the platform upgrade command or the runbook step dispatches the workflow on `main`. The workflow then sets the image and resolves the alert.
 
 **Alert path.** The workflow posts the alert transition to Substrate's existing alert receiver. It uses its own receiver capability, which the receiver accepts only for the job `cloud-deploy` (Substrate task). The CI log prints only the alert name and its error code.
@@ -153,7 +154,7 @@ A JSON schema checks the file in CI, and each `runbook` link must resolve. The f
 **Crossing.** A move from release A to release B crosses an entry when A is older than its `version`, and B is that version or newer.
 
 **Stop.** From phase 1, the workflow reads the barrier file. It stops on every entry at or below the new release that no successful platform Deployment lists in `barriers_crossed`, whatever the entry's scope.
-- The workflow sets nothing. It raises `cloud-release-barrier`, prints the entry's ID, and fails.
+- The workflow does not set that release. It raises `cloud-release-barrier`, prints the entry's ID, falls back as D1 step 5 says, and fails only when no older release qualifies.
 - A person does the runbook step, then upgrades the platform with the entry in `barriers_crossed`: by hand with the runbook in phase 1, or with `--crossed <id>` once D7 ships. The workflow then treats the entry as crossed.
 - The platform upgrade command refuses to cross a `platform` entry without `--crossed <id>`.
 

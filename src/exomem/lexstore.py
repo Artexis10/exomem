@@ -1718,14 +1718,17 @@ class _SelectedUnits:
                 if unit is not None and unit.unit_ref is not None:
                     yield row, unit
 
+    def prepare(self, paths: set[str]) -> None:
+        """Prepare the filter's dimension membership of `paths` before their exact checks."""
+        source = self.filter_plan.dimensions if self.filter_plan is not None else None
+        if paths and hasattr(source, "prepare"):
+            source.prepare(paths, conn=self.conn, interpretations=self.interpretations)
+
     def candidates(self, rows: Iterable[tuple]) -> Iterator[tuple[tuple, Any]]:
         """Prepare only query candidates; corpus ranking statistics use `served` directly."""
         iterator = iter(self.served(rows))
         while batch := list(itertools.islice(iterator, _OCCURRENCE_TRANSPORT_BATCH)):
-            source = self.filter_plan.dimensions if self.filter_plan is not None else None
-            if hasattr(source, "prepare"):
-                source.prepare({str(row[1]) for row, _unit in batch}, conn=self.conn,
-                               interpretations=self.interpretations)
+            self.prepare({str(row[1]) for row, _unit in batch})
             yield from batch
 
     def contributions(
@@ -3519,6 +3522,14 @@ def _catalog_usable() -> bool:
     return backend() != "python"
 
 
+def duplicate_index_configured() -> bool:
+    """Whether the configuration keeps the duplicate index at all; False is a final answer and never a reason to retry.
+
+    `payload_candidates` also answers None while the index is rebuilding or failed, which is a temporary state.
+    """
+    return _catalog_usable()
+
+
 def _term_units(units) -> list[list[object]]:
     """`[stem, unit, needed]` rows for the corroboration filter.
 
@@ -5159,11 +5170,17 @@ def search_semantic_units_result(
     validated: dict[tuple[str, str, str, int], bool] | None = None,
     filter_plan: Any | None = None,
     rank_query: bool = False,
+    scan_limit: int | None = None,
+    scan_stopped: list[bool] | None = None,
+    scan_whole_pages: bool = False,
 ) -> CatalogQueryResult[list[SemanticUnitLexicalHit]]:
     """Typed exact-category unit query preserving every catalog outcome.
 
     `rank_query` ranks the eligible rows by the query's BM25 match and keeps the best `k`; an
-    unavailable FTS5 answers `unsupported`. `validated` keeps each row stamp's currency check
+    unavailable FTS5 answers `unsupported`. `scan_limit` bounds the proposed rows that fail the
+    exact check; `scan_stopped` receives True when the scan stops there with rows left unchecked.
+    `scan_whole_pages` lets an unranked scan finish the page it is in before it stops there.
+    `validated` keeps each row stamp's currency check
     for the caller's request, so several queries over the same parents read each one once. A request
     shares it across its activation lanes, so a parent whose file changes
     while its catalogue rows do not passes in every later query as it did in
@@ -5213,6 +5230,9 @@ def search_semantic_units_result(
         released_parent_paths=released_parent_paths,
         registry_scope=registry_scope,
         filter_plan=filter_plan,
+        scan_limit=scan_limit,
+        scan_stopped=scan_stopped,
+        scan_whole_pages=scan_whole_pages,
     )
     if not result.readiness.complete or not _validate_current:
         return result
@@ -5277,6 +5297,9 @@ def search_semantic_units_result(
                 validated=validated,
                 filter_plan=filter_plan,
                 rank_query=rank_query,
+                scan_limit=scan_limit,
+                scan_stopped=scan_stopped,
+                scan_whole_pages=scan_whole_pages,
             )
     _schedule_repair(vault_root)
     return CatalogQueryResult(
@@ -14357,6 +14380,9 @@ class LexicalStore:
         registry_scope: str | None = None,
         filter_plan: Any | None = None,
         parents_first: bool = False,
+        scan_limit: int | None = None,
+        scan_stopped: list[bool] | None = None,
+        scan_whole_pages: bool = False,
     ) -> CatalogQueryResult[list[SemanticUnitLexicalHit]]:
         """Ready-catalogue unit query, optionally ranking bounded material terms.
 
@@ -14375,6 +14401,9 @@ class LexicalStore:
         def query(conn: sqlite3.Connection) -> list[SemanticUnitLexicalHit]:
             # A caller's stemmed tokens rank the window; a term budget may replace them below.
             tokens = list(stemmed_tokens)
+            if scan_stopped is not None:
+                # A retried read reports only its own stop.
+                scan_stopped.clear()
             view = _SelectedUnits(
                 self.vault_root, conn, admitted=admitted_parent_paths, released=released_parent_paths,
                 filter_plan=filter_plan,
@@ -14406,7 +14435,8 @@ class LexicalStore:
                 excluded_categories_by_parent=excluded_categories_by_parent,
                 registry_scope=registry_scope,
                 selected_units=view, statistics=statistics, parents_first=parents_first,
-                filter_plan=filter_plan,
+                filter_plan=filter_plan, scan_limit=scan_limit, scan_stopped=scan_stopped,
+                scan_whole_pages=scan_whole_pages,
             )
 
         return self._serve_from_ready_catalog_result(
@@ -14439,6 +14469,9 @@ class LexicalStore:
         statistics: _AdmittedStatisticsEntry | None = None,
         filter_plan: Any | None = None,
         parents_first: bool = False,
+        scan_limit: int | None = None,
+        scan_stopped: list[bool] | None = None,
+        scan_whole_pages: bool = False,
     ) -> list[SemanticUnitLexicalHit]:
         """Units whose own selected meaning matches, ranked, then limited to `k`.
 
@@ -14483,17 +14516,31 @@ class LexicalStore:
         params.extend(literal_tokens)
         where = " AND ".join(clauses)
 
-        def wanted(row: tuple, unit: Any) -> bool:
+        def proposed(row: tuple, unit: Any) -> bool:
             path = str(row[1])
             return (
                 view.matches(plans, path, unit)
-                and view.matches_filter(row, unit)
                 and (
                     excluded_categories_by_parent is None
                     or unit.category not in excluded_categories_by_parent.get(path, ())
                 )
                 and (allowed_unit_refs is None or unit.unit_ref in allowed_unit_refs)
             )
+
+        def wanted(row: tuple, unit: Any) -> bool:
+            return proposed(row, unit) and view.matches_filter(row, unit)
+
+        rejected = 0
+        stopped = False
+
+        def stop_scan() -> bool:
+            # Each rejected row cost an exact check; past the limit the caller reports partial coverage.
+            nonlocal stopped
+            if scan_limit is not None and rejected >= scan_limit and not stopped:
+                stopped = True
+                if scan_stopped is not None:
+                    scan_stopped.append(True)
+            return stopped
 
         hits: list[SemanticUnitLexicalHit] = []
         # Literal selection is exact metadata: it never ranks and needs no FTS5.
@@ -14508,6 +14555,9 @@ class LexicalStore:
             candidate_tokens = {}
             candidates = {}
             ambiguous = set()
+            # A filter's exact check waits for the BM25 order, so that `scan_limit` bounds it.
+            deferred = filter_plan is not None
+            checked: set[str] = set()
             matching = iter(conn.execute("SELECT rowid, stemmed FROM unit_fts WHERE unit_fts MATCH ?", (match,)))
             while batch := list(itertools.islice(matching, _OCCURRENCE_TRANSPORT_BATCH)):
                 selected = [(representative, str(stemmed), representatives.get(representative))
@@ -14521,12 +14571,18 @@ class LexicalStore:
                     [json.dumps(rowids), *params],
                 )
                 eligible_rows = {(str(row[1]), str(row[0])): (row, unit)
-                                 for row, unit in view.candidates(rows) if wanted(row, unit)}
+                                 for row, unit in (view.served(rows) if deferred else view.candidates(rows))
+                                 if (proposed if deferred else wanted)(row, unit)}
                 for _representative, stemmed, ref in selected:
                     if ref is None or allowed_unit_refs is not None and ref not in allowed_unit_refs:
                         continue
                     winners = [eligible_rows[path, key] for _rowid, path, key in occurrences[ref]
                                if (path, key) in eligible_rows]
+                    if deferred and len(winners) > 1:
+                        # Exact checks decide which alias stands for the ref, so they cannot wait.
+                        view.prepare({str(row[1]) for row, _unit in winners})
+                        winners = [winner for winner in winners if view.matches_filter(*winner)]
+                        checked.add(ref)
                     if not winners:
                         continue
                     if len(winners) > 1:
@@ -14545,10 +14601,25 @@ class LexicalStore:
                 for row, unit in view.candidates(row for row in rows if (str(row[1]), str(row[0])) in keys):
                     if wanted(row, unit) and str(unit.unit_ref) in ambiguous:
                         candidates[str(unit.unit_ref)] = (row, unit)
+                        checked.add(str(unit.unit_ref))
             scored = statistics.statistics.score(
-                {ref: candidate_tokens[ref] for ref in candidates}, tokens, k,
+                {ref: candidate_tokens[ref] for ref in candidates}, tokens, len(candidates) if deferred else k,
             )
-            hits = [_unit_hit(*candidates[ref], score) for ref, score in scored]
+            if not deferred:
+                hits = [_unit_hit(*candidates[ref], score) for ref, score in scored]
+            else:
+                for start in range(0, len(scored), _OCCURRENCE_TRANSPORT_BATCH):
+                    batch = scored[start:start + _OCCURRENCE_TRANSPORT_BATCH]
+                    view.prepare({str(candidates[ref][0][1]) for ref, _score in batch if ref not in checked})
+                    for ref, score in batch:
+                        if len(hits) >= k or stop_scan():
+                            break
+                        if ref in checked or view.matches_filter(*candidates[ref]):
+                            hits.append(_unit_hit(*candidates[ref], score))
+                        else:
+                            rejected += 1
+                    if len(hits) >= k or stopped:
+                        break
         else:
             if ranked:
                 match = " OR ".join(f'"{token}"' for token in tokens)
@@ -14566,11 +14637,19 @@ class LexicalStore:
                     f"WHERE {where} ORDER BY u.updated DESC, u.parent_path DESC, u.source_order",
                     params,
                 )
+            # The unranked order keeps each page's units together, so a whole-page scan stops where one starts.
+            whole_pages = scan_whole_pages and not ranked
+            page = None
             for row, unit in view.candidates(rows):
                 if len(hits) >= k:
                     break
+                if not (whole_pages and str(row[1]) == page) and stop_scan():
+                    break
+                page = str(row[1])
                 if wanted(row, unit):
                     hits.append(_unit_hit(row, unit, row[18]))
+                else:
+                    rejected += 1
         view.require_complete()
         return hits
 

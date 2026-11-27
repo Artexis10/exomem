@@ -1,7 +1,9 @@
 """Run release-boundary fixtures against files and real canonical store rows."""
 
+import tempfile
 from contextlib import contextmanager
 from contextvars import ContextVar
+from pathlib import Path
 
 import pytest
 from conftest import initialize_vault_state_offline
@@ -51,8 +53,11 @@ def prepare_vault(root):
         if not epistemic_graph.sidecar_path(root).exists():
             epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
         memory_refs.ReferenceIndex(root).rebuild_all()
-        with connection.open_writer(connection.store_path(root), lease_check=lambda: True) as handle:
-            migrate.stage(root, handle.connection)
+        with (
+            tempfile.TemporaryDirectory() as scratch,
+            connection.open_writer(connection.store_path(root), lease_check=lambda: True) as handle,
+        ):
+            migrate.stage(root, handle.connection, Path(scratch) / "expected.sqlite")
             with handle.transaction() as tx:
                 tx.execute(
                     "INSERT INTO store_mode(id, mode, revision, changed_at, release) "
