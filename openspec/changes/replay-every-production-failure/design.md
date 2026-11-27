@@ -110,7 +110,8 @@ Nothing was billed in either sample. At the higher median, these are the typical
 | Run | Sessions | Notional cost |
 |---|---|---|
 | A fix with three targeted cases and no text change | 18 | about $3 |
-| A skill or guidance change reaching 25 cases, plus three targeted cases | about 68 | about $12 |
+| A change to the shipped skills, which nearly every case loads, plus three targeted cases | about 126 | about $23 |
+| A change to one workflow skill that only some client classes load, plus three targeted cases | about 68 | about $12 |
 | A model or judge change, every case on two arms | 108 | about $20 |
 | The release run | 54 | about $10 |
 
