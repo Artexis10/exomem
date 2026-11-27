@@ -1,29 +1,93 @@
+## MODIFIED Requirements
+
+### Requirement: An export is recognised by its name pattern and its items' keys
+
+A staged member SHALL be recognised only when its name matches an entry's `file_glob` and its content matches what the entry's parser reads: a JSON array whose first item carries every key in `item_keys`, an XML document whose root element is `root`, an mbox whose first line starts with `From `, or a JSON object of at most 1 MiB that carries every key in `item_keys`. A file that an expansion wrote SHALL never be recognised. Code SHALL branch only on `parser`.
+
+#### Scenario: Two vendors share a file name
+
+- **WHEN** a stage holds a `conversations.json` whose first item carries `mapping` and `current_node`, and another whose first item carries `chat_messages` and `uuid`
+- **THEN** the first is recognised as a ChatGPT export and the second as a Claude export
+
+#### Scenario: An unrelated file with the same name
+
+- **WHEN** a stage holds a `conversations.json` whose items match no entry's `item_keys`
+- **THEN** it is not recognised and files as an ordinary staged file
+
+#### Scenario: A ChatGPT export in numbered shards
+
+- **WHEN** a stage holds `conversations-000.json` and `conversations-001.json`, each with ChatGPT items
+- **THEN** both are recognised, each expands into its own transcripts, and each files once as an artifact Source
+
+#### Scenario: An export inside an export is not expanded
+
+- **WHEN** a mail message carries an attachment named `archive.mbox`
+- **THEN** the attachment files as an ordinary file and nothing is derived from it
+
+#### Scenario: An album's metadata file
+
+- **WHEN** a Takeout album folder holds a `metadata.json` without `photoTakenTime`
+- **THEN** it is not recognised and files as an ordinary staged file
+
+### Requirement: Filing files each export item as its own Source
+
+At the start of `file`, before selection, the cell SHALL expand every recognised export in the stage into one Markdown transcript per item, named by the vendor's item id or, where the export has none, by a hash of the item. It SHALL record each with the item's created time, Source kind and export path. Each transcript SHALL then be planned, deduplicated, applied and counted like any staged file. The export file itself SHALL file once, as an artifact Source whatever its size. A recognised photo sidecar is not an export: it SHALL derive nothing and file nothing.
+
+#### Scenario: A ChatGPT export becomes one Source per conversation
+
+- **WHEN** a person drops a ChatGPT export that holds 40 conversations on Home and the cell files it
+- **THEN** the vault gains 40 session Sources, each titled with its conversation's title and each carrying the conversation's created time, plus one Source for the export file
+
+#### Scenario: The same export is imported again
+
+- **WHEN** the same export is imported again unchanged
+- **THEN** every transcript is skipped as already imported, and no duplicate Source is created
+
 ## ADDED Requirements
 
-### Requirement: A Takeout photo sidecar is read and left out
+### Requirement: A Takeout sidecar pairs only one to one
 
-A staged JSON object of at most 1 MiB that matches the `google-photos-sidecar` entry SHALL pair with the one image or video in its own folder named by its `title`, taking a copy number from the sidecar's name. A paired sidecar SHALL file nothing. The filing view SHALL count it in `left_out` with reason `IMPORT_SIDECAR_APPLIED`. A sidecar that pairs with no file, or with more than one file, SHALL file as an ordinary file.
+A recognised Takeout sidecar SHALL pair with an image or video in its own staged folder only when its name and its `title` both fit that file under the entry's naming facts, no other file fits it, and that file fits no other sidecar. A pair SHALL be recorded without any position.
+
+#### Scenario: Duplicates with the copy number in either place
+
+- **WHEN** a folder holds `IMG.jpg`, `IMG(1).jpg`, `IMG.jpg.json` and `IMG(1).jpg.supplemental-metadata.json`, both sidecars titled `IMG.jpg`
+- **THEN** each sidecar pairs with its own photo, and neither photo receives the other's time or caption
+
+#### Scenario: A long name cut by Takeout
+
+- **WHEN** a photo's name and its sidecar's name are both cut at the lengths the entry names, and the sidecar's `title` holds the full name
+- **THEN** the sidecar pairs with that photo
+
+#### Scenario: Two sidecars fit one photo
+
+- **WHEN** two sidecars in one folder both fit the same photo
+- **THEN** neither pairs, and both are counted unpaired
+
+### Requirement: A Takeout sidecar is counted by its outcome, never filed
+
+A recognised sidecar SHALL never file as a Source. The filing view SHALL count it in `left_out` under exactly one reason: `IMPORT_SIDECAR_APPLIED` (its photo filed and received a time or caption), `IMPORT_SIDECAR_EMPTY` (its photo filed and it carried nothing), `IMPORT_SIDECAR_PHOTO_NOT_FILED` (its photo was skipped or failed), or `IMPORT_SIDECAR_UNPAIRED` (listed by path). It SHALL NOT add to the stage total as a derived file.
 
 #### Scenario: A Takeout album
 
-- **WHEN** a staged folder holds 50 photos and their 50 sidecars, one of them named with a 46-character cut
-- **THEN** 50 photo Sources file and no JSON Source does, and the filing view counts 50 left out with reason `IMPORT_SIDECAR_APPLIED`
-
-#### Scenario: A duplicate name
-
-- **WHEN** a folder holds `IMG.jpg`, `IMG(1).jpg`, `IMG.jpg.json` and `IMG.jpg(1).json`
-- **THEN** each sidecar pairs with its own photo
+- **WHEN** a staged folder holds 50 photos and their 50 sidecars, 48 of which carry a time or caption
+- **THEN** 50 photo Sources file and no JSON Source does, and the filing view counts 48 `IMPORT_SIDECAR_APPLIED` and 2 `IMPORT_SIDECAR_EMPTY`, and reads done
 
 #### Scenario: A sidecar without its photo
 
 - **WHEN** a sidecar's photo is in another archive part that was not staged
-- **THEN** the sidecar files as an ordinary file
+- **THEN** the sidecar files nothing, and the filing view counts and lists it as `IMPORT_SIDECAR_UNPAIRED`
+
+#### Scenario: The same Takeout imported again
+
+- **WHEN** the same Takeout is imported again unchanged
+- **THEN** every photo is skipped as already imported, no JSON Source files, and every sidecar counts as `IMPORT_SIDECAR_PHOTO_NOT_FILED`
 
 ### Requirement: The owner's caption is kept on the photo
 
-A paired sidecar's non-empty `description` SHALL become the photo Source's `caption` page field, so that a search for its words finds the photo.
+A paired sidecar's non-empty `description` SHALL go into the photo Source's description section, through the same redaction as an upload's description.
 
 #### Scenario: A captioned photo
 
 - **WHEN** a paired sidecar's description is "first day at the lake house"
-- **THEN** the photo's Source page has that caption, and a search for "lake house" finds the photo
+- **THEN** the photo's Source holds that description, and a search for "lake house" finds the photo
