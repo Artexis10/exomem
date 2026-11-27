@@ -116,6 +116,21 @@ def test_the_cli_turns_faces_on_only_with_the_typed_confirmation_and_records_the
     assert setting.enabled and setting.consent_surface == "cli" and setting.consent_at
 
 
+def test_every_faces_command_takes_the_vault_option_that_on_takes(vault, tmp_path, monkeypatch, capsys) -> None:
+    """Catches `exomem faces off --vault` failing, which leaves faces on for an owner who asked to stop them."""
+    turn_on(vault)
+    other = tmp_path / "another-vault"
+    other.mkdir()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(other))  # The option, not the environment, names the vault.
+
+    stopped = cli.main(["faces", "off", "--vault", str(vault)])
+    shown = cli.main(["faces", "status", "--vault", str(vault), "--json"])
+
+    assert stopped == 0 and shown == 0, capsys.readouterr().err
+    assert not face_store.enabled(vault)
+    assert '"state": "off"' in capsys.readouterr().out
+
+
 def test_an_audience_bound_session_is_refused_every_face_operation_before_the_store_opens(vault, monkeypatch) -> None:
     """Catches face data served to another principal."""
     turn_on(vault)
@@ -233,6 +248,31 @@ def test_a_cloud_account_that_never_turned_faces_on_is_told_the_deployment_does_
     assert face_operations.TURN_ON_COMMAND not in status["next_action"]
     assert face_store.HOSTED_SETTING in status["next_action"]
     assert not face_store.store_dir(vault).exists()
+
+
+def test_a_threshold_outside_its_real_range_is_refused_and_one_inside_is_kept(doors, vault) -> None:
+    """Catches a similarity above 1 or a score above 1 that would silently stop all grouping or detection."""
+    turn_on(vault)
+
+    too_similar = doors("manage_memory", "faces.set", {"thresholds": {"join_similarity": 5.0}})
+    too_sure = doors("manage_memory", "faces.set", {"thresholds": {"min_detection_score": 7}})
+    kept = doors("manage_memory", "faces.set", {"thresholds": {"join_similarity": 0.6}})
+
+    assert "INVALID_ARGUMENT" in str(too_similar) and "INVALID_ARGUMENT" in str(too_sure)
+    assert face_groups.overrides(vault) == {"join_similarity": 0.6}
+    assert kept["changed"] is True
+
+
+def test_turning_faces_off_drops_the_face_vectors_held_in_memory(doors, vault) -> None:
+    """Catches group centroids, which are face data, kept in a running service after the owner turns faces off."""
+    turn_on(vault)
+    face_groups.record_page(vault, "Photos/garden.jpg", [face(0)], model_id=MODEL)
+    people_key = str(face_store.people_path(vault))
+    assert any(key[0] == people_key for key in face_groups._CACHE)  # Grouping held them, so the check is live.
+
+    doors("manage_memory", "faces.set", {"state": "off"})
+
+    assert not any(key[0] == people_key for key in face_groups._CACHE)
 
 
 def seed_two_people_and_strangers(vault: Path) -> None:

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 import threading
 from collections.abc import Sequence
@@ -77,6 +78,14 @@ class PageFace:
 def policy() -> dict[str, Any]:
     """The shipped record of the grouping settings and where each default comes from."""
     return json.loads(files("exomem").joinpath("face_policy.json").read_text(encoding="utf-8"))["settings"]
+
+
+def ranges() -> dict[str, tuple[float, float]]:
+    """Each setting's lowest and highest allowed value from the policy record; no upper bound is infinity."""
+    return {
+        name: (float(low), math.inf if high is None else float(high))
+        for name, (low, high) in ((name, entry["range"]) for name, entry in policy().items())
+    }
 
 
 def defaults() -> dict[str, float]:
@@ -334,10 +343,20 @@ def erase(vault_root: Path) -> tuple[Counts | None, list[str]]:
             for connection in reversed(held):
                 connection.rollback()
                 connection.close()
-        people_key = str(face_store.people_path(vault_root))
-        for key in [key for key in _CACHE if key[0] == people_key]:
-            del _CACHE[key]  # The centroids held in memory are face data too.
+        _drop_held_centroids(vault_root)
         return found, face_store.remove_store(vault_root)
+
+
+def forget_centroids(vault_root: Path) -> None:
+    """Drop this vault's centroids held in memory: they are face data too, and off or delete must not keep them."""
+    with _WRITE_LOCK:
+        _drop_held_centroids(vault_root)
+
+
+def _drop_held_centroids(vault_root: Path) -> None:
+    people_key = str(face_store.people_path(vault_root))
+    for key in [key for key in _CACHE if key[0] == people_key]:
+        del _CACHE[key]
 
 
 def _exclusions(writing: Writing, page: str) -> list[tuple[int, float | None, tuple[float, ...]]]:

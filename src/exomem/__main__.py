@@ -3999,6 +3999,12 @@ def _faces_main(argv: list[str]) -> int:
     head, rest = argv[0], argv[1:]
     if head == "on":
         return _faces_on_main(rest)
+    # Every faces command takes `--vault` as `on` does; the registry commands read the vault from the environment.
+    vault_parser = argparse.ArgumentParser(add_help=False)
+    vault_parser.add_argument("--vault", default=None)
+    chosen, rest = vault_parser.parse_known_args(rest)
+    if chosen.vault:
+        os.environ["EXOMEM_VAULT_PATH"] = str(Path(chosen.vault).expanduser())
     if head == "off":
         return _core_op_main(["manage_faces", "--action", "set", "--state", "off", *rest])
     return _core_op_main(["manage_faces", "--action", head, *rest])

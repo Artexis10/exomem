@@ -259,7 +259,7 @@ def change_setting(vault_root: Path, *, state: str | None, thresholds: Mapping[s
 
 
 def _threshold_changes(thresholds: Mapping[str, Any]) -> dict[str, float | None]:
-    known = face_groups.defaults()
+    known = face_groups.ranges()
     changes: dict[str, float | None] = {}
     for name, value in thresholds.items():
         if name not in known:
@@ -268,9 +268,12 @@ def _threshold_changes(thresholds: Mapping[str, Any]) -> dict[str, float | None]
         if value is None:
             changes[name] = None
             continue
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
-            raise OpError("INVALID_ARGUMENT", f"The threshold {name} must be a number of zero or more, so nothing changed.",
-                          "Pass a number, or null to return to the default.")
+        low, high = known[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) \
+                or not low <= value <= high:
+            allowed = f"from {low:g} to {high:g}" if math.isfinite(high) else f"of {low:g} or more"
+            raise OpError("INVALID_ARGUMENT", f"The threshold {name} must be a number {allowed}, so nothing changed.",
+                          "Pass a number in that range, or null to return to the default.")
         changes[name] = float(value)
     return changes
 
@@ -286,6 +289,7 @@ def turn_off(vault_root: Path) -> dict[str, Any]:
         face_store.record_opt_out(index)
     face_scan.stop_backfill(vault_root, timeout=30)
     face_scan.unload()
+    face_groups.forget_centroids(vault_root)
     return {
         "outcome": "Faces are off. Stored faces and names are kept until the owner deletes them.",
         "state": "off",
