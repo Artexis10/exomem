@@ -17,6 +17,7 @@ import numpy as np
 from . import media_models, runtime_resources
 from .asr_facts import AsrFacts
 from .embedding_backend import ModelFilesUnavailable
+from .speech_tracks import Track
 
 
 @dataclass(frozen=True)
@@ -26,34 +27,50 @@ class Segment:
     text: str
 
 
-def audio_chunks(path: Path, sample_rate: int, chunk_samples: int) -> Iterator[np.ndarray]:
-    """Decode audio and video with bounded buffers through PyAV's resampler."""
+def audio_chunks(
+    path: Path, sample_rate: int, chunk_samples: int, stream: int = 0, channel: int | None = None
+) -> Iterator[np.ndarray]:
+    """Decode audio and video with bounded buffers through PyAV's resampler.
+
+    `stream` counts the file's audio streams. `channel` picks one channel of that stream; without it
+    the channels mix down to one, as a recording with no declared tracks does.
+    """
     import av
 
+    from .speech_tracks import TrackUnavailable
+
     fifo = av.AudioFifo()
-    resampler = av.AudioResampler(format="fltp", layout="mono", rate=sample_rate)
     with av.open(str(path)) as container:
         if not container.streams.audio:
             return
-        for frame in container.decode(audio=0):
+        if stream >= len(container.streams.audio):
+            raise TrackUnavailable(f"the file has {len(container.streams.audio)} audio streams; stream {stream} does not exist")
+        audio = container.streams.audio[stream]
+        if channel is not None and channel >= audio.channels:
+            raise TrackUnavailable(f"stream {stream} has {audio.channels} channels; channel {channel} does not exist")
+        # A channel is read from the stream's own layout; mixing to mono would blend it with the others.
+        resampler = av.AudioResampler(
+            format="fltp", layout="mono" if channel is None else audio.layout, rate=sample_rate
+        )
+        for frame in container.decode(audio=stream):
             for decoded in resampler.resample(frame):
                 decoded.pts = None
                 fifo.write(decoded)
                 while fifo.samples >= chunk_samples:
-                    yield fifo.read(chunk_samples).to_ndarray()[0]
+                    yield fifo.read(chunk_samples).to_ndarray()[channel or 0]
         for decoded in resampler.resample(None):
             decoded.pts = None
             fifo.write(decoded)
         while fifo.samples:
-            yield fifo.read(min(fifo.samples, chunk_samples)).to_ndarray()[0]
+            yield fifo.read(min(fifo.samples, chunk_samples)).to_ndarray()[channel or 0]
 
 
-def decode_audio(path: Path, sample_rate: int) -> np.ndarray:
+def decode_audio(path: Path, sample_rate: int, stream: int = 0, channel: int | None = None) -> np.ndarray:
     """The whole recording as mono float32, through the same resampler as the chunked reader.
 
     Samples keep their decoded float values, so loud passages are not clipped to full scale.
     """
-    chunks = list(audio_chunks(path, sample_rate, sample_rate * 30))
+    chunks = list(audio_chunks(path, sample_rate, sample_rate * 30, stream, channel))
     return np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
 
 
@@ -61,12 +78,21 @@ def decode_audio(path: Path, sample_rate: int) -> np.ndarray:
 PROGRESS_FORMAT = 1
 
 
-def _progress_path(vault_root: Path, binary_rel: str) -> Path:
+def _progress_path(vault_root: Path, binary_rel: str, track: str | None = None) -> Path:
     # Keyed by the file's vault path, so removing the file can discard its partial transcript.
+    # A track of a multitrack recording adds its own key, so each track resumes on its own.
     from . import state_paths
 
     name = hashlib.sha256(binary_rel.encode("utf-8")).hexdigest()
+    if track is not None:
+        name += "." + hashlib.sha256(track.encode("utf-8")).hexdigest()[:16]
     return state_paths.vault_state_dir(vault_root) / "media-progress" / "speech" / f"{name}.json"
+
+
+def _records_of(vault_root: Path, binary_rel: str) -> list[Path]:
+    """The progress records of one file: its own and those of each of its tracks."""
+    own = _progress_path(vault_root, binary_rel)
+    return [own, *sorted(own.parent.glob(f"{own.stem}.*.json"))]
 
 
 def binary_rel(vault_root: Path, path: Path) -> str | None:
@@ -104,14 +130,18 @@ def _write_progress(vault_root: Path, path: Path, record: dict) -> None:
 
 
 def progress_offset(vault_root: Path, binary_rel: str) -> int:
-    """Audio samples of this vault file already transcribed; only grows until the transcript completes."""
-    record = _read_progress(_progress_path(vault_root, binary_rel))
-    return 0 if record is None else int(record["next_offset"])
+    """Audio samples of this vault file already transcribed, summed over its tracks; only grows until the transcript completes.
+
+    The sum is what a job's stop counts against its limit: a stop that moved any track forward
+    is progress, so a long recording of several tracks is not stopped for a track that is slow.
+    """
+    return sum(int(record["next_offset"]) for path in _records_of(vault_root, binary_rel) if (record := _read_progress(path)))
 
 
 def discard_progress(vault_root: Path, binary_rel: str) -> None:
-    """Forget the partial transcript of a removed, purged or retired vault file."""
-    _progress_path(vault_root, binary_rel).unlink(missing_ok=True)
+    """Forget the partial transcript of a removed, purged or retired vault file, every track's included."""
+    for path in _records_of(vault_root, binary_rel):
+        path.unlink(missing_ok=True)
 
 
 def _file_sha256(path: Path) -> str:
@@ -425,10 +455,13 @@ class OnnxWhisperBackend:
         language: str | None = None,
         multilingual: bool = False,
         report: AsrFacts | None = None,
+        track: Track | None = None,
     ) -> tuple[Iterator[Segment], str]:
         """Transcribe by seeking through the audio; with a vault, a stopped run resumes at its last seek.
 
         A `language` code replaces detection for the whole file. `report` receives what the engine decided.
+        A `track` reads that stream or channel alone and keeps its own progress record. The record of a
+        finished track stays until the file's transcript is complete, so a stop never transcribes it again.
         """
         if multilingual:  # one language serves the whole file here, so the mode cannot be honoured
             from .extract import MultilingualUnsupported
@@ -446,7 +479,7 @@ class OnnxWhisperBackend:
                 rate = self.spec["sample_rate"]
                 chunk_samples = int(rate * self.spec["chunk_seconds"])
                 rel = binary_rel(vault_root, path) if vault_root is not None else None
-                progress = _progress_path(vault_root, rel) if rel is not None else None
+                progress = _progress_path(vault_root, rel, None if track is None else track.key) if rel is not None else None
                 identity = _file_sha256(path) if progress is not None else None
                 record = _read_progress(progress) if progress is not None else None
                 if record is not None and (
@@ -463,7 +496,8 @@ class OnnxWhisperBackend:
                 chosen = requested if requested is not None else (record["language"] if record else None)
                 probability = record.get("language_probability") if record and requested is None else None
                 yield from done
-                samples = _SeekBuffer(audio_chunks(path, rate, chunk_samples))
+                stream, channel = (0, None) if track is None else (track.stream, track.channel)
+                samples = _SeekBuffer(audio_chunks(path, rate, chunk_samples, stream, channel))
                 while True:
                     window = samples.window(seek, chunk_samples)
                     length = len(window)
@@ -509,7 +543,7 @@ class OnnxWhisperBackend:
                     report.language_probability = probability if requested is None else None
                     report.duration_seconds = seek / rate
                     report.policy = f"decoding-{self.spec['decoding']['revision']}"
-                if progress is not None:
+                if progress is not None and track is None:
                     progress.unlink(missing_ok=True)
 
         return segments(), label

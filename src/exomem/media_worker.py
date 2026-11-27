@@ -61,6 +61,7 @@ from . import (
     runtime_resources,
     scene_frames,
     semantic_segments,
+    speech_tracks,
 )
 from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, AsrFacts
 from .backfill import iter_kb_files
@@ -130,6 +131,7 @@ _PREVIEW_SETTLEMENT_ATTEMPTS = 3
 _RETURNED = "returned"
 _RENDERER_ACTION = "check the timestamp renderer, then retry"
 _FAILED_ACTION = "repair or replace the media artifact, then retry"
+_TRACKS_ACTION = "reprocess the recording with its tracks"
 _LANGUAGE_ACTION = (
     "choose a language the speech model supports and process the file again with reprocess, "
     "or correct EXOMEM_ASR_LANGUAGE"
@@ -903,6 +905,22 @@ class MediaWorker:
             return self._publication_outcome(
                 committed, BLOCKED, self._asr_runtime_failure
             )
+        if job.tracks_unreadable is not None:
+            # The stored row is wrong, not the media: every retry reads the same row,
+            # so only a new declaration repairs it. The error names that remedy as well,
+            # because a reprocess over a complete transcript keeps only the error, on the job row.
+            unreadable = f"{job.tracks_unreadable}; {_TRACKS_ACTION}"
+            committed = self._commit_processing_failure(
+                job,
+                expected_sidecar=expected_sidecar,
+                expected_evidence_version=expected_evidence_version,
+                expected_binary=expected_binary,
+                state=FAILED,
+                error=unreadable,
+                next_action=_TRACKS_ACTION,
+                retryable=False,
+            )
+            return self._publication_outcome(committed, FAILED, unreadable)
         try:
             if job.diarize is not None and not media_engines.stage_enabled(job.media_type):
                 raise extract.EngineDisabled(media_engines.SPEECH, "the speech engine is switched off")
@@ -918,6 +936,10 @@ class MediaWorker:
                 kwargs["multilingual"] = True
             if diarize is not None:
                 kwargs["diarize"] = diarize
+            # A request's declaration wins over the one the sidecar records; the commit then records it.
+            tracks = speech_tracks.as_data(job.tracks) if job.tracks is not None else preserve.speech_tracks_pin(claimed_content)
+            if tracks is not None:
+                kwargs["tracks"] = tracks
             with media_store.logical_view(self._vault_root, job.binary_path) as view:
                 result = extract.extract_text(view, **kwargs)
         except extract.TimestampRenderingUnavailable as e:
@@ -1627,6 +1649,8 @@ class MediaWorker:
         handoff, receipts, surplus, epoch_published = committed
         self._complete_deferred_graph_completion(handoff, receipts, epoch_published=epoch_published)
         self._retire_surplus_parts(surplus)
+        # The transcript is published: a multitrack recording's track records are no longer needed to resume.
+        self._discard_speech_progress(job)
         return True
 
     def _extraction_writes(
@@ -1656,6 +1680,7 @@ class MediaWorker:
             speakers=speakers,
             speaker_verification=speaker_verification,
             diarize=job.diarize,
+            speech_tracks=job.tracks,
             attempts=max(1, job.attempts),
             asr=asr,
             ocr=ocr,
@@ -3000,6 +3025,8 @@ class MediaWorker:
             self._store.finalize_result(
                 item.result, requeue_remaining=item.result.kind in {"extraction", "pending"}
             )
+            if item.result.kind == "extraction":
+                self._discard_speech_progress(item.result.job)
             ended.append(item.result)
         return ended
 

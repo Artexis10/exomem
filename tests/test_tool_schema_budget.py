@@ -90,7 +90,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # The door operation `files.classify`, which changes a kept page's classes later without touching its bytes, added
 # 31 B to the tool surface the same day, 21 B of it in the two door enums (classify-sensitive-material-at-capture).
 # With the dated-observation wording above, the wire measures 33,051 B, and the `create_note` ceiling rises to 2,060 B.
-TOTAL_BUDGET = 33_060
+# The per-file `tracks` declaration of separate microphones on the `save_source` and `save_evidence` file handles added
+# 328 B on 2026-11-27 (keep-speech-results-in-cloud): with the `sensitivity` list above, the wire measures 33,379 B,
+# the two ceilings rise to 1,850 B and 1,650 B, and the total to 33,400 B. The handle names the shape that
+# `media.process` publishes, in 164 B each.
+TOTAL_BUDGET = 33_400
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
@@ -122,8 +126,8 @@ TOOL_CEILINGS: dict[str, int] = {
     "read_page": 700,
     "recall_context": 2800,
     "save_episode": 1200,
-    "save_evidence": 1450,
-    "save_source": 1650,
+    "save_evidence": 1650,
+    "save_source": 1850,
     # `people`, the restriction to pictures of named people, took it to 1,401 B on 2026-11-27 (add-face-search).
     "search_memory": 1450,
     # A pointer to edit_note's supersede_observation joined 2026-11-24

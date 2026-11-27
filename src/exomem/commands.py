@@ -547,6 +547,7 @@ class ClientArtifactFile(TypedDict):
     mime_type: NotRequired[Annotated[str, Field(max_length=255)]]
     file_name: NotRequired[str]
     diarize: NotRequired[Annotated[bool, Field(strict=True, description="Request or skip speaker labels for this audio or video file.")]]
+    tracks: NotRequired[speech_attach_schema_module.Tracks]
 
 
 _OptionalArtifactAdoption = Annotated[
@@ -10568,6 +10569,7 @@ def op_process_media(
     names: speech_attach_schema_module.Names = (),
     replace_labelled: bool = False,
     renames: speech_attach_schema_module.Renames | None = None,
+    tracks: speech_attach_schema_module.Tracks | None = None,
 ) -> dict:
     """Check governed media; retry after remediation; extract again; replicate originals; attach speech.
 
@@ -10580,6 +10582,8 @@ def op_process_media(
     needs the original's SHA-256 and size, and a repeat of the same call changes nothing.
     A merged-turn page is processed again with speaker labels before an attach. Rename-speakers
     changes the speaker labels of one recording to the names a person gave; it keeps no voice.
+    Process or reprocess with `tracks` declares which audio streams or channels of one recording are
+    separate microphones; the recording keeps the declaration, and each line of its transcript names its track.
 
     Args:
         path: Governed KB media path; omit for bounded all-media work. Attach-speech and rename-speakers take one recording.
@@ -10597,6 +10601,7 @@ def op_process_media(
         names: Attach-speech: names for labels of `turns`.
         replace_labelled: Attach-speech: replace a result that has speaker labels or names; the old one stays on a prior page.
         renames: Rename-speakers: each label as the page shows it, mapped to a person's name.
+        tracks: Process or reprocess one recording: its separate microphones, each with a name and its audio stream or channel.
     """
     from . import due_state as due_state_module
     from . import media_processing
@@ -10605,7 +10610,7 @@ def op_process_media(
 
     validate_process_media_operation(operation)
     if operation in {"attach-speech", "rename-speakers"}:
-        if any(value is not None for value in (paths, language, store, diarize)) or multilingual:
+        if any(value is not None for value in (paths, language, store, diarize, tracks)) or multilingual:
             raise OpError("MEDIA_SPEECH_ARGUMENTS", f"{operation} takes one path and its own fields only")
         return _speech_media(
             vault_root, operation, path=path, binary_sha256=binary_sha256, binary_size=binary_size,
@@ -10614,6 +10619,7 @@ def op_process_media(
         )
     if path is not None and paths is not None:
         raise OpError("MEDIA_PATH_SELECTOR_CONFLICT", "use either path or paths, not both")
+    declared = _declared_tracks(operation, path, tracks)
     if diarize is not None:
         if operation not in {"process", "reprocess"}:
             raise OpError("DIARIZE_NOT_APPLICABLE", "speaker labels apply to process and reprocess only")
@@ -10652,11 +10658,56 @@ def op_process_media(
             language=language,
             multilingual=multilingual,
             diarize=diarize,
+            tracks=declared,
         )
     # `retry` re-enqueues in the machine-local job store and commits nothing, so
     # the commit gate inside the carrier keeps it silent — that is the contract,
     # not an omission.
     return _carrying_batch_advisories(vault_root, result)
+
+
+def _declared_tracks(operation: str, path: str | None, tracks: object) -> tuple[Any, ...] | None:
+    """The declaration of tracks a process or reprocess request gives, read before anything is written."""
+    from . import speech_tracks
+    from .cli_ops import OpError
+
+    if tracks is None:
+        return None
+    if operation not in {"process", "reprocess"}:
+        raise OpError("TRACKS_NOT_APPLICABLE", "a declaration of tracks applies to process and reprocess only")
+    if path is None:
+        raise OpError("MEDIA_PATH_REQUIRED", "a declaration of tracks names the streams of one recording; give its path")
+    try:
+        declared = speech_tracks.declaration(tracks)
+    except speech_tracks.TrackDeclarationError as error:
+        raise OpError("INVALID_TRACKS", str(error)) from error
+    if not declared and operation != "reprocess":
+        raise OpError(
+            "INVALID_TRACKS",
+            "declare at least one track, or omit tracks to keep the recording's own; "
+            "to read it as one mix again, reprocess it with tracks: []",
+        )
+    # An empty declaration on reprocess reads one mix and clears the recorded one (`preserve.set_speech_tracks_pin`).
+    return declared
+
+
+def _require_source_write(vault_root: Path, binary: Path) -> None:
+    """Refuse a caller who may not write the recording's Source, before anything reads it or queues work.
+
+    A declaration of tracks rewrites the Source when the worker publishes, so the caller must hold the write the
+    publication makes (as `source_corrections.can_record` asks). The refusal is the one an unavailable target gives,
+    so it says nothing about the recording, its transcript or its labels. It is fail-closed for restricted writers
+    only: a wrong refusal costs that writer one retry, and the owner never pays, because the owner always passes.
+    """
+    from . import originals
+    from .cli_ops import OpError
+    from .governance import connector_boundary, membership
+
+    sidecar = originals.sidecar_path(binary).relative_to(vault_root).as_posix()
+    try:
+        connector_boundary.require_write(vault_root, sidecar, content=None)
+    except (ValueError, OSError, connector_boundary.BoundaryUnavailable, membership.MembershipUnresolved):
+        raise OpError("WRITE_REFUSED", "target is unavailable") from None
 
 
 def _speech_media(
@@ -10753,6 +10804,7 @@ def _process_media(
     language: str | None = None,
     multilingual: bool = False,
     diarize: bool | None = None,
+    tracks: tuple[Any, ...] | None = None,
 ) -> dict:
     from . import index_sync, media_jobs
     from .cli_ops import OpError
@@ -10965,10 +11017,13 @@ def _process_media(
 
     if media_processing.classify_media(binary) is None and not document_containers.is_container(binary):
         raise OpError("UNSUPPORTED_MEDIA", f"unsupported media type for {binary.name!r}")
+    if tracks is not None:
+        _require_source_write(vault_root, binary)
 
     try:
         result = _run_media_operation(
             vault_root, binary, operation, language, multilingual, _commit_guard, diarize=diarize,
+            tracks=tracks,
         )
     except media_processing.MediaProcessingError as exc:
         raise OpError(exc.code, exc.reason) from exc
@@ -10994,24 +11049,30 @@ def _process_media(
 
 def _run_media_operation(
     vault_root: Path, binary: Path, operation: str, language, multilingual: bool, commit_guard,
-    *, queue_guard=None, diarize: bool | None = None,
+    *, queue_guard=None, diarize: bool | None = None, tracks=None,
 ):
     """Run one explicit media operation on one governed binary.
 
     `queue_guard` (reprocess only) is the hold for queueing that commits no sidecar; see `reconcile_media`.
+    `tracks` is a declaration that `speech_tracks.declaration` has read; one the Source already records asks for nothing.
     """
     from . import document_containers, media_processing
 
     if document_containers.is_container(binary):
         if diarize is not None:
             raise media_processing.MediaProcessingError("DIARIZE_NOT_APPLICABLE", "speaker labels apply to audio and video only")
+        if tracks is not None:
+            raise media_processing.MediaProcessingError(
+                "TRACKS_NOT_APPLICABLE", "a declaration of tracks applies to audio and video only"
+            )
         if language is not None or multilingual or operation == "reprocess":
             raise media_processing.MediaProcessingError("UNSUPPORTED_MEDIA", "process or retry the container; reprocess individual document payloads without a language option")
         return media_processing.process_container(vault_root, binary, retry=operation == "retry", commit_guard=commit_guard)
-    if operation == "process" and (language is not None or multilingual or diarize is not None):
+    tracks = media_processing.unapplied_tracks(vault_root, binary, tracks)
+    if operation == "process" and (language is not None or multilingual or diarize is not None or tracks is not None):
         return media_processing.process_declared_media(
             vault_root, binary, language=language, multilingual=multilingual,
-            commit_guard=commit_guard, diarize=diarize,
+            commit_guard=commit_guard, diarize=diarize, tracks=tracks,
         )
     if operation == "process":
         return media_processing.reconcile_media(
@@ -11020,7 +11081,7 @@ def _run_media_operation(
     if operation == "reprocess":
         return media_processing.reprocess_media(
             vault_root, binary, language=language, multilingual=multilingual,
-            commit_guard=commit_guard, queue_guard=queue_guard, diarize=diarize,
+            commit_guard=commit_guard, queue_guard=queue_guard, diarize=diarize, tracks=tracks,
         )
     return media_processing.retry_media(vault_root, binary, commit_guard=commit_guard)
 

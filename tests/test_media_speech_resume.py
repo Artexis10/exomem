@@ -29,9 +29,9 @@ def _enqueue_speech(vault: Path):
     return store, binary, sidecar
 
 
-def _transcribed(vault: Path, binary: Path, windows: int) -> Path:
-    """Leave the progress record the engine writes after `windows` windows of `binary`."""
-    path = onnx_asr_runtime._progress_path(vault, onnx_asr_runtime.binary_rel(vault, binary))
+def _transcribed(vault: Path, binary: Path, windows: int, track: str | None = None) -> Path:
+    """Leave the progress record the engine writes after `windows` windows of `binary`, or of one of its tracks."""
+    path = onnx_asr_runtime._progress_path(vault, onnx_asr_runtime.binary_rel(vault, binary), track)
     onnx_asr_runtime._write_progress(
         vault,
         path,
@@ -267,6 +267,31 @@ def test_a_worker_restart_mid_job_resumes_from_the_saved_offset(
     [result] = media_jobs.MediaJobStore(vault).pending_results()
     assert result.payload["text"] == "six windows of speech"
     assert sidecar.exists()
+
+
+@pytest.mark.parametrize("execution_mode", ["inline", "process"])
+def test_a_published_multitrack_transcript_drops_the_progress_of_every_track(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, execution_mode: str
+) -> None:
+    store, binary, sidecar = _enqueue_speech(vault)
+
+    def engine(path: Path, *, vault_root: Path, **_kwargs):
+        # Each track keeps its record after its last window, so that a stop before publication loses no track.
+        _transcribed(vault_root, path, 3, track="0:0")
+        _transcribed(vault_root, path, 3, track="0:1")
+        return extract.ExtractResult(text="[0:00] [Host]: hello", media_type="audio", engine="test+tracks+timed")
+
+    monkeypatch.setattr(extract, "extract_text", engine)
+    job = store.claim_next()
+    assert job is not None
+    worker = media_worker.MediaWorker(vault, execution_mode=execution_mode)
+    worker._process(job)
+    if execution_mode == "process":
+        assert onnx_asr_runtime.progress_offset(vault, onnx_asr_runtime.binary_rel(vault, binary)) == 6 * _WINDOW
+        worker._drain_parent_results()
+
+    assert b"[Host]: hello" in sidecar.read_bytes()
+    assert onnx_asr_runtime.progress_offset(vault, onnx_asr_runtime.binary_rel(vault, binary)) == 0
 
 
 def test_a_new_upload_is_claimed_before_a_resumed_recording(vault: Path) -> None:
