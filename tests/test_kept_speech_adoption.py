@@ -495,6 +495,30 @@ def test_with_the_speech_engine_on_a_kept_recording_queues_no_speech_job_and_a_k
     assert ledger.counts()["pending"] == 0
 
 
+def test_a_kept_video_whose_page_settles_in_a_later_chunk_still_gets_its_frame_vector_job(
+    vault: Path, owner: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setattr(embeddings, "clip_enabled", lambda: True)
+    video, video_page = _transcribed(owner, monkeypatch, "clip.mp4", media="video")
+    _stage(vault, video, video_page)
+    monkeypatch.setattr(extract, "extract_text", lambda *_a, **_k: pytest.fail("the speech engine ran"))
+    monkeypatch.setattr(adoption_run, "APPLY_CHUNK_ITEMS", 1)  # the byte cap splits a real video from its page the same way
+
+    run_id, planned = _plan(vault)
+    applied = adoption_run.apply(vault, run_id=run_id, plan_id=planned["plan"]["plan_id"], today=TODAY)
+    while applied.get("continuation"):
+        applied = adoption_run.apply(
+            vault, run_id=run_id, plan_id=planned["plan"]["plan_id"], continuation=applied["continuation"], today=TODAY
+        )
+
+    outcomes = applied["outcomes"]
+    stored_video = vault / outcomes[f"{STAGE}/{video.name}"]["artifact_path"]
+    assert outcomes[f"{STAGE}/{video_page.name}"]["kept_speech"]["outcome"] == "filled"
+    job = media_jobs.MediaJobStore(vault).get_by_binary(stored_video, media_type="video")
+    assert job is not None and job.do_clip and not job.do_ocr
+
+
 def test_a_restored_vault_with_complete_audio_and_video_pages_queues_no_speech_job_and_keeps_its_pages(
     owner: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, long_transcripts: None
 ) -> None:
@@ -669,6 +693,68 @@ def test_deciding_whether_a_recording_is_coming_loads_no_adoption_run_of_the_vau
 
     assert held["apply_stop"]["code"] == kept_speech.RECORDING_PENDING and applied["phase"] == "applied"
     assert loads == []
+
+
+def test_a_page_is_held_not_filed_as_text_when_the_stage_index_of_its_recordings_window_is_damaged(
+    duplicate_index: Path, owner: Path, monkeypatch: pytest.MonkeyPatch, long_transcripts: None
+) -> None:
+    vault = duplicate_index
+    audio, audio_page = _transcribed(owner, monkeypatch, "interview.m4a", lines=40)
+    recording_window = _series_window(vault, audio, series=(audio, audio_page))
+    page_window = _series_window(vault, audio_page, series=(audio, audio_page))
+    pages = _stored_pages(vault)
+    recording_run, recording_plan = consume._plan(vault, f"_Imports/{recording_window}")  # planned, not applied
+    index = adoption_run.AdoptionRunStore(vault).base.parent / "stage-runs" / f"{recording_window}.json"
+    assert index.is_file()
+    index.write_text("{ not a run list", encoding="utf-8")  # a crash or an edit left the stage's index unreadable
+
+    run_id, plan_id = consume._plan(vault, f"_Imports/{page_window}")
+    held = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=TODAY)
+
+    assert adoption_run.AdoptionRunStore(vault).load(run_id)["plan"]["kept_speech"]["awaiting"] == 1
+    assert held["apply_stop"]["code"] == kept_speech.RECORDING_PENDING and _stored_pages(vault) == pages  # no text Source
+    consume._apply(vault, recording_run, recording_plan)
+    applied = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, continuation=held["continuation"], today=TODAY)
+    assert applied["outcomes"][f"_Imports/{page_window}/{audio_page.name}"]["kept_speech"]["outcome"] == "filled"
+
+
+def test_a_stage_index_keeps_the_run_that_another_process_listed_while_a_run_started(
+    vault: Path, owner: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    binary, _page = _transcribed(owner, monkeypatch, "interview.m4a")
+    window = _series_window(vault, binary, series=(binary,))
+    first = adoption_run.start(vault, path=f"_Imports/{window}", today=TODAY)["run_id"]
+    index = adoption_run.AdoptionRunStore(vault).base.parent / "stage-runs" / f"{window}.json"
+    real, raced = adoption_run.AdoptionRunStore.indexed_in_stage, []
+
+    def listed_by_another_process(store, run):
+        write = real(store, run)
+        if not raced:  # another process lists its run after this start read the index and before it commits
+            raced.append(True)
+            index.write_text(json.dumps({"stage": window, "runs": [first, "adr-other-process"]}))
+        return write
+
+    monkeypatch.setattr(adoption_run.AdoptionRunStore, "indexed_in_stage", listed_by_another_process)
+
+    second = adoption_run.start(vault, path=f"_Imports/{window}", today=TODAY)["run_id"]
+
+    assert json.loads(index.read_text())["runs"] == [first, "adr-other-process", second]
+
+
+def test_a_page_whose_recording_is_in_no_window_of_its_series_reads_no_other_windows_series(
+    duplicate_index: Path, owner: Path, monkeypatch: pytest.MonkeyPatch, long_transcripts: None
+) -> None:
+    vault = duplicate_index
+    audio, audio_page = _transcribed(owner, monkeypatch, "interview.m4a", lines=40)
+    page_window = _series_window(vault, audio_page, series=(audio_page,))
+    bystander = _series_window(vault, audio, series=(audio,))  # a window of another series that holds a recording
+    read: list[str] = []
+    real = import_stage.read_series
+    monkeypatch.setattr(import_stage, "read_series", lambda root, window: read.append(window) or real(root, window))
+
+    consume._plan(vault, f"_Imports/{page_window}")
+
+    assert page_window in read and bystander not in read
 
 
 @pytest.fixture

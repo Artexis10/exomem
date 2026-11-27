@@ -65,7 +65,15 @@ from . import overview as overview_module
 from .adopt import _TEXT_IMPORT_SUFFIXES
 from .governance import raw_protection
 from .kbdir import is_in_managed_root, managed_join, managed_root
-from .vault import PlannedWrite, batch_atomic_write, is_import_id, kb_root, parse_frontmatter
+from .vault import (
+    MISSING_CONTENT_HASH,
+    ContentHashMismatchError,
+    PlannedWrite,
+    batch_atomic_write,
+    is_import_id,
+    kb_root,
+    parse_frontmatter,
+)
 from .writer_lease import _FAST_ACK_DEADLINE_SECONDS
 
 RUNS_DIR = "_Adoption/runs"
@@ -483,44 +491,56 @@ class AdoptionRunStore:
     def _stage_index(self, import_id: str) -> Path:
         return self.base.parent / _STAGE_RUNS / f"{import_id}.json"
 
-    def _indexed_runs(self, import_id: str) -> list[str] | None:
-        """The ids that the stage's index lists, none when it lists none; None when the index cannot be read."""
+    def _index_state(self, import_id: str) -> tuple[list[str] | None, str | None]:
+        """The run ids that the stage's index lists, and the hash that guards a write of it.
+
+        The ids are an empty list for a stage with no index, and None when the index exists and cannot be read.
+        """
         try:
-            document = json.loads(self._stage_index(import_id).read_text(encoding="utf-8"))
+            raw = self._stage_index(import_id).read_bytes()
         except FileNotFoundError:
-            return []
-        except (OSError, ValueError):
-            return None
+            return [], MISSING_CONTENT_HASH
+        except OSError:
+            return None, None
+        guard = hashlib.sha256(raw).hexdigest()
+        try:
+            document = json.loads(raw)
+        except ValueError:
+            return None, guard
         ids = document.get("runs") if isinstance(document, dict) else None
-        return ids if isinstance(ids, list) and all(isinstance(run_id, str) for run_id in ids) else None
+        return (ids if isinstance(ids, list) and all(isinstance(run_id, str) for run_id in ids) else None), guard
 
     def indexed_in_stage(self, run: dict) -> PlannedWrite | None:
         """The write that adds a run to the index of its stage, to commit with the run; None when it has no stage or is listed.
 
         The index names each stage's runs, so a caller that needs one stage's runs reads that stage's file and
-        those runs and never the runs of the vault (`stage_steps`). A damaged index is built again from the runs.
+        those runs and never the runs of the vault (`stage_steps`). A damaged index is built again from the runs,
+        which loads them all, so that costs once for each damage. The write is guarded by the hash of the index
+        that it read: when another process lists a run first, the commit refuses (`ContentHashMismatchError`) and
+        `start` reads the index again, so no entry is lost.
         """
         recorded = run.get("stage")
         import_id = recorded.get("stage") if isinstance(recorded, dict) else None
         if not is_import_id(import_id):
             return None
-        listed = self._indexed_runs(import_id)
+        listed, guard = self._index_state(import_id)
         if listed is None:
             listed = [earlier["run_id"] for earlier in reversed(self.runs_of_stage(import_id))]
         if run["run_id"] in listed:
             return None
         content = json.dumps({"stage": import_id, "runs": [*listed, run["run_id"]]}) + "\n"
-        return PlannedWrite(path=self._stage_index(import_id), content=content)
+        return PlannedWrite(path=self._stage_index(import_id), content=content, expected_hash=guard)
 
     def stage_steps(self, import_id: str) -> tuple[str, ...] | None:
-        """The step that moves each run of the stage on (`_next_filing_step`); none for a stage no run started in.
+        """The step that moves each run of the stage on (`_next_filing_step`); empty for a stage no run started in.
 
         It reads the stage's own index and then one counted run for each run of that stage, so its cost follows the
         stage and never the vault's history of runs. A run counted before and unchanged since is not read again.
-        None when the index cannot be read, which is not an empty stage. A run that started before the index existed
-        is not listed.
+        None when the index exists and cannot be read: that is no answer, and a caller treats the stage as still
+        open, so that damage never files a page early. The next run that starts in the stage builds the index again.
+        A run that started before the index existed is not listed.
         """
-        listed = self._indexed_runs(import_id)
+        listed, _guard = self._index_state(import_id)
         if listed is None:
             return None
         tallies = (_tally_of(self.run_dir(run_id)) for run_id in listed)
@@ -589,6 +609,8 @@ class AdoptionRunStore:
 
 # The folder beside `runs/` that holds, for each stage, the ids of the runs that started in it (`indexed_in_stage`).
 _STAGE_RUNS = "stage-runs"
+# How often `start` reads a stage's index again when another process lists a run in it first.
+_INDEX_ATTEMPTS = 4
 # What a `file` reply counts of one outcome, as bits (see `_Tally`).
 _FILED, _FAILED, _SKIPPED, _STORED = 1, 2, 4, 8
 # The runs a process keeps counted, by folder: enough for the pages of a few large imports.
@@ -1753,20 +1775,30 @@ def start(
         }
     store = AdoptionRunStore(root)
     with _LOCK:
-        indexed = store.indexed_in_stage(run)  # the stage's index of runs commits with the run, so no run is missing from it
-        if source_run is None:
-            store.save(run, *([indexed] if indexed else []))
-        else:
+        if source_run is not None:
             # The cursor turns `used` in the same atomic write that saves the page it opened.
             source_run = store.load(source_run["run_id"])
             current = _cursor_entry(source_run, "after", token)
             if current["state"] == "used":
                 return _present(root, store.load(current["reply"]["run_id"]))
             current["state"], current["reply"] = "used", {"run_id": run_id}
-            batch_atomic_write(
-                [store.planned_write(run), store.planned_write(source_run), *([indexed] if indexed else [])],
-                vault_root=root,
-            )
+        for attempt in range(_INDEX_ATTEMPTS):
+            # The stage's index of runs commits with the run, so no run is missing from it.
+            indexed = store.indexed_in_stage(run)
+            index_write = [indexed] if indexed else []
+            try:
+                if source_run is None:
+                    store.save(run, *index_write)
+                else:
+                    batch_atomic_write(
+                        [store.planned_write(run), store.planned_write(source_run), *index_write], vault_root=root,
+                    )
+            except ContentHashMismatchError as clash:
+                # Another process listed a run of this stage between the read and the commit: read the index again.
+                if indexed is None or clash.path != indexed.path or attempt == _INDEX_ATTEMPTS - 1:
+                    raise
+            else:
+                break
     return _present(root, run)
 
 
@@ -2072,15 +2104,18 @@ class _Arrivals:
     and nothing says the window is finished (`expects`). A window that the person discarded or cancelled, one that
     filed its last step, and a recording that failed in a finished window each send nothing: the page files as text.
 
-    The read costs what the series costs and never what the vault's history costs. It checks the recording against
-    the series' path list before it reads anything else. It then reads one small series file for each stage folder
-    that the vault holds now, and for a window of the series that holds the recording one filing record, one receipt
-    and the stage's index of runs with each run's counted step (`AdoptionRunStore.stage_steps`). It loads no other run.
+    The read costs what the series costs and never what the vault's history costs, and it stops at the first
+    question that answers no. It checks the recording against the page's own series (one small file) first. It then
+    lists the stage folders that the vault holds now, and looks for the recording in each by name. Only a window
+    that holds it has its series file read, and only one of the same series has its filing record, its window
+    record and its stage's index of runs read (`AdoptionRunStore.stage_steps`). It loads no other run.
     """
 
     def __init__(self, root: Path) -> None:
         self._root = root
-        self._series: dict[str, tuple[frozenset[str], tuple[str, ...]]] = {}
+        self._folders: list[str] | None = None
+        self._series: dict[str, import_stage.Series | None] = {}
+        self._named: dict[str, frozenset[str]] = {}
         self._unfinished: dict[str, bool] = {}
 
     def expects(self, page_rel: str) -> bool:
@@ -2088,37 +2123,38 @@ class _Arrivals:
         parts = PurePosixPath(page_rel).parts
         if len(parts) < 3 or parts[0] != IMPORT_STAGE_DIR or not page_rel.lower().endswith(".md"):
             return False
-        recording = "/".join(parts[2:])[: -len(".md")]
-        paths, siblings = self._of(parts[1])
-        if recording not in paths:
+        window, recording = parts[1], "/".join(parts[2:])[: -len(".md")]
+        mine = self._read_series(window)
+        if mine is None or recording not in self._paths(window):
             return False  # no window of this series holds that recording: nothing else needs reading
-        return any(
-            os.path.lexists(self._root / IMPORT_STAGE_DIR / sibling / recording) and self._open(sibling) for sibling in siblings
-        )
+        for other in self._stage_folders():
+            if other == window or not os.path.lexists(self._root / IMPORT_STAGE_DIR / other / recording):
+                continue
+            theirs = self._read_series(other)
+            if theirs is not None and (theirs.label, theirs.paths) == (mine.label, mine.paths) and self._open(other):
+                return True
+        return False
 
-    def _of(self, window: str) -> tuple[frozenset[str], tuple[str, ...]]:
-        """The series' paths and the other windows of the series, for a window; read once."""
+    def _stage_folders(self) -> list[str]:
+        """The stage folders that the vault holds now, not every window it ever received: a window whose folder is gone has no file left to file."""
+        if self._folders is None:
+            try:
+                with os.scandir(self._root / IMPORT_STAGE_DIR) as entries:
+                    self._folders = sorted(entry.name for entry in entries if is_import_id(entry.name))
+            except OSError:
+                self._folders = []
+        return self._folders
+
+    def _read_series(self, window: str) -> import_stage.Series | None:
         if window not in self._series:
-            self._series[window] = self._read(window)
+            self._series[window] = import_stage.read_series(self._root, window)
         return self._series[window]
 
-    def _read(self, window: str) -> tuple[frozenset[str], tuple[str, ...]]:
-        mine = import_stage.read_series(self._root, window)
-        if mine is None:
-            return frozenset(), ()
-        try:
-            # The stage folders that the vault holds now, not every window it ever received: a window whose folder is
-            # gone has no file left to file.
-            with os.scandir(self._root / IMPORT_STAGE_DIR) as entries:
-                others = sorted(entry.name for entry in entries if entry.name != window and is_import_id(entry.name))
-        except OSError:
-            return frozenset(), ()
-        same = tuple(
-            other for other in others
-            if (series := import_stage.read_series(self._root, other)) is not None
-            and (series.label, series.paths) == (mine.label, mine.paths)
-        )
-        return frozenset(mine.paths), same
+    def _paths(self, window: str) -> frozenset[str]:
+        if window not in self._named:
+            series = self._read_series(window)
+            self._named[window] = frozenset(series.paths) if series is not None else frozenset()
+        return self._named[window]
 
     def _open(self, window: str) -> bool:
         """Whether a window still has work that can file its members: not discarded, not filed to the end, not cancelled.
@@ -2126,7 +2162,8 @@ class _Arrivals:
         A window that no run has started in is not planned yet, so it is open. Every run that started in it is read
         by its counted step: one step other than `done` (an open scan or apply, a retry, a finish) keeps it open, as
         `_resumed_page` reads a stage's runs. A run that was cancelled ends in `done`, so nothing files its members.
-        An index that cannot be read is no answer, and the page files as text.
+        An index that exists and cannot be read is no answer: the window stays open, so that damage never files a
+        page early (`AdoptionRunStore.stage_steps`).
         """
         if window not in self._unfinished:
             self._unfinished[window] = self._read_open(window)
@@ -2140,7 +2177,7 @@ class _Arrivals:
         if landed is None or landed.kind != import_stage.WINDOW_LANDED:
             return False
         steps = AdoptionRunStore(self._root).stage_steps(window)
-        return steps is not None and (not steps or any(step != "done" for step in steps))
+        return steps is None or not steps or any(step != "done" for step in steps)
 
 
 def _pair_kept_page(
@@ -2826,12 +2863,12 @@ def _space_shortfall(root: Path, chunk: list[dict], stage: import_stage.Stage | 
     }
 
 
-def _request_frame_vectors(root: Path, planned: dict, stats: Counter) -> None:
+def _request_frame_vectors(root: Path, artifact_path: str, stats: Counter) -> None:
     """Queue the frame vectors of a recording that arrived with its transcript: its extraction is complete, so no
-    other request would queue the job (`media_processing.queue_frame_vectors`); finish repairs what is missed."""
+    other request would queue the job (`media_processing.queue_frame_vectors`), and `finish` does not repair it."""
     from . import media_processing
 
-    artifact = root / planned["artifact_path"]
+    artifact = root / artifact_path
     try:
         media_processing.queue_frame_vectors(root, artifact, media_processing.classify_media(artifact))
     except Exception:  # noqa: BLE001 - committed custody is authoritative; the worker scan queues the job at its next start
@@ -3480,7 +3517,7 @@ def _apply_chunk(
     stats["kept_unpaired"] += sum(
         1 for path in as_text if (outcomes.get(path) or {}).get("status") in _APPLIED_STATUSES
     )
-    with_page = _settle_kept_pages(root, run, deferred_kept, stats=stats, reads=reads)
+    with_page = _settle_kept_pages(root, run, deferred_kept, stats=stats, reads=reads)  # recordings whose page settled now
     with call_spans.span("adoption.settle", {"items": len(settled) + len(landed)}):
         for planned in [*settled, *landed]:
             outcome = outcomes[planned["original_path"]]
@@ -3501,8 +3538,10 @@ def _apply_chunk(
                 seconds = _request_extraction(root, planned, budget, stats)
                 if seconds is not None:
                     extractions.append(seconds)
-            if planned["original_path"] in with_page:
-                _request_frame_vectors(root, planned, stats)
+    for recording in sorted(with_page):
+        # Whichever chunk stored the recording: the chunk cap splits a video from its page, which plans after it.
+        if artifact_path := (outcomes.get(recording) or {}).get("artifact_path"):
+            _request_frame_vectors(root, artifact_path, stats)
     written.extend(copied)
     # The Sources are written without the semantic seam, so the chunk counts them in the
     # backlog itself, before any note does. Each draft note's own commit refreshes its Source.
