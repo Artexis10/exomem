@@ -25,7 +25,6 @@ from pathlib import Path
 
 import yaml
 
-from .held_fs import name_variants
 from .kbdir import managed_join
 from .vault import (
     FILENAME_STYLES,
@@ -35,6 +34,7 @@ from .vault import (
     UnparseableFilenameStyleError,
     batch_atomic_write,
     corrected_title_name,
+    folder_variants,
     kb_root,
     read_bytes_without_pinning,
     read_guarded_text,
@@ -310,14 +310,15 @@ def _fallback_registry() -> ProjectRegistry:
 
 
 def reuse_folder_spelling(folder: str, existing: Iterable[str]) -> str:
-    """The existing folder name that shares `folder`'s `vault_name_key`, else `folder`.
+    """The existing folder name that shares `folder`'s `folder_lookalike_key`, else `folder`.
 
-    An exact match wins; among variants the first in sorted order is stable.
+    An exact match wins; among variants the first in sorted order is stable. `existing` holds
+    folder names, so a name that differs only by case or separators is the same folder.
     """
     names = set(existing)
     if folder in names:
         return folder
-    return next(iter(name_variants(names, folder)), folder)
+    return next(iter(folder_variants(names, folder)), folder)
 
 
 def child_folder_names(directory: Path) -> list[str]:
@@ -332,7 +333,7 @@ def child_folder_names(directory: Path) -> list[str]:
 def _title_case_slug(key: str, existing: Iterable[str] = ()) -> str:
     """Auto-derive a folder name from a slug key (`project-alpha` → `Project Alpha`).
 
-    A name in `existing` with the same `vault_name_key` is reused as spelled.
+    A name in `existing` with the same `folder_lookalike_key` is reused as spelled.
     """
     return reuse_folder_spelling(" ".join(part.capitalize() for part in key.split("-")), existing)
 
@@ -505,7 +506,7 @@ def plan_project_keys(
         if variant != folder_name:
             raise ValueError(
                 f"PATH_VARIANT_EXISTS: project folder {folder_name!r} matches the "
-                f"existing folder {variant!r} apart from case or Unicode form; "
+                f"existing folder {variant!r} apart from case, Unicode form or separators; "
                 "use that spelling"
             )
         known_folders.append(folder_name)

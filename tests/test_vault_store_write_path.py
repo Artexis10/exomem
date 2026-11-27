@@ -846,6 +846,66 @@ def test_a_stored_split_is_merged_into_its_canonical_spelling(served):
     assert rows == [("Knowledge Base/Notes/Stored Only/Epsilon.md",)]
 
 
+def _store_pages(root, folder, stems):
+    for stem in stems:
+        vault_module.batch_atomic_write(
+            [planned(root, f"{folder}/{stem}.md", GAMMA_TEXT, create_only=True)],
+            vault_root=root,
+            post_commit_fanout=False,
+        )
+
+
+def test_a_folder_that_only_the_store_holds_takes_a_write_that_differs_by_a_separator(served):
+    """Defect: the store walk steers only the case, so `stored only/` opens beside the stored `Stored-Only/`."""
+    _store_pages(served, "Knowledge Base/Notes/Stored-Only", ["Gamma"])
+    assert not (served / "Knowledge Base/Notes/Stored-Only").exists()
+
+    assert (
+        vault_module.respell_new_path(served, "Knowledge Base/Notes/stored only/Delta.md")
+        == "Knowledge Base/Notes/Stored-Only/Delta.md"
+    )
+
+
+def test_a_folder_leaf_that_only_the_store_holds_is_steered_when_the_caller_names_a_folder(served):
+    """Defect: a leaf folder is judged by the disk alone, so a stored `Stored-Only` is invisible to its own look-alike."""
+    _store_pages(served, "Knowledge Base/Notes/Stored-Only", ["Gamma"])
+    assert not (served / "Knowledge Base/Notes/Stored-Only").exists()
+
+    assert (
+        vault_module.respell_new_path(served, "Knowledge Base/Notes/stored only", leaf_is_folder=True)
+        == "Knowledge Base/Notes/Stored-Only"
+    )
+
+
+def test_a_stored_group_never_gains_a_third_spelling(served):
+    """Defect: the store walk takes the first look-alike by name, so the smaller stored side keeps growing."""
+    _store_pages(served, "Knowledge Base/Notes/stored_only", ["Gamma", "Delta", "Epsilon"])
+    _store_pages(served, "Knowledge Base/Notes/Stored-Only", ["Zeta"])
+
+    assert (
+        vault_module.respell_new_path(served, "Knowledge Base/Notes/storedonly/Eta.md")
+        == "Knowledge Base/Notes/stored_only/Eta.md"
+    )
+
+
+def test_a_stored_separator_pair_is_merged_into_its_canonical_spelling(served):
+    """Defect: the merge groups stored folders by case only, so a stored pair that differs by a hyphen stays two."""
+    from exomem import path_variants
+
+    _store_pages(served, "Knowledge Base/Notes/Stored-Only", ["Gamma", "Delta"])
+    _store_pages(served, "Knowledge Base/Notes/stored only", ["Epsilon"])
+
+    preview = path_variants.preview(served)
+    assert [unit["from"] for unit in preview["moves"]] == ["Knowledge Base/Notes/stored only/Epsilon.md"]
+    result = path_variants.apply(served, plan_id=preview["plan_id"], why="merge the stored pair")
+
+    assert result["moved"] == [
+        {"from": "Knowledge Base/Notes/stored only/Epsilon.md", "to": "Knowledge Base/Notes/Stored-Only/Epsilon.md"}
+    ]
+    rows = store_rows(served, "SELECT path FROM store_pages WHERE path LIKE ?", "Knowledge Base/Notes/%Epsilon.md")
+    assert rows == [("Knowledge Base/Notes/Stored-Only/Epsilon.md",)]
+
+
 def test_the_rows_that_governed_commands_commit_equal_a_cold_derivation_from_the_files(
     served, tmp_path
 ):

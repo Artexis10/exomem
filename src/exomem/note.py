@@ -1439,7 +1439,7 @@ def _resolve_path(
         predecessor=predecessor,
     )
     folder = vault_root / respell_new_path(
-        vault_root, placement.folder.relative_to(vault_root).as_posix()
+        vault_root, placement.folder.relative_to(vault_root).as_posix(), leaf_is_folder=True
     )
     stem = placement.stem
     from .governance import connector_boundary
@@ -1451,7 +1451,7 @@ def _resolve_path(
         )
         if inbox is not None:
             # The inbox is another tree, so its folders take their existing spellings too.
-            folder = vault_root / respell_new_path(vault_root, inbox)
+            folder = vault_root / respell_new_path(vault_root, inbox, leaf_is_folder=True)
         connector_boundary.require_create(vault_root, (folder / f"{stem}.md").relative_to(vault_root).as_posix())
     except ValueError as error:
         raise NoteError("WRITE_REFUSED", [], "target is unavailable") from error

@@ -1138,9 +1138,11 @@ def _check_path_variants(vault_root: Path) -> list[AuditFinding]:
     """Report sibling names that one portable filesystem would hold as a single entry.
 
     Names with one `vault_name_key` (NFC, then casefold) are defects: the vault
-    cannot be exported or opened on Windows or default macOS. Names that match
-    only after NFKC folding and dropping separators are candidates for a human
-    to judge. Read-only: nothing is merged.
+    cannot be exported or opened on Windows or default macOS. Folders that differ
+    only by separators (`vault.folder_lookalike_key`) are defects too: they divide
+    one collection, and the merge preview folds them. Names that match only after
+    NFKC folding and dropping punctuation are candidates for a human to judge.
+    Read-only: nothing is merged.
     """
     from . import path_variants
 
@@ -1148,41 +1150,41 @@ def _check_path_variants(vault_root: Path) -> list[AuditFinding]:
     # The names an export carries, so a defect here is a collision that blocks an export.
     for parent, subdirs, names in path_variants.sibling_names(vault_root):
         prefix = f"{parent}/" if parent else ""
-        defects: dict[str, list[str]] = {}
-        for name in names:
-            request_budget.checkpoint()
-            defects.setdefault(vault_module.vault_name_key(name), []).append(name)
+        request_budget.checkpoint()
+        folders = set(subdirs)
+        defects = path_variants.sibling_groups(names, lambda name, folders=folders: name in folders)
         loose: dict[str, list[str]] = {}
         for name in names:
-            # Letters and digits only: separators and punctuation are not identity.
+            # Letters and digits only: punctuation is not identity.
             request_budget.checkpoint()
             loose_key = "".join(
                 char for char in vault_module.vault_name_key(name, form="NFKC") if char.isalnum()
             )
             loose.setdefault(loose_key, []).append(name)
-        in_defect = {name for group in defects.values() if len(group) > 1 for name in group}
-        for group in defects.values():
+        in_defect = {name for group in defects for name in group}
+        for group in defects:
             request_budget.checkpoint()
-            if len(group) > 1:
-                findings.append(
-                    AuditFinding(
-                        category="path_variants",
-                        severity="error",
-                        path=f"{prefix}{group[0]}",
-                        detail=(
-                            f"{len(group)} sibling names collide after NFC and casefold: "
-                            + ", ".join(repr(name) for name in group)
-                        ),
-                        proposed_fix=(
-                            f"preview the merge with {capabilities.active_call_text('maintain_memory', {'mode': 'path-variants'})}; "
-                            "nothing is merged until its plan is applied"
-                            if set(group) <= set(subdirs)
-                            else "rename one of these by hand; only folders are merged"
-                        ),
-                        paths=[f"{prefix}{name}" for name in group],
-                        meta={"class": "defect"},
-                    )
+            collides = len({vault_module.vault_name_key(name) for name in group}) == 1
+            findings.append(
+                AuditFinding(
+                    category="path_variants",
+                    severity="error",
+                    path=f"{prefix}{group[0]}",
+                    detail=(
+                        f"{len(group)} sibling names "
+                        + ("collide after NFC and casefold: " if collides else "differ only by separators: ")
+                        + ", ".join(repr(name) for name in group)
+                    ),
+                    proposed_fix=(
+                        f"preview the merge with {capabilities.active_call_text('maintain_memory', {'mode': 'path-variants'})}; "
+                        "nothing is merged until its plan is applied"
+                        if set(group) <= folders
+                        else "rename one of these by hand; only folders are merged"
+                    ),
+                    paths=[f"{prefix}{name}" for name in group],
+                    meta={"class": "defect"},
                 )
+            )
         for key, group in loose.items():
             request_budget.checkpoint()
             if key and len(group) > 1 and not set(group) <= in_defect:
@@ -1193,7 +1195,7 @@ def _check_path_variants(vault_root: Path) -> list[AuditFinding]:
                         path=f"{prefix}{group[0]}",
                         detail=(
                             f"{len(group)} sibling names differ only by compatibility form "
-                            "or separators: " + ", ".join(repr(name) for name in group)
+                            "or punctuation: " + ", ".join(repr(name) for name in group)
                         ),
                         proposed_fix="judge by hand whether these are one name; nothing is merged",
                         paths=[f"{prefix}{name}" for name in group],

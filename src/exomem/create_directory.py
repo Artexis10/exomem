@@ -66,7 +66,7 @@ def create_directory(
         _abs_path, rel_path = resolve_under_vault(vault_root, path)
     except VaultPathError as e:
         raise CreateDirectoryError(code=e.code, reason=e.reason) from e
-    rel_path = respell_new_path(vault_root, rel_path)
+    rel_path = respell_new_path(vault_root, rel_path, leaf_is_folder=True)
 
     # Read-only protection: a subtree marked `readonly`/`excluded` in
     # _access.yaml is a hard refusal (no override). create_directory does a
