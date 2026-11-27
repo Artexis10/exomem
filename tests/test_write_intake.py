@@ -404,6 +404,27 @@ def test_a_save_sent_after_a_queued_one_runs_after_it(
     assert one["finished_at"] <= two["finished_at"]
 
 
+def test_a_save_behind_queued_saves_is_queued_at_once_without_the_intake_wait(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect: a save behind a backlog waited the whole intake wait for a queue that rarely empties."""
+    _writer, holder = managers
+    remember = _command("remember")
+    paused = threading.Event()
+    real_claim = write_intake._claim_head
+    monkeypatch.setattr(write_intake, "_claim_head", lambda root: 0.05 if not paused.is_set() else real_claim(root))
+    with _Hold(holder, vault):
+        first = _send(remember, vault, _remember_kwargs(vault, 6))
+    monkeypatch.setenv("EXOMEM_BUSY_INTAKE_AFTER_SECONDS", "30")
+    started = time.monotonic()
+    second = _send(remember, vault, _remember_kwargs(vault, 7), scope="principal:session-b")
+    assert second["state"] == "queued"
+    assert time.monotonic() - started < 5.0
+    paused.set()
+    _wait_for_state(vault, first["queued_write"]["ref"], "applied")
+    _wait_for_state(vault, second["queued_write"]["ref"], "applied")
+
+
 def test_a_compact_save_with_governed_metadata_behind_the_queue_is_refused_at_once_and_never_queued(
     vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
