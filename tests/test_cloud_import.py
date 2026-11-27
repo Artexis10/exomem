@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tracemalloc
 from pathlib import Path
 
 import pytest
@@ -599,3 +600,23 @@ def test_directories_do_not_inherit_a_setgid_volume_root(tmp_path: Path) -> None
 
     for directory in (root / "staging", root / "staging" / "notes"):
         assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+
+
+def test_the_unpacker_keeps_no_header_of_a_member_it_has_read() -> None:
+    """Defect: `tarfile` kept every member's header for a whole stream, so an import near the member limit outgrew
+    its Job's memory limit. The two archives differ only in member count; what the larger one holds beyond the
+    smaller is the unpacker's cost per member, which must stay far under the header's own."""
+
+    def peak(count: int) -> int:
+        stream = io.BytesIO(_archive(*(_file(f"notes/folder-{i % 200:03d}/page-{i:06d}.md") for i in range(count))))
+        tracemalloc.start()
+        try:
+            unpack_stream(stream, None, max_bytes=GiB, max_members=count)
+            return tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+    bytes_per_member = (peak(20_000) - peak(2_000)) / 18_000
+
+    # Measured 2026-11: about 800 bytes per member with the headers kept, about 290 without.
+    assert bytes_per_member < 550

@@ -397,7 +397,11 @@ def replay_stop_event() -> threading.Event | None:
 
 
 def replay_stopping() -> bool:
-    """Whether this thread replays a queued save whose drainer is stopping; every dispatcher wait ends then."""
+    """Whether this thread replays a queued save whose drainer is stopping.
+
+    The warm-up wait, the turn wait and the store queue wait end then. A guard wait inside one
+    attempt still runs to its own short bound.
+    """
     stop = replay_stop_event()
     return stop is not None and stop.is_set()
 
@@ -926,7 +930,7 @@ def _replay(vault_root: Path, claim: _Claim, *, stop: threading.Event | None = N
     Every step from the command lookup to the dispatcher sits in one try, so any error ends
     in a recorded outcome and the row never stays applying behind the queue.
     """
-    from . import auth_sessions, cli_ops, writer_lease
+    from . import auth_sessions, cli_ops
 
     replay = _Replay(vault_root, claim, stop=stop)
     token = _REPLAY.set(replay)
@@ -958,16 +962,17 @@ def _replay(vault_root: Path, claim: _Claim, *, stop: threading.Event | None = N
         except Exception:  # noqa: BLE001 - without its marker connection the replay waits for the next pass
             log.warning("write intake could not open its store for the replay of %s", claim.id, exc_info=True)
             return (QUEUED, "MUTATION_BUSY")
-        with background_call(principal, descriptor):
-            result = writer_lease.invoke_command(
-                command,
-                *injected,
-                idempotency_key=_replay_identity(claim),
-                idempotency_principal_scope=principal.audience_id,
-                # Receipts require a UUID request id; one per attempt, derived from the save.
-                mutation_request_id=str(uuid.uuid5(_REQUEST_NAMESPACE, f"{claim.id}:{claim.attempts}")),
-                **claim.arguments,
-            )
+        result = invoke_in_background(
+            principal,
+            descriptor,
+            command,
+            *injected,
+            idempotency_key=_replay_identity(claim),
+            idempotency_principal_scope=principal.audience_id,
+            # Receipts require a UUID request id; one per attempt, derived from the save.
+            mutation_request_id=str(uuid.uuid5(_REQUEST_NAMESPACE, f"{claim.id}:{claim.attempts}")),
+            **claim.arguments,
+        )
     except Exception as error:  # noqa: BLE001 - every replay ends in a recorded outcome
         refusal = cli_ops.public_refusal(error)
         code = str(refusal.get("code")) if refusal else "INTERNAL"
@@ -1019,7 +1024,7 @@ def background_call(principal: Any, descriptor: Any) -> Iterator[None]:
         yield
 
 
-def invoke_in_background(principal: Any, descriptor: Any, command: Any, *args: Any, **kwargs: Any) -> Any:
+def invoke_in_background(principal: Any, descriptor: Any, command: Any, /, *args: Any, **kwargs: Any) -> Any:
     """Run one command for a stored principal from a background thread, bound as `background_call` binds it."""
     from . import writer_lease
 

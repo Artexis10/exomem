@@ -12,7 +12,7 @@ from exomem import page_fields
 from exomem.vocabulary import registry
 
 
-def test_the_shipped_pack_declares_the_four_origin_fields_with_their_source(vault: Path) -> None:
+def test_the_shipped_pack_declares_the_origin_fields_with_their_source(vault: Path) -> None:
     """A dropped or mis-keyed entry, so filing writes no origin or reads the wrong envelope key."""
     declared = {
         field.field: (field.source, field.envelope) for field in page_fields.provenance_fields(vault)
@@ -23,6 +23,7 @@ def test_the_shipped_pack_declares_the_four_origin_fields_with_their_source(vaul
         "upload_device": ("envelope", "device_family"),
         "upload_browser": ("envelope", "browser_family"),
         "file_modified": ("member-time", None),
+        "item_created": ("item-time", None),
     }
     # An origin field is not a pointer, so the governed pointer write never offers to change it.
     assert not declared.keys() & page_fields.pointer_fields(vault)
@@ -43,7 +44,7 @@ def test_an_overlay_that_adds_a_provenance_field_is_reported_and_ignored(vault: 
     assert [finding["code"] for finding in snapshot.findings] == ["invalid_registry_overlay"]
     assert page_fields.WIDENING_CODE in snapshot.findings[0]["detail"]
     assert "uploader_ip" not in {field.field for field in page_fields.provenance_fields(vault)}
-    assert len(page_fields.provenance_fields(vault)) == 4
+    assert len(page_fields.provenance_fields(vault)) == 5
 
 
 def test_an_overlay_may_retire_one_origin_field(vault: Path) -> None:
@@ -56,4 +57,4 @@ def test_an_overlay_may_retire_one_origin_field(vault: Path) -> None:
     fields = {field.field for field in page_fields.provenance_fields(vault)}
 
     assert list(registry.load(page_fields.SPEC, vault).findings) == []
-    assert fields == {"origin_label", "upload_browser", "file_modified"}
+    assert fields == {"origin_label", "upload_browser", "file_modified", "item_created"}
