@@ -1,1 +1,4 @@
-An export of a Cloud vault with two folders whose names differ only by capital letters now stops before it copies anything, instead of failing after packing.
+---
+title: Exports stop at once on case-split folders
+---
+When two folders in your Cloud vault have names that differ only by capital letters, an export now stops within moments instead of after a long wait.
