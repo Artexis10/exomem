@@ -235,3 +235,20 @@ def test_object_lifetime_aggregates_residency_recovery_owner_age_and_existing_pi
     media_bindings.withdraw(vault)
     with closing(ledger._connect(readonly=True)) as conn:
         assert media_bindings.object_facts(conn, key) is None
+
+
+def test_a_file_write_while_the_ledger_is_being_created_files_without_bindings(vault, monkeypatch):
+    """The ledger file appears before its creator commits the schema; a write in that window must still file."""
+    import sqlite3
+
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    path = media_jobs.job_store_path(vault.resolve())
+    path.unlink(missing_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(path)) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+    rel = "Notes/sample.md"
+
+    assert media_bindings.begin_file_change(vault, {rel: b"# Sample\n"}, [rel]) is None
+    assert media_bindings.withdraw(vault) is None
