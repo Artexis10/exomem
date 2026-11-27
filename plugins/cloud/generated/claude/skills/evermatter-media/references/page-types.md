@@ -388,7 +388,7 @@ page that supplies nothing. [Profiles](profiles.md) covers seeding and changing 
 | `sources` | optional | Material that informed the protocol |
 
 `concluded` says the run finished and its result stands. Pair it with `concluded:` (the date) and
-`outcome:` (a verdict such as `confirmed`, `refuted`, `qualified`, `inconclusive`, `abandoned` or `worsened`).
+`outcome:` (a verdict such as `confirmed`, `refuted`, `qualified`, `inconclusive` or `abandoned`).
 
 **Content shape:**
 
@@ -463,18 +463,18 @@ prediction stays active and ranked, for the same reason a refuted experiment sta
 
 ### Recording a tried approach
 
-When you ran a test, trial or comparison, write or update its note in that turn: an `experiment` for a tried
-change, a `failure` for a diagnosed one. One note holds the record:
+When you ran a test, trial or comparison that tried a change, write or update its `experiment` note in that
+turn. The note's `outcome:` is its one verdict, so the body carries no second verdict row. Use `refuted` when
+the result rules out the hoped-for gain, including a change that made the result worse: say the direction and
+size in the body. Use `inconclusive` when the interval includes no change or is too wide to say. The body holds:
 
 - the intent: what the run was meant to learn or achieve;
 - what changed, with its commit or run id;
-- the verdict, as the `verdict:` row of a `## Finding` unit, from the registry. Use `refuted` when the result
-  rules out the hoped-for gain, `worsened` when it made the result worse, and `inconclusive` when the result is
-  too uncertain to say;
-- the test's limits: its cases, its instrument and what it could not show;
+- the limits: its cases, its instrument and what it could not show;
 - what would reopen it: the change that makes a retry worth trying.
 
-When the project keeps a run record, link it from the note and keep the verdict out of the record.
+A concluded experiment's body is read-only, so a retry is a new `experiment` note that links the earlier one.
+When the project keeps a run record, give the record a link to this note; the record never copies the verdict.
 
 ### Recording a degree of belief
 

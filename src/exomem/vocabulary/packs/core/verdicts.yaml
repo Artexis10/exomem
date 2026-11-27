@@ -11,4 +11,3 @@ verdicts:
   inconclusive: {labels: {en: Inconclusive}, description: The evidence neither supports nor contradicts the claim.}
   qualified: {labels: {en: Qualified}, description: The claim holds only under stated conditions.}
   refuted: {labels: {en: Refuted}, description: The evidence contradicts the claim.}
-  worsened: {labels: {en: Made it worse}, description: The evidence shows the change made the result worse.}

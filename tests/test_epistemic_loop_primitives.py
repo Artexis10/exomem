@@ -188,7 +188,6 @@ def test_registry_extension_may_not_shadow_the_prediction_kind() -> None:
         ("  QUALIFIED  ", "qualified"),
         ("inconclusive", "inconclusive"),
         ("Abandoned", "abandoned"),
-        ("Made it worse", "worsened"),
     ],
 )
 def test_verdict_values_normalize_onto_the_unit(authored: str, expected: str) -> None:
@@ -200,14 +199,13 @@ def test_verdict_values_normalize_onto_the_unit(authored: str, expected: str) ->
     assert unit.to_dict()["verdict"] == expected
 
 
-def test_shipped_verdicts_are_the_six_audit_approved_values() -> None:
+def test_shipped_verdicts_are_the_five_audit_approved_values() -> None:
     assert semantic_language_registry.core_registry().label_keys(semantic_labels.VERDICTS) == (
         "abandoned",
         "confirmed",
         "inconclusive",
         "qualified",
         "refuted",
-        "worsened",
     )
 
 

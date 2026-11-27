@@ -534,11 +534,9 @@ def test_the_shipped_verdicts_resolve_by_key_and_label_without_a_vault_entry() -
     registry = language_registry.core_registry()
 
     assert registry.label_keys(semantic_labels.VERDICTS) == (
-        "abandoned", "confirmed", "inconclusive", "qualified", "refuted", "worsened",
+        "abandoned", "confirmed", "inconclusive", "qualified", "refuted",
     )
     assert registry.resolve_label(semantic_labels.VERDICTS, "  Refuted ") == "refuted"
-    # A tried approach that made the result worse needs its own verdict: "refuted" would lose the sign of harm.
-    assert registry.resolve_label(semantic_labels.VERDICTS, "Made it worse") == "worsened"
     assert registry.resolve_label(semantic_labels.VERDICTS, "probably-wrong") is None
     assert registry.resolve_label(semantic_labels.VERDICTS, "0.7") is None
 
