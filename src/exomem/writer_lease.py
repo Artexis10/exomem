@@ -187,6 +187,15 @@ _IDEMPOTENCY_LEGACY_OWNER_GRACE_SECONDS = 600.0
 #: headroom; anything past it is drained by the next start and stays visible in
 #: `oldest_pending_age_seconds`, which this never resets.
 _IDEMPOTENCY_START_SWEEP_LIMIT = 64
+#: Dead owner lock files one store start removes. Every process that opens the store leaves its
+#: store-lifetime owner file behind when it exits, and only a probe of that exact owner used to
+#: remove one: a personal machine held 25,723 and a cloud cell gained about 100 an hour. Each removal
+#: is one open, try-lock and unlink, so a few hundred stay a few milliseconds on process start, and a
+#: backlog drains over successive starts.
+_OWNER_FILE_SWEEP_LIMIT = 256
+#: An owner opens its file and locks it at once, so a lockable file younger than this may be an owner
+#: between those two steps; it is left for a later start.
+_OWNER_FILE_MIN_AGE_SECONDS = 60.0
 _OUTCOME_UNKNOWN_TERMINAL = ("exomem.outcome-unknown", 1)
 _OUTCOME_UNKNOWN_PAYLOAD = pickle.dumps(_OUTCOME_UNKNOWN_TERMINAL)
 _WINDOWS_DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
@@ -3196,6 +3205,45 @@ def _acquire_own_owner_lock(state_dir: Path, owner: str) -> Any | None:
     return None
 
 
+def _sweep_dead_owner_files(state_dir: Path, *, now: float) -> int:
+    """Remove owner lock files whose lock is free, up to `_OWNER_FILE_SWEEP_LIMIT`; return how many.
+
+    A free lock means its owner is gone, and `_probe_owner_liveness` reads a missing file the same
+    way, so removing one changes no liveness answer. A held or unreadable file stays.
+    """
+    removed = 0
+    try:
+        entries = os.scandir(_owner_lock_path(state_dir, "bootstrap").parent)
+    except OSError:
+        return 0
+    with entries:
+        for entry in entries:
+            if removed >= _OWNER_FILE_SWEEP_LIMIT:
+                break
+            if not entry.name.endswith(".lock"):
+                continue
+            try:
+                if now - entry.stat(follow_symlinks=False).st_mtime < _OWNER_FILE_MIN_AGE_SECONDS:
+                    continue
+                handle = open(entry.path, "r+b")
+            except OSError:
+                continue
+            try:
+                if not _try_owner_lock(handle):
+                    continue
+                _release_owner_lock(handle)
+            except OSError:
+                continue
+            finally:
+                handle.close()
+            try:
+                os.unlink(entry.path)
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
 def _probe_owner_liveness(state_dir: Path, owner: str) -> bool:
     """Fail-closed liveness probe for `owner` (a `pid:nonce` string).
 
@@ -3461,6 +3509,13 @@ class IdempotencyStore:
                 self._owner_lock_handle = None
             return
         self.start_sweep = self._sweep_dead_non_terminal_rows()
+        try:
+            removed = _sweep_dead_owner_files(self.state_dir, now=time.time())
+        except Exception:  # noqa: BLE001 - housekeeping never stops a store from opening
+            logger.warning("idempotency owner file sweep did not complete", exc_info=True)
+        else:
+            if removed:
+                logger.info("removed %d dead idempotency owner files", removed)
 
     def _sweep_dead_non_terminal_rows(self) -> dict[str, Any]:
         """Resolve `pending`/`reserved` rows whose owner is provably dead.
