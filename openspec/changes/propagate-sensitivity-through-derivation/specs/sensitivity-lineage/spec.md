@@ -20,7 +20,7 @@ A row's effective classes SHALL be the union of its own classes, its collection 
 
 ### Requirement: An authored write carries the classes of what it drew on
 
-Every authored write SHALL call one pre-plan step that adds to `inherited_sensitivity` the effective classes of every derivation ref the planned page holds after the write, a row's source refs, an episode's `about` refs and the page it edits. A derivation ref is a `sources` value, a frontmatter field mapped to an `inherits_sensitivity` relation, or a typed link with such a relation, however it arrived. The plan function SHALL refuse an authored write whose floor lacks a class that the step computes.
+Every authored write SHALL call one pre-plan step that adds to `inherited_sensitivity` the effective classes of every derivation ref the planned page holds after the write, a row's source refs, an episode's `about` refs and the page it edits. The plan function SHALL refuse an authored write whose floor lacks a class that the step computes.
 
 #### Scenario: An observation links a classified page
 
@@ -31,6 +31,15 @@ Every authored write SHALL call one pre-plan step that adds to `inherited_sensit
 
 - **WHEN** an authored write reaches the plan function with a floor that lacks a class of a page it names in `sources`
 - **THEN** the plan function refuses the write and names the missing class
+
+### Requirement: Derivation refs are read from the planned page
+
+A derivation ref SHALL be a `sources` value, a frontmatter field mapped to an `inherits_sensitivity` relation, or a typed link with such a relation, whether it arrived through `sources`, `links`, `set_fields` or body text.
+
+#### Scenario: Sources set through a field edit
+
+- **WHEN** an agent sets a note's `sources` field through `edit_note` field edits to name a `health` page
+- **THEN** the note's floor includes `health`
 
 ### Requirement: Carry-over never reveals an unreadable page
 
