@@ -99,6 +99,7 @@ from .log_events import log_event
 from .published_admission import Admission, admission_of, deciding
 
 if TYPE_CHECKING:
+    from . import unit_rows as unit_rows_module
     from .semantic_index import SemanticParentIndexState
 
 log = logging.getLogger(__name__)
@@ -802,7 +803,7 @@ def _ranking_metadata(
     return RankingPage(frontmatter=frontmatter, **payload)
 
 
-def _unit_eligibility_columns(unit: object) -> tuple[str | None, ...]:
+def unit_eligibility_columns(unit: object) -> tuple[str | None, ...]:
     """`(verdict, check_by_day, check_by_json, tags_canonical_json)` for one unit.
 
     Read off `structured_filters.unit_view`, the same adapter the evaluator
@@ -6449,6 +6450,8 @@ class PageRows:
     body_lower: str
     structure_json: str | None
     units: tuple[SemanticUnitRow, ...]
+    #: The unit rows that `units` project from; a store's `unit_rows` table and the graph's candidate nodes read them too.
+    unit_rows: tuple[unit_rows_module.UnitRow, ...] = ()
 
 
 def page_rows(
@@ -6473,7 +6476,8 @@ def page_rows(
     destination file itself.
     """
     from . import bm25 as bm25_module
-    from . import recall_policy, semantic_language_registry, semantic_units
+    from . import recall_policy
+    from . import unit_rows as unit_rows_module
     from .semantic_index import structural_metadata
 
     if not recall_policy.admits_markdown_content(vault_root, rel, raw):
@@ -6524,60 +6528,20 @@ def page_rows(
     }
     structure_json = None
     units: list[SemanticUnitRow] = []
+    built: tuple[unit_rows_module.UnitRow, ...] = ()
     if page is not None and state is not None and state.candidates is not None:
         structure_json = json.dumps(structural_metadata(state), sort_keys=True)
-        authored_keys = {
-            occurrence.key: tuple(
-                key for key in semantic_units.GOVERNED_UNIT_METADATA_KEYS if key in occurrence.metadata
+        built = unit_rows_module.build(rel, state)
+        units = [
+            SemanticUnitRow(
+                unit_rows_module.lexical_columns(row, columns),
+                " ".join(bm25_module.tokenize(row.content)),
+                row.row_keys,
             )
-            for occurrence in semantic_units.structural_occurrences(state.candidates)
-        }
-        for source_order, unit in enumerate(semantic_units.candidate_units(state.candidates)):
-            verdict, check_by_day, check_by_json, tags_canonical_json = (
-                _unit_eligibility_columns(unit)
-            )
-            units.append(
-                SemanticUnitRow(
-                    {
-                        "record_type": "structural_occurrence",
-                        "unit_ref": semantic_units.occurrence_key(
-                            unit.form, unit.span, unit.source_hash
-                        ),
-                        "parent_path": state.path,
-                        "parent_ref": state.parent_ref,
-                        "parent_generation": state.parent_generation,
-                        "parent_source_hash": state.parent_source_hash,
-                        "parser_version": state.parser_version,
-                        "form": unit.form,
-                        "category_raw": unit.category_raw,
-                        "category_key": unit.category_key,
-                        "category": semantic_language_registry.normalize_label(unit.category_raw),
-                        "kind": unit.kind_key,
-                        "content": unit.content,
-                        "tags_json": json.dumps(
-                            list(unit.tags), ensure_ascii=False, separators=(",", ":")
-                        ),
-                        "context": unit.context,
-                        "unit_source_hash": unit.source_hash,
-                        "anchor": unit.anchor,
-                        "line": unit.line,
-                        "end_line": unit.end_line,
-                        "fingerprint": None,
-                        "source_order": source_order,
-                        "updated": updated,
-                        "in_kb": int(in_kb),
-                        "in_vault": int(in_vault),
-                        "verdict": verdict,
-                        "check_by_day": check_by_day,
-                        "check_by_json": check_by_json,
-                        "tags_canonical_json": tags_canonical_json,
-                    },
-                    " ".join(bm25_module.tokenize(unit.content)),
-                    authored_keys[semantic_units.occurrence_key(unit.form, unit.span, unit.source_hash)],
-                )
-            )
+            for row in built
+        ]
     return PageRows(columns, stemmed, " ".join(bm25_module.tokenize(title or "")),
-                    title_lower, body_lower, structure_json, tuple(units))
+                    title_lower, body_lower, structure_json, tuple(units), built)
 
 
 def _membership_of_parts(rel_parts: tuple[str, ...]) -> tuple[bool, bool]:
@@ -6697,6 +6661,11 @@ def write_page_rows(conn: sqlite3.Connection, rows: PageRows, *, projections: fr
             conn.execute(
                 "INSERT INTO unit_fts(rowid, stemmed) VALUES(?, ?)", (unit_rowid, unit.stemmed)
             )
+    # Only a store that holds the table writes it: a file-mode sidecar never has one.
+    if projections is not None and "unit_rows" in projections:
+        from . import unit_rows as unit_rows_module
+
+        unit_rows_module.write(conn, rows.unit_rows, rows.columns)
 
 
 def _delete_unit_rows(conn: sqlite3.Connection, parent_path: str, *, projections: frozenset[str] | None = None) -> None:
@@ -6709,6 +6678,10 @@ def _delete_unit_rows(conn: sqlite3.Connection, parent_path: str, *, projections
     conn.execute("DELETE FROM semantic_units WHERE parent_path = ?", (parent_path,))
     if projections is None or "unit_row_keys" in projections:
         conn.execute("DELETE FROM unit_row_keys WHERE parent_path = ?", (parent_path,))
+    if projections is not None and "unit_rows" in projections:
+        from . import unit_rows as unit_rows_module
+
+        unit_rows_module.delete(conn, parent_path)
     # A parent left with no rows keeps no revision (see `_delete_page_rowid`); one with a page row keeps it.
     conn.execute(
         "DELETE FROM unit_revisions WHERE parent_path = ? AND NOT EXISTS (SELECT 1 FROM pages WHERE path = ?)",
@@ -6748,15 +6721,18 @@ def delete_page_rows(conn: sqlite3.Connection, rel: str, *, projections: frozens
     conn.execute("DELETE FROM unit_revisions WHERE parent_path = ?", (rel,))
 
 
-def derive_catalogue_rows(vault_root: Path, conn: sqlite3.Connection) -> None:
+def derive_catalogue_rows(
+    vault_root: Path, conn: sqlite3.Connection, *, projections: frozenset[str] | None = None
+) -> None:
     """Fill the catalogue on ``conn`` from the vault's Markdown files, as a cold rebuild does.
 
     ``conn`` already holds the schema that ``create_catalogue_schema`` made. Store mode compares what this
-    derives with the rows it copied in. It owns no transaction and stamps no meta row.
+    derives with the rows it copied in. It owns no transaction and stamps no meta row. ``projections`` names
+    the tables that ``conn`` holds, as ``write_page_rows`` takes them.
     """
     store = LexicalStore(vault_root)
     members, signatures = store._walk_entries()
-    store._insert_members(conn, members, signatures)
+    store._insert_members(conn, members, signatures, projections=projections)
 
 
 def corpus_paths(vault_root: Path) -> list[Path]:
@@ -8797,10 +8773,12 @@ class LexicalStore:
         for scope, target in targets.items():
             self._bless(conn, scope, target)
 
-    def _insert_members(self, conn: sqlite3.Connection, members, signatures) -> None:
+    def _insert_members(
+        self, conn: sqlite3.Connection, members, signatures, *, projections: frozenset[str] | None = None
+    ) -> None:
         """Insert a page row, with its full-text and unit rows, for each walked file (caller owns the txn)."""
         for path, (in_kb, in_vault) in members.items():
-            self._insert_page(conn, path, signatures[path][0], in_kb, in_vault)
+            self._insert_page(conn, path, signatures[path][0], in_kb, in_vault, projections=projections)
 
     def _delta_source(self):
         """`(members, signatures)` for the heal's diff — from the live freshness
@@ -8886,6 +8864,8 @@ class LexicalStore:
         mtime_ns: int,
         in_kb: bool,
         in_vault: bool,
+        *,
+        projections: frozenset[str] | None = None,
     ) -> None:
         """Insert one page row + its fts/tri rows (caller owns the txn).
 
@@ -8936,7 +8916,7 @@ class LexicalStore:
             in_vault=in_vault,
         )
         if rows is not None:
-            write_page_rows(conn, rows)
+            write_page_rows(conn, rows, projections=projections)
 
     def _delete_semantic_units(self, conn: sqlite3.Connection, parent_path: str) -> None:
         _delete_unit_rows(conn, parent_path)

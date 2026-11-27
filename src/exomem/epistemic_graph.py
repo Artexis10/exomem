@@ -19,7 +19,7 @@ import stat
 import threading
 import time
 import weakref
-from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, closing, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
@@ -52,6 +52,7 @@ from . import (
     semantic_units,
     sidecar_store,
     traversal_profiles,
+    unit_rows,
     view_lag,
     vocabulary_recovery,
 )
@@ -2697,6 +2698,7 @@ def page_graph_rows(
     target_exists: Callable[[str], bool],
     landing: Callable[[str, str], tuple[str, str, dict[str, str]]],
     prepared_structure: Mapping[str, Any] | None = None,
+    prepared_unit_rows: Sequence[unit_rows.UnitRow] | None = None,
 ) -> PageGraphRows | None:
     """The graph rows of one page, derived from ``raw`` and the inputs below.
 
@@ -2721,8 +2723,8 @@ def page_graph_rows(
         prepared_structure=prepared_structure,
     )
     unit_nodes = [
-        _candidate_node(page, unit, state)
-        for unit in semantic_units.candidate_units(state.candidates)
+        _candidate_node(page, row)
+        for row in (unit_rows.build(rel, state) if prepared_unit_rows is None else prepared_unit_rows)
     ]
     edges = _structural_edges_for_page(
         vault_root,
@@ -14725,7 +14727,7 @@ def _unit_candidate_key(rel_path: str, unit: semantic_units.SemanticUnit) -> str
     return _candidate_key(rel_path, key, unit.form)
 
 
-def _unit_anchor(unit: semantic_units.SemanticUnit) -> str | None:
+def _unit_anchor(unit: semantic_units.SemanticUnit | unit_rows.UnitRow) -> str | None:
     if unit.form == "rich":
         return (
             unit.anchor
@@ -14735,7 +14737,7 @@ def _unit_anchor(unit: semantic_units.SemanticUnit) -> str | None:
     return unit.anchor
 
 
-def _parent_stamps(state: semantic_index.SemanticParentIndexState) -> dict[str, Any]:
+def _parent_stamps(state: semantic_index.SemanticParentIndexState | unit_rows.UnitRow) -> dict[str, Any]:
     return {
         "parent_generation": state.parent_generation,
         "parent_source_hash": state.parent_source_hash,
@@ -14743,7 +14745,7 @@ def _parent_stamps(state: semantic_index.SemanticParentIndexState) -> dict[str, 
     }
 
 
-def _candidate_metadata(unit: semantic_units.SemanticUnit) -> dict[str, Any]:
+def _candidate_metadata(unit: semantic_units.SemanticUnit | unit_rows.UnitRow) -> dict[str, Any]:
     """Selection-free unit facts a served unit node reports."""
     return {
         "form": unit.form,
@@ -14755,32 +14757,29 @@ def _candidate_metadata(unit: semantic_units.SemanticUnit) -> dict[str, Any]:
     }
 
 
-def _candidate_node(
-    page, unit: semantic_units.SemanticUnit, state: semantic_index.SemanticParentIndexState,
-) -> GraphNode:
-    key = semantic_units.occurrence_key(unit.form, unit.span, unit.source_hash)
+def _candidate_node(page, row: unit_rows.UnitRow) -> GraphNode:
+    """The graph node of one stored unit row; the row holds every fact, and this holds the graph's rules."""
     return GraphNode(
-        node_key=_candidate_key(page.rel_path, key, unit.form),
+        node_key=row.node_key,
         kind=CANDIDATE_KIND,
-        path=page.rel_path,
-        anchor=_unit_anchor(unit),
-        title=unit.title,
-        text=_node_text(
-            page, unit.content if unit.form == "compact" else unit.body or unit.title or ""
-        ),
-        source_hash=state.parent_source_hash,
-        line_start=unit.line,
-        line_end=unit.end_line,
+        path=row.path,
+        anchor=_unit_anchor(row),
+        title=row.title,
+        # A rich unit's body is its content; a rich unit with no body reads as its title.
+        text=_node_text(page, row.content if row.form == "compact" else row.content or row.title or ""),
+        source_hash=row.parent_source_hash,
+        line_start=row.line,
+        line_end=row.end_line,
         metadata={
             "origin": "structural_occurrence",
-            "occurrence_key": key,
-            **_candidate_metadata(unit),
-            **_parent_stamps(state),
+            "occurrence_key": row.occurrence_key,
+            **_candidate_metadata(row),
+            **_parent_stamps(row),
         },
         # Raw labels in the selected adapters' normalization domain; selected
         # interpretation decides every match these columns propose.
-        unit_category=semantic_language_registry.normalize_label(unit.category_raw),
-        unit_kind=unit.kind_key,
+        unit_category=row.category,
+        unit_kind=row.kind_key,
     )
 
 

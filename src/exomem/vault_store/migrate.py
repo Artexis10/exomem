@@ -31,6 +31,7 @@ from .. import (
     memory_refs,
     state_migration,
     state_paths,
+    unit_rows,
     vault,
     writer_lease,
 )
@@ -70,13 +71,15 @@ class Staged:
     pages: int = 0
     binaries: int = 0
     skipped: list[ownership.Skipped] = field(default_factory=list)
-    #: Each object the lexical, the graph, the references, then the inbound-link owner created: name -> type, in creation order.
+    #: Each object the lexical, the graph, the references, the inbound-link, then the unit row owner created: name -> type, in creation order.
     objects: dict[str, str] = field(default_factory=dict)
     lexical_tables: list[str] = field(default_factory=list)
     graph_tables: list[str] = field(default_factory=list)
     refs_tables: list[str] = field(default_factory=list)
     #: The tables that no sidecar holds, so staging derives their rows from the files.
     link_tables: list[str] = field(default_factory=list)
+    #: The unit row table, which no sidecar holds either; staging copies it from the one derivation of the files.
+    unit_tables: list[str] = field(default_factory=list)
     #: How the graph sidecar's rows differed from the files' derivation, which staging took instead.
     graph_sidecar: tuple[verify.Difference, ...] = ()
     timings: dict[str, float] = field(default_factory=dict)
@@ -117,8 +120,8 @@ def schema_objects(conn: sqlite3.Connection) -> dict[str, str]:
 
 def create_owner_schema(
     conn: sqlite3.Connection,
-) -> tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, str]]:
-    """Create the lexical, graph, references, then inbound-link tables with their owners' DDL; return what each created."""
+) -> tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, str], dict[str, str]]:
+    """Create the lexical, graph, references, inbound-link, then unit row tables with their owners' DDL; return what each created."""
     before = schema_objects(conn)
     lexstore.create_catalogue_schema(conn)
     lexstore.create_browse_index(conn)  # store-only: a sidecar shares the catalogue DDL above
@@ -130,12 +133,15 @@ def create_owner_schema(
     refs_done = schema_objects(conn)
     vault.create_inbound_schema(conn)
     page_admission.create_schema(conn)
+    links_done = schema_objects(conn)
+    unit_rows.create_schema(conn)
     after = schema_objects(conn)
     return (
         {n: t for n, t in middle.items() if n not in before},
         {n: t for n, t in graph_done.items() if n not in middle},
         {n: t for n, t in refs_done.items() if n not in graph_done},
-        {n: t for n, t in after.items() if n not in refs_done},
+        {n: t for n, t in links_done.items() if n not in refs_done},
+        {n: t for n, t in after.items() if n not in links_done},
     )
 
 
@@ -145,17 +151,18 @@ def stage(
     """Load the exact bytes of every owned file into ``conn``, a staged store, and fill its tables.
 
     The one derivation of the files goes to a new database at ``expected``, which `verify_staged`
-    compares with next. The graph tables are that derivation's rows; the lexical and reference
+    compares with next. The graph and unit row tables are that derivation's rows; the lexical and reference
     tables are the sidecars' rows, which `verify_staged` proves against it.
     """
     staged = Staged()
     started = time.perf_counter()
-    lexical, graph, refs, links = create_owner_schema(conn)
-    staged.objects = {**lexical, **graph, **refs, **links}
+    lexical, graph, refs, links, units = create_owner_schema(conn)
+    staged.objects = {**lexical, **graph, **refs, **links, **units}
     staged.lexical_tables = [n for n, t in lexical.items() if t in ("table", "virtual")]
     staged.graph_tables = [n for n, t in graph.items() if t in ("table", "virtual")]
     staged.refs_tables = [n for n, t in refs.items() if t in ("table", "virtual")]
     staged.link_tables = [n for n, t in links.items() if t in ("table", "virtual")]
+    staged.unit_tables = [n for n, t in units.items() if t in ("table", "virtual")]
     _load_files(vault_root, conn, staged, revision)
     staged.timings["load_files_s"] = time.perf_counter() - started
     started = time.perf_counter()
@@ -242,7 +249,7 @@ def _copy_sidecars(
     """
     sources = (
         (lexstore.lexical_path(vault_root), staged.lexical_tables),
-        (expected, _graph_row_tables(staged)),
+        (expected, [*_graph_row_tables(staged), *staged.unit_tables]),
         (
             epistemic_graph.sidecar_path(vault_root),
             [name for name in staged.graph_tables if name in epistemic_graph.BUILD_STAMP_TABLES],
@@ -771,8 +778,8 @@ def _install_rows(
             "VAULT_STORE_OBJECTS_EXIST",
             f"the store already holds {len(present)} of the tables store mode creates, e.g. {', '.join(present[:5])}",
         )
-    lexical, graph, refs, links = create_owner_schema(conn)
-    if {**lexical, **graph, **refs, **links} != staged.objects:
+    lexical, graph, refs, links, units = create_owner_schema(conn)
+    if {**lexical, **graph, **refs, **links, **units} != staged.objects:
         raise OpError(
             "VAULT_STORE_SCHEMA_DRIFT",
             "the owners' schema differs from the one that was staged and proved",
@@ -784,6 +791,7 @@ def _install_rows(
             *staged.graph_tables,
             *staged.refs_tables,
             *staged.link_tables,
+            *staged.unit_tables,
             "store_pages",
             "store_binaries",
         ):

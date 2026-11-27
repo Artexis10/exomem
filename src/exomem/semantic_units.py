@@ -663,7 +663,7 @@ def _core_relations() -> RelationRegistry:
     return relation_registry.core_registry()
 
 
-def _identity_facts(units: list[SemanticUnit]) -> dict[str, dict[str, Any]]:
+def identity_facts(units: list[SemanticUnit]) -> dict[str, dict[str, Any]]:
     """Fingerprints for every occurrence number a selected interpretation can bind.
 
     Unit fingerprints never depend on selected vocabulary; only which candidates
@@ -691,7 +691,7 @@ def _identity_facts(units: list[SemanticUnit]) -> dict[str, dict[str, Any]]:
 
 def structural_summary(candidates: SemanticUnitCandidates) -> dict[str, Any]:
     """Serialize parser facts, without copying the parent body into metadata."""
-    identity = _identity_facts(list(candidate_units(candidates)))
+    identity = identity_facts(list(candidate_units(candidates)))
     # These fields are the closed structural-summary protocol, not authored vocabulary.
     return {
         "format": STRUCTURAL_FORMAT,
