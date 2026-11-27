@@ -39,14 +39,20 @@ CODE_WAITING = "IMPORT_SIDECAR_WAITING"
 #: How each sidecar counts when filing is done, from its photo's filing result.
 CODE_APPLIED = "IMPORT_SIDECAR_APPLIED"
 CODE_EMPTY = "IMPORT_SIDECAR_EMPTY"
+CODE_PHOTO_ALREADY_IMPORTED = "IMPORT_SIDECAR_PHOTO_ALREADY_IMPORTED"
 CODE_PHOTO_NOT_FILED = "IMPORT_SIDECAR_PHOTO_NOT_FILED"
 CODE_UNPAIRED = "IMPORT_SIDECAR_UNPAIRED"
-#: Each settled reason as (whether the sidecar's content is in the Knowledge Base although its staged copy stays; how a
-#: residual summary counts such files, with `{n}` as their number). `adoption_consume.STAYS` reads these rows.
+#: What became of a paired photo in the import: its Source was stored now, an earlier Source already held its bytes (it
+#: is in the vault), or it did not file (it failed, or no outcome says otherwise). `adoption_run` reads the outcomes.
+STORED, ALREADY_IMPORTED, NOT_FILED = "stored", "already-imported", "not-filed"  # nosemgrep: ep-word-set -- the closed results of one photo's filing, this module's own protocol with `adoption_run`.
+#: Each settled reason as (whether the residual counts the sidecar as in the Knowledge Base although its staged copy stays,
+#: because its photo is in the vault and nothing here needs the person; how a residual summary counts such files, with
+#: `{n}` as their number). `adoption_consume.STAYS` reads these rows.
 STAYS: Mapping[str, tuple[bool, str]] = MappingProxyType({  # nosemgrep: ep-word-set, ep-word-dict -- this module's own closed reason codes, a protocol of the residual report and not vocabulary.
-    CODE_APPLIED: (True, "{n} sidecar whose date or caption went to its photo"),
-    CODE_EMPTY: (True, "{n} sidecar with no date or caption to give"),
-    CODE_PHOTO_NOT_FILED: (False, "{n} sidecar whose photo is not filed"),
+    CODE_APPLIED: (True, "{n} sidecar paired with its filed photo, whose time applies only where the photo states none"),
+    CODE_EMPTY: (True, "{n} sidecar paired with its filed photo, with no time or caption to give"),
+    CODE_PHOTO_ALREADY_IMPORTED: (True, "{n} sidecar whose photo was already in the vault"),
+    CODE_PHOTO_NOT_FILED: (False, "{n} sidecar whose photo did not file"),
     CODE_UNPAIRED: (False, "{n} sidecar that no one photo fits"),
 })
 #: The rows are appended, fsynced and counted this many at a time, so a pass costs one fsync for each batch.
@@ -211,28 +217,36 @@ def photo_facts(reading: Reading) -> dict[str, dict]:
     return facts
 
 
-def settle(reading: Reading, filed: Callable[[str], bool]) -> tuple[dict[str, str], dict[str, int] | None]:
+def settle(reading: Reading, photo_filing: Callable[[str], str]) -> tuple[dict[str, str], dict[str, int] | None]:
     """Each sidecar, by its path in the stage, with the one reason that it stays, and the counts of the stage's sidecars.
 
-    The reason follows the photo's filing result (`filed` says whether the import filed the photo at a path in the stage):
-    an unpaired sidecar is `UNPAIRED`; one whose photo is not filed is `PHOTO_NOT_FILED`; any other is `APPLIED` when it
-    carried a time or a caption, else `EMPTY`. The counts are the filed photos that received a date and a caption, and the
-    times that were skipped as upload times. A stage with no sidecar has no counts, never zero ones.
+    The reason follows the photo's filing result (`photo_filing` says, for the photo at a path in the stage, whether it
+    was `STORED`, was `ALREADY_IMPORTED` or did not file): an unpaired sidecar is `UNPAIRED`; one whose photo did not file
+    is `PHOTO_NOT_FILED`; one whose photo an earlier Source already holds is `PHOTO_ALREADY_IMPORTED`; any other is `APPLIED`
+    when it carried a time or a caption, else `EMPTY`. `APPLIED` says that the sidecar was paired with a photo that filed
+    now: its time applies only where the photo states none.
+
+    The counts are over the sidecars whose photo filed now: those that carry a usable time (`with_time`), those that carry a
+    caption, and those whose time was skipped as an upload time. A stage with no sidecar has no counts, never zero ones.
     """
     if not reading.rows.sidecars:
         return {}, None
     codes: dict[str, str] = {}
-    counts = {"dated": 0, "captioned": 0, "time_skipped": 0}
+    counts = {"with_time": 0, "captioned": 0, "time_skipped": 0}
     for path, row in reading.rows.sidecars.items():
         photo = reading.rows.pairs.get(path, (None, None))[0]
         if photo is None:
             codes[path] = CODE_UNPAIRED
-        elif not filed(photo):
+            continue
+        filing = photo_filing(photo)
+        if filing == ALREADY_IMPORTED:
+            codes[path] = CODE_PHOTO_ALREADY_IMPORTED
+        elif filing != STORED:
             codes[path] = CODE_PHOTO_NOT_FILED
         else:
-            dated, captioned = row.get("time") is not None, row.get("caption") is not None
-            codes[path] = CODE_APPLIED if dated or captioned else CODE_EMPTY
-            counts["dated"] += dated
+            with_time, captioned = row.get("time") is not None, row.get("caption") is not None
+            codes[path] = CODE_APPLIED if with_time or captioned else CODE_EMPTY
+            counts["with_time"] += with_time
             counts["captioned"] += captioned
             counts["time_skipped"] += row.get("skip") is True
     return codes, counts

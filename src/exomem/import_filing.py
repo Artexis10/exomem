@@ -236,7 +236,7 @@ def _left_out(vault_root: Path, import_id: str) -> dict:
 
     unfiled, sidecars = adoption_run.unfiled_report(vault_root, import_id)
     # A sidecar that did its work is counted, not listed, so that a long Takeout never crowds out the files that need a look.
-    done_work = (export_sidecars.CODE_APPLIED, export_sidecars.CODE_EMPTY)
+    done_work = {code for code, (in_the_vault, _summary) in export_sidecars.STAYS.items() if in_the_vault}
     members = sorted(unfiled, key=lambda member: (member["code"] in done_work, member["path"]))
     by_reason: dict[str, int] = {}
     for member in members:

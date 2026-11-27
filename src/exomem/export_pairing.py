@@ -5,16 +5,20 @@ Google publishes no specification, so the rules follow the community tools that 
 or video in its own folder, no other file fits it, and that file fits no other sidecar. Every vendor fact (the suffix
 word, the length limits, the replaced characters) is registry data on the entry (`source_formats`).
 
-Names compare exactly after NFC normalisation, and a copy number `(n)` compares apart from the name. The pairing is
-linear in the files: one index over the folder's photos, and a sidecar looks up its few candidates in it.
+Names compare exactly after NFC normalisation, and a copy number `(n)` compares apart from the name. A title's
+extension fits a file's when both have the same MIME type, so `.jpeg` fits `.jpg`, and `.heic`, a raw file or a video never
+fits a `.jpg` sibling. The pairing is linear in the files: one index over the folder's photos, and a sidecar looks up its
+few candidates in it.
 """
 
 from __future__ import annotations
 
 import bisect
+import mimetypes
 import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 from .capture_metadata import KINDS
@@ -26,6 +30,9 @@ if TYPE_CHECKING:
 #: Why a sidecar stays unpaired: no file fits it, or more than one file or sidecar does.
 NO_PHOTO, AMBIGUOUS = "no-photo", "ambiguous"
 _MAX_COPY_DIGITS = 6
+#: The standard extension-to-MIME table of the Python standard library and nothing else: no `mime.types` file of the host
+#: is read, so the same Takeout pairs the same way on every machine.
+_MIME_TYPES = mimetypes.MimeTypes()
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,7 +55,7 @@ class _Reading:
 @dataclass(frozen=True, slots=True)
 class _Entry:
     path: str
-    kind: str
+    mime: str
     stem: str
 
 
@@ -59,6 +66,15 @@ def key_of(file_name: str, title: object, fmt: SourceFormat) -> Key | None:
         return None
     stem, copy = _split_copy(name[: -len(".json")])
     return Key(_cut_suffix(stem, fmt.suffix_word), copy, len(stem) >= fmt.sidecar_name_limit, title_name(title, fmt))
+
+
+def mime_of(name: str) -> str:
+    """The MIME type of a file name's extension, or the lower-cased extension itself when the table has no type for it.
+
+    Two names have the same type when Google may write one for the other (`.jpg` and `.jpeg`); a different format never does.
+    """
+    extension = PurePosixPath(name).suffix.lower()
+    return _MIME_TYPES.guess_type("file" + extension)[0] or extension
 
 
 def title_name(title: object, fmt: SourceFormat) -> str | None:
@@ -119,12 +135,12 @@ def decide(sidecars: Mapping[str, Key], photos: Iterable[str], fmt: SourceFormat
     for path in photos:
         folder, _slash, raw = path.rpartition("/")
         name = unicodedata.normalize("NFC", raw)
-        kind = media_type_for(name)
-        if kind not in KINDS:
+        if media_type_for(name) not in KINDS:
             continue
+        mime = mime_of(name)
         for reading in _readings(name):
-            entry = _Entry(path, kind, reading.stem)
-            exact.setdefault((folder, reading.stem, reading.copy, kind), []).append(entry)
+            entry = _Entry(path, mime, reading.stem)
+            exact.setdefault((folder, reading.stem, reading.copy, mime), []).append(entry)
             by_copy.setdefault((folder, reading.copy), []).append((reading.full, entry))
     names: dict[tuple[str, int | None], list[str]] = {}
     entries: dict[tuple[str, int | None], list[_Entry]] = {}
@@ -157,20 +173,20 @@ def _fits(
     """The photos of `folder` that the sidecar's name and its title both fit."""
     if key.title is None:
         return []
-    title_stem, title_kind = key.title.rpartition(".")[0], media_type_for(key.title)
-    kind = media_type_for(key.base)
+    title_stem, title_mime = key.title.rpartition(".")[0], mime_of(key.title)
+    base_mime, base_is_media = mime_of(key.base), media_type_for(key.base) in KINDS
     fits: dict[str, None] = {}
     for reading in _readings(key.base, key.copy):
-        if kind in KINDS:
-            for entry in exact.get((folder, reading.stem, reading.copy, kind), ()):
-                if entry.stem == title_stem and entry.kind == title_kind:
+        if base_is_media:
+            for entry in exact.get((folder, reading.stem, reading.copy, base_mime), ()):
+                if entry.stem == title_stem and entry.mime == title_mime:
                     fits[entry.path] = None
         if key.at_limit and reading.full:
             held = names.get((folder, reading.copy), ())
             at = bisect.bisect_left(held, reading.full)
             while at < len(held) and held[at].startswith(reading.full):
                 entry = entries[(folder, reading.copy)][at]
-                if entry.stem == title_stem and entry.kind == title_kind:
+                if entry.stem == title_stem and entry.mime == title_mime:
                     fits[entry.path] = None
                 at += 1
     return list(fits)

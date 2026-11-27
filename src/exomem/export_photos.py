@@ -71,7 +71,11 @@ def facts_of(document: dict) -> Facts:
 
 
 def _epoch(stamp: Any) -> int | None:
-    """The whole seconds of a `{"timestamp": "<epoch seconds>"}` object, or None."""
+    """The whole seconds of a `{"timestamp": "<epoch seconds>"}` object, or None.
+
+    A time at or before the epoch (1970-01-01) or after year 9999 is None, so such a sidecar gives no time. The reader takes no
+    negative stamp: a photo from before 1970 stays undated, which this change does not cover.
+    """
     value = stamp.get("timestamp") if isinstance(stamp, dict) else None
     if isinstance(value, str) and value.isascii() and value.isdigit() and len(value) <= _MAX_DIGITS:
         value = int(value)

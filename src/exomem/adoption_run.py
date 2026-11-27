@@ -2039,7 +2039,7 @@ def unfiled_members(root: Path, import_id: str, runs: tuple[dict, ...] | None = 
 def unfiled_report(root: Path, import_id: str, runs: tuple[dict, ...] | None = None) -> tuple[list[dict], dict | None]:
     """The members of an import that adoption did not file or `finish` did not verify, as a residual record lists them, and the counts of its sidecars.
 
-    The counts are None for a stage with no recognised Takeout sidecar, else `{"dated", "captioned", "time_skipped"}`.
+    The counts are None for a stage with no recognised Takeout sidecar, else `{"with_time", "captioned", "time_skipped"}`.
 
     Each entry has the path relative to the stage, its bytes and why it stays (see `adoption_consume.residual`).
     The members are the stage manifest's, plus any staged file that the manifest does not list, plus the items and
@@ -2059,7 +2059,7 @@ def unfiled_report(root: Path, import_id: str, runs: tuple[dict, ...] | None = N
     for path, (size, _digest) in (stage.members if stage is not None else {}).items():
         files.setdefault(path, size)
     reading = export_sidecars.read(root, import_id)
-    settled, counts = export_sidecars.settle(reading, _photo_filed(pages, f"{import_stage.STAGE_DIR}/{import_id}/"))
+    settled, counts = export_sidecars.settle(reading, _photo_filing(pages, f"{import_stage.STAGE_DIR}/{import_id}/"))
     unfiled = [
         import_stage.residual_member(path, size, reason)
         for path, size, reason in adoption_consume.stage_reasons(import_id, list(files.items()), pages, _APPLIED_STATUSES, settled)
@@ -2079,15 +2079,16 @@ def _stage_residual(root: Path, run: dict, pages: tuple[dict, ...]) -> dict | No
     stage_id = stage.get("stage") if isinstance(stage, dict) else None
     settled = {}
     if stage_id is not None:
-        settled = export_sidecars.settle(export_sidecars.read(root, stage_id), _photo_filed(pages, f"{import_stage.STAGE_DIR}/{stage_id}/"))[0]
+        settled = export_sidecars.settle(export_sidecars.read(root, stage_id), _photo_filing(pages, f"{import_stage.STAGE_DIR}/{stage_id}/"))[0]
     return adoption_consume.residual(root, run, _APPLIED_STATUSES, pages[1:], settled)
 
 
-def _photo_filed(pages: tuple[dict, ...], prefix: str) -> Callable[[str], bool]:
-    """Whether the import stored the Source of a staged file (its path in the stage), as a `file` reply counts a filed file.
+def _photo_filing(pages: tuple[dict, ...], prefix: str) -> Callable[[str], str]:
+    """What became of a staged file (its path in the stage) in the import, as `export_sidecars.settle` reads it.
 
-    A file is filed when a page of the import stored its Source, or its newest outcome is a filing that no earlier
-    Source held. A skipped duplicate, a failed file and a file with no outcome are not.
+    A file is `STORED` when a page of the import stored its Source, or its newest outcome is a filing that no earlier
+    Source held, as a `file` reply counts a filed file. It is `ALREADY_IMPORTED` when its newest outcome is a skipped
+    duplicate: a Source in the vault already holds its bytes. A failed file and a file with no outcome did not file.
     """
     newest: dict[str, int] = {}
     stored: set[str] = set()
@@ -2097,11 +2098,13 @@ def _photo_filed(pages: tuple[dict, ...], prefix: str) -> Callable[[str], bool]:
             if marks & _STORED:
                 stored.add(path)
 
-    def filed(path: str) -> bool:
+    def filing(path: str) -> str:
         marks = newest.get(prefix + path, 0)
-        return prefix + path in stored or bool(marks & _FILED and not marks & _SKIPPED)
+        if prefix + path in stored or (marks & _FILED and not marks & _SKIPPED):
+            return export_sidecars.STORED
+        return export_sidecars.ALREADY_IMPORTED if marks & _SKIPPED else export_sidecars.NOT_FILED
 
-    return filed
+    return filing
 
 
 def _earlier_page_unapplied(store: AdoptionRunStore, run: dict) -> str | None:

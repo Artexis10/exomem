@@ -24,14 +24,22 @@ from test_app_export_import import (  # noqa: F401 -- `_private_journal_folder` 
 )
 from test_notes_mail_exports import JPEG
 
-from exomem import export_expansion, import_stage, lexstore
+from exomem import (
+    adoption_consume,
+    client_artifacts,
+    export_expansion,
+    export_photos,
+    import_stage,
+    lexstore,
+)
 from exomem import find as find_module
 from exomem.vault import parse_frontmatter
 
 ALBUM = "Takeout/Google Photos/Lake trip"
 UPLOADED = dt.datetime(2025, 1, 9, 8, 30, tzinfo=dt.UTC)
 APPLIED, EMPTY = "IMPORT_SIDECAR_APPLIED", "IMPORT_SIDECAR_EMPTY"
-NOT_FILED, UNPAIRED = "IMPORT_SIDECAR_PHOTO_NOT_FILED", "IMPORT_SIDECAR_UNPAIRED"
+ALREADY, NOT_FILED = "IMPORT_SIDECAR_PHOTO_ALREADY_IMPORTED", "IMPORT_SIDECAR_PHOTO_NOT_FILED"
+UNPAIRED = "IMPORT_SIDECAR_UNPAIRED"
 
 
 def taken_at(number: int) -> dt.datetime:
@@ -114,7 +122,7 @@ def test_an_album_files_each_photo_with_its_sidecars_time_and_caption_and_no_jso
         assert not any(key.startswith("capture_") for key in pages[f"{ALBUM}/IMG_{number:04d}.jpg"][0])
     assert view["state"] == "done"
     assert view["left_out"]["by_reason"] == {APPLIED: 48, EMPTY: 2}
-    assert view["left_out"]["sidecars"] == {"dated": 48, "captioned": 24, "time_skipped": 2}
+    assert view["left_out"]["sidecars"] == {"with_time": 48, "captioned": 24, "time_skipped": 2}
     assert view["progress"] == {"total": 100, "filed": 50, "skipped_duplicates": 0, "failed": 0, "left_out": 50, "remaining": 0}
 
 
@@ -230,6 +238,45 @@ def test_a_jpeg_title_pairs_with_a_jpg_file_and_a_video_never_takes_a_photos_sid
     assert view["left_out"]["by_reason"] == {APPLIED: 1, UNPAIRED: 1}
 
 
+def test_a_heic_and_a_jpg_of_one_shot_each_pair_with_their_own_sidecar(vault: Path) -> None:
+    """Catches a pairing by image-or-video only: a phone's HEIC and its JPG copy share a stem, so both sidecars went ambiguous."""
+    _id, pages, view = one_photo_albums(vault, {
+        f"{ALBUM}/IMG_60.heic": b"\x00\x00\x00\x18ftypheic" + b"shot 60",
+        f"{ALBUM}/IMG_60.jpg": photo("IMG_60.jpg"),
+        f"{ALBUM}/IMG_60.heic.supplemental-metadata.json": sidecar("IMG_60.heic", taken=taken_at(50)),
+        f"{ALBUM}/IMG_60.jpg.supplemental-metadata.json": sidecar("IMG_60.jpg", taken=taken_at(51)),
+    })
+
+    assert time_of(pages, f"{ALBUM}/IMG_60.heic") == "2022-08-23T12:50:00Z"
+    assert time_of(pages, f"{ALBUM}/IMG_60.jpg") == "2022-08-24T12:51:00Z"
+    assert view["left_out"]["by_reason"] == {APPLIED: 2}
+
+
+def test_a_raw_file_and_a_jpg_of_one_shot_each_pair_with_their_own_sidecar(vault: Path) -> None:
+    """Catches the same ambiguity for a camera's raw file beside its JPG."""
+    _id, pages, view = one_photo_albums(vault, {
+        f"{ALBUM}/DSC_61.dng": b"II*\x00" + b"raw 61",
+        f"{ALBUM}/DSC_61.jpg": photo("DSC_61.jpg"),
+        f"{ALBUM}/DSC_61.dng.json": sidecar("DSC_61.dng", taken=taken_at(52)),
+        f"{ALBUM}/DSC_61.jpg.json": sidecar("DSC_61.jpg", taken=taken_at(53)),
+    })
+
+    assert time_of(pages, f"{ALBUM}/DSC_61.dng") == "2022-08-25T12:52:00Z"
+    assert time_of(pages, f"{ALBUM}/DSC_61.jpg") == "2022-08-26T12:53:00Z"
+    assert view["left_out"]["by_reason"] == {APPLIED: 2}
+
+
+def test_a_jpg_sidecar_never_pairs_with_a_png_of_the_same_stem(vault: Path) -> None:
+    """Catches a title whose extension names another format taking the time: the PNG would carry a JPG's date."""
+    _id, pages, view = one_photo_albums(vault, {
+        f"{ALBUM}/Scan_62.png": b"\x89PNG\r\n\x1a\n" + b"scan 62",
+        f"{ALBUM}/Scan_62.jpg.json": sidecar("Scan_62.jpg", taken=taken_at(54)),
+    })
+
+    assert "capture_time" not in pages[f"{ALBUM}/Scan_62.png"][0]
+    assert view["left_out"]["by_reason"] == {UNPAIRED: 1}
+
+
 def test_two_sidecars_that_fit_one_photo_leave_both_unpaired_and_the_photo_undated(vault: Path) -> None:
     """Catches a pairing that picks one: the wrong sidecar would date a photo and nothing would show it."""
     _id, pages, view = one_photo_albums(vault, {
@@ -290,7 +337,7 @@ def test_an_album_metadata_file_and_a_sidecar_over_a_mebibyte_file_as_ordinary_f
     assert view["left_out"]["by_reason"] == {}
 
 
-def test_the_same_takeout_imported_again_files_nothing_and_counts_every_sidecar_as_its_photo_not_filed(vault: Path) -> None:
+def test_the_same_takeout_imported_again_files_nothing_and_counts_every_sidecar_as_its_photo_already_imported(vault: Path) -> None:
     """Catches a re-import that files the JSON files it skipped before, or one that counts an unchanged photo as dated again."""
     members = {}
     for number in range(6):
@@ -305,8 +352,41 @@ def test_the_same_takeout_imported_again_files_nothing_and_counts_every_sidecar_
 
     assert source_pages(vault) == before and len(before) == 6
     assert view["progress"]["skipped_duplicates"] == 6 and view["progress"]["filed"] == 0
-    assert view["left_out"]["by_reason"] == {NOT_FILED: 6}
-    assert view["left_out"]["sidecars"] == {"dated": 0, "captioned": 0, "time_skipped": 0}
+    assert view["left_out"]["by_reason"] == {ALREADY: 6}
+    assert view["left_out"]["sidecars"] == {"with_time": 0, "captioned": 0, "time_skipped": 0}
+
+
+def test_an_album_copy_of_a_photo_already_filed_counts_its_sidecar_as_already_imported_and_not_for_review(vault: Path) -> None:
+    """Catches a copy in a second album whose sidecar is reported as a photo that did not file, so the owner reviews a photo that is in the vault."""
+    shared = JPEG + b"in two albums"
+    import_id, pages, view = one_photo_albums(vault, {
+        f"{ALBUM}/IMG_70.jpg": shared,
+        f"{ALBUM}/IMG_70.jpg.json": sidecar("IMG_70.jpg", taken=taken_at(60), caption="first album"),
+        "Takeout/Google Photos/Photos from 2022/IMG_70.jpg": shared,
+        "Takeout/Google Photos/Photos from 2022/IMG_70.jpg.json": sidecar("IMG_70.jpg", taken=taken_at(60), caption="second album"),
+    })
+
+    assert list(pages) == [f"{ALBUM}/IMG_70.jpg"]
+    assert view["progress"]["filed"] == 1 and view["progress"]["skipped_duplicates"] == 1
+    assert view["left_out"]["by_reason"] == {APPLIED: 1, ALREADY: 1}
+    assert all(adoption_consume.is_filed(code) for code in view["left_out"]["by_reason"])  # none of it is "needs review"
+
+
+def test_a_sidecar_whose_photo_did_not_file_is_counted_as_such_and_left_for_review(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches a photo that failed to file reported as in the vault: its time and caption would be lost without a trace."""
+    monkeypatch.setenv(client_artifacts.ADOPTION_CEILING_ENV, str(len(JPEG) + 5))
+    _id, pages, view = one_photo_albums(vault, {
+        f"{ALBUM}/small.jpg": JPEG + b"s",
+        f"{ALBUM}/small.jpg.json": sidecar("small.jpg", taken=taken_at(61)),
+        f"{ALBUM}/large.jpg": JPEG + b"l" * 100,  # over the ceiling: adoption does not copy it
+        f"{ALBUM}/large.jpg.json": sidecar("large.jpg", taken=taken_at(62)),
+    })
+
+    assert f"{ALBUM}/large.jpg" not in pages
+    assert view["left_out"]["by_reason"] == {APPLIED: 1, NOT_FILED: 1, "over_ceiling": 1}
+    assert not adoption_consume.is_filed(NOT_FILED)
 
 
 def test_no_photo_files_before_every_sidecar_is_read_when_the_pass_outlasts_a_call(vault: Path, monkeypatch) -> None:
@@ -337,6 +417,13 @@ def test_no_photo_files_before_every_sidecar_is_read_when_the_pass_outlasts_a_ca
     for number in range(12):
         assert time_of(pages, f"{ALBUM}/IMG_{number:02d}.jpg") == taken_at(number).strftime("%Y-%m-%dT%H:%M:%SZ")
     assert view["left_out"]["by_reason"] == {APPLIED: 12}
+
+
+def test_a_sidecar_time_at_or_before_1970_gives_no_time() -> None:
+    """Catches a zero or negative stamp read as a time: the photo would carry 1970-01-01 as its capture date."""
+    for value in ("0", "-86400"):
+        facts = export_photos.facts_of({"title": "OLD_1.jpg", "photoTakenTime": {"timestamp": value}, "creationTime": stamp(UPLOADED)})
+        assert facts.time is None and not facts.time_skipped
 
 
 def test_a_sidecar_that_cannot_be_read_ends_the_pass_in_part_and_releases_the_photos(vault: Path) -> None:
@@ -372,12 +459,14 @@ def test_a_caption_files_in_the_description_section_with_a_card_number_removed_a
     })
 
     text = pages[f"{ALBUM}/IMG_60.jpg"][1]
-    assert "\n## Description\n\nRegatta dinner, paid with card [card number removed, ends 1111]\n" in text
-    assert "4111" not in text.replace("ends 1111", "")
+    # The description section alone: the rest of a page holds random ids, digests and times in which "4111" can occur by chance.
+    section = text.split("\n## Description\n", 1)[1].split("\n## ", 1)[0]
+    assert section.strip() == "Regatta dinner, paid with card [card number removed, ends 1111]"
     if lexstore.fts5_available():
         _reset(vault)
-        hits = find_module.find(vault, query="regatta", scope="kb-only", mode="keyword", graph=False, result_level="page", limit=10)
-        assert [hit.path for hit in hits] == list(source_pages(vault))
+        found = {query: [hit.path for hit in find_module.find(vault, query=query, scope="kb-only", mode="keyword", graph=False, result_level="page", limit=10)]
+                 for query in ("regatta", "4111")}
+        assert found == {"regatta": list(source_pages(vault)), "4111": []}
 
 
 def test_the_file_reply_names_each_sidecar_by_what_became_of_its_photo_and_none_as_not_selected(vault: Path) -> None:
