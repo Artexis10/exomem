@@ -6450,8 +6450,7 @@ class PageRows:
     body_lower: str
     structure_json: str | None
     units: tuple[SemanticUnitRow, ...]
-    #: The unit rows that `units` project from. A store's `unit_rows` table and the graph's
-    #: candidate nodes read them too.
+    #: The unit rows that `units` project from. The graph's candidate nodes project from them too.
     unit_rows: tuple[unit_rows_module.UnitRow, ...] = ()
 
 
@@ -6665,11 +6664,6 @@ def write_page_rows(conn: sqlite3.Connection, rows: PageRows, *, projections: fr
             conn.execute(
                 "INSERT INTO unit_fts(rowid, stemmed) VALUES(?, ?)", (unit_rowid, unit.stemmed)
             )
-    # Only a store that holds the table writes it: a file-mode sidecar never has one.
-    if projections is not None and "unit_rows" in projections:
-        from . import unit_rows as unit_rows_module
-
-        unit_rows_module.write(conn, rows.unit_rows, rows.columns)
 
 
 def _delete_unit_rows(conn: sqlite3.Connection, parent_path: str, *, projections: frozenset[str] | None = None) -> None:
@@ -6682,10 +6676,6 @@ def _delete_unit_rows(conn: sqlite3.Connection, parent_path: str, *, projections
     conn.execute("DELETE FROM semantic_units WHERE parent_path = ?", (parent_path,))
     if projections is None or "unit_row_keys" in projections:
         conn.execute("DELETE FROM unit_row_keys WHERE parent_path = ?", (parent_path,))
-    if projections is not None and "unit_rows" in projections:
-        from . import unit_rows as unit_rows_module
-
-        unit_rows_module.delete(conn, parent_path)
     # A parent left with no rows keeps no revision (see `_delete_page_rowid`); one with a page row keeps it.
     conn.execute(
         "DELETE FROM unit_revisions WHERE parent_path = ? AND NOT EXISTS (SELECT 1 FROM pages WHERE path = ?)",
@@ -6725,18 +6715,15 @@ def delete_page_rows(conn: sqlite3.Connection, rel: str, *, projections: frozens
     conn.execute("DELETE FROM unit_revisions WHERE parent_path = ?", (rel,))
 
 
-def derive_catalogue_rows(
-    vault_root: Path, conn: sqlite3.Connection, *, projections: frozenset[str] | None = None
-) -> None:
+def derive_catalogue_rows(vault_root: Path, conn: sqlite3.Connection) -> None:
     """Fill the catalogue on ``conn`` from the vault's Markdown files, as a cold rebuild does.
 
     ``conn`` already holds the schema that ``create_catalogue_schema`` made. Store mode compares what this
     derives with the rows it copied in. It owns no transaction and stamps no meta row.
-    ``projections`` names the tables that ``conn`` holds, as ``write_page_rows`` takes them.
     """
     store = LexicalStore(vault_root)
     members, signatures = store._walk_entries()
-    store._insert_members(conn, members, signatures, projections=projections)
+    store._insert_members(conn, members, signatures)
 
 
 def corpus_paths(vault_root: Path) -> list[Path]:
@@ -8777,19 +8764,10 @@ class LexicalStore:
         for scope, target in targets.items():
             self._bless(conn, scope, target)
 
-    def _insert_members(
-        self,
-        conn: sqlite3.Connection,
-        members,
-        signatures,
-        *,
-        projections: frozenset[str] | None = None,
-    ) -> None:
+    def _insert_members(self, conn: sqlite3.Connection, members, signatures) -> None:
         """Insert a page row, with its full-text and unit rows, for each walked file (caller owns the txn)."""
         for path, (in_kb, in_vault) in members.items():
-            self._insert_page(
-                conn, path, signatures[path][0], in_kb, in_vault, projections=projections
-            )
+            self._insert_page(conn, path, signatures[path][0], in_kb, in_vault)
 
     def _delta_source(self):
         """`(members, signatures)` for the heal's diff — from the live freshness
@@ -8875,8 +8853,6 @@ class LexicalStore:
         mtime_ns: int,
         in_kb: bool,
         in_vault: bool,
-        *,
-        projections: frozenset[str] | None = None,
     ) -> None:
         """Insert one page row + its fts/tri rows (caller owns the txn).
 
@@ -8927,7 +8903,7 @@ class LexicalStore:
             in_vault=in_vault,
         )
         if rows is not None:
-            write_page_rows(conn, rows, projections=projections)
+            write_page_rows(conn, rows)
 
     def _delete_semantic_units(self, conn: sqlite3.Connection, parent_path: str) -> None:
         _delete_unit_rows(conn, parent_path)

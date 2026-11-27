@@ -1,9 +1,8 @@
-"""The unit row set reproduces the lexical unit rows and the graph's candidate nodes.
+"""The one unit row builder reproduces the lexical unit rows and the graph's candidate nodes.
 
 OpenSpec make-vault-store-canonical D10, task 5.1. For the same bytes, `verify.derive_expected`
-derives a store's tables from a vault's files, so it is the one place where the new `unit_rows`
-table sits beside the two row sets that it merges. Each test reads the stored unit rows back and
-projects them again.
+derives a store's tables from a vault's files, so it holds the lexical rows and the graph nodes
+that the one builder projects. The parser's own units are the oracle for both.
 """
 
 from __future__ import annotations
@@ -16,17 +15,7 @@ from typing import NamedTuple
 
 import pytest
 
-from exomem import (
-    epistemic_graph,
-    find_corpus,
-    lexstore,
-    semantic_index,
-    semantic_language_registry,
-    semantic_units,
-    unit_rows,
-    vault,
-)
-from exomem.relation_registry import core_registry as core_relations
+from exomem import semantic_index, semantic_units
 from exomem.vault_store import verify
 
 ANCHORED = "Knowledge Base/Notes/harbour-tide.md"
@@ -109,159 +98,6 @@ def derived(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Derived:
     return Derived(root, expected)
 
 
-def _stored_rows(expected: Path, path: str | None = None) -> list[unit_rows.UnitRow]:
-    with closing(sqlite3.connect(expected)) as conn:
-        conn.row_factory = sqlite3.Row
-        where, arguments = ("WHERE path = ? ", (path,)) if path else ("", ())
-        found = conn.execute(
-            f"SELECT * FROM unit_rows {where}ORDER BY path, ordinal", arguments
-        ).fetchall()
-    return [unit_rows.UnitRow.from_record(dict(row)) for row in found]
-
-
-def _page_columns(expected: Path) -> dict[str, dict[str, object]]:
-    with closing(sqlite3.connect(expected)) as conn:
-        conn.row_factory = sqlite3.Row
-        return {row["path"]: dict(row) for row in conn.execute("SELECT * FROM pages")}
-
-
-def _differing(conn: sqlite3.Connection, one: str, other: str) -> int:
-    return sum(
-        conn.execute(
-            f"SELECT COUNT(*) FROM (SELECT * FROM {a} EXCEPT SELECT * FROM {b})"
-        ).fetchone()[0]
-        for a, b in ((one, other), (other, one))
-    )
-
-
-def test_the_lexical_projection_of_the_unit_rows_is_the_semantic_units_table(
-    derived: Derived,
-) -> None:
-    """A unit row that loses a field in the store would leave the lexical row and its projection
-    apart."""
-    pages = _page_columns(derived.expected)
-    with closing(sqlite3.connect(":memory:")) as projected:
-        lexstore.create_catalogue_schema(projected)
-        columns = [
-            name
-            for (name,) in projected.execute("SELECT name FROM pragma_table_info('semantic_units')")
-        ]
-        for row in _stored_rows(derived.expected):
-            values = unit_rows.lexical_columns(row, pages[row.path])
-            marks = ", ".join("?" * len(values))
-            projected.execute(
-                f"INSERT INTO semantic_units({', '.join(values)}) VALUES ({marks})",
-                tuple(values.values()),
-            )
-        projected.execute("ATTACH DATABASE ? AS derived", (str(derived.expected),))
-        select = ", ".join(name for name in columns if name != "rowid")
-        for name in ("main", "derived"):
-            projected.execute(
-                f"CREATE TEMP VIEW units_{name} AS SELECT {select} FROM {name}.semantic_units"
-            )
-        stored = projected.execute("SELECT COUNT(*) FROM units_derived").fetchone()[0]
-        assert stored >= len(PAGES) - 1, "the fixture vault must hold units for this check"
-        assert _differing(projected, "units_main", "units_derived") == 0
-        stored_keys = {
-            (row.path, row.occurrence_key, key)
-            for row in _stored_rows(derived.expected)
-            for key in row.row_keys
-        }
-        derived_keys = set(
-            projected.execute(
-                "SELECT parent_path, occurrence_key, row_key FROM derived.unit_row_keys"
-            )
-        )
-        assert stored_keys == derived_keys != set()
-
-
-def test_the_graph_projection_of_the_unit_rows_is_the_graph_candidate_nodes(
-    derived: Derived,
-) -> None:
-    """Knowledge Base pages project the stored unit rows to the graph; a copy outside has none."""
-    root = derived.root
-    resolver = vault.WikilinkResolver.from_entries(root, [(rel, rel) for rel in GRAPH_PAGES])
-    type_basis = epistemic_graph.producer_type_basis(root)
-    with closing(sqlite3.connect(":memory:")) as projected:
-        epistemic_graph.create_row_schema(projected, publication=False)
-        for rel in GRAPH_PAGES:
-            raw = PAGES[rel]
-            page = find_corpus.parse_page(root / rel, 0.0, root, content=raw, resolved_relative=rel)
-            state = semantic_index.current_parent_index_state(root, rel, source=raw.decode())
-            graph = epistemic_graph.page_graph_rows(
-                root, rel, raw, page=page, state=state, resolver=resolver, type_basis=type_basis,
-                target_exists=lambda _rel: False,
-                landing=lambda *_: pytest.fail("the fixture has no link"),
-                prepared_unit_rows=_stored_rows(derived.expected, rel),
-            )
-            epistemic_graph.write_page_graph_rows(
-                projected, graph, epistemic_graph.graph_registry_stamps(root)
-            )
-        projected.execute("ATTACH DATABASE ? AS derived", (str(derived.expected),))
-        select = "SELECT {} FROM {}.graph_nodes WHERE kind = 'candidate'"
-        columns = ", ".join(
-            name
-            for (name,) in projected.execute("SELECT name FROM pragma_table_info('graph_nodes')")
-            if name not in ("rowid", "node_id")
-        )
-        for name in ("main", "derived"):
-            projected.execute(f"CREATE TEMP VIEW nodes_{name} AS {select.format(columns, name)}")
-        counted = projected.execute("SELECT COUNT(*) FROM nodes_derived").fetchone()[0]
-        assert counted >= len(GRAPH_PAGES)
-        assert _differing(projected, "nodes_main", "nodes_derived") == 0
-        outside = projected.execute(
-            "SELECT COUNT(*) FROM derived.graph_nodes WHERE path = ?", (OUTSIDE,)
-        ).fetchone()[0]
-        assert outside == 0
-    assert _stored_rows(derived.expected, OUTSIDE), "the copy outside the Knowledge Base keeps rows"
-
-
-def test_references_bound_from_the_stored_identity_facts_are_the_ones_the_page_summary_binds(
-    derived: Derived,
-) -> None:
-    """Binding at read time needs only the stored facts, so an overlay leaves no stale ref."""
-    core = semantic_language_registry.core_registry()
-    stored_by_page: dict[str, list[unit_rows.UnitRow]] = {}
-    for row in _stored_rows(derived.expected):
-        stored_by_page.setdefault(row.path, []).append(row)
-    with closing(sqlite3.connect(derived.expected)) as conn:
-        summaries = dict(
-            conn.execute("SELECT path, structure_json FROM pages WHERE structure_json IS NOT NULL")
-        )
-    assert UNREADABLE not in summaries
-
-    def bind(
-        summary: dict, parent_ref: str | None, rel: str
-    ) -> list[tuple[str, str | None, str | None]]:
-        selected = semantic_units.interpret_structural_summary(
-            summary, language_registry=core, relation_registry=core_relations(),
-            parent_ref=parent_ref, path=rel,
-        )
-        return [(unit.occurrence_key, unit.unit_ref, unit.fingerprint) for unit in selected.units]
-
-    for rel, raw_summary in summaries.items():
-        metadata = json.loads(raw_summary)
-        summary = metadata["structure"]
-        rows = {row.occurrence_key: row for row in stored_by_page.get(rel, [])}
-        for item in (*summary["rich"], *summary["compact"]):
-            row = rows.get(item["key"])
-            item["identity"] = None if row is None else {
-                "signature": row.identity_signature,
-                "fingerprints": list(row.identity_fingerprints),
-            }
-        original = json.loads(raw_summary)["structure"]
-        parent_ref = metadata["parent_ref"]
-        assert bind(summary, parent_ref, rel) == bind(original, parent_ref, rel)
-        assert bind(summary, parent_ref, rel), f"{rel} binds no unit"
-    twins = bind(json.loads(summaries[TWINS])["structure"], _memory_ref(_TWINS_ID), TWINS)
-    # The two identical unanchored units bind occurrence 1 and 2, so their references differ.
-    assert len({unit_ref for _key, unit_ref, _fingerprint in twins}) == len(twins) == 2
-
-
-def _memory_ref(identity: str) -> str:
-    return f"exomem://memory/{identity}"
-
-
 def test_the_lexical_rows_and_graph_nodes_say_what_the_parser_emits_for_the_same_bytes(
     derived: Derived,
 ) -> None:
@@ -331,6 +167,42 @@ def test_each_projection_keeps_the_rule_that_the_other_does_not_share(derived: D
     )
 
 
-def test_a_page_with_no_structure_has_a_page_row_and_no_unit_row(derived: Derived) -> None:
-    assert UNREADABLE in _page_columns(derived.expected)
-    assert _stored_rows(derived.expected, UNREADABLE) == []
+def test_a_knowledge_base_page_has_the_same_units_in_the_lexical_rows_and_the_graph(
+    derived: Derived,
+) -> None:
+    """One builder gives both row sets the same units; the copy outside the Knowledge Base has no
+    graph node."""
+    with closing(sqlite3.connect(derived.expected)) as conn:
+        for rel in GRAPH_PAGES:
+            lexical = set(
+                conn.execute(
+                    "SELECT unit_ref, line, end_line FROM semantic_units WHERE parent_path = ?",
+                    (rel,),
+                )
+            )
+            nodes = {
+                (json.loads(metadata)["occurrence_key"], line, end_line)
+                for metadata, line, end_line in conn.execute(
+                    "SELECT metadata, line_start, line_end FROM graph_nodes "
+                    "WHERE path = ? AND kind = 'candidate'", (rel,),
+                )
+            }
+            assert lexical == nodes != set(), rel
+        counts = [
+            conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {column} = ?", (OUTSIDE,)
+            ).fetchone()[0]
+            for table, column in (("graph_nodes", "path"), ("semantic_units", "parent_path"))
+        ]
+        assert counts[0] == 0 and counts[1] > 0
+
+
+def test_a_page_with_no_structure_has_a_page_row_and_no_units(derived: Derived) -> None:
+    with closing(sqlite3.connect(derived.expected)) as conn:
+        pages = conn.execute("SELECT COUNT(*) FROM pages WHERE path = ?", (UNREADABLE,)).fetchone()
+        assert pages[0] == 1
+        for table, column in (("semantic_units", "parent_path"), ("graph_nodes", "path")):
+            held = conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {column} = ?", (UNREADABLE,)
+            ).fetchone()[0]
+            assert held == 0, table

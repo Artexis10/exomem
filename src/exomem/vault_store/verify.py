@@ -12,7 +12,7 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import epistemic_graph, lexstore, memory_refs, unit_rows, vault
+from .. import epistemic_graph, lexstore, memory_refs, vault
 from ..governance import page_admission
 from . import projection
 
@@ -37,10 +37,7 @@ class Difference:
 
 
 def derive_expected(vault_root: Path, path: Path) -> None:
-    """Derive the lexical, unit, graph, reference and inbound-link rows from the files.
-
-    Each owner's own builder derives its rows into a new database.
-    """
+    """Derive the lexical, graph, reference and inbound-link rows from the files with the owners' own builders into a new database."""
     conn = sqlite3.connect(path, isolation_level=None)
     try:
         conn.execute("BEGIN")
@@ -49,11 +46,7 @@ def derive_expected(vault_root: Path, path: Path) -> None:
         memory_refs.create_identity_schema(conn)
         vault.create_inbound_schema(conn)
         page_admission.create_schema(conn)
-        unit_rows.create_schema(conn)
-        projections = frozenset(
-            name for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-        )
-        lexstore.derive_catalogue_rows(vault_root, conn, projections=projections)
+        lexstore.derive_catalogue_rows(vault_root, conn)
         epistemic_graph.derive_row_tables(vault_root, conn)
         memory_refs.derive_identities(vault_root, conn)
         vault.derive_inbound_rows(vault_root, conn)

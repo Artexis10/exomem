@@ -43,7 +43,7 @@ PASS = "vault_store_registry_pass"
 #: that this build derives; its pass creates the objects and derives every page, and only then
 #: records this version. Version 1 adds inbound links; version 2 adds page admission;
 #: version 3 adds payload hashes for legacy Evidence pages; version 4 adds lineage prior paths;
-#: version 5 adds authored unit row keys and title contact; version 6 adds the unit rows.
+#: version 5 adds authored unit row keys and title contact.
 OWNER_SCHEMA = "vault_store_owner_schema"
 # These generations are the closed introduction versions of the owners' derived projections.
 INBOUND_LINKS_OWNER_VERSION = 1
@@ -55,10 +55,7 @@ PAYLOAD_HASHES_OWNER_VERSION = 3
 # ``owner_schema_behind`` count that as behind too.
 UNIT_ROW_KEYS_OWNER_VERSION = 5
 TITLE_CONTACT_OWNER_VERSION = UNIT_ROW_KEYS_OWNER_VERSION
-# Version 6 derives the unit row table (task 5.1) for every page, so a store at 5 needs another
-# pass.
-UNIT_ROWS_OWNER_VERSION = 6
-OWNER_SCHEMA_VERSION = UNIT_ROWS_OWNER_VERSION
+OWNER_SCHEMA_VERSION = UNIT_ROW_KEYS_OWNER_VERSION
 # A parser input change needs new rows, but no owner DDL or collection-schema barrier.
 PARSER_VERSION = "vault_store_parser_version"
 KEYS = (OVERLAY_REVISION, REGISTRY_REVISION, PASS, OWNER_SCHEMA, PARSER_VERSION)
@@ -328,9 +325,8 @@ def _create_owner_objects(tx: Connection, root: Path) -> None:
 
     created = dict(item for group in create_owner_schema(tx) for item in group.items())
     _record_objects(tx, created)
-    if "page_admission" in created or "prior_paths" in created or "unit_rows" in created:
-        # Earlier batches wrote no page facts, prior paths or unit rows, so an older cursor cannot
-        # skip those pages.
+    if "page_admission" in created or "prior_paths" in created:
+        # Earlier batches wrote no page facts or prior paths, so an older cursor cannot skip those pages.
         tx.execute("DELETE FROM store_meta WHERE key = ?", (PASS,))
     if "inbound_links" in created:
         held = frozenset(row[0] for row in tx.execute("SELECT path FROM store_pages"))
