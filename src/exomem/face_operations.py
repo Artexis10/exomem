@@ -379,8 +379,14 @@ def delete(vault_root: Path) -> dict[str, Any]:
         "remaining": remaining,
     })
     if remaining:
+        from . import media_worker
+
+        # On Windows a media child keeps its store connections, and so the files, open until it exits idle.
+        minutes = max(1, math.ceil(media_worker.idle_seconds_setting() / 60))
         sentence = (f"Faces are off, but the delete is partial: {', '.join(remaining)} could not be removed. "
-                    "Repeat faces.delete to finish it.")
+                    "Repeat faces.delete to finish it. If it stays partial, the media worker still holds the "
+                    f"files: repeat it once no picture has been processed for {minutes} "
+                    f"minute{'s' if minutes != 1 else ''}, when the worker closes them.")
     else:
         sentence = "Faces are off, and every face, group and name in this account's face store is deleted."
     return {

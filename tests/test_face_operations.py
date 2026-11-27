@@ -340,8 +340,9 @@ def test_delete_removes_every_face_store_file_reports_what_it_held_and_turns_sea
 def test_a_delete_that_cannot_remove_a_file_reports_partial_and_a_repeat_finishes_it(
     doors, vault, monkeypatch
 ) -> None:
-    """Catches a partial delete reported as complete."""
+    """Catches a partial delete reported as complete, or one that never says when a repeat can finish it."""
     seed_two_people_and_strangers(vault)
+    monkeypatch.setenv("EXOMEM_MEDIA_IDLE_SECONDS", "600")  # A media child holds files until it idles this long.
     real_unlink = Path.unlink
 
     def people_store_held(path, *args, **kwargs):
@@ -357,6 +358,7 @@ def test_a_delete_that_cannot_remove_a_file_reports_partial_and_a_repeat_finishe
     assert first["deletion"] == "partial", first
     assert first["remaining"] == ["faces/people.sqlite", "faces"]
     assert "faces/people.sqlite" in first["outcome"]
+    assert "10 minutes" in first["outcome"]
     assert repeat["deletion"] == "deleted", repeat
     assert repeat["counts"] == first["counts"] == {"faces": 5, "groups": 4, "people": 2, "pages": 4}
     assert not face_store.store_dir(vault).exists()

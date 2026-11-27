@@ -515,7 +515,7 @@ class MediaWorker:
         if selected not in {"process", "inline"}:
             raise ValueError("media worker mode must be process or inline")
         self._execution_mode = selected
-        self._idle_seconds = idle_seconds if idle_seconds is not None else _idle_seconds()
+        self._idle_seconds = idle_seconds if idle_seconds is not None else idle_seconds_setting()
         self._q: queue.Queue[_Job | None] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -3263,7 +3263,8 @@ def _join_with_timeout(q: queue.Queue, timeout: float) -> None:
         time.sleep(0.02)
 
 
-def _idle_seconds() -> float:
+def idle_seconds_setting() -> float:
+    """How long a media child waits without work before it exits and closes every file it holds."""
     try:
         return max(0.1, float(os.environ.get("EXOMEM_MEDIA_IDLE_SECONDS") or "300"))
     except ValueError:
