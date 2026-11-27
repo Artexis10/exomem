@@ -30,9 +30,10 @@ In development work, reuse the context you already retrieved for the task. Refre
 dependency, a decision, a topic or a source version changes, or when the user asks. Keep
 implementation steps, test logs and transient PR or CI status in the repository. Capture reusable
 decisions, constraints, diagnosed failures and verified milestone outcomes in one pass at a
-meaningful boundary. Record a tried approach's outcome, as [page-types](page-types.md#recording-a-tried-approach)
-defines it, at the boundary where its result is known. A checkpoint or a tool call alone is not a capture trigger. This cadence never
-suppresses an explicit save request or a substantive landing.
+meaningful boundary. Record a tried approach's outcome, as
+[page-types](page-types.md#recording-a-tried-approach) defines it, at the boundary where its result
+is known. A checkpoint or a tool call alone is not a capture trigger. This cadence never suppresses
+an explicit save request or a substantive landing.
 
 ## Stepping-stones
 
