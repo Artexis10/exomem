@@ -198,7 +198,7 @@ Only a caller whose saves may be queued SHALL read queued saves or the intake co
 
 ### Requirement: A save its arguments condemn is refused, not queued
 
-Before the intake accepts a save, the serving process SHALL apply each refusal that the save's arguments alone decide, without reading the vault. A save that such a refusal condemns SHALL get that refusal at once and SHALL NOT be queued. A refusal that depends on vault state SHALL stay at the replay.
+Before the intake accepts a save, the serving process SHALL apply the argument-only checks that exist for it: compact observation metadata, an episode recap's own validation, and the argument rules of `record_memory` and `plan_memory`. A save that one of them refuses SHALL get that refusal at once and SHALL NOT be queued. A refusal that reads vault state SHALL stay at the replay.
 
 #### Scenario: An oversized recap behind the queue is refused at once
 

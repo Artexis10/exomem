@@ -15916,8 +15916,11 @@ def refusal_before_queueing(command: Command, arguments: Mapping[str, Any]) -> E
     operations = None if rules is None else operation_entries.register_operations(command.name)
     if rules is None or operations is None or operations.selector is None:
         return None
-    # These rules take the caller's own selector value and refuse an unknown one themselves.
-    fields = {key: value for key, value in arguments.items() if key not in {operations.selector, "response_detail"}}
+    # These rules take the caller's own selector value and refuse an unknown one themselves; the
+    # tool-level arguments its renderings declare are not operation fields.
+    skipped = {operations.selector, *(name for rendering in _renderings_for(command.name)
+                                      for name in rendering.tool_arguments)}
+    fields = {key: value for key, value in arguments.items() if key not in skipped}
     try:
         rules.validate(arguments.get(operations.selector), fields)
     except Exception as error:  # noqa: BLE001 - the command's own refusal, whatever its type

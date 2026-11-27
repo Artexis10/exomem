@@ -17,7 +17,7 @@ None.
 
 ### Modified Capabilities
 
-- `busy-write-intake`: adds the requirement that a save its arguments condemn is refused, not queued.
+- `busy-write-intake`: adds the requirement that a save its argument-only checks condemn is refused, not queued.
 
 ## Impact
 
