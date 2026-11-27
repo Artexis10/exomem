@@ -1013,8 +1013,8 @@ def value_refusal(vault_root: Path, arguments: Mapping[str, Any]) -> OpError | N
     this thread cannot read now, a manifest that the caller may not see, and an open queued save that may change
     what the collection declares before this one replays. Such a save is a Records save that carries a manifest
     text, or a save of another command whose arguments name the manifest's path, such as an edit of its
-    frontmatter. A direct revise that commits between this check and the replay is not seen: the replay then
-    refuses or lands by the revised declaration.
+    frontmatter. A direct revise that commits after this check, before the replay would have run, is not
+    seen: the check can refuse a value that the revised collection accepts, and the caller sends it again.
     """
     action = arguments.get("action")
     values = arguments.get("item") if action == "append" else arguments.get("changes") if action == "update" else None
