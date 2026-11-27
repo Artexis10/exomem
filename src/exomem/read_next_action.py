@@ -58,10 +58,9 @@ def _later_turns(continuity: str | None) -> str | None:
     if not (_callable("search_memory") and _callable("activate_context")):
         return None
     text = (
-        "Before you answer a later turn with a new question or claim on the user's life, work or a topic their "
-        f"memory lists, {capabilities.active_call_text('search_memory', {})} it or call "
-        f"{capabilities.active_call_text('activate_context', {})} again: they may keep a view on it. "
-        "One about nothing of theirs needs none."
+        "Before you answer a later turn with a new question or claim on a subject their memory lists, "
+        f"{capabilities.active_call_text('search_memory', {})} it, even when it sounds like general knowledge "
+        "or comes from someone else: their own view or rule on it shows only in a search."
     )
     if len(text) > MAX_CHARS:
         raise ValueError("later-turns prose exceeds its protocol bound")
