@@ -509,9 +509,14 @@ def family_tags(scope: str, category: str) -> list[str]:
 
 
 def _evidence_segments(vault_root: Path, scope: str, category: str) -> tuple[str, str, str]:
-    """The `Evidence`, scope and category folder names as they are spelled on disk, each taking an existing sibling's."""
+    """The `Evidence`, scope and category folder names as they are spelled on disk, each taking an existing sibling's.
+
+    A scope or category that differs from an existing sibling only by separators takes that sibling's spelling too.
+    """
     relative = respell_new_path(
-        vault_root, (kb_root(vault_root) / "Evidence" / scope / category).relative_to(vault_root).as_posix()
+        vault_root,
+        (kb_root(vault_root) / "Evidence" / scope / category).relative_to(vault_root).as_posix(),
+        leaf_is_folder=True,
     )
     evidence, scope_spelled, category_spelled = relative.split("/")[-3:]
     return evidence, scope_spelled, category_spelled
@@ -521,7 +526,8 @@ def evidence_folder(vault_root: Path, scope: str, category: str) -> Path:
     """The Evidence family folder for already-valid destination segments.
 
     Each folder on the way takes an existing sibling's spelling when it matches
-    by `vault_name_key`, so scope `food` lands in an existing `Food`.
+    by `vault_name_key`, so scope `food` lands in an existing `Food`, or by
+    `folder_lookalike_key`, so scope `gardentools` lands in an existing `garden-tools`.
     """
     evidence, scope_spelled, category_spelled = _evidence_segments(vault_root, scope, category)
     return kb_root(vault_root) / evidence / scope_spelled / category_spelled
@@ -905,8 +911,9 @@ def preserve(
             )
             sidecar_md = _render_sidecar(
                 artifact_name=filename_safe,
-                scope=scope_safe,
-                category=category_safe,
+                # The folders the capture landed in, so the page's tags name them as its folders do.
+                scope=folder.parent.name,
+                category=folder.name,
                 date_iso=stamp_iso,
                 description=desc_clean,
                 text=pieces[0] if pieces else None,
@@ -990,12 +997,12 @@ def preserve(
         # Index + log updates.
         rel_artifact_for_summary = managed_relative(rel_artifact)
         activity_summary = (
-            f"`{rel_artifact_for_summary}` (evidence, {scope_safe}/{category_safe}, "
+            f"`{rel_artifact_for_summary}` (evidence, {folder.parent.name}/{folder.name}, "
             f"mobile via exomem)"
         )
         log_body = (
-            f"Mobile preserve via exomem. scope={scope_safe}, "
-            f"category={category_safe}, filename={filename_safe}."
+            f"Mobile preserve via exomem. scope={folder.parent.name}, "
+            f"category={folder.name}, filename={filename_safe}."
         )
         if description and description.strip():
             desc_one_line = description.strip().replace("\n", " ")

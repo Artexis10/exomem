@@ -956,7 +956,9 @@ def _destination(vault_root: Path, *parts: str) -> str:
 
     # The spelling the capture lands under, so a receipt names the folder written.
     return respell_new_path(
-        vault_root, kb_root(vault_root).joinpath(*parts).relative_to(vault_root).as_posix()
+        vault_root,
+        kb_root(vault_root).joinpath(*parts).relative_to(vault_root).as_posix(),
+        leaf_is_folder=True,
     )
 
 
