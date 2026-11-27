@@ -137,6 +137,8 @@ def test_a_restored_people_store_names_rescanned_faces_once_faces_are_turned_on_
     for suffix in ("", "-wal", "-shm"):
         Path(str(face_store.index_path(vault)) + suffix).unlink(missing_ok=True)
     garden = [face(unit(1, 0.02))]
+    (vault / "Photos").mkdir(exist_ok=True)
+    (vault / "Photos" / "garden.jpg").write_bytes(b"the picture's bytes")  # The rescan reads a picture that exists.
 
     stored_while_off = face_scan.commit(vault, "Photos/garden.jpg", garden)
     assert stored_while_off is False
