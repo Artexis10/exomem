@@ -146,7 +146,9 @@ class NewerStore(sqlite3.DatabaseError):
 
 def is_busy(error: sqlite3.Error) -> bool:
     """Whether `error` means another connection holds the store: it is readable, and a retry can succeed."""
-    return getattr(error, "sqlite_errorcode", None) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    # `sqlite_errorcode` is the extended result code (such as SQLITE_BUSY_SNAPSHOT); its low byte is the primary.
+    code = getattr(error, "sqlite_errorcode", None)
+    return code is not None and code & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
 
 
 def _readable_version(connection: sqlite3.Connection, path: Path) -> int:

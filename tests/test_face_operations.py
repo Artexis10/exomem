@@ -429,6 +429,27 @@ def test_naming_on_a_damaged_face_index_is_refused_and_points_to_delete(doors, v
     assert "faces.delete" in off["next_action"]
 
 
+def test_turning_faces_off_on_a_store_a_newer_release_wrote_is_refused_not_claimed(doors, vault) -> None:
+    """Catches an off request answered as done while the newer release still runs faces on that store."""
+    seed_two_people_and_strangers(vault)
+    with closing(sqlite3.connect(face_store.index_path(vault))) as index:
+        index.execute(f"PRAGMA user_version = {face_store.SCHEMA_VERSION + 1}")
+
+    reply = doors("manage_memory", "faces.set", {"state": "off"})
+
+    error = reply.get("error") or reply
+    assert error.get("code") == "FACES_UNREADABLE", reply
+    assert "newer release" in str(error), reply
+
+
+def test_a_store_busy_with_an_extended_code_is_retried_not_called_damaged() -> None:
+    """Catches a transient lock answered as damage, which points the owner to deleting their faces."""
+    busy_snapshot = sqlite3.OperationalError("database is locked")
+    busy_snapshot.sqlite_errorcode = sqlite3.SQLITE_BUSY | (2 << 8)  # SQLITE_BUSY_SNAPSHOT
+
+    assert face_store.is_busy(busy_snapshot)
+
+
 def test_the_delete_result_and_status_name_what_the_delete_cannot_reach_and_when_it_ends(doors, vault) -> None:
     """Catches a delete that lets the owner believe no copy of their face data remains anywhere."""
     seed_two_people_and_strangers(vault)

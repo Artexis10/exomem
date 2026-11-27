@@ -321,9 +321,13 @@ def turn_off(vault_root: Path) -> dict[str, Any]:
     except sqlite3.DatabaseError as error:
         if face_store.is_busy(error):
             raise  # Another connection holds the store: it is readable, and the caller retries.
-        # No face work runs on a store this release cannot read, so off is already in effect.
+        if isinstance(error, face_store.NewerStore):
+            # The release that wrote the store still reads faces as on; an off recorded nowhere would be lost there.
+            raise face_search.faces_unreadable(error) from error
+        # No face work runs on a damaged store, so off is already in effect.
         answer = _unreadable(error)
         answer["outcome"] = "Faces are already off in effect: the face data cannot be read, so no picture is scanned."
+        answer["next_action"] = "To erase the damaged face data, the owner runs faces.delete. Nothing else is needed."
         return answer
     if not enabled:
         return {"outcome": "Faces are already off.", "state": "off"}
@@ -350,7 +354,7 @@ def delete(vault_root: Path) -> dict[str, Any]:
 
     try:
         turn_off(vault_root)
-    except sqlite3.DatabaseError:
+    except (sqlite3.DatabaseError, OpError):  # OpError: FACES_UNREADABLE for a store a newer release wrote.
         # A damaged or newer face index cannot record "off". Erasing it below turns faces off all the same.
         log.warning("faces: the face index could not record off before its delete", exc_info=True)
     # Faces may have been off already, with an earlier backfill still finishing its picture.
