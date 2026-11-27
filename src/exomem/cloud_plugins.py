@@ -244,12 +244,18 @@ def build_packages(
     package_output.mkdir(parents=True, exist_ok=True)
     staging = tempfile.TemporaryDirectory(prefix="exomem-packaged-edition-")
     repository = definition["repository"].removeprefix("https://github.com/")
+    marketplace = definition["claude_code_marketplace"]
+    # The hooked edition is listed in its own marketplace, where it can take the product name.
+    claude_code_install = (
+        f"run `/plugin marketplace add {marketplace['repository']}`, then "
+        f"`/plugin install {definition['name']}@{marketplace['name']}`"
+    )
     for edition, (provider, hooked, bundles_server) in _EDITIONS.items():
-        # An edition listed as its own marketplace plugin names itself in the definition.
+        # An edition with its own name or listing sets it in the definition.
         identity_override = definition.get("edition_identities", {}).get(edition, {})
         packaged = bool(identity_override.get("packaged"))
-        # An unlisted edition ships as an upload file only, outside the repository
-        # marketplace, where its name would collide with the local plugin's.
+        # An unlisted edition stays out of the repository marketplace, where its name would
+        # collide with the local plugin's; the Claude Code marketplace lists it instead.
         listed = not packaged and identity_override.get("listed", True)
         release = package_skills.RELEASE_PLACEHOLDER if packaged else None
         target = (Path(staging.name) if packaged else destination) / edition
@@ -330,8 +336,8 @@ def build_packages(
             + (
                 "Lifecycle hooks are available in the full Evermatter plugin. They add "
                 "automatic recall, capture checks and continuation on Claude Code and "
-                f"Cowork. To use it, upload `{definition['release_assets']['claude-hooks.zip']}` from "
-                "the release page as a plugin instead of installing this edition.\n\n"
+                f"Cowork. To use it in Claude Code, {claude_code_install} instead of "
+                "installing this edition.\n\n"
                 if provider == "claude" and not hooked
                 else ""
             )
@@ -346,9 +352,11 @@ def build_packages(
         if hooked:
             _claude_hooks(root, target)
             with (target / "README.md").open("a", encoding="utf-8", newline="\n") as stream:
-                # An edition outside the marketplace has no install line.
+                # A packaged edition is outside every marketplace, so it has no install line.
                 install = (
                     ""
+                    if packaged
+                    else f"To install this plugin in Claude Code, {claude_code_install}. "
                     if not listed
                     else "To install this plugin in Claude Code, run "
                     f"`/plugin install {identity_override.get('name', definition['name'])} "

@@ -171,7 +171,7 @@ def test_connector_edition_adds_hooks_to_an_existing_connection_without_a_server
     hooked_manifest = json.loads(
         (ROOT / "plugins/cloud/generated/claude-hooks/.claude-plugin/plugin.json").read_text()
     )
-    # Both editions sit in one marketplace; a person picks between them by these labels.
+    # A person picks between the account and self-hosted editions by these labels.
     assert manifest["name"] != hooked_manifest["name"]
     assert manifest["displayName"] != hooked_manifest["displayName"]
     assert manifest["description"] != hooked_manifest["description"]

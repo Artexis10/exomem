@@ -30,12 +30,15 @@ Claude has three editions. The directory edition, `generated/claude`, contains
 skills, the remote MCP connection, the icon, README and LICENSE. The Claude
 directory refuses command hooks and non-text files from publishers that are not
 Verified organizations, so the build fails if a hook or another file type enters
-this edition. Its README names the install command for the hooked edition.
+this edition. Its README names the Claude Code install commands for the hooked edition.
 
 The hooked edition, `generated/claude-hooks`, is named `evermatter` like the
-directory edition and ships only as the release asset `evermatter-claude-hooks.zip`
-for upload. It stays out of the repository marketplace, where `evermatter` names the
-local plugin. It registers the release-owned retrieval, capture
+directory edition. Claude Code installs it from the separate marketplace
+`substrate-systems/evermatter-plugins` (`/plugin install evermatter@evermatter`),
+whose one entry points at this folder on the main branch. It stays out of this
+repository's marketplace, where `evermatter` names the local plugin; `listed: false`
+in its identity keeps it out. In Claude and Cowork, the release asset
+`evermatter-claude-hooks.zip` uploads as a plugin. It registers the release-owned retrieval, capture
 and continuation hooks through `hooks/hooks.json`. The adapter copies canonical
 scripts byte-for-byte, passes `--client claude` and a writable plugin-local
 state home, and uses `--activation-mode mcp` for retrieval/capture. The hooks
@@ -62,7 +65,7 @@ The template keeps the release placeholder in its skills and manifest, and the
 server fills in its installed release, so a release cut leaves it unchanged.
 `scripts/cloud-plugin.py check` compares the packaged template with a fresh build.
 
-The two marketplace editions name themselves in `plugins/cloud/definition.json`
+The hooked and connector editions name themselves in `plugins/cloud/definition.json`
 under `edition_identities`. The hooked edition shows as "Evermatter" and the
 connector edition as "Evermatter (self-hosted)". Each description opens with the
 account it serves, so a person can choose from the listing alone. Claude

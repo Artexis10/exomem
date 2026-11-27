@@ -23,6 +23,10 @@
     "openai.zip": "evermatter-openai.zip",
     "release.json": "evermatter-release.json"
   },
+  "claude_code_marketplace": {
+    "repository": "substrate-systems/evermatter-plugins",
+    "name": "evermatter"
+  },
   "release_asset_aliases": {
     "openai.zip": ["exomem-cloud-openai.zip"]
   },
@@ -30,7 +34,7 @@
     "claude-hooks": {
       "listed": false,
       "display_name": "Evermatter",
-      "getting_started": "Upload this file as a plugin in Claude, open the plugin's Connectors tab, connect Evermatter and sign in to your Evermatter account. If you installed Evermatter from the Claude directory or added it as a connector, remove that first, so Claude does not hold two connections or run each hook twice.",
+      "getting_started": "In Claude, upload this file as a plugin, open the plugin's Connectors tab, connect Evermatter and sign in to your Evermatter account. If you installed Evermatter from the Claude directory or added it as a connector, remove that first, so Claude does not hold two connections or run each hook twice.",
       "lead": "For an Evermatter account: connects Claude to Evermatter and adds automatic recall and capture."
     },
     "claude-connector-hooks": {
