@@ -12,9 +12,12 @@ LABEL="com.exomem"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOG="$REPO_ROOT/logs/exomem.log"
-PROFILE="${EXOMEM_PROFILE:-hybrid}"
 
 . "$SCRIPT_DIR/_service-common.sh"
+
+# The profile may be named under any of its names in the process environment.
+PROFILE="$(exomem_process_setting EXOMEM_PROFILE)"
+PROFILE="${PROFILE:-hybrid}"
 
 # --- Preflight against the venv the service ACTUALLY runs ------------------------
 # This script used to restart blind. Its Windows twin gates on `doctor` first, and
@@ -31,7 +34,7 @@ if [[ -n "$SERVICE_PY" && -x "$SERVICE_PY" ]]; then
     echo "Preflight: exomem doctor --profile $PROFILE..."
     if ! "$SERVICE_PY" "${DOCTOR_ARGS[@]}"; then
         echo "Doctor preflight failed for profile '$PROFILE'; service NOT restarted." >&2
-        echo "Fix the findings, or set EXOMEM_PROFILE to the profile this box runs." >&2
+        echo "Fix the findings, or set EVERMATTER_PROFILE to the profile this box runs." >&2
         exit 1
     fi
 else

@@ -2,7 +2,7 @@
 name: evermatter-defrag
 description: 'Reconcile duplicate, stale or conflicting memory in Evermatter while keeping history: merge, supersede or leave alone. Use when the user asks to defrag, reconcile or deduplicate notes, or asks what is stale or contradictory on a topic.'
 metadata:
-  skill_contract: 2dcc587330510cf6885783abf5912a58874f7c7e7ca34934b23307e37c53b8fe
+  skill_contract: afb7c249546f811b84254ffe37e8c5b838b04c585468b47b5a49c75662f6b2e4
   version: "0.2.0"
 ---
 

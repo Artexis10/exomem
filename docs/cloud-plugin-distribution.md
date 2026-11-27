@@ -53,7 +53,7 @@ hooked edition would add a second server that points at Evermatter Cloud.
 The server edition, `claude-server`, is a template that ships inside the Python
 package at `src/exomem/_plugins/claude-server.zip`, outside the marketplace. It
 carries the hooked edition's hooks and skills and a server at the reserved origin
-`https://server.invalid`. A self-hosted server with `EXOMEM_BASE_URL` serves it at
+`https://server.invalid`. A self-hosted server with `EVERMATTER_BASE_URL` serves it at
 `/claude-plugin.zip`, with its own origin in place of the placeholder and a plugin
 name derived from its host, so its user installs everything in one upload.
 The template keeps the release placeholder in its skills and manifest, and the

@@ -2,7 +2,7 @@
 name: evermatter-capture
 description: 'Save what a conversation settled into Evermatter: a conclusion, a decision, a fact about a person or thing, a recurring item or measurement, or a proof file. Use when the user says save, remember, log or file this, or when the session lands on something durable that the engagement level allows you to capture.'
 metadata:
-  skill_contract: 2dcc587330510cf6885783abf5912a58874f7c7e7ca34934b23307e37c53b8fe
+  skill_contract: afb7c249546f811b84254ffe37e8c5b838b04c585468b47b5a49c75662f6b2e4
   version: "0.2.0"
 ---
 

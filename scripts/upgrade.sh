@@ -182,10 +182,11 @@ if [[ -z "$VAULT" ]]; then
     VAULT="$(exomem_dotenv_value "$REPO_ROOT" EXOMEM_VAULT_PATH)"
 fi
 [[ -z "$VAULT" ]] && VAULT="$(exomem_process_setting EXOMEM_VAULT_PATH)"
-[[ -n "$VAULT" ]] || die "no vault resolved; pass --vault or set EXOMEM_VAULT_PATH"
+[[ -n "$VAULT" ]] || die "no vault resolved; pass --vault or set EVERMATTER_VAULT_PATH"
 
 DOTENV_STATE_ROOT="$(exomem_dotenv_value "$REPO_ROOT" EXOMEM_STATE_ROOT)"
 PROCESS_STATE_ROOT="$(exomem_process_setting EXOMEM_STATE_ROOT)"
+exomem_refuse_hosted_state_root_conflicts "$REPO_ROOT/.env"
 PREFERRED_STATE_ROOT="${PROCESS_STATE_ROOT:-${DOTENV_STATE_ROOT:-$(exomem_platform_state_root)}}"
 MANAGED_STATE_ROOT="$(exomem_select_service_state_root \
     "$UNIT_FILE" "$VENV_PYTHON" "$PREFERRED_STATE_ROOT")" \

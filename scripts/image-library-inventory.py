@@ -280,7 +280,8 @@ def inventory(source: Source) -> dict:
             "architecture": source.config["architecture"], "os": source.config["os"],
             "created": source.config.get("created"),
             "labels": source.config["config"].get("Labels") or {},
-            "variant": env.get("EXOMEM_CONTAINER_VARIANT"),
+            # The image names its variant under the public prefix; images built before the rename used EXOMEM_.
+            "variant": env.get("EVERMATTER_CONTAINER_VARIANT") or env.get("EXOMEM_CONTAINER_VARIANT"),
         },
         "layers": len(source.layers),
         "python_distributions": len(overlay.metadata),

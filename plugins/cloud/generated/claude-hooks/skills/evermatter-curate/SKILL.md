@@ -2,7 +2,7 @@
 name: evermatter-curate
 description: 'Improve how Evermatter is organised: links, topics, titles, structure, and moving or splitting pages, through previewed plans. Use when the user asks to clean up, organise, link, restructure, rename or file notes.'
 metadata:
-  skill_contract: 2dcc587330510cf6885783abf5912a58874f7c7e7ca34934b23307e37c53b8fe
+  skill_contract: afb7c249546f811b84254ffe37e8c5b838b04c585468b47b5a49c75662f6b2e4
   version: "0.2.0"
 ---
 

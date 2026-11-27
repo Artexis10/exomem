@@ -25,6 +25,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+from exomem.env_compat import SETTING_PREFIXES
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -183,7 +185,7 @@ def _clean_env(home: Path, vault: Path) -> dict[str, str]:
     env = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith(("EXOMEM_", "KB_MCP_", "PYTHONPATH"))
+        if not key.startswith((*SETTING_PREFIXES, "PYTHONPATH"))
     }
     env.update(
         {
