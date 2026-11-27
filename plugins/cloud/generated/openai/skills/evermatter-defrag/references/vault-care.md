@@ -111,10 +111,13 @@ never fetches one back), when it holds unmarked preserved notes, or when this ho
 original's kind. Run it again after the bytes of a skipped original return.
 
 `capture_date_source` names where a date came from, as a key of the `capture-date-sources` vocabulary:
-`camera-exif`, `matched-original`, `file-name` or `source-date`. The first three are evidence. `source-date` is a
+`camera-exif`, `matched-original`, `file-name`, `export-sidecar` or `source-date`. The first four are evidence.
+`export-sidecar` is the time that a Google Photos Takeout records beside a photo whose file states none; the page
+also records `capture_date_matched_from`, the sidecar's path in the export. `source-date` is a
 fallback: a photo or video with no evidence date answers a `page.capture_date` filter with the day it was filed,
 labelled `source-date`, and nothing is stored. Filter on `page.capture_date_source` to keep or drop those. A date
-of a higher source is never replaced by a lower one, in this order: camera, matched original, file name. The
+of a higher source is never replaced by a lower one, in this order: camera, matched original, file name, export
+sidecar. A matched-original or export-sidecar date also survives a re-read of the file, which cannot reproduce it. The
 vault overlay `_Schema/capture-date-name-formats.yaml` adds file-name formats. Each needs a `pattern` that names
 the groups `year`, `month`, `day`, `hour`, `minute` and `second`, a `maker`, and a one-line `description` of why
 the name states a capture time.
