@@ -350,6 +350,8 @@ spec:
               value: {{ .Values.cellctl.mediaEngineFleetDefault | toJson | quote }}
             - name: CELLCTL_SOURCE_ERASURE_CELL_IDS
               value: {{ .Values.cellctl.sourceErasureCellIds | toJson | quote }}
+            - name: CELLCTL_FACES_HOSTED_CELL_IDS
+              value: {{ .Values.cellctl.facesHostedCellIds | toJson | quote }}
             - name: CELLCTL_LOG_LEVEL
               value: INFO
             - name: CELLCTL_HEARTBEAT_PATH

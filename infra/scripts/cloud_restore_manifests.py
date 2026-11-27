@@ -15,6 +15,7 @@ process memory only and never prints it.
     running-pods           print the Pods that could still use the cell volume
     outside-backup-window  exit 0 only outside the live cellctl's nightly backup window
     backup-paths           print the paths a backup covers and a restore rewrites
+    exclude-patterns       print the patterns a backup excludes, one per line
     restore-job-selector   print the label selector of cellctl's restore Jobs
 """
 
@@ -47,6 +48,7 @@ from cellctl.backup_window import (  # noqa: E402
 # pods match what Pod Security and cell admission already admit for its Jobs.
 from cellctl.manifests import (  # noqa: E402
     BACKUP_PATHS,
+    CATALOGUE_BACKUP_EXCLUDES,
     HOLD_ANNOTATION,
     JOB_KIND_LABEL,
     JOB_KIND_RESTIC_VERIFY,
@@ -524,6 +526,7 @@ def main(argv: list[str]) -> int:
             command.add_argument("--name", required=True)
             command.add_argument("--scratch")
     commands.add_parser("backup-paths", help="print what a restore rewrites, one line, space-separated")
+    commands.add_parser("exclude-patterns", help="print what a backup excludes, one pattern per line")
     commands.add_parser("restore-job-selector", help="print the label selector of cellctl's restore Jobs")
     args = parser.parse_args(argv)
     try:
@@ -541,6 +544,9 @@ def main(argv: list[str]) -> int:
             check_outside_backup_window(args.context)
         elif args.command == "restore-job-selector":
             print(f"{JOB_KIND_LABEL}={JOB_KIND_RESTORE}")
+        elif args.command == "exclude-patterns":
+            for pattern in CATALOGUE_BACKUP_EXCLUDES:
+                print(pattern)
         else:
             print(" ".join(BACKUP_PATHS))
     except (ValueError, RuntimeError, KeyError) as error:

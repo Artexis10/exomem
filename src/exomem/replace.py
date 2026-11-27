@@ -34,6 +34,7 @@ from . import (
     relation_review,
     reserved_paths,
     semantic_writes,
+    sensitivity_classes,
     temporal,
     vocabulary_resolution,
 )
@@ -637,6 +638,8 @@ def replace(
             relation_review_hash=relation_review_hash,
             relation_review_reason=relation_review_reason,
             vocabulary_decision=vocabulary_decision,
+            # A replacement holds the same material, so it keeps the classes of the page it supersedes.
+            sensitivity=list(sensitivity_classes.classes_of(old_parsed.frontmatter)) or None,
             _return_prepared=True,
             _supersedes_target=old_link_target,
             _preflight_operation="replacement",

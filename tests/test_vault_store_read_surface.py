@@ -108,6 +108,7 @@ SAMPLES = {
     "query_data": {"path": DATA},
     "list_directory": {"path": "Knowledge Base/Notes", "recursive": True},
     "list_trash": {},
+    "manage_faces:status": {"action": "status"},
     "list_inbound_links": {"target": CLAIM},
     "schema_memory:infer": {"operation": "infer", "subject": "categories"},
     "schema_memory:validate": {"operation": "validate", "subject": "categories"},

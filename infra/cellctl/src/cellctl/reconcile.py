@@ -583,6 +583,9 @@ class ClusterConfig:
     # erase-captured-source: identity system -> the cells whose owner enabled erasure for it.
     # A selection with no fleet default, because each cell's enablement is its owner's decision.
     source_erasure_cell_ids: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    # add-face-search D9a: the cells where the operator enabled face search. No fleet default: a
+    # cell not named here refuses faces whatever its owner chooses.
+    faces_hosted_cell_ids: tuple[str, ...] = ()
     # add-cloud-media-store D4-D6: the media edge's settings; None leaves every cell as before.
     media_edge: MediaEdgeConfig | None = None
     # Whether the schema has the media key columns. run_loop observes it on each connect; it is
@@ -673,6 +676,14 @@ class ClusterConfig:
                 or len(set(cell_ids)) != len(cell_ids)
             ):
                 raise ValueError("a Source erasure selection maps identity systems to unique base32 cell IDs")
+        faces = self.faces_hosted_cell_ids
+        if (
+            not isinstance(faces, tuple)
+            or len(faces) > 1024
+            or any(not isinstance(cell_id, str) or not db.CELL_ID_RE.fullmatch(cell_id) for cell_id in faces)
+            or len(set(faces)) != len(faces)
+        ):
+            raise ValueError("a face search selection is a list of unique base32 cell IDs")
 
     @property
     def reads_media_keys(self) -> bool:
@@ -717,6 +728,10 @@ class ClusterConfig:
         """The cell's Source erasure policy as the runtime reads it; "" keeps erasure off."""
         systems = sorted(system for system, ids in self.source_erasure_cell_ids.items() if cell_id in ids)
         return json.dumps({"enabled_systems": systems}, separators=(",", ":")) if systems else ""
+
+    def faces_hosted_for_cell(self, cell_id: str) -> bool:
+        """Whether the operator enabled face search for this cell."""
+        return cell_id in self.faces_hosted_cell_ids
 
 
 class ClusterGateway:
@@ -1071,6 +1086,9 @@ def _compute_render_digest(
     if erasure:
         # Enabling erasure restarts only that cell; every other cell keeps its digest.
         material["source_erasure_policy"] = erasure
+    if cluster_config.faces_hosted_for_cell(row.cell_id):
+        # Enabling faces restarts only that cell; every other cell keeps its digest.
+        material["faces_hosted"] = "1"
     edge = cluster_config.media_edge
     media_mode = _media_mode(cluster_config, row)
     if edge is not None and media_credential_version is not None:
@@ -3599,6 +3617,7 @@ async def _reconcile_row(
             grant_public_key=cluster_config.grant_public_key,
             media_engines=cluster_config.media_engines_for_cell(row.cell_id),
             source_erasure_policy=cluster_config.source_erasure_policy_for_cell(row.cell_id),
+            faces_hosted=cluster_config.faces_hosted_for_cell(row.cell_id),
             b2_key_id=key_id,
             b2_key_secret=key_secret,
             **secret_material,

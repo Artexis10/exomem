@@ -23,5 +23,5 @@
 
 ## 3. Delivery
 
-- [ ] 3.1 Review the exact change independently, with disclosure, egress and the query budget as the main risks; resolve findings.
-- [ ] 3.2 Merge, then synchronize this delta into the canonical specs and archive this change with `openspec archive`.
+- [x] 3.1 Review the exact change independently, with disclosure, egress and the query budget as the main risks; resolve findings.
+- [x] 3.2 Merge, then synchronize this delta into the canonical specs and archive this change with `openspec archive`.

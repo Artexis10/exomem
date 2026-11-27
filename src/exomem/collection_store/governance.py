@@ -23,6 +23,7 @@ from typing import Any
 from .. import access, capabilities, find_corpus, sensitivity_classes, vault
 from .. import structured_collections as collections
 from ..find_types import ParsedPage
+from ..vocabulary import registry
 from ..governance import authorization_session_authority as authority
 from ..governance import (
     authorization_session_lifecycle,
@@ -175,9 +176,10 @@ def _own_classes(schema: collections.ItemSchema, values: Mapping[str, Any]) -> l
 
 
 def _with_sensitivity(metadata: dict[str, list[str]], classes: Iterable[object]) -> dict[str, list[str]]:
-    """``metadata`` with its `sensitivity` classes, lower-cased and sorted. A subject without any keeps no key, so
-    metadata written before the field existed keeps its exact bytes."""
-    normalized = sorted({str(value).lower() for value in classes})
+    """``metadata`` with its `sensitivity` classes as registry keys, sorted. A subject without any keeps no key, so
+    metadata written before the field existed keeps its exact bytes. The key form is the registry's token form,
+    so `Tax ID` and `TAX_ID` store as the `tax-id` that a policy selecting the class names."""
+    normalized = sorted({registry.token(str(value)) for value in classes} - {""})
     return {**metadata, SENSITIVITY: normalized} if normalized else metadata
 
 

@@ -254,6 +254,10 @@ class SearchMemory(Wire):
         default=None,
         description='Kinds to keep, e.g. ["image", "video"] for a photo, screenshot or video. If unsure a picture is meant, also search without it.',
     )
+    people: list[str] | None = Field(
+        default=None,
+        description='Show only pictures and videos where each named person\'s face appears, e.g. ["Fixture Person"].',
+    )
     filters: dict[str, Any] | None = Field(
         default=None, description='Metadata filter, such as {"page.status": "active"}.'
     )
@@ -284,7 +288,7 @@ def _search(wire: dict[str, Any], ctx: Context) -> Translated:
         "query": wire.get("query"), "types": wire.get("types"), "tags": wire.get("tags"),
         "filters": wire.get("filters"), "deep": wire.get("deep"), "limit": wire.get("limit"),
         "continuation": wire.get("more"), "detail": wire.get("detail"), "projects": wire.get("projects"),
-        "file_types": wire.get("file_types"),
+        "file_types": wire.get("file_types"), "people": wire.get("people"),
     }
     return "ask_memory", _leaf_call(wire, "options", ctx, "ask_memory", "search_memory", leaf)
 

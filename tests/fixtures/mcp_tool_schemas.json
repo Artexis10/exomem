@@ -729,6 +729,7 @@
             "files.append",
             "files.move",
             "files.classify",
+            "faces.status",
             "episodes.material",
             "episodes.inspect",
             "episodes.candidates",
@@ -871,6 +872,9 @@
             "procedures.approve",
             "procedures.revoke",
             "procedures.quarantine",
+            "faces.set",
+            "faces.name",
+            "faces.delete",
             "episodes.input",
             "episodes.prepare",
             "episodes.disposition",
@@ -1534,6 +1538,13 @@
           },
           "type": "array",
           "description": "Kinds to keep, e.g. [\"image\", \"video\"] for a photo, screenshot or video. If unsure a picture is meant, also search without it."
+        },
+        "people": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Show only pictures and videos where each named person's face appears, e.g. [\"Fixture Person\"]."
         },
         "filters": {
           "type": "object",

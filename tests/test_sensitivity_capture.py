@@ -295,6 +295,26 @@ def test_an_agent_records_a_class_on_a_note_and_an_unknown_class_writes_nothing(
     assert "renews card X0000000" in text
 
 
+def test_a_note_that_supersedes_a_classified_note_keeps_its_class(vault: Path, agent: Callable[..., dict]) -> None:
+    """A replacement that holds the same material and drops the class, so the live page reads unclassified."""
+    note = {
+        "title": "Card renewal", "type": "insight", "unlinked_reason": "A standalone test note.",
+        "content": "# Card renewal\n\n## Observations\n\n- [finding] Test Person renews card X0000000 #admin\n",
+    }
+    saved = agent("create_note", {**note, "sensitivity": ["identity"]})
+    assert "error" not in saved, saved
+
+    replaced = agent("supersede_note", {
+        "note": "Card renewal", "title": "Card renewal 2027", "why": "The card was renewed",
+        "unlinked_reason": "A standalone test note.",
+        "content": "# Card renewal 2027\n\n## Observations\n\n- [finding] Test Person renewed card X0000001 #admin\n",
+    })
+
+    assert "error" not in replaced, replaced
+    [page] = vault.rglob("Card renewal 2027.md")
+    assert _page(vault, page.relative_to(vault).as_posix())[0]["sensitivity"] == ["identity"]
+
+
 @pytest.mark.usefixtures("owner_scope")
 def test_an_episode_revision_keeps_the_class_and_a_different_declaration_is_refused(
     vault: Path, source_schema: Any
@@ -359,9 +379,12 @@ def test_a_file_collection_refuses_a_class_floor_and_keeps_the_classes_a_row_nam
     made = agent("manage_memory", {"operation": "records.create", "arguments": {
         **create, "manifest_text": CLINIC_MANIFEST.replace("sensitivity: [health]\n", "")}})
     assert "error" not in made, made
+    unknown = agent("add_record", {"collection": "Clinic visits", "item": {"visit": "X-ray"}, "why": "Log it",
+                                   "sensitivity": ["passport-ish"]})
     added = agent("add_record", {"collection": "Clinic visits", "item": {"visit": "Scan"}, "why": "Log a scan",
-                                 "sensitivity": ["financial"]})
+                                 "sensitivity": ["Financial"]})
 
+    assert unknown["error"]["code"] == sensitivity_classes.UNKNOWN_CODE
     assert "error" not in added, added
     [row] = (vault / "Knowledge Base/Records/Clinic/Entries").glob("*.md")
     assert _page(vault, row.relative_to(vault).as_posix())[0]["sensitivity"] == ["financial"]

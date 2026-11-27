@@ -263,6 +263,27 @@ def validate_new_row(
         _validate_body(body)
 
 
+def _registered_classes(
+    root: Path, manifest: collections.CollectionManifest, values: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    """The row with its own `sensitivity` classes in canonical form, or a refusal naming the registered keys.
+
+    Every collection, file or store, takes the same check that a page capture applies, so a row never keeps a
+    class that a policy would read as unclassified.
+    """
+    from . import sensitivity_classes
+    from .collection_store import governance
+
+    own = governance._own_classes(manifest.schema, values)
+    if not own:
+        return values
+    try:
+        canonical = sensitivity_classes.validated(root, own)
+    except sensitivity_classes.SensitivityError as error:
+        raise collections.CollectionError(error.code, error.reason) from error
+    return {**values, governance.SENSITIVITY: list(canonical)}
+
+
 def append_record(
     vault_root: Path,
     collection: str | Path | collections.CollectionManifest,
@@ -295,6 +316,7 @@ def append_record(
     supplied_manifest = record_governance.resolve_collection_for_mutation(root, collection)
     if supplied_manifest.storage.strategy == "dataset":
         record_formats.load_adapter(root, supplied_manifest).refuse_mutation("append")
+    overrides = _registered_classes(root, supplied_manifest, overrides)
     key = (
         _validate_item_key(item_key, manifest=supplied_manifest, candidate=overrides)
         if item_key

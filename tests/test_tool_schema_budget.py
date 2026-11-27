@@ -77,11 +77,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # The door operations `media.attach_speech` and `media.rename_speakers`, an owner's agent attaching a speech result it
 # computed and naming the speakers after the fact, added 41 B to the write door's enum on 2026-11-25
 # (keep-speech-results-in-cloud).
+# Search by person added 205 B on 2026-11-27 (add-face-search): `search_memory.people` 165 B, and the owner's door
+# operations `faces.status`, `faces.set` and `faces.name` 40 B to the two door enums. `faces.delete`, which erases
+# the face store, added 15 B to the write door's enum the same day. The wire measures 31,963 B.
 # The optional `sensitivity` list on `create_note`, `save_source`, `save_evidence`, `save_episode` and `add_record`, through which the
 # agent that reads the material names its classes, added 739 B on 2026-11-25 (classify-sensitive-material-at-capture).
 # The door operation `files.classify`, which changes a kept page's classes later without touching its bytes, added
 # 31 B to the tool surface the same day, 21 B of it in the two door enums (classify-sensitive-material-at-capture).
-TOTAL_BUDGET = 32_520
+# The wire measures 32,736 B.
+TOTAL_BUDGET = 32_740
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
@@ -97,11 +101,14 @@ TOOL_CEILINGS: dict[str, int] = {
     "edit_note": 3700,
     "edit_plan_item": 750,
     "edit_record": 850,
+    # inspect_name_drift joined the read door on 2026-11-23 (align-names-with-titles); faces.status on 2026-11-27
+    # (add-face-search) took it to 2,265 B.
+    "inspect_memory": 2300,
+    "list_review_items": 750,
+    # faces.set, faces.name and faces.delete joined the write door on 2026-11-27 (add-face-search): 2,679 B.
+    "manage_memory": 2700,
     # inspect_name_drift joined the read door on 2026-11-23 (align-names-with-titles).
     # `files.classify` joined both doors on 2026-11-25 (classify-sensitive-material-at-capture).
-    "inspect_memory": 2270,
-    "list_review_items": 750,
-    "manage_memory": 2660,
     "query_plan_items": 1050,
     # `options` names `query`, the typed version-1 query that a derived collection also answers, added 32 B on
     # 2026-11-25 (legacy arguments on a derived collection).
@@ -112,7 +119,8 @@ TOOL_CEILINGS: dict[str, int] = {
     "save_episode": 1200,
     "save_evidence": 1450,
     "save_source": 1650,
-    "search_memory": 1250,
+    # `people`, the restriction to pictures of named people, took it to 1,401 B on 2026-11-27 (add-face-search).
+    "search_memory": 1450,
     # A pointer to edit_note's supersede_observation joined 2026-11-24
     # (add-unit-level-supersession).
     "supersede_note": 1400,
