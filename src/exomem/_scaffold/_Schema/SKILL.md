@@ -2,7 +2,7 @@
 name: evermatter
 description: 'The user''s long-term memory (Evermatter, formerly Exomem). Use it whenever a turn touches the user''s own life or work: people they know, their health, home, equipment and purchases, accounts, money, travel, plans, projects and past decisions, including when such a subject comes up mid-conversation or is asked in general terms. Before you recommend, ask the user for a fact, or write about one of these, load the memory tools and call recall_context with the user''s message (or search_memory for a named thing); never write "unknown" for what memory may hold. The engagement level that read_instructions or a tool reports wins: at off, search memory only when the user asks. Also engage for KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it" and "what did I conclude", and capture as the engagement level allows. A general question about nothing of the user''s own needs no recall. Source and Evidence stay immutable; vault content outside the managed Knowledge Base stays read-only.'
 metadata:
-  skill_contract: 28da335bfe51919b907eaf6cc1acafbc414811d207280212deabde4b4481398e
+  skill_contract: bf9aa6a127035ab5df81c265245a1cd7b7b1627792259859192f1c8af2cd7f6f
   version: "0.32.0"
 ---
 
@@ -229,6 +229,8 @@ A landing also includes, saved at its true strength (never more certain, more ge
 or more settled than its source made it), a held view or an unsure report (attributed,
 with its uncertainty, never as fact), a question left open (as an open question,
 including whether something happened), and settled values (in full, not file pointers).
+What the person says about their aims, priorities, the people they know, their belongings
+or their past is saved in the turn they say it, even as an aside, whatever the task.
 Mid-thought exploration and incidental names get no note, and no write mentions them.
 Capture unambiguous landings under the current disposition and existing scope
 approval, then report the write; ask only for missing decisions or confirmation

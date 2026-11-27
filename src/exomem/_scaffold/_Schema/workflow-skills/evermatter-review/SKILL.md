@@ -2,7 +2,7 @@
 name: evermatter-review
 description: 'Work through what Evermatter flags for review: due items, stale or contradictory notes, unprocessed sources, relation suggestions, vocabulary and audit findings. Use when the user asks to review the KB, what needs attention, or to drain the backlog.'
 metadata:
-  skill_contract: 28da335bfe51919b907eaf6cc1acafbc414811d207280212deabde4b4481398e
+  skill_contract: bf9aa6a127035ab5df81c265245a1cd7b7b1627792259859192f1c8af2cd7f6f
   version: "0.2.0"
 ---
 

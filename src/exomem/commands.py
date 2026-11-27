@@ -9279,8 +9279,8 @@ def op_observe_memory(
         relations: {kind, target} objects. Replaces on update.
         verdict: Rich verdict in words, never a number; `read_schema` lists them. '' clears.
         check_by: Rich ISO revisit date; '' clears.
-        as_of: Rich ISO start date; '' clears.
-        until: Rich ISO last valid date; '' clears.
+        as_of: Rich ISO start date; with no kind, saves in a dated block; '' clears.
+        until: Rich ISO last valid date; with no kind, saves in a dated block; '' clears.
         id: Parent-unique anchor; derived on add if omitted.
         unit_ref: Unit ref for update/remove or existing-unit preview; otherwise validate previews an add.
         unit: Unit id from a read or a write reply, for update/remove. It stands for unit_ref and both guards.

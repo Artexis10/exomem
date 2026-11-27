@@ -2688,11 +2688,16 @@ def project_terminal(
             f"{user_summary}{_unfiled_record_clause(records_routing)} "
             f"({cloud_cell.store_identity()['name']})"
         )
-        # An update that dropped relations, or a compact observation whose source link went to the
-        # page, says so where the person reads, with the repair or the page field it cites.
+        # An update that dropped relations, a compact observation whose source link went to the
+        # page, or a dated observation that became a rich unit says so where the person reads,
+        # with the repair, the page field or the kind it cites.
         if (
             isinstance(leaf, Mapping)
-            and (leaf.get("relations_dropped") or leaf.get("relations_cited"))
+            and (
+                leaf.get("relations_dropped")
+                or leaf.get("relations_cited")
+                or leaf.get("kind_defaulted")
+            )
             and isinstance(leaf.get("outcome"), str)
         ):
             compact["user_summary"] += f". {leaf['outcome']}"

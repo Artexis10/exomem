@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import logging
 import os
 import re
 import threading
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 _FALSE = frozenset({"", "0", "false", "no", "off"})
 _INSTALL_LOCK = threading.Lock()
@@ -90,6 +91,58 @@ def log_client_version(value: object, *, env: Mapping[str, str] | None = None) -
     if not content_private_logging_enabled(env):
         return text
     return text if _CLIENT_VERSION.fullmatch(text) else None
+
+
+@functools.cache
+def _official_extension_ids() -> frozenset[str]:
+    """The extension identifiers the installed MCP packages name.
+
+    Imported, never retyped. A closed set that the specification and its SDK fix, so a
+    row may carry these in content-private mode. Any other id is text the client chose.
+    """
+    from fastmcp.utilities.tasks import TASKS_EXTENSION_ID
+    from mcp.server.apps import EXTENSION_ID as APPS_EXTENSION_ID
+
+    return frozenset({TASKS_EXTENSION_ID, APPS_EXTENSION_ID})
+
+
+def log_client_extensions(
+    names: Iterable[str], *, env: Mapping[str, str] | None = None
+) -> tuple[list[str], int]:
+    """The declared extension ids a log row may carry, and how many it withheld.
+
+    The official ids come first, so a later cut of a long list never drops one for a
+    vendor id. Outside content-private mode every id is kept. Inside it, an id is
+    caller-chosen text and rows are hash-chained, so only the official ids survive and
+    the rest is counted, the way `client_family` reduces a client name to a family.
+    """
+
+    official = _official_extension_ids()
+    ordered = sorted(set(names), key=lambda name: (name not in official, name))
+    if not content_private_logging_enabled(env):
+        return ordered, 0
+    safe = [name for name in ordered if name in official]
+    return safe, len(ordered) - len(safe)
+
+
+# The shape of an MCP protocol revision (a date), which is a format check, not a vocabulary.
+_PROTOCOL_REVISION = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+def log_protocol_version(value: object, *, env: Mapping[str, str] | None = None) -> str | None:
+    """A protocol revision: verbatim, or under content-private logging only a date.
+
+    A revision is the specification's own identifier, but the client states it, so
+    anything that is not a plain date is dropped in the mode that keeps rows free of
+    caller-chosen text.
+    """
+
+    if value is None or not str(value):
+        return None
+    text = str(value)
+    if not content_private_logging_enabled(env):
+        return text
+    return text if _PROTOCOL_REVISION.fullmatch(text) else None
 
 
 _HTTP_METHODS = frozenset(
