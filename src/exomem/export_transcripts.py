@@ -108,13 +108,13 @@ def _plain_name(value: object, fallback: str) -> str:
     return stem or fallback
 
 
-def _printable(text: str) -> str:
+def printable(text: str) -> str:
     return text.translate(_NO_CONTROLS)
 
 
 def printable_line(value: object, limit: int) -> str:
     """A header-like value as one printable line of at most `limit` characters; empty when it is not text."""
-    return " ".join(_printable(value).split())[:limit] if isinstance(value, str) else ""
+    return " ".join(printable(value).split())[:limit] if isinstance(value, str) else ""
 
 
 def hashed_stem(*pieces: str | bytes) -> str:
@@ -177,12 +177,19 @@ def part_names(parts: list[tuple[str, str]]) -> list[str]:
     return names
 
 
-def indexable(name: str) -> bool:
-    """Whether the media pipeline reads a file of this name, which it decides by the extension."""
-    return media_type_for(name) is not None
+def indexable(name: str, media_type: str = "") -> bool:
+    """Whether the media pipeline reads a part: the extension of its name decides, else the extension of the MIME type it declares.
+
+    A part that declares a readable type under a name of another kind, such as plain text called `archive.mbox`,
+    is kept as that name; the pipeline then files it as the file that its name says it is.
+    """
+    if media_type_for(name) is not None:
+        return True
+    extension = _MIME.guess_extension(media_type.split(";")[0].strip().lower()) if media_type else None
+    return extension is not None and media_type_for(f"part{extension}") is not None
 
 
-def _stamp(moment: dt.datetime) -> str:
+def stamp(moment: dt.datetime) -> str:
     return moment.replace(microsecond=0, tzinfo=None).isoformat() + "Z"
 
 
@@ -215,8 +222,8 @@ def _shown_time(moment: dt.datetime | None) -> str:
     return f" · {moment:%Y-%m-%d %H:%M} UTC" if moment is not None else ""
 
 
-def _title(value: object, created: dt.datetime | None, fmt: SourceFormat) -> str:
-    title = " ".join(_printable(value).split())[:_MAX_TITLE_CHARS] if isinstance(value, str) else ""
+def title_of(value: object, created: dt.datetime | None, fmt: SourceFormat) -> str:
+    title = " ".join(printable(value).split())[:_MAX_TITLE_CHARS] if isinstance(value, str) else ""
     if title:
         return title
     return f"{fmt.untitled} {created:%Y-%m-%d}" if created is not None else fmt.untitled
@@ -239,7 +246,7 @@ def _transcript(title: str, shown: list[tuple[str, dt.datetime | None, str]]) ->
 
 def _keep(text: object) -> str:
     """A message's text as the export holds it, without control characters or the blank lines around it."""
-    kept = _printable(text) if isinstance(text, str) else ""
+    kept = printable(text) if isinstance(text, str) else ""
     return kept.strip("\n") if kept.strip() else ""
 
 
@@ -283,13 +290,13 @@ def _chatgpt_text(content: object) -> str:
     return "\n\n".join(kept for piece in pieces if (kept := _keep(piece)))
 
 
-def _positional_id(index: int) -> str:
+def positional_id(index: int) -> str:
     """The id of an item that carries none: its position in the export."""
     return f"item-{index + 1:06d}"
 
 
 def _chatgpt_id(item: Mapping[str, Any], index: int) -> str:
-    return _plain_name(item.get("conversation_id") or item.get("id"), _positional_id(index))
+    return _plain_name(item.get("conversation_id") or item.get("id"), positional_id(index))
 
 
 def _chatgpt(item: Mapping[str, Any], fmt: SourceFormat, index: int) -> Transcript | Unreadable:
@@ -311,9 +318,9 @@ def _chatgpt(item: Mapping[str, Any], fmt: SourceFormat, index: int) -> Transcri
         if label is not None and not hidden and body:
             shown.append((label, _moment(message.get("create_time")), body))
     updated = _moment(item.get("update_time"))
-    title = _title(item.get("title"), created, fmt)
+    title = title_of(item.get("title"), created, fmt)
     return Transcript(
-        item_id, title, _stamp(created) if created else None, updated.timestamp() if updated else None,
+        item_id, title, stamp(created) if created else None, updated.timestamp() if updated else None,
         _transcript(title, shown))
 
 
@@ -335,14 +342,14 @@ def _attachments(message: Mapping[str, Any], fmt: SourceFormat) -> list[str]:
     blocks = []
     for attachment in attached if isinstance(attached, list) else []:
         if isinstance(attachment, Mapping) and (content := _keep(attachment.get("extracted_content"))):
-            name = " ".join(_printable(str(attachment.get("file_name") or "")).split())
+            name = " ".join(printable(str(attachment.get("file_name") or "")).split())
             heading = f"{fmt.attachment}: {name}" if name else fmt.attachment
             blocks.append(_quoted(f"{heading}\n\n{content}"))
     return blocks
 
 
 def _claude_id(item: Mapping[str, Any], index: int) -> str:
-    return _plain_name(item.get("uuid"), _positional_id(index))
+    return _plain_name(item.get("uuid"), positional_id(index))
 
 
 def _claude(item: Mapping[str, Any], fmt: SourceFormat, index: int) -> Transcript | Unreadable:
@@ -360,9 +367,9 @@ def _claude(item: Mapping[str, Any], fmt: SourceFormat, index: int) -> Transcrip
         if label is not None and body:
             shown.append((label, _from_iso(message.get("created_at")), body))
     updated = _from_iso(item.get("updated_at"))
-    title = _title(item.get("name"), created, fmt)
+    title = title_of(item.get("name"), created, fmt)
     return Transcript(
-        item_id, title, _stamp(created) if created else None, updated.timestamp() if updated else None,
+        item_id, title, stamp(created) if created else None, updated.timestamp() if updated else None,
         _transcript(title, shown))
 
 
@@ -391,7 +398,7 @@ def _read_item(reader: _Json, item: Mapping[str, Any], fmt: SourceFormat, index:
         try:
             item_id = reader.id_of(item, index)
         except Exception:  # noqa: BLE001 -- an item too damaged to name is listed by its position
-            item_id = _positional_id(index)
+            item_id = positional_id(index)
         return Unreadable(item_id, f"it could not be read ({type(error).__name__})")
 
 
@@ -417,6 +424,6 @@ def read(fmt: SourceFormat, stream: BinaryIO, *, start: int = 0, workdir: Path |
             if isinstance(item, Mapping):
                 yield ReadItem(index + 1, _read_item(reader, item, fmt, index))
             else:
-                yield ReadItem(index + 1, Unreadable(_positional_id(index), "it is not an object"))
+                yield ReadItem(index + 1, Unreadable(positional_id(index), "it is not an object"))
     except (ijson.JSONError, UnicodeDecodeError, OSError) as error:
         raise ExportFault(type(error).__name__) from None

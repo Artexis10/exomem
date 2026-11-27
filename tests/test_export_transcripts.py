@@ -232,3 +232,40 @@ def test_chatgpt_times_of_any_other_form_leave_the_item_without_a_time_and_still
 
     assert isinstance(result, export_transcripts.Transcript)
     assert (result.created, result.updated) == (None, None) and "**You**\n\nHello." in result.text
+
+
+def test_an_attachment_name_keeps_letters_of_any_script_and_its_extension() -> None:
+    assert export_transcripts.part_names([("Счёт.jpg", "image/jpeg"), ("report 2024.PDF", "application/pdf")]) == ["Счёт.jpg", "report 2024.PDF"]
+
+
+def test_a_name_with_no_extension_takes_the_extension_of_its_type_and_a_type_that_has_none_leaves_it_bare() -> None:
+    assert export_transcripts.part_names([("scan", "image/png"), ("scan", "application/x-unknown-thing")]) == ["scan.png", "scan"]
+
+
+def test_two_parts_with_the_same_name_in_one_item_get_distinct_names_and_a_folding_volume_sees_no_clash() -> None:
+    names = export_transcripts.part_names([("image001.png", "image/png"), ("image001.png", "image/png"), ("IMAGE001.PNG", "image/png")])
+
+    assert names == ["image001.png", "image001 (2).png", "IMAGE001 (3).PNG"]
+    assert len({name.casefold() for name in names}) == 3
+
+
+def test_a_leading_dot_or_a_path_in_a_name_never_reaches_the_file_name() -> None:
+    assert export_transcripts.part_names([(".htaccess", "image/png"), ("../../etc/passwd.txt", "text/plain"), ("..", "image/png")]) == [
+        "htaccess.png", "passwd.txt", "part-3.png"]
+
+
+def test_a_long_name_is_cut_on_a_character_boundary_to_at_most_255_bytes_and_keeps_its_extension() -> None:
+    (name,) = export_transcripts.part_names([("Ж" * 300 + ".jpg", "image/jpeg")])
+
+    assert len(name.encode("utf-8")) <= 255 and name.endswith(".jpg") and set(name[:-4]) == {"Ж"}
+
+
+def test_a_name_is_normalised_to_nfc() -> None:
+    (name,) = export_transcripts.part_names([("café.png", "image/png")])
+
+    assert name == "café.png"
+
+
+def test_an_indexable_part_is_decided_by_its_name_else_by_the_type_it_declares() -> None:
+    assert export_transcripts.indexable("scan.jpg") and export_transcripts.indexable("noext", "image/png")
+    assert not export_transcripts.indexable("tool.exe", "application/x-msdownload") and not export_transcripts.indexable("noext")

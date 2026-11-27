@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
 
-from . import export_transcripts
+from . import export_mail, export_notes, export_transcripts
 
 if TYPE_CHECKING:
     from .export_transcripts import ReadItem
@@ -41,11 +41,21 @@ class Parser:
 # nosemgrep: ep-word-set -- The registry attribute names that a JSON-array parser reads: this module's own schema, not vocabulary.
 _JSON_NEEDS = frozenset({"item_keys", "roles", "attachment"})
 _NO_WORDS: frozenset[str] = frozenset()
+# nosemgrep: ep-word-set -- The registry attribute names that the notes parser reads: this module's own schema, not vocabulary.
+_NOTE_NEEDS = frozenset({"root", "words"})
+# nosemgrep: ep-word-set -- The display-word keys that the notes parser reads: this module's own schema, not vocabulary.
+_NOTE_WORDS = frozenset({"created", "updated", "tags", "source", "attachments", "extracted", "kept", "cut_short"})
+# nosemgrep: ep-word-set -- The registry attribute names that the mailbox parser reads: this module's own schema, not vocabulary.
+_MAIL_NEEDS = frozenset({"label_header", "skip_labels", "words"})
+# nosemgrep: ep-word-set -- The display-word keys that the mailbox parser reads: this module's own schema, not vocabulary.
+_MAIL_WORDS = frozenset({"attachments", "extracted", "kept", "cut_short"})
 
 #: The parser of each closed `parser` value; the keys are the only values that the `source-formats` registry accepts.
 PARSERS: Mapping[str, Parser] = {
     "chatgpt-conversations": Parser(_JSON_NEEDS, _NO_WORDS, export_transcripts.recognise_json, export_transcripts.read),
     "claude-conversations": Parser(_JSON_NEEDS, _NO_WORDS, export_transcripts.recognise_json, export_transcripts.read),
+    "evernote-notes": Parser(_NOTE_NEEDS, _NOTE_WORDS, export_notes.recognise, export_notes.read),
+    "gmail-mbox": Parser(_MAIL_NEEDS, _MAIL_WORDS, export_mail.recognise, export_mail.read),
 }
 
 
