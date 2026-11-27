@@ -129,6 +129,11 @@ _PENDING_VISIBILITY_COMPONENT = "pending_visibility"
 # of the command; the owner learns that under this name rather than finding them silently missing.
 _STORE_UNAVAILABLE_COMPONENT = "collection_store"
 
+# Partial-coverage disclosure. An exact dimension scan stops at a designed per-request bound, so the
+# result covers the best-ranked rows only. No lane failed: the result is cacheable and is not a
+# degradation, and the caller says more matches may exist (`partial_coverage_out`).
+PARTIAL_DIMENSION_SCAN = "dimension_scan_bound"
+
 
 def _record_degradation(lane: str) -> None:
     """Increment the process-lifetime silent-degradation counter for `lane`."""
@@ -231,9 +236,11 @@ def auto_rerank_allowed_by_policy() -> bool:
 # see, the embedding/CLIP sidecars when a semantic lane could contribute, and
 # today's date (temporal lanes and recency filters are date-relative). Cached
 # values are deep-copied on the way in AND out so caller mutation can never
-# poison a later response. `EXOMEM_FIND_CACHE_SIZE=0` disables it.
+# poison a later response. `EXOMEM_FIND_CACHE_SIZE=0` disables it. An entry
+# also keeps the partial-coverage markers its result carried, which a cache hit
+# reports again.
 # --------------------------------------------------------------------------- #
-_FIND_CACHE: OrderedDict[tuple, tuple[list[Hit], tuple[str, str]]] = OrderedDict()
+_FIND_CACHE: OrderedDict[tuple, tuple[list[Hit], tuple[str, str], tuple[str, ...]]] = OrderedDict()
 _FIND_CACHE_LOCK = threading.Lock()
 _FIND_CACHE_CHECKPOINTS: dict[
     tuple, tuple[tuple[str, freshness.RecallFreshnessCheckpoint], ...]
@@ -1656,6 +1663,7 @@ def find(
     type_basis: note_types.Basis | None = None,
     dimension_check_out: dict[str, int] | None = None,
     dimension_groups_out: list[dimension_display.GroupRequest] | None = None,
+    partial_coverage_out: list[str] | None = None,
     _catalog_admission: Any | None = None,
     _pending_coverage: Any | None = None,
     _cache_probe: bool = False,
@@ -1684,6 +1692,11 @@ def find(
     best `limit` units it checked (`checked`) and how many are in the dimension
     (`kept`), because the limit applied before the check and more units in the
     dimension may exist.
+
+    `partial_coverage_out`: optional caller-owned list. A designed bound that
+    stopped an exact dimension scan, where the result may lack matches past it,
+    appends `PARTIAL_DIMENSION_SCAN` here. No lane failed, so the result is
+    cached with the marker and a cache hit reports it again.
 
     `dimension_groups_out`: optional caller-owned list. When the filter asks for
     dimension groups (`structured_filters.requested_groups`) and the search
@@ -2160,6 +2173,7 @@ def find(
     resolved_config = config if config is not None else _active_ranking()
     degraded = degraded_out if degraded_out is not None else []
     failed = failed_out if failed_out is not None else []
+    partial_coverage = partial_coverage_out if partial_coverage_out is not None else []
 
     def _note_projection_lag() -> None:
         with _span(
@@ -2251,6 +2265,7 @@ def find(
                         _FIND_CACHE.move_to_end(unit_cache_key)
             if cached_units is not None and _current(cached_units[1]):
                 cached_hits = _cached_selection_hits(vault_root, cached_units[0], pending)
+                partial_coverage.extend(cached_units[2])
                 _note_projection_lag()
                 if timings is not None:
                     timings.cache["hit"] = True
@@ -2304,6 +2319,7 @@ def find(
                 mode=mode,
                 degraded_out=degraded,
                 failed_out=failed,
+                partial_coverage_out=partial_coverage,
                 retrieval_trace=retrieval_trace,
                 timings=timings,
                 prepared_queries=_prepared_queries,
@@ -2356,7 +2372,7 @@ def find(
             _note_projection_lag()
             if unit_cache_key is not None and not degraded and not failed and _publishable():
                 with _FIND_CACHE_LOCK:
-                    _FIND_CACHE[unit_cache_key] = (copy.deepcopy(verified), _dependency())
+                    _FIND_CACHE[unit_cache_key] = (copy.deepcopy(verified), _dependency(), tuple(partial_coverage))
                     _FIND_CACHE_CHECKPOINTS.pop(unit_cache_key, None)
                     _FIND_CACHE.move_to_end(unit_cache_key)
                     _trim_find_cache(cache_size)
@@ -2523,6 +2539,7 @@ def find(
                         _FIND_CACHE.move_to_end(cache_key)
         if cached is not None and _current(cached[1]):
             cached_hits = _cached_selection_hits(vault_root, cached[0], pending)
+            partial_coverage.extend(cached[2])
             _note_projection_lag()
             if timings is not None:
                 timings.cache["hit"] = True
@@ -2584,6 +2601,7 @@ def find(
                 mode=mode,
                 degraded_out=degraded,
                 failed_out=failed,
+                partial_coverage_out=partial_coverage,
                 retrieval_trace=retrieval_trace,
                 query_vector_provider=_query_vector,
                 prepared_queries=_prepared_queries,
@@ -3115,7 +3133,7 @@ def find(
             and _publishable()
         ):
             with _FIND_CACHE_LOCK:
-                _FIND_CACHE[cache_key] = (copy.deepcopy(hits), _dependency())
+                _FIND_CACHE[cache_key] = (copy.deepcopy(hits), _dependency(), tuple(partial_coverage))
                 if cache_checkpoints is not None:
                     _FIND_CACHE_CHECKPOINTS[cache_key] = cache_checkpoints
                 else:
@@ -4032,6 +4050,7 @@ def _find_semantic_units(
     mode: str,
     degraded_out: list[str] | None,
     failed_out: list[str] | None,
+    partial_coverage_out: list[str] | None = None,
     retrieval_trace: Any | None = None,
     timings: FindTimings | None = None,
     query_vector_provider: Callable[[], Any] | None = None,
@@ -4068,7 +4087,8 @@ def _find_semantic_units(
         return _find_semantic_units(
             vault_root, query=query, limit=limit, scope=scope, plan=plan, snapshot=snapshot,
             prefer_active=prefer_active, config=config, mode=mode, degraded_out=degraded_out,
-            failed_out=failed_out, retrieval_trace=retrieval_trace, timings=timings,
+            failed_out=failed_out, partial_coverage_out=partial_coverage_out,
+            retrieval_trace=retrieval_trace, timings=timings,
             query_vector_provider=query_vector_provider, allowed_parent_paths=allowed_parent_paths,
             prepared_queries=prepared_queries, recall_checkpoint=recall_checkpoint, repair=repair,
             max_catalog_candidates=max_catalog_candidates, truncated_out=truncated_out,
@@ -4078,11 +4098,9 @@ def _find_semantic_units(
         )
 
     def finish(hits):
-        if partial and (failed_out is None or "semantic_units_candidate_window" not in failed_out):
-            # An exact scan stopped at its bound, so one search method may have missed results.
-            if failed_out is not None:
-                failed_out.append("semantic_units_candidate_window")
-            _record_degradation("semantic_units_candidate_window")
+        if partial and partial_coverage_out is not None and PARTIAL_DIMENSION_SCAN not in partial_coverage_out:
+            # An exact scan stopped at its bound: no lane failed, but the result may lack matches past it.
+            partial_coverage_out.append(PARTIAL_DIMENSION_SCAN)
         if _candidate_window is not None:
             _candidate_window.exhausted = candidate_window_exhausted
         return hits if _defer_hydration else _finish_unit_candidates(

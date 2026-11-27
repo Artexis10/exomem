@@ -1061,7 +1061,8 @@ def test_a_sparse_family_dimension_checks_no_more_rows_as_the_corpus_grows(
     stored, writer, encoder, monkeypatch, mode, restricted,  # noqa: F811
 ):
     """Catches exact checks that grow with the corpus when a family's members are one unit in nine
-    and lack the query word, and a stopped scan whose result does not say it may be incomplete.
+    and lack the query word, a stopped scan whose result does not say more matches may exist or
+    calls it a failed search method, and a stopped scan that is not cached like a full one.
     A restricted caller ranks its lexical lane by admitted statistics, a separate branch."""
     def sources(first):
         return tuple(
@@ -1084,30 +1085,45 @@ def test_a_sparse_family_dimension_checks_no_more_rows_as_the_corpus_grows(
         lexstore._SelectedUnits, "matches_filter", lambda self, row, unit: checks.append(row[1]) or real(self, row, unit),
     )
 
+    def ask(filters):
+        checks.clear()
+        with request_scope(EXTERNAL) if restricted else contextlib.nullcontext():
+            result = commands.op_ask_memory(
+                stored, query="signal", scope="kb-only", mode=mode, result_level="unit",
+                filters=filters, limit=2, graph=False,
+            )
+        return result, len(checks)
+
+    grouped = {"unit.dimension": {"$eq": "provenance"}}
+    # A filter that asks for dimension groups is never cached, so the repeat names the same members
+    # through `$or`, which asks for none.
+    ungrouped = {"$or": [{"unit.dimension": {"$eq": "provenance"}}, {"unit.dimension": {"$eq": "currency"}}]}
+
     def search(*puts):
         write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=puts))
         if mode != "keyword":
             catch_up(stored)
         find.clear_cache()
-        checks.clear()
-        with request_scope(EXTERNAL) if restricted else contextlib.nullcontext():
-            result = commands.op_ask_memory(
-                stored, query="signal", scope="kb-only", mode=mode, result_level="unit",
-                filters={"unit.dimension": {"$eq": "provenance"}}, limit=2, graph=False, include_timings=True,
-            )
-        return result, len(checks)
+        return ask(grouped)
 
     smaller, smaller_checks = search(
         *sources(0), write.PagePut("Knowledge Base/Notes/Family target.md", b"# Family target\n\nSurvey material.\n"),
     )
     larger, larger_checks = search(*sources(8), *sources(16))
+    first, first_checks = ask(ungrouped)
+    repeat, repeat_checks = ask(ungrouped)
 
     assert larger_checks == smaller_checks
-    for result in (smaller, larger):
-        assert "semantic_units_candidate_window" in result.get("degraded", [])
+    for result in (smaller, larger, first, repeat):
+        # The agent reads that the filter covered the best matches only, not that a method failed.
+        assert result["notice"] == commands._SEARCH_NOTICE_DIMENSION
         # Keyword search needs the query word, which no member holds; the vector lane ranks members.
         assert len(result["hits"]) == (0 if mode == "keyword" else 2)
         assert all("Qualifying source material" in hit["excerpt"] for hit in result["hits"])
+    assert repeat["hits"] == first["hits"]
+    # The cache serves the repeat with its notice; a restricted caller's search is never cached.
+    assert first_checks > 0
+    assert repeat_checks == (first_checks if restricted else 0)
 
 
 def test_a_family_dimension_does_no_graph_work_for_unrelated_pages(stored, writer, monkeypatch):  # noqa: F811
