@@ -89,9 +89,11 @@ The session-close engine serves no instructions by patching a module global in a
 
 ## Cost and selection
 
-The README asks for three repeats. A full run of 54 cases on two arms is 324 sessions. At $0.2 to $1 of notional usage per session, that is $65 to $324 of subscription usage, which is not metered spend. Runs with the `openai` actor are metered and need agreement before they run. Wall-clock time is unverified.
+A change replays only the cases it can reach, under the eval-loop's selection: the cases whose checks name a tool, a skill or a guidance text that the change alters, failures first. It runs one to three repeats on two arms. Admitting a new positive case needs three repeats on the arm without the fix, for that case only.
 
-The README's rule decides when the set runs: rerun the cases when guidance text, a prompt, the model or the code that reads the answer changes. A change that reaches only some cases runs those first, and the full set runs at release.
+The release run plays the whole set once, on the release candidate alone: 54 sessions. A failing case is rerun with more repeats before the release. A full run on two arms with three repeats is never the normal path.
+
+On 2026-11-27, 107 replay sessions of this kind cost a median of $0.18 of notional subscription usage each, with a maximum of $0.32. Nothing was billed. So a fix that reaches three cases costs about 12 to 18 sessions, about $2 to $3 notional, and a release run about $10 notional. Runs with the `openai` actor are metered and need agreement before they run.
 
 ## Risks
 
