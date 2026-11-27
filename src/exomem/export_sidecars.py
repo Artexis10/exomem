@@ -26,9 +26,7 @@ The sidecars are untrusted content: a value is kept as data, and nothing in a si
 
 from __future__ import annotations
 
-import functools
 from collections.abc import Callable, Mapping
-from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -127,42 +125,8 @@ def apply(entry: dict, row: dict) -> None:
         entry["fault"] = row.get("fault") if isinstance(row.get("fault"), str) else None
 
 
-#: The rows that one `file` call has read, by stage and the size of the rows file, while `reading_once` holds the call. Callers
-#: never change what they read, so a repeated read of unchanged rows may return the same object.
-_CALL_READS: ContextVar[dict[tuple[str, str, int], Rows] | None] = ContextVar("sidecar_rows_of_one_call", default=None)
-
-
-def reading_once(call: Callable[..., Any]) -> Callable[..., Any]:
-    """Wrap a call so that it reads a stage's rows once while the rows are unchanged: 100,000 sidecars are about 120 MB a read."""
-
-    @functools.wraps(call)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        token = _CALL_READS.set({})
-        try:
-            return call(*args, **kwargs)
-        finally:
-            _CALL_READS.reset(token)
-
-    return wrapper
-
-
 def read_rows(root: Path, import_id: str) -> Rows:
-    """One pass over the expansion rows for the pass's own rows; when a sidecar or a pair has two rows, the last one counts.
-
-    Within `reading_once`, a read of rows that have not grown since the last read of that stage returns it. The rows are
-    only appended, so their size says whether they changed.
-    """
-    reads = _CALL_READS.get()
-    if reads is None:
-        return _read_rows(root, import_id)
-    key = (str(root), import_id, import_stage.expansion_rows_size(root, import_id))
-    if key not in reads:
-        reads.clear()  # the call holds one read, and drops the old one before the new read
-        reads[key] = _read_rows(root, import_id)
-    return reads[key]
-
-
-def _read_rows(root: Path, import_id: str) -> Rows:
+    """One pass over the expansion rows for the pass's own rows; when a sidecar or a pair has two rows, the last one counts."""
     sidecars: dict[str, dict] = {}
     pairs: dict[str, tuple[str | None, str | None]] = {}
     unreadable: set[str] = set()

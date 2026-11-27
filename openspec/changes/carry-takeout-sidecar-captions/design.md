@@ -121,11 +121,8 @@ The load target is 10,000 tenants, and pairing runs per cell.
 - **Counting.** Each `file` call that reaches the filing steps reads the rows, because the rows are the record and the state entry only caches the pass. One read of the rows costs, measured on 2026-11-27 on a laptop, in a process that held 78 MB before the read:
   - 100,000 sidecars with 100,000 pairs (46.6 MB of rows): 0.50 s, and 120 MB more memory, a peak of 198 MB.
   - 250,000 sidecars with 250,000 pairs: 1.31 s, and 295 MB more memory, a peak of 373 MB. The cell's memory limit is 3 GiB (`cellctl` `memory_limit`).
-  - Both stay far inside the call's 50 s budget (`request_budget.MCP_REQUEST_BUDGET_SECONDS`). The memory of a read is the same before and after the change below: it is one set of dictionaries per read, and a leaner shape was not built.
-- **Reads per call.** `file` reads the rows once for each size that the rows file has during the call (`export_sidecars.reading_once`). The rows only grow, so the size says whether they changed. Measured on 2026-11-27 with 3,000 sidecars and 3,000 photos, by counting the reads that return rows in `adoption_run.file`'s first call, which ends the pass and starts filing:
-  - Before: 3 reads, which returned 9,000 sidecar rows. After: 2 reads, which returned 6,000. The pass appends its pair rows once, so the call reads the rows before and after that append and no more. A call that does not append reads them once.
-  - A later call in that run, which applies a page, made no read, before and after.
-  - A call holds one read at a time and drops it before a read of changed rows, so the call's peak is the figure above, not twice it. The call keeps that one read until it ends, where an earlier read was freed with its caller.
+  - Both stay far inside the call's 50 s budget (`request_budget.MCP_REQUEST_BUDGET_SECONDS`). A read builds one set of dictionaries, and no leaner shape was built.
+- **Reads per call.** `file` reads the rows each time a step needs them and keeps no read between steps. Measured on 2026-11-27 with 3,000 sidecars and 3,000 photos, by counting the reads that return rows in `adoption_run.file`'s first call, which ends the pass and starts filing: 3 reads, which returned 9,000 sidecar rows. A later call in that run, which applies a page, made no read. At 250,000 sidecars the first call therefore spends about three reads of 1.31 s on the rows, and holds one read of 295 MB at a time. A per-call cache would save one of the three reads and hold a read for the whole call, so none is built.
 
 ## Risks
 

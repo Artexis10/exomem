@@ -5155,7 +5155,6 @@ def _file_step(
     return store.load(run_id)
 
 
-@export_sidecars.reading_once
 def file(
     root: Path,
     *,
