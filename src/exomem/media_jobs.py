@@ -3098,7 +3098,7 @@ class MediaJobStore:
         try:
             tracks = None if stored is None else speech_tracks.declaration(json.loads(stored))
         except (ValueError, TypeError) as error:  # TrackDeclarationError and JSONDecodeError are ValueErrors
-            unreadable = f"the job's declaration of tracks cannot be read ({error}); reprocess the recording with its tracks"
+            unreadable = f"the job's declaration of tracks cannot be read ({error})"
         return MediaJob(
             id=int(row["id"]),
             binary_path=self.vault_root / str(row["binary_rel"]),

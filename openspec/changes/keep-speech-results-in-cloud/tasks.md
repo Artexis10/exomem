@@ -45,7 +45,7 @@
 - [ ] 4.7 Follow-up, out of scope here: a job timeout per track. Today one job clock covers every track, and the stop limit counts their summed progress. Verify: a test where a long first track stops and the second track's budget is untouched.
 - [ ] 4.8 Follow-up, out of scope here: status reports the tracks of a recording that waits. Verify: a status test that names each track and its progress.
 - [ ] 4.9 Follow-up, out of scope here: the dominance rule across separate files aligned by a shared time, with the redesigned sessions of task 4.5. Verify: two aligned files with bleed hold the bled words once.
-- [ ] 4.10 Follow-up, out of scope here: map the iXML `FUNCTION` values that the iXML specification defines for microphones, as data, so that a recorder's track list can declare microphones. Verify: fixtures from the specification's values, and a MixL/MixR file that stays one mix.
+- [ ] 4.10 Follow-up, out of scope here: map the iXML `FUNCTION` values that the iXML specification defines for microphones, as data, so that a recorder's track list can declare microphones. Verify: fixtures from the specification's values, a MixL/MixR file that stays one mix, and a recording whose declaration was cleared with `tracks: []` stays one mix after a later plain reprocess, even where the file publishes microphones.
 
 ## 5. Naming after the fact
 

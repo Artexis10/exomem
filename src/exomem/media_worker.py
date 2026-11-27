@@ -131,6 +131,7 @@ _PREVIEW_SETTLEMENT_ATTEMPTS = 3
 _RETURNED = "returned"
 _RENDERER_ACTION = "check the timestamp renderer, then retry"
 _FAILED_ACTION = "repair or replace the media artifact, then retry"
+_TRACKS_ACTION = "reprocess the recording with its tracks"
 _LANGUAGE_ACTION = (
     "choose a language the speech model supports and process the file again with reprocess, "
     "or correct EXOMEM_ASR_LANGUAGE"
@@ -904,9 +905,21 @@ class MediaWorker:
             return self._publication_outcome(
                 committed, BLOCKED, self._asr_runtime_failure
             )
+        if job.tracks_unreadable is not None:
+            # The stored row is wrong, not the media: every retry reads the same row,
+            # so only a new declaration repairs it.
+            committed = self._commit_processing_failure(
+                job,
+                expected_sidecar=expected_sidecar,
+                expected_evidence_version=expected_evidence_version,
+                expected_binary=expected_binary,
+                state=FAILED,
+                error=job.tracks_unreadable,
+                next_action=_TRACKS_ACTION,
+                retryable=False,
+            )
+            return self._publication_outcome(committed, FAILED, job.tracks_unreadable)
         try:
-            if job.tracks_unreadable is not None:  # fails as any unreadable input does, below
-                raise speech_tracks.TrackDeclarationError(job.tracks_unreadable)
             if job.diarize is not None and not media_engines.stage_enabled(job.media_type):
                 raise extract.EngineDisabled(media_engines.SPEECH, "the speech engine is switched off")
             kwargs = {"media_type": job.media_type, "vault_root": self._vault_root}

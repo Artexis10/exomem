@@ -10678,7 +10678,8 @@ def _require_source_write(vault_root: Path, binary: Path) -> None:
 
     A declaration of tracks rewrites the Source when the worker publishes, so the caller must hold the write the
     publication makes (as `source_corrections.can_record` asks). The refusal is the one an unavailable target gives,
-    so it says nothing about the recording, its transcript or its labels.
+    so it says nothing about the recording, its transcript or its labels. It is fail-closed for restricted writers
+    only: a wrong refusal costs that writer one retry, and the owner never pays, because the owner always passes.
     """
     from . import originals
     from .cli_ops import OpError
