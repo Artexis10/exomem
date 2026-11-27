@@ -174,12 +174,17 @@ While the filer stands aside from a stage, the stage SHALL stay `working` with n
 
 ### Requirement: A Step That Moves Shows Its Progress In The Page Position
 
-The page position of a `file` reply SHALL change while a step makes progress with no count changing: `sources_read` while the plan or the apply reads the Sources over several calls, and `copies_settled` while a `finish` removes staged copies. A field SHALL be present only while its step runs.
+The page position of a `file` reply SHALL change while a step makes progress with no count changing: `sources_read` while the plan or the apply reads the Sources over several calls, `copies_settled` while a `finish` removes staged copies, and `set_aside` while a read of an app export leaves items out by the entry's own rule. A field SHALL be present only while its step runs.
 
 #### Scenario: A cold read of the Sources spans more than the stall limit
 
 - **WHEN** a read of the Sources takes more calls than the stall limit under a waiting writer
 - **THEN** each reply's page position carries a larger `sources_read`, and the filer counts no stall
+
+#### Scenario: An export read that sets messages aside spans more than the stall limit
+
+- **WHEN** a read of a mailbox leaves out each message that it meets, so it derives no file and changes no count, for more calls than the stall limit
+- **THEN** each reply's page position carries a larger `set_aside`, and the filer counts no stall
 
 ### Requirement: A Chunk's Size Is Bounded By Its Timed Evidence
 

@@ -553,7 +553,7 @@ def test_a_file_call_ends_an_export_expansion_for_a_waiting_write_and_the_next_c
             assert await asyncio.to_thread(running.wait, 30), "the import never reached a conversation"
             note = await client.call_tool(*public_call("create_note", _remember("agent")), raise_on_error=False)
             first = await filing
-            read = len(import_stage.read_expansion(vault, staged.rsplit("/", 1)[1])["rows"])
+            read = len(list(import_stage.read_expansion_rows(vault, staged.rsplit("/", 1)[1])))
             _settle(monkeypatch, settled)
             return first, note.structured_content, await _file_to_done(client, staged, first, "next"), read
 
@@ -591,9 +591,9 @@ def test_a_file_call_that_read_an_export_ends_before_it_scans_so_the_scan_has_a_
     read_in_call: dict[int, int] = {}
     continuation = None
     for call in range(1, 40):
-        before = len((import_stage.read_expansion(vault, import_id) or {"rows": []})["rows"])
+        before = len(list(import_stage.read_expansion_rows(vault, import_id)))
         reply = adoption_run.file(vault, path=staged, continuation=continuation)
-        after = len(import_stage.read_expansion(vault, import_id)["rows"])
+        after = len(list(import_stage.read_expansion_rows(vault, import_id)))
         read_in_call[call] = after - before
         if reply["filing"] != "working":
             break

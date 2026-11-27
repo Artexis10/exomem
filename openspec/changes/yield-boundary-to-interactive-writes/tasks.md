@@ -14,9 +14,10 @@
 - [x] 1.12 End a plan's or an apply's read of the earlier imports as incomplete when the filesystem refuses a Source page for now, and read the page again in the next call.
 - [x] 1.13 Start a `finish` search (the recall check and each search of the recall sample) only while the budget covers the delivery reserve; end the sample at the first search that a warming index cannot answer; report warming as `pending`, not `failed`, and count the searches not reached as `pending`.
 - [x] 1.14 Give the cell's filer the stall limit of the Cloud CLI's driver, from one shared value (`adoption_run.FILING_STALL_CALLS`): when 5 `working` replies in a row repeat the counts and page position of the reply before, it parks the stage with `IMPORT_FILING_STALLED` and no need, and calls again after a delay that doubles from 60 s to 15 minutes, instead of calling again at once or parking for good.
-- [x] 1.15 Show real progress in the page position (`sources_read` while a read of the Sources spans calls, `copies_settled` while a `finish` removes copies), so a healthy stage is not a stall.
+- [x] 1.15 Show real progress in the page position (`sources_read` while a read of the Sources spans calls, `copies_settled` while a `finish` removes copies, `set_aside` while a read of an app export leaves items out), so a healthy stage is not a stall.
 - [x] 1.16 Bound an apply chunk by its timed evidence: at most `APPLY_CHUNK_GROWTH` (2) times the largest timed chunk, and one turn for the first chunk while a writer waits.
 - [x] 1.17 Make the cell's filer stand aside from a stage that an agent files: no `file` call on it while an agent's call runs or ended less than `AGENT_QUIET_SECONDS` (twice the hold limit) ago, shown as `working` with no stop and no need (the filing view's `note`, read from memory, says an agent files it) and no stall count, with each agent reply's counts written into the record, and woken at once by a reply that is `done` or `stopped` or by a `file` call with `wait` false. The filer's own `file` call no longer lists its stage again, which dropped the delays that its calls returned.
+- [x] 1.18 File an app export itself in the scan that follows its read when the read derived no file (`_released_exports`), as it files when the stage is read in one call.
 
 ## 2. Replay marker
 

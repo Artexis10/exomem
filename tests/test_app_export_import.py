@@ -16,11 +16,14 @@ import test_adoption_consume as consume
 from test_adoption_series import _window
 
 from exomem import (
-    archive_members,
+    cloud_import,
     export_expansion,
+    export_parsers,
+    export_transcripts,
     import_filing,
     import_stage,
     source_formats,
+    state_paths,
     writer_lease,
 )
 from exomem.vault import parse_frontmatter
@@ -146,6 +149,11 @@ def source_pages(vault: Path) -> dict[str, tuple[dict, str]]:
     return pages
 
 
+def expansion_rows(vault: Path, import_id: str) -> list[dict]:
+    """The rows of the stage's expansion record, in the order they were appended."""
+    return [row for _after, row in import_stage.read_expansion_rows(vault, import_id)]
+
+
 EXPORTS = {
     "chatgpt": (chatgpt_conversation, CHATGPT_COUNT),
     "claude": (claude_conversation, CLAUDE_COUNT),
@@ -218,21 +226,32 @@ def test_an_expansion_that_outlasts_one_call_resumes_and_files_each_item_once(va
     assert view["progress"] == {"total": 7, "filed": 7, "skipped_duplicates": 0, "failed": 0, "left_out": 0, "remaining": 0}
 
 
-def test_a_crash_between_a_transcript_and_its_row_rewrites_the_same_file_under_the_same_name(vault: Path) -> None:
+def test_a_crash_between_a_transcript_and_its_row_rewrites_the_same_file_under_the_same_name(vault: Path, monkeypatch) -> None:
     """Catches a resume that writes a second copy of an item whose first copy had no row yet."""
     import_id = stage_export(vault, [claude_conversation(number) for number in range(6)])
     stage = vault / "_Imports" / import_id
+    append = export_expansion._append
+    appended: list[int] = []
+
+    def crashes_before_the_fourth_row(*args, **kwargs):
+        appended.append(1)
+        if len(appended) == 4:
+            raise RuntimeError("the process died after the fourth transcript and before its row")
+        return append(*args, **kwargs)
+
+    monkeypatch.setattr(export_expansion, "_append", crashes_before_the_fourth_row)
+    with pytest.raises(RuntimeError, match="the process died"):
+        export_expansion.expand(vault, import_id, keep_going=lambda: True)
+    written = sorted(path.name for path in (stage / "conversations items").iterdir())
+    assert len(written) == 4 and len(expansion_rows(vault, import_id)) == 3
+    monkeypatch.undo()
 
     export_expansion.expand(vault, import_id, keep_going=lambda: True)
-    derived = sorted(path.name for path in (stage / "conversations items").iterdir())
-    record = import_stage.read_expansion(vault, import_id)
-    record.update(rows=[], bytes=0)
-    record["exports"]["conversations.json"].update(state="working", read=0)
-    import_stage.write_expansion(vault, import_id, record)
-    export_expansion.expand(vault, import_id, keep_going=lambda: True)
 
-    assert sorted(path.name for path in (stage / "conversations items").iterdir()) == derived and len(derived) == 6
-    assert len(import_stage.read_expansion(vault, import_id)["rows"]) == 6
+    assert set(written) <= {path.name for path in (stage / "conversations items").iterdir()}  # the fourth item kept its name
+    assert len(list((stage / "conversations items").iterdir())) == 6
+    assert [row["status"] for row in expansion_rows(vault, import_id)] == ["derived"] * 6
+    assert export_expansion.read(vault, import_id).files == 6
 
 
 def test_a_truncated_export_files_the_items_before_the_cut_and_is_listed_as_read_in_part(vault: Path) -> None:
@@ -265,9 +284,9 @@ def test_an_unreadable_item_is_counted_as_failed_with_its_reason_and_the_others_
     assert view["progress"] == {"total": 7, "filed": 6, "skipped_duplicates": 0, "failed": 1, "left_out": 1, "remaining": 0}
 
 
-def test_an_export_over_the_expansion_cap_files_up_to_the_cap_and_is_listed_with_the_cap_code(vault: Path, monkeypatch) -> None:
-    """Catches a cap that drops the rest of an export in silence."""
-    monkeypatch.setattr(archive_members, "MAX_ENTRIES", 5)
+def test_an_export_over_the_entry_limit_files_up_to_the_limit_and_is_listed_with_the_cap_code(vault: Path, monkeypatch) -> None:
+    """Catches a cap that drops the rest of an export in silence, or one that is not the import's own member limit."""
+    monkeypatch.setenv(cloud_import.MAX_MEMBERS_ENV, "5")
 
     view = file_to_done(vault, stage_export(vault, [chatgpt_conversation(number) for number in range(8)]))
 
@@ -319,9 +338,9 @@ def test_an_export_that_lands_in_the_stage_after_the_first_walk_is_expanded_by_t
 
     export_expansion.expand(vault, import_id, keep_going=lambda: True, rewalk=True)
 
-    record = import_stage.read_expansion(vault, import_id)
-    assert sorted(record["exports"]) == ["conversations.json", "more/conversations.json"]
-    assert sorted(row["path"].split("/")[0] for row in record["rows"]) == ["conversations items"] * 2 + ["more"] * 3
+    assert sorted(export_expansion.read(vault, import_id).exports) == ["conversations.json", "more/conversations.json"]
+    assert sorted(row["export"] for row in expansion_rows(vault, import_id)) == ["conversations.json"] * 2 + ["more/conversations.json"] * 3
+    assert sorted(path.split("/")[0] for path in import_stage.derived_files(vault, import_id)) == ["conversations items"] * 2 + ["more"] * 3
 
 
 def _degrade_claude_sender(item: dict) -> None:
@@ -362,33 +381,47 @@ def test_a_field_of_the_wrong_type_in_one_item_never_parks_the_import(vault: Pat
     assert view["state"] == "done" and view["progress"]["failed"] == 0 and view["progress"]["remaining"] == 0
 
 
-def test_an_item_that_fails_in_a_way_no_reader_foresaw_is_counted_failed_and_the_rest_file(vault: Path, monkeypatch) -> None:
-    """Catches an unforeseen fault in one item that parks the import, with the export and its other files unfiled."""
-    from exomem import export_transcripts
-
+def test_an_item_that_fails_in_a_way_no_reader_foresaw_is_counted_failed_by_its_vendor_id_and_the_rest_file(
+    vault: Path, monkeypatch,
+) -> None:
+    """Catches an unforeseen fault in one item that parks the import, or one that is listed by position when the item has an id."""
     reader = export_transcripts.READERS["claude-conversations"]
 
     def reads_all_but_one(item, fmt, index):
         if index == 2:
             raise RuntimeError("a shape that no reader foresaw")
-        return reader(item, fmt, index)
+        return reader.read(item, fmt, index)
 
-    monkeypatch.setitem(export_transcripts.READERS, "claude-conversations", reads_all_but_one)
+    monkeypatch.setitem(
+        export_transcripts.READERS, "claude-conversations", export_transcripts._Json(reader.id_of, reads_all_but_one))
+    export = [claude_conversation(number) for number in range(4)]
 
-    view = file_to_done(vault, stage_export(vault, [claude_conversation(number) for number in range(4)], beside={"notes.txt": b"kept"}))
+    view = file_to_done(vault, stage_export(vault, export, beside={"notes.txt": b"kept"}))
 
     pages = source_pages(vault)
     assert len(pages) == 5 and not any(page[0]["title"] == title_of(2) for page in pages.values())  # 3 items, the export, notes.txt
     assert view["state"] == "done" and view["left_out"]["by_reason"] == {"IMPORT_ITEM_UNREADABLE": 1}
+    assert view["left_out"]["items"] == [{"path": f"conversations.json item {export[2]['uuid']}", "code": "IMPORT_ITEM_UNREADABLE"}]
     assert view["progress"]["failed"] == 1 and view["progress"]["remaining"] == 0
 
 
-def test_a_staged_file_at_a_name_the_expansion_would_use_is_never_overwritten(vault: Path) -> None:
-    """Catches a transcript that replaces a file that the sender staged beside the export."""
+def test_an_item_with_no_vendor_id_is_listed_by_its_position(vault: Path) -> None:
+    """Catches a failed item with no id of its own that is listed under a blank or a repeated name."""
+    export = [claude_conversation(number) for number in range(3)]
+    del export[1]["uuid"]
+    export[1]["chat_messages"] = "not a list"
+
+    view = file_to_done(vault, stage_export(vault, export))
+
+    assert view["left_out"]["items"] == [{"path": "conversations.json item item-000002", "code": "IMPORT_ITEM_UNREADABLE"}]
+
+
+def test_a_staged_file_at_a_name_the_expansion_would_use_is_never_overwritten_and_the_item_takes_a_free_name(vault: Path) -> None:
+    """Catches a transcript that replaces a file the sender staged beside the export, or an item dropped as unreadable for its name."""
     export = [claude_conversation(number) for number in range(3)]
     item_id = export[1]["uuid"]
     folder = "conversations items"
-    sender = {f"{folder}/{item_id}.md": b"The sender's own note, first.\n", f"{folder}/{item_id}-2.md": b"The sender's own note, second.\n"}
+    sender = {f"{folder}/{item_id}.md": b"The sender's own note, first.\n"}
 
     import_id = stage_export(vault, export, beside=sender)
     # A first call scans before it reads the export, and filing consumes the sender's notes; expanding first meets the clash.
@@ -398,9 +431,29 @@ def test_a_staged_file_at_a_name_the_expansion_would_use_is_never_overwritten(va
     pages = source_pages(vault).values()
     texts = [text for _frontmatter, text in pages]
     assert any("The sender's own note, first." in text for text in texts)
-    assert any("The sender's own note, second." in text for text in texts)
-    assert not any(frontmatter["title"] == title_of(1) for frontmatter, _text in pages)  # the clashing item is counted, not written over
-    assert view["state"] == "done" and view["progress"]["failed"] == 1 and view["progress"]["remaining"] == 0
+    assert sum(1 for frontmatter, _text in pages if frontmatter["title"] == title_of(1)) == 1  # the clashing item files under a free name
+    assert view["state"] == "done" and view["progress"]["failed"] == 0 and view["progress"]["remaining"] == 0
+    assert view["left_out"]["by_reason"] == {}
+
+
+def test_an_item_that_finds_no_free_name_is_counted_failed_with_its_own_reason_not_as_unreadable(vault: Path, monkeypatch) -> None:
+    """Catches a name clash that is reported as an unreadable item, which says nothing true about the item."""
+    monkeypatch.setattr(export_expansion, "_NAME_TRIES", 1)  # the id, then the id with the position: two names to try
+    export = [claude_conversation(number) for number in range(3)]
+    item_id = export[1]["uuid"]
+    folder = "conversations items"
+    sender = {f"{folder}/{item_id}.md": b"first\n", f"{folder}/{item_id}-2.md": b"second\n"}  # the item's names: its id, then its id and position
+
+    import_id = stage_export(vault, export, beside=sender)
+    # A first call scans before it reads the export, and filing consumes the sender's notes; expanding first meets the clash.
+    export_expansion.expand(vault, import_id, keep_going=lambda: True)
+    view = file_to_done(vault, import_id)
+
+    pages = source_pages(vault).values()
+    assert not any(frontmatter["title"] == title_of(1) for frontmatter, _text in pages)
+    assert view["state"] == "done" and view["left_out"]["by_reason"] == {"IMPORT_ITEM_NAME_TAKEN": 1}
+    assert view["left_out"]["items"] == [{"path": f"conversations.json item {item_id}", "code": "IMPORT_ITEM_NAME_TAKEN"}]
+    assert view["progress"]["failed"] == 1 and view["progress"]["remaining"] == 0
 
 
 def test_a_control_character_in_a_conversation_does_not_turn_its_transcript_into_an_artifact(vault: Path) -> None:
@@ -419,16 +472,26 @@ def test_a_control_character_in_a_conversation_does_not_turn_its_transcript_into
 
 def test_a_lone_surrogate_in_a_conversation_is_written_as_a_replacement_character(vault: Path, monkeypatch) -> None:
     """Catches an item that stops the expansion with an encoding error when the JSON reader hands back a lone surrogate."""
-    from exomem import export_transcripts
-
-    monkeypatch.setattr(export_transcripts, "read", lambda fmt, stream, *, start=0: iter([
-        (0, export_transcripts.Transcript("one", "A title", None, None, "# A title\n\nhalf a pair: \ud83d\n"))]))
+    monkeypatch.setattr(export_parsers, "read", lambda fmt, stream, *, start, workdir: iter([
+        export_transcripts.ReadItem(1, export_transcripts.Transcript("one", "A title", None, None, "# A title\n\nhalf a pair: \ud83d\n"))]))
     import_id = stage_export(vault, [claude_conversation(0)])
 
     export_expansion.expand(vault, import_id, keep_going=lambda: True)
 
     assert (vault / "_Imports" / import_id / "conversations items" / "one.md").read_text(encoding="utf-8") == "# A title\n\nhalf a pair: ?\n"
-    assert import_stage.read_expansion(vault, import_id)["failed"] == []
+    assert export_expansion.read(vault, import_id).failed == 0
+
+
+def test_a_stage_with_no_member_manifest_still_expands_its_export(vault: Path) -> None:
+    """Catches an export that files as one blob because its stage has no receipt, as after a local import that failed to copy a file."""
+    import_id = stage_export(vault, [claude_conversation(number) for number in range(4)])
+    (state_paths.vault_state_dir(vault) / "cloud-imports" / f"{import_id}.json").unlink()
+    assert import_stage.read(vault, import_id) is None
+
+    file_to_done(vault, import_id)
+
+    sessions = [page for page in source_pages(vault).values() if page[0]["source_type"] == "session"]
+    assert len(sessions) == 4
 
 
 def test_a_stage_with_no_recognised_export_leaves_no_expansion_record(vault: Path) -> None:
@@ -438,7 +501,7 @@ def test_a_stage_with_no_recognised_export_leaves_no_expansion_record(vault: Pat
     export_expansion.expand(vault, import_id, keep_going=lambda: True)
     export_expansion.expand(vault, import_id, keep_going=lambda: True, rewalk=True)
 
-    assert import_stage.read_expansion(vault, import_id) is None
+    assert not import_stage.expansion_dir(vault, import_id).exists()
 
 
 def test_a_chatgpt_export_split_into_shards_files_every_conversation_and_each_shard_once(vault: Path) -> None:

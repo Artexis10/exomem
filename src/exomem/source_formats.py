@@ -1,8 +1,9 @@
 """App export formats that filing recognises: a shipped pack that a vault overlay can only retire from or extend.
 
 An export from another app arrives as one file that holds many items. Which file names and item keys
-reveal a vendor's export, and which author roles a transcript shows, change as vendors change, so they are
-registry data (`source-formats`). Code knows only how to read each closed `parser`, in `export_transcripts`.
+reveal a vendor's export, and which words a transcript shows, change as vendors change, so they are
+registry data (`source-formats`). Code knows only how to read each closed `parser`, in `export_parsers`: each parser
+owns its container (a JSON array, an XML document, an mbox) and the facts it needs from its entry.
 """
 
 from __future__ import annotations
@@ -10,24 +11,24 @@ from __future__ import annotations
 import os
 import stat
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, BinaryIO
 
-import ijson
-
-from . import export_transcripts
+from .export_parsers import PARSERS
 from .vault import kb_root
 from .vocabulary import registry
 
-#: The closed `parser` values that `export_transcripts` implements; a registry entry may name only these.
-PARSERS = frozenset(export_transcripts.READERS)
 PACK = "source-formats.yaml"
-#: What an overlay may change on a shipped entry besides its status: the words that a transcript shows.
+#: What an overlay may change on a shipped entry besides its status: the words that a transcript shows, and the labels that a mailbox leaves out.
 # nosemgrep: ep-word-set -- The registry schema's closed attribute names that an overlay may change, not vocabulary.
-_RELABELLED = ("roles", "untitled", "attachment")
+_CHANGEABLE = ("roles", "untitled", "attachment", "words", "skip_labels")
+#: The attributes that every entry carries, whatever its parser.
+# nosemgrep: ep-word-set -- The registry schema's closed attribute names, not vocabulary.
+_COMMON = frozenset({"file_glob", "parser", "item_kind", "untitled"})
 _MAX_LABEL_CHARS = 80
+_MAX_SKIP_LABELS = 64
 
 
 def registry_path(root: Path) -> Path:
@@ -38,9 +39,40 @@ def _one_line(value: object, limit: int) -> bool:
     return isinstance(value, str) and bool(value.strip()) and len(value) <= limit and value.isprintable()
 
 
+def _phrase(value: object) -> bool:
+    return _one_line(value, _MAX_LABEL_CHARS)
+
+
+def _fact_shape(name: str, value: object, parser: str) -> str | None:
+    """What is wrong with one attribute's value, or None. Each attribute has the shape that its name says."""
+    if name == "item_keys":
+        ok = isinstance(value, list) and bool(value) and all(_one_line(key, 128) for key in value)
+        return None if ok else "item_keys must list the JSON keys that every item carries"
+    if name == "root":
+        return None if _one_line(value, 128) and not any(char.isspace() for char in value) else "root must be the name of the XML root element"
+    if name == "label_header":
+        ok = _one_line(value, 128) and not any(char.isspace() or char == ":" for char in value)
+        return None if ok else "label_header must be the name of the mail header that carries the labels"
+    if name == "skip_labels":
+        ok = isinstance(value, list) and len(value) <= _MAX_SKIP_LABELS and all(_one_line(label, 128) for label in value)
+        return None if ok else "skip_labels must list the labels whose messages are left out, and may be empty"
+    if name == "roles":
+        ok = (
+            isinstance(value, Mapping) and bool(value)
+            and all(_one_line(role, 64) and _phrase(label) for role, label in value.items())
+        )
+        return None if ok else "roles maps each shown author role to one short display label"
+    if name == "words":
+        keys = PARSERS[parser].words
+        ok = isinstance(value, Mapping) and set(value) == keys and all(_phrase(word) for word in value.values())
+        return None if ok else "words must give one short phrase for each of " + ", ".join(sorted(keys))
+    return None if _phrase(value) else f"{name} must be one short phrase that a transcript shows"
+
+
 def _check(entry: registry.Entry, entries: Mapping[str, registry.Entry]) -> None:
     attributes = entry.attributes
-    if attributes.get("parser") not in PARSERS:
+    parser = attributes.get("parser")
+    if parser not in PARSERS:
         raise registry.RegistryError(
             "INVALID_SOURCE_FORMAT: parser must be one of " + ", ".join(sorted(PARSERS))
             + "; a new vendor format needs a parser in code first")
@@ -48,31 +80,28 @@ def _check(entry: registry.Entry, entries: Mapping[str, registry.Entry]) -> None
     # A pattern over a member's own name, so it holds no path; it must keep a literal character, or it would match every file.
     if not _one_line(pattern, 255) or "/" in pattern or "\\" in pattern or pattern.startswith(".") or not pattern.strip("*?"):
         raise registry.RegistryError("INVALID_SOURCE_FORMAT: file_glob must be one file name pattern, such as conversations*.json")
-    keys = attributes.get("item_keys")
-    if not isinstance(keys, list) or not keys or not all(_one_line(key, 128) for key in keys):
-        raise registry.RegistryError("INVALID_SOURCE_FORMAT: item_keys must list the JSON keys that every item carries")
     if not _one_line(attributes.get("item_kind"), 64):
         raise registry.RegistryError("INVALID_SOURCE_FORMAT: item_kind must name the Source kind of each item")
-    for name in ("untitled", "attachment"):
-        if not _one_line(attributes.get(name), _MAX_LABEL_CHARS):
-            raise registry.RegistryError(f"INVALID_SOURCE_FORMAT: {name} must be one short phrase that a transcript shows")
-    roles = attributes.get("roles")
-    if (
-        not isinstance(roles, Mapping) or not roles
-        or not all(_one_line(role, 64) and _one_line(label, _MAX_LABEL_CHARS) for role, label in roles.items())
-    ):
-        raise registry.RegistryError("INVALID_SOURCE_FORMAT: roles maps each shown author role to one short display label")
+    needed = _COMMON | PARSERS[parser].needs
+    if extra := sorted(set(attributes) - needed):
+        raise registry.RegistryError(
+            f"INVALID_SOURCE_FORMAT: {parser} does not read {', '.join(extra)}; it reads {', '.join(sorted(needed))}")
+    for name in sorted(needed - {"file_glob", "parser", "item_kind"}):
+        if name not in attributes:
+            raise registry.RegistryError(f"INVALID_SOURCE_FORMAT: {parser} needs {name}")
+        if (wrong := _fact_shape(name, attributes[name], parser)) is not None:
+            raise registry.RegistryError(f"INVALID_SOURCE_FORMAT: {wrong}")
 
 
 def _narrowed(entry: registry.Entry, base: registry.Entry) -> None:
     """A shipped entry changes only by retirement or by the words it shows: what a vendor's export is stays shipped data."""
     fixed = lambda held: {  # noqa: E731
         "label": held.label, "description": held.description,
-        "attributes": {name: registry._plain(value) for name, value in held.attributes.items() if name not in _RELABELLED},  # noqa: SLF001
+        "attributes": {name: registry._plain(value) for name, value in held.attributes.items() if name not in _CHANGEABLE},  # noqa: SLF001
     }
     if fixed(entry) != fixed(base):
         raise registry.RegistryError(
-            f"PACK_ENTRY_FIXED: a vault may only retire shipped source format {entry.key} or change its roles, untitled and attachment words")
+            f"PACK_ENTRY_FIXED: a vault may only retire shipped source format {entry.key} or change its {', '.join(_CHANGEABLE)}")
     _check(entry, {})
 
 
@@ -113,7 +142,7 @@ class _Adapter(registry.FixedPackAdapter):
         _narrowed(entry, base)
         document["entries"][key] = {
             "status": entry.status,
-            "attributes": {name: registry._plain(entry.attributes[name]) for name in _RELABELLED},  # noqa: SLF001
+            "attributes": {name: registry._plain(entry.attributes[name]) for name in _CHANGEABLE if name in entry.attributes},  # noqa: SLF001
         }
 
 
@@ -123,8 +152,10 @@ SPEC = registry.RegistrySpec(
     overlay=registry_path,
     adapter=_Adapter(PACK, lambda: SPEC, _check),
     fields=frozenset({"label", "description", "status", "attributes"}),
-    attributes=frozenset({"file_glob", "item_keys", "parser", "item_kind", *_RELABELLED}),
-    immutable=frozenset({"attributes.file_glob", "attributes.item_keys", "attributes.parser", "attributes.item_kind"}),
+    attributes=frozenset({*_COMMON, "item_keys", "root", "label_header", *_CHANGEABLE}),
+    immutable=frozenset({
+        "attributes.file_glob", "attributes.item_keys", "attributes.parser", "attributes.item_kind", "attributes.root",
+        "attributes.label_header"}),
     # Agents meet export formats only through a filing view, not the bootstrap.
     summarize_keys=False,
 )
@@ -132,16 +163,23 @@ SPEC = registry.RegistrySpec(
 
 @dataclass(frozen=True, slots=True)
 class SourceFormat:
-    """One active entry: the facts that recognise a vendor's export and say how to read and show its items."""
+    """One active entry: the facts that recognise a vendor's export and say how to read and show its items.
+
+    Only the facts of the entry's own parser are set; the others keep their empty defaults.
+    """
 
     key: str
     file_glob: str
-    item_keys: tuple[str, ...]
+    item_keys: tuple[str, ...]  # JSON: the keys that every item carries
     parser: str
     item_kind: str
-    roles: Mapping[str, str]
-    untitled: str  # the title of a conversation that has none; its date follows when it has one
-    attachment: str  # the word that heads a quoted attachment
+    roles: Mapping[str, str]  # JSON: the author roles that a transcript shows, with their labels
+    untitled: str  # the title of an item that has none; its date follows when it has one
+    attachment: str  # JSON: the word that heads a quoted attachment
+    root: str | None = None  # XML: the name of the document's root element
+    label_header: str | None = None  # mbox: the header that carries a message's labels
+    skip_labels: tuple[str, ...] = ()  # mbox: the labels whose messages are left out
+    words: Mapping[str, str] = field(default_factory=dict)  # the parser's other display words, by its closed key set
 
     def names(self, member: str) -> bool:
         """Whether a member's own name matches the entry's `file_glob`, as a provider's conflict-copy patterns match: without regard to case."""
@@ -156,9 +194,10 @@ def formats(vault_root: Path) -> tuple[SourceFormat, ...]:
     """
     return tuple(
         SourceFormat(
-            entry.key, entry.attributes["file_glob"], tuple(entry.attributes["item_keys"]), entry.attributes["parser"],
-            entry.attributes["item_kind"], dict(entry.attributes["roles"]), entry.attributes["untitled"],
-            entry.attributes["attachment"])
+            entry.key, entry.attributes["file_glob"], tuple(entry.attributes.get("item_keys", ())), entry.attributes["parser"],
+            entry.attributes["item_kind"], dict(entry.attributes.get("roles", {})), entry.attributes["untitled"],
+            entry.attributes.get("attachment", ""), entry.attributes.get("root"), entry.attributes.get("label_header"),
+            tuple(entry.attributes.get("skip_labels", ())), dict(entry.attributes.get("words", {})))
         for entry in registry.load(SPEC, vault_root).active
     )
 
@@ -176,19 +215,17 @@ def open_export(path: Path) -> BinaryIO:
 
 
 def recognise(vault_root: Path, path: Path) -> SourceFormat | None:
-    """The format of the staged file `path`, or None: its name matches an entry's `file_glob` and its first item carries the entry's keys.
+    """The format of the staged file `path`, or None: its name matches an entry's `file_glob` and its content is what the entry's parser reads.
 
-    Only the first item of the top-level array is read. A file that is not JSON, not an array, or whose first item
-    is cut off is not recognised, and files as an ordinary file.
+    Each parser checks its own container: a JSON array whose first item carries the entry's keys, an XML document with
+    the entry's root element, or an mbox. A file that is not that container, or is cut off before the check can
+    tell, is not recognised, and files as an ordinary file.
     """
-    named = [candidate for candidate in formats(vault_root) if candidate.names(path.name)]
-    if not named:
-        return None
-    try:
-        with open_export(path) as stream:
-            first = next(ijson.items(stream, "item", use_float=True), None)
-    except (ijson.JSONError, OSError, ValueError):
-        return None
-    if not isinstance(first, dict):
-        return None
-    return next((candidate for candidate in named if all(key in first for key in candidate.item_keys)), None)
+    for candidate in (candidate for candidate in formats(vault_root) if candidate.names(path.name)):
+        try:
+            with open_export(path) as stream:
+                if PARSERS[candidate.parser].recognise(stream, candidate):
+                    return candidate
+        except OSError:
+            return None
+    return None
