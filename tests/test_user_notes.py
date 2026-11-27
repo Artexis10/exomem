@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -344,18 +345,20 @@ def test_a_release_without_notes_gets_an_empty_list_that_the_cells_reader_accept
     assert release_notes_format.parse_document(json.dumps(document)) == ()
 
 
-def test_the_files_keys_change_only_with_the_schema():
-    """An outside reader, the monthly digest, parses `release-notes.json` by these keys: a change to them raises SCHEMA first."""
+#: The key sets of each schema, as the monthly digest (a separate service) reads `release-notes.json`. A key that changes
+#: without a schema bump edits the entry of the current schema, which this table shows in review; a new schema adds an entry.
+KEYS_BY_SCHEMA = {
+    2: {"file": ["releases", "schema"], "release": ["notes", "released_on", "version"], "note": ["text", "title"]},
+}
+
+
+def test_the_files_keys_are_the_ones_pinned_for_its_schema():
     release = release_notes_format.Release("1.3.0", (1, 3, 0), "2026-02-02", (release_notes_format.Note("Title", "Sentence."),))
 
     file = release_notes_format.document([release])
 
-    assert (file["schema"], sorted(file), sorted(file["releases"][0]), sorted(file["releases"][0]["notes"][0])) == (
-        2,
-        ["releases", "schema"],
-        ["notes", "released_on", "version"],
-        ["text", "title"],
-    )
+    keys = {"file": sorted(file), "release": sorted(file["releases"][0]), "note": sorted(file["releases"][0]["notes"][0])}
+    assert keys == KEYS_BY_SCHEMA[file["schema"]]
 
 
 def test_the_page_starts_with_whats_new_and_shows_a_note_without_a_title_by_its_sentence(asset):
@@ -390,19 +393,34 @@ def test_a_page_that_has_the_marker_is_left_as_it_is_and_a_page_without_it_gets_
     assert second == first
 
 
-def test_note_text_reads_as_plain_letters_whatever_it_holds(asset):
-    """GitHub must show a sentence as written: CommonMark finds no syntax in it, and `@` and `#` are broken up
-    so GitHub's own linking of names and issue numbers (which a backslash does not stop) finds nothing."""
+def _what_github_reads(asset, text: str) -> str:
+    """The text of `_plain(text)` once CommonMark has read it: what GitHub's own linking then looks at. Fails on any markup."""
     from markdown_it import MarkdownIt
 
-    text = "Ask @someone about #123 at https://example.com or me@example.com, use * freely, _a_ <b>x</b> [y](z) `c` $5 & $6."
-
-    shown = asset._plain(text)
-
-    tokens = MarkdownIt("commonmark").parse(shown)
+    tokens = MarkdownIt("commonmark").parse(asset._plain(text))
     assert [token.type for token in tokens] == ["paragraph_open", "inline", "paragraph_close"]
     assert {child.type for child in tokens[1].children} == {"text"}
-    assert "".join(child.content for child in tokens[1].children) == text.replace("@", "@\u200b").replace("#", "#\u200b")
+    return "".join(child.content for child in tokens[1].children)
+
+
+def test_note_text_reads_as_the_same_letters_whatever_markdown_it_holds(asset):
+    text = "Use * freely, _a_ <b>x</b> [y](z) `c` and https://example.com or me@example.com & 5 * 3."
+
+    shown = _what_github_reads(asset, text)
+
+    assert shown.replace("\u200b", "") == text
+
+
+def test_what_github_links_after_reading_the_markdown_is_broken_up_and_the_words_stay_the_same(asset):
+    """A backslash does not stop GitHub linking a mention, an issue, a commit or reading math, so each is cut with an invisible space."""
+    text = "Ask @someone about #123 and GH-3319, fixed in 9f2c4e1ab7d30586c1e2a4f5b6d7e8091a2b3c4d, which costs $5 a month, not $x$ or $$y$$."
+
+    shown = _what_github_reads(asset, text)
+
+    assert shown.replace("\u200b", "") == text
+    assert not re.search(r"[0-9a-f]{7,}", shown, re.IGNORECASE)  # no commit
+    assert not re.search(r"[@#]\w|GH-\d", shown, re.IGNORECASE)  # no mention, no issue
+    assert all(shown[at - 1] == "\u200b" for at in (m.start() for m in re.finditer(r"\$", shown)))  # no `$` opens or closes a formula
 
 
 def release(tag, published, assets=("sample.whl",), draft=False):
@@ -440,40 +458,92 @@ def test_a_run_takes_every_release_since_the_window_start_that_has_assets_and_la
         ]
     ]
 
-    assert asset.missing_tags(pages, SINCE) == ["v1.8.0", "v1.5.0", "v1.3.5"]
+    assert asset.missing_tags(pages, SINCE) == ["v1.5.0", "v1.3.5", "v1.8.0"]  # oldest first
 
 
-def test_the_list_is_read_past_a_hundred_releases_and_stops_at_the_page_that_reaches_the_window_start(asset, monkeypatch):
-    """GitHub gives 100 releases a page: a month with more releases than that is still all in the window."""
-    requested = []
-    newest_first = [release(f"v1.{minor}.0", "2026-11-20" if minor >= 100 else "2026-09-01") for minor in range(299, -1, -1)]
+def listing_of(releases, requested):
+    """A stand-in for `gh api .../releases?per_page=100&page=N`: the page asked for, as GitHub's JSON, and the URL recorded."""
 
     def run(*command):
         requested.append(command[-1])
         page = int(command[-1].rsplit("page=", 1)[1])
-        listing = newest_first[(page - 1) * 100 : page * 100]
         return json.dumps(
             [
                 {"tag_name": r["tag"], "draft": r["draft"], "published_at": r["published_at"].isoformat(), "assets": [{"name": n} for n in r["assets"]]}
-                for r in listing
+                for r in releases[(page - 1) * 100 : page * 100]
             ]
         )
 
-    monkeypatch.setattr(asset, "_run", run)
+    return run
+
+
+def test_the_list_is_read_past_a_hundred_releases_and_stops_at_the_page_that_is_entirely_before_the_window(asset, monkeypatch):
+    """GitHub gives 100 releases a page: a month with more releases than that is still all in the window."""
+    requested = []
+    newest_first = [release(f"v1.{minor}.0", "2026-11-20" if minor >= 100 else "2026-09-01") for minor in range(299, -1, -1)]
+    monkeypatch.setattr(asset, "_run", listing_of(newest_first, requested))
 
     tags = asset.missing_tags(asset._release_pages(), SINCE)
 
-    assert len(tags) == 200  # v1.299.0 down to v1.100.0, over pages 1 and 2
-    assert tags[0] == "v1.299.0" and tags[-1] == "v1.100.0"
-    assert [url.rsplit("page=", 1)[1] for url in requested] == ["1", "2", "3"]  # page 3 holds the first older release; page 4 is never read
+    assert sorted(tags) == sorted(f"v1.{minor}.0" for minor in range(100, 300))  # every release of pages 1 and 2
+    assert [url.rsplit("page=", 1)[1] for url in requested] == ["1", "2", "3"]  # page 3 is all older; page 4 is never read
     assert all("per_page=100" in url for url in requested)
+
+
+def test_a_page_that_holds_an_old_release_among_newer_ones_does_not_end_the_read(asset):
+    """The list is in version order, not publish order: a hotfix of an old line can sit on a page above newer releases."""
+    pages = [
+        [release("v1.9.0", "2026-11-20"), release("v1.1.1", "2026-03-01")],  # an old release on the first page
+        [release("v1.8.0", "2026-11-10"), release("v1.7.0", "2026-11-01")],
+        [release("v1.0.0", "2026-02-01")],  # a page of old releases only
+        [release("v0.9.0", "2026-11-25")],  # never reached
+    ]
+
+    assert asset.missing_tags(iter(pages), SINCE) == ["v1.7.0", "v1.8.0", "v1.9.0"]
+
+
+def test_a_list_that_never_reaches_a_page_before_the_window_fails_and_says_so(asset, monkeypatch):
+    monkeypatch.setattr(asset, "MAX_PAGES", 2)
+    in_window = [release(f"v1.{minor}.0", "2026-11-20") for minor in range(250)]
+    monkeypatch.setattr(asset, "_run", listing_of(in_window, []))
+
+    with pytest.raises(SystemExit, match="more than 200 releases"):
+        asset.missing_tags(asset._release_pages(), SINCE)
+
+
+def test_one_run_prints_at_most_forty_releases_oldest_first_and_says_how_many_wait(asset, monkeypatch, capsys):
+    """The first run after a merge must not send one GitHub call per release of a long backlog: later runs continue."""
+    backlog = [release(f"v1.{minor}.0", f"2026-10-{1 + minor % 28:02d}") for minor in range(60)]
+    monkeypatch.setattr(asset, "_run", listing_of(backlog, []))
+
+    asset.print_missing(None, now=datetime(2026, 11, 27, tzinfo=UTC))
+
+    shown = capsys.readouterr()
+    tags = shown.out.split()
+    assert len(tags) == 40 == asset.MAX_RELEASES_PER_RUN
+    assert shown.err.strip() == "20 more release(s) lack the file; the next run takes them"
+    published = {r["tag"]: r["published_at"] for r in backlog}
+    waiting = [tag for tag in published if tag not in tags]
+    assert max(published[tag] for tag in tags) <= min(published[tag] for tag in waiting)  # the older ones go first
+
+
+def test_the_release_a_dispatch_names_is_served_even_when_a_backlog_fills_the_run(asset, monkeypatch, capsys, tmp_path):
+    older = {"tag_name": "v1.0.0", "draft": False, "published_at": "2026-03-01T09:00:00+00:00", "assets": [{"name": "sample.whl"}]}
+    backlog = [release(f"v1.{minor}.0", "2026-11-01") for minor in range(1, 61)]
+    listing = listing_of(backlog, [])
+    monkeypatch.setattr(asset, "_run", lambda *command: json.dumps(older) if command[-1].endswith("releases/tags/v1.0.0") else listing(*command))
+
+    asset.print_missing("v1.0.0", now=datetime(2026, 11, 27, tzinfo=UTC))
+
+    tags = capsys.readouterr().out.split()
+    assert tags[0] == "v1.0.0" and len(tags) == 40
 
 
 def test_the_tag_a_dispatch_names_joins_the_sweep_even_when_older_than_the_window(asset):
     older = release("v1.2.0", "2026-03-01")
     pages = [[release("v1.8.0", "2026-11-20"), release("v1.4.0", "2026-09-30")]]
 
-    assert asset.missing_tags(pages, SINCE, named=older) == ["v1.8.0", "v1.2.0"]
+    assert asset.missing_tags(pages, SINCE, named=older) == ["v1.2.0", "v1.8.0"]  # the release the operator named goes first
 
 
 def test_a_named_release_that_has_its_file_or_is_in_the_window_already_is_not_added_again(asset):

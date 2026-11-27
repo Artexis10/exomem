@@ -2,7 +2,7 @@
 
 ### Requirement: Every release publishes its own user notes file
 
-Each published release SHALL attach `release-notes.json` in the user notes file format (`schema` 2), which the cell's reader shares. It SHALL hold only that release's notes: at most one entry, with the version, `released_on` (the tag's date) and the notes the generator gives that release. A release with no notes SHALL attach an empty `releases` list, so a missing file always means the notes are missing. The notes come from the tag's tree and the file from the running workflow revision's code.
+Each published release SHALL attach `release-notes.json` in the user notes file format (`schema` 2), which the cell's reader shares. It SHALL hold only that release's notes: at most one entry, with the version, `released_on` (the tag's date) and the notes the generator gives that release. A release with no notes SHALL attach an empty `releases` list, so a missing file always means the notes are missing. The notes come from the tag's tree and the file from the code of the run that builds it.
 
 #### Scenario: Release with notes
 
@@ -19,10 +19,11 @@ Each published release SHALL attach `release-notes.json` in the user notes file 
 - **WHEN** a run builds the file of release 1.3.0 after release 1.4.0 exists and a note of 1.3.0 was edited in 1.4.0
 - **THEN** the file holds the note as 1.3.0's tag has it
 
-#### Scenario: A healed older release uses the current format
+#### Scenario: A healed file has the schema of the run that heals it
 
-- **WHEN** a schema change has shipped and a run builds the file of an older release that lacks it
-- **THEN** that file has the new `schema`, because the running revision's code writes it
+- **WHEN** a schema change has shipped and a run on main builds the file of an older release that lacks it
+- **THEN** that file has the new `schema`
+- **AND** a run on an older release tag, which has that tag's code, writes the schema of that tag's code
 
 ### Requirement: The notes file format is a published contract
 
@@ -40,7 +41,7 @@ The format of `release-notes.json` SHALL be a contract with readers outside this
 
 ### Requirement: Publishing the notes never gates the release
 
-The notes file, the page section and the upload SHALL run in their own job, which needs the plan and `build-artifacts` and which no publish, image or deploy job needs. A failure there SHALL turn the job and the workflow run red and SHALL stop no other job. The release plan SHALL NOT count the notes file when it decides whether a release is complete. A dry run SHALL build the notes of its own tag and SHALL write nothing to GitHub.
+The release workflow SHALL attempt the notes of every release, and a later real run SHALL heal a release whose attempt failed; that is the whole sense in which the notes are required. The file, the page section and the upload SHALL run in their own job, which no publish, image or deploy job needs. A failure there SHALL turn the job and the run red and SHALL stop no other job. The plan SHALL NOT count the file when it decides whether a release is complete.
 
 #### Scenario: The notes cannot be built
 
@@ -58,14 +59,9 @@ The notes file, the page section and the upload SHALL run in their own job, whic
 - **THEN** the upload refuses to replace it and the notes job fails
 - **AND** no other release artifact is changed or held
 
-#### Scenario: Dry run
-
-- **WHEN** a dry run builds the artifacts of a release
-- **THEN** the notes job builds that release's notes and neither uploads the file nor edits the release page
-
 ### Requirement: Every run publishes the notes that recent releases lack
 
-Every real run of the release workflow SHALL publish the file and the page section for each release that was published since the start of the previous UTC month, has assets and lacks the file, building each from its tag. It SHALL read the release list 100 a page, newest first, until a page holds a release published before that start. A draft SHALL NOT count. A release with no asset SHALL be left alone, because the release controller reads its page for the changelog before publication starts.
+Every real run SHALL publish the file and the page section for each release published since the start of the previous UTC month that has assets and lacks the file, building each from its tag. It SHALL read the release list 100 a page until a page holds only releases published before that start. A draft SHALL NOT count, and a release with no asset SHALL be left alone, because the release controller reads its page for the changelog before publication starts.
 
 #### Scenario: A failed run left a release without its notes
 
@@ -80,12 +76,17 @@ Every real run of the release workflow SHALL publish the file and the page secti
 #### Scenario: More than 100 releases in the window
 
 - **WHEN** 130 releases were published since the start of the previous month and none has the file
-- **THEN** the run reads the second page of the list and publishes the notes of all 130
+- **THEN** the run reads the second page of the list and counts all 130
 
 #### Scenario: The window ends
 
-- **WHEN** the list reaches a release published before the start of the previous month
-- **THEN** the run reads no further page, and leaves that release and the older ones alone
+- **WHEN** a page of the list holds only releases published before the start of the previous month
+- **THEN** the run reads no further page, and leaves the releases of that page alone
+
+#### Scenario: An old release sits among recent ones
+
+- **WHEN** a page holds a release published before the window beside releases published inside it, because the list is in version order, not publish order
+- **THEN** the run still reads the next page and publishes the recent releases
 
 #### Scenario: Every release has its file
 
@@ -96,6 +97,20 @@ Every real run of the release workflow SHALL publish the file and the page secti
 
 - **WHEN** a release exists with no asset because the release controller has not finished with it
 - **THEN** the run leaves that release's page and files alone
+
+### Requirement: One run handles at most 40 releases
+
+A run SHALL handle at most 40 releases, so that the first run after a merge stays inside the repository's shared GitHub token budget. It SHALL take the release a dispatch names first and then the others oldest first, and SHALL say how many wait. The next run SHALL take them.
+
+#### Scenario: A long backlog
+
+- **WHEN** 130 releases in the window lack the file
+- **THEN** the run handles the 40 oldest, says that 90 wait, and the next run handles the next 40
+
+#### Scenario: A named release in a long backlog
+
+- **WHEN** an operator names a release and 60 other releases lack the file
+- **THEN** the run handles the named release and 39 others
 
 ### Requirement: A dispatch run can heal one named release
 
@@ -111,9 +126,33 @@ In a real `workflow_dispatch` run, the `tag` input SHALL join the releases above
 - **WHEN** the named release already has its notes file
 - **THEN** the run publishes nothing for it and says that it already has the file
 
-### Requirement: A dry run never displaces a real run
+### Requirement: Only a real run on main or the release tag writes to GitHub
 
-The notes job SHALL use one concurrency group for real runs and another for dry runs, so that a dry run never displaces a real run that waits.
+The release plan SHALL decide whether a run writes the notes to GitHub: only a run that is not a dry run and runs on `main` or on the release tag SHALL. Any other run SHALL build the notes of its own tag and write nothing, because the upload path never replaces a published file and code that no review has passed must not leave one.
+
+#### Scenario: A push to main
+
+- **WHEN** a merge to `main` starts the workflow
+- **THEN** the notes job publishes the notes that releases lack
+
+#### Scenario: A dispatch from a branch
+
+- **WHEN** an operator dispatches the workflow from a feature branch, with or without the dry-run input
+- **THEN** the notes job builds the notes of the named tag and uploads no file and edits no page
+
+#### Scenario: A dispatch on the release tag
+
+- **WHEN** a run on the release tag itself is not a dry run
+- **THEN** the notes job publishes the notes that releases lack
+
+#### Scenario: Dry run
+
+- **WHEN** a dry run builds the artifacts of a release
+- **THEN** the notes job builds that release's notes and neither uploads the file nor edits the release page
+
+### Requirement: A run that writes nothing never displaces a run that writes
+
+The notes job SHALL use one concurrency group for runs that write to GitHub and another for runs that do not, so that a run that writes nothing never displaces a run that waits to write.
 
 #### Scenario: A dry run while a real run waits
 
@@ -151,9 +190,14 @@ The release page body SHALL start with a "What's new" section above the technica
 
 ### Requirement: Note text never links or formats on the page
 
-A note's title and sentence SHALL NOT produce an @-mention, an issue or pull request reference, an autolink or emphasis on the public release page. The page text SHALL be escaped for GitHub Markdown, and the notes file SHALL keep the original text. Other renderings that GitHub applies to plain text, such as an emoji shortcode, MAY still occur.
+A note's title and sentence SHALL NOT produce an @-mention, an issue, pull request or commit reference, an autolink, math or emphasis on the public release page. The page text SHALL be escaped for GitHub Markdown, and the notes file SHALL keep the original text. Other renderings that GitHub applies to plain text, such as an emoji shortcode, MAY still occur.
 
 #### Scenario: Hostile text
 
-- **WHEN** a note says `Ask @someone about #123 at https://example.com and use * freely`
-- **THEN** GitHub's Markdown renderer shows that text with no mention, no issue or pull request reference, no link and no emphasis
+- **WHEN** a note says `Ask @someone about #123 and GH-45 at https://example.com, fixed in a full commit hash, and use * freely`
+- **THEN** GitHub's Markdown renderer shows that text with no mention, no issue, pull request or commit reference, no link and no emphasis
+
+#### Scenario: Money text
+
+- **WHEN** a note says `It costs $5 a month`
+- **THEN** the page shows `$5 a month` and no math

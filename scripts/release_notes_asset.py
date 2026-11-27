@@ -4,10 +4,10 @@ The notes come from the same two definitions as the cell image's notes file: `sc
 gives each note to the first release that contains it, and `src/exomem/release_notes_format.py` is the
 file format. This script adds no second assignment and no second serialiser. Two subcommands:
 
-  missing  Prints the tags of the releases that have no `release-notes.json`, one per line: every release
-           published since the start of the previous UTC month, and the release `--also` names (which may be
-           older). The release list is read a page of 100 at a time, newest first, until a release older
-           than that start.
+  missing  Prints the tags of the releases that have no `release-notes.json`, one per line, at most 40 a run:
+           the release `--also` names (which may be older), then the releases published since the start of
+           the previous UTC month, oldest first. The release list is read a page of 100 at a time until a
+           page holds only releases older than that start. What a run leaves, the next run takes.
   publish  For each tag given, builds that release's notes from its tag's tree, starts its page with a
            "What's new" section when it has notes, then uploads the file. Page first, so a release that
            has the file has its page. A tag that fails does not stop the others; the run then fails.
@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import string
 import subprocess
 import sys
@@ -43,7 +44,18 @@ PAGE_SIZE = 100
 PAGE_MARKER = "<!-- evermatter-whats-new -->"
 RECOVERY = Path(__file__).resolve().parents[1] / "infra" / "scripts" / "release_recovery.py"
 GH_TIMEOUT_SECONDS = 300
+#: One run handles at most this many releases. A release costs about five GitHub calls (reading its page,
+#: editing it, and the upload's two reads and its write), and the repository's token has 1,000 calls an hour
+#: that its other workflows share; the runs after a merge to main continue what one run leaves.
+MAX_RELEASES_PER_RUN = 40
+#: The release list is read at most this many pages (1,000 releases): a window that long is a fault to name.
+MAX_PAGES = 10
 ZERO_WIDTH_SPACE = "\u200b"
+#: What GitHub turns into a link whatever Markdown says, besides `@` and `#` (which `_plain` breaks one by one).
+#: Both are GitHub's documented autolink shapes, a closed set it fixes: a commit is 7 to 40 hex digits, and an
+#: issue can be written `GH-` and a number.
+COMMIT_SHAPE = re.compile(r"[0-9A-Fa-f]{7,}")
+ISSUE_SHAPE = re.compile(r"GH-(?=[0-9])", re.IGNORECASE)
 
 
 def _run(*command: str) -> str:
@@ -66,15 +78,20 @@ def release_document(repo: Path, tag: str) -> dict:
 
 
 def _plain(text: str) -> str:
-    """`text` for the page: GitHub finds no mention, reference, link or emphasis in it, whatever a note or title holds.
+    """`text` for the page: GitHub finds no mention, reference, link, commit, math or emphasis in it, whatever a note or title holds.
 
     CommonMark lets any ASCII punctuation mark take a backslash (a set the specification fixes), so no
-    character reads as emphasis, a link, an autolink, HTML or math. GitHub links `@name`, `#123` and an
-    address after it has read the Markdown, and a backslash does not stop that, so a zero-width space follows
-    each `@` and `#`. The notes file keeps the original text; only the page is escaped.
+    character reads as emphasis, a link, an autolink or HTML. GitHub links `@name`, `#123`, `GH-123`, a commit
+    and an address, and reads `$x$` as math, after it has read the Markdown, and a backslash does not stop
+    those. So a zero-width space follows each `@`, `#` and `GH-`, comes before each `$`, and cuts each run of
+    7 or more hex digits into runs of 6. The notes file keeps the original text; only the page is changed.
     """
-    escaped = "".join(f"\\{char}" if char in string.punctuation else char for char in text)
-    return escaped.replace("@", "@" + ZERO_WIDTH_SPACE).replace("#", "#" + ZERO_WIDTH_SPACE)
+    broken = COMMIT_SHAPE.sub(
+        lambda run: ZERO_WIDTH_SPACE.join(run.group()[start : start + 6] for start in range(0, len(run.group()), 6)), text
+    )
+    broken = ISSUE_SHAPE.sub(lambda issue: issue.group() + ZERO_WIDTH_SPACE, broken)
+    broken = broken.replace("@", "@" + ZERO_WIDTH_SPACE).replace("#", "#" + ZERO_WIDTH_SPACE).replace("$", ZERO_WIDTH_SPACE + "$")
+    return "".join(f"\\{char}" if char in string.punctuation else char for char in broken)  # last, so a space never comes between a backslash and its mark
 
 
 def whats_new_section(release) -> str:
@@ -124,26 +141,21 @@ def why_left_alone(release: dict) -> str | None:
 
 
 def missing_tags(pages: Iterable[Sequence[dict]], since: datetime, named: dict | None = None) -> list[str]:
-    """The tags, newest first, of the releases published at or after `since` that lack the notes file, then `named` if it lacks it.
+    """The tags of the releases that lack the notes file, in the order a run takes them: `named` first, then the others oldest first.
 
-    `pages` are GitHub's release list, newest first, one page after another; reading stops after the first
-    page that holds a release published before `since`, and the releases of that page before `since` are
-    left out. `named` is one release outside that window that the caller asks for (a dispatch's tag).
+    `pages` are GitHub's release list, one page after another. That list is in version order, not publish
+    order, so reading stops only at a page whose releases were all published before `since`; a release before
+    `since` is left out. `named` is one release that the caller asks for whatever its age (a dispatch's tag).
     """
-    tags: list[str] = []
+    found: list[dict] = []
     for page in pages:
-        reached_older = False
-        for release in page:
-            if release["draft"]:
-                continue
-            if release["published_at"] < since:
-                reached_older = True
-            elif why_left_alone(release) is None:
-                tags.append(release["tag"])
-        if reached_older:
+        published = [release for release in page if not release["draft"]]
+        found += [r for r in published if r["published_at"] >= since and why_left_alone(r) is None]
+        if published and all(release["published_at"] < since for release in published):
             break
-    if named is not None and named["tag"] not in tags and why_left_alone(named) is None:
-        tags.append(named["tag"])
+    tags = [release["tag"] for release in sorted(found, key=lambda release: release["published_at"])]
+    if named is not None and why_left_alone(named) is None:
+        tags = [named["tag"], *(tag for tag in tags if tag != named["tag"])]
     return tags
 
 
@@ -159,26 +171,31 @@ def _release_row(release: dict) -> dict:
 
 
 def _release_pages() -> Iterator[list[dict]]:
-    """GitHub's releases, newest first, a page of `PAGE_SIZE` at a time, read only as far as the caller goes."""
-    page = 1
-    while True:
+    """GitHub's releases in its list order (by version, not by publish time), a page of `PAGE_SIZE` at a time, read only as far as the caller goes."""
+    for page in range(1, MAX_PAGES + 1):
         listing = json.loads(_run("gh", "api", f"repos/{{owner}}/{{repo}}/releases?per_page={PAGE_SIZE}&page={page}"))  # the repository: GH_REPO
         yield [_release_row(release) for release in listing]
         if len(listing) < PAGE_SIZE:
             return
-        page += 1
+    raise SystemExit(f"missing: the release list has more than {MAX_PAGES * PAGE_SIZE} releases and none of its pages is entirely before the window")
 
 
-def print_missing(also: str | None) -> None:
-    """Print the tags that `missing_tags` finds for a run now, and say on stderr why `also` is left out when it is."""
+def print_missing(also: str | None, now: datetime | None = None) -> None:
+    """Print the first `MAX_RELEASES_PER_RUN` tags that `missing_tags` finds, and say on stderr what is left for later runs.
+
+    When `also` is left out, stderr says why.
+    """
     named = None
     if also:
         named = _release_row(json.loads(_run("gh", "api", f"repos/{{owner}}/{{repo}}/releases/tags/{also}")))
         reason = why_left_alone(named)
         if reason is not None:
             print(f"{also} is left alone: {reason}", file=sys.stderr)
-    for tag in missing_tags(_release_pages(), previous_month_start(datetime.now(UTC)), named):
+    tags = missing_tags(_release_pages(), previous_month_start(now or datetime.now(UTC)), named)
+    for tag in tags[:MAX_RELEASES_PER_RUN]:
         print(tag)
+    if len(tags) > MAX_RELEASES_PER_RUN:
+        print(f"{len(tags) - MAX_RELEASES_PER_RUN} more release(s) lack the file; the next run takes them", file=sys.stderr)
 
 
 def publish_release(repo: Path, tag: str, directory: Path, *, dry_run: bool) -> str:
@@ -229,7 +246,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
 
-    find = commands.add_parser("missing", help="print the releases since the previous month's start that have no notes file")
+    find = commands.add_parser("missing", help="print the first 40 releases since the previous month's start that have no notes file")
     find.add_argument("--also", metavar="TAG", help="a release of any age to include when it lacks the file")
 
     build = commands.add_parser("publish", help="publish the notes of the given releases")

@@ -6,10 +6,11 @@
 ## 2. Publish through the release workflow
 
 - [x] 2.1 Add the `release-notes` job: after `build-artifacts`, needed by no other job, one run at a time.
-- [x] 2.2 Check every release published since the start of the previous UTC month (the list paged 100 at a time) and the tag a dispatch names; publish the notes of each that has assets and lacks the file, built from its tag; a dry run builds its own tag and writes nothing.
-- [x] 2.3 Write the section before the upload, upload through `release_recovery.py upload-file`, and let one release's failure leave the others to finish before the job fails.
-- [x] 2.4 Describe the job, the asset and the page section in `docs/release.md`; name the outside reader in the format module.
-- [x] 2.5 Pin the format's key sets in a test, so a key change fails until `schema` changes.
+- [x] 2.2 Check every release published since the start of the previous UTC month (the list paged 100 at a time, to the first page that is all older) and the tag a dispatch names; publish the notes of at most 40 that have assets and lack the file, built from their tags, the named one first and then the oldest; a run that writes nothing builds its own tag only.
+- [x] 2.3 Let only a real run on main or the release tag write to GitHub: the plan's `notes_publish` output decides, and a test pins it.
+- [x] 2.4 Write the section before the upload, upload through `release_recovery.py upload-file`, and let one release's failure leave the others to finish before the job fails.
+- [x] 2.5 Describe the job, the asset and the page section in `docs/release.md`; name the outside reader in the format module.
+- [x] 2.6 Pin the format's key sets by schema in a test, so a key change edits the current schema's entry.
 
 ## 3. Acceptance
 
