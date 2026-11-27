@@ -499,6 +499,79 @@ def test_a_record_call_with_arguments_its_action_refuses_behind_the_queue_is_nev
     _wait_for_state(vault, first["queued_write"]["ref"], "applied")
 
 
+def _ledger_bulk(vault: Path, rows: list, source: str | None) -> dict:
+    from record_fixtures import LEDGER_COLLECTION_PATH, setup_ledger_collection
+
+    from exomem import record_formats
+    from exomem import structured_collections as collections
+
+    setup_ledger_collection(vault)
+    manifest = collections.load_manifest(vault, vault / LEDGER_COLLECTION_PATH)
+    return {
+        "action": "bulk_upsert", "collection": LEDGER_COLLECTION_PATH, "why": "import a normalised export",
+        "expected_container_hash": record_formats.load_adapter(vault, manifest).read().snapshot,
+        "rows": rows, **({"source": source} if source is not None else {}),
+    }
+
+
+def test_a_queued_bulk_write_that_rejects_every_row_fails_and_is_never_called_saved(
+    vault: Path, managers, drainer
+) -> None:
+    """A replay that answers committed:false with rejected rows saved nothing, so it is a failed save."""
+    from record_fixtures import ledger_item
+
+    _writer, holder = managers
+    # The source page does not exist, which only the write itself can find out.
+    kwargs = _ledger_bulk(vault, [{"item": ledger_item(slug=f"entry-{n}")} for n in range(2)],
+                          "Knowledge Base/Evidence/never-preserved.md")
+    with _Hold(holder, vault):
+        ref = _send(_command("record_memory"), vault, kwargs)["queued_write"]["ref"]
+        # A status check while it waits answers its state, not the payload the caller already holds.
+        assert "arguments" not in write_intake.read(vault, ref=ref)["queued_write"]
+    failed = _wait_for_state(vault, ref, "failed")
+    assert failed["error"]["code"] == "SOURCE_NOT_FOUND"
+    assert failed["error"]["message"] == "nothing was saved: 2 of 2 rows were rejected"
+    assert failed["arguments"]["rows"] == kwargs["rows"]
+    assert write_intake.read(vault, ref=ref)["user_summary"].startswith("Not saved")
+    # A release before this one stored such a replay as applied; reading it must not say saved either.
+    outcome = {"operation": "bulk_upsert", "committed": False,
+               "counts": {"inserted": 0, "updated": 0, "unchanged": 0, "rejected": 2}}
+    with write_intake._write(vault) as conn:
+        conn.execute("UPDATE intake SET state = 'applied', outcome = ? WHERE id = ?",
+                     (json.dumps(outcome), ref.removeprefix(write_intake.REF_PREFIX)))
+    assert write_intake.read(vault, ref=ref)["user_summary"].startswith("Not saved")
+
+
+def test_a_bulk_write_with_malformed_rows_behind_the_queue_is_refused_at_once_and_never_queued(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bare rows with no source fail on their arguments alone, so they are refused before queueing."""
+    from record_fixtures import ledger_item
+
+    _writer, holder = managers
+    observe = _command("observe_memory")
+    plain = {
+        "path": "Knowledge Base/Notes/Insights/percentage-based-feature-flag-rollout.md",
+        "operation": "add", "category": "operating_constraint", "content": "A busy vault must not lose a save",
+    }
+    paused = threading.Event()
+    real_claim = write_intake._claim_head
+    monkeypatch.setattr(write_intake, "_claim_head", lambda root: 0.05 if not paused.is_set() else real_claim(root))
+    with _Hold(holder, vault):
+        first = _send(observe, vault, plain)
+    rows = [ledger_item(slug="entry-0"), {"item": ledger_item(slug="entry-1")}, {"item": ledger_item(slug="entry-2")}]
+    bare = _ledger_bulk(vault, rows, None)
+    with pytest.raises(OpError, match=r"3 of 3 rows would be rejected .*INVALID_BULK_ROW: rows 0; SOURCE_REQUIRED: rows 1, 2"):
+        _send(_command("record_memory"), vault, bare, scope="principal:session-b")
+    assert [item["ref"] for item in write_intake.read(vault)["items"]] == [first["queued_write"]["ref"]]
+    paused.set()
+    _wait_for_state(vault, first["queued_write"]["ref"], "applied")
+    # Sent directly, with nothing queued, the same rows keep the writer's report of every row.
+    direct = _send(_command("record_memory"), vault, bare, scope="principal:session-c")
+    assert direct["committed"] is False
+    assert [row["code"] for row in direct["rows"]] == ["INVALID_BULK_ROW", "SOURCE_REQUIRED", "SOURCE_REQUIRED"]
+
+
 def test_a_dated_save_with_relations_behind_a_backlog_is_told_only_the_exit_that_lands(
     vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
 ) -> None:

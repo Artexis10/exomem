@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import uuid
 from collections import ChainMap
-from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 
@@ -187,13 +186,12 @@ def prepare(writer, manifest, rows, source, settlement=None, links=None) -> list
     for index, raw in enumerate(rows):
         candidate = Candidate(index)
         candidates.append(candidate)
-        if (not isinstance(raw, Mapping) or set(raw) - records._BULK_ROW_KEYS
-                or not isinstance(raw.get("item"), Mapping)):
-            candidate.error = records._bulk_reject(index, "INVALID_BULK_ROW",
-                "a row is an object of item, optional body and source; a source is required on the row or once for the batch")
+        shape = records.bulk_row_shape_refusal(index, raw)
+        if shape is not None:
+            candidate.error = shape
             continue
         body = raw.get("body")
-        reference = raw["source"] if raw.get("source") is not None else source
+        reference = records.bulk_row_reference(raw, source)
         try:
             records._refuse_excluded_authored_names(raw["item"])
             _refuse_view_stamp(manifest, raw["item"])
@@ -203,8 +201,7 @@ def prepare(writer, manifest, rows, source, settlement=None, links=None) -> list
                     raise collections.CollectionError("UNREPRESENTABLE_RECORD_BODY",
                                                       "markdown-log storage cannot represent item bodies")
             if reference is None:
-                candidate.error = records._bulk_reject(index, "SOURCE_REQUIRED",
-                    "a row needs a preserved source reference")
+                candidate.error = records.bulk_source_required(index)
                 continue
             resolved = (settlement.source if settlement is not None else
                         records._resolve_bulk_source(writer.root, reference, writer._operation.allows_file, cache))

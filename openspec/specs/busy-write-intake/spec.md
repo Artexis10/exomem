@@ -158,7 +158,7 @@ While a save is queued or being applied, a resend with the save's original idemp
 
 ### Requirement: A failed queued save stays visible
 
-A queued save whose application ends in a refusal other than contention SHALL be recorded as `failed` with the public refusal and SHALL keep its arguments. The service SHALL NOT change a queued save to make it apply, and SHALL NOT delete a failed save by itself. The owner SHALL be able to list queued and failed saves and dismiss a failed one with `exomem intake list` and `exomem intake dismiss <id>`. An applied save SHALL keep its compact outcome and drop its arguments.
+A queued save whose replay ends in a refusal other than contention, or returns `committed: false` with rejected rows, SHALL be recorded `failed` with the refusal or the first rejected row's code, and SHALL keep its arguments. The service SHALL NOT change a queued save to make it apply, nor delete a failed one; the owner lists and dismisses them with `exomem intake list` and `exomem intake dismiss <id>`. An applied save SHALL keep its compact outcome and drop its arguments.
 
 #### Scenario: A stale edit fails visibly
 
@@ -166,6 +166,13 @@ A queued save whose application ends in a refusal other than contention SHALL be
 - **AND** the page changes before the edit is applied
 - **THEN** the save is recorded `failed` with the guard's refusal
 - **AND** reading it returns the refusal and the original arguments
+
+#### Scenario: A bulk write that rejects every row fails visibly
+
+- **WHEN** a queued `record_memory` bulk write names a source page that does not exist
+- **AND** its replay rejects every row and commits nothing
+- **THEN** the save is recorded `failed` with `SOURCE_NOT_FOUND` and its arguments
+- **AND** reading it does not say it was saved
 
 ### Requirement: The next save names failed queued saves
 
@@ -181,7 +188,7 @@ When queued saves have failed and no reply has named them, the next successful r
 
 ### Requirement: Callers can read a queued save's outcome
 
-`review_memory(mode="queued-write")` SHALL list open and failed saves, oldest first and bounded by `limit`. With `ref` it SHALL return that save's state (`queued`, `applying`, `applied` or `failed`), its attempts, its compact outcome when applied, its refusal when failed, and its arguments while queued or failed. `coordination_status` SHALL report the queued, applying and failed counts and the age of the oldest queued save, and SHALL report `unknown` when the store cannot be read.
+`review_memory(mode="queued-write")` SHALL list open and failed saves, oldest first, bounded by `limit`. With `ref` it SHALL return the save's state, attempts, compact outcome when applied (read as not saved when it committed nothing and rejected rows), refusal and arguments when failed. `coordination_status` SHALL report the queued, applying and failed counts and the oldest queued age, or `unknown` when the store cannot be read.
 
 #### Scenario: A later session checks a queued save
 
@@ -205,7 +212,7 @@ Only a caller whose saves may be queued SHALL read queued saves or the intake co
 
 ### Requirement: A save its arguments condemn is refused, not queued
 
-Before the intake accepts a save, the serving process SHALL apply the argument-only checks that exist for it: compact observation metadata, an episode recap's own validation, and the argument rules of `record_memory` and `plan_memory`. A save that one of them refuses SHALL get that refusal at once and SHALL NOT be queued. A refusal that reads vault state SHALL stay at the replay.
+Before the intake accepts a save, the serving process SHALL apply the argument-only checks that exist for it: compact observation metadata, an episode recap's own validation, the argument rules of `record_memory` and `plan_memory`, and malformed or sourceless rows of a bulk write under `on_reject: abort`, named by row. A save that one of them refuses SHALL get that refusal at once and SHALL NOT be queued. A refusal that reads vault state SHALL stay at the replay.
 
 #### Scenario: An oversized recap behind the queue is refused at once
 
@@ -219,3 +226,10 @@ Before the intake accepts a save, the serving process SHALL apply the argument-o
 - **WHEN** an owner sends an edit of a page that a queued save will create
 - **AND** that queued save has not been applied yet
 - **THEN** the edit is queued behind it, not refused for the missing page
+
+#### Scenario: Bare bulk rows behind the queue are refused at once
+
+- **WHEN** an owner sends a `record_memory` bulk write whose rows lack `item` or a source, under `on_reject: abort`
+- **AND** earlier saves are still queued
+- **THEN** the call returns `INVALID_RECORD_ARGUMENTS` naming the rejected rows
+- **AND** the intake holds only the earlier saves

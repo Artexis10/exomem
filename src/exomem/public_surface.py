@@ -506,8 +506,21 @@ def _curation_examples() -> list[dict[str, Any]]:
     return examples()
 
 
-#: Worked examples that read_instructions adds to an operation whose argument is a whole plan.
-_EXAMPLES = {"curation.propose": _curation_examples}
+def _bulk_upsert_examples() -> list[dict[str, Any]]:
+    from .record_memory import bulk_upsert_contract
+
+    contract = bulk_upsert_contract()
+    arguments = {key: value for key, value in contract["example"].items() if key != "action"}
+    return [{
+        "name": "bulk_upsert",
+        "when": f"rows: {contract['arguments']['rows']}. source: {contract['arguments']['source']}.",
+        "operation": "records.bulk_upsert",
+        "arguments": arguments,
+    }]
+
+
+#: Worked examples that read_instructions adds to an operation whose argument is a whole plan or row list.
+_EXAMPLES = {"curation.propose": _curation_examples, "records.bulk_upsert": _bulk_upsert_examples}
 
 
 def help_for(topic: str | None, commands: Sequence[Any]) -> dict[str, Any]:

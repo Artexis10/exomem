@@ -1154,6 +1154,43 @@ def _bulk_reject(index: int, code: str, message: str, **extra: Any) -> dict[str,
     return {"index": index, "outcome": "rejected", "code": code, "message": message, **extra}
 
 
+INVALID_BULK_ROW_MESSAGE = (
+    "a row is an object of item, optional body and source; a source is required on the row or once for the batch"
+)
+
+
+def bulk_row_shape_refusal(index: int, raw: object) -> dict[str, Any] | None:
+    """The rejection a row earns from its shape alone, before any vault read."""
+    if not isinstance(raw, Mapping) or set(raw) - _BULK_ROW_KEYS or not isinstance(raw.get("item"), Mapping):
+        return _bulk_reject(index, "INVALID_BULK_ROW", INVALID_BULK_ROW_MESSAGE)
+    return None
+
+
+def bulk_row_reference(raw: Mapping[str, Any], source: object) -> object:
+    """The source a row resolves against: its own, else the batch's."""
+    return raw["source"] if raw.get("source") is not None else source
+
+
+def bulk_source_required(index: int) -> dict[str, Any]:
+    return _bulk_reject(index, "SOURCE_REQUIRED", "a row needs a preserved source reference")
+
+
+def bulk_argument_refusals(rows: Sequence[object], source: object) -> list[dict[str, Any]]:
+    """The row rejections that the arguments alone decide: a malformed row, or a row with no source.
+
+    Every other rejection reads the vault (the source page, the schema, the stored rows), so it
+    stays with the write.
+    """
+    refusals = []
+    for index, raw in enumerate(rows):
+        refusal = bulk_row_shape_refusal(index, raw)
+        if refusal is None and bulk_row_reference(raw, source) is None:  # type: ignore[arg-type]
+            refusal = bulk_source_required(index)
+        if refusal is not None:
+            refusals.append(refusal)
+    return refusals
+
+
 def _bulk_error_row(index: int, error: collections.CollectionError, **extra: Any) -> dict[str, Any]:
     details = error.details if isinstance(error.details, Mapping) else {}
     fields = details.get("issues")
@@ -1379,21 +1416,13 @@ def bulk_upsert_records(
         source_guards: dict[str, vault.PathGuard] = {}
 
         for index, raw in enumerate(rows):
-            if (
-                not isinstance(raw, Mapping)
-                or set(raw) - _BULK_ROW_KEYS
-                or not isinstance(raw.get("item"), Mapping)
-            ):
-                outcomes.append(
-                    _bulk_reject(
-                        index,
-                        "INVALID_BULK_ROW",
-                        "a row is an object of item, optional body and source; a source is required on the row or once for the batch",
-                    )
-                )
+            shape = bulk_row_shape_refusal(index, raw)
+            if shape is not None:
+                outcomes.append(shape)
                 continue
+            assert isinstance(raw, Mapping)
             body = raw.get("body")
-            reference = raw["source"] if "source" in raw and raw["source"] is not None else source
+            reference = bulk_row_reference(raw, source)
             try:
                 _refuse_excluded_authored_names(raw["item"])
                 if body is not None:
@@ -1404,11 +1433,7 @@ def bulk_upsert_records(
                             "markdown-log storage cannot represent item bodies",
                         )
                 if reference is None:
-                    outcomes.append(
-                        _bulk_reject(
-                            index, "SOURCE_REQUIRED", "a row needs a preserved source reference"
-                        )
-                    )
+                    outcomes.append(bulk_source_required(index))
                     continue
                 resolved = _resolve_bulk_source(root, reference, allowed, cache=source_cache)
                 if resolved is None:

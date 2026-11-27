@@ -2872,7 +2872,7 @@ def _intake_main(argv: list[str]) -> int:
     subcommands = parser.add_subparsers(dest="command", required=True)
     list_parser = subcommands.add_parser("list", help="list queued, applying and failed saves")
     list_parser.add_argument("--limit", type=int, default=50, help="most saves to list, at most 50")
-    show_parser = subcommands.add_parser("show", help="show one save, with its arguments")
+    show_parser = subcommands.add_parser("show", help="show one save, with its arguments when it failed")
     show_parser.add_argument("ref", help="the save's exomem://queued-write/<id> ref or its id")
     dismiss_parser = subcommands.add_parser("dismiss", help="remove one failed save")
     dismiss_parser.add_argument("ref", help="the save's exomem://queued-write/<id> ref or its id")

@@ -684,7 +684,7 @@ def parse_manifest_contract(*, store_mode: bool = False, store_vault: bool = Fal
     # A served vault answers describe in file mode too, so both modes carry the store's writer rule.
     return {
         **manifest_authoring_contract(store=store_mode or store_vault),
-        "bulk_upsert": _bulk_upsert_contract(store_mode=store_mode),
+        "bulk_upsert": bulk_upsert_contract(store_mode=store_mode),
         "history": _history_contract(),
         "writer_lease": UNSUPPORTED_WRITERS,
     }
@@ -722,7 +722,7 @@ def _history_contract() -> dict[str, Any]:
     }
 
 
-def _bulk_upsert_contract(*, store_mode: bool = False) -> dict[str, Any]:
+def bulk_upsert_contract(*, store_mode: bool = False) -> dict[str, Any]:
     """The `bulk_upsert` action's contract, from the writer's own constants."""
     contract = {
         "why": (
@@ -947,6 +947,35 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
     if action == "query" and values["item_key"] is not None and supplied - {"collection", "item_key"}:
         _invalid_arguments("a query with item_key reads that one row and its body, so it takes only collection; "
                            "remove " + ", ".join(sorted(supplied - {"collection", "item_key"})))
+
+
+def queue_refusal(arguments: Mapping[str, Any]) -> OpError | None:
+    """The refusal a bulk write gets before it is queued, when its arguments alone condemn it; else None.
+
+    Queue-only: a direct call keeps the writer's per-row report. A queued save that the replay would
+    reject only reports it after the vault frees up, and under abort one rejected row saves nothing.
+    """
+    if arguments.get("action") != "bulk_upsert" or arguments.get("on_reject") not in {None, "abort"}:
+        return None
+    rows, source = arguments.get("rows"), arguments.get("source")
+    if not isinstance(rows, list | tuple) or not rows or len(rows) > records.BULK_UPSERT_MAX_ROWS:
+        return OpError("INVALID_RECORD_ARGUMENTS",
+                       f"rows must be a list of 1 to {records.BULK_UPSERT_MAX_ROWS} row objects")
+    if source is not None and not isinstance(source, str):
+        return OpError("INVALID_RECORD_ARGUMENTS", "source must be the path of a preserved Sources or Evidence page")
+    refusals = records.bulk_argument_refusals(rows, source)
+    if not refusals:
+        return None
+    by_code: dict[str, list[str]] = {}
+    for row in refusals:
+        by_code.setdefault(row["code"], []).append(str(row["index"]))
+    named = "; ".join(f"{code}: rows {', '.join(indexes)}" for code, indexes in by_code.items())
+    return OpError(
+        "INVALID_RECORD_ARGUMENTS",
+        f"{len(refusals)} of {len(rows)} rows would be rejected and on_reject=abort saves nothing ({named}); "
+        f"{records.INVALID_BULK_ROW_MESSAGE}, e.g. "
+        '{"item": {...}, "source": "<preserved Sources or Evidence page>"}',
+    )
 
 
 def _require_one_history_selector(given: Mapping[str, Any]) -> None:
