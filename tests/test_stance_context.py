@@ -29,7 +29,7 @@ def stance_vault(tmp_path):
     _seed(tmp_path)
     _write(tmp_path, "Knowledge Base/_Schema/SKILL.md", "# Memory schema\n")
     schema = Path(stance.__file__).parent / "_scaffold/_Schema/references"
-    for name in ("frontmatter.md", "page-types.md"):
+    for name in ("page-types.md",):
         _write(tmp_path, f"Knowledge Base/_Schema/references/{name}", (schema / name).read_text(encoding="utf-8"))
     _page(tmp_path, "global", "stance: true\n", body="- [rule] Keep a source for each claim. ^source\n")
     initialize_vault_state_offline(tmp_path, source="stance workflow fixture")

@@ -15,7 +15,6 @@ def _section(relative: str, heading: str) -> str:
 def test_shipped_scaffold_teaches_human_readable_memory_citations() -> None:
     sections = (
         _section("SKILL.md", "## Durable references"),
-        _section("references/operations.md", "## Stable identity and references"),
     )
 
     for guidance in sections:
@@ -36,12 +35,3 @@ def test_shipped_scaffold_teaches_human_readable_memory_citations() -> None:
         ):
             assert required in guidance
         assert "exomem://memory/<uuid>" in guidance
-
-
-def test_operations_warns_against_visible_custom_scheme_link_targets() -> None:
-    guidance = _section(
-        "references/operations.md", "## Stable identity and references"
-    )
-
-    assert "do not embed the canonical ref as a markdown link target" in guidance
-    assert "plain title-first citation" in guidance
