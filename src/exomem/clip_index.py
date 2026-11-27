@@ -424,6 +424,10 @@ class ClipIndex:
 
         ``photo.jpg.md`` is the canonical artifact exposed to ordinary recall;
         CLIP stores it as ``photo.jpg``.  Only a terminal ``.md`` is stripped.
+
+        The picture's faces stay. Every caller drops a picture from recall, not from the vault, and a
+        person restriction only narrows the pages that recall admits. A picture whose file is gone
+        reaches `embeddings.delete_clip_after_remove` through reconcile's CLIP orphan pass, which drops them.
         """
         return self.purge_paths_if_present(
             [path.removesuffix(".md") for path in markdown_paths]

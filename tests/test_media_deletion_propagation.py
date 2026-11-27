@@ -135,25 +135,29 @@ def test_delete_after_remove_drops_the_pictures_face_rows_in_the_clip_step(
     assert _outcome(report, "clip").outcome == "completed"
 
 
-def test_a_face_store_that_cannot_drop_the_rows_reports_the_clip_step_degraded(
+def test_a_face_store_that_cannot_drop_the_rows_is_retried_by_reconcile(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Catches a removal reported clean while the removed photo's faces stay in the face store."""
-    from exomem import face_groups
+    """Catches the faces of a removed photo left for good after one failed cleanup."""
+    from exomem import face_groups, reconcile
 
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
-    rel = "Knowledge Base/Evidence/Rental/photos/a.jpg"
+    rel = "Knowledge Base/Evidence/Rental/photos/a.jpg"  # Its file is gone, as after a removal.
     embeddings.ClipIndex(vault).upsert(rel, _unit(0), 1.0)
     _picture_with_a_face(vault, rel)
+    real_forget = face_groups.forget_pages
 
     def locked(*args, **kwargs):
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(face_groups, "forget_pages", locked)
     report = index_sync.delete_after_remove(vault, [rel])
+    monkeypatch.setattr(face_groups, "forget_pages", real_forget)
 
     assert _outcome(report, "clip").outcome == "degraded"
     assert _face_pages(vault) == [rel]
+    reconcile.reconcile(vault)
+    assert _face_pages(vault) == []
     assert not embeddings.ClipIndex(vault).has(rel)
 
 

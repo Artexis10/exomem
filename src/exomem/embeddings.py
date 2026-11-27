@@ -3011,17 +3011,17 @@ def delete_clip_after_remove(
     only sqlite, so a lean (no `embeddings` extra) install still purges cleanly.
 
     The removed pictures' faces go in the same step, whether CLIP or faces are on or off: a face row of a
-    removed picture would still match its person. A face store failure reports this step degraded, so
-    source erasure counts the face store among the owners that must acknowledge.
+    removed picture would still match its person. A face store failure keeps the CLIP rows and reports this
+    step degraded: reconcile's CLIP orphan pass, which finds pictures by their CLIP rows, then retries both,
+    and source erasure counts the face store among the owners that must acknowledge.
     """
     from . import face_groups
 
     try:
         face_groups.forget_pages(vault_root, removed_rel_paths)
-    except Exception:  # noqa: BLE001 - reported below; the CLIP rows still go
+    except Exception:  # noqa: BLE001 - reported below; the CLIP rows stay so a later pass retries
         log.warning("face rows of removed pictures could not be dropped", exc_info=True)
-        status = _delete_clip_rows(vault_root, removed_rel_paths)
-        return EmbeddingSyncStatus("degraded", "face_delete_failed", status.eligible_count)
+        return EmbeddingSyncStatus("degraded", "face_delete_failed", len(removed_rel_paths))
     return _delete_clip_rows(vault_root, removed_rel_paths)
 
 
