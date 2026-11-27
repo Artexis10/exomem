@@ -7357,7 +7357,6 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "replicate": "mutation",
         "attach-speech": "mutation",
         "rename-speakers": "mutation",
-        "group-session": "mutation",
     },
     ("observe_memory", "operation"): {
         "add": "mutation",

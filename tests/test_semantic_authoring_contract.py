@@ -43,11 +43,10 @@ COMPILED_DESTINATIONS = {
     "production-log": "Notes/Productions",
     "profile": "Notes/Profiles",
     "research-note": "Notes/Research",
-    "session-transcript": "Notes/Sessions",
 }
 EXPECTED_NORMATIVE_IDENTITY = (
     12,
-    "sha256:39ad41017b6bf49e294c4ccb659f0b1224c9c726336bc4f590bebd44fee7daa8",
+    "sha256:26c49ad6461355e0e9d3441c6130f290676aada986db30c37c2f97278c54fc47",
 )
 PORTABLE_CORE_KEYS = [
     "action",

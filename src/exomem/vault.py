@@ -9037,18 +9037,6 @@ def _scan_wikilinks(text: str) -> list[tuple[int, str, str]]:
     return out
 
 
-def parse_wikilink(text: str) -> tuple[str, str | None] | None:
-    """The target and the alias of `text` when it is exactly one wikilink, `[[target]]` or `[[target|alias]]`, else None.
-
-    It reads the grammar that the inbound-link index reads, so a page that parses its own links through it
-    can never disagree with the index about which links it holds. The alias is returned as written.
-    """
-    if _WIKILINK_PATTERN.fullmatch(text) is None:
-        return None
-    target, bar, alias = text[2:-2].partition("|")
-    return target.strip(), (alias or None) if bar else None
-
-
 def inbound_rows(rel: str, text: str) -> tuple[str, list[tuple[int, str, str, str]]]:
     """The basename that the page at ``rel`` counts toward, and each of its links as
     ``(line_number, context, raw_target, bucket_key)``, in scan order.

@@ -239,7 +239,6 @@ def test_the_shipped_pack_reproduces_each_former_type_set() -> None:
         "production-log",
         "procedure",
         "profile",
-        "session-transcript",
     }
     former_sets = {
         note_types.ranks_as_compiled: compiled | {"entity"},
@@ -255,11 +254,10 @@ def test_the_shipped_pack_reproduces_each_former_type_set() -> None:
             "profile",
             "entity",
         },
-        note_types.sources_required: {"research-note", "insight", "failure", "pattern", "session-transcript"},
+        note_types.sources_required: {"research-note", "insight", "failure", "pattern"},
         note_types.ranks_as_source: {"source"},
         note_types.raw: {"source", "evidence"},
         note_types.profile: {"profile"},
-        note_types.session_transcript: {"session-transcript"},
         note_types.titled_name: compiled | {"entity", "source"},
     }
     for predicate, members in former_sets.items():
@@ -275,7 +273,6 @@ def test_the_shipped_pack_reproduces_each_former_type_set() -> None:
         "production-log": "Notes/Productions",
         "procedure": "Notes/Procedures",
         "profile": "Notes/Profiles",
-        "session-transcript": "Notes/Sessions",
     }
 
 

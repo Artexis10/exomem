@@ -10452,7 +10452,7 @@ def op_transfer_artifact(
 
 
 ProcessMediaOperation = Literal[
-    "process", "status", "retry", "reprocess", "replicate", "attach-speech", "rename-speakers", "group-session"
+    "process", "status", "retry", "reprocess", "replicate", "attach-speech", "rename-speakers"
 ]
 
 
@@ -10474,8 +10474,6 @@ def op_process_media(
     names: speech_attach_schema_module.Names = (),
     replace_labelled: bool = False,
     renames: speech_attach_schema_module.Renames | None = None,
-    members: speech_attach_schema_module.Members | None = None,
-    title: speech_attach_schema_module.SessionTitle | None = None,
 ) -> dict:
     """Check governed media; retry after remediation; extract again; replicate originals; attach speech.
 
@@ -10488,8 +10486,6 @@ def op_process_media(
     needs the original's SHA-256 and size, and a repeat of the same call changes nothing.
     A merged-turn page is processed again with speaker labels before an attach. Rename-speakers
     changes the speaker labels of one recording to the names a person gave; it keeps no voice.
-    Group-session writes one transcript page for separate recordings of one event, each recording
-    its own track, and keeps it current as the recordings change.
 
     Args:
         path: Governed KB media path; omit for bounded all-media work. Attach-speech and rename-speakers take one recording.
@@ -10507,8 +10503,6 @@ def op_process_media(
         names: Attach-speech: names for labels of `turns`.
         replace_labelled: Attach-speech: replace a result that has speaker labels or names; the old one stays on a prior page.
         renames: Rename-speakers: each label as the page shows it, mapped to a person's name.
-        members: Group-session: each track's name mapped to its recording's path.
-        title: Group-session: the session page's title; the same title again regroups it.
     """
     from . import due_state as due_state_module
     from . import media_processing
@@ -10516,13 +10510,13 @@ def op_process_media(
     from .cli_ops import OpError
 
     validate_process_media_operation(operation)
-    if operation in speech_attach_schema_module.SPEECH_OPERATIONS:
+    if operation in {"attach-speech", "rename-speakers"}:
         if any(value is not None for value in (paths, language, store, diarize)) or multilingual:
-            raise OpError("MEDIA_SPEECH_ARGUMENTS", f"{operation} takes its own fields only")
+            raise OpError("MEDIA_SPEECH_ARGUMENTS", f"{operation} takes one path and its own fields only")
         return _speech_media(
             vault_root, operation, path=path, binary_sha256=binary_sha256, binary_size=binary_size,
             segments=segments, turns=turns, engine=engine, asr=asr, names=names,
-            replace_labelled=replace_labelled, renames=renames, members=members, title=title,
+            replace_labelled=replace_labelled, renames=renames,
         )
     if path is not None and paths is not None:
         raise OpError("MEDIA_PATH_SELECTOR_CONFLICT", "use either path or paths, not both")
@@ -10585,17 +10579,14 @@ def _speech_media(
     names: Any,
     replace_labelled: bool,
     renames: Any,
-    members: Any,
-    title: str | None,
 ) -> dict:
-    """Attach a speech result to one recording's Source, rename its speaker labels, or group recordings as a session.
+    """Attach a speech result to one recording's Source, or rename its speaker labels.
 
     Each commits its page under the mutation guard alone (`speech_attach.commit_under_guard`), so the
-    request holds no wider boundary. Each refuses before the first write, and a repeat writes nothing.
-    An attach or a rename that changes a recording then renders again the session pages that link it.
+    request holds no wider boundary. Both refuse before the first write, and a repeat writes nothing.
     """
     from . import due_state as due_state_module
-    from . import media_processing, speaker_rename, speech_attach, speech_session
+    from . import media_processing, speaker_rename, speech_attach
     from .cli_ops import OpError
     from .writer_lease import active_manager, active_mutation_request_id
 
@@ -10610,39 +10601,25 @@ def _speech_media(
             holder_kind="command",
         )
 
-    required_fields = {
-        speech_attach_schema_module.ATTACH_OPERATION: {
-            "path": path, "binary_sha256": binary_sha256, "binary_size": binary_size, "segments": segments,
-            "engine": engine,
-        },
-        speech_attach_schema_module.RENAME_OPERATION: {"path": path, "renames": renames},
-        speech_attach_schema_module.GROUP_OPERATION: {"members": members, "title": title},
-    }
+    attaching = operation == speech_attach_schema_module.ATTACH_OPERATION
     # The door's per-operation row lists the same fields; a direct caller is held to the required ones here.
-    missing = [name for name, value in required_fields[operation].items() if value is None]
+    required = (
+        {"binary_sha256": binary_sha256, "binary_size": binary_size, "segments": segments, "engine": engine}
+        if attaching else {"renames": renames}
+    )
+    missing = [name for name, value in {"path": path, **required}.items() if value is None]
     if missing:
         raise OpError("MEDIA_SPEECH_ARGUMENTS", f"{operation} needs {', '.join(missing)}")
-    if operation == speech_attach_schema_module.GROUP_OPERATION and path is not None:
-        raise OpError("MEDIA_SPEECH_ARGUMENTS", "group-session takes its recordings in members, not in path")
     try:
         with due_state_module.batch_scope(vault_root):
-            if operation == speech_attach_schema_module.ATTACH_OPERATION:
+            if attaching:
                 result = speech_attach.attach(
                     vault_root, path, binary_sha256=binary_sha256, binary_size=binary_size, segments=segments,
                     engine=engine, turns=turns or None, names=names or None, asr=asr, replace_labelled=replace_labelled,
                     commit_guard=commit_guard,
                 )
-            elif operation == speech_attach_schema_module.RENAME_OPERATION:
-                result = speaker_rename.rename(vault_root, path, renames, commit_guard=commit_guard)
             else:
-                result = speech_session.group(vault_root, members, title, commit_guard=commit_guard)
-            if operation != speech_attach_schema_module.GROUP_OPERATION and result["outcome"] != "unchanged":
-                # The recording changed, so the session pages that link it show its new text and names.
-                sessions = speech_session.refresh_published(
-                    vault_root, [result["sidecar_path"]], commit_guard=commit_guard,
-                )
-                if sessions:
-                    result = {**result, "sessions": sessions}
+                result = speaker_rename.rename(vault_root, path, renames, commit_guard=commit_guard)
     except media_processing.MediaProcessingError as error:
         raise OpError(error.code, error.reason) from error
     if result["outcome"] == "unchanged":
@@ -15618,7 +15595,7 @@ def validate_process_media_operation(operation: Any) -> None:
 
         raise OpError(
             "INVALID_MEDIA_OPERATION",
-            "process_media operation must be process, status, retry, reprocess, replicate, attach-speech, rename-speakers, or group-session",
+            "process_media operation must be process, status, retry, reprocess, replicate, attach-speech, or rename-speakers",
         )
 
 

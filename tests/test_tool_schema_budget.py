@@ -106,9 +106,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "inspect_memory": 2300,
     "list_review_items": 750,
     # faces.set, faces.name and faces.delete joined the write door on 2026-11-27 (add-face-search): 2,679 B.
-    # `media.group_session`, grouping the recordings of one event as a session, added 22 B to its enum on 2026-11-27
-    # (keep-speech-results-in-cloud): 2,701 B, and the wire total stays at 32,300 B.
-    "manage_memory": 2710,
+    "manage_memory": 2700,
     "query_plan_items": 1050,
     # `options` names `query`, the typed version-1 query that a derived collection also answers, added 32 B on
     # 2026-11-25 (legacy arguments on a derived collection).

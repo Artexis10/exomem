@@ -167,7 +167,7 @@ MEDIA_OUTCOMES = {"process": "processed", "retry": "retried", "reprocess": "repr
 _SPEECH_REPLY_FIELDS = (
     "operation", "outcome", "media_type", "state", "sidecar_path", "extracted_by", "attached_digest",
     "speakers", "speaker_verification", "names_not_carried", "prior_extraction", "speech_job", "renamed",
-    "next_action", "session_path", "alignment", "members", "sessions",
+    "next_action",
 )
 #: The media operations whose result reports how many jobs they requeued.
 MEDIA_REQUEUE_OPERATIONS = frozenset({"retry", "reprocess"})

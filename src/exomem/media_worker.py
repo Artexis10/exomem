@@ -29,7 +29,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -1629,29 +1629,7 @@ class MediaWorker:
         handoff, receipts, surplus, epoch_published = committed
         self._complete_deferred_graph_completion(handoff, receipts, epoch_published=epoch_published)
         self._retire_surplus_parts(surplus)
-        self._refresh_sessions((job.sidecar_path,))
         return True
-
-    def _refresh_sessions(self, sidecars: Sequence[Path]) -> None:
-        """Render again the session pages that link recordings whose extraction was just published.
-
-        The extraction is already committed, so a refresh that cannot run is logged and never fails the job:
-        the page stays as it was until the next change to a member, or until `group-session` runs again.
-        """
-        if not sidecars:
-            return
-        from . import speech_session
-
-        def guard() -> contextlib.AbstractContextManager[Any]:
-            return get_manager().mutation_guard(
-                self._vault_root, operation="background_media_session_refresh", holder_kind="background"
-            )
-
-        try:
-            get_manager().yield_to_waiting_writes(self._vault_root)
-            speech_session.refresh_published(self._vault_root, sidecars, commit_guard=guard)
-        except Exception:  # noqa: BLE001 - the member's extraction is committed; a session page that lags is not a job failure
-            log.warning("media session refresh failed for %s", [path.name for path in sidecars], exc_info=True)
 
     def _extraction_writes(
         self,
@@ -3025,7 +3003,6 @@ class MediaWorker:
                 item.result, requeue_remaining=item.result.kind in {"extraction", "pending"}
             )
             ended.append(item.result)
-        self._refresh_sessions([item.result.job.sidecar_path for item in staged if item.result.kind == "extraction"])
         return ended
 
     def _finish_prepared_target(

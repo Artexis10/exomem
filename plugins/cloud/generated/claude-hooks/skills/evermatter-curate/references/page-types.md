@@ -337,17 +337,6 @@ page that supplies nothing. [Profiles](profiles.md) covers seeding and changing 
 - derived_from [[Notes/Insights/how-i-play]]
 ```
 
-## session-transcript
-
-**Location:** `Notes/Sessions/`
-**Naming:** `<title-slug>.md`, written by `manage_memory(operation="media.group_session")`, not by `create_note`.
-
-A session transcript is one page for separate recordings of one event, each from its own microphone. Its
-`sources` link each recording with its track name as the link label, `track_offsets` gives each track's
-start in seconds, and `alignment` says how the starts were found: from a time the files publish, or
-`assumed-start` when they share none. Its `## Transcript` is generated and is overwritten when a member
-changes. Everything below its owner-notes marker is the owner's and is kept.
-
 ## experiment
 
 **Location:** `Notes/Experiments/<Domain>/`, where the folder is the domain's path label (`workflow` lives in `Workflow/`). Add a new sub-domain only when the first experiment in that domain is written.

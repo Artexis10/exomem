@@ -113,25 +113,6 @@ When a member's extraction or speaker names change, speech SHALL find that membe
 - **WHEN** a member's speaker labels are renamed, or the member is reprocessed, after grouping
 - **THEN** the session page's transcript shows the member's new text and names, and the owner's section stays
 
-### Requirement: A session page is never more readable than one of its members
-
-A session page copies its members' text, so it SHALL be at least as restricted as every member. Grouping SHALL refuse a member that is more restricted than the page and write nothing. Every later render SHALL leave such a member's text out and report the page as withheld. A member is more restricted when it has a governance scope that the page lacks, when `_access.yaml` excludes it, or when its restriction cannot be decided.
-
-#### Scenario: A restricted member is refused
-
-- **WHEN** an agent groups a recording that a governance scope restricts with a recording outside that scope, and the session page's folder is outside the scope too
-- **THEN** the grouping is refused, the refusal names the track and says to bring the session page into that scope or to leave the recording out, and no session page is written
-
-#### Scenario: A session page in the member's scope is grouped and restricted like the member
-
-- **WHEN** the session page's folder is inside the scope that restricts a member
-- **THEN** the session groups, and a caller whom the scope bars neither reads the session page nor finds it by search
-
-#### Scenario: A member that becomes more restricted is withheld at the next refresh
-
-- **WHEN** a member comes under a restriction that the session page does not share, and the session page renders again
-- **THEN** the page no longer holds that member's text, its member list says the text is withheld, the refresh reports the page as withheld, and a caller whom the restriction bars is released none of that member's words through the page
-
 ### Requirement: A track is diarised only when labels are requested and it is not declared single-voice
 
 Speech SHALL diarise a track only when speaker labels are requested for the recording and the track is not declared single-voice. The turns of a diarised track SHALL read `<track name>: Speaker A`. Where diarisation cannot run, the result SHALL report that the requested labels are unavailable, and the track names SHALL still label the turns.

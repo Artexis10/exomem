@@ -84,8 +84,6 @@ class NoteType:
     index_row: str = ""
     #: Whether the type's pages are the owner's preference profiles. Only the shipped pack sets it.
     profile: bool = False
-    #: Whether the type's pages group the separate recordings of one event. Only the shipped pack sets it.
-    session_transcript: bool = False
 
 
 def _note_type(entry: registry.Entry) -> NoteType:
@@ -107,7 +105,6 @@ def _note_type(entry: registry.Entry) -> NoteType:
         stem=stem,
         index_row=str(attributes.get("index_row") or entry.key),
         profile=bool(attributes.get("profile", False)),
-        session_transcript=bool(attributes.get("session_transcript", False)),
     )
 
 
@@ -180,11 +177,6 @@ def profile(note_type: NoteType) -> bool:
     return note_type.profile
 
 
-def session_transcript(note_type: NoteType) -> bool:
-    """Set L: the page type that groups the separate recordings of one event, found by this attribute and never by its key."""
-    return note_type.session_transcript
-
-
 def titled_name(note_type: NoteType) -> bool:
     """Set J: pages whose file name is built from their frontmatter title.
 
@@ -236,10 +228,6 @@ def _check_attributes(entry: registry.Entry) -> None:
     if not isinstance(attributes.get("profile", False), bool):
         raise registry.RegistryError(
             f"INVALID_NOTE_TYPE_ATTRIBUTE: {entry.key} profile must be true or false"
-        )
-    if not isinstance(attributes.get("session_transcript", False), bool):
-        raise registry.RegistryError(
-            f"INVALID_NOTE_TYPE_ATTRIBUTE: {entry.key} session_transcript must be true or false"
         )
     if attributes.get("sources", "optional") not in SOURCES_VALUES:
         raise registry.RegistryError(
