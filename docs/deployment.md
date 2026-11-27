@@ -1870,7 +1870,7 @@ needs the same command. Issuing needs `EXOMEM_JWT_SIGNING_KEY`, which can
 forge any owner session, so give the agent a wrapper instead of the key. The
 wrapper:
 
-- keeps the signing key out of the agent's environment;
+- keeps the signing key out of the agent's environment, so it never reaches the agent's context, transcript or child processes; the agent can still read the service configuration;
 - passes a neutral task id as the client label, never a description that
   could name a person or client, because the label reaches every access log
   line;
