@@ -2,7 +2,7 @@
 name: evermatter-research
 description: 'Research a focused question with Evermatter: check what is already known, gather and keep sources, and save attributed findings. Use when the user asks to research, investigate, compare options, check a claim, or dig deeper into a topic.'
 metadata:
-  skill_contract: ebff271d97530f23edc460cb279e4b58ac729e1ddac5281211bdf6df6faa6d9f
+  skill_contract: f7588bce55c4db96ad1f99ad20b4fffee7a1a82475af73bb706bdba3d9424655
   version: "0.2.0"
 ---
 

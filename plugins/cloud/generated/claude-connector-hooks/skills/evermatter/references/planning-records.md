@@ -106,6 +106,9 @@ imports as rows without retyping a cell. `read_instructions(topic="records.impor
    `columns` give the same counts as the preview.
 5. A page over 256 KiB, or with too many cells, is refused as `IMPORT_SOURCE_TOO_LARGE`. Save the table as csv
    and import that.
+6. When the preview's `coverage` is `partial`, `columns`, `unparsed_cells` and `check_sum` are null. Split the page
+   into smaller tables, or export it as csv, then preview again.
+7. A derived collection refuses `markdown-table`. Use csv or ndjson with `members` for it.
 
 ```json
 {"mode": "preview", "source_ref": "<the Evidence path save_evidence returned>", "format": "markdown-table",

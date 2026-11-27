@@ -92,9 +92,9 @@ log = logging.getLogger(__name__)
 # nosemgrep: ep-word-set -- The import request grammar fixes these source formats.
 FORMATS = ("ndjson", "json-array", "csv", "json-document", "markdown-table")
 MAX_ROW_BYTES = 1 << 20
-# A Markdown page is parsed whole, once per page (``import_markdown.read_tables`` keeps the last few), so its size
-# is capped: a 256 KiB ledger parses in about 0.15 s on the store thread (measured 2026-11-27), and a larger
-# table belongs in a csv file, which streams. ``import_markdown.MAX_PARSE_TOKENS`` bounds the worst page.
+# A Markdown page is parsed whole (``import_markdown.read_tables`` keeps the last few parses as an optimisation), so
+# its size is capped, and a larger table belongs in a csv file, which streams. ``import_markdown.MAX_PARSE_TOKENS``
+# bounds the worst page.
 MAX_TABLE_SOURCE_BYTES = 256 << 10
 MAX_TABLES_LISTED = 20
 CELL_TEXT_CHARS = 200
@@ -296,7 +296,10 @@ def contract() -> dict[str, Any]:
             "page as their source, and status reports the same columns over the rows read so far. The "
             "Evidence is your copy of the page's text, not the page: compare check_sum with the totals the "
             f"page states. The page is read whole, so a page over {MAX_TABLE_SOURCE_BYTES} bytes or with too "
-            "many cells is refused as IMPORT_SOURCE_TOO_LARGE: save the table as csv instead. members is refused"
+            "many cells is refused as IMPORT_SOURCE_TOO_LARGE: save the table as csv instead. When a preview's "
+            "coverage is partial, columns, unparsed_cells and check_sum are null: split the page into smaller "
+            "tables, or export it as csv, then preview again. members is refused, and a derived collection "
+            "refuses markdown-table: use csv or ndjson with members there"
         ),
         "states": {
             "running": (
@@ -359,7 +362,7 @@ def _source_not_found() -> Never:
         "source is not a released preserved Sources or Evidence file",
         at="import_request.source_ref",
         expected="vault path of a preserved Sources or Evidence file",
-        # One text for an absent, an unpreserved and a withheld ref, so the refusal reveals which applied.
+        # One text for an absent, an unpreserved and a withheld ref, so the refusal reveals none of them.
         repair=(
             "preserve the file's own bytes first, with save_evidence (or save_source for an original), "
             "then pass the Evidence or Sources path it returns as source_ref; page text, a URL and a "
@@ -1120,7 +1123,7 @@ class _Reader:
         return self._peek() is None
 
     def tables(self) -> tuple[import_markdown.Table, ...] | None:
-        """A markdown-table page's tables, parsed whole once; None when the page cannot be read as tables."""
+        """A markdown-table page's tables, parsed whole; None when the page cannot be read as tables."""
         if self.page is None:
             self.handle.seek(0)
             data = bytearray()
@@ -4062,6 +4065,19 @@ def _visible(writer, collection: str, job_id: str) -> _Job:
 
 def _require_members(manifest, request: _Request) -> None:
     """Refuse a derived collection's import of anything but export members, in preview and start alike."""
+    if manifest.derived and request.format == "markdown-table":
+        # A derived collection needs members, and markdown-table refuses members: say so at the first refusal,
+        # so an agent does not add members and meet the page refusal next.
+        _refuse(
+            derived_rows.COLLECTION_DERIVED,
+            "markdown-table cannot import into a derived collection, which imports export members only",
+            at="import_request.format",
+            expected="format csv or ndjson with members, for a derived collection",
+            repair=(
+                "use csv or ndjson with members, as a glob or list of member paths of an export manifest; "
+                "save the table as a csv export first, or import it into a collection that is not derived"
+            ),
+        )
     if manifest.derived and request.members is None:
         _refuse(
             derived_rows.COLLECTION_DERIVED,

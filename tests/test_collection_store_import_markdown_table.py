@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from test_collection_store_import_exports import agent, finish, preserve_export
-from test_collection_store_importer import CID, importer, refused, run, setup, small
+from test_collection_store_importer import CID, importer, manifest_text, refused, run, setup, small
 from test_collection_store_writer import store as store  # noqa: F401 - the pytest fixture
 
 from exomem import commands
@@ -23,6 +23,7 @@ LEDGER_FIELDS = (
     "    ref: {type: string, required: true}\n    entry_date: {type: date}\n    entry_date_text: {type: string}\n"
     "    counterparty: {type: string}\n    amount: {type: number}\n    note: {type: string}\n"
 )
+LEDGER_TEXT = manifest_text(CID, "Ledger", LEDGER_FIELDS)
 # The page opens with an index table, so the ledger is table 1.
 PAGE = """# Ledger, spring
 
@@ -370,3 +371,18 @@ def test_a_scale_on_a_cell_that_is_not_a_number_is_refused_when_the_mapping_is_r
         preview = _agent(store, owner, mode="preview", source_ref=kept["path"], format="markdown-table", mapping=mapping)
         assert [(found["code"], found["at"]) for found in preview["mapping"]["findings"]] == [
             ("IMPORT_MAPPING_INVALID", "mapping.fields.entry_date.scale")], kind
+
+
+def test_a_derived_collection_refuses_a_table_import_once_and_names_the_formats_that_work(store):
+    """Defect: the first refusal said to add members, and adding them was refused as a page: an agent looped."""
+    derived = LEDGER_TEXT.replace("strategy: markdown-items\n", "strategy: sqlite\n").replace(
+        "lifecycle: active\n", "lifecycle: active\nview_mode: summary\nderived: true\n")
+    setup(store, b"", title="Ledger", fields=LEDGER_FIELDS, text=derived)
+    owner = owner_principal(surface="mcp")
+    with request_scope(owner):
+        kept = commands.op_preserve_evidence(store.root, "ledger", "derived", "derived.md", PAGE)
+    error = refused(_agent, store, owner, mode="preview", source_ref=kept["path"], format="markdown-table",
+                    mapping=MAPPING)
+    assert "members" not in error.details["at"]
+    assert "csv" in error.details["repair"] and "ndjson" in error.details["repair"]
+    assert "add members" not in error.details["repair"]

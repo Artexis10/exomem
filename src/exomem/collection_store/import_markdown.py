@@ -20,9 +20,8 @@ from markdown_it.rules_block.table import table as _table_rule
 
 _BOM = b"\xef\xbb\xbf"
 
-# The parser's cost is its token count: a 256 KiB ledger is about 70,000 tokens and parses in 0.14 s, while the
-# worst pages of that size (one-cell rows, a wide sparse table) reach 200,000 to 330,000 and take over a second.
-# Past this count the page is refused, so a read stays well inside a batch and a preview's budget.
+# The parser's cost is its token count, and the worst pages of the byte cap (one-cell rows, a wide sparse table)
+# carry far more tokens per byte than a ledger. Past this count the page is refused, so a parse stays bounded.
 MAX_PARSE_TOKENS = 150_000
 # markdown-it-py ends a table early, and turns the rest into a paragraph, once its rows autofill more than this
 # many empty cells. Each autofilled cell is three tokens, so a page that reaches that limit is over the token cap
