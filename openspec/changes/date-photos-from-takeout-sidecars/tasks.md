@@ -11,6 +11,6 @@
 
 ## 3. Delivery checks
 
-- [ ] 3.1 Add a `user-notes/` entry. Run the scoped suites, the guard modules in `tests/pr_guard_modules.txt` and the read-surface test.
+- [x] 3.1 Add a `user-notes/` entry. Run the scoped suites, the guard modules in `tests/pr_guard_modules.txt` and the read-surface test.
 - [ ] 3.2 Before the release note goes out, file one real Google Photos Takeout from an owner's own account, in its default 2 GB parts, into a sandbox cell. Count each sidecar reason, the time-skipped count and the unpaired share caused by split parts. On photos that state no time, compare the sidecar time with known truth (file-name times, matched originals from the recovery preview) and record the agreement rate in the design.
 - [ ] 3.3 Archive this change after `import-notes-and-mail-exports` and `recover-media-capture-dates`.
