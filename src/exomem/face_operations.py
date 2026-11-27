@@ -129,8 +129,35 @@ def status(vault_root: Path, *, page: str | None, limit: int | None, cursor: str
     """On or off, availability, the consent record, progress, counts, thresholds and one page of groups.
 
     With `page`, the faces on that picture and their groups instead of the group list. Reads only: a
-    status never creates the face store.
+    status never creates the face store. A face store this release cannot read answers `unreadable`.
     """
+    try:
+        return _status(vault_root, page=page, limit=limit, cursor=cursor)
+    except sqlite3.OperationalError:
+        raise  # Busy or locked: the store is readable, and the caller retries.
+    except sqlite3.DatabaseError as error:
+        return _unreadable(error)
+
+
+def _unreadable(error: sqlite3.DatabaseError) -> dict[str, Any]:
+    # The face step skips every picture and a removal keeps its CLIP rows until the store goes, so the owner
+    # must learn the fix here.
+    newer = isinstance(error, face_store.NewerStore)
+    cause = "a newer release of Exomem wrote it" if newer else "it is damaged"
+    return {
+        "outcome": f"The face data cannot be read: {cause}. No picture is scanned for faces until it is fixed.",
+        "state": "unreadable",
+        "available": False,
+        "unavailable_reason": cause,
+        "next_action": (
+            ("Run the release that wrote it, or the" if newer else "The")
+            + " owner erases the face data with faces.delete, and turns faces on again to scan the pictures anew."
+        ),
+        "diagnostics": {"error": str(error)},
+    }
+
+
+def _status(vault_root: Path, *, page: str | None, limit: int | None, cursor: str | None) -> dict[str, Any]:
     setting = face_store.read_setting(vault_root)
     on = setting is not None and setting.enabled
     unavailable = face_store.unavailable_reason(setting)

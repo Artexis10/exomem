@@ -379,6 +379,26 @@ def test_delete_erases_a_face_index_this_release_cannot_open(doors, vault, damag
     assert reply["counts"] == "unknown" or reply["counts"]["people"] == 2
 
 
+@pytest.mark.parametrize("damage", ["garbage bytes", "a newer schema"])
+def test_status_on_a_face_index_this_release_cannot_open_names_it_and_points_to_delete(doors, vault, damage) -> None:
+    """Catches a status that fails on a damaged face index, which leaves the owner no way to learn the fix."""
+    seed_two_people_and_strangers(vault)
+    index_file = face_store.index_path(vault)
+    if damage == "garbage bytes":
+        index_file.write_bytes(b"not a database, just bytes" * 200)
+        for suffix in ("-wal", "-shm"):
+            Path(f"{index_file}{suffix}").unlink(missing_ok=True)
+    else:
+        with closing(sqlite3.connect(index_file)) as index:
+            index.execute(f"PRAGMA user_version = {face_store.SCHEMA_VERSION + 1}")
+
+    status = doors("inspect_memory", "faces.status", {})
+
+    assert status["state"] == "unreadable", status
+    assert status["available"] is False
+    assert "faces.delete" in status["next_action"]
+
+
 def test_the_delete_result_and_status_name_what_the_delete_cannot_reach_and_when_it_ends(doors, vault) -> None:
     """Catches a delete that lets the owner believe no copy of their face data remains anywhere."""
     seed_two_people_and_strangers(vault)

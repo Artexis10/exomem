@@ -377,6 +377,23 @@ def test_a_picture_removed_while_its_faces_commit_keeps_no_face_row(
     assert face_rows(vault) == []
 
 
+def test_a_damaged_face_index_leaves_a_new_picture_findable_by_what_it_shows(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches one damaged face file stopping image search from learning every picture added after it."""
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setattr(embeddings, "embed_image", lambda path: np.ones(embeddings.CLIP_DIM, dtype=np.float32))
+    turn_faces_on(vault)
+    face_store.index_path(vault).write_bytes(b"not a database, just bytes" * 200)
+    stored = preserve.preserve_bytes(
+        vault, scope="Rental", category="photos", filename="porch.jpg", data=b"\xff\xd8 a picture", text="porch"
+    )
+
+    media_worker.MediaWorker(vault)._process(clip_job(vault, stored, "image"))
+
+    assert embeddings.ClipIndex(vault).has(stored.path)
+
+
 def test_a_large_pictures_face_is_cropped_from_its_own_pixels_not_the_detectors_downscale() -> None:
     """Catches the embedder seeing a blurred, downscaled face in a large photo, which splits its person."""
     pytest.importorskip("PIL")  # The core tier has no image decoder; the face step decodes the picture.

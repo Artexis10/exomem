@@ -18,6 +18,7 @@ setting never creates the store: an account that never turned faces on has no fa
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import sqlite3
@@ -29,6 +30,8 @@ from pathlib import Path
 import numpy as np
 
 from . import private_state, reserved_paths, state_paths
+
+log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 BUSY_TIMEOUT_MS = 5000
@@ -137,6 +140,17 @@ def people_path(vault_root: Path) -> Path:
     return state_paths.vault_state_dir(vault_root) / reserved_paths.FACE_PEOPLE_PATH
 
 
+class NewerStore(sqlite3.DatabaseError):
+    """A face store that a newer release wrote: it may hold rows this one would misread or drop."""
+
+
+def _readable_version(connection: sqlite3.Connection, path: Path) -> int:
+    version = connection.execute("PRAGMA user_version").fetchone()[0]
+    if version > SCHEMA_VERSION:
+        raise NewerStore(f"{path.name} has schema version {version}; this release reads {SCHEMA_VERSION}")
+    return version
+
+
 def _open(path: Path, schema: str, *, synchronous: str, create: bool, shared: bool) -> sqlite3.Connection:
     # Without `create`, a missing database raises `sqlite3.OperationalError` instead of starting an empty one.
     # A `shared` connection serves the threads that take turns under the caller's lock.
@@ -148,10 +162,7 @@ def _open(path: Path, schema: str, *, synchronous: str, create: bool, shared: bo
         connection.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute(f"PRAGMA synchronous={synchronous}")
-        version = connection.execute("PRAGMA user_version").fetchone()[0]
-        # A store that a newer release wrote may hold rows this one would misread or drop.
-        if version > SCHEMA_VERSION:
-            raise sqlite3.DatabaseError(f"{path.name} has schema version {version}; this release reads {SCHEMA_VERSION}")
+        version = _readable_version(connection, path)
         if version == SCHEMA_VERSION:
             return connection  # The schema is in place; writing it again would cost a synced transaction.
         with connection:
@@ -227,8 +238,17 @@ def deployment_refusal() -> str | None:
 
 
 def active(vault_root: Path) -> bool:
-    """Whether faces run here now: the owner turned them on and the deployment allows them."""
-    return enabled(vault_root) and deployment_refusal() is None
+    """Whether the face step runs here now: the owner turned faces on and the deployment allows them.
+
+    A face index that cannot be read counts as off here, so a face failure never stops a picture's CLIP
+    step; `faces.status` names the damage and the fix.
+    """
+    try:
+        on = enabled(vault_root)
+    except (sqlite3.Error, OSError) as error:
+        log.warning("faces: the face index cannot be read, so the face step is skipped: %s", error)
+        return False
+    return on and deployment_refusal() is None
 
 
 def unavailable_reason(setting: FaceSetting | None) -> str | None:
@@ -268,8 +288,17 @@ def record_opt_out(index: sqlite3.Connection) -> None:
 
 
 def connect_read_only(path: Path) -> sqlite3.Connection:
-    """Open one face store database for reading; it never creates the file or its directory."""
-    return sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=BUSY_TIMEOUT_MS / 1000)
+    """Open one face store database for reading; it never creates the file or its directory.
+
+    Raises `sqlite3.DatabaseError` when the file is not a database this release reads.
+    """
+    connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=BUSY_TIMEOUT_MS / 1000)
+    try:
+        _readable_version(connection, path)
+    except BaseException:
+        connection.close()
+        raise
+    return connection
 
 
 def record_availability(index: sqlite3.Connection, reason: str | None) -> None:

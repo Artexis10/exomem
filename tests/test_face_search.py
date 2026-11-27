@@ -319,5 +319,5 @@ def test_a_person_restriction_sends_the_same_statements_at_any_store_size(vault,
 
     statements = face_store_statements(vault, monkeypatch)
 
-    # The setting read, one name lookup and one page lookup.
-    assert [line.split()[0] for line in statements] == ["SELECT", "SELECT", "SELECT"], statements
+    # The setting read, one name lookup and one page lookup, each on a connection that first checks the version.
+    assert [line.split()[0] for line in statements] == ["PRAGMA", "SELECT"] * 3, statements

@@ -3020,6 +3020,8 @@ def delete_clip_after_remove(
     try:
         face_groups.forget_pages(vault_root, removed_rel_paths)
     except Exception:  # noqa: BLE001 - reported below; the CLIP rows stay so a later pass retries
+        # When this fires on a face store that cannot be read, it holds back every picture's CLIP cleanup and
+        # erasure until the owner runs faces.delete; `faces.status` answers `unreadable` and names that fix.
         log.warning("face rows of removed pictures could not be dropped", exc_info=True)
         return EmbeddingSyncStatus("degraded", "face_delete_failed", len(removed_rel_paths))
     return _delete_clip_rows(vault_root, removed_rel_paths)
