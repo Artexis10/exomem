@@ -419,20 +419,14 @@ def _public_lexical_repair(value: object) -> dict[str, object] | None:
             return None
         return round(min(max(float(raw), 0.0), 604800.0), 3)
 
-    public: dict[str, object] = {
+    # A waiting rebuild shows its result only. The bytes it needs and the volume's free bytes stay in the
+    # `lexical_repair_finished` log event: the readiness route is unauthenticated.
+    return {
         "phase": phase,
         "age_seconds": duration("age_seconds"),
         "last_duration_seconds": duration("last_duration_seconds"),
         "last_result": result,
     }
-    if result == "waiting_for_space":
-        # The bytes the rebuild needs free and the volume's free bytes when it waited. An unreadable
-        # figure stays absent, never zero.
-        for name in ("space_needed_bytes", "space_free_bytes"):
-            raw = value.get(name)
-            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
-                public[name] = raw
-    return public
 
 
 def _public_catalogue_lag(retrieval: Mapping[str, Any]) -> dict[str, object]:

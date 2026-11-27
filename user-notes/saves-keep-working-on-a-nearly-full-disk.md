@@ -1,4 +1,4 @@
 ---
 title: Saves keep working on a nearly full disk
 ---
-When your disk is nearly full, saving a note no longer fails while search rebuilds. The rebuild waits until there is room, so search may lag meanwhile.
+When your disk is nearly full, search now pauses its rebuild instead of taking the space your saves need, so search may lag while saving a note keeps working.

@@ -40,8 +40,10 @@ Building the normal-table catalog needs no FTS5, so these run everywhere.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
+import shutil
 import sqlite3
 import threading
 import time
@@ -1996,57 +1998,139 @@ def test_await_repairs_idle_waits_for_an_in_flight_repair() -> None:
     assert lexstore.await_repairs_idle(root, timeout=30.0) is True
 
 
-def _a_catalogue_of_several_megabytes(root: Path) -> lexstore.LexicalStore:
+def _a_page(root: Path, n: int) -> Path:
+    return _kb_file(root, f"page-{n:03d}.md", " ".join(f"word{n}x{k}" for k in range(150)))
+
+
+def _a_catalogue_of_several_megabytes(root: Path, pages: int = 250) -> lexstore.LexicalStore:
     """A built, current live catalogue large enough that a second copy of it dwarfs the build's other files."""
-    pages = [
-        _kb_file(root, f"page-{n:03d}.md", " ".join(f"word{n}x{k}" for k in range(150)))
-        for n in range(250)
-    ]
-    _seed(root, pages)
+    _seed(root, [_a_page(root, n) for n in range(pages)])
     lexstore.ensure_fresh(root)
     return lexstore.get_store(root)
 
 
+def _bytes_beside(path: Path) -> int:
+    """The total size of the files that share a name prefix with `path`: the catalogue, its logs and any temp."""
+    total = 0
+    for member in path.parent.glob(f"{path.name}*"):
+        with contextlib.suppress(OSError):  # a member may go between the listing and the stat
+            total += member.stat().st_size
+    return total
+
+
+@contextmanager
+def _watching_bytes_beside(path: Path) -> Any:
+    """Collect the largest `_bytes_beside(path)` that a sampler sees while the block runs."""
+    peak = [0]
+    stop = threading.Event()
+
+    def sample() -> None:
+        while not stop.is_set():
+            peak[0] = max(peak[0], _bytes_beside(path))
+            time.sleep(0.001)
+
+    sampler = threading.Thread(target=sample, daemon=True)
+    sampler.start()
+    try:
+        yield peak
+    finally:
+        stop.set()
+        sampler.join(_OBSERVE_SECONDS)
+
+
+@pytest.mark.parametrize("shape", ["unchanged", "new_release", "grown"])
 def test_a_full_rebuild_holds_one_extra_copy_of_the_catalogue_not_two(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    shape: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Copying the live catalogue into a temp in WAL mode lands it in the temp's `-wal`, and the first commit
-    folds it into the temp's main file: the volume held three copies. The reconcile starts right after that
-    commit, so the temp's files at its start are the build's high-water mark."""
+    """A build that writes pages into the temp in one transaction must keep that transaction out of a
+    write-ahead log: the log holds the pages beside the main file that the checkpoint fills from them.
+    A copy of the live catalogue (`unchanged`), a first build after a release changed how pages derive
+    (`new_release`) and a build that adds pages to a smaller live catalogue (`grown`) are three branches
+    of the build. The temp holds the new catalogue once, plus a journal of the old pages that the build rewrites,
+    so its bytes stay near one copy, where a write-ahead log makes them two."""
+    store = _a_catalogue_of_several_megabytes(tmp_path, pages=60 if shape == "grown" else 250)
+    if shape == "grown":
+        _seed(tmp_path, [_a_page(tmp_path, n) for n in range(250)])
+    if shape == "new_release":
+        monkeypatch.setattr(lexstore, "__version__", "99.0.0")
+    before = _bytes_beside(store.path)
+
+    with _watching_bytes_beside(store.path) as volume_peak:
+        assert store.rebuild_atomic() is True
+
+    published_bytes = store.path.stat().st_size
+    assert published_bytes > 2_000_000, "too small for a second copy to outweigh the temp's fixed files"
+    extra = volume_peak[0] - before
+    assert extra < 1.5 * published_bytes, (
+        f"the build held {extra} bytes beside {before} bytes of live catalogue that became {published_bytes}"
+    )
+    with sqlite3.connect(store.path) as published:
+        assert published.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
+
+@pytest.mark.parametrize("shape", ["reconciled_copy", "first_build"])
+def test_a_rebuild_stops_when_the_volume_drops_below_the_reserve_while_it_runs(
+    shape: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rebuild that parses every page again, or an import chunk that starts while it runs, can take the room
+    that the start check found. The build checks again where it already yields, and declines to wait."""
     store = _a_catalogue_of_several_megabytes(tmp_path)
-    live_bytes = store.path.stat().st_size
-    assert live_bytes > 2_000_000, "too small for a copy to outweigh the temp's fixed files"
-    real_reconcile = store._reconcile_catalog
-    temp_bytes: list[int] = []
+    live = store.path.read_bytes()
+    if shape == "first_build":
+        monkeypatch.setattr(lexstore, "__version__", "99.0.0")
+    real_usage = shutil.disk_usage
+    reads = []
 
-    def measure_then_reconcile(conn: sqlite3.Connection, *args: Any) -> Any:
-        temp = Path(conn.execute("PRAGMA database_list").fetchone()[2])
-        temp_bytes.append(sum(member.stat().st_size for member in temp.parent.glob(f"{temp.name}*")))
-        return real_reconcile(conn, *args)
+    def room_goes_after_the_start_check(path: Any) -> Any:
+        usage = real_usage(path)
+        reads.append(path)
+        return usage if len(reads) == 1 else usage._replace(free=0)
 
-    monkeypatch.setattr(store, "_reconcile_catalog", measure_then_reconcile)
-    assert store.rebuild_atomic() is True
+    monkeypatch.setattr(lexstore.shutil, "disk_usage", room_goes_after_the_start_check)
 
-    assert temp_bytes, "the build never reconciled a copy of the live catalogue"
-    assert temp_bytes[0] < 1.25 * live_bytes, f"the temp held {temp_bytes[0]} bytes beside a live {live_bytes}"
+    assert store.rebuild_atomic() is False
+
+    assert store._last_rebuild_result == "waiting_for_space"
+    assert len(reads) >= 2, "the start check did not run, or the build never checked again"
+    assert store.path.read_bytes() == live
+    assert not list(store.path.parent.glob("*rebuild*")), "the declined build left its temp"
+
+
+def test_a_killed_build_leaves_no_rollback_journal_behind_after_the_next_sweep(tmp_path: Path) -> None:
+    """The build's temp is in rollback-journal mode, so a killed build leaves a hot `-journal` beside its temp.
+    The journal is as big as the pages the build rewrote, and the sweep takes it with the temp."""
+    store = _a_catalogue_of_several_megabytes(tmp_path, pages=10)
+    temp = store.path.with_name(f"{store.path.name}.rebuild-{uuid.uuid4().hex}.tmp")
+    temp.write_bytes(b"a half-built catalogue")
+    journal = temp.with_name(f"{temp.name}-journal")
+    journal.write_bytes(b"the originals of the pages it rewrote")
+
+    store._sweep_orphan_rebuild_temps(boot=True)
+
+    assert not temp.exists() and not journal.exists()
 
 
 def test_a_full_rebuild_waits_for_space_instead_of_starving_writes_and_runs_once_there_is_room(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A volume that cannot hold a second copy of the catalogue plus the import reserve leaves its last bytes
-    to canonical writes: the repair says so, writes nothing, and runs on its next flight once space returns."""
+    to canonical writes: the repair says so, writes nothing, and runs on its next flight once space returns.
+    The byte figures reach the log, not the unauthenticated readiness route."""
     store = _a_catalogue_of_several_megabytes(tmp_path)
     live = store.path.read_bytes()
     monkeypatch.setenv("EXOMEM_IMPORT_RESERVE_BYTES", str(1 << 50))  # more than any volume holds
 
-    lexstore._schedule_repair(tmp_path)
-    assert lexstore.await_repairs_idle(tmp_path, timeout=_OBSERVE_SECONDS)
+    with caplog.at_level("INFO", logger="exomem.lexstore"):
+        lexstore._schedule_repair(tmp_path)
+        assert lexstore.await_repairs_idle(tmp_path, timeout=_OBSERVE_SECONDS)
 
     waiting = lexstore.repair_progress(tmp_path)
     assert waiting is not None and waiting["last_result"] == "waiting_for_space"
-    assert waiting["space_needed_bytes"] >= (1 << 50) + len(live)
-    assert waiting["space_free_bytes"] < waiting["space_needed_bytes"]
+    assert set(waiting) == {"phase", "age_seconds", "last_duration_seconds", "last_result"}
+    logged = [r.fields for r in caplog.records if getattr(r, "event", "") == "lexical_repair_finished"]
+    assert logged[-1]["result"] == "waiting_for_space"
+    assert logged[-1]["space_needed_bytes"] >= (1 << 50) + len(live)
+    assert logged[-1]["space_free_bytes"] < logged[-1]["space_needed_bytes"]
     assert store.path.read_bytes() == live
     assert not list(store.path.parent.glob("*rebuild*")), "the pass wrote a temp before it waited"
 
@@ -2056,7 +2140,33 @@ def test_a_full_rebuild_waits_for_space_instead_of_starving_writes_and_runs_once
 
     published = lexstore.repair_progress(tmp_path)
     assert published is not None and published["last_result"] == "published"
-    assert "space_needed_bytes" not in published
+
+
+def test_a_targeted_pass_after_a_space_wait_leaves_the_wait_visible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deferred write that lands after a waiting full pass must not turn readiness to `targeted` while the
+    full repair is still owed."""
+    store = lexstore.get_store(tmp_path)
+    page = _kb_file(tmp_path, "later.md")
+
+    def waits_while_a_write_defers() -> bool:
+        store._last_rebuild_result = "waiting_for_space"
+        lexstore._schedule_repair(tmp_path, deferred_paths=[page])
+        return False
+
+    monkeypatch.setattr(store, "rebuild_atomic", waits_while_a_write_defers)
+    monkeypatch.setattr(store, "retry_deferred_upsert", lambda paths, **_kw: True)
+    monkeypatch.setattr(
+        lexstore,
+        "runtime_retrieval_catalog_proof",
+        lambda *_args, **_kwargs: {"kb": object(), "vault": object()},
+    )
+    lexstore._schedule_repair(tmp_path)
+    assert lexstore.await_repairs_idle(tmp_path, timeout=_OBSERVE_SECONDS)
+
+    finished = lexstore.repair_progress(tmp_path)
+    assert finished is not None and finished["last_result"] == "waiting_for_space"
 
 
 def test_repair_progress_reports_bounded_phase_duration_and_result(

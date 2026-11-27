@@ -151,7 +151,7 @@ def _folder(entries=(), name="notes"):
 
 
 def _plan():
-    return large_import.LargeImportPlan(sizing=None, ceiling=1, cli_image="x", deadline=time.monotonic() + 60, free_bytes=0)
+    return large_import.LargeImportPlan(sizing=None, ceiling=1, reserve=1, cli_image="x", deadline=time.monotonic() + 60, free_bytes=0)
 
 
 STAGE = {"stage": "i-1", "proof": "cloud-receipt"}
@@ -426,6 +426,32 @@ def test_each_folders_app_log_is_kept_under_its_own_name(monkeypatch, tmp_path):
 
     kept = {path.name: path.read_bytes() for path in (tmp_path / "diagnostics").iterdir()}
     assert kept == {"cell-app-notes-exomem.log": b"first pod", "cell-app-media-exomem.log": b"second pod"}
+
+
+def test_a_rebuild_waiting_for_space_shows_its_byte_figures_from_the_app_log_not_from_readiness(monkeypatch, tmp_path):
+    wait = {"event": "lexical_repair_finished",
+            "fields": {"result": "waiting_for_space", "space_needed_bytes": 900, "space_free_bytes": 400}}
+    published = {"event": "lexical_repair_finished", "fields": {"result": "published"}}
+    log = "\n".join([json.dumps(published), "not json at all", json.dumps(wait), json.dumps(wait)]).encode()
+    ctx = SimpleNamespace(stack=SimpleNamespace(workdir=tmp_path))
+    monkeypatch.setattr(large_import, "exec_json", lambda *_args, **_kwargs: _log_in_the_pod(log))
+
+    kept = asyncio.run(large_import.keep_cell_app_logs(ctx, "end"))
+
+    assert kept["exomem.log"]["space_waits"] == {"count": 2, "last": {"space_needed_bytes": 900, "space_free_bytes": 400}}
+
+
+def test_the_ceiling_and_the_import_reserve_come_from_one_run_of_the_image(monkeypatch):
+    calls = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        return SimpleNamespace(stdout="noise from the image\n209715200\n268435456\n")
+
+    monkeypatch.setattr(large_import, "run", fake_run)
+
+    assert large_import.cloud_limits("image:tag", "run-1") == (209715200, 268435456)
+    assert len(calls) == 1 and "image:tag" in calls[0]
 
 
 def _failure_ctx(tmp_path, *, log_returncode: int, log: str):

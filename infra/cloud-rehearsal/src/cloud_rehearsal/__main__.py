@@ -87,8 +87,9 @@ def _parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--keep", action="store_true", help="leave the stack running for inspection")
     run_parser.add_argument(
         "--large-import", action="store_true",
-        help="bring a large folder and then a media-heavy one into a cell whose local-storage volume cannot hold "
-        "two copies (design D7); runs after provisioning, in place of the other steps (partial proof; never gates a node)",
+        help="bring a large folder and then a media-heavy one into a cell whose local-storage volume is below twice the "
+        "data and below what staged copies left behind would need (design D7); runs after provisioning, in place of "
+        "the other steps (partial proof; never gates a node)",
     )
     run_parser.add_argument("--large-import-files", type=int, default=large_import_fixture.DEFAULT_FILES,
                             help="with --large-import: the number of files in both folders; the byte total shrinks first")
@@ -97,8 +98,8 @@ def _parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--large-import-minutes", type=float, default=115,
                             help="with --large-import: stop filing and report what is done this long after the process started")
     run_parser.add_argument("--large-import-smoke", action="store_true",
-                            help="with --large-import: accept data that cannot show the volume is below two copies; "
-                            "the verdict is then smoke_only, never pass")
+                            help="with --large-import: accept data that cannot show the volume is below twice the data "
+                            "and below what staged copies left behind would need; the verdict is then smoke_only, never pass")
     run_parser.add_argument(
         "--raw-import", action="store_true",
         help="bring the generator's messy collection into a fresh cell and into one that already holds another collection, "

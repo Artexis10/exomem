@@ -22,7 +22,7 @@ GIB = 1 << 30
 MIB = 1 << 20
 
 DEFAULT_FILES = 70_000
-DEFAULT_TARGET_BYTES = 6_000_000_000
+DEFAULT_TARGET_BYTES = 10_000_000_000
 
 # Dispositions are this module's own closed result set, fixed by construction.
 FILED_ARTIFACT = "filed_artifact"  # a visible non-text file, at any size: Source, then consumed
@@ -63,16 +63,16 @@ MIN_NOTES = 3
 # (x1.05) and the backup repository (x1.0), plus the cell volume and some headroom for images.
 PEAK_COPIES = 4.1
 MIN_VOLUME_GIB = 4  # the platform chart's smallest cellStorage.maxCellGib
-# What a cell keeps beside the files that it imports, for each file filed. The catalogue figure is measured on this
-# fixture's own notes: 8,000 of them took 19,600 bytes a row after the first build and 26,400 after one round of edits;
-# 33,000 allows a second round. The other derived state (extracted text, graph, sidecars) is an estimate, not a
-# measurement: the report's `peak_volume_used` against `sizing.fullest_volume_bytes` shows how far off it is.
+# What a cell keeps beside the files that it imports, for each file filed. The catalogue figure comes from one local
+# build of this fixture's notes (no run file kept): 8,000 notes took 19,600 bytes a row after the first build and
+# 26,400 after one round of edits, and 33,000 allows a second round. It is unverified on a cell. The other derived
+# state (extracted text, graph, sidecars) is a guess with no measurement behind it. The report's `peak_volume_used`
+# against `sizing.fullest_volume_bytes` shows how far off both are.
 CATALOGUE_BYTES_PER_FILE = 33_000
 OTHER_DERIVED_BYTES_PER_FILE = 10_000
-# The free space that a full catalogue rebuild keeps back for canonical writes (the cell's import reserve,
-# `cloud_import.DEFAULT_RESERVE_BYTES`; this harness cannot import the product).
-REBUILD_RESERVE_BYTES = 256 * MIB
-VOLUME_MARGIN = 1.15  # over the fullest the volume gets: the file system's own overhead (2.8% measured) and a chunk in flight
+# The volume's margin over the fullest the run is expected to get: an allowance for the file system's own overhead
+# (unmeasured) and for a chunk in flight.
+VOLUME_MARGIN = 1.10
 HEADROOM_BYTES = 4 * GIB
 SHRINK = 0.9
 
@@ -121,8 +121,8 @@ class Sizing:
     scaled: bool
     proves_one_copy_only: bool
     note: str
-    fullest_volume_bytes: int  # the fullest the volume gets while filing removes each staged copy
-    with_staged_copy_bytes: int  # what it would need if the first folder's staged copies stayed
+    fullest_volume_bytes: int  # the fullest the volume gets in a run that consumes each staged copy
+    staged_copies_peak_bytes: int  # the fullest it gets in a run that leaves the first folder's staged copies
 
 
 def disposition_of(kind: str, *, hidden: str | None, include_hidden: bool) -> str:
@@ -351,24 +351,42 @@ def derived_bytes(files: int) -> int:
     return files * (CATALOGUE_BYTES_PER_FILE + OTHER_DERIVED_BYTES_PER_FILE)
 
 
-def rebuild_transient_bytes(files: int) -> int:
-    """The most that a full catalogue rebuild adds while it runs: one more copy of the catalogue, and the reserve."""
-    return files * CATALOGUE_BYTES_PER_FILE + REBUILD_RESERVE_BYTES
+def rebuild_transient_bytes(files: int, reserve: int) -> int:
+    """The most that a full catalogue rebuild adds while it runs: one more copy of the catalogue, and the reserve
+    that the rebuild leaves free (`lexstore._rebuild_space_wait`; a rebuild that parses every page again can exceed
+    one copy, and stops at the reserve)."""
+    return files * CATALOGUE_BYTES_PER_FILE + reserve
 
 
-def fullest_volume_bytes(content_bytes: int, files: int) -> int:
-    """The fullest the cell's volume gets when filing removes each staged copy: the filed files, what the cell
-    derives from them, and a catalogue rebuild at the end."""
-    return content_bytes + derived_bytes(files) + rebuild_transient_bytes(files)
+def fullest_volume_bytes(notes_bytes: int, media_bytes: int, files_notes: int, files_media: int, reserve: int) -> int:
+    """The fullest the cell's volume gets in a run that consumes each staged copy, step by step as the run goes.
+
+    1. The first folder is staged, then filed page by page: its bytes sit once on the volume, staged or filed,
+       beside what the cell derives from the files so far. A rebuild may run at the end.
+    2. The first folder's leftover is discarded, which is a few hidden files.
+    3. The second folder is staged and filed the same way, beside the first folder's filed bytes and everything
+       derived from both. A rebuild may run at the end. This is the peak.
+    """
+    first = notes_bytes + derived_bytes(files_notes) + rebuild_transient_bytes(files_notes, reserve)
+    files = files_notes + files_media
+    second = notes_bytes + media_bytes + derived_bytes(files) + rebuild_transient_bytes(files, reserve)
+    return max(first, second)
 
 
-def with_staged_copy_bytes(notes_bytes: int, content_bytes: int, files: int) -> int:
-    """The same peak if the first folder's staged copies stayed after filing, as they did before filing removed them."""
-    return notes_bytes + fullest_volume_bytes(content_bytes, files)
+def staged_copies_peak_bytes(notes_bytes: int, files_notes: int, *, ceiling: int, large_min: int) -> int:
+    """The fullest the volume gets in a run that files the first folder but leaves every staged copy.
+
+    The stage keeps its copy of each file, and filing writes a Source copy of each file that is not above the ceiling
+    (a file above it is renamed, so it has no second copy). The first stage is discarded before the second folder
+    arrives, so the copies add nothing after the first folder. No rebuild is counted: the run does not control when
+    one coincides, and this figure only has to stay above the volume without one.
+    """
+    over = _large_sizes(LARGE_NOTES, ceiling, large_min)[1]
+    return notes_bytes + (notes_bytes - over) + derived_bytes(files_notes)
 
 
-def volume_gib_for(content_bytes: int, files: int) -> int:
-    return max(MIN_VOLUME_GIB, math.ceil(VOLUME_MARGIN * fullest_volume_bytes(content_bytes, files) / GIB))
+def volume_gib_for(fullest_bytes: int) -> int:
+    return max(MIN_VOLUME_GIB, math.ceil(VOLUME_MARGIN * fullest_bytes / GIB))
 
 
 def generation_need_bytes(folder_bytes: int) -> int:
@@ -382,14 +400,15 @@ def peak_disk_bytes(notes_bytes: int, volume_gib: int) -> int:
     return generation_need_bytes(notes_bytes) + volume_gib * GIB
 
 
-def plan_sizes(*, free_bytes: int, ceiling: int, files: int, target_bytes: int,
+def plan_sizes(*, free_bytes: int, ceiling: int, reserve: int, files: int, target_bytes: int,
                large_min: int = LARGE_MIN_BYTES) -> Sizing:
     """Choose the bytes of each folder and the cell volume from the free disk.
 
     The file count never shrinks; the bytes do, by a tenth at a time, until the first folder's peak
-    fits. The volume holds both folders once, what the cell derives from their files and one more copy of
-    the lexical catalogue while it rebuilds, and not a second copy of the first folder. The result says
-    when scaling left the volume too large to prove that.
+    fits. The volume holds what a run that consumes each staged copy needs at its fullest
+    (`fullest_volume_bytes`). The result says when it also fails to prove the claim: that is, when the volume
+    reaches what a run that leaves the first folder's staged copies needs (`staged_copies_peak_bytes`), or reaches
+    twice the data (design D7, `scale-agent-led-imports`).
     """
     files_media = files // MEDIA_FILES_DIVISOR
     files_notes = files - files_media
@@ -399,7 +418,7 @@ def plan_sizes(*, free_bytes: int, ceiling: int, files: int, target_bytes: int,
     scaled = False
     while True:
         media = max(floor_media, int(notes * (1 - NOTES_SHARE) / NOTES_SHARE))
-        volume = volume_gib_for(notes + media, files)
+        volume = volume_gib_for(fullest_volume_bytes(notes, media, files_notes, files_media, reserve))
         needed = peak_disk_bytes(max(notes, media), volume)
         if needed <= free_bytes:
             break
@@ -407,16 +426,20 @@ def plan_sizes(*, free_bytes: int, ceiling: int, files: int, target_bytes: int,
             raise SizingError(f"{free_bytes / GIB:.1f} GiB free disk cannot hold even the smallest fixture, "
                               f"which needs {needed / GIB:.1f} GiB")
         notes, scaled = max(floor_notes, int(notes * SHRINK)), True
-    fullest = fullest_volume_bytes(notes + media, files)
-    staged = with_staged_copy_bytes(notes, notes + media, files)
-    proves = volume * GIB < staged
+    fullest = fullest_volume_bytes(notes, media, files_notes, files_media, reserve)
+    staged = staged_copies_peak_bytes(notes, files_notes, ceiling=ceiling, large_min=large_min)
+    below_staged, below_twice = volume * GIB < staged, volume * GIB < 2 * (notes + media)
     note = (f"first folder {notes / GIB:.2f} GiB and second {media / GIB:.2f} GiB on a {volume} GiB volume"
             + (f"; scaled down from {target_bytes / GIB:.2f} GiB to fit {free_bytes / GIB:.1f} GiB free"
                if scaled else ""))
-    if not proves:
-        note += (f"; the volume is not below what a staged copy of the first folder would need ({staged / GIB:.2f} GiB), "
-                 "so the run cannot show that consuming is what makes it fit")
-    return Sizing(notes, media, volume, files_notes, files_media, scaled, proves, note, fullest, staged)
+    if not below_staged:
+        note += (f"; the volume is not below what a run that leaves the first folder's staged copies would need "
+                 f"({staged / GIB:.2f} GiB), so the run cannot show that consuming is what makes it fit")
+    if not below_twice:
+        note += (f"; the volume is not below twice the data ({2 * (notes + media) / GIB:.2f} GiB), "
+                 "which design D7 requires of the proof")
+    return Sizing(notes, media, volume, files_notes, files_media, scaled, below_staged and below_twice, note,
+                  fullest, staged)
 
 
 # --- the answer key -------------------------------------------------------------------------
