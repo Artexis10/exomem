@@ -434,20 +434,23 @@ jobs:
 
   # The user notes of each release: `release-notes.json` for the digest that reads it, and a What's new
   # section at the top of the release page for the people who read it (scripts/release_notes_asset.py).
-  # Nothing waits for this job: it turns itself red when it fails and stops no package, image or rollout.
-  # Every run checks the 20 newest published releases and gives each one that lacks the file its notes,
-  # built from that release's own tag, so a release this job missed heals on the next run. It runs after
-  # `build-artifacts` whatever that job's result. A dry run builds the notes of its own tag and writes
-  # nothing to GitHub.
+  # Nothing waits for this job: when it fails it turns itself and the run red and stops no package, image or
+  # rollout. Every real run gives its notes to each release published since the start of the previous UTC month
+  # that lacks the file (the release list, 100 a page, newest first, until a release older than that start), and
+  # to the release a `workflow_dispatch` run names in its `tag` input, however old, so the operator can heal one
+  # named release. The notes come from each release's tag tree; the file is written with this revision's code.
+  # It runs after `build-artifacts` whatever that job's result. A dry run builds the notes of its own tag and
+  # writes nothing to GitHub.
   release-notes:
     needs: [plan, build-artifacts]
     if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # One run at a time, so two runs never upload the same file together. A run that waits is replaced by a
-    # newer one, which checks the same releases again.
+    # One real run at a time, so two runs never upload the same file together; a run that waits is replaced by
+    # a newer one, which checks the same releases again. Dry runs have their own group, so one never displaces
+    # a real run.
     concurrency:
-      group: release-notes
+      group: release-notes-${{ needs.plan.outputs.dry_run == 'true' && 'dry-run' || 'publish' }}
       cancel-in-progress: false
     permissions:
       contents: write
@@ -470,12 +473,16 @@ jobs:
         id: scan
         env:
           TAG: ${{ needs.plan.outputs.tag }}
+          EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
           if [[ "$DRY_RUN" == true ]]; then
             tags="$TAG"
           else
-            tags=$(python3 scripts/release_notes_asset.py missing | tr '\n' ' ')
+            arguments=()
+            # A dispatch's tag is the one release this run was asked to serve; it joins the sweep whatever its age.
+            [[ "$EVENT" == workflow_dispatch ]] && arguments+=(--also "$TAG")
+            tags=$(python3 scripts/release_notes_asset.py missing "${arguments[@]}" | tr '\n' ' ')
           fi
           echo "tags=${tags% }" >> "$GITHUB_OUTPUT"
           echo "Releases to publish notes for: ${tags:-none}"

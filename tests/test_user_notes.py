@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -343,6 +344,20 @@ def test_a_release_without_notes_gets_an_empty_list_that_the_cells_reader_accept
     assert release_notes_format.parse_document(json.dumps(document)) == ()
 
 
+def test_the_files_keys_change_only_with_the_schema():
+    """An outside reader, the monthly digest, parses `release-notes.json` by these keys: a change to them raises SCHEMA first."""
+    release = release_notes_format.Release("1.3.0", (1, 3, 0), "2026-02-02", (release_notes_format.Note("Title", "Sentence."),))
+
+    file = release_notes_format.document([release])
+
+    assert (file["schema"], sorted(file), sorted(file["releases"][0]), sorted(file["releases"][0]["notes"][0])) == (
+        2,
+        ["releases", "schema"],
+        ["notes", "released_on", "version"],
+        ["text", "title"],
+    )
+
+
 def test_the_page_starts_with_whats_new_and_shows_a_note_without_a_title_by_its_sentence(asset):
     notes_file = notes_file_text(
         {"title": "Photos keep their date", "text": "Imported photos keep the day they were taken."},
@@ -390,24 +405,84 @@ def test_note_text_reads_as_plain_letters_whatever_it_holds(asset):
     assert "".join(child.content for child in tokens[1].children) == text.replace("@", "@\u200b").replace("#", "#\u200b")
 
 
-def releases(*rows):
-    """GitHub's release list as `_published_releases` returns it: (tag, assets, draft) rows, newest first."""
-    return [{"tag": tag, "assets": assets, "draft": draft} for tag, assets, draft in rows]
+def release(tag, published, assets=("sample.whl",), draft=False):
+    """One release as `_release_row` returns it: its publish time is an ISO date, its assets are names."""
+    stamp = datetime.fromisoformat(f"{published}T09:00:00+00:00") if published else None
+    return {"tag": tag, "published_at": stamp, "assets": list(assets), "draft": draft}
 
 
-def test_a_run_checks_the_newest_twenty_published_releases_that_have_assets_and_lack_the_file(asset):
+SINCE = datetime(2026, 10, 1, tzinfo=UTC)  # the start of the previous month for a run in November 2026
+
+
+@pytest.mark.parametrize(
+    ("now", "start"),
+    [
+        (datetime(2026, 11, 27, 18, 5, tzinfo=UTC), datetime(2026, 10, 1, tzinfo=UTC)),
+        (datetime(2027, 1, 1, 0, 0, tzinfo=UTC), datetime(2026, 12, 1, tzinfo=UTC)),  # the year changes
+    ],
+)
+def test_the_window_starts_at_the_beginning_of_the_previous_utc_month(asset, now, start):
+    assert asset.previous_month_start(now) == start
+
+
+def test_a_run_takes_every_release_since_the_window_start_that_has_assets_and_lacks_the_file(asset):
     file = asset.NOTES_ASSET
-    listing = releases(
-        ("v2.0.0", [], True),  # a draft is not published and does not count toward the twenty
-        ("v1.9.0", [], False),  # publication has not started: the release controller still reads this page
-        ("v1.8.0", ["sample.whl"], False),  # lacks the file
-        ("v1.7.0", ["sample.whl", file], False),  # has it
-        ("v1.6.0-rc.1", ["sample.whl"], False),  # not vX.Y.Z: the notes format cannot name it
-        ("v1.5.0", ["sample.whl"], False),  # lacks the file
-        ("v1.4.0", ["sample.whl"], False),  # beyond the limit
-    )
+    pages = [
+        [
+            release("v2.0.0", None, assets=(), draft=True),  # a draft is not published
+            release("v1.9.0", "2026-11-26", assets=()),  # publication has not started: the release controller still reads this page
+            release("v1.8.0", "2026-11-20"),  # lacks the file
+            release("v1.7.0", "2026-11-10", assets=("sample.whl", file)),  # has it
+            release("v1.6.0-rc.1", "2026-11-05"),  # not vX.Y.Z: the notes format cannot name it
+            release("v1.5.0", "2026-10-02"),  # the first days of the window's first month
+            release("v1.4.0", "2026-09-30"),  # before the window
+            release("v1.3.5", "2026-10-15"),  # the list is not ordered by publish time, so the rest of this page is still read
+        ]
+    ]
 
-    assert asset.newest_missing(listing, limit=5) == ["v1.8.0", "v1.5.0"]
+    assert asset.missing_tags(pages, SINCE) == ["v1.8.0", "v1.5.0", "v1.3.5"]
+
+
+def test_the_list_is_read_past_a_hundred_releases_and_stops_at_the_page_that_reaches_the_window_start(asset, monkeypatch):
+    """GitHub gives 100 releases a page: a month with more releases than that is still all in the window."""
+    requested = []
+    newest_first = [release(f"v1.{minor}.0", "2026-11-20" if minor >= 100 else "2026-09-01") for minor in range(299, -1, -1)]
+
+    def run(*command):
+        requested.append(command[-1])
+        page = int(command[-1].rsplit("page=", 1)[1])
+        listing = newest_first[(page - 1) * 100 : page * 100]
+        return json.dumps(
+            [
+                {"tag_name": r["tag"], "draft": r["draft"], "published_at": r["published_at"].isoformat(), "assets": [{"name": n} for n in r["assets"]]}
+                for r in listing
+            ]
+        )
+
+    monkeypatch.setattr(asset, "_run", run)
+
+    tags = asset.missing_tags(asset._release_pages(), SINCE)
+
+    assert len(tags) == 200  # v1.299.0 down to v1.100.0, over pages 1 and 2
+    assert tags[0] == "v1.299.0" and tags[-1] == "v1.100.0"
+    assert [url.rsplit("page=", 1)[1] for url in requested] == ["1", "2", "3"]  # page 3 holds the first older release; page 4 is never read
+    assert all("per_page=100" in url for url in requested)
+
+
+def test_the_tag_a_dispatch_names_joins_the_sweep_even_when_older_than_the_window(asset):
+    older = release("v1.2.0", "2026-03-01")
+    pages = [[release("v1.8.0", "2026-11-20"), release("v1.4.0", "2026-09-30")]]
+
+    assert asset.missing_tags(pages, SINCE, named=older) == ["v1.8.0", "v1.2.0"]
+
+
+def test_a_named_release_that_has_its_file_or_is_in_the_window_already_is_not_added_again(asset):
+    has_file = release("v1.2.0", "2026-03-01", assets=("sample.whl", asset.NOTES_ASSET))
+    in_window = release("v1.8.0", "2026-11-20")
+    pages = lambda: [[in_window, release("v1.4.0", "2026-09-30")]]  # noqa: E731 - a fresh list each call
+
+    assert asset.missing_tags(pages(), SINCE, named=has_file) == ["v1.8.0"]
+    assert asset.missing_tags(pages(), SINCE, named=in_window) == ["v1.8.0"]
 
 
 class FakeGitHub:
