@@ -918,6 +918,8 @@ class MediaWorker:
                 kwargs["multilingual"] = True
             if diarize is not None:
                 kwargs["diarize"] = diarize
+            if (tracks := preserve.speech_tracks_pin(claimed_content)) is not None:
+                kwargs["tracks"] = tracks
             with media_store.logical_view(self._vault_root, job.binary_path) as view:
                 result = extract.extract_text(view, **kwargs)
         except extract.TimestampRenderingUnavailable as e:

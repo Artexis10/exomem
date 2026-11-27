@@ -18,7 +18,16 @@ from pathlib import Path
 import pytest
 from fastmcp import Client
 
-from exomem import call_ledger, commands, extract, extraction_parts, media_jobs, preserve, speech_attach, writer_lease
+from exomem import (
+    call_ledger,
+    commands,
+    extract,
+    extraction_parts,
+    media_jobs,
+    preserve,
+    speech_attach,
+    writer_lease,
+)
 from exomem import server as server_module
 from exomem.vault import parse_frontmatter
 

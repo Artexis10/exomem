@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import json
 import os
 import threading
 import time
@@ -39,6 +40,7 @@ from exomem import (
 )
 from exomem import find as find_module
 from exomem import vault as vault_module
+from exomem.asr_facts import AsrFacts
 from exomem.vault import content_hash
 
 
@@ -2617,6 +2619,36 @@ def test_recovered_speech_request_keeps_its_diarization_choice(
     assert published["speaker_verification"] == ("unavailable" if requested else "not-requested")
     assert b"[0:00] recorded speech" in sidecar.read_bytes()
     assert binary.read_bytes() == b"FAKEBYTES"
+
+
+def test_the_tracks_an_owner_declared_on_a_sidecar_reach_the_engine_and_outlive_the_extraction(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    saved = _preserve_media_stub(vault, filename="panel.wav")
+    sidecar = vault / saved.sidecar_path
+    declared = [{"name": "Host", "channel": 0, "single_voice": True}, {"name": "Guest", "channel": 1}]
+    sidecar.write_text(
+        preserve._set_frontmatter_field(sidecar.read_text(encoding="utf-8"), "speech_tracks", json.dumps(declared)),
+        encoding="utf-8",
+    )
+    asked: list[object] = []
+
+    def transcribe(_path, *, media_type, tracks=None, **_options):
+        asked.append(tracks)
+        return extract.ExtractResult(
+            text="[0:00] [Host]: hello", media_type=media_type, engine="test+tracks+timed",
+            asr=AsrFacts(language="en", tracks_policy="tracks-policy-test"),
+        )
+
+    monkeypatch.setattr(extract, "extract_text", transcribe)
+
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+    worker._process(media_worker._Job(binary_path=vault / saved.path, sidecar_path=sidecar, media_type="audio"))
+
+    published = _parsed_frontmatter(sidecar)
+    assert asked == [declared]
+    assert published["speech_tracks"] == declared, "a new extraction keeps what the owner declared"
+    assert published["asr_tracks_policy"] == "tracks-policy-test"
 
 
 @pytest.mark.parametrize("awaiting_dependency", [False, True])

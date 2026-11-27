@@ -2045,6 +2045,16 @@ def diarize_pin(content: str) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
+#: The tracks an owner or an agent declared for this recording. It is a declaration, not an extraction
+#: fact, so a new extraction keeps it (`is_extraction_field` does not list it).
+_SPEECH_TRACKS_FIELD = "speech_tracks"
+
+
+def speech_tracks_pin(content: str) -> object | None:
+    """The tracks declared on this sidecar, as written: a list of `{name, stream, channel, single_voice}`."""
+    return parse_frontmatter(content)[0].get(_SPEECH_TRACKS_FIELD)
+
+
 def set_diarize_pin(content: str, diarize: bool | None) -> str:
     """Save an explicit preference and keep an existing preference when omitted."""
     if diarize is None:
@@ -2363,6 +2373,8 @@ def _set_asr_facts(content: str, asr: AsrFacts | None) -> str:
         ("asr_duration_seconds", number(asr.duration_seconds, 2)),
         ("asr_policy", text(asr.policy)),
     ]
+    if asr.tracks_policy is not None:
+        fields.append(("asr_tracks_policy", text(asr.tracks_policy)))
     if asr.language_requested is not None:
         fields.append((_ASR_PIN_FIELD, yaml_scalar(asr.language_requested)))
     for field, value in fields:

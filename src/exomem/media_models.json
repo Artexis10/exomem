@@ -149,6 +149,34 @@
         }
       }
     },
+    "tracks": {
+      "revision": "tracks-policy-1",
+      "source": "iXML specification v2.x (TRACK_LIST), EBU Tech 3285 (BWF bext TimeReference), SMPTE 12M timecode; the margin and hop are this deployment's choice",
+      "dominance_margin_db": 6.0,
+      "energy_hop_seconds": 0.05,
+      "families": [
+        {
+          "key": "ixml-track-list",
+          "kind": "ixml",
+          "track": "TRACK_LIST/TRACK",
+          "channel": "CHANNEL_INDEX",
+          "name": "NAME",
+          "declares_microphone": true,
+          "single_voice": false
+        },
+        {
+          "key": "stream-title",
+          "kind": "stream_tag",
+          "tag": "title",
+          "declares_microphone": false,
+          "single_voice": false
+        }
+      ],
+      "start_sources": [
+        {"key": "bwf-time-reference", "kind": "bext_time_reference"},
+        {"key": "container-timecode", "kind": "timecode_tag", "tag": "timecode"}
+      ]
+    },
     "metadata_files": [
       "config.json",
       "vocab.json",
