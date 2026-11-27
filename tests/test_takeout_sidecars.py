@@ -1,6 +1,6 @@
 """A Google Photos Takeout is filed as photos that carry the caption of their sidecars, and no JSON Source, and no sidecar time.
 
-OpenSpec carry-takeout-sidecar-captions, groups 1 and 2.2. A sidecar's time dates no page: it is read into the sidecar's row only. The vault is a temporary one with a real stage, and the
+OpenSpec carry-takeout-sidecar-captions, groups 1 and 2.2. A sidecar's time dates no page and is not read. The vault is a temporary one with a real stage, and the
 cell's filer drives `adoption_studio file` through the dispatcher, as for any import. The folders, names and sidecars are
 invented, in the name forms that community tools report for Takeout. Each test names the failure it catches.
 """
@@ -42,6 +42,7 @@ UPLOADED = dt.datetime(2025, 1, 9, 8, 30, tzinfo=dt.UTC)
 APPLIED, EMPTY = "IMPORT_SIDECAR_APPLIED", "IMPORT_SIDECAR_EMPTY"
 ALREADY, NOT_FILED = "IMPORT_SIDECAR_PHOTO_ALREADY_IMPORTED", "IMPORT_SIDECAR_PHOTO_NOT_FILED"
 UNPAIRED, UNREADABLE = "IMPORT_SIDECAR_UNPAIRED", "IMPORT_SIDECAR_UNREADABLE"
+ALBUM_ENTRY = "IMPORT_SIDECAR_ALBUM_ENTRY"
 
 
 def taken_at(number: int) -> dt.datetime:
@@ -402,6 +403,33 @@ def test_an_album_copy_of_a_photo_already_filed_counts_its_sidecar_as_already_im
     assert all(adoption_consume.is_filed(code) for code in view["left_out"]["by_reason"])  # none of it is "needs review"
 
 
+def test_an_album_that_lists_a_photo_by_its_sidecar_alone_counts_it_as_filed_with_the_photo_of_its_year_folder(vault: Path) -> None:
+    """Catches a modern Takeout, whose album folders hold the sidecars alone, reporting one sidecar to review for each album membership."""
+    year = "Takeout/Google Photos/Photos from 2022"
+    _id, pages, view = one_photo_albums(vault, {
+        f"{year}/IMG_90.jpg": photo("IMG_90.jpg"),
+        f"{year}/IMG_90.jpg.supplemental-metadata.json": sidecar("IMG_90.jpg", caption="Dusk"),
+        f"{ALBUM}/IMG_90.jpg.supplemental-metadata.json": sidecar("IMG_90.jpg", caption="Dusk"),
+    })
+
+    assert list(pages) == [f"{year}/IMG_90.jpg"] and caption_of(pages, f"{year}/IMG_90.jpg") == "Dusk"
+    assert view["left_out"]["by_reason"] == {APPLIED: 1, ALBUM_ENTRY: 1}
+    assert all(adoption_consume.is_filed(code) for code in view["left_out"]["by_reason"])  # none of it is "needs review"
+
+
+def test_an_album_sidecar_whose_title_is_another_photos_stays_unpaired_although_its_cut_name_is_the_same(vault: Path) -> None:
+    """Catches an album entry decided by the file name alone: a cut name is shared by long titles, and this photo is not in the vault."""
+    year = "Takeout/Google Photos/Photos from 2022"
+    cut = "birthday_party_with_all_the_cousins_and_the_wh"
+    _id, _pages, view = one_photo_albums(vault, {
+        f"{year}/{cut}o.jpg": photo("whole"),
+        f"{year}/{cut}.json": sidecar(f"{cut}ole_family_2019.jpg", caption="the whole family"),
+        f"{ALBUM}/{cut}.json": sidecar(f"{cut}ale_party_2019.jpg", caption="another photo"),
+    })
+
+    assert view["left_out"]["by_reason"] == {APPLIED: 1, UNPAIRED: 1}
+
+
 def test_a_sidecar_whose_photo_did_not_file_is_counted_as_such_and_left_for_review(
     vault: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -456,10 +484,10 @@ def test_an_ordinary_import_with_json_files_opens_each_of_them_once_however_ofte
     monkeypatch.setattr(export_sidecars, "_examine", lambda path, known: opened.append(path) or examine(path, known))
     import_id = stage_takeout(vault, {f"project/part{number}.json": json.dumps({"name": f"part {number}"}).encode() for number in range(3)})
 
-    for _call in range(3):
-        export_expansion.expand(vault, import_id, keep_going=lambda: True)
+    file_to_done(vault, import_id, calls=200)
 
     assert len(opened) == 3
+    assert sorted(filed_files(vault, import_id)) == [f"project/part{number}.json" for number in range(3)]
 
 
 def test_a_sidecar_that_cannot_be_read_is_listed_alone_while_the_pass_reads_on_and_no_json_files(vault: Path) -> None:

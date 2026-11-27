@@ -96,7 +96,7 @@ A recognised Takeout sidecar SHALL pair with an image or video in its own staged
 
 ### Requirement: A Takeout sidecar is counted by its outcome, never filed
 
-A recognised sidecar SHALL never file as a Source. When filing reaches done, the filing view SHALL count each sidecar in `left_out` under exactly one reason, from its photo's filing result, and SHALL NOT add it to the stage total as a derived file. The reasons are `IMPORT_SIDECAR_APPLIED`, `IMPORT_SIDECAR_EMPTY`, `IMPORT_SIDECAR_PHOTO_ALREADY_IMPORTED`, `IMPORT_SIDECAR_PHOTO_NOT_FILED`, `IMPORT_SIDECAR_UNPAIRED` and `IMPORT_SIDECAR_UNREADABLE`, which the view lists by path.
+A recognised sidecar SHALL never file as a Source. When filing reaches done, the filing view SHALL count each sidecar in `left_out` under exactly one reason, from its photo's filing result, and SHALL NOT add it to the stage total as a derived file. A reason's code is `IMPORT_SIDECAR_` and one of `APPLIED`, `EMPTY`, `PHOTO_ALREADY_IMPORTED`, `PHOTO_NOT_FILED`, `ALBUM_ENTRY`, `UNPAIRED` or `UNREADABLE`, and the view lists the sidecars by path.
 
 #### Scenario: A Takeout album
 
@@ -120,7 +120,7 @@ A recognised sidecar SHALL never file as a Source. When filing reaches done, the
 
 #### Scenario: A photo in two albums
 
-- **WHEN** a Takeout holds the same photo in two albums, each with its own sidecar
+- **WHEN** a Takeout holds the photo's file in two album folders, each with its own sidecar
 - **THEN** one photo Source files, with the caption of its own sidecar, and the other album's sidecar counts as `IMPORT_SIDECAR_PHOTO_ALREADY_IMPORTED`
 - **AND** nothing in the stage's report needs the person's review
 
@@ -128,6 +128,21 @@ A recognised sidecar SHALL never file as a Source. When filing reaches done, the
 
 - **WHEN** a paired photo is larger than the adoption ceiling and does not file
 - **THEN** its sidecar counts as `IMPORT_SIDECAR_PHOTO_NOT_FILED`, which the report lists as needing review
+
+### Requirement: An album's sidecar follows the photo that Takeout stored once
+
+An unpaired sidecar whose name and `title` are those of a sidecar that paired with a photo in another folder of the same stage SHALL count as `IMPORT_SIDECAR_ALBUM_ENTRY`: it counts as filed, because that photo is in the vault, and it gives no caption of its own. When that photo did not file, the sidecar SHALL count as `IMPORT_SIDECAR_PHOTO_NOT_FILED`. A sidecar that fits no paired sidecar SHALL stay `IMPORT_SIDECAR_UNPAIRED`.
+
+#### Scenario: An album that holds only the sidecar
+
+- **WHEN** a stage holds a photo and its sidecar in `Photos from 2022`, and an album folder that holds the same sidecar alone
+- **THEN** the photo files once with its caption, and the filing view counts 1 `IMPORT_SIDECAR_APPLIED` and 1 `IMPORT_SIDECAR_ALBUM_ENTRY`
+- **AND** nothing in the stage's report needs the person's review
+
+#### Scenario: An album sidecar with another photo's title
+
+- **WHEN** an album folder holds a sidecar whose name is the same cut name as a paired sidecar's, and whose `title` is another file's
+- **THEN** it stays `IMPORT_SIDECAR_UNPAIRED` and the report lists it for review
 
 ### Requirement: The view counts the captions that sidecars gave
 
@@ -140,17 +155,25 @@ Over the sidecars whose photo filed now, the filing view SHALL count those that 
 
 ### Requirement: Photos wait for their sidecars
 
-The images and videos of a stage that holds recognised sidecars SHALL stay out of selection until the pass over the stage's sidecars ends: when every JSON file is examined and the pairs are decided. A JSON file that cannot be read SHALL get its own record, and the pass SHALL read on past it and end in part. Each paired photo SHALL then file with its sidecar's caption.
+A stage that holds any JSON file of at most 1 MiB SHALL keep its images and videos out of selection until the pass over those files ends, before any of them is known to be a sidecar. The pass ends when every such file is examined and the pairs are decided. A JSON file that cannot be read SHALL get its own record, and the pass SHALL read on past it and end in part. Each paired photo SHALL then file with its sidecar's caption.
 
 #### Scenario: A Takeout larger than one call's budget
 
 - **WHEN** a stage holds more sidecars than one `file` call reads
 - **THEN** no photo files before every sidecar is read, and every paired photo carries its sidecar's caption
 
+#### Scenario: A stray JSON file in a photo import
+
+- **WHEN** a stage holds photos and one JSON file of 1 MiB or less that is no sidecar
+- **THEN** the photos wait until the pass has examined that file, so the import takes one more call than a stage with no JSON file
+- **AND** the JSON file then files as an ordinary Source, and every photo files with no caption
+
 #### Scenario: A sidecar that cannot be read
 
 - **WHEN** a sidecar of the stage cannot be read
 - **THEN** the pass reads on, ends in part, and the photos are released
+- **AND** the sidecars before it and after it keep their pairs, and the unreadable file does not file as a Source
+- **AND** the filing view counts the unreadable file as `IMPORT_SIDECAR_UNREADABLE`, lists it by path as needing review, and lists the partial read with `IMPORT_EXPORT_PARTIAL`
 
 ### Requirement: The sidecar pass runs once per stage
 
@@ -159,9 +182,8 @@ The pass over a stage's sidecars SHALL run once, also for a stage that holds JSO
 #### Scenario: An ordinary import with JSON files
 
 - **WHEN** a stage holds JSON files that are no sidecars and is filed in three calls
-- **THEN** each JSON file is opened once
-- **AND** the sidecars before it and after it keep their pairs, and no JSON file of the stage files as a Source
-- **AND** the filing view counts the unreadable file as `IMPORT_SIDECAR_UNREADABLE`, lists it by path as needing review, and lists the partial read with `IMPORT_EXPORT_PARTIAL`
+- **THEN** each JSON file is opened once, however many calls the filing takes
+- **AND** each of those JSON files files as an ordinary Source, because none of them is a sidecar
 
 ### Requirement: The owner's caption is kept on the photo
 

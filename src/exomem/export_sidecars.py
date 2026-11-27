@@ -47,6 +47,9 @@ CODE_APPLIED = "IMPORT_SIDECAR_APPLIED"
 CODE_EMPTY = "IMPORT_SIDECAR_EMPTY"
 CODE_PHOTO_ALREADY_IMPORTED = "IMPORT_SIDECAR_PHOTO_ALREADY_IMPORTED"
 CODE_PHOTO_NOT_FILED = "IMPORT_SIDECAR_PHOTO_NOT_FILED"
+#: A sidecar in a folder that holds no photo of it, whose name and title are those of a sidecar that paired in another folder:
+#: an album that lists a photo which Takeout stored once, in its year folder.
+CODE_ALBUM_ENTRY = "IMPORT_SIDECAR_ALBUM_ENTRY"
 CODE_UNPAIRED = "IMPORT_SIDECAR_UNPAIRED"
 #: A file that could be a sidecar and could not be read: it stays staged, and nothing is known of what it holds.
 CODE_UNREADABLE = "IMPORT_SIDECAR_UNREADABLE"
@@ -61,6 +64,7 @@ STAYS: Mapping[str, tuple[bool, str]] = MappingProxyType({  # nosemgrep: ep-word
     CODE_EMPTY: (True, "{n} sidecar paired with its filed photo, with no caption to give"),
     CODE_PHOTO_ALREADY_IMPORTED: (True, "{n} sidecar whose caption was not applied, because the vault already held its photo"),
     CODE_PHOTO_NOT_FILED: (False, "{n} sidecar whose photo did not file"),
+    CODE_ALBUM_ENTRY: (True, "{n} sidecar of an album entry, whose photo is in the vault from another folder"),
     CODE_UNPAIRED: (False, "{n} sidecar that no one photo fits"),
     CODE_UNREADABLE: (False, "{n} possible sidecar that could not be read"),
 })
@@ -244,16 +248,31 @@ def settle(reading: Reading, photo_filing: Callable[[str], str]) -> tuple[dict[s
     when it carried a caption, else `EMPTY`. `APPLIED` says that the sidecar was paired with a photo that filed now and gave it
     its caption.
 
+    An unpaired sidecar whose key (name and title) is that of a sidecar that paired is an album entry: Takeout stores a photo
+    once, in its year folder, and lists it in each album with a sidecar alone (GPTH Neo issue 133). It follows the photo of
+    the paired sidecar: `ALBUM_ENTRY` when that photo is in the vault, `PHOTO_NOT_FILED` when it is not. It gives no caption
+    and counts in no `captioned`. One index of the paired keys serves every sidecar, so the work stays linear.
+
     The count is over the sidecars whose photo filed now: those that carry a caption (`captioned`). A stage with no sidecar has no counts, never zero ones.
     """
     codes = dict.fromkeys(reading.rows.unreadable, CODE_UNREADABLE)
     if not reading.rows.sidecars:
         return codes, None
     counts = {"captioned": 0}
+    photos: dict[export_pairing.Key, str] = {}  # each key that paired, with the first photo (by path) that it paired with
+    for path, row in reading.rows.sidecars.items():
+        photo, key = reading.rows.pairs.get(path, (None, None))[0], _key_of(row)
+        if photo is not None and key is not None:
+            photos[key] = min(photo, photos.get(key, photo))
     for path, row in reading.rows.sidecars.items():
         photo = reading.rows.pairs.get(path, (None, None))[0]
         if photo is None:
-            codes[path] = CODE_UNPAIRED
+            key = _key_of(row)
+            elsewhere = photos.get(key) if key is not None else None
+            if elsewhere is None:
+                codes[path] = CODE_UNPAIRED
+            else:
+                codes[path] = CODE_ALBUM_ENTRY if photo_filing(elsewhere) in (STORED, ALREADY_IMPORTED) else CODE_PHOTO_NOT_FILED
             continue
         filing = photo_filing(photo)
         if filing == ALREADY_IMPORTED:
