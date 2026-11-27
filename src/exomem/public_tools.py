@@ -216,6 +216,10 @@ _UNLINKED = Field(
 _PREVIEW = Field(default=None)
 _DETAIL = Field(default=None)
 _REVIEW = Field(default=None, description="This call's preview `review_token`; a profile page's write needs it.")
+_SENSITIVITY = Field(
+    default=None,
+    description="Sensitivity classes you judge this holds, such as identity or health.",
+)
 _DRAFT_FIELDS = ("draft_id", "draft_hash", "draft_token")
 
 
@@ -377,6 +381,7 @@ class CreateNote(Wire):
     unlinked_reason: str | None = _UNLINKED
     vocabulary_decision: VocabularyDecision | None = None
     suggest_links: bool | None = Field(default=None, description="Also return pages to link.")
+    sensitivity: list[str] | None = _SENSITIVITY
     review: str | None = _REVIEW
     preview: bool | None = _PREVIEW
     detail: Detail | None = _DETAIL
@@ -392,6 +397,7 @@ def _create_note(wire: dict[str, Any], ctx: Context) -> Translated:
         "title": wire["title"], "content": wire["content"], "note_type": wire.get("type"),
         "project": wire.get("project"), "projects": wire.get("projects"), "sources": wire.get("sources"),
         "tags": wire.get("tags"), "suggestions": wire.get("suggest_links"), "validate_only": wire.get("preview"),
+        "sensitivity": wire.get("sensitivity"),
         "response_detail": wire.get("detail"), **_unlinked(wire), **_vocabulary(wire), **_NO_SLUG,
         **_creation_review(wire),
     }
@@ -735,6 +741,7 @@ class SaveSource(Wire):
     tags: list[str] | None = None
     why: str | None = None
     document_form: str | None = Field(default=None, description="The form of this record of the work, as an open slug such as abstract.")
+    sensitivity: list[str] | None = _SENSITIVITY
     options: dict[str, Any] | None = Field(default=None, description="Rare knobs: raw_protection, source_identity, expected_sha256, correction, custody_only, import_identity.")
     detail: Detail | None = _DETAIL
 
@@ -745,6 +752,7 @@ def _save_source(wire: dict[str, Any], ctx: Context) -> Translated:
         "tags": wire.get("tags"), "why_captured": wire.get("why"), "source_kind": wire.get("source_kind"),
         "domain": wire.get("domain"), "files": wire.get("files"), "response_detail": wire.get("detail"),
         "projects": wire.get("projects"), "document_form": wire.get("document_form"),
+        "sensitivity": wire.get("sensitivity"),
     }
     return "capture_source", _leaf_call(wire, "options", ctx, "capture_source", "save_source", leaf)
 
@@ -756,6 +764,7 @@ class SaveEvidence(Wire):
     text: str | None = Field(default=None, description="Exact UTF-8 text to keep.")
     files: list[FileHandle] | None = Field(default=None, description="Attached files, up to eight.")
     description: str | None = None
+    sensitivity: list[str] | None = _SENSITIVITY
     options: dict[str, Any] | None = Field(default=None, description="Rare knobs: raw_protection, transcriptions, archive.")
     detail: Detail | None = _DETAIL
 
@@ -766,10 +775,12 @@ def _save_evidence(wire: dict[str, Any], ctx: Context) -> Translated:
         raise Refusal("INVALID_ARGUMENT", "save_evidence takes `text` with `name`, or `files`, and not both.")
     if files:
         leaf = {"scope": wire["scope"], "category": wire["category"], "files": wire["files"],
-                "description": wire.get("description"), "response_detail": wire.get("detail")}
+                "description": wire.get("description"), "sensitivity": wire.get("sensitivity"),
+                "response_detail": wire.get("detail")}
         return "preserve_artifacts", _leaf_call(wire, "options", ctx, "preserve_artifacts", "save_evidence", leaf)
     leaf = {"scope": wire["scope"], "category": wire["category"], "filename": wire["name"],
-            "content": wire["text"], "description": wire.get("description"), "response_detail": wire.get("detail")}
+            "content": wire["text"], "description": wire.get("description"), "sensitivity": wire.get("sensitivity"),
+            "response_detail": wire.get("detail")}
     return "preserve_evidence", _leaf_call(wire, "options", ctx, "preserve_evidence", "save_evidence", leaf)
 
 
@@ -783,6 +794,7 @@ class SaveEpisode(Wire):
     said: list[str] | None = Field(default=None, description="Up to three verbatim user statements.")
     about: list[str] | None = Field(default=None, description="Pages this concerns, by title.")
     client: str | None = None
+    sensitivity: list[str] | None = _SENSITIVITY
     detail: Detail | None = _DETAIL
 
 
@@ -909,13 +921,26 @@ class AddRecord(Wire):
     body: str | None = None
     hold: bool | None = None
     held: str | None = None
+    sensitivity: list[str] | None = Field(
+        default=None,
+        description="Classes this row adds to its collection's; the item schema needs a `sensitivity` array field.",
+    )
     options: dict[str, Any] | None = Field(default=None, description="Rare knobs: delivery, item_key.")
     detail: Detail | None = _DETAIL
 
 
+def _row_item(wire: dict[str, Any]) -> dict[str, Any]:
+    """The row's fields. A `sensitivity` argument joins the item's own classes in its `sensitivity` field."""
+    item = wire["item"]
+    if wire.get("sensitivity") is None:
+        return item
+    held = item.get("sensitivity")
+    return {**item, "sensitivity": [*(held if isinstance(held, list) else []), *wire["sensitivity"]]}
+
+
 def _add_record(wire: dict[str, Any], ctx: Context) -> Translated:
     leaf = {
-        "action": "append", "collection": wire["collection"], "item": wire["item"], "why": wire["why"],
+        "action": "append", "collection": wire["collection"], "item": _row_item(wire), "why": wire["why"],
         "body": wire.get("body"), "hold": wire.get("hold"), "held": wire.get("held"),
         "new_collection": wire.get("new_collection"), "response_detail": wire.get("detail"),
     }

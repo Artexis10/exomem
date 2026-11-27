@@ -38,6 +38,7 @@ from . import (
     memory_refs,
     project_keys,
     schema,
+    sensitivity_classes,
     source_capture,
     source_corrections,
     source_imports,
@@ -154,6 +155,8 @@ class AddResult:
     duplicate_check_unavailable: bool = False
     # An erasable Source's path names its content, so no call or write log keeps it. Never sent to callers.
     path_withheld: bool = False
+    # The classes the page records, their basis and the disclosure in force (`sensitivity_classes.report`).
+    sensitivity: dict[str, Any] | None = None
 
     def as_dict(self) -> dict:
         out = {"path": self.path, "ref": self.ref, "warnings": self.warnings}
@@ -183,6 +186,8 @@ class AddResult:
             out["same_url"] = self.same_url
         if self.duplicate_check_unavailable:
             out["duplicate_check_unavailable"] = True
+        if self.sensitivity is not None:
+            out["sensitivity"] = self.sensitivity
         # These are this producer's result fields; historical outcome facts stay independently readable.
         paths = tuple((key,) for key in out if key not in (
             "capture_outcome", "duplicate_check_unavailable", "same_url",
@@ -547,6 +552,7 @@ def add(
     identity_check: Mapping[str, object] | None = None,
     ingested_into: Sequence[str] = (),
     custody_only: bool | None = None,
+    sensitivity: Sequence[str] | None = None,
     _allocation: Mapping[str, str | None] | None = None,
     _prepare: Callable[[dict], None] | None = None,
     _validate_inputs: Callable[[], None] | None = None,
@@ -643,7 +649,7 @@ def add(
                 expected_sha256=expected_sha256,
                 correction=correction_plan,
                 document_form=document_form, identity_check=identity_check, ingested_into=ingested_into,
-                custody_only=custody_only,
+                custody_only=custody_only, sensitivity=sensitivity,
                 _allocation=_allocation,
                 _prepare=prepare_raw if _prepare is not None else None,
                 _validate_inputs=_validate_inputs,
@@ -690,6 +696,8 @@ def add(
     domain_binding, domain_resolution = prepared.domain_binding, prepared.domain_resolution
     episode_lines = prepared.episode_lines
     filename_slug, slug_warnings = prepared.filename_slug, prepared.slug_warnings
+    # Decided before anything is written or matched: an unknown class refuses the whole capture.
+    classification = _capture_classification(vault_root, sensitivity, kind, correction_plan)
 
     # Corpus-aware near-duplicate check (best-effort; warns, never blocks — the
     # 57% unprocessed-source backlog implies real dupes). Skipped when embeddings
@@ -758,7 +766,10 @@ def add(
             source_custody.require_publishable(vault_root, reference)
             if source_custody.available():
                 capture_attempts.record_observed(vault_root, reference)
-            return AddResult(path=path, ref=reference, warnings=identity_warnings, capture_outcome="reused")
+            return AddResult(
+                path=path, ref=reference, warnings=identity_warnings, capture_outcome="reused",
+                sensitivity=sensitivity_classes.stored_report(vault_root, path),
+            )
     # Identity decides an identity-bearing capture alone; an artifact, a correction, an adoption, an
     # episode revision and a protected capture each have a lane of their own.
     checks_duplicates = (
@@ -774,7 +785,8 @@ def add(
         )
         if lookup.hit is not None:
             return _reused_capture(
-                lookup.hit, title=title, kind=kind.key, url=url, tags=_clean_tags(tags), why_captured=why_captured,
+                vault_root, lookup.hit,
+                declared_sensitivity=classification.classes if sensitivity is not None else None, title=title, kind=kind.key, url=url, tags=_clean_tags(tags), why_captured=why_captured,
                 domain=domain_resolution.key if domain_resolution else None,
                 projects=list(dict.fromkeys(projects or ())),
             )
@@ -919,6 +931,7 @@ def add(
         identity_check=identity_check,
         ingested_into=ingested_into,
         custody_only=custody_only,
+        sensitivity=classification.classes,
     )
     supersede_writes = _supersede_writes(
         vault_root, supersede_targets, new_path=source_path, stamp_iso=stamp_iso
@@ -1282,6 +1295,9 @@ def add(
         same_url=same_url,
         duplicate_check_unavailable=duplicate_unavailable,
         path_withheld=custody_started,
+        sensitivity=sensitivity_classes.report(
+            vault_root, classification, rel_path=None if custody_started else source_path.relative_to(vault_root).as_posix(),
+        ),
     )
 
 
@@ -1292,6 +1308,36 @@ def stored_why(page_text: str) -> str | None:
     lines = body.split(f"\n{CAPTURE_HEADING}\n", 1)[0].splitlines()[1:]
     quoted = [line[2:] for line in lines if line.startswith("> ")]
     return "\n".join(quoted) or None
+
+
+def _capture_classification(
+    vault_root: Path,
+    declared: Sequence[str] | None,
+    kind: source_taxonomy.Resolution,
+    correction: source_corrections.CorrectionPlan | None,
+) -> sensitivity_classes.Classification:
+    """The classes a Source capture records.
+
+    A new capture takes the caller's list, else its kind's default. A correction keeps the classes of the Source
+    it replaces: that page is append-only, so only the classify operation changes them, and a different
+    declaration refuses instead of rewriting them. The kept classes are reported as `declared`, which they were
+    when the predecessor was captured or classified.
+    """
+    if correction is None:
+        return sensitivity_classes.classify_capture(vault_root, declared, kind_default=kind.sensitivity)
+    kept = sensitivity_classes.classes_of(parse_frontmatter(correction.old_source)[0])
+    if declared is not None and set(sensitivity_classes.validated(vault_root, declared)) != set(kept):
+        from .set_frontmatter_field import owned_field_route
+
+        raise AddError(
+            code="APPEND_ONLY", missing=[sensitivity_classes.FIELD],
+            reason="a correction keeps the sensitivity of the Source it replaces"
+            + (f" ({', '.join(kept)})" if kept else " (none)") + ". "
+            + (owned_field_route(vault_root, sensitivity_classes.FIELD) or ""),
+        )
+    return sensitivity_classes.Classification(
+        kept, sensitivity_classes.BASIS_DECLARED if kept else sensitivity_classes.BASIS_NONE
+    )
 
 
 def correction_carry(old_source: str) -> dict[str, object]:
@@ -1314,8 +1360,8 @@ def correction_carry(old_source: str) -> dict[str, object]:
 
 
 def _reused_capture(
-    hit: duplicates.Duplicate, *, title: str, kind: str, url: str | None, tags: list[str],
-    why_captured: str | None, domain: str | None, projects: list[str],
+    vault_root: Path, hit: duplicates.Duplicate, *, declared_sensitivity: Sequence[str] | None, title: str, kind: str,
+    url: str | None, tags: list[str], why_captured: str | None, domain: str | None, projects: list[str],
 ) -> AddResult:
     """The result of a capture whose text `hit` already holds: nothing is written or merged.
 
@@ -1335,6 +1381,8 @@ def _reused_capture(
             ("why_captured", why, stored_why(hit.payload.text)),
             ("domain", domain, kept.get("domain")),
             ("projects", projects or None, kept.get("projects")),
+            ("sensitivity", None if declared_sensitivity is None else list(declared_sensitivity),
+             kept.get("sensitivity") or None),
         )
         # A field the caller omitted, or that equals the kept value, is not listed. Lists compare as sets.
         if provided is not None and (
@@ -1348,6 +1396,7 @@ def _reused_capture(
             "source_kind": kept.get("source_type"), "url": kept.get("url"),
         },
         fields_not_applied=differences,
+        sensitivity=sensitivity_classes.stored_report(vault_root, hit.path, kept),
     )
 
 
@@ -1881,6 +1930,7 @@ def _render_source(
     identity_check: Mapping[str, object] | None = None,
     ingested_into: Sequence[str] = (),
     custody_only: bool | None = None,
+    sensitivity: Sequence[str] = (),
 ) -> str:
     """Emit the source page markdown matching the source page shape that page-types.md describes.
 
@@ -1915,6 +1965,8 @@ def _render_source(
         lines.append(f"document_form: {document_form}")
     if custody_only:
         lines.append("custody_only: true")
+    if sensitivity:
+        lines.append(f"{sensitivity_classes.FIELD}: " + yaml_flow_list(sensitivity))
     if artifact_rel:
         # The stored file is what extraction reads, so its name decides the kind; the original's name
         # can differ (a Markdown original is stored under `.md.txt`; captures before it used `.md.bin`).

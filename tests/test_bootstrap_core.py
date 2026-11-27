@@ -46,11 +46,14 @@ CORE_HEADROOM_WARNING_BYTES = 512
 #: `authoring` was raised from 20,900 to 23,000 for the three ownership routes (about 1,150
 #: bytes, 20,8xx to 21,960): the served contract carries the test and the deferral rule the
 #: ownership question reads, so that no copy of the wording lives in code.
+#: `routing` was raised from 12,500 to 12,600 for the `secrets` rule that tells an agent to keep
+#: identity, health and financial documents in full (12,551 bytes): it names what is kept beside
+#: what is not, so the exclusion never reads as a rule against identity numbers.
 SECTION_BYTE_CEILINGS = {
     "authoring": 23_000,
     "vocabulary": 11_900,
     "records_planning": 5_900,
-    "routing": 12_500,
+    "routing": 12_600,
     "adoption": 7_200,
     "envelope": 2_200,
     "epistemics": 5_400,
@@ -477,7 +480,9 @@ def test_the_session_profile_is_live_state_only(monkeypatch):
         assert live in session
     # 22,000 -> 22,200 on 2026-11-17: the vocabulary section lists the new document-forms registry
     # (147 B), which an agent reads to choose a Source's `document_form`.
-    assert len(_text(session)) < 22_200
+    # 22,200 -> 22,300 on 2026-11-27: it also lists the `sensitivity-classes` registry (22,243 B),
+    # which an agent reads to name a capture's classes.
+    assert len(_text(session)) < 22_300
 
 
 def test_the_bootstrap_names_the_store_it_reaches(monkeypatch):

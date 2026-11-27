@@ -155,6 +155,13 @@
         "held": {
           "type": "string"
         },
+        "sensitivity": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Classes this row adds to its collection's; the item schema needs a `sensitivity` array field."
+        },
         "options": {
           "type": "object",
           "description": "Rare knobs: delivery, item_key."
@@ -277,6 +284,13 @@
         "suggest_links": {
           "type": "boolean",
           "description": "Also return pages to link."
+        },
+        "sensitivity": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Sensitivity classes you judge this holds, such as identity or health."
         },
         "review": {
           "type": "string",
@@ -714,6 +728,7 @@
             "files.create",
             "files.append",
             "files.move",
+            "files.classify",
             "faces.status",
             "episodes.material",
             "episodes.inspect",
@@ -853,6 +868,7 @@
             "files.recover",
             "files.reclassify",
             "files.revert_reclassification",
+            "files.classify",
             "procedures.approve",
             "procedures.revoke",
             "procedures.quarantine",
@@ -1289,6 +1305,13 @@
         "client": {
           "type": "string"
         },
+        "sensitivity": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Sensitivity classes you judge this holds, such as identity or health."
+        },
         "detail": {
           "enum": [
             "compact",
@@ -1366,6 +1389,13 @@
         },
         "description": {
           "type": "string"
+        },
+        "sensitivity": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Sensitivity classes you judge this holds, such as identity or health."
         },
         "options": {
           "type": "object",
@@ -1466,6 +1496,13 @@
         "document_form": {
           "type": "string",
           "description": "The form of this record of the work, as an open slug such as abstract."
+        },
+        "sensitivity": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Sensitivity classes you judge this holds, such as identity or health."
         },
         "options": {
           "type": "object",

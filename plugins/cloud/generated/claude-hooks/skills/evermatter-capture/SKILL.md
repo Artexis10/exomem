@@ -2,7 +2,7 @@
 name: evermatter-capture
 description: 'Save what a conversation settled into Evermatter: a conclusion, a decision, a fact about a person or thing, a recurring item or measurement, or a proof file. Use when the user says save, remember, log or file this, or when the session lands on something durable that the engagement level allows you to capture.'
 metadata:
-  skill_contract: ca5d5e97fe254a49a10688bed19167de45957d3cdc599d8d17220532d2e6010b
+  skill_contract: cab3177457264a95c9d99fc3ea11d6dbe2f9b19ea456bdad690600a908e8b42b
   version: "0.2.0"
 ---
 
@@ -37,7 +37,7 @@ is durable: save it when it is agreed, as `proactive_capture` allows.
 1. Find where it belongs before you write. Reuse the `recall_context` packet if the conversation holds one; otherwise call `recall_context(turn=<the user's message verbatim>)`. Check the `skills` that `recall_context` returned for an owner skill that covers this task. If one does, read it with `read_page` and follow its method through the steps below: it decides what to capture and where it goes. Look at its `skills` for a Records collection that fits, and use `search_memory` for a named thing the packet does not cover.
 2. Split the material into objects that a later question would ask for separately, and give each one home:
    - a raw text or file the user shares: `save_source` (`content` or `files`, with `source_kind` and `domain`);
-   - a proof file (a receipt, label, invoice, warranty): `save_evidence(files=...)` in the turn it arrives, or `upload_files(lane="evidence", ...)` when you hold no file handle, and put the returned `cite` wikilink in the text you write about it; never keep a card number, code or password;
+   - a proof file (a receipt, label, invoice, warranty): `save_evidence(files=...)` in the turn it arrives, or `upload_files(lane="evidence", ...)` when you hold no file handle, and put the returned `cite` wikilink in the text you write about it. Keep identity, health and financial documents in full and name their classes in `sensitivity`; never keep an authenticator (a payment card number, a security code, a password or a live credential), and ask for a copy with it covered ([page types](references/page-types.md#sensitivity));
    - a recurring named item or measurement: a Records row (step 3);
    - a stated intent or commitment: a plan item (step 4);
    - a fact about a known person, place or thing: that entity (step 5);

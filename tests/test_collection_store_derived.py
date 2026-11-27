@@ -1317,3 +1317,20 @@ def test_a_preview_refuses_what_a_start_refuses_for_a_source_without_members(der
             agent(writer, mode=mode, **request)
         refusals.append((refused.value.code, refused.value.details["at"]))
     assert refusals == [(derived_rows.COLLECTION_DERIVED, "import_request.members")] * 2
+
+
+def test_a_derived_preview_and_import_agree_on_rows_with_sensitivity_values(derived):
+    """Defect: a derived preview refused rows whose `sensitivity` names a class the registry does not hold, while the
+    derived import, which keeps no governance metadata and must replay its log, imports them."""
+    text = TEXT.replace(FIELDS, FIELDS + "    sensitivity: {type: array, items: {type: string}}\n")
+    days = {"samples/2026-11-01.json": {"device": "unit-1", "days": [{"date": "2026-11-01", "samples": [
+        {"t": "2026-11-01T08:00:00", "v": 1, "cls": ["passport-ish"]},
+        {"t": "2026-11-01T09:00:00", "v": 2, "cls": ["Health"]}]}]}}
+    mapping = {**SAMPLES, "fields": {**SAMPLES["fields"], "sensitivity": "cls"}}
+    writer, job = derived("classed", days, text=text, mapping=mapping)
+    preview = agent(writer, mode="preview", source_ref=_preserve(writer.root, _archive(days))["path"],
+                    format="json-document", members="samples/*", mapping=mapping)
+    status = finish(writer, job)
+
+    assert preview["would_reject"] == {}, preview
+    assert status["state"] == "complete" and status["rows"]["imported"] == 2, status

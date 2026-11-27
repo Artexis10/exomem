@@ -33,6 +33,7 @@ from . import (
     recall_policy,
     rename_journal,
     reserved_paths,
+    sensitivity_classes,
     speech_tracks,
     temporal,
 )
@@ -1878,10 +1879,13 @@ def _render_pending_sidecar(
     preserved_notes: str | None = None
     adoption_receipt: Mapping[str, object] | None = None
     container_binding = None
+    sensitivity: list[str] = []
     if original is not None:
         frontmatter, body, raw_frontmatter = parse_frontmatter(original)
         existing_id = memory_refs.normalize_id(frontmatter.get("exomem_id"))
         container_binding = frontmatter.get("container_member")
+        # The capture's classes survive a re-render: only the classify operation changes them.
+        sensitivity = list(sensitivity_classes.classes_of(frontmatter))
         candidate_receipt = frontmatter.get("artifact_adoption")
         if isinstance(candidate_receipt, Mapping):
             adoption_receipt = candidate_receipt
@@ -1919,6 +1923,7 @@ def _render_pending_sidecar(
         governance_artifact_path=provenance.relative_path if container_binding else None,
         governance_artifact_sha256=provenance.sha256 if container_binding else None,
         governance_artifact_size=provenance.size if container_binding else None,
+        sensitivity=sensitivity,
     )
     if isinstance(container_binding, Mapping):
         rendered = document_containers.annotate(rendered, "container_member", container_binding)

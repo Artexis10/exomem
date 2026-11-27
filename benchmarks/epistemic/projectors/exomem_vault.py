@@ -78,19 +78,19 @@ TYPE_TO_KIND: Mapping[str, str] = {
 #: fairness evidence, not an extension point for a scenario or provider run.
 KIND_MAPPING_EVIDENCE: Mapping[str, tuple[str, ...]] = MappingProxyType(
     {
-        "source": ("src/exomem/_scaffold/_Schema/references/page-types.md:82",),
-        "research-note": ("src/exomem/_scaffold/_Schema/references/page-types.md:124",),
-        "insight": ("src/exomem/_scaffold/_Schema/references/page-types.md:168",),
-        "pattern": ("src/exomem/_scaffold/_Schema/references/page-types.md:244",),
-        "failure": ("src/exomem/_scaffold/_Schema/references/page-types.md:206",),
-        "experiment": ("src/exomem/_scaffold/_Schema/references/page-types.md:340",),
-        "production-log": ("src/exomem/_scaffold/_Schema/references/page-types.md:459",),
-        "entity": ("src/exomem/_scaffold/_Schema/references/page-types.md:518",),
+        "source": ("src/exomem/_scaffold/_Schema/references/page-types.md:115",),
+        "research-note": ("src/exomem/_scaffold/_Schema/references/page-types.md:157",),
+        "insight": ("src/exomem/_scaffold/_Schema/references/page-types.md:201",),
+        "pattern": ("src/exomem/_scaffold/_Schema/references/page-types.md:277",),
+        "failure": ("src/exomem/_scaffold/_Schema/references/page-types.md:239",),
+        "experiment": ("src/exomem/_scaffold/_Schema/references/page-types.md:373",),
+        "production-log": ("src/exomem/_scaffold/_Schema/references/page-types.md:492",),
+        "entity": ("src/exomem/_scaffold/_Schema/references/page-types.md:551",),
         "entity:decision": (
-            "src/exomem/_scaffold/_Schema/references/page-types.md:518",
-            "src/exomem/_scaffold/_Schema/references/page-types.md:573",
+            "src/exomem/_scaffold/_Schema/references/page-types.md:551",
+            "src/exomem/_scaffold/_Schema/references/page-types.md:606",
         ),
-        "sources_fallback": ("src/exomem/_scaffold/_Schema/references/page-types.md:84",),
+        "sources_fallback": ("src/exomem/_scaffold/_Schema/references/page-types.md:117",),
     }
 )
 
@@ -178,7 +178,7 @@ FIELD_DECLARATIONS: tuple[FieldDeclaration, ...] = (
     FieldDeclaration(
         field="authored_by",
         status="declared",
-        evidence="src/exomem/_scaffold/_Schema/references/page-types.md:95",
+        evidence="src/exomem/_scaffold/_Schema/references/page-types.md:128",
     ),
     FieldDeclaration(
         field="locator",
@@ -188,7 +188,7 @@ FIELD_DECLARATIONS: tuple[FieldDeclaration, ...] = (
     FieldDeclaration(
         field="open_question",
         status="declared",
-        evidence="src/exomem/_scaffold/_Schema/references/page-types.md:157",
+        evidence="src/exomem/_scaffold/_Schema/references/page-types.md:190",
     ),
     FieldDeclaration(
         field="uncertainty",

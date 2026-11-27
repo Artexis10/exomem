@@ -28,7 +28,7 @@ import os
 import re
 import shlex
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import ExitStack, nullcontext, suppress
 from dataclasses import dataclass, replace
 from functools import partial, wraps
@@ -51,6 +51,7 @@ from . import attention as attention_module
 from . import audit as audit_module
 from . import audit_fix as audit_fix_module
 from . import bootstrap_core as bootstrap_core_module
+from . import build_record as build_record_module
 from . import call_spans as call_spans_module
 from . import capabilities as capabilities_module
 from . import capture_attempts as capture_attempts_module
@@ -156,6 +157,7 @@ from . import semantic_language_registry as semantic_language_registry_module
 from . import semantic_unit_read as semantic_unit_read_module
 from . import semantic_units as semantic_units_module
 from . import semantic_writes as semantic_writes_module
+from . import sensitivity_classes as sensitivity_classes_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
 from . import source_coverage as source_coverage_module
@@ -2278,7 +2280,7 @@ def op_bootstrap(
                 ),
                 "when": "the user shares a proof file (label, receipt, invoice, order, warranty): keep it that turn",
                 "custody": "original first; transcription beside, never instead; put the returned `cite` wikilink in your text",
-                "secrets": "never keep card numbers, codes or passwords; ask for a covered copy and say why",
+                "secrets": "keep identity, health and financial documents in full; never keep a payment card number, security code or password: ask for a covered copy and say why",
                 "fallback": {
                     "tool": "transfer_artifact",
                     "args": {"operation": "upload", "lane": "evidence", "scope": "<scope>", "category": "<category>"},
@@ -4042,6 +4044,14 @@ def op_suggest_relations(
     )
 
 
+def _checked_sensitivity(vault_root: Path, supplied: Sequence[str] | None) -> list[str] | None:
+    """The canonical classes of a capture's `sensitivity` argument, refused before anything is staged or written.
+
+    `None` stays `None`: the capture then takes its Source kind's default.
+    """
+    return None if supplied is None else list(sensitivity_classes_module.validated(vault_root, supplied))
+
+
 def _resolve_source_kind_argument(
     vault_root: Path, source_type: str | None, source_kind: str | None
 ) -> str:
@@ -4103,6 +4113,7 @@ def _add_source(
     passages: list[source_capture.DeclaredPassage] | None = None,
     document_form: str | None = None,
     custody_only: bool | None = None,
+    sensitivity: Sequence[str] | None = None,
 ) -> dict:
     """Capture text as a source under an already-resolved kind.
 
@@ -4138,6 +4149,7 @@ def _add_source(
                 passages=passages,
                 document_form=document_form,
                 custody_only=custody_only,
+                sensitivity=sensitivity,
             )
     except add_module.AddError as e:
         # FastMCP serializes raised exceptions; we want a structured shape.
@@ -5656,6 +5668,7 @@ def op_preserve(
     content: str,
     description: str | None = None,
     raw_protection: bool = False,
+    sensitivity: Sequence[str] | None = None,
 ) -> dict:
     """Capture a TEXT artifact to Evidence/<scope>/<category>/.
 
@@ -5680,6 +5693,7 @@ def op_preserve(
         description: Optional. If supplied, a sidecar `<filename>.md`
             is written alongside the artifact with frontmatter and the
             description under `## Description`.
+        sensitivity: Optional sensitivity classes the page records; the text is kept in full either way.
 
     Returns:
         {path, sidecar_path, warnings}.
@@ -5691,6 +5705,7 @@ def op_preserve(
     preserve_module = _preserve_module()
     from .cli_ops import OpError
 
+    sensitivity = _checked_sensitivity(vault_root, sensitivity)
     # Before the duplicate lookup hashes it: the kept text never holds a card number or a labelled credential.
     kept_content, description, _text, redaction_warnings = preserve_module.redact_capture_text(
         content=content, description=description,
@@ -5726,7 +5741,7 @@ def op_preserve(
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest() if isinstance(content, str) else ""
     held = evidence_reuse.reuse(
         vault_root, scope=scope, category=category, sha256=digest, protected=raw_protection,
-        filename=filename, description=description,
+        filename=filename, description=description, sensitivity=sensitivity,
     )
     duplicate = held.duplicate
     if duplicate is not None:
@@ -5743,6 +5758,9 @@ def op_preserve(
             content_type=mimetypes.guess_type(preserve_module._sanitize_filename(filename))[0],
         )
         receipt["warnings"] = [*redaction_warnings, *receipt.get("warnings", ())]
+        # The kept page's own classes, not the declaration this call made: `fields_not_applied` names a difference.
+        if (kept := sensitivity_classes_module.stored_report(vault_root, duplicate.sidecar_path)) is not None:
+            receipt["sensitivity"] = kept
         if duplicate.family_added:
             # The page gained a family: that edit is a committed write.
             mark_active_mutation_committed()
@@ -5758,6 +5776,7 @@ def op_preserve(
             content=content,
             description=description,
             raw_protection=raw_protection,
+            sensitivity=sensitivity,
         )
     except preserve_module.PreserveError as e:
         raise ValueError(_leaf_error_message(e)) from e
@@ -5852,6 +5871,7 @@ def op_note(
     vocabulary_decision: _DomainVocabularyDecisionArgument = None,
     summary: str | None = None,
     topics: str | list[str] | None = None,
+    sensitivity: list[str] | None = None,
 ) -> dict:
     """Create a compiled note in the Knowledge Base.
 
@@ -5969,6 +5989,8 @@ def op_note(
         vocabulary_decision: After a vocabulary_preparation response, submit its
             evidence_fingerprint with outcome reuse, create, or defer and the
             reviewed canonical value. The response is bound to that evidence.
+        sensitivity: Sensitivity classes you judge the note to carry, such as identity,
+            health or financial. The reply reports them with what governs the page.
 
     Returns:
         {path, warnings, suggestions?, write_feedback}. `write_feedback` is
@@ -5977,7 +5999,7 @@ def op_note(
         validation failure, raises a structured error with code=INVALID_NOTE,
         the missing fields, and the reason.
     """
-    return _invoke_note(
+    result = _invoke_note(
         vault_root,
         content=content,
         note_type=note_type,
@@ -6016,7 +6038,14 @@ def op_note(
         vocabulary_decision=vocabulary_decision,
         summary=summary,
         topics=topics,
-    ).as_dict()
+        sensitivity=sensitivity,
+    )
+    payload = result.as_dict()
+    if isinstance(result, note_module.NoteResult):
+        payload["sensitivity"] = sensitivity_classes_module.report(
+            vault_root, sensitivity_classes_module.classify_capture(vault_root, sensitivity), rel_path=result.path,
+        )
+    return payload
 
 
 def _invoke_note(
@@ -7926,6 +7955,7 @@ def _compile_guarded_activation(
     return _CompiledActivation(guarded, True, thread)
 
 
+@build_record_module.warming_scoped
 def _op_activate_context_body(
     vault_root: Path,
     turn: str = "",
@@ -8163,12 +8193,10 @@ def _op_activate_context_body(
                 # silent degrade to an empty freshness key, which would let the
                 # request keep serving against a registry it could not prove
                 # current for this principal's access policy.
-                reason = (
-                    working_set_runtime_module.WARMING
-                    if exc.status == "warming"
-                    else working_set_runtime_module.UNAVAILABLE
-                )
-                return _abstain(reason)
+                if exc.status == "warming":
+                    build_record_module.note_warming(build_record_module.WAITING_ON_RECALL_REGISTRY, site=exc.site)
+                    return _abstain(working_set_runtime_module.WARMING)
+                return _abstain(working_set_runtime_module.UNAVAILABLE)
             except Exception:  # noqa: BLE001 - unavailable freshness never grants disclosure
                 # Abstain right here rather than continuing in a half-state:
                 # freshness that could not be established grants nothing, and
@@ -8208,6 +8236,11 @@ def _op_activate_context_body(
             state, index = working_set_runtime_module.UNAVAILABLE, None
     if index is not None:
         index.close()
+    if managed_cold and state in (working_set_runtime_module.READY, working_set_runtime_module.WARMING):
+        # A pending seed makes the turn abstain whatever the index answered, so the seed is its cause.
+        build_record_module.note_warming(
+            build_record_module.WAITING_ON_RECALL_SEED, freshness_module.seed_state(vault_root, "kb")
+        )
     if state != working_set_runtime_module.READY or index is None:
         return _abstain(state)
 
@@ -9063,6 +9096,7 @@ def op_remember(
     vocabulary_decision: _DomainVocabularyDecisionArgument = None,
     summary: str | None = None,
     topics: str | list[str] | None = None,
+    sensitivity: list[str] | None = None,
 ) -> dict:
     """Save a durable conclusion as compiled knowledge.
 
@@ -9096,6 +9130,7 @@ def op_remember(
         relation_review_hash: Draft hash the review covers.
         relation_review_reason: Audit reason for reviewed-none.
         vocabulary_decision: Answers a vocabulary_preparation response.
+        sensitivity: Sensitivity classes you judge the note to carry, such as identity, health or financial.
     """
     return op_note(
         vault_root,
@@ -9136,6 +9171,7 @@ def op_remember(
         vocabulary_decision=vocabulary_decision,
         summary=summary,
         topics=topics,
+        sensitivity=sensitivity,
     )
 
 
@@ -9610,6 +9646,7 @@ def op_capture_source(
     document_form: str | None = None,
     custody_only: bool | None = None,
     import_identity: str | None = None,
+    sensitivity: list[str] | None = None,
 ) -> dict:
     """Save Source text or original files.
 
@@ -9640,9 +9677,12 @@ def op_capture_source(
         capture_reservation: Unchanged reservation for exact identity-bearing text or passages.
         document_form: What the document is as a record of a work; a new key registers.
         custody_only: Keep the Source for safekeeping with no note expected; a correction carries it.
+        sensitivity: Sensitivity classes you judge the material to carry, such as identity, health or financial.
+            Keep it in full and classify it. Omit it to take the kind's default. A correction keeps its predecessor's.
     """
     from . import source_imports
 
+    sensitivity = _checked_sensitivity(vault_root, sensitivity)
     import_key = None
     if import_identity is not None:
         if not files or len(files) != 1 or adoption is not None or correction is not None:
@@ -9737,7 +9777,7 @@ def op_capture_source(
             "slug": slug, "source_type": kind, "url": url, "tags": tags, "why_captured": why_captured,
             "domain": domain, "projects": projects, "raw_protection": raw_protection,
             "expected_sha256": expected_sha256, "document_form": document_form,
-            "custody_only": custody_only,
+            "custody_only": custody_only, "sensitivity": sensitivity,
         }
         if metadata_only:
             captured = client_artifacts.capture_source_correction(
@@ -9780,6 +9820,7 @@ def op_capture_source(
             passages=passages,
             document_form=document_form,
             custody_only=custody_only,
+            sensitivity=sensitivity,
         )
         if source_redaction_warnings:
             source["warnings"] = [*source_redaction_warnings, *(source.get("warnings") or [])]
@@ -9793,7 +9834,7 @@ def op_capture_source(
             out["capture_outcome"] = "reused"
             out["mutated"] = False
         # The terminal reads these from the leaf's top level.
-        for key in ("vocabulary_resolution", "vocabulary_receipt"):
+        for key in ("vocabulary_resolution", "vocabulary_receipt", "sensitivity"):
             if key in source:
                 out[key] = source[key]
                 source_result_attribution.carry(source, out, moves={(key,): (key,)})
@@ -9940,6 +9981,7 @@ def op_episode_memory(
     order: list[str] | None = None,
     max_leaves: int | None = None,
     postcommit: bool | None = None,
+    sensitivity: list[str] | None = None,
 ) -> dict:
     """Save a recap for later sessions.
 
@@ -9966,6 +10008,7 @@ def op_episode_memory(
         open: Max 5 items, 200 characters each. One of the three lists is required.
         said: Max 3 verbatim user statements, 300 characters.
         about: Max 3 `exomem://` refs.
+        sensitivity: `record` only: sensitivity classes you judge the recap to carry. A later revision keeps them.
         candidate: Your stable key for one change.
         proposal: For `prepare`; alternatives are up to 8 inspected pages
             {target, scope, version: the `content_hash` you read}. A changed
@@ -9996,6 +10039,7 @@ def op_episode_memory(
         "said": said,
         "about": about,
         "client": client,
+        "sensitivity": sensitivity,
     }
     workflow = {
         "candidate": candidate,
@@ -10057,6 +10101,7 @@ def op_episode_memory(
             said=said,
             about=about,
             client=client,
+            sensitivity=sensitivity,
         )
     if action in {"input", "material"}:
         from .episode_recovery import EpisodeInputOwner
@@ -10197,6 +10242,7 @@ def op_preserve_evidence(
     content: str,
     description: str | None = None,
     raw_protection: bool = False,
+    sensitivity: Sequence[str] | None = None,
 ) -> dict:
     """Preserve text as append-only proof.
 
@@ -10211,6 +10257,7 @@ def op_preserve_evidence(
         content: Exact UTF-8 text.
         description: Sidecar description.
         raw_protection: Keep the original owner-only until a whole-artifact release.
+        sensitivity: Sensitivity classes you judge it to carry, such as identity, health or financial. Keep it in full.
     """
     return op_preserve(
         vault_root,
@@ -10220,6 +10267,7 @@ def op_preserve_evidence(
         content=content,
         description=description,
         raw_protection=raw_protection,
+        sensitivity=sensitivity,
     )
 
 
@@ -10233,6 +10281,7 @@ def op_preserve_artifacts(
     raw_protection: bool = False,
     archive: Literal["members"] | None = None,
     description: str | None = None,
+    sensitivity: Sequence[str] | None = None,
 ) -> dict:
     """Preserve client file handles as append-only Evidence.
 
@@ -10248,6 +10297,7 @@ def op_preserve_artifacts(
         raw_protection: Keep originals owner-only until whole-artifact release.
         archive: Keep a held zip as members; path is an import source_ref.
         description: One caption for every file, kept on each new original's page.
+        sensitivity: Sensitivity classes for every file, kept on each new original's page; the bytes stay whole.
     """
     from . import client_artifacts
     from . import due_state as due_state_module
@@ -10265,6 +10315,7 @@ def op_preserve_artifacts(
             raw_protection=raw_protection,
             archive=archive,
             description=description,
+            sensitivity=sensitivity,
         )
     _note_committed_artifact_targets(result)
     # No batch deltas: Evidence blobs author no predictions, questions,
@@ -15051,6 +15102,37 @@ def op_revert_reclassification(
     return result.as_dict()
 
 
+def op_classify_page(
+    vault_root: Path,
+    *,
+    path: str,
+    sensitivity: list[str] | None = None,
+    reason: str | None = None,
+    revert_record: str | None = None,
+    expected_hash: str | None = None,
+    validate_only: bool = False,
+) -> dict:
+    """Record which sensitivity classes a page holds, without changing any other byte.
+
+    The page keeps its body, its path and every other frontmatter line; only its `sensitivity`
+    field changes, through the governed pointer write. Pass `sensitivity` with registered class
+    keys, or `[]` to clear them, or `revert_record` with the `pointer_write` id of an earlier
+    classification to return the page to its earlier bytes. `reason` is required and recorded.
+    With `validate_only` nothing is written.
+    """
+    from . import classify_page
+
+    if not path:
+        raise ValueError("INVALID_PATH: classify requires `path` naming the page")
+    try:
+        return classify_page.classify(
+            vault_root, path=path, sensitivity=sensitivity, reason=reason,
+            revert_record=revert_record, expected_hash=expected_hash, validate_only=validate_only,
+        )
+    except classify_page.ClassifyError as error:
+        raise ValueError(f"{error.code}: {error.reason}") from error
+
+
 def op_manage_memory_file(
     vault_root: Path,
     operation: str = "list",
@@ -15089,21 +15171,29 @@ def op_manage_memory_file(
     preview_digest: str | None = None,
     preview_run_id: str | None = None,
     cursor: str | None = None,
+    sensitivity: list[str] | None = None,
+    revert_record: str | None = None,
+    expected_hash: str | None = None,
 ) -> dict:
     """Manage files when typed tools do not fit.
 
     Destructive operations need explicit flags.
 
     Args:
-        operation: list, trash-list and propose-reclassification read; create, append
-            and move read with validate_only; the others write.
+        operation: list, trash-list and propose-reclassification read; create, append,
+            move and classify read with validate_only; the others write.
         path: Target for list/create/append/delete; default trash path for recover.
         allow_curated: Permit operations in curated trees where canonical leaves allow it.
         kind: file or dir, for create.
         source_kind: What a captured artifact IS; reclassify sets it.
         domain: What it is ABOUT; like source_kind.
         artifact_path: reclassify only: the existing file the source's pointer must name.
-        reason: Required for reclassify and revert-reclassification.
+        reason: Required for reclassify, revert-reclassification and classify.
+        sensitivity: classify only: the sensitivity classes the page holds, as registered keys;
+            an empty list clears them. The page keeps every other byte and never moves.
+        revert_record: classify only, instead of `sensitivity`: the `pointer_write` id of an
+            earlier classification of this page, which returns the page to its earlier bytes.
+        expected_hash: classify only: the page's content hash, to refuse a stale write.
         confirm: Required for delete.
         expected_dead_inbound: Links expected to die in the same workflow.
         validate_only: Validate a Markdown create or append, or preview a move, without
@@ -15129,7 +15219,7 @@ def op_manage_memory_file(
         )
     )
     append_review_requested = semantic_transition_token is not None
-    shared_review_requested = (validate_only and operation != "move") or any(
+    shared_review_requested = (validate_only and operation not in {"move", "classify"}) or any(
         value is not None
         for value in (
             relation_disposition,
@@ -15230,6 +15320,11 @@ def op_manage_memory_file(
             reason=reason,
             preview_digest=preview_digest,
         )
+    if operation == "classify":
+        return op_classify_page(
+            vault_root, path=path, sensitivity=sensitivity, reason=reason,
+            revert_record=revert_record, expected_hash=expected_hash, validate_only=validate_only,
+        )
     if operation == "trash-list":
         return op_list_trash(vault_root, date=date)
     if operation == "recover":
@@ -15244,8 +15339,8 @@ def op_manage_memory_file(
         )
     raise ValueError(
         "INVALID_MODE: manage_memory_file operation must be list, create, append, "
-        "move, reclassify, propose-reclassification, revert-reclassification, delete, "
-        "trash-list, or recover"
+        "move, reclassify, propose-reclassification, revert-reclassification, classify, "
+        "delete, trash-list, or recover"
     )
 
 

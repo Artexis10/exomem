@@ -14,7 +14,7 @@ import ssl
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from functools import partial
@@ -22,7 +22,13 @@ from pathlib import Path, PurePosixPath
 from queue import Empty, Queue
 from urllib.parse import urljoin, urlsplit
 
-from . import duplicates, evidence_reuse, memory_refs, source_result_attribution
+from . import (
+    duplicates,
+    evidence_reuse,
+    memory_refs,
+    sensitivity_classes,
+    source_result_attribution,
+)
 from .cli_ops import OpError
 from .mutation_terminal import as_reused
 from .preserve import (
@@ -890,6 +896,17 @@ def _unless_written(result: dict) -> dict:
     return as_reused(result) if reused else result
 
 
+def _call_sensitivity(vault_root: Path, reports: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    """One `sensitivity` report for a call that stored pages.
+
+    Every file of one call takes the same declaration. The ceiling is per page, so a call that stored several
+    pages states the governance state without naming one page's ceiling.
+    """
+    if len(reports) == 1:
+        return dict(reports[0])
+    return {**reports[0], "disclosure": sensitivity_classes.disclosure(vault_root, None)}
+
+
 def _finish_adoption(outcomes: list[dict[str, object] | None]) -> dict:
     final = [outcome for outcome in outcomes if outcome is not None]
     return _unless_written({
@@ -1559,6 +1576,8 @@ def _capture_source_adoption(
         finished = _finish_adoption(outcomes)
         if isinstance(payload, dict) and "vocabulary_resolution" in payload:
             finished["vocabulary_resolution"] = payload["vocabulary_resolution"]
+        if isinstance(payload, dict) and "sensitivity" in payload:
+            finished["sensitivity"] = payload["sensitivity"]
         return finished
     finally:
         if artifact is not None:
@@ -1574,6 +1593,7 @@ def _preserve_evidence_adoption(
     files: list[Mapping[str, object]],
     adoption: object,
     raw_protection: bool = False,
+    sensitivity: tuple[str, ...] | None = None,
 ) -> dict:
     prepared = _adoption_inputs(files, adoption)
     if isinstance(prepared, dict):
@@ -1650,6 +1670,7 @@ def _preserve_evidence_adoption(
 
         manager = active_manager()
         duplicate: DuplicateArtifact | None = None
+        payload: dict | None = None
         try:
             with manager.absorbing_mutation_guard(
                 vault_root,
@@ -1667,7 +1688,7 @@ def _preserve_evidence_adoption(
                     # another key, name or family, cannot both find nothing.
                     held = evidence_reuse.reuse(
                         vault_root, scope=scope, category=category, sha256=artifact.sha256, protected=protected,
-                        filename=artifact.filename,
+                        filename=artifact.filename, sensitivity=sensitivity,
                     )
                     duplicate = held.duplicate
                     if duplicate is None:
@@ -1690,6 +1711,7 @@ def _preserve_evidence_adoption(
                                 media_pending=True,
                                 diarize=artifact.diarize,
                                 tracks=artifact.tracks,
+                                sensitivity=sensitivity,
                             )
                         payload = _with_unavailable_warning(result.as_dict(), held.available, "this file")
             if raced is not None:
@@ -1717,7 +1739,11 @@ def _preserve_evidence_adoption(
             )
         except (PreserveError, SafeFetchError) as error:
             outcomes[selected_index] = _failed(artifact.file_id, error)
-        return _finish_adoption(outcomes)
+        finished = _finish_adoption(outcomes)
+        report = payload.get("sensitivity") if payload is not None else None
+        if isinstance(report, Mapping) and (outcomes[selected_index] or {}).get("outcome") == "stored":
+            finished["sensitivity"] = dict(report)
+        return finished
     finally:
         if artifact is not None:
             # A held upload is spent only by storing it; any refusal after the claim puts it back.
@@ -1816,6 +1842,7 @@ def _commit_staged_sources(
     )
 
     resolution: dict | None = None
+    sensitivity_reports: list[dict] = []
     manager = active_manager()
     refusals: list[OpError] = []
     wrote_import_receipt = False
@@ -1949,6 +1976,8 @@ def _commit_staged_sources(
                 # Every file shares one domain request; the first commit's
                 # record is the one that chose the destination.
                 resolution = resolution or payload.get("vocabulary_resolution")
+                if isinstance(payload.get("sensitivity"), dict):
+                    sensitivity_reports.append(payload["sensitivity"])
                 # A compact terminal reads `stored_path`, `media_id` and the other
                 # receipt fields through a bounded projection. A committed row
                 # whose field does not read keeps its state, loses that field and
@@ -2012,6 +2041,8 @@ def _commit_staged_sources(
         out["summary"]["already_stored"] = already_stored
     if resolution is not None:
         out["vocabulary_resolution"] = resolution
+    if sensitivity_reports:
+        out["sensitivity"] = _call_sensitivity(vault_root, sensitivity_reports)
     if source_fields.get("custody_only") is True:
         # The resolved mark (a correction carries its predecessor's): the outcome line says so.
         out["custody_only"] = True
@@ -2120,6 +2151,7 @@ def preserve_artifacts(
     raw_protection: bool = False,
     archive: str | None = None,
     description: str | None = None,
+    sensitivity: Sequence[str] | None = None,
 ) -> dict:
     """Stage remote files first, then preserve each append-only artifact under a narrow guard.
 
@@ -2129,6 +2161,10 @@ def preserve_artifacts(
 
     `description` is one caption for every file in the call. Like a
     transcription, it is written only with a newly stored original.
+
+    `sensitivity` is one list of sensitivity classes for every file in the call, recorded on each new original's
+    page. An original that is already stored keeps the classes its page holds, and the outcome names the
+    declaration it did not take.
 
     With `archive="members"` each file is a held zip, kept as its members
     exactly as `/upload` with `archive=members` keeps it; see `_preserve_members`.
@@ -2158,6 +2194,16 @@ def preserve_artifacts(
             "Drop the caption, or save the file without adoption or archive.",
             details={"field": "description"},
         )
+    # Before anything is staged: an unknown class refuses the whole call and nothing is fetched or written.
+    declared_sensitivity = None if sensitivity is None else sensitivity_classes.validated(vault_root, sensitivity)
+    if archive is not None and declared_sensitivity:
+        # A members preservation has no original page to carry a class, and the members' pages are not classified here.
+        raise OpError(
+            "INVALID_PRESERVE",
+            "a sensitivity class is not accepted with archive=members",
+            "Drop the class, or save the file without archive and classify its page.",
+            details={"field": "sensitivity"},
+        )
     caption_warnings: list[str] = []
     if description is not None:
         from .preserve import redact_capture_text
@@ -2173,6 +2219,7 @@ def preserve_artifacts(
             files=files,
             adoption=adoption,
             raw_protection=raw_protection,
+            sensitivity=declared_sensitivity,
         )
     # Before the empty-batch shortcut: a malformed destination is a property of
     # the call, so `files=[]` with `scope="a/b"` must refuse rather than report
@@ -2225,6 +2272,7 @@ def preserve_artifacts(
     manager = active_manager()
     refusals: list[OpError] = []
     body_started = False
+    sensitivity_reports: list[Mapping[str, object]] = []
 
     @contextmanager
     def commit_guard() -> Iterator[None]:
@@ -2267,7 +2315,7 @@ def preserve_artifacts(
                     # that stores a miss.
                     held = evidence_reuse.reuse(
                         vault_root, scope=scope, category=category, sha256=artifact.sha256, protected=protected,
-                        filename=artifact.filename, description=description,
+                        filename=artifact.filename, description=description, sensitivity=declared_sensitivity,
                     )
                     if held.duplicate is None:
                         with artifact.path.open("rb") as stream:
@@ -2284,6 +2332,7 @@ def preserve_artifacts(
                                 diarize=artifact.diarize,
                                 tracks=artifact.tracks,
                                 description=description,
+                                sensitivity=declared_sensitivity,
                                 **(
                                     {"text": transcription, "text_origin": "client"}
                                     if transcription
@@ -2339,6 +2388,8 @@ def preserve_artifacts(
                 }
                 if isinstance(payload.get("document_container"), Mapping):
                     outcomes[index]["document_container"] = dict(payload["document_container"])
+                if isinstance(payload.get("sensitivity"), Mapping):
+                    sensitivity_reports.append(payload["sensitivity"])
                 if transcription:
                     outcomes[index]["transcription"] = {
                         "state": "recorded",
@@ -2360,7 +2411,10 @@ def preserve_artifacts(
     if staged and len(refusals) == len(staged):
         # Nothing began, so the call stays retryable under its own key instead of recording a failure.
         raise refusals[0]
-    return _batch_result(outcomes)
+    result = _batch_result(outcomes)
+    if sensitivity_reports:
+        result["sensitivity"] = _call_sensitivity(vault_root, sensitivity_reports)
+    return result
 
 
 #: Characters that end or split a wikilink target (`#` heading, `|` alias, brackets), so a path holding one cannot be cited.
