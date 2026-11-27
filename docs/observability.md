@@ -705,6 +705,23 @@ neither a ceiling nor a release.
 
 ## Recall availability
 
+### Why recall still answers `index_warming`
+
+An `index_warming` answer from `activate_context` carries `abstention.diagnostics`.
+The agent repeats only `abstention.reason`; the diagnostics are for the operator.
+
+- `waiting_on` names the warm-up the turn waited on:
+  - `recall_seed` is the boot-time seed of the recall registry.
+  - `identity_inventory` is the in-memory walk of private identities.
+  - `activation_index` is the activation index build. Its slot is shared with the context catalogue fold.
+  - `recall_registry` is a refusal by the recall registry. `site` names the gate that refused.
+- `build` is that warm-up's state in this process:
+  - `state`: `building`, `failed`, `not_started` or `ready`.
+  - `seconds` is how long a running build has run. `job` names the work in a shared slot.
+  - `last_failure` holds the exception class, `seconds_ago` and `failures`, the consecutive failures since the last success. It never holds the message, because a message can name a private path.
+
+A warm-up that fails on every retry shows `failures` growing. A hung build shows `building` with `seconds` growing.
+
 The packaged MCP canary checks private cases through `search_memory`,
 `recall_context` and `read_page`.
 On a schema mismatch, the attempt can retain `schema_failure` with the validator

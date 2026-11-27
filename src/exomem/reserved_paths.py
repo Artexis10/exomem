@@ -30,7 +30,7 @@ from typing import IO, TYPE_CHECKING
 
 from rpds import HashTrieMap, HashTrieSet
 
-from . import call_spans, foreground_priority, held_fs, request_budget
+from . import build_record, call_spans, foreground_priority, held_fs, request_budget
 from .cli_ops import OpError
 from .kbdir import managed_join, managed_root_rel, managed_split_parts
 
@@ -3678,6 +3678,8 @@ class _BaselineFlight:
 
 
 _BASELINE_IDENTITY_FLIGHTS: dict[str, _BaselineFlight] = {}
+#: When the running build started and how the last ones failed, for a warming diagnostic.
+_IDENTITY_BUILDS = build_record.BuildRecord()
 
 #: How long a follower may wait on the one build already running.  Deliberately
 #: NOT the mutation-gate budget: a follower waits on an in-process Event, which
@@ -3762,6 +3764,12 @@ def identity_catalogue_ready(vault_root: Path) -> bool:
     """Whether a private-identity inventory is available without building one."""
 
     return _warm_baseline_identity_catalogue(vault_root) is not None
+
+
+def identity_catalogue_warm_state(vault_root: Path) -> dict[str, object]:
+    """The inventory build's state for a warming diagnostic (`build_record.BuildRecord.state`)."""
+
+    return _IDENTITY_BUILDS.state(_vault_identity_key(vault_root), ready=identity_catalogue_ready(vault_root))
 
 
 #: How often a reader looks for the background build before that build has registered its flight.
@@ -4039,6 +4047,7 @@ def _baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
                         raise ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
                     leading = True
                     _BASELINE_IDENTITY_FLIGHTS[vault_key] = flight
+                    _IDENTITY_BUILDS.started(vault_key)
                 else:
                     flight = running
 
@@ -4054,14 +4063,17 @@ def _baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
             flight.catalogue = _install_baseline_identity_catalogue(
                 vault_key, _build_baseline_identity_catalogue(vault_root)
             )
+            _IDENTITY_BUILDS.succeeded(vault_key)
         except BaseException as error:
             # A leader's stop is its own: it is a BaseException that a follower's caller may not
             # handle, and it says nothing about the inventory. Followers build it themselves.
             if leading:
                 if isinstance(error, foreground_priority.BulkCancelled):
                     flight.cancelled = True
+                    _IDENTITY_BUILDS.ended(vault_key)
                 else:
                     flight.error = error
+                    _IDENTITY_BUILDS.failed(vault_key, error)
             raise
         finally:
             if leading:

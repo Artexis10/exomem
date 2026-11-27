@@ -61,6 +61,7 @@ from typing import Any, NamedTuple, NoReturn
 
 from . import (
     activation_conventions,
+    build_record,
     context_roles,
     freshness,
     lifecycle_statuses,
@@ -291,9 +292,46 @@ def first_turn_warm_wait_seconds() -> float:
     return max(0.0, min(FIRST_TURN_WARM_WAIT_SECONDS, budget.seconds / 4, budget.remaining() / 2))
 
 
+#: What an `index_warming` answer waited on: one protocol value per warm-up the request path checks.
+WAITING_ON_RECALL_SEED = "recall_seed"
+WAITING_ON_RECALL_REGISTRY = "recall_registry"
+WAITING_ON_IDENTITY_INVENTORY = "identity_inventory"
+WAITING_ON_ACTIVATION_INDEX = "activation_index"
+
+
+def warming_diagnostics(
+    vault_root: Path, waiting_on: str | None = None, *, site: str | None = None
+) -> dict[str, object]:
+    """The diagnostics part of an `index_warming` answer: the warm-up it waited on and that build's state.
+
+    With no `waiting_on`, `ensure_index` answered warming, and its checks are read again in its own
+    order. The read comes after the answer, so a build that finished in between reads as ready.
+    `site` is the recall registry's refusal site (`find.RETRIEVAL_WARMING_SITES`).
+    """
+    root = Path(vault_root)
+    build: dict[str, object] | None = None
+    if waiting_on == WAITING_ON_RECALL_SEED:
+        build = freshness.seed_state(root, "kb")
+    elif waiting_on is None:
+        from . import reserved_paths
+
+        if _managed() and not reserved_paths.identity_catalogue_ready(root):
+            waiting_on, build = WAITING_ON_IDENTITY_INVENTORY, reserved_paths.identity_catalogue_warm_state(root)
+        else:
+            waiting_on, build = WAITING_ON_ACTIVATION_INDEX, _BUILD_RECORD.state(root.absolute(), ready=False)
+    diagnostics: dict[str, object] = {"waiting_on": waiting_on}
+    if site is not None:
+        diagnostics["site"] = site
+    if build is not None:
+        diagnostics["build"] = build
+    return diagnostics
+
+
 _CACHE_LOCK = threading.Lock()
 _PACKET_CACHE: OrderedDict[tuple, tuple[dict[str, Any], tuple[str, str]]] = OrderedDict()
 _BUILDS: dict[Path, threading.Thread] = {}
+#: When the build in a vault's slot started, which job it runs, and how the last ones failed.
+_BUILD_RECORD = build_record.BuildRecord()
 _BUILD_SHUTDOWNS: dict[Path, threading.Event] = {}
 #: One inline-build lock per vault root. The managed path single-flights through
 #: `_BUILDS` and a background thread; the unmanaged path has no thread to join,
@@ -2702,6 +2740,7 @@ def _schedule_build(
             return
 
     def _warm() -> None:
+        _BUILD_RECORD.started(root, job=label)
         try:
             # A bulk pass: its walks yield to a request in flight, never under a lock one waits on.
             with foreground_priority.bulk(stop=stop):
@@ -2709,9 +2748,11 @@ def _schedule_build(
                     _warm_index(root, freshness_stamp, stop)
                 else:
                     job()
+            _BUILD_RECORD.succeeded(root, job=label)
         except foreground_priority.BulkCancelled:
-            pass
-        except Exception:  # noqa: BLE001 - the optional stage stays soft-failing
+            _BUILD_RECORD.ended(root)
+        except Exception as error:  # noqa: BLE001 - the optional stage stays soft-failing
+            _BUILD_RECORD.failed(root, error, job=label)
             log.warning("%s background build failed", label, exc_info=True)
         finally:
             with _CACHE_LOCK:
