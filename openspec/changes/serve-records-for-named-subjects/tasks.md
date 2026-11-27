@@ -1,7 +1,7 @@
 ## 1. Declaration
 
 - [x] 1.1 Parse `subject` and the field `description` in Records manifests; refuse a malformed declaration in parsing, revise and validate with an error that names what to change; publish both in the authoring contract.
-  - Evidence: `parse_subject`, `_subject_field`, `SubjectDeclaration`, `FieldSpec.description` and `_subject_json_schema` in `src/exomem/structured_collections.py`. Tests in `tests/test_subject_records.py`: `test_a_subject_declaration_parses_with_its_defaults`, `test_a_malformed_subject_is_refused_naming_what_to_change` (11 cases), `test_only_a_records_collection_declares_a_subject`, `test_validating_or_revising_a_ledger_refuses_a_malformed_subject`.
+  - Evidence: `parse_subject`, `_subject_field`, `SubjectDeclaration`, `FieldSpec.description` and `_subject_json_schema` in `src/exomem/structured_collections.py`. Tests in `tests/test_subject_records.py`: `test_a_subject_declaration_parses_with_its_defaults`, `test_a_malformed_subject_is_refused_naming_what_to_change` (11 cases), `test_only_a_records_collection_declares_a_subject`, `test_creating_validating_or_revising_a_ledger_refuses_a_malformed_subject`, `test_a_manifest_that_used_subject_for_something_else_stays_readable`.
 
 ## 2. The block
 
@@ -18,7 +18,9 @@
     - a collection's own refusal: `test_a_collection_that_cannot_be_admitted_leaves_the_other_ledgers_served` (both id orders);
     - an entry's own failure: `test_a_sum_that_cannot_be_read_makes_its_own_entry_unavailable`;
     - budget, stubs and the lead's citations: `test_a_ledger_whose_newest_rows_do_not_fit_keeps_its_sums`, `test_a_nearly_full_packet_names_the_ledger_it_had_no_room_for`, `test_a_ledger_entry_keeps_the_leads_citations_from_other_collections` (both id orders), `test_a_ledger_entry_without_newest_rows_leaves_the_leads_citations_whole`, and the `cited_by` and `summary` assertions in the first test; in `tests/test_page_citations.py`, `test_an_unlisted_field_is_counted_and_leaves_the_hit_s_citations_to_the_other_fields`;
-    - `show` refuses a link field: the `show-a-link` case of `test_a_malformed_subject_is_refused_naming_what_to_change`.
+    - `show` refuses a link field: the `show-a-link` case of `test_a_malformed_subject_is_refused_naming_what_to_change`;
+    - decimal sums, datetime order and a long description: `test_decimal_amounts_sum_to_the_places_they_were_written_with`, `test_the_newest_rows_by_datetime_follow_the_instant_not_the_text`, `test_a_long_measure_description_is_cut_so_the_sums_still_fit`;
+    - hook delivery, in `tests/test_retrieve_nudge_working_set.py`: `test_the_hook_shows_each_named_pages_tally_or_why_it_has_none` (map and rollback layouts), `test_a_cap_that_cannot_hold_every_tally_line_counts_the_ones_it_cut`.
 - [x] 2.2 Measure the block against the Records load target per pair.
   - Evidence: `benchmarks/subject_records/latency.py` and its recorded run in `benchmarks/subject_records/results.json`, summarised in `benchmarks/subject_records/README.md`.
 - [x] 2.3 Teach the declaration in the skill scaffold and add a user note.
@@ -31,6 +33,8 @@
 - [ ] 3.3 Operator vault step after release:
   1. Declare `subject` on the target Records collection.
   2. Check that its storage is a Markdown-items collection or a typed-v2 summary collection, since any other encoding reads `unavailable`.
-  3. Run the real turn once, and check that the person's lead in `turn_slice.items` carries `exact_alias` in its `evidence`.
-  4. If it does not, add the name that the turn uses to `aliases` on the person's entity page, and run the turn again.
+  3. Check that the incident turns hold at least one term of the collection's effective `claims`.
+  4. If a turn holds none, add its term to the manifest's `claims`.
+  5. Run the real turn once, and check that the person's lead in `turn_slice.items` carries `exact_alias` in its `evidence`.
+  6. If it does not, add the name that the turn uses to `aliases` on the person's entity page, and run the turn again.
 - [ ] 3.4 Sync the deltas into the canonical specs and archive this change with `openspec archive`, after the strict gate passes.

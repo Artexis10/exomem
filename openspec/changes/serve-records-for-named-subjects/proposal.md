@@ -24,7 +24,7 @@ What is missing is a declaration of how a collection's rows add up, and a block 
   - `show`: up to four fields for each newest row;
   - `recent`: 0 to 10 newest rows, 3 by default.
 
-  Parsing, revise and validate refuse a malformed declaration and name what to change. A field may carry a `description`, which a reader shows beside the value, such as which sign of an amount means what.
+  A collection create, revise and validate refuse a malformed declaration and name what to change; a stored manifest that used `subject` for something else still reads, with no ledger. A field may carry a `description`, which a reader shows beside the value, such as which sign of an amount means what.
 - **`subject_records` in `recall_context`.** When the turn names a page by its title or alias, rows cite that page through `subject.field`, and the turn holds a claim term of the collection, the packet carries one entry for the pair. Each entry leads with a sentence that the agent can repeat. It has the sums by state and in total, the counts of rows with no amount or no date, the newest rows and the collection's method page. The block sits at the top level of the packet, so it survives a starved task context.
 - **Nothing dropped in silence.** At most three entries carry numbers. A later pair, or one that the packet has no room for, stays as an `omitted` stub, and the block counts every pair it left out.
 - **Honest unknowns.** A missing amount is counted as unknown and never summed as 0. A building index reads `warming`. A withheld field reads `unavailable`. Neither carries a number, and neither entry appears unless the caller may read a row that cites the page.

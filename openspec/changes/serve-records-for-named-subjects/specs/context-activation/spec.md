@@ -33,17 +33,40 @@ A served `recall_context` packet SHALL carry a top-level `subject_records` block
 
 ### Requirement: A ready entry reports its sums and unknowns honestly
 
-A `ready` entry SHALL lead with `summary`, one sentence built at render time from the entry's own values. It SHALL carry `anchor`, `collection`, `measure`, `state`, `by_state` when `state` is declared, `total`, `unknown`, up to `recent` `newest` rows, and the `capture.method` page when it resolves for the caller. A row with no measure SHALL count in `rows` and `unknown.measure`, never in a sum. A sum with no known measure SHALL be null.
+A `ready` entry SHALL lead with `summary`, a sentence built at render time from its own values. It SHALL carry `anchor`, `collection`, `measure`, `state`, `by_state` when `state` is declared, `total`, `unknown`, up to `recent` `newest` rows, and the `capture.method` page when it resolves for the caller. A row with no measure SHALL count in `rows` and `unknown.measure`, never in a sum. A sum SHALL keep its values' most decimal places, and with no known measure SHALL be null.
 
 #### Scenario: An unknown amount is not a zero
 
 - **WHEN** one cited row has no amount and another has no date
 - **THEN** the entry counts both rows, reports `unknown.measure` 1 and `unknown.order` 1, and the missing amount adds nothing to any sum
 
+#### Scenario: Decimal amounts sum without float noise
+
+- **WHEN** a person's settled rows hold 0.1, 0.2 and -4.15
+- **THEN** the settled sum is -3.85 in `by_state` and in `summary`
+
 #### Scenario: The summary repeats the values
 
 - **WHEN** a `ready` entry is served
 - **THEN** its first key is `summary`, and the sentence names the anchor, each state's sum, the unknown counts and the newest date
+
+### Requirement: The hook shows every ledger entry
+
+The Claude Code hook SHALL render the `subject_records` block in every layout that it renders a resolved packet in: the block's state and reason, and one line per entry with its `summary`, or its page, collection and `reason`. Lines that its ceiling cuts, and pairs without an entry, SHALL be counted on a last line.
+
+#### Scenario: A hook-served turn sees the tally
+
+- **WHEN** a hook-delivered packet carries a `ready` entry and an `omitted` stub
+- **THEN** the injected block holds the entry's `summary` and the stub's `reason`, each with the collection's ref
+
+### Requirement: A measure's description is bounded
+
+A `ready` entry's `measure.description` SHALL be the measure field's `description`, cut to 200 characters and ending in `…` when longer, so a long description cannot crowd an entry's sums out of the packet.
+
+#### Scenario: A long description is cut
+
+- **WHEN** the measure field's `description` runs to thousands of characters
+- **THEN** the entry stays `ready` with its sums, and its `measure.description` holds at most 200 characters ending in `…`
 
 ### Requirement: A total is arithmetic, not a balance
 

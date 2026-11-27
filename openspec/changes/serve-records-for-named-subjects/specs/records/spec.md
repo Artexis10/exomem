@@ -13,7 +13,7 @@ A Records manifest MAY declare `subject`, a closed mapping. `field` SHALL name a
 
 ### Requirement: A malformed subject is refused with what to change
 
-Manifest parsing, `revise` and `validate_revision` SHALL refuse a `subject` with an unknown key, a missing required key, a key that names no declared field or a field of another type, or a `show` or `recent` outside its bound. The refusal SHALL name the key and say what to change. A refusal for a wrong field SHALL list the declared fields that the key accepts. A Planning collection and a derived collection SHALL NOT declare `subject`.
+A collection create, `revise` and `validate_revision` SHALL refuse a `subject` with an unknown key, a missing required key, a key that names no declared field or a field of another type, or a `show` or `recent` outside its bound. The refusal SHALL name the key and say what to change, and list the declared fields that a wrong field's key accepts. A Planning or derived collection SHALL NOT declare `subject`. A reader SHALL treat a refused `subject` as none.
 
 #### Scenario: A measure that is not a number is refused
 
@@ -27,5 +27,10 @@ Manifest parsing, `revise` and `validate_revision` SHALL refuse a `subject` with
 
 #### Scenario: A Planning collection cannot declare a subject
 
-- **WHEN** a Planning manifest declares `subject`
-- **THEN** parsing refuses it and says that only a Records collection declares `subject`
+- **WHEN** a create or revise gives a Planning manifest a `subject`
+- **THEN** it is refused, and the message says that only a Records collection declares `subject`
+
+#### Scenario: A manifest that used subject for something else stays readable
+
+- **WHEN** a stored manifest holds a `subject` value that is not a declaration, such as a plain word
+- **THEN** the collection reads with no ledger, and a revise that keeps the value is refused with what to change

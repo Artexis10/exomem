@@ -34,7 +34,7 @@ On typed rows, the aggregate groups by the state's stored cell and decodes one r
 - `omitted` counts every pair that the cap or the budget left without its entry, including one with no room for its stub.
 - A lead whose `ready` entry carries `newest` keeps `cited_by_count`, and its `cited_by` leaves out that ledger's citations through `subject.field`: the entry's sums and newest rows stand for them. The citation read itself counts those rows and lists none of them (`page_citations.for_hits`, `unlisted`), so the three it lists are other collections' citations whichever id sorts first. An entry without `newest`, from a `recent` of 0 or a room cut, leaves `cited_by` whole.
 
-When not even the block's frame fits, the packet carries no block. A failure before a ledger applies is logged at debug level and leaves the packet unchanged; a failure after is the block's own state or a proven pair's, and a collection's own refusal leaves that collection out (D8).
+When not even the block's frame fits, the packet carries no block. The Claude Code hook renders the block after the turn slice, as the packet's other content: the block's state, then one line per entry with its `summary` or its `reason`, cut by whole lines with a last line that counts what it cut. A failure before a ledger applies is logged at debug level and leaves the packet unchanged; a failure after is the block's own state or a proven pair's, and a collection's own refusal leaves that collection out (D8).
 
 **D7. Each entry leads with a sentence the agent can repeat.** A `ready` entry's `summary` is built from its own values at render time: the anchor, the sum over every state, each state's sum, the unknown counts and the newest date. The template adds words, never values. The total is arithmetic over every state, not a balance: the collection's method page says which states count toward what is owed. An entry without numbers leads with its `reason`. Only a `ready` entry carries `measure`.
 
@@ -53,6 +53,8 @@ The Records load target for a filtered query applies per (anchor, collection): p
 
 ## Risks / Trade-offs
 
-- SQLite sums floating-point amounts with its own compensated sum, which can differ in the last digit from the query engine's exact accumulator. Integer amounts are exact, and an integer sum past the 64-bit range reads `unavailable`.
+- SQLite sums floating-point amounts in binary, so 0.1 + 0.2 - 4.15 reads -3.8500000000000005. The grouped aggregate also returns the most decimal places of the values each group sums, read from `printf('%!.15g')` so it is the same on every SQLite version, and the server rounds each sum to them. Integer amounts are exact, and an integer sum past the 64-bit range reads `unavailable`.
 - A number stored outside SQLite's plain range, such as a large decimal, makes the entry `unavailable` rather than inexact.
-- `subject` was an unchecked key before this change. A manifest that used it for another purpose now fails to parse, and the error names the key to remove.
+- `subject` was an unchecked key before this change. A manifest that used it for another purpose still reads, with no ledger and a debug log. A collection create, `revise` or `validate_revision` refuses the value and names the key to change.
+- A stored datetime keeps its offset, so JSON rows order by `julianday()`, which reads the offset on SQLite 3.38, the store's floor.
+- A field's `description` is free text that every entry repeats, so the server cuts it to 200 characters, ending in `…`.
