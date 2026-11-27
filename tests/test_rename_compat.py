@@ -29,8 +29,9 @@ def _subprocess_env() -> dict[str, str]:
 def test_kb_mcp_alias_is_the_same_module_object() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
-        import exomem.find
         import kb_mcp.find
+
+        import exomem.find
     assert kb_mcp.find is exomem.find  # single module state, not a re-import
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
@@ -346,3 +347,46 @@ def test_the_credential_hook_sends_no_key_when_service_env_names_two_different_o
     monkeypatch.setenv("EXOMEM_SERVICE_ENV", str(service_env))
 
     assert exomem_local_credentials.rest_key() == ("", "")
+
+
+def test_a_writer_persists_the_public_name_and_a_rewrite_reaches_every_spelling() -> None:
+    assert env_compat.emitted_name("EXOMEM_VAULT_PATH") == "EVERMATTER_VAULT_PATH"
+    assert env_compat.emitted_name("KB_MCP_PORT") == "EVERMATTER_PORT"
+    assert env_compat.emitted_name("EVERMATTER_PORT") == "EVERMATTER_PORT"
+    assert env_compat.emitted_name("PATH") == "PATH"
+    for name in ("EXOMEM_PORT", "EVERMATTER_PORT", "KB_MCP_PORT"):
+        assert env_compat.names_for(name) == ("EXOMEM_PORT", "EVERMATTER_PORT", "KB_MCP_PORT")
+    assert env_compat.names_for("PATH") == ("PATH",)
+
+
+def test_the_supervisor_refusal_names_the_two_ways_to_settle_it_and_no_value() -> None:
+    """The failure: it said to delete a line, but the supervisor's own environment holds one of the two names."""
+    sources = [{"EXOMEM_STATE_ROOT": "/supervisor-root"}, {"EVERMATTER_STATE_ROOT": "/file-root"}]
+
+    with pytest.raises(env_compat.SettingsConflict) as refused:
+        env_compat.refuse_placement_conflicts_across(sources, source="the supervisor environment and its files")
+
+    message = str(refused.value)
+    assert "EVERMATTER_STATE_ROOT and EXOMEM_STATE_ROOT" in message
+    assert "Restart the unit" in message and "change the file so that its value matches" in message
+    assert "supervisor-root" not in message and "file-root" not in message
+
+
+def test_a_measurement_script_clears_every_spelling_of_an_inherited_setting(monkeypatch) -> None:
+    """The failure: the scrub listed two prefixes, so an inherited EVERMATTER_ setting reached a live writer."""
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "_records_measurement_env.py"
+    spec = importlib.util.spec_from_file_location("records_measurement_env", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    # The scrub deletes from os.environ, so it runs over a copy: the real environment keeps the
+    # settings that the test harness set for every other test in this worker.
+    inherited = {name: "live" for name in ("EXOMEM_INHERITED", "EVERMATTER_INHERITED", "KB_MCP_INHERITED")}
+    monkeypatch.setattr(os, "environ", {**inherited, "UNRELATED_SETTING": "kept"})
+
+    module.clear_inherited()
+
+    assert os.environ == {"UNRELATED_SETTING": "kept"}

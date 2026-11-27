@@ -22,10 +22,11 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
 
+from exomem.env_compat import SETTING_PREFIXES
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BASIC_MEMORY_ROOT = REPO_ROOT.parent / "basic-memory"
@@ -118,7 +119,7 @@ class HarnessContext:
         env = {
             k: v
             for k, v in os.environ.items()
-            if not k.startswith(("EXOMEM_", "KB_MCP_"))
+            if not k.startswith(SETTING_PREFIXES)
         }
         env.update(
             {

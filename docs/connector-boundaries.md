@@ -11,7 +11,7 @@ Managed-vault import remains a separate delivery and requires separate operation
 
 ## Host configuration
 
-Set `EXOMEM_CONNECTOR_BOUNDARY_CONFIG` to an absolute JSON file path outside the vault.
+Set `EVERMATTER_CONNECTOR_BOUNDARY_CONFIG` to an absolute JSON file path outside the vault.
 The host operator owns this file. Connector requests cannot amend it.
 The service and maintenance process must read the same configuration.
 
@@ -53,7 +53,7 @@ An older runtime that lacks this compatibility capability must refuse the armed 
 5. Start the runtime through its service manager, expecting startup to validate the configuration and portable requirement.
 
 ```sh
-exomem maintain --migrate-state --offline --arm-connector-boundary --vault "$EXOMEM_VAULT_PATH"
+exomem maintain --migrate-state --offline --arm-connector-boundary --vault "$EVERMATTER_VAULT_PATH"
 ```
 
 Maintenance also prepares the existing immutable semantic activation manifest.

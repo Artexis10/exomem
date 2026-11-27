@@ -34,6 +34,7 @@ from typing import Any
 from release_arm import MeasurementRefused, extract_release, latest_release_tag, prepare_tag_runtime
 
 from exomem import latency_watch
+from exomem.env_compat import SETTING_PREFIXES
 from exomem.install_info import distribution_probe
 from exomem.request_latency_contract import load_contract
 
@@ -311,7 +312,7 @@ INIT_STATE = ("import sys; from pathlib import Path; from exomem import state_mi
               "authority=m.assert_offline_migration_authority(source='latency gate arm before seeding'))")
 
 #: The runner's own settings never reach an arm: its keys, tokens and service settings stay out.
-_HOST_PREFIXES = ("EXOMEM_", "KB_MCP_", "FASTMCP_", "GITHUB_")
+_HOST_PREFIXES = (*SETTING_PREFIXES, "FASTMCP_", "GITHUB_")
 _HOST_SUFFIXES = ("_API_KEY", "_ACCESS_TOKEN", "_TOKEN", "_SECRET")
 
 

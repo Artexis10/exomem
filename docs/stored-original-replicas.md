@@ -13,7 +13,7 @@ The store supports WSL-mounted Windows drives that provide hard links and direct
 Eviction removes plaintext from the vault and its current mirrors. Keep the store and the exported key for recovery.
 
 Place the vault's media store configuration in `media-store.json` in its state directory.
-Keep the existing `vaults` object and store descriptors. Remove `EXOMEM_MEDIA_STORE_CONFIG` from the process environment before using the owner commands.
+Keep the existing `vaults` object and store descriptors. Remove `EVERMATTER_MEDIA_STORE_CONFIG` from the process environment before using the owner commands.
 
 The following commands use the example vault `/srv/archive` and a configured store named `disk`.
 
@@ -111,12 +111,12 @@ A read of unknown size after a store starts work counts toward the cap conservat
 At 500,000 similarly sized replicas and 25 TB in one store, the calculation gives 116 replicas and 5.4 GiB in about 216 seconds per round.
 Two such stores use about 432 seconds per round. At this distribution and cadence, both cover their replicas within 30 days.
 Larger or unevenly sized objects and slow or unavailable stores can lengthen the cycle.
-Raise `EXOMEM_REPLICA_CHECK_READ_MIB_PER_SECOND` if the read cap is the limiting factor.
+Raise `EVERMATTER_REPLICA_CHECK_READ_MIB_PER_SECOND` if the read cap is the limiting factor.
 The store that has waited longest goes first in each round.
 Set these two environment variables on the service to change them:
 
-- `EXOMEM_REPLICA_CHECK_CYCLE_DAYS`: the days between two checks of one replica.
-- `EXOMEM_REPLICA_CHECK_READ_MIB_PER_SECOND`: the read rate of a content check.
+- `EVERMATTER_REPLICA_CHECK_CYCLE_DAYS`: the days between two checks of one replica.
+- `EVERMATTER_REPLICA_CHECK_READ_MIB_PER_SECOND`: the read rate of a content check.
 
 ## Set the sample budget of a store
 
