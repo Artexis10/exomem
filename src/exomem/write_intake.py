@@ -1110,6 +1110,9 @@ class Admission:
     #: The same, for a refusal that needs a read of the vault's declarations. Only a save that is
     #: about to queue runs it (`certain_refusal`), so a save that never meets contention reads nothing.
     declared_refusal: Callable[[], Exception | None] | None = None
+    #: The call's arguments, whose own references the terminal filter leaves as sent.
+    arguments: Mapping[str, Any] = field(default_factory=dict)
+    _released: bool = field(default=False, init=False, repr=False)
 
     def run(self, call: Callable[[], Any]) -> Any:
         """Run the save, or queue it when the boundary stays busy.
@@ -1149,7 +1152,13 @@ class Admission:
                 self.drainer.end_accept(self.origin)
 
     def certain_refusal(self) -> Exception | None:
-        """The refusal this save is certain to get, read once and only for a save about to queue."""
+        """The refusal this save is certain to get, read once and only for a save about to queue.
+
+        It is raised in place of the call, outside `invoke_command`'s terminal filter, and a declared
+        refusal quotes the vault's own declaration. So it leaves through that filter here, as the same
+        refusal from the call does. A refusal that the filter cannot release is dropped: the save goes
+        on as if none were known, and its own refusal comes from the call or the replay.
+        """
         if self.refusal is None and self.declared_refusal is not None:
             read, self.declared_refusal = self.declared_refusal, None
             try:
@@ -1157,6 +1166,18 @@ class Admission:
             except Exception:  # noqa: BLE001 - a declaration that cannot be read leaves the save queueable
                 log.debug("write intake could not read the declarations of a %s save", self.command.name,
                           exc_info=True)
+        if self.refusal is not None and not self._released:
+            from .governance import egress
+
+            self._released = True
+            try:
+                egress.postfilter_error(
+                    self.command.name, self.refusal, self.drainer.vault_root, request_kwargs=self.arguments
+                )
+            except Exception:  # noqa: BLE001 - an unfiltered refusal never leaves; the save runs or queues instead
+                log.warning("write intake could not filter the refusal of a %s save", self.command.name,
+                            exc_info=True)
+                self.refusal = None
         return self.refusal
 
     def _run_in_flight(self, call: Callable[[], Any], started: float, deadline: float) -> Any:
@@ -1415,6 +1436,7 @@ def admission(command: Any, injected: tuple[Any, ...], kwargs: Mapping[str, Any]
         origin_ttl=origin[1],
         refusal=refusal_before_queueing(command, jsonable),
         declared_refusal=lambda: declared_refusal_before_queueing(command, jsonable, drainer.vault_root),
+        arguments=jsonable,
     )
 
 
@@ -1511,22 +1533,35 @@ def _summary_line(state_counts: Mapping[str, int]) -> str:
     return f"{queued} queued save(s) waiting, {failed} failed save(s) to review."
 
 
-def open_arguments(vault_root: Path, command_name: str) -> list[dict[str, Any]] | None:
-    """The arguments of each save of `command_name` that still waits or applies, or None when unreadable.
+def may_change_declaration(
+    vault_root: Path, *, command_name: str, argument: str, path: str, seconds: float
+) -> bool | None:
+    """Whether a save that still waits or applies may change a declaration before a later save replays.
 
-    A save that reads a declaration asks, because an earlier queued save may change what that
-    declaration says before this one replays.
+    A save of `command_name` may when its `argument` holds a value other than null; a save of any other
+    command may when a string among its arguments contains `path`. One EXISTS query decides it inside
+    SQLite, so no queued arguments reach Python. A query that has not answered within `seconds` stops:
+    None, unknown, as for a queue that cannot be read.
     """
+    if seconds <= 0:
+        return None
+    deadline = time.monotonic() + seconds
     try:
         with _store(vault_root, mode="read") as conn:
-            rows = conn.execute(
-                "SELECT arguments FROM intake WHERE command = ? AND state IN (?, ?)", (command_name, *_OPEN_STATES)
-            ).fetchall()
-        return [json.loads(row["arguments"]) for row in rows if row["arguments"] is not None]
+            # Each row costs a handful of steps, however large its arguments, so the deadline is read often.
+            conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 100)
+            (found,) = conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM intake WHERE state IN (?, ?) AND arguments IS NOT NULL AND CASE "
+                "WHEN command = ? THEN json_extract(arguments, '$.' || ?) IS NOT NULL "
+                "ELSE EXISTS (SELECT 1 FROM json_tree(intake.arguments) AS node "
+                "WHERE node.type = 'text' AND instr(node.value, ?) > 0) END)",
+                (*_OPEN_STATES, command_name, argument, path),
+            ).fetchone()
+        return bool(found)
     except FileNotFoundError:
-        return []
+        return False
     except Exception:  # noqa: BLE001 - a queue that cannot be read is an unknown, never an empty one
-        log.debug("write intake could not read its open %s saves", command_name, exc_info=True)
+        log.debug("write intake could not read its open saves", exc_info=True)
         return None
 
 

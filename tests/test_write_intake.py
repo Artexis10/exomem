@@ -14,6 +14,7 @@ import hashlib
 import json
 import threading
 import time
+import tracemalloc
 from dataclasses import replace
 from pathlib import Path
 
@@ -30,6 +31,7 @@ from exomem import (
     cloud_cell,
     commands,
     mutation_journal,
+    record_memory,
     request_budget,
     write_intake,
     writer_lease,
@@ -534,11 +536,11 @@ def test_a_record_call_with_arguments_its_action_refuses_behind_the_queue_is_nev
     _wait_for_state(vault, first["queued_write"]["ref"], "applied")
 
 
-def _ledger_declaring_a_status(vault: Path) -> str:
-    """The ledger collection with one more field, whose declared values are `draft` and `published`."""
+def _ledger_declaring_a_status(vault: Path, values: str = "draft, published") -> str:
+    """The ledger collection with one more field, whose declared values are `values`: `draft` and `published` unless given."""
     manifest = setup_ledger_collection(vault)
     text = manifest.read_text(encoding="utf-8")
-    declared = "    status:\n      type: enum\n      enum: [draft, published]\n    exact_text:\n"
+    declared = f"    status:\n      type: enum\n      enum: [{values}]\n    exact_text:\n"
     manifest.write_text(text.replace("    exact_text:\n", declared, 1), encoding="utf-8")
     return LEDGER_COLLECTION_PATH
 
@@ -618,6 +620,139 @@ def test_an_undeclared_record_value_behind_a_queued_manifest_revision_is_queued_
     assert receipt["state"] == "queued"
     paused.set()
     _wait_for_state(vault, first, "applied")
+
+
+def test_an_undeclared_record_value_behind_a_queued_edit_of_the_manifest_is_queued_not_refused(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A queued edit of the manifest may change what the collection declares before this save replays."""
+    _writer, holder = managers
+    collection = _ledger_declaring_a_status(vault)
+    first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
+    with _Hold(holder, vault):
+        edit = _send(_command("edit_memory"), vault, {
+            "path": collection, "why": "rename the ledger",
+            "operation": {"kind": "patch_frontmatter", "field": "title", "value": "Publications"},
+        }, scope="principal:session-b")
+    assert edit["state"] == "queued"
+    receipt = _send(_command("record_memory"), vault, _status_call(collection, "update", "resolved"),
+                    scope="principal:session-c")
+    assert receipt["state"] == "queued"
+    paused.set()
+    _wait_for_state(vault, first, "applied")
+
+
+def test_the_busy_record_check_holds_none_of_the_queued_arguments_in_memory(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect: the check loaded and decoded every open Records save on the request thread, up to 4 MiB each,
+    and the queue has no cap on how many it holds."""
+    _writer, holder = managers
+    collection = _ledger_declaring_a_status(vault)
+    monkeypatch.setattr(write_intake, "_claim_head", lambda root: 0.05)
+    long_text = "x" * (3 << 20)
+    with _Hold(holder, vault):
+        for number in range(4):
+            receipt = _send(_command("record_memory"), vault, {
+                "action": "append", "collection": collection, "why": "record a long entry",
+                "item": ledger_item(slug=f"long-note-{number}", exact_text=long_text),
+            }, scope=f"principal:session-{number}")
+            assert receipt["state"] == "queued"
+    tracemalloc.start()
+    try:
+        refusal = record_memory.value_refusal(vault, _status_call(collection, "update", "resolved"))
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert refusal is not None and refusal.code == "SCHEMA_ENUM"
+    assert peak < len(long_text), f"the check held {peak} bytes while 4 saves of {len(long_text)} bytes waited"
+
+
+def _mcp_server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """The MCP server an agent calls, with no embeddings and the call ledger under `tmp_path`."""
+    monkeypatch.setattr(server_module, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_CALL_LEDGER_DIR", str(tmp_path / "ledger"))
+    monkeypatch.delenv("EXOMEM_MCP_TOOL_SHAPE", raising=False)
+    call_ledger.reset_chain_cache()
+    return server_module.build_server(require_auth=False)
+
+
+def _reply_text(result) -> str:
+    """Everything an MCP reply shows its caller: its text blocks and its structured content."""
+    texts = [getattr(block, "text", "") for block in result.content]
+    return "\n".join([*texts, json.dumps(result.structured_content, sort_keys=True)])
+
+
+_CREDENTIAL = "ghp_" + "A1b2" * 9
+
+
+def test_a_busy_record_refusal_blocks_a_credential_in_the_declared_values_as_the_save_itself_does(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Defect: the refusal raised before queueing quoted the manifest's enum unfiltered, a credential included,
+    while the same refusal from the save itself left through the egress filter, which blocks the credential."""
+    _writer, holder = managers
+    collection = _ledger_declaring_a_status(vault, f"draft, {_CREDENTIAL}")
+    server = _mcp_server(monkeypatch, tmp_path)
+
+    async def add(client: Client, why: str):
+        return await client.call_tool(*public_call("add_record", {
+            "collection": collection, "why": why, "item": ledger_item(status="resolved"),
+        }), raise_on_error=False)
+
+    # One session: the server's shutdown stops the vault's drainer.
+    async def run():
+        async with Client(server) as client:
+            direct = await add(client, "record a published entry")
+            first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
+            busy = await add(client, "record a published entry again")
+            assert [item["ref"] for item in write_intake.read(vault)["items"]] == [first]
+            paused.set()
+            _wait_for_state(vault, first, "applied")
+        return direct, busy
+
+    direct, busy = asyncio.run(run())
+    assert "nothing is held" in busy.structured_content["error"]["message"]
+    for reply in (direct, busy):
+        assert _CREDENTIAL not in _reply_text(reply)
+        error = reply.structured_content["error"]
+        assert error["code"] == "SCHEMA_ENUM"
+        assert 'allowed: "draft", "[credential blocked by exomem egress policy]"' in error["message"]
+
+
+def test_an_undeclared_record_value_by_title_over_mcp_is_refused_behind_an_ordinary_queued_add_record(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Defect: MCP stores every parameter of a queued `add_record`, an unset one as null, and the check read a
+    present `manifest_text` key as a queued revision. One ordinary queued save turned the refusal off, and a wrong
+    value came back "Queued, not saved yet"."""
+    _writer, holder = managers
+    collection = _ledger_declaring_a_status(vault)
+    server = _mcp_server(monkeypatch, tmp_path)
+    paused = threading.Event()
+    real_claim = write_intake._claim_head
+    monkeypatch.setattr(write_intake, "_claim_head", lambda root: 0.05 if not paused.is_set() else real_claim(root))
+
+    async def run():
+        async with Client(server) as client:
+            with _Hold(holder, vault):
+                ordinary = await client.call_tool(*public_call("add_record", {
+                    "collection": collection, "why": "record a draft", "item": ledger_item(status="draft"),
+                }), raise_on_error=False)
+            wrong = await client.call_tool(*public_call("add_record", {
+                "collection": "Publications ledger", "why": "record a resolved entry",
+                "item": ledger_item(slug="second-note", status="resolved"),
+            }), raise_on_error=False)
+            queued = [item["ref"] for item in write_intake.read(vault)["items"]]
+            paused.set()
+            _wait_for_state(vault, ordinary.structured_content["queued_write"]["ref"], "applied")
+        return ordinary.structured_content, wrong.structured_content, queued
+
+    ordinary, wrong, queued = asyncio.run(run())
+    assert queued == [ordinary["queued_write"]["ref"]]
+    assert wrong["error"]["code"] == "SCHEMA_ENUM"
+    assert wrong["error"]["message"].startswith('Field is outside its enum: status; allowed: "draft", "published"')
 
 
 def test_a_revisit_save_with_relations_behind_a_backlog_is_told_only_the_exit_that_lands(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import math
 from collections.abc import Mapping
 from pathlib import Path
@@ -24,6 +25,8 @@ from . import (
 from .cli_ops import OpError, action_argument_contract
 from .query_compat import public_filter_annotation
 from .structured_collections import CollectionError, collection_remediation
+
+log = logging.getLogger(__name__)
 
 _QueryFilters = public_filter_annotation()
 
@@ -962,37 +965,43 @@ def _require_one_history_selector(given: Mapping[str, Any]) -> None:
 
 #: The argument that carries a manifest's text. A save that sends it can change what a collection declares.
 _MANIFEST_ARGUMENT = "manifest_text"
-#: How long the read of a declaration may run. The check only buys an earlier refusal, so a slow read gives
-#: the save up to the queue it would have joined, which is what its caller was already going to wait on.
+#: How long the check may read: the declaration, then the queue. It only buys an earlier refusal, so a slow
+#: read gives the save up to the queue it would have joined, which is what its caller was already going to wait on.
 _DECLARATION_READ_SECONDS = 0.5
 _RESEND_WITH_A_DECLARED_VALUE = (
     "Nothing was saved and nothing is held. Send the call again with a value the collection declares."
 )
 
 
-def _declared_manifest(vault_root: Path, collection: str) -> structured_collections.CollectionManifest | None:
+def _declared_manifest(
+    vault_root: Path, collection: str, budget: request_budget.RequestBudget
+) -> structured_collections.CollectionManifest | None:
     """The Records manifest that `collection` names, as a request thread reads it now, or None where that is unknown.
 
     A title, path, UUID or reference resolves as a read resolves it. A collection that the store owns is read
     from the store's last commit beside the store thread (`read_served`): it never queues behind that thread
-    and never reads the projected `_collection.md`, which can lag the store. The read stops at
-    `_DECLARATION_READ_SECONDS` and answers None for any refusal, such as a busy or unserved store.
+    and never reads the projected `_collection.md`, which can lag the store. The read stops at `budget` and
+    answers None for any refusal, such as a busy or unserved store or a title that several collections carry.
+    It records no release: a refusal it answers None for reaches no caller, and a mutation's own resolution
+    of its collection records none either.
     """
     from .collection_store import runtime as store_runtime
+    from .governance import egress
 
     def read() -> structured_collections.CollectionManifest:
-        path = collection_refs.resolve_collection(vault_root, collection, profile="records")
-        return record_governance.require_records_profile(
-            record_governance.resolve_collection_without_receipt(vault_root, path)
-        )
+        with egress.decide_without_receipt():
+            path = collection_refs.resolve_collection(vault_root, collection, profile="records")
+            return record_governance.require_records_profile(
+                record_governance.resolve_collection_without_receipt(vault_root, path)
+            )
 
-    budget = request_budget.RequestBudget(seconds=_DECLARATION_READ_SECONDS)
     try:
         with request_budget.checking(request_budget.ReadCheckpoint(budget)):
             return store_runtime.read_served(vault_root, read)
     except request_budget.ReadBudgetExhausted:
         return None
-    except Exception:  # noqa: BLE001 - an unknown, withheld or unreadable collection keeps the replay's own refusal
+    except Exception as error:  # noqa: BLE001 - an unknown, withheld or unreadable collection keeps the replay's own refusal
+        log.debug("a busy Records save could not read its collection's declaration: %s", type(error).__name__)
         return None
 
 
@@ -1001,15 +1010,19 @@ def value_refusal(vault_root: Path, arguments: Mapping[str, Any]) -> OpError | N
 
     The busy intake raises it instead of queueing a save whose replay would refuse the same value. It takes no
     lock and no store writer. Whatever is not certain answers None and the save queues as before: a collection
-    this thread cannot read now, a manifest that the caller may not see, and any queued save that carries a
-    manifest text, because it may change what the collection declares before this save replays.
+    this thread cannot read now, a manifest that the caller may not see, and an open queued save that may change
+    what the collection declares before this one replays. Such a save is a Records save that carries a manifest
+    text, or a save of another command whose arguments name the manifest's path, such as an edit of its
+    frontmatter. A direct revise that commits between this check and the replay is not seen: the replay then
+    refuses or lands by the revised declaration.
     """
     action = arguments.get("action")
     values = arguments.get("item") if action == "append" else arguments.get("changes") if action == "update" else None
     collection = arguments.get("collection")
     if not isinstance(values, Mapping) or not values or type(collection) is not str:
         return None
-    manifest = _declared_manifest(Path(vault_root), collection)
+    budget = request_budget.RequestBudget(seconds=_DECLARATION_READ_SECONDS)
+    manifest = _declared_manifest(Path(vault_root), collection, budget)
     if manifest is None:
         return None
     refusal = records.supplied_value_refusal(manifest, values)
@@ -1017,8 +1030,15 @@ def value_refusal(vault_root: Path, arguments: Mapping[str, Any]) -> OpError | N
         return None
     from . import write_intake
 
-    queued = write_intake.open_arguments(vault_root, "record_memory")
-    if queued is None or any(_MANIFEST_ARGUMENT in earlier for earlier in queued):
+    changing = write_intake.may_change_declaration(
+        vault_root,
+        command_name=operation_entries.RECORDS.command,
+        argument=_MANIFEST_ARGUMENT,
+        # The path below the knowledge-base root: a caller may name the manifest with or without that root.
+        path=kbdir.managed_split(manifest.path, key=str.casefold) or manifest.path,
+        seconds=budget.remaining(),
+    )
+    if changing is not False:
         return None
     return OpError(
         refusal.code, refusal.reason, _RESEND_WITH_A_DECLARED_VALUE, details=_json_safe_details(refusal.details)
