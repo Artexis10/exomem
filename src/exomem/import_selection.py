@@ -15,7 +15,6 @@ from pathlib import Path
 
 import pathspec
 
-from . import extraction_parts
 from .cli_progress import files_phrase, human_bytes
 
 # A .gitignore larger than this is not a rules file; reading it whole could exhaust memory.
@@ -256,6 +255,9 @@ def _leave_reason(
 
 def select(folder: Path, *, include_hidden: bool = False, use_gitignore: bool = True) -> Selection:
     """Walk `folder` once and sort every entry into the files to take or the reason to leave it."""
+    # `extraction_parts` loads the media stack, which a command that only lists files need not pay for.
+    from . import extraction_parts
+
     result = Selection()
     # Each pending folder carries the .gitignore files above it; a file's `base` is its folder's path
     # from the root, with a closing slash, so a rule reads relative to its file.

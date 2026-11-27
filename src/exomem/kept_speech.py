@@ -22,18 +22,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import (
-    extraction_parts,
-    held_fs,
-    lexstore,
-    media_engines,
-    media_processing,
-    media_types,
-    preserve,
-    prior_extraction,
-    reserved_paths,
-    speech_attach,
-)
+# `extraction_parts`, `preserve`, `prior_extraction` and `speech_attach` load the media stack, and `adoption_run`
+# imports this module, so each function that needs one imports it when called (`tests/test_lazy_imports.py`).
+from . import held_fs, lexstore, media_engines, media_processing, media_types, reserved_paths
 from .governance import capture_redaction
 from .vault import PlannedWrite, content_hash, parse_frontmatter, read_guarded_text
 
@@ -85,6 +76,8 @@ def candidate(page_rel: str) -> tuple[str, str] | None:
 
 def part_folder(page_rel: str) -> str:
     """The vault-relative folder that holds the further parts of the page's extraction."""
+    from . import extraction_parts
+
     return extraction_parts.folder_for(Path(page_rel)).as_posix()
 
 
@@ -146,6 +139,8 @@ class Examined:
         `recording` is the plan's own item for the recording, when this plan stores it. `awaiting` marks a page whose
         recording is stored nowhere yet: its plan item is a text Source that apply files only when no recording comes.
         """
+        from . import extraction_parts
+
         folder = Path(self.page)
         return {
             "page": self.page, "pages": self.pages,
@@ -158,6 +153,8 @@ class Examined:
 
 def _read_parts(root: Path, page_rel: str, count: int) -> tuple[list[bytes], str] | None:
     """The raw bytes of parts 2 to `count`, or None when one is missing, unreadable or no part page."""
+    from . import extraction_parts
+
     raw: list[bytes] = []
     for number in range(2, count + 1):
         data = _read(root, extraction_parts.part_path(Path(page_rel), number).as_posix())
@@ -173,6 +170,8 @@ def _read_parts(root: Path, page_rel: str, count: int) -> tuple[list[bytes], str
 
 
 def _reading(root: Path, page_rel: str, page: bytes, count: int) -> _Reading | None:
+    from . import extraction_parts
+
     parts = _read_parts(root, page_rel, count)
     if parts is None:
         return None
@@ -193,6 +192,8 @@ def examine(
     `expect` is the staged original's SHA-256 and size. With none (the recording is not staged) the page's own record
     is what a stored Source must match, and the caller looks that Source up.
     """
+    from . import extraction_parts
+
     data = _read(root, page_rel)
     try:
         text = data.decode("utf-8") if data is not None else None
@@ -251,6 +252,8 @@ def find_recording(root: Path, sha256: str, size: int, *, prefer: str | None = N
 
 
 def _binds(root: Path, recording: str, sha256: str, size: int) -> bool:
+    from . import speech_attach
+
     try:
         speech_attach.bind(root, speech_attach.resolve(root, recording), sha256, size)
     except media_processing.MediaProcessingError:
@@ -280,6 +283,8 @@ class Kept:
 
     @property
     def digest(self) -> str:
+        from . import prior_extraction
+
         return prior_extraction.digest_of(self.engine, self.text)
 
 
@@ -289,6 +294,8 @@ def load(root: Path, record: Mapping[str, Any]) -> Kept:
     The kept text passes the card-number and credential removal that every kept text passes
     (`client-artifact-preservation`). A removal changes where the text splits; with none, the page's own parts stay.
     """
+    from . import extraction_parts, preserve
+
     page_rel = record["page"]
     data = _read(root, page_rel)
     reading = None if data is None else _reading(root, page_rel, data, int(record["pages"]))
@@ -329,6 +336,8 @@ class Settled:
 
 def _holds(vault: Path, kept: Kept, sidecar: Path, before: str) -> bool:
     """Whether the Source, or a prior extraction page it lists, already holds the kept result (design D1, step 1)."""
+    from . import prior_extraction
+
     digest = kept.digest
     pages = [(sidecar, before)] + [
         (vault / f"{link}.md", None) for link in prior_extraction.links_of(before)
@@ -355,6 +364,7 @@ def settle(
     one keeps its result while the page's goes to a prior page. Every write is one batch guarded by the Source page's
     content hash, and only the speech stage of a waiting job ends.
     """
+    from . import extraction_parts, preserve, prior_extraction, speech_attach
 
     def unit(commit: Callable[[Any], None]) -> Settled:
         current = speech_attach.resolve(vault, recording)
