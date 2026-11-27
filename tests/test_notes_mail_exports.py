@@ -36,6 +36,7 @@ from test_app_export_import import (  # noqa: F401 -- `_private_journal_folder` 
 )
 
 from exomem import (
+    adoption_run,
     cloud_import,
     export_expansion,
     export_mail,
@@ -433,6 +434,32 @@ def test_a_mailbox_that_outlasts_one_call_resumes_at_the_next_message_and_files_
     assert view["progress"] == {"total": 11, "filed": 11, "skipped_duplicates": 0, "failed": 0, "left_out": 0, "remaining": 0}
 
 
+def test_a_mailbox_read_that_only_sets_messages_aside_does_not_look_stalled_to_the_filer(vault: Path, monkeypatch) -> None:
+    """Catches a long read of Spam and Trash that derives no file and moves no count, so the filer parks the import as stalled."""
+    from exomem import import_filing, write_intake
+    from exomem.governance import principal as principal_module
+
+    expand = export_expansion.expand
+    # One message a call, so the read takes more calls in a row than the filer allows without movement.
+    monkeypatch.setattr(
+        export_expansion, "expand",
+        lambda root, import_id, *, keep_going, rewalk=False: expand(root, import_id, keep_going=lambda: False, rewalk=rewalk),
+    )
+    messages = [mail(number, labels="Spam") for number in range(adoption_run.FILING_STALL_CALLS + 4)] + [mail(40)]
+    import_id = stage_export(vault, mbox(messages), name="takeout.mbox")
+    filer = import_filing.Filer(vault)
+    owner = write_intake.principal_record(principal_module.owner_principal(surface="library"))
+    assert filer.register(import_id, principal=owner, surface=None)
+
+    for _ in range(60):
+        if filer.run_once(import_id) is None:
+            break
+        assert import_filing.read_view(vault, import_id)["state"] == "working"
+
+    assert import_filing.read_view(vault, import_id)["state"] == "done"
+    assert len(correspondence(vault)) == 1
+
+
 def test_a_later_takeout_whose_labels_changed_files_every_message_as_already_imported(vault: Path) -> None:
     """Catches a label in the transcript or the name: a re-export with other read and category labels would double the mailbox."""
     first = [mail(number, labels="Inbox,Unread") for number in range(6)]
@@ -657,7 +684,8 @@ def test_a_full_disk_while_writing_parks_the_import_with_a_free_space_need_and_a
 
     assert [need["need"] for need in view["needs"]] == ["free_space"]
     assert view["state"] == "parked" and len(expansion_rows(vault, import_id)) == 2
-    assert len(correspondence(vault)) == 2  # the two messages that were written before the full disk file; the stop waits for the rescan
+    # The call that read the export ends at the stop, so the scan that files the two messages written before the full disk is the first step of the call after it.
+    assert not correspondence(vault)
     monkeypatch.undo()
     for _ in range(60):
         if filer.run_once(import_id) is None:

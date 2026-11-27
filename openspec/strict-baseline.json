@@ -392,6 +392,7 @@
     "too-long change/bound-request-latency-across-surfaces/request-latency-contract :: One shared canary measures live public calls and recall availability",
     "too-long change/bound-request-latency-across-surfaces/request-latency-contract :: The activation log records the budget outcome",
     "too-long change/bound-request-latency-across-surfaces/stable-memory-references :: Disclosure-neutral reference resolution",
+    "too-long change/capture-what-the-person-says/agent-bootstrap-contract :: The capture predicate saves each claim at its true strength",
     "too-long change/carry-authorization-issuer/mcp-protocol-compatibility :: Authorization responses carry the advertised issuer",
     "too-long change/carry-recorded-positions/recorded-positions :: A Position Is Served Whole When It Fits The Block's Bound",
     "too-long change/carry-recorded-positions/recorded-positions :: Recall Serves The Positions That Bear On A Turn",

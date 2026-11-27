@@ -49,7 +49,10 @@ CEILINGS = {
     # so rather than stay silent (2026-11-23 Cloud disconnect went unnoticed for
     # hours); it is gated on tool discovery so deferred ToolSearch reads connected.
     # Sent on every substantive MCP-mode turn, so growth costs every turn.
-    "mcp activation": (retrieve._MCP_ACTIVATION, 1450),
+    # 1450 -> 1700 (1698 in use): the capture sentence states the rule for what the user says in
+    # passing, because after a compaction the agent no longer holds the rule its recall served
+    # (2026-11-27: an operational session saved none of the user's stated vision or people).
+    "mcp activation": (retrieve._MCP_ACTIVATION, 1700),
 }
 
 

@@ -5033,6 +5033,37 @@ def caller_holds_no_request_worker() -> Iterator[None]:
         _CALLER_HOLDS_NO_REQUEST_WORKER.reset(token)
 
 
+#: Whether the commands this thread runs are background work (`as_background_work`).
+_BACKGROUND_WORK: ContextVar[bool] = ContextVar("exomem_background_work", default=False)
+
+
+@contextmanager
+def as_background_work() -> Iterator[None]:
+    """Mark the commands run inside as background work: their wait for the boundary is no interactive writer's.
+
+    A write counts among the boundary's interactive waiters (`waiter_count`) so that a hold steps aside for it
+    between units. A long import that nobody waits for, the import filer's, must not count: its waiting would
+    make an agent's own call, or the owner's write, end early to let it in. Its hold is named `background`.
+    """
+    token = _BACKGROUND_WORK.set(True)
+    try:
+        yield
+    finally:
+        _BACKGROUND_WORK.reset(token)
+
+
+def in_background_work() -> bool:
+    """Whether the commands this thread runs are background work (`as_background_work`)."""
+    return _BACKGROUND_WORK.get()
+
+
+def _dispatch_holder_kind() -> str:
+    """How a command's wide boundary hold names its holder to a blocked writer: background work, a job's run or a command."""
+    from . import maintenance_jobs
+
+    return "background" if _BACKGROUND_WORK.get() else maintenance_jobs.holder_kind()
+
+
 # A waiting write parks one of the process's sync workers (anyio's limiter,
 # shared with search and activation). Only half may be parked, so a long
 # holder cannot turn every worker into a sleeping write and starve reads.
@@ -5774,6 +5805,14 @@ class LeaseManager:
         for the boundary commits when it releases (`VaultMutationCoordinator.waiter_count`).
         """
         return self._mutation_coordinator_for(vault_root).waiter_count()
+
+    def hold_room(self, vault_root: os.PathLike[str] | str) -> float | None:
+        """Seconds before this thread's hold of the vault's boundary turns overdue; None when it holds none.
+
+        For a long mutation that must end its call before a waiting writer is refused for the length of the
+        hold (`VaultMutationCoordinator.hold_room`).
+        """
+        return self._mutation_coordinator_for(vault_root).hold_room()
 
     def yield_to_waiting_writes(
         self,
@@ -7365,7 +7404,7 @@ class LeaseManager:
                             request_id=request_id,
                             operation=command.name,
                             # A job's dispatch under the wide switch: a blocked writer learns that a job holds it.
-                            holder_kind=maintenance_jobs.holder_kind(),
+                            holder_kind=_dispatch_holder_kind(),
                             session_open_admission=session_open_admission,
                         )
                     )

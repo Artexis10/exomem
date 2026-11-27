@@ -184,26 +184,43 @@ def unfiled(root: Path, import_id: str) -> list[dict]:
     return members
 
 
-def expand(root: Path, import_id: str, *, keep_going: Callable[[], bool], rewalk: bool = False) -> None:
+def find_exports(root: Path, import_id: str, *, rewalk: bool = False) -> bool:
+    """Record the stage's recognised exports as `working`, so a scan leaves each out until it is read; True when it found one.
+
+    It walks the stage when the record holds no export yet or one has lost its format, and `rewalk` walks it again
+    for an export that came after, such as one that a rerun of a local import copied. It reads no export item.
+    A stage with no recognised export is left with no record.
+    """
+    return _register(root, _load(root, import_id), rewalk)
+
+
+def _register(root: Path, record: _Record, rewalk: bool) -> bool:
+    lost = any(entry["format"] is None for entry in record.exports.values())
+    if (rewalk or lost or not record.exports) and _walk(root, record.import_id, record):
+        _save(root, record)  # before the first row, so that a crash never leaves rows whose export has no format
+        return True
+    return False
+
+
+def expand(root: Path, import_id: str, *, keep_going: Callable[[], bool], rewalk: bool = False) -> bool:
     """Derive transcripts from the stage's recognised exports until each is read or `keep_going` says the call is out of budget.
 
-    A call walks the stage to find its exports when it has none yet, and `rewalk` walks it again for an export that
-    came after, such as one that a rerun of a local import copied. A stage with no recognised export is left with no
-    record. Each call resumes the export that is `working` at its recorded position, and always handles one item,
-    so a call that starts with no budget left still moves on. An export that cannot be read to its end is `partial`,
-    and the transcripts read before the fault stay. A full volume stops the call with the record's `stop`, and the
-    next call tries again from the same item.
+    It finds the exports as `find_exports` does. Each call resumes the export that is `working` at its recorded
+    position, and always handles one item, so a call that starts with no budget left still moves on. An export that
+    cannot be read to its end is `partial`, and the transcripts read before the fault stay. A full volume stops the
+    call with the record's `stop`, and the next call tries again from the same item. It returns whether the call did
+    work: it found an export or read from one. A call that returns False changed nothing.
     """
     record = _load(root, import_id)
     record.stop = None
-    lost = any(entry["format"] is None for entry in record.exports.values())
-    if (rewalk or lost or not record.exports) and _walk(root, import_id, record):
-        _save(root, record)  # before the first row, so that a crash never leaves rows whose export has no format
+    worked = _register(root, record, rewalk)
     for export, state in record.exports.items():
         if state.get("state") != WORKING:
             continue
+        worked = True
         if not _slice(root, record, export, state, keep_going):
-            return
+            break
+    return worked
 
 
 def _walk(root: Path, import_id: str, record: _Record) -> bool:
