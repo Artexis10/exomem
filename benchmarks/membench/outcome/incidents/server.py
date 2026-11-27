@@ -1,7 +1,7 @@
 """The arm's own HTTP MCP server on a loopback port, for the cases whose agent must send a file's bytes.
 
 Only an HTTP MCP session with a verified sign-in can hand a file's bytes to Exomem (``upload_files``, then
-``exomem attach --handoff-file``). A stdio session cannot, and a loopback server that skips sign-in
+``evermatter attach --handoff-file``). A stdio session cannot, and a loopback server that skips sign-in
 refuses the handoff ("no verified HTTP session"). So the unit's server runs the product's own sign-in mode:
 a disposable key, a placeholder identity provider that nothing contacts, and one owner session that the
 arm's own session authority issues (``arm_side.py mint``). No product guard is relaxed. The server binds
