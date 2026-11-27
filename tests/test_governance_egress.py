@@ -3171,6 +3171,7 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
         "reclassify": "mutation",
         "propose-reclassification": "structure",
         "revert-reclassification": "mutation",
+        "classify": "validation",
     }
     manage = product["manage_memory_file"]
     assert commands.invocation_is_read_only(manage, {"operation": "list"})
@@ -3183,6 +3184,8 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
         manage, {"operation": "create", "validate_only": False}
     )
     assert commands.invocation_is_read_only(manage, {"operation": "move", "validate_only": True})
+    assert commands.invocation_is_read_only(manage, {"operation": "classify", "validate_only": True})
+    assert not commands.invocation_is_read_only(manage, {"operation": "classify", "validate_only": False})
     assert not commands.invocation_is_read_only(manage, {"operation": "move"})
     assert commands.invocation_is_read_only(
         product["observe_memory"], {"operation": "supersede", "validate_only": True}
