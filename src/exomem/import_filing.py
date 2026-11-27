@@ -52,8 +52,8 @@ STOP_NOT_REPLAYABLE = "IMPORT_FILING_LOGIN_NOT_REPLAYABLE"
 STOP_REPLY_UNREADABLE = "IMPORT_FILING_REPLY_UNREADABLE"
 #: The stage's `working` replies showed no movement for `adoption_run.FILING_STALL_CALLS` calls in a row; the filer waits and tries again.
 STOP_STALLED = "IMPORT_FILING_STALLED"
-#: An agent is filing the stage: the cell stands aside and carries on if the agent stops.
-STOP_AGENT_FILING = "IMPORT_FILING_AGENT_ACTIVE"
+#: What the filing view says of a `working` stage that an agent files, while the cell stands aside from it.
+AGENT_FILING_NOTE = "an agent is filing this import; the cell files it if the agent stops calling"
 #: The mutation protocol's final answer for an identity: its outcome will never be known, so the next call has a new one.
 _OUTCOME_UNKNOWN = "MUTATION_OUTCOME_UNKNOWN"
 #: A continuation that `file` no longer knows: the next call names the stage alone and carries on its newest scan.
@@ -184,9 +184,9 @@ def _progress(record: dict) -> dict | None:
 def read_view(vault_root: Path, import_id: str) -> dict:
     """What `adoption_studio status` answers with `view="filing"`: the stage's record, or `unknown` when it has none.
 
-    One record read. It opens no run, inventory or outcome file, so a client may poll it at any rate. A stage
-    with no record is `unknown` and reports no counts, never zero ones. The cell states no time left: a caller
-    that derives one from `rate` says "at the measured rate".
+    One record read and one look at the filer's memory. It opens no run, inventory or outcome file, so a client may
+    poll it at any rate. A stage with no record is `unknown` and reports no counts, never zero ones. The cell states
+    no time left: a caller that derives one from `rate` says "at the measured rate".
     """
     record = read_record(vault_root, import_id)
     if record is None:
@@ -199,6 +199,9 @@ def read_view(vault_root: Path, import_id: str) -> dict:
         view["left_out"] = {key: record["left_out"][key] for key in ("by_reason", "items", "truncated")}
     if (rate := _rate(record.get("calls") or [])) is not None:
         view["rate"] = rate
+    # The filer holds this in memory, and it ends by itself with the quiet window: a record would claim it for good.
+    if record["state"] == WORKING and (filer := filer_for(vault_root)) is not None and filer.agent_active(import_id):
+        view["note"] = AGENT_FILING_NOTE
     return view
 
 
@@ -339,12 +342,16 @@ class Filer:
         with self._condition:
             self._agent_calls[import_id] = self._agent_calls.get(import_id, 0) + 1
 
-    def agent_ended(self, import_id: str, *, working: bool) -> None:
+    def agent_ended(self, import_id: str, *, working: bool, counts: dict[str, int] | None = None) -> None:
         """An agent's `file` call on the stage returned. A stage still working stays the agent's for the quiet window.
 
-        A reply that is not `working` (the stage is done, or stopped) leaves the agent nothing to call again, so the
-        filer is woken to record that state at once instead of after the window.
+        `counts` are the reply's: they go into the record before the window starts, so the view's counts and `as_of`
+        move with the agent's work and are no staler than a filer call's. A reply that is not `working` (the stage is
+        done, or stopped) leaves the agent nothing to call again, so the filer is woken to record that state at once
+        instead of after the window.
         """
+        if counts is not None:
+            self._record_agent_counts(import_id, counts)
         with self._condition:
             left = self._agent_calls.get(import_id, 1) - 1
             if left > 0:
@@ -359,6 +366,24 @@ class Filer:
                     self._due[import_id] = 0.0
                     self._condition.notify_all()
 
+    def _record_agent_counts(self, import_id: str, counts: dict[str, int]) -> None:
+        """Store what an agent's call filed, as a filer call's reply would; never raises, the agent's call is done."""
+        def change(record: dict) -> None:
+            if record["state"] in (DONE, DISCARDED):
+                return
+            record["progress"] = counts
+            handled = counts["filed"] + counts["skipped_duplicates"]
+            record["calls"] = [*record["calls"], [time.time(), handled]][-_RATE_CALLS:]
+        try:
+            _update(self.vault_root, import_id, change)
+        except Exception:  # noqa: BLE001 - a store fault must not fail the agent's own file call
+            log.warning("import filer could not record the counts of an agent call on %s", import_id, exc_info=True)
+
+    def agent_left(self, import_id: str) -> None:
+        """The agent hands the stage to the cell (`file` with `wait` false): the quiet window ends, so the filer may call at once."""
+        with self._condition:
+            self._agent_quiet_until.pop(import_id, None)
+
     def _agent_wait(self, import_id: str) -> float:
         """Seconds that the filer leaves the stage alone: the quiet window while an agent files it, 0.0 otherwise."""
         with self._condition:
@@ -370,13 +395,9 @@ class Filer:
                 return 0.0
             return left
 
-    def _stand_aside(self, import_id: str) -> None:
-        """Show that an agent files the stage: parked with the reason and no need, for a person or a client to read."""
-        record = read_record(self.vault_root, import_id)
-        if record is None or (record.get("stop") or {}).get("code") == STOP_AGENT_FILING:
-            return
-        stop = {"code": STOP_AGENT_FILING, "reason": "an agent is filing this import; the cell carries on if it stops"}
-        _update(self.vault_root, import_id, lambda held: held.update(state=PARKED, needs=[], person=[], stop=stop))
+    def agent_active(self, import_id: str) -> bool:
+        """Whether an agent files the stage now: a call is in flight, or the quiet window after one has not ended."""
+        return self._agent_wait(import_id) > 0.0
 
     # ----- the loop
 
@@ -477,8 +498,8 @@ class Filer:
             return None
         if (aside := self._agent_wait(import_id)) > 0.0:
             # An agent that files the stage takes the boundary at each of its calls, so a call of the filer's would end
-            # after one turn for it, and pay the fixed cost of a call again. Not a stall: no count, no support need.
-            self._stand_aside(import_id)
+            # after one turn for it, and pay the fixed cost of a call again. Not a stall, and no write: the stage
+            # stays `working`, and the view reads the window from memory (`read_view`).
             return aside
         principal = write_intake.restore_principal(record["principal"])
         login = write_intake.login_state(principal)
@@ -744,10 +765,12 @@ class AgentFileCall:
 
     def __init__(self) -> None:
         self.working = True  # a call that returns no reply (it raised) leaves the stage with the agent for the window
+        self.counts: dict[str, int] | None = None
 
     def returned(self, reply: Any) -> None:
         filing = reply.get("filing") if isinstance(reply, dict) else None
         self.working = filing not in (_REPLY_DONE, _REPLY_STOPPED)
+        self.counts = _counts(reply.get("progress")) if isinstance(reply, dict) else None
 
 
 @contextlib.contextmanager
@@ -774,7 +797,7 @@ def agent_filing(vault_root: Path, path: str, collection: str | None = None) -> 
         _register_caller(filer, import_id, path, collection)
         yield call
     finally:
-        filer.agent_ended(import_id, working=call.working)
+        filer.agent_ended(import_id, working=call.working, counts=call.counts)
 
 
 def _register_caller(filer: Filer, import_id: str, path: str, collection: str | None) -> None:
@@ -820,5 +843,6 @@ def wake(vault_root: Path, path: str, collection: str | None = None) -> None:
             STOP_NOT_REPLAYABLE,
             "this login cannot be replayed by the cell, so it cannot file in the background; "
             "call file again with its continuation until filing is not working")
+    filer.agent_left(import_id)  # the agent hands the stage over: the window that its earlier calls left must not delay the cell
     filer.register(
         import_id, principal=principal, surface=write_intake.surface_record(), collection=collection, fresh_stage=True)

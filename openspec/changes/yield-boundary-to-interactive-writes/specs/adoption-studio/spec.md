@@ -139,18 +139,38 @@ The cell's filer SHALL stop calling `file` on a stage once `adoption_run.FILING_
 
 ### Requirement: The Cell's Filer Stands Aside From A Stage That An Agent Files
 
-The cell's filer SHALL make no `file` call on a stage while an agent's `file` call on it runs or ended less than twice the mutation lock's hold limit ago. It SHALL show the stage as parked with the stop `IMPORT_FILING_AGENT_ACTIVE` and no need, SHALL count no stall for it, and SHALL carry on once no agent has called for that long. A `done` or `stopped` reply of the agent's call SHALL end the wait. The filer's own `file` call SHALL NOT list the stage with the filer again.
+The cell's filer SHALL make no `file` call on a stage while an agent's `file` call on it runs or ended less than twice the mutation lock's hold limit ago, and SHALL carry on once no agent has called for that long. A `done` or `stopped` reply, or a `file` call with `wait` false, SHALL end the wait. The filer's own `file` call SHALL NOT list the stage with the filer again.
 
 #### Scenario: An agent files a stage the cell also lists
 
 - **WHEN** an agent's `file` calls on a registered stage keep arriving, each returning `working`
-- **THEN** the filer makes no call on the stage and the stage is parked with `IMPORT_FILING_AGENT_ACTIVE`, with no need
+- **THEN** the filer makes no call on the stage
 - **AND** once no agent has called for the quiet window, the filer files the stage to its end and each file is filed once
+
+#### Scenario: The agent hands the stage to the cell
+
+- **WHEN** an agent that filed the stage calls `file` with `wait` false inside the quiet window
+- **THEN** the filer files the stage at once, not after the window
 
 #### Scenario: The filer's own call
 
 - **WHEN** the filer's `file` call on a stage runs the `file` command
 - **THEN** the command does not list the stage with the filer again
+
+### Requirement: The Filing View Says That An Agent Files The Stage
+
+While the filer stands aside from a stage, the stage SHALL stay `working` with no stop and no need, and the filing view SHALL carry a `note` that says an agent files it. Each reply of the agent's call SHALL move the record's counts and `as_of`. The filer SHALL write no record for the wait, and the `note` SHALL end with the wait.
+
+#### Scenario: A client reads the view while an agent files
+
+- **WHEN** a client reads the filing view of a stage that an agent has just filed a page of
+- **THEN** `state` is `working`, `stop` is null, `needs` is empty and `note` says an agent files the stage
+- **AND** `progress` holds the counts of the agent's last reply, and the record's `as_of` does not change while the filer waits
+
+#### Scenario: The cell files the stage
+
+- **WHEN** the quiet window has ended and the filer has filed the stage
+- **THEN** the filing view carries no `note`
 
 ### Requirement: A Step That Moves Shows Its Progress In The Page Position
 
@@ -195,3 +215,24 @@ A `plan` or `apply` read of the earlier imports that meets a Source page which t
 - **WHEN** a `plan` meets a Source page that the held filesystem refuses for now
 - **THEN** the read ends incomplete and the plan files no item against a partial index
 - **AND** a later call reads the page again and plans from the whole index
+
+## MODIFIED Requirements
+
+### Requirement: A stop states what it needs
+
+The filing view's `needs` SHALL be a list of objects, empty unless the stage is `parked`. A free-space stop SHALL give `{need: "free_space", bytes}`: the bytes that the next chunk and reserve need when known, else null. An ended login SHALL give `{need: "login"}`. A read-only cell SHALL give `{need: "read_only"}` and the filer SHALL recheck on a fixed interval. A stop that the cell retries by itself SHALL give no need and say it will try again. Any other stop SHALL give `{need: "support"}`.
+
+#### Scenario: Filing stops for lack of room
+
+- **WHEN** the next chunk and the reserve do not fit the free space
+- **THEN** `needs` holds `free_space` with the bytes that the volume must hold
+
+#### Scenario: The cell serves read-only
+
+- **WHEN** a filing call is refused with `CLOUD_CELL_READ_ONLY`
+- **THEN** `needs` holds `read_only`, the filer checks again on its own, and the stage is filed once the cell leaves read-only mode
+
+#### Scenario: A stop that the cell retries by itself
+
+- **WHEN** a stage is parked with `IMPORT_FILING_STALLED`
+- **THEN** its reason says the cell will try again and `needs` is empty, so no one has to act

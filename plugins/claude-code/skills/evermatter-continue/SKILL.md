@@ -2,7 +2,7 @@
 name: evermatter-continue
 description: Resume prior project or session context from Evermatter when the user wants to continue, pick something back up, or remember what was happening on a topic. Part of Evermatter, formerly Exomem.
 metadata:
-  skill_contract: ffc5249eeb00a480276bef7b767736825ae7d87bdd42fdccdbc37e2c15a6788d
+  skill_contract: 9a8065093f1ca92ac3e6d695fb08fc01e47971be0661987919c671b6e8a84ada
   version: "0.1.0"
 ---
 

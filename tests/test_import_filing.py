@@ -175,8 +175,11 @@ def test_a_crash_after_the_cell_committed_a_call_repeats_it_under_its_identity_a
     assert len(adoption_run.AdoptionRunStore(vault).runs_at(f"_Imports/{import_id}")) == 1
 
 
-def test_an_agents_file_call_registers_the_stage_and_the_cell_finishes_it(vault: Path, one_step_calls) -> None:
+def test_an_agents_file_call_registers_the_stage_and_the_cell_finishes_it(
+    vault: Path, one_step_calls, monkeypatch
+) -> None:
     """The agent calls `file` once and goes away: with no registration the stage waits for a call that never comes."""
+    monkeypatch.setattr(import_filing, "AGENT_QUIET_SECONDS", 1.0)  # the agent never calls again, so the quiet window is the wait
     import_id = _stage(vault, filing=None)
     filer = import_filing.start(vault)
     try:
@@ -211,26 +214,56 @@ def test_the_filer_stands_aside_while_an_agent_files_the_stage_and_files_it_once
     vault: Path, one_step_calls, monkeypatch
 ) -> None:
     """Catches a filer that takes the boundary between an agent's calls: each of its calls ends after one turn for the
-    agent that waits, and pays the fixed cost of a call again, so the two together file slower than the agent alone."""
+    agent that waits, and pays the fixed cost of a call again, so the two together file slower than the agent alone.
+    It also catches a view that parks the stage for it, or stamps the record again for each wake of the filer."""
     monkeypatch.setattr(import_filing, "AGENT_QUIET_SECONDS", 1.5)
     import_id = _stage(vault, filing=None)
     import_filing.start(vault)
     try:
         replies = [_file_call(vault, import_id), _file_call(vault, import_id)]
         time.sleep(0.5)  # the filer was woken by each call, and would have taken the boundary by now
-        while_agent_files = import_filing.read_record(vault, import_id)
+        record = import_filing.read_record(vault, import_id)
         view = import_filing.read_view(vault, import_id)
+        time.sleep(0.5)
+        later = import_filing.read_record(vault, import_id)
         done = _wait_for(vault, import_id, "done", seconds=60)  # the agent stops calling; the quiet window passes
         after = import_filing.read_record(vault, import_id)
+        finished = import_filing.read_view(vault, import_id)
     finally:
         import_filing.stop(vault)
 
     assert [reply["filing"] for reply in replies] == ["working", "working"]
-    assert while_agent_files["seq"] == 0  # the filer made no call while the agent filed
-    assert view["state"] == "parked" and view["stop"]["code"] == import_filing.STOP_AGENT_FILING and view["needs"] == []
+    assert record["seq"] == 0  # the filer made no call while the agent filed
+    assert later["as_of"] == record["as_of"]  # and stamped no record for the wait
+    assert view["state"] == "working" and view["stop"] is None and view["needs"] == []
+    assert view["note"] == import_filing.AGENT_FILING_NOTE
+    # The agent's own counts are the view's: its reply, no staler than a filer call's would be.
+    expected = {key: replies[-1]["progress"][key] for key in ("filed", "skipped_duplicates", "failed")}
+    assert record["progress"] == expected
+    assert view["progress"]["filed"] == expected["filed"]
     assert done["state"] == "done" and after["seq"] > 0  # then the cell carried the stage to its end
+    assert "note" not in finished  # and the view no longer says an agent files it
     assert len(_sources(vault)) == len(FILES)
     assert len(adoption_run.AdoptionRunStore(vault).runs_at(f"_Imports/{import_id}")) == 1
+
+
+def test_an_agents_hand_off_with_wait_false_is_filed_at_once_and_not_after_the_quiet_window(
+    vault: Path, one_step_calls, monkeypatch
+) -> None:
+    """Catches a hand-off that lands inside the window its earlier calls left: the filer would wait it out for nothing."""
+    monkeypatch.setattr(import_filing, "AGENT_QUIET_SECONDS", 600.0)
+    import_id = _stage(vault, filing=None)
+    import_filing.start(vault)
+    try:
+        _file_call(vault, import_id)
+        waiting = import_filing.read_view(vault, import_id)
+        _file_call(vault, import_id, wait=False)
+        done = _wait_for(vault, import_id, "done", seconds=30)
+    finally:
+        import_filing.stop(vault)
+
+    assert waiting["note"] == import_filing.AGENT_FILING_NOTE  # the stage was the agent's, for ten minutes
+    assert done["state"] == "done" and len(_sources(vault)) == len(FILES)
 
 
 def test_the_filers_own_file_call_does_not_list_its_stage_with_itself_again(vault: Path) -> None:
