@@ -480,3 +480,21 @@ def test_a_filed_photo_with_a_dated_name_and_no_sidecar_takes_its_date_from_the_
 
     named = parse_frontmatter(texts[f"{ALBUM}/20200314_101112.jpg"])[0]
     assert (named["capture_time"], named["capture_date_source"]) == ("2020-03-14T10:11:12", "file-name")
+
+
+@pytest.mark.frame_codecs
+def test_the_owner_backfill_dates_a_filed_photo_from_the_name_its_owner_gave_it(vault: Path) -> None:
+    """Catches a backfill that reads the filer's stored name, so a filed photo whose name states its time stays undated."""
+    from exomem import capture_backfill
+    from exomem.governance.principal import library_scope
+
+    members = {f"{ALBUM}/20200314_101112.jpg": _jpeg_file(taken=None, seed=5)}
+    _import_id, pages, _view = one_photo_albums(vault, members)
+    assert "capture_time" not in pages[f"{ALBUM}/20200314_101112.jpg"][0]
+
+    with library_scope():
+        plan = capture_backfill.backfill(vault)
+        capture_backfill.backfill(vault, dry_run=False, plan_id=plan["plan_id"])
+
+    named = next(fields for fields, _text in source_pages(vault).values() if fields.get("original_filename"))
+    assert (named["capture_time"], named["capture_date_source"]) == ("2020-03-14T10:11:12", "file-name")

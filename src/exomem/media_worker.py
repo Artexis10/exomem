@@ -355,16 +355,6 @@ def _evidence_version_or_none(content: str) -> str | None:
         return None
 
 
-def _sent_name(content: str, stored: str) -> str:
-    """The file name the owner's original had, as its sidecar page records it; `stored` when the page records none.
-
-    A filed original lives under a name of the filer's own, which states nothing of the file the owner kept, so
-    the page's `original_filename` is the name that a file-name date reads.
-    """
-    recorded = parse_frontmatter(content)[0].get("original_filename")
-    return recorded if isinstance(recorded, str) and recorded else stored
-
-
 def _sidecar_input_matches(content: str, expected_hash: str, expected_version: str | None) -> bool:
     return content_hash(content) == expected_hash or (
         expected_version is not None and _evidence_version_or_none(content) == expected_version
@@ -1028,7 +1018,7 @@ class MediaWorker:
             return self._publication_outcome(committed, FAILED, error)
         text = _within_result_limit(result.sidecar_text, job.sidecar_path.name)
         result.capture = capture_metadata.with_name_date(
-            self._vault_root, result.capture, job.media_type, _sent_name(claimed_content, job.binary_path.name)
+            self._vault_root, result.capture, job.media_type, capture_metadata.given_name(parse_frontmatter(claimed_content)[0], job.binary_path.name)
         )
         if preserve._has_ambiguous_legacy_preserved_notes(claimed_content):
             return _ProcessOutcome(

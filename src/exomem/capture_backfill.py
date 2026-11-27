@@ -249,7 +249,7 @@ def _plan_page(
     if view is None or (facts is None and not _still_local(root, snapshot)):
         plan.skip(rel, BYTES_NOT_ON_VOLUME)  # it left the volume between the census and the read
         return
-    facts = capture_metadata.with_name_date(root, facts, kind, snapshot.path.name)
+    facts = capture_metadata.with_name_date(root, facts, kind, capture_metadata.given_name(fields, snapshot.path.name))
     if isinstance(copy, str):
         plan.no_match(rel, copy)
     elif recovery is not None and copy is not None:
