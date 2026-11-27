@@ -5236,6 +5236,7 @@ def op_replace(
     hypothesis: str | None = None,
     n: int | None = None,
     concluded: str | None = None,
+    outcome: str | None = None,
     medium: str | None = None,
     recorded: str | None = None,
     published: str | None = None,
@@ -5317,6 +5318,7 @@ def op_replace(
         "hypothesis": hypothesis,
         "n": n,
         "concluded": concluded,
+        "outcome": outcome,
         "medium": medium,
         "recorded": recorded,
         "published": published,
@@ -5850,6 +5852,7 @@ def op_note(
     hypothesis: str | None = None,
     n: int | None = None,
     concluded: str | None = None,
+    outcome: str | None = None,
     medium: str | None = None,
     recorded: str | None = None,
     published: str | None = None,
@@ -5891,8 +5894,7 @@ def op_note(
       → `Notes/Patterns/<slug>.md`
     - `experiment`: hypothesis + protocol. `domain`, `started` (YYYY-MM-DD),
       and `duration` (e.g. "30 days", "ongoing") REQUIRED. Optional
-      `hypothesis`,
-` (default 1), `concluded`.
+      `hypothesis`, `n` (default 1), `concluded`, `outcome`.
       → `Notes/Experiments/<domain>/YYYY-MM-<slug>.md`
     - `production-log`: creative artifact log. `medium` REQUIRED (e.g.
       "Posts", "Articles"). Optional `recorded`, `published`, `host`,
@@ -5952,6 +5954,9 @@ def op_note(
         hypothesis: experiment only. One-line claim being tested.
         n: experiment only. Sample size. Defaults to 1 (n-of-1).
         concluded: experiment only. YYYY-MM-DD when it ended (absent while ongoing).
+        outcome: experiment only. How it turned out, one verdict key of the verdict
+            registry (a letter-case variant is accepted and stored as the key).
+            Optional; an unknown verdict refuses and names the accepted ones.
         medium: production-log only. Subfolder, e.g. "Posts", "Articles".
         recorded: production-log only. YYYY-MM-DD of recording session.
         published: production-log only. YYYY-MM-DD of publication.
@@ -6017,6 +6022,7 @@ def op_note(
         hypothesis=hypothesis,
         n=n,
         concluded=concluded,
+        outcome=outcome,
         medium=medium,
         recorded=recorded,
         published=published,
@@ -9093,6 +9099,7 @@ def op_remember(
     hypothesis: str | None = None,
     n: int | None = None,
     concluded: str | None = None,
+    outcome: str | None = None,
     medium: str | None = None,
     recorded: str | None = None,
     published: str | None = None,
@@ -9168,6 +9175,7 @@ def op_remember(
         hypothesis=hypothesis,
         n=n,
         concluded=concluded,
+        outcome=outcome,
         medium=medium,
         recorded=recorded,
         published=published,
@@ -9527,6 +9535,7 @@ def op_replace_memory(
     hypothesis: str | None = None,
     n: int | None = None,
     concluded: str | None = None,
+    outcome: str | None = None,
     medium: str | None = None,
     recorded: str | None = None,
     published: str | None = None,
@@ -9590,6 +9599,7 @@ def op_replace_memory(
         hypothesis=hypothesis,
         n=n,
         concluded=concluded,
+        outcome=outcome,
         medium=medium,
         recorded=recorded,
         published=published,
