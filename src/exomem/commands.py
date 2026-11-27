@@ -15921,6 +15921,8 @@ def refusal_before_queueing(command: Command, arguments: Mapping[str, Any]) -> E
         return None if error is None else error.leaf_error()
     if command.name == "episode_memory":
         return episode_memory_module.argument_refusal(dict(arguments))
+    if command.name == "record_memory" and (queued := record_memory_module.queue_refusal(arguments)) is not None:
+        return queued
     rules = _ARGUMENT_RULES.get(command.name)
     operations = None if rules is None else operation_entries.register_operations(command.name)
     if rules is None or operations is None or operations.selector is None:

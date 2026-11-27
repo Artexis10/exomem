@@ -191,7 +191,7 @@ def prepare(writer, manifest, rows, source, settlement=None, links=None) -> list
             candidate.error = shape
             continue
         body = raw.get("body")
-        reference = raw["source"] if raw.get("source") is not None else source
+        reference = records.bulk_row_reference(raw, source)
         try:
             records._refuse_excluded_authored_names(raw["item"])
             _refuse_view_stamp(manifest, raw["item"])
@@ -201,8 +201,7 @@ def prepare(writer, manifest, rows, source, settlement=None, links=None) -> list
                     raise collections.CollectionError("UNREPRESENTABLE_RECORD_BODY",
                                                       "markdown-log storage cannot represent item bodies")
             if reference is None:
-                candidate.error = records._bulk_reject(index, "SOURCE_REQUIRED",
-                    "a row needs a preserved source reference")
+                candidate.error = records.bulk_source_required(index)
                 continue
             resolved = (settlement.source if settlement is not None else
                         records._resolve_bulk_source(writer.root, reference, writer._operation.allows_file, cache))

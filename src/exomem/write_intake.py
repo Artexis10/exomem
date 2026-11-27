@@ -1018,6 +1018,7 @@ def _rejected_rows(result: Any) -> dict[str, Any] | None:
         "remediation": "Correct the rejected rows and send the save again; its arguments are below.",
         "committed": False,
         "rejected_rows": [
+            # nosemgrep: ep-word-search -- the bulk receipt protocol's own row keys, a closed set.
             {key: row[key] for key in ("index", "code", "message", "fields", "source") if key in row}
             for row in rows[:_REJECTED_ROWS_SHOWN]
         ],
@@ -1519,13 +1520,6 @@ def _view(row: sqlite3.Row, *, full: bool, position: int | None) -> dict[str, An
     return view
 
 
-def _rejected_count(outcome: Any) -> int:
-    """Rows a committed bulk save rejected (`on_reject=skip`), from the bulk receipt protocol's counts."""
-    counts = outcome.get("counts") if isinstance(outcome, Mapping) else None
-    rejected = counts.get("rejected") if isinstance(counts, Mapping) else None
-    return rejected if isinstance(rejected, int) and rejected > 0 else 0
-
-
 def _summary_line(state_counts: Mapping[str, int]) -> str:
     queued = state_counts.get(QUEUED, 0) + state_counts.get(APPLYING, 0)
     failed = state_counts.get(FAILED, 0)
@@ -1565,12 +1559,9 @@ def read(vault_root: Path, ref: str | None = None, limit: int | None = None) -> 
             FAILED: "Not saved: the queued save failed. Its arguments are below; correct and send it again.",
         }
         summary = summaries[view["state"]]
-        rejected = _rejected_count(view.get("outcome"))
-        if view["state"] == APPLIED and rejected:
-            summary = (
-                f"Partly saved: the queued save was applied, but {rejected} row(s) were rejected and not "
-                "saved; the outcome lists them."
-            )
+        if view["state"] == APPLIED and _rejected_rows(view.get("outcome")) is not None:
+            # Recorded applied before a replay that saved nothing became a failed save.
+            summary = "Not saved: the queued save ran, but it rejected its rows and committed nothing."
         if view["state"] == FAILED and view.get("error", {}).get("code") == "MUTATION_OUTCOME_UNKNOWN":
             summary = (
                 "Not confirmed: the service stopped while applying this save, so it may have landed. "

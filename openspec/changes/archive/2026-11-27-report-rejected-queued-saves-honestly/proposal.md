@@ -5,8 +5,8 @@ On 2026-11-27 a 36-row bulk Records write was queued twice behind a busy vault. 
 ## What Changes
 
 - A replay that returns `committed: false` with rejected rows ends `failed`, with the first row's code and the rejected rows, not `applied`.
-- An applied bulk save that rejected some rows reads "Partly saved", not "Saved".
-- Under `on_reject: abort`, a bulk write whose rows are malformed or have no source is refused before queueing, naming the rows.
+- A save stored `applied` although it committed nothing reads "Not saved".
+- Under `on_reject: abort`, a bulk write whose rows are malformed or have no source is refused before queueing, naming every such row. A direct call keeps its per-row report.
 - A status read returns a save's arguments only when it failed.
 - `read_instructions` for `records.bulk_upsert` shows the row shape with a worked example.
 

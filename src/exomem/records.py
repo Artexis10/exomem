@@ -1166,6 +1166,15 @@ def bulk_row_shape_refusal(index: int, raw: object) -> dict[str, Any] | None:
     return None
 
 
+def bulk_row_reference(raw: Mapping[str, Any], source: object) -> object:
+    """The source a row resolves against: its own, else the batch's."""
+    return raw["source"] if raw.get("source") is not None else source
+
+
+def bulk_source_required(index: int) -> dict[str, Any]:
+    return _bulk_reject(index, "SOURCE_REQUIRED", "a row needs a preserved source reference")
+
+
 def bulk_argument_refusals(rows: Sequence[object], source: object) -> list[dict[str, Any]]:
     """The row rejections that the arguments alone decide: a malformed row, or a row with no source.
 
@@ -1175,8 +1184,8 @@ def bulk_argument_refusals(rows: Sequence[object], source: object) -> list[dict[
     refusals = []
     for index, raw in enumerate(rows):
         refusal = bulk_row_shape_refusal(index, raw)
-        if refusal is None and (raw.get("source") if isinstance(raw, Mapping) else None) is None and source is None:
-            refusal = _bulk_reject(index, "SOURCE_REQUIRED", "a row needs a preserved source reference")
+        if refusal is None and bulk_row_reference(raw, source) is None:  # type: ignore[arg-type]
+            refusal = bulk_source_required(index)
         if refusal is not None:
             refusals.append(refusal)
     return refusals
@@ -1413,7 +1422,7 @@ def bulk_upsert_records(
                 continue
             assert isinstance(raw, Mapping)
             body = raw.get("body")
-            reference = raw["source"] if "source" in raw and raw["source"] is not None else source
+            reference = bulk_row_reference(raw, source)
             try:
                 _refuse_excluded_authored_names(raw["item"])
                 if body is not None:
@@ -1424,11 +1433,7 @@ def bulk_upsert_records(
                             "markdown-log storage cannot represent item bodies",
                         )
                 if reference is None:
-                    outcomes.append(
-                        _bulk_reject(
-                            index, "SOURCE_REQUIRED", "a row needs a preserved source reference"
-                        )
-                    )
+                    outcomes.append(bulk_source_required(index))
                     continue
                 resolved = _resolve_bulk_source(root, reference, allowed, cache=source_cache)
                 if resolved is None:

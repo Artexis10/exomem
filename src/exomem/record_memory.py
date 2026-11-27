@@ -908,18 +908,6 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
         _invalid_arguments("; ".join(parts))
     if action == "history":
         _require_one_history_selector(values)
-    if action == "bulk_upsert" and values["on_reject"] in {None, "abort"} and isinstance(values["rows"], list | tuple):
-        # Under abort one rejected row writes nothing, so a row its arguments condemn fails the call now,
-        # not after a wait for the vault.
-        refusals = records.bulk_argument_refusals(values["rows"], values["source"])
-        if refusals:
-            named = "; ".join(f"row {row['index']}: {row['code']}" for row in refusals[:5])
-            more = f" and {len(refusals) - 5} more" if len(refusals) > 5 else ""
-            _invalid_arguments(
-                f"{len(refusals)} of {len(values['rows'])} rows would be rejected and on_reject=abort saves "
-                f"nothing ({named}{more}); {records.INVALID_BULK_ROW_MESSAGE}, e.g. "
-                '{"item": {...}, "source": "<preserved Sources or Evidence page>"}'
-            )
     if action == "append" and values["item"] is None and values["held"] is None:
         _invalid_arguments("append requires item or held")
     if (
@@ -959,6 +947,35 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
     if action == "query" and values["item_key"] is not None and supplied - {"collection", "item_key"}:
         _invalid_arguments("a query with item_key reads that one row and its body, so it takes only collection; "
                            "remove " + ", ".join(sorted(supplied - {"collection", "item_key"})))
+
+
+def queue_refusal(arguments: Mapping[str, Any]) -> OpError | None:
+    """The refusal a bulk write gets before it is queued, when its arguments alone condemn it; else None.
+
+    Queue-only: a direct call keeps the writer's per-row report. A queued save that the replay would
+    reject only reports it after the vault frees up, and under abort one rejected row saves nothing.
+    """
+    if arguments.get("action") != "bulk_upsert" or arguments.get("on_reject") not in {None, "abort"}:
+        return None
+    rows, source = arguments.get("rows"), arguments.get("source")
+    if not isinstance(rows, list | tuple) or not rows or len(rows) > records.BULK_UPSERT_MAX_ROWS:
+        return OpError("INVALID_RECORD_ARGUMENTS",
+                       f"rows must be a list of 1 to {records.BULK_UPSERT_MAX_ROWS} row objects")
+    if source is not None and not isinstance(source, str):
+        return OpError("INVALID_RECORD_ARGUMENTS", "source must be the path of a preserved Sources or Evidence page")
+    refusals = records.bulk_argument_refusals(rows, source)
+    if not refusals:
+        return None
+    by_code: dict[str, list[str]] = {}
+    for row in refusals:
+        by_code.setdefault(row["code"], []).append(str(row["index"]))
+    named = "; ".join(f"{code}: rows {', '.join(indexes)}" for code, indexes in by_code.items())
+    return OpError(
+        "INVALID_RECORD_ARGUMENTS",
+        f"{len(refusals)} of {len(rows)} rows would be rejected and on_reject=abort saves nothing ({named}); "
+        f"{records.INVALID_BULK_ROW_MESSAGE}, e.g. "
+        '{"item": {...}, "source": "<preserved Sources or Evidence page>"}',
+    )
 
 
 def _require_one_history_selector(given: Mapping[str, Any]) -> None:

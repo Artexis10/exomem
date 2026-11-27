@@ -533,6 +533,13 @@ def test_a_queued_bulk_write_that_rejects_every_row_fails_and_is_never_called_sa
     assert failed["error"]["message"] == "nothing was saved: 2 of 2 rows were rejected"
     assert failed["arguments"]["rows"] == kwargs["rows"]
     assert write_intake.read(vault, ref=ref)["user_summary"].startswith("Not saved")
+    # A release before this one stored such a replay as applied; reading it must not say saved either.
+    outcome = {"operation": "bulk_upsert", "committed": False,
+               "counts": {"inserted": 0, "updated": 0, "unchanged": 0, "rejected": 2}}
+    with write_intake._write(vault) as conn:
+        conn.execute("UPDATE intake SET state = 'applied', outcome = ? WHERE id = ?",
+                     (json.dumps(outcome), ref.removeprefix(write_intake.REF_PREFIX)))
+    assert write_intake.read(vault, ref=ref)["user_summary"].startswith("Not saved")
 
 
 def test_a_bulk_write_with_malformed_rows_behind_the_queue_is_refused_at_once_and_never_queued(
@@ -552,12 +559,17 @@ def test_a_bulk_write_with_malformed_rows_behind_the_queue_is_refused_at_once_an
     monkeypatch.setattr(write_intake, "_claim_head", lambda root: 0.05 if not paused.is_set() else real_claim(root))
     with _Hold(holder, vault):
         first = _send(observe, vault, plain)
-    bare = _ledger_bulk(vault, [ledger_item(slug="entry-0"), {"item": ledger_item(slug="entry-1")}], None)
-    with pytest.raises(OpError, match=r"2 of 2 rows would be rejected .*row 0: INVALID_BULK_ROW; row 1: SOURCE_REQUIRED"):
+    rows = [ledger_item(slug="entry-0"), {"item": ledger_item(slug="entry-1")}, {"item": ledger_item(slug="entry-2")}]
+    bare = _ledger_bulk(vault, rows, None)
+    with pytest.raises(OpError, match=r"3 of 3 rows would be rejected .*INVALID_BULK_ROW: rows 0; SOURCE_REQUIRED: rows 1, 2"):
         _send(_command("record_memory"), vault, bare, scope="principal:session-b")
     assert [item["ref"] for item in write_intake.read(vault)["items"]] == [first["queued_write"]["ref"]]
     paused.set()
     _wait_for_state(vault, first["queued_write"]["ref"], "applied")
+    # Sent directly, with nothing queued, the same rows keep the writer's report of every row.
+    direct = _send(_command("record_memory"), vault, bare, scope="principal:session-c")
+    assert direct["committed"] is False
+    assert [row["code"] for row in direct["rows"]] == ["INVALID_BULK_ROW", "SOURCE_REQUIRED", "SOURCE_REQUIRED"]
 
 
 def test_a_dated_save_with_relations_behind_a_backlog_is_told_only_the_exit_that_lands(
