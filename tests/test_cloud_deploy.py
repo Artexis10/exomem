@@ -10,11 +10,13 @@ from __future__ import annotations
 import copy
 import http.client
 import importlib.util
+import io
 import json
 import re
 import sys
 import types
 import urllib.error
+import urllib.request
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -676,7 +678,30 @@ def test_no_release_between_the_fleet_and_the_newest_that_the_platform_carries_l
 
     assert (code, recorded.puts()) == (1, [])
     assert log.splitlines()[-1] == PLATFORM_BLOCK_LINE
+    assert log.splitlines().count(PLATFORM_BLOCK_LINE) == 1
     assert recorded.alerts()[-2:] == [(cloud_deploy.PLATFORM_NEEDED_ALERT, True), FAILING_RESOLVED]
+
+
+def test_a_registry_that_fails_during_the_covered_release_search_logs_the_block_then_the_registry_stop(
+        capsys, monkeypatch) -> None:
+    # Catches a blocked run whose fallback search fails on the registry and logs only the registry error,
+    # which hides the platform block that started the search.
+    def lookup(reference: str) -> str | None:
+        if reference.endswith(":0.171.0-cloud"):
+            return "sha256:" + "a" * 64
+        raise urllib.error.URLError("unreachable")
+
+    monkeypatch.setitem(sys.modules, "release_recovery", types.SimpleNamespace(image_digest=lookup))
+    recorded = Recorded(["substrate_rollout_behind"], releases=SEVERAL_BEHIND)
+    changed_by_tag = {"v0.171.0": CHART_CHANGE, "v0.170.3": TESTS_AND_DOCS, "v0.170.2": TESTS_AND_DOCS,
+                      "v0.170.1": TESTS_AND_DOCS}
+
+    code, log, _ = _run(recorded, capsys, changed_by_tag=changed_by_tag, image_lookup=cloud_deploy.registry_image)
+
+    assert (code, recorded.puts()) == (1, [])
+    assert log.splitlines()[-2:] == [PLATFORM_BLOCK_LINE, "cloud-deploy: REGISTRY_LOOKUP_FAILED v0.170.3 URLError"]
+    assert log.splitlines().count(PLATFORM_BLOCK_LINE) == 1
+    assert recorded.alerts()[-1] == (cloud_deploy.FAILING_ALERT, True)
 
 
 @pytest.mark.parametrize(("barrier_version", "rolled_out", "last_line"), [
@@ -817,6 +842,21 @@ def test_a_registry_that_fails_ends_the_run_on_a_failing_stop_that_alerts_and_pr
     assert (code, recorded.puts()) == (1, [])
     assert log.splitlines()[-1] == f"cloud-deploy: REGISTRY_LOOKUP_FAILED v0.171.0 {type(failure).__name__}"
     assert "ghcr.io" not in log
+    assert recorded.alerts()[-1] == (cloud_deploy.FAILING_ALERT, True)
+
+
+def test_a_registry_token_answer_that_is_not_an_object_ends_the_run_on_the_registry_stop(capsys, monkeypatch) -> None:
+    # Catches a token answer that is valid JSON but not an object, which crashed the run with a traceback
+    # and sent no failing alert.
+    monkeypatch.setenv("GITHUB_ACTOR", "example-actor")
+    monkeypatch.setenv("GH_TOKEN", ENV["GH_TOKEN"])
+    monkeypatch.setattr(urllib.request, "urlopen", lambda request, timeout: io.BytesIO(b'["unexpected"]'))
+    recorded = Recorded(["substrate_rollout_behind"])
+
+    code, log, _ = _run(recorded, capsys, image_lookup=cloud_deploy.registry_image)
+
+    assert (code, recorded.puts()) == (1, [])
+    assert log.splitlines()[-1] == "cloud-deploy: REGISTRY_LOOKUP_FAILED v0.171.0 ValueError"
     assert recorded.alerts()[-1] == (cloud_deploy.FAILING_ALERT, True)
 
 
