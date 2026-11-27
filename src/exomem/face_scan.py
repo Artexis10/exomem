@@ -136,12 +136,31 @@ def commit(vault_root: Path, page: str, faces: Sequence[PageFace] | None, *, mti
                 face_groups.forget_changed(vault_root, page, mtime)
             return False
         face_groups.record_page(vault_root, page, faces, model_id=face_models.embedder_model_id(), mtime=mtime)
+        if _removed(vault_root, page):
+            # A removal that ran between the caller's last check and this commit found no face to drop, and
+            # reconcile finds removed pictures by CLIP rows it already dropped. A removal drops the file before
+            # its cleanup, so a removal this check misses runs its cleanup after the commit and drops them.
+            # Changed bytes are left to their own CLIP job: it replaces the faces and keeps the owner's exclusions.
+            face_groups.forget_pages(vault_root, [page])
+            return False
     except face_groups.FacesStopped:
         return False  # Turned off or deleted while this picture was in flight.
     except Exception:  # noqa: BLE001 - a face failure must never stop the picture's other media steps
         log.warning("face index write failed for %s", Path(page).name, exc_info=True)
         return False
     return True
+
+
+def _removed(vault_root: Path, page: str) -> bool:
+    """Whether a removal took the picture: no bytes are held, and it is not an evicted original, which keeps rows."""
+    from . import media_processing, originals
+
+    try:
+        if media_processing.held_path(vault_root, vault_root / page).is_file():
+            return False
+        return not originals.evicted(vault_root, page)
+    except Exception:  # noqa: BLE001 - undecided: dropping costs one rescan, keeping could leave an erased face
+        return True
 
 
 # --- Backfill on turn-on ------------------------------------------------------------------------------

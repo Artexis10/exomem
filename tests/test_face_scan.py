@@ -339,6 +339,44 @@ def test_a_changed_original_drops_the_faces_of_its_old_bytes(vault: Path, monkey
     assert face_rows(vault) == []
 
 
+@pytest.mark.parametrize("step", ["new picture", "backfill"])
+def test_a_picture_removed_while_its_faces_commit_keeps_no_face_row(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    """Catches the faces of an erased photo stored after its removal ran, which no later pass finds."""
+    pytest.importorskip("PIL")  # The core tier has no image decoder; the face step decodes the picture.
+    from exomem import face_groups, index_sync, media_processing, reconcile
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setattr(embeddings, "embed_image", lambda path: np.ones(embeddings.CLIP_DIM, dtype=np.float32))
+    stored = preserve.preserve_bytes(
+        vault, scope="Rental", category="photos", filename="porch.jpg", data=red_square_photo("porch"), text="porch"
+    )
+    worker = media_worker.MediaWorker(vault)
+    if step == "backfill":
+        worker._process(clip_job(vault, stored, "image"))  # Faces are off: only the CLIP index learns it.
+    monkeypatch.setattr(face_models, "load", _SquareFaces)
+    turn_faces_on(vault)
+    real_record = face_groups.record_page
+
+    def removed_just_before(vault_root, page, faces, **kwargs):
+        # The owner erases the picture after the face step's last check, before its faces commit.
+        media_processing.held_path(vault, vault / stored.path).unlink()
+        index_sync.delete_after_remove(vault, [stored.path])
+        return real_record(vault_root, page, faces, **kwargs)
+
+    monkeypatch.setattr(face_groups, "record_page", removed_just_before)
+    if step == "backfill":
+        face_scan.backfill_batch(vault)
+    else:
+        worker._process(clip_job(vault, stored, "image"))
+
+    monkeypatch.setattr(face_groups, "record_page", real_record)
+    reconcile.reconcile(vault)
+    assert not embeddings.ClipIndex(vault).has(stored.path)
+    assert face_rows(vault) == []
+
+
 def test_a_large_pictures_face_is_cropped_from_its_own_pixels_not_the_detectors_downscale() -> None:
     """Catches the embedder seeing a blurred, downscaled face in a large photo, which splits its person."""
     pytest.importorskip("PIL")  # The core tier has no image decoder; the face step decodes the picture.
