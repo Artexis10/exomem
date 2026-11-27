@@ -32,8 +32,10 @@ directory refuses command hooks and non-text files from publishers that are not
 Verified organizations, so the build fails if a hook or another file type enters
 this edition. Its README names the install command for the hooked edition.
 
-The hooked edition, `generated/claude-hooks`, is listed in the repository
-marketplace as `exomem-cloud`. It registers the release-owned retrieval, capture
+The hooked edition, `generated/claude-hooks`, is named `evermatter` like the
+directory edition and ships only as the release asset `evermatter-claude-hooks.zip`
+for upload. It stays out of the repository marketplace, where `evermatter` names the
+local plugin. It registers the release-owned retrieval, capture
 and continuation hooks through `hooks/hooks.json`. The adapter copies canonical
 scripts byte-for-byte, passes `--client claude` and a writable plugin-local
 state home, and uses `--activation-mode mcp` for retrieval/capture. The hooks
@@ -85,9 +87,10 @@ user-invocable workflows; additional command/agent copies are not required.
 The package version comes from the checked-out `pyproject.toml`, not an installed
 Python distribution. Regenerate when the release version, canonical skill,
 definition or `plugins/cloud/evals/cases.json` changes. Release Please regenerates
-the Cloud packages on its release branch. GitHub release assets include
-`exomem-cloud-claude.zip`, `exomem-cloud-openai.zip` and
-`exomem-cloud-release.json`. Verify their digests against the tagged source before
+the Cloud packages on its release branch. GitHub release assets carry
+the names that `release_assets` in `plugins/cloud/definition.json` sets:
+`evermatter-claude.zip`, `evermatter-claude-hooks.zip`, `evermatter-openai.zip` and
+`evermatter-release.json`. Verify their digests against the tagged source before
 uploading them to a directory.
 
 ## Native acceptance
@@ -248,7 +251,7 @@ After operator approval, use the existing OpenAI plugin:
 
 After operator approval, use the existing Claude listing:
 
-1. Confirm the tracked repository, branch and plugin folder; the existing submission remains identified.
+1. Confirm the tracked repository, branch and plugin folder `plugins/cloud/generated/claude`; the existing submission remains identified.
 2. Release the reviewed change through that tracked branch; the portal observes the intended new version.
 3. Inspect its validation, security findings and icon previews; the package contains no hooks or scripts.
 4. If the listing still shows an older icon, change the listing icon in the portal where it allows that; the package icon cannot change it.

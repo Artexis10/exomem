@@ -209,8 +209,9 @@ def _compat_build(name: str, kind: str, tag: str, directory: Path) -> None:
 def cloud_files(tag: str) -> dict[str, tuple[str, str]]:
     source = "plugins/cloud/generated"
     metadata = run("git", "show", f"{tag}:{source}/release.json")
-    # These filenames are the existing public Cloud release asset contract.
-    mapping = {
+    definition = json.loads(run("git", "show", f"{tag}:plugins/cloud/definition.json"))
+    # Tags cut before the definition named its release assets used these names.
+    mapping = definition.get("release_assets") or {
         "claude.zip": "exomem-cloud-claude.zip",
         "openai.zip": "exomem-cloud-openai.zip",
         "release.json": "exomem-cloud-release.json",
