@@ -159,7 +159,7 @@ def _removed(vault_root: Path, page: str) -> bool:
         if media_processing.held_path(vault_root, vault_root / page).is_file():
             return False
         return not originals.evicted(vault_root, page)
-    except Exception:  # noqa: BLE001 - undecided: dropping costs one rescan, keeping could leave an erased face
+    except Exception:  # noqa: BLE001 - undecided: dropping costs a rescan and the owner's exclusions on that picture; keeping could leave an erased face
         return True
 
 

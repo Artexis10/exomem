@@ -161,6 +161,22 @@ def test_a_face_store_that_cannot_drop_the_rows_is_retried_by_reconcile(
     assert not embeddings.ClipIndex(vault).has(rel)
 
 
+def test_an_unreadable_face_index_holds_back_no_text_page_removal(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Catches a damaged or newer face index stalling every removal and every text Source erasure."""
+    from exomem import face_store
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    note = "Knowledge Base/Notes/a-note.md"
+    embeddings.ClipIndex(vault).upsert(note, _unit(0), 1.0)
+    index = face_store.index_path(vault)
+    index.parent.mkdir(parents=True, exist_ok=True)
+    index.write_bytes(b"not a database" * 64)
+
+    report = index_sync.delete_after_remove(vault, [note])
+
+    assert _outcome(report, "clip").outcome == "completed"
+
+
 # ---- 2. Scene-frame cleanup -------------------------------------------------
 
 

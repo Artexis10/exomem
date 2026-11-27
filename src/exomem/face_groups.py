@@ -43,7 +43,7 @@ from typing import Any
 
 import numpy as np
 
-from . import face_store, media_models
+from . import face_store, media_models, media_types
 
 log = logging.getLogger(__name__)
 
@@ -623,7 +623,9 @@ def forget_pages(vault_root: Path, pages: Sequence[str]) -> int:
     because they name a removed file. Returns the faces removed.
     """
     path = face_store.index_path(vault_root)
-    keys = sorted({page for page in pages if page})
+    # Only a picture or video holds faces. A text page never opens the face store, so an unreadable index
+    # holds back the cleanup of removed pictures alone, never every removal or a text Source's erasure.
+    keys = sorted({page for page in pages if page and media_types.media_type_for(page) is not None})
     if not keys or not path.is_file():
         return 0
     wanted = json.dumps(keys)
