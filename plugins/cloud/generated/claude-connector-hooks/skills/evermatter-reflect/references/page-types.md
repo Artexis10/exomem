@@ -388,7 +388,7 @@ page that supplies nothing. [Profiles](profiles.md) covers seeding and changing 
 | `sources` | optional | Material that informed the protocol |
 
 `concluded` says the run finished and its result stands. Pair it with `concluded:` (the date) and
-`outcome:` (a verdict such as `confirmed`, `refuted`, `qualified`, `inconclusive` or `abandoned`).
+`outcome:` (a verdict such as `confirmed`, `refuted`, `qualified`, `inconclusive`, `abandoned` or `worsened`).
 
 **Content shape:**
 
@@ -460,6 +460,21 @@ already have (`contradicts`, `evidenced_by`, `supports`) and let `verdict:` carr
 Both rows exist only in the rich form; a compact `- [category] ...` observation carries no metadata.
 Edits preserve both rows, so correcting a prediction's wording never costs its verdict. A refuted
 prediction stays active and ranked, for the same reason a refuted experiment stays concluded.
+
+### Recording a tried approach
+
+When you ran a test, trial or comparison, write or update its note in that turn: an `experiment` for a tried
+change, a `failure` for a diagnosed one. One note holds the record:
+
+- the intent: what the run was meant to learn or achieve;
+- what changed, with its commit or run id;
+- the verdict, as the `verdict:` row of a `## Finding` unit, from the registry. Use `refuted` when the result
+  rules out the hoped-for gain, `worsened` when it made the result worse, and `inconclusive` when the result is
+  too uncertain to say;
+- the test's limits: its cases, its instrument and what it could not show;
+- what would reopen it: the change that makes a retry worth trying.
+
+When the project keeps a run record, link it from the note and keep the verdict out of the record.
 
 ### Recording a degree of belief
 
