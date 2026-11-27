@@ -95,8 +95,8 @@ imports as rows without retyping a cell. `read_instructions(topic="records.impor
    a URL are not sources, and `records.import` refuses them.
 2. Preview with the request below. The `columns` count shows each mapped column's parsed, missing, unparsed and
    rejected cells and malformed rows, which add up to the rows read. `would_reject` names the row, column and
-   original text of each refused cell. `check_sum` gives the total. Compare it with the total the page states:
-   that comparison is the check that your copy matches the page.
+   original text of each refused cell. `check_sum` gives the total. Compare it and the row count with the page:
+   a match shows the summed column and the row count agree, not that every name, date or reference matches.
 3. Read the preview to the person before you start. An unparseable number rejects its row and is never stored as
    null. A leading `+` or `-` is a sign; a currency symbol, a thousands separator or parentheses reject the row.
    A date such as `2025-??-??` leaves the date field missing, and a second field mapped to the same column keeps
