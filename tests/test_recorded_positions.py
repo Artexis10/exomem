@@ -109,6 +109,72 @@ def test_a_page_the_caller_may_not_see_contributes_nothing(vault: Path, monkeypa
     assert "studio-equipment-log" not in str(guest["positions"])
 
 
+def test_a_save_published_during_the_request_leaves_its_positions_and_leads_as_the_request_read_them(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another save published to the catalogue while the request ran; every exact lane then read the catalogue past
+    the request's checkpoint, answered stale, and the person's recorded positions vanished from recall."""
+    import threading
+
+    from exomem import freshness, working_set_runtime
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    position = "I prefer a slow candle before the glaze firing ramps this week"
+    lead = _page(
+        vault, "glaze-firing-schedule",
+        body=f"Glaze firing schedule for the kiln this week.\n\n- [preference] {position} (2026-03-04) ^pos-l\n",
+    )
+    later = _page(vault, "shelf-inventory", body=FILLER)
+    warm_managed_cell(vault)
+    _built(vault).close()
+    working_set_runtime.reset_caches_for_tests()
+    # The catalogue publishes only by the save below, never by a repair the stale lanes would schedule.
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", lambda *_args, **_kwargs: None)
+    store = lexstore.get_store(vault)
+    requested = lexstore.checkpoint_state(store.published_recall_checkpoint("kb"))
+    discover = working_set.task_candidates
+    published: list[object] = []
+    discovered: list[str] = []
+
+    def save_elsewhere() -> None:
+        (vault / later).write_text(
+            "---\ntype: insight\nstatus: active\n---\n\n# shelf-inventory\n\n"
+            "The glaze firing schedule suits the kiln this week.\n\n"
+            "- [preference] I prefer a fast glaze firing schedule for the kiln this week (2026-03-05) ^pos-m\n",
+            encoding="utf-8",
+        )
+        freshness.on_files_changed(vault, changed=[vault / later])
+        # The save's own graph step, so the request's link lane reads a current graph.
+        epistemic_graph.upsert_after_write(vault, [vault / later])
+        # The bounded foreground delta of another request's read publishes the save.
+        store.catalog_readiness("kb", None)
+        published.append(lexstore.checkpoint_state(store.published_recall_checkpoint("kb")))
+
+    def save_then_discover(*args, **kwargs):
+        if not published:
+            writer = threading.Thread(target=save_elsewhere)
+            writer.start()
+            writer.join(30)
+        leads = discover(*args, **kwargs)
+        discovered.extend(found["source_ref"] for found in leads[0])
+        return leads
+
+    monkeypatch.setattr(working_set, "task_candidates", save_then_discover)
+
+    packet = _activate(vault, turn=TURN, max_chars=8000)
+
+    assert len(published) == 1 and published[0] is not None and published[0] != requested
+    block = packet["positions"]
+    assert block["state"] == "ready", block
+    assert [item["ref"].rpartition("/")[2] for item in block["items"]] == ["glaze-firing-schedule.md#pos-l"]
+    assert not any(gap.get("reason") == "lane_failed" for gap in packet["task_context"].get("missing", ()))
+    # Discovery found the lead; the packet lists it in the turn slice, not again among the task candidates.
+    assert lead in discovered
+    assert later not in discovered
+    assert later not in {item["source_ref"] for item in packet["task_context"]["candidates"]}
+    assert "pos-m" not in str(block)
+
+
 def test_a_position_served_or_held_as_stance_is_not_repeated(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A standing line repeated as a position doubles its prompt cost and reads as two separate views.
 

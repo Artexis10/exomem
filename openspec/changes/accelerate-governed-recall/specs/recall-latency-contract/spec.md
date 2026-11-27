@@ -335,7 +335,14 @@ most one connection and run at most one full readiness proof per scope per
 selection. A request MAY use a cache-probe selection and a selection after
 encoding. Activation MAY use an initial lexical selection and a selection for
 synchronous compilation after semantic evidence. Each selection SHALL close
-before provider work or final evidence checks, respectively. Activation SHALL
+before provider work or final evidence checks, respectively, except that the
+maps packet SHALL hold one request read view at its pinned lexical checkpoint
+across its compilation, query encodes included. Its exact catalogue reads at
+that checkpoint and its selections SHALL read that view, and the request SHALL
+close it before final evidence checks. A catalogue publication by another
+write during the request SHALL NOT make those reads stale. A Source erasure
+that completes after the view opened SHALL make each later read of the view
+answer stale. Activation SHALL
 defer its lag repair until the request ends, preserving its pinned checkpoint
 between selections. Independent readers SHALL retain their current proof, and
 an absent checkpoint SHALL NOT gain authority from a retained view.
@@ -372,9 +379,21 @@ hash that supplies their disclosed excerpt or frame annotation.
 #### Scenario: Activation retains a checkpoint across its selection phases
 
 - **WHEN** activation pins a catalogue checkpoint that trails only on withheld pages
-- **THEN** its initial lexical selection closes before encoding
-- **AND** its compilation selection closes before final evidence checks
+- **THEN** its initial lexical selection and its compilation selection read at that checkpoint
+- **AND** every catalogue view they read closes before final evidence checks
 - **AND** lag repair runs after the activation ends, so it cannot replace that checkpoint between selections
+
+#### Scenario: A save published during activation leaves the map's lanes as the request read them
+
+- **WHEN** another write publishes a page to the lexical catalogue after the maps packet pinned its checkpoint
+- **THEN** the packet's positions and task-context lanes answer from the pinned checkpoint, not stale
+- **AND** the published page and its positions appear in none of them
+
+#### Scenario: A Source erasure retires the request's read view
+
+- **WHEN** a Source erasure drops catalogue rows while a request holds a read view that predates it
+- **THEN** the next read of that view answers stale with no rows
+- **AND** the erased page is not served from the older snapshot
 
 #### Scenario: A retained view preserves admission checks
 

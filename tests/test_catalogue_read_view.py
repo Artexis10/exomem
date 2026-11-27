@@ -1401,3 +1401,50 @@ def test_admission_readers_still_require_an_explicit_checkpoint_inside_selection
         assert store.recall_admitted_paths("kb", checkpoint) == paths
         assert store.published_admitted_paths("kb", checkpoint, admission, paths) == admitted
         assert store.published_withheld_paths("kb", checkpoint, admission, paths) == {denied}
+
+
+def test_a_source_erasure_retires_the_request_held_view(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A request's view predates an erasure that ran on another thread; a later read of it served the erased rows."""
+    import threading
+
+    from exomem import source_custody, writer_lease
+
+    page = vault / "Knowledge Base/Notes/erased-during-request.md"
+    page.write_text("# Erased\n\n- [config] erasedduringrequest marker ^erased-unit\n", encoding="utf-8")
+    warm_managed_cell(vault)
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", lambda *_args, **_kwargs: None)
+    store = lexstore.get_store(vault)
+    rel = page.relative_to(vault).as_posix()
+    erased: list[bool] = []
+
+    def erase() -> None:
+        # The eraser's derived and caches steps: drop the rows, then fence every reader that read before the drop.
+        with writer_lease.active_manager().mutation_guard(vault):
+            page.unlink()
+            freshness.on_files_changed(vault, deleted=[page])
+            erased.append(lexstore.delete_after_remove(vault, [rel]))
+            erased.append(source_custody.advance_retirement_generation(vault))
+            erased.append(lexstore.restart_change_journal(vault))
+
+    with lexstore.request_catalog_view(vault, lag_dispatch=lambda _root: None):
+        checkpoint = freshness.recall_checkpoint(vault, "kb")
+        assert lexstore.retain_request_view(vault, checkpoint) is not None
+
+        def read() -> lexstore.CatalogQueryResult:
+            return store.search_semantic_units_result(
+                [], 10, ("config",), (), "kb", checkpoint.triple,
+                recall_checkpoint=checkpoint, allow_delta=False,
+            )
+
+        before = read()
+        eraser = threading.Thread(target=erase)
+        eraser.start()
+        eraser.join(30)
+        after = read()
+
+    assert rel in {hit.parent_path for hit in before.value or ()}
+    assert erased == [True, True, True]
+    assert rel not in {hit.parent_path for hit in after.value or ()}
+    assert (after.readiness.status, after.value) == ("stale", None)

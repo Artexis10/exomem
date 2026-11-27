@@ -489,10 +489,42 @@ it with the current path on the reference corpus.
   boundary; no connection survives into another request.
 
   Activation uses two optional selection phases: initial lexical evidence,
-  then resolution, carry and role queries after semantic evidence. Neither
-  phase holds a transaction across query encoding. Failed capture preserves
-  the existing optional lexical outcome. The compiler closes its selection
-  on every return and exception, before final evidence checks.
+  then resolution, carry and role queries after semantic evidence. In the
+  anchors packet neither phase holds a transaction across query encoding; the
+  maps packet holds one request view across both (below). Failed capture
+  preserves the existing optional lexical outcome. The compiler closes its
+  selection on every return and exception, before final evidence checks.
+
+  The maps packet holds one request read view. Exact reads pin the request's
+  lexical checkpoint and refuse a catalogue at any other state. A save that
+  another request publishes mid-activation therefore made the positions,
+  task-text and methods lanes answer stale, and the map lost what the request
+  had already read. `request_catalogue_view` opens a slot around the map's
+  compilation. The first bind at the request's checkpoint, or the bind in
+  `pin_lexical_checkpoint` at the checkpoint it pinned, captures one SQL
+  snapshot whose stored checkpoint has that state. Exact reads borrow the
+  snapshot only on a matching explicit checkpoint, and selections read it
+  without closing it. The request closes it after compilation, then
+  dispatches any lag that it showed. The final evidence checks run after it
+  closes, on live state. The view is never an admission: it stays out of the
+  admitted-catalogue slot that find reads.
+
+  A foreground delta cannot replace the held view. The catalogue keeps only
+  each page's newest rows, so once a later save has published, no read of
+  the live catalogue can return the rows at the request's checkpoint.
+
+  A Source erasure fences the view. The view reads the Source retirement
+  generation before its snapshot pins, and a view with no readable
+  generation is not captured. Readiness rejects the view once the
+  generation has advanced, and a query that completes after an advance
+  answers stale. The eraser drops the rows before it advances the
+  generation, so no erased row survives in a read that the fence passes.
+
+  Holding the view costs WAL retention, not writer progress. SQLite readers
+  never block writers, so saves and publications proceed. The snapshot
+  stops the WAL from checkpointing past it only while the packet compiles.
+  During that window `rebuild_atomic` declines with `wal_busy`, as it does
+  for any other reader.
 
   Selection exit sends activation's lag repair through its existing deferred
   repair queue. Repair dispatch waits until the activation request ends, so
