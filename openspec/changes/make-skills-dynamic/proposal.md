@@ -39,7 +39,7 @@ An example shows why this matters. A meeting tool's summary lists one person's s
 ## Impact
 
 - **No new store or schema.** The change adds no skill store, frontmatter field or selector, as `recognize-situations-and-project-methods` decided.
-- **Latency:** an activation gains one filter on a catalogue column that already exists. A skill read gains one link parse of the page it already loaded. The findings run in inspection.
+- **Latency:** an activation gains one filter on a catalogue column that already exists. A skill read gains one link parse and at most 20 non-building link lookups, within a budget of 20 ms at p95. The findings run in inspection.
 - **Load target:** the repository records no load target for Evermatter.
 - **What this change lets the owner see:**
   - The agent's own report of its steps, in the reply, on every client the server serves.
@@ -56,7 +56,7 @@ An example shows why this matters. A meeting tool's summary lists one person's s
   - `rebuild-shipped-skills-on-tool-surface`: owner skills build on shipped workflows.
   - `declare-collection-capture-methods`: a collection's capture method can be a skill page, and it then gets the same block when read.
 
-  This change's requirements are new and contradict none of theirs.
+  This change words its requirements to fit theirs. The status switch narrows what counts as a visible skill page and an admitted candidate. The advice clause stays inside the one-sentence advice. When each change archives, task 4.3 checks the merged canonical text for contradictions.
 
 ## Decisions by the owner (2026-11-27)
 

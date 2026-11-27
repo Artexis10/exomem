@@ -2,7 +2,7 @@
 
 ### Requirement: A skill's body arrives with a skill block
 
-When a `read_memory` result or a method item carries the body of a page that is a vault skill, it SHALL also carry one `skill` block with a `follow` text and the list of linked skills. The `follow` text SHALL live in one place in code. When the hook serves a method item that carries a skill's body, it SHALL render that item's `follow` text.
+When a page read (`read_page`) or a method item carries the body of a page that is a vault skill, it SHALL also carry one `skill` block with a `follow` text and the list of linked skills. The `follow` text SHALL live in one place in code. When the hook serves a method item that carries a skill's body, it SHALL render that item's `follow` text.
 
 #### Scenario: A skill read carries the block
 
@@ -30,7 +30,7 @@ The `follow` text SHALL apply when the agent uses the skill, and SHALL tell the 
 
 ### Requirement: Serving texts name the skill block for skills
 
-The skills catalogue advice and the next-action texts that name a skill SHALL keep their guidance for collections and other leads, and SHALL add, within their length bounds, that a skill's result says how to follow it.
+The skills catalogue advice and the next-action texts that name a skill SHALL keep their guidance for collections and other leads, and SHALL add, within their length bounds and within the same sentence where a text is held to one sentence, that a skill's result says how to follow it.
 
 #### Scenario: The catalogue advice covers both
 
@@ -57,7 +57,7 @@ The shipped scaffold SHALL teach an owner to link a reused skill with a wiki lin
 
 ### Requirement: The skill block lists linked skills
 
-The `skill` block SHALL list the skills that the body links, each with its name and reference, derived from the body's links that resolve to a recognised skill for the caller. A link that egress withholds SHALL NOT appear in the list.
+The `skill` block SHALL list the live skills that the body links, each with its name and reference, derived from the body's links that resolve to a recognised skill for the caller. The block SHALL resolve at most 20 distinct links per skill. It SHALL resolve each through the read path's lookup that never builds the title resolver, so a bare title that this lookup cannot resolve is left out of the list. A link that egress withholds SHALL NOT appear in the list.
 
 #### Scenario: A linked skill is named
 
@@ -66,16 +66,30 @@ The `skill` block SHALL list the skills that the body links, each with its name 
 
 ### Requirement: Status switches a skill off
 
-The skills catalogue, the method-fit candidates and every task-context path that serves a skill as a method item SHALL leave out a skill whose page's status class is a class that the vocabulary registry declares and that is not `live`. A skill page with no status, or with a status whose class cannot be read, SHALL stay live. The filter SHALL apply to skills only, not to Records collections. Code SHALL branch only on the registry-declared status class.
+A skill whose page's status class is a class that the vocabulary registry declares and that is not `live` SHALL count as switched off. A switched-off skill SHALL NOT count as a visible skill page for the skills catalogue, and task discovery SHALL NOT admit it as a candidate, so neither the catalogue, the method-fit candidates nor a task-context method item serves it.
+
+#### Scenario: A switched-off skill read by path
+
+- **WHEN** an agent reads a switched-off skill page by its path
+- **THEN** the result's `skill` block says that the skill is switched off, in place of the `follow` text, and lists no linked skills
 
 #### Scenario: An archived skill leaves every serving path
 
 - **WHEN** the owner sets a skill page's status to one whose class is not `live`
 - **THEN** the next catalogue leaves the skill out, task discovery that reaches the page serves no method item for it, and setting a live status brings it back
 
+### Requirement: Unclassified skills stay live
+
+A skill page with no status, or with a status whose class cannot be read, SHALL stay live. The switch SHALL apply to skills only, not to Records collections. Code SHALL branch only on the registry-declared status class.
+
+#### Scenario: A skill with no status
+
+- **WHEN** a skill page carries no status
+- **THEN** the catalogue lists it as it does today
+
 ### Requirement: Broken skill links and names are owner findings
 
-Inspection SHALL report, to the vault owner only, one finding for each wiki link in a skill's text whose last path segment is `SKILL` or `SKILL.md` and that names no file the owner can see, and one finding for each `name` that two or more skills share. None of these findings SHALL block a write, a turn or the catalogue.
+Inspection SHALL report, to the vault owner only, one finding for each wiki link in a skill's text whose last path segment is `SKILL` or `SKILL.md` and that names no file the owner can see or names a switched-off skill, and one finding for each `name` that two or more skills share. None of these findings SHALL block a write, a turn or the catalogue.
 
 #### Scenario: A linked skill was removed
 

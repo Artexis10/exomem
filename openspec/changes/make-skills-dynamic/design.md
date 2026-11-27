@@ -44,18 +44,26 @@ Non-goals:
 
 ### D1. The follow text rides on the skill's body
 
-When the server returns a skill's body, the result carries one `skill` block. That covers two cases: a `read_memory` result for a page that `vault_skills.recognise` accepts, and a method item that carries a skill's body as its contract. The block holds:
+When the server returns a skill's body, the result carries one `skill` block. That covers two cases: a page read (the `read_page` tool, which runs the `read_memory` command) for a page that `vault_skills.recognise` accepts, and a method item that carries a skill's body as its contract. The block holds:
 
 - `follow`: the follow text (D2);
 - `skills`: the skills that the body links, each by name and reference. The list is derived from the body's links that resolve to a recognised skill for the caller, and leaves out any link that egress withholds.
 
-The follow text lives in one place in code. The block costs one link parse of a page the read already loaded, and loads only when a skill is read.
+The follow text lives in one place in code. The block loads only when a skill is read.
+
+Its cost is bounded:
+
+- one parse of the links in the page the read already loaded;
+- at most 20 distinct links resolved. A skill links a few steps' worth of other skills, so 20 leaves room without letting a long page cost a lookup per link;
+- each lookup goes through the read path's resolver that never builds the title index: a file check for a path-form link, and the cached title lookup for a bare title. A bare title that this lookup cannot resolve is left out of the list.
+
+Latency budget: the block adds at most 20 ms at p95 to a skill read. Task 2.1 measures the read's p95 before and after on a production-sized vault copy.
 
 The existing serving texts keep their guidance, because they also serve collections and ordinary leads:
 
 - `_advice`, `skill_check` and `method_selected` gain one clause that applies only to skills, "a skill's result says how to follow it", where it fits the 240-character bound;
 - `task_read` stays as it is;
-- the hook renders the `follow` text of a method item that carries a skill's body, so a hook-delivered skill shows the text. Only a method-fit selection carries a skill's body as a method item, and that placement is off by default. On a default install, the hook path therefore serves skills through the catalogue, and the block arrives when the agent reads the skill.
+- the hook renders the `follow` text of a method item that carries a skill's body, outside the quoted contract, because it is product text and not page text. A hook-delivered skill then shows the text. Only a method-fit selection carries a skill's body as a method item, and that placement is off by default. On a default install, the hook path therefore serves skills through the catalogue, and the block arrives when the agent reads the skill.
 
 The generated hook copy follows the templates through its generator.
 
@@ -106,7 +114,9 @@ Rejected:
 
 ### D4. Status switches a skill off
 
-The catalogue's skill entries, the method-fit candidates and `_with_skill` drop a skill whose `lifecycle_class` is a registry-declared class other than `live`. A skill with no status, or with a class that cannot be read, stays live. Records collections keep today's filter. Code branches only on the registry-declared class, never on a status key.
+A skill whose `lifecycle_class` is a registry-declared class other than `live` is switched off. It is not a visible skill page for the catalogue, and task discovery does not admit it as a candidate, so the catalogue's skill entries, the method-fit candidates and `_with_skill` all leave it out. Wording the switch as a narrowing of "visible" and "admitted" keeps the `deliver-session-context-and-skills` requirements "Skill items SHALL list visible skill pages" and "When task discovery admits a skill page as a candidate, the response SHALL project it as a method item" true as written.
+
+A switched-off skill that a live skill links is left out of the live skill's `skills` list, and inspection reports the link. A switched-off skill read by its path carries a `skill` block that says it is switched off, in place of the follow text. A skill with no status, or with a class that cannot be read, stays live. Records collections keep today's filter. Code branches only on the registry-declared class, never on a status key.
 
 ### D5. The use readout waits for its capability
 
@@ -126,12 +136,12 @@ Rejected for now:
 
 Inspection reports, for the owner only:
 
-- a wiki link in a skill's text whose last path segment is `SKILL` or `SKILL.md` and that names no file the owner can see, through `page_names.resolve_page`;
+- a wiki link in a skill's text whose last path segment is `SKILL` or `SKILL.md` and that names no file the owner can see or names a switched-off skill, through `page_names.resolve_page`. `SKILL` is the file name that the Agent Skills format fixes, so this test checks a format token, not meaning;
 - two skills with the same `name`;
 - a `SKILL.md` in the Knowledge Base, outside Sources and Evidence, without a string `name` and `description`;
 - the skills that D4 hides, with their count.
 
-A write that leaves a skill page without its fields succeeds and says so on its receipt. None of these blocks a write, a turn or the catalogue.
+A write that leaves a skill page without its fields succeeds and says so on its receipt. None of these blocks a write, a turn or the catalogue. Inspection reads skills from the catalogue's indexed skill rows and pages its findings, so its cost grows with the number of skills, not with the vault.
 
 ### D7. Shipped skills stay the base until the owner chooses
 
