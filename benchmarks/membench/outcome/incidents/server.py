@@ -37,15 +37,17 @@ def free_port() -> int:
 
 
 def lay_exomem_command(root: Path, arm: Path, arm_env: Mapping[str, str] | None = None) -> Path:
-    """A directory to put first on the actor's PATH: its ``exomem`` runs the arm's own CLI under the unit's pins."""
+    """A directory to put first on the actor's PATH: its ``evermatter`` and ``exomem`` run the arm's own CLI under
+    the unit's pins. The skill names ``evermatter``; older arms name ``exomem``. Both must resolve to the arm."""
     directory = root / "bin"
     directory.mkdir()
     pins = " ".join(
         f"{key}={shlex.quote(value)}" for key, value in server_pins(root, arm, arm_env).items()
     )
-    command = directory / "exomem"
-    command.write_text(f'#!/bin/sh\nexec env {pins} {shlex.quote(sys.executable)} -m exomem "$@"\n')
-    command.chmod(0o755)
+    for name in ("evermatter", "exomem"):
+        command = directory / name
+        command.write_text(f'#!/bin/sh\nexec env {pins} {shlex.quote(sys.executable)} -m exomem "$@"\n')
+        command.chmod(0o755)
     return directory
 
 
