@@ -8,7 +8,7 @@ A save that the caller sent is never lost because the vault was busy. When the m
 
 ### Requirement: A busy save is accepted durably instead of refused
 
-The serving HTTP process SHALL accept a save durably when the vault mutation boundary stays busy, instead of returning `MUTATION_BUSY`. Acceptance SHALL persist the save to a machine-local store that survives a process kill and a power loss before the receipt is returned. An eligible save SHALL wait for the boundary for at most the intake wait (15 s by default) before it is accepted.
+The serving HTTP process SHALL accept a save durably when the vault mutation boundary stays busy, instead of returning `MUTATION_BUSY`. Acceptance SHALL persist the save to a machine-local store that survives a process kill and a power loss before the receipt is returned. An eligible save SHALL wait for the boundary for at most the intake wait (2 s by default) before it is accepted.
 
 #### Scenario: A save during a long hold comes back queued
 
@@ -75,7 +75,7 @@ A save that meets no contention SHALL NOT read the intake store, and a fault in 
 
 ### Requirement: Queued saves land once, in arrival order
 
-One drainer in the serving process SHALL apply queued saves in acceptance order, through the ordinary dispatcher, as the principal that sent each save. A contention refusal during application SHALL leave the save queued and retried, without a limit on attempts. A new eligible save that arrives while saves are queued SHALL wait behind them and SHALL be queued behind them if the queue does not empty within the intake wait.
+One drainer in the serving process SHALL apply queued saves in acceptance order, through the ordinary dispatcher, as the principal that sent each save. A contention refusal during application SHALL leave the save queued and retried, without a limit on attempts. A new eligible save that arrives while saves are queued SHALL be queued behind them at once, without waiting for the queue to empty.
 
 #### Scenario: Two clients' saves land after the hold ends
 
@@ -88,6 +88,13 @@ One drainer in the serving process SHALL apply queued saves in acceptance order,
 - **WHEN** a `remember` save is queued
 - **AND** an `edit_memory` of that page arrives while the create is still queued
 - **THEN** the edit is applied after the create
+
+#### Scenario: A save behind queued saves gets its receipt at once
+
+- **WHEN** saves are queued and not yet applied
+- **AND** the owner sends another eligible save
+- **THEN** the call returns its queued receipt without waiting the intake wait
+- **AND** the save is applied after the earlier ones
 
 ### Requirement: A replay commits at most once
 
