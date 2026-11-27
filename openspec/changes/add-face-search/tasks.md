@@ -86,8 +86,14 @@
 
 ## 10. Delivery
 
-- [x] 10.1 Add a user note under `user-notes/` in one plain sentence. Evidence: user-notes/find-photos-of-a-person.md.
+- [ ] 10.1 Add a user note under `user-notes/` in one plain sentence in the pull request that releases faces to users. The note to add: "You can now find photos and videos of a person by name, once you turn on face search on your computer and name the faces it groups."
 - [ ] 10.4 Before release, record the new MCP discovery fingerprint as pending in the personal plugin contract, and upload both face model assets to the `served-models` release, built from the committed build script.
   The fingerprint is recorded as pending in `deploy/chatgpt/personal-plugin-contract.json`; the asset upload is open.
 - [ ] 10.2 Two blind review passes by separate reviewers (biometric data), each with the risk lens, before merge.
 - [ ] 10.3 After release, refresh hosted connector discovery for the new `search_memory` field and door operations.
+- [ ] 10.5 Let a Cloud cell listed in `cellctl.facesHostedCellIds` run faces: bake both face artifacts into the cell image beside the CLIP towers with an offline load gate, turn the CLIP step on for that cell only (cells default to `EXOMEM_DISABLE_CLIP=1`), and measure the face models in the media child against its CLIP memory budget. Task 9.6 depends on it.
+
+## 11. Deferred
+
+- [ ] 11.1 Run the turn-on backfill in the service, so `exomem faces on` asks the running service to scan instead of scanning in the terminal process.
+- [ ] 11.2 Decide whether the face index and the people store become one database, so a face write is one commit instead of two.
