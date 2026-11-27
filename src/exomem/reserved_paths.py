@@ -3764,6 +3764,47 @@ def identity_catalogue_ready(vault_root: Path) -> bool:
     return _warm_baseline_identity_catalogue(vault_root) is not None
 
 
+#: How often a reader looks for the background build before that build has registered its flight.
+_WARM_FLIGHT_POLL_SECONDS = 0.05
+
+
+@call_spans.timed("reserved.identity.warm_wait")
+def await_identity_catalogue_warm(vault_root: Path, timeout: float) -> bool:
+    """Wait at most ``timeout`` seconds for the background inventory build; True once one is ready.
+
+    A fresh process has no inventory until its first warm finishes, which takes seconds on a small
+    vault. Waiting that long lets the first turn get its context instead of a warming outcome. The
+    reader only waits on the build already scheduled: it never starts or leads one. For a reader that
+    holds no boundary.
+    """
+
+    if _identity_coordination_active(vault_root):
+        # The build needs the identity coordination this caller holds: waiting would only run out the clock.
+        return identity_catalogue_ready(vault_root)
+    vault_key = _vault_identity_key(vault_root)
+    deadline = time.monotonic() + max(0.0, timeout)
+    # The build registers its flight on its own thread, so it can be absent for a moment after scheduling.
+    followed = False
+    # The caller is a read holding no boundary, so it leaves the in-flight count rather than releasing
+    # every bulk pass: other requests keep their priority while it waits.
+    with foreground_priority.outside_foreground():
+        while not identity_catalogue_ready(vault_root):
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return False
+            with _PUBLISHED_IDENTITY_LOCK:
+                flight = _BASELINE_IDENTITY_FLIGHTS.get(vault_key)
+            if flight is not None:
+                followed = True
+                flight.done.wait(left)
+            elif followed:
+                # The build ended without an inventory (it failed or was stopped): nothing more is coming.
+                return False
+            else:
+                time.sleep(min(_WARM_FLIGHT_POLL_SECONDS, left))
+    return True
+
+
 def revalidate_identity_catalogue_generation(vault_root: Path) -> bool:
     """Prove a carried inventory against the vault's current identity generation.
 

@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Create assigns a new collection's id when the manifest names none
-The Records command's `create` and `validate` of a new collection SHALL accept a manifest with no `exomem_id` line. `create` SHALL assign an id and return it as `collection_id`; `validate` SHALL warn `COLLECTION_ID_ASSIGNED_AT_CREATE`. A present `exomem_id` that is not a UUID SHALL still be refused with `INVALID_COLLECTION_ID`. `describe` SHALL mark `exomem_id` optional and show no fixed id in its examples.
+The Records command's `create` and `validate` of a new collection SHALL accept a manifest with no `exomem_id` line. `create` SHALL assign an id and return it as `collection_id`; `validate` SHALL warn `COLLECTION_ID_ASSIGNED_AT_CREATE`. A present `exomem_id` that is not a UUID SHALL still be refused with `INVALID_COLLECTION_ID`. `describe` SHALL mark `exomem_id` optional for a new collection and show no fixed id in its examples.
 
 #### Scenario: A client with no UUID source creates a collection
 - **WHEN** a client creates a collection from a manifest that has no `exomem_id` line

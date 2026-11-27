@@ -164,7 +164,8 @@ def record_memory(
             is rejected and reports every would-be outcome; `skip` commits the rest.
         import_request: import only, for a store-routed collection: a durable job
             streams one preserved Sources/Evidence file in bounded batches; store-mode
-            `describe` carries its contract.
+            `describe` carries its contract and read_instructions(topic="records.import")
+            teaches every mode and format with a worked call.
         query: query only, for a store-routed collection: a typed v1 query object
             instead of the legacy shaping arguments; store-mode `describe` names its
             grammar route.
