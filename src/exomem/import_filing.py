@@ -187,7 +187,7 @@ def read_view(vault_root: Path, import_id: str) -> dict:
         "stop": record.get("stop"), "needs": record.get("needs") or [], "person": record.get("person") or [],
     }
     if record["state"] == DONE and record.get("left_out") is not None:
-        view["left_out"] = {key: record["left_out"][key] for key in ("by_reason", "items", "truncated")}
+        view["left_out"] = {key: record["left_out"][key] for key in ("by_reason", "items", "truncated", "sidecars") if key in record["left_out"]}
     if (rate := _rate(record.get("calls") or [])) is not None:
         view["rate"] = rate
     return view
@@ -232,17 +232,23 @@ def _left_out(vault_root: Path, import_id: str) -> dict:
     A `done` stage is never filed again unless a caller files it again, so this is read once and stored; the
     view then answers without opening a run. Raises when the runs cannot be read, so the stage is not `done` yet.
     """
-    from . import adoption_run
+    from . import adoption_run, export_sidecars
 
-    members = sorted(adoption_run.unfiled_members(vault_root, import_id), key=lambda member: member["path"])
+    unfiled, sidecars = adoption_run.unfiled_report(vault_root, import_id)
+    # A sidecar that did its work is counted, not listed, so that a long Takeout never crowds out the files that need a look.
+    done_work = (export_sidecars.CODE_APPLIED, export_sidecars.CODE_EMPTY)
+    members = sorted(unfiled, key=lambda member: (member["code"] in done_work, member["path"]))
     by_reason: dict[str, int] = {}
     for member in members:
         by_reason[member["code"]] = by_reason.get(member["code"], 0) + 1
-    return {
+    left_out = {
         "count": len(members), "by_reason": dict(sorted(by_reason.items())),
         "items": [{"path": member["path"], "code": member["code"]} for member in members[:LEFT_OUT_ITEMS]],
         "truncated": len(members) > LEFT_OUT_ITEMS,
     }
+    if sidecars is not None:
+        left_out["sidecars"] = sidecars
+    return left_out
 
 
 def _held(stop: dict | None) -> bool:

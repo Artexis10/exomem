@@ -511,10 +511,15 @@ def render_artifact_source(
     """The Source page of an artifact original, in capture's own page format."""
     from . import add as add_module
     from . import memory_refs
-    from .preserve import _sanitize_filename
+    from .preserve import DESCRIPTION_HEADING, _sanitize_filename
 
     kind, domain_lines = _kind_lines(planned)
     name = _sanitize_filename(Path(planned["original_path"]).name)
+    content = add_module._describe_artifact(name, planned["original_sha256"], planned["original_bytes"])
+    sidecar = planned.get("sidecar") or {}
+    if sidecar.get("caption"):
+        # The owner's caption from a Takeout sidecar, in the section an upload's description has, so one caption has one home.
+        content = f"{content}\n\n{DESCRIPTION_HEADING}\n\n{sidecar['caption']}"
     return add_module._render_source(
         title=planned["title"],
         source_type=kind,
@@ -525,17 +530,37 @@ def render_artifact_source(
             f"Copied from `{_clean_inline(planned['original_path'])}` by Evermatter adoption. "
             "The original remains unchanged."
         ),
-        content=add_module._describe_artifact(
-            name, planned["original_sha256"], planned["original_bytes"]
-        ),
+        content=content,
         exomem_id=source_id or memory_refs.new_id(),
         domain=(planned.get("classification") or {}).get("domain"),
         artifact_name=name,
         artifact_rel=planned["artifact_path"],
         artifact_digest=planned["original_sha256"],
         artifact_size=planned["original_bytes"],
-        extra_lines=_provenance_lines(planned, collection, provenance),
+        extra_lines=[*_provenance_lines(planned, collection, provenance), *_sidecar_capture_lines(sidecar)],
     )
+
+
+def _sidecar_capture_lines(sidecar: Mapping[str, Any]) -> list[str]:
+    """The capture record that a paired Takeout sidecar's time gives its photo's Source page, as the media worker writes one.
+
+    The time is UTC, and the source is the one the `capture-date-sources` pack gives the sidecar's producer, so a
+    wrong pair can be audited from the page. A sidecar with no time gives no line, and so does a time the record's bounds refuse.
+    """
+    from . import capture_dates, capture_metadata
+
+    time = sidecar.get("time")
+    if time is None:
+        return []
+    try:
+        facts = capture_metadata.CaptureFacts.from_payload({
+            capture_metadata.CAPTURE_TIME: time, capture_metadata.CAPTURE_DATE: time[:10],
+            capture_metadata.CAPTURE_DATE_BASIS: capture_metadata.BASIS_UTC,
+            capture_metadata.CAPTURE_DATE_SOURCE: capture_dates.source_for("export-sidecar"),
+            capture_metadata.CAPTURE_DATE_MATCHED_FROM: sidecar["path"]})
+    except ValueError:
+        return []
+    return [f"{name}: {value}" for name, value in facts.frontmatter().items()]
 
 
 def note_body(planned: Mapping[str, Any], text: str) -> str:

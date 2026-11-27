@@ -90,7 +90,8 @@ def test_an_overlay_entry_with_a_parser_that_code_lacks_is_refused_and_the_other
     assert [finding["path"] for finding in snapshot.findings] == ["entries.odd-notes"]
     assert "INVALID_SOURCE_FORMAT" in snapshot.findings[0]["detail"]
     assert {entry.key for entry in snapshot.active} == {
-        "chatgpt-conversations", "claude-conversations", "evernote-notes", "gmail-mbox", "kite-chats"}
+        "chatgpt-conversations", "claude-conversations", "evernote-notes", "gmail-mbox", "google-photos-sidecar",
+        "kite-chats"}
 
 
 def test_an_overlay_entry_whose_file_name_pattern_matches_every_file_or_names_a_folder_is_refused(tmp_path):

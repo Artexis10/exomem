@@ -3,7 +3,8 @@
 An export from another app arrives as one file that holds many items. Which file names and item keys
 reveal a vendor's export, and which words a transcript shows, change as vendors change, so they are
 registry data (`source-formats`). Code knows only how to read each closed `parser`, in `export_parsers`: each parser
-owns its container (a JSON array, an XML document, an mbox) and the facts it needs from its entry.
+owns its container (a JSON array, an XML document, an mbox, a JSON object) and the facts it needs from its entry.
+A photo-sidecar parser derives no items: its entries name the sidecar files that date and caption the photos beside them.
 """
 
 from __future__ import annotations
@@ -26,9 +27,12 @@ PACK = "source-formats.yaml"
 _CHANGEABLE = ("roles", "untitled", "attachment", "words", "skip_labels")
 #: The attributes that every entry carries, whatever its parser.
 # nosemgrep: ep-word-set -- The registry schema's closed attribute names, not vocabulary.
-_COMMON = frozenset({"file_glob", "parser", "item_kind", "untitled"})
+_COMMON = frozenset({"file_glob", "parser"})
 _MAX_LABEL_CHARS = 80
 _MAX_SKIP_LABELS = 64
+#: The longest file name or name limit an entry may state; a file name never passes 255 bytes, and a limit past it names nothing.
+_MAX_NAME_LIMIT = 255
+_MAX_REPLACED = 16
 
 
 def registry_path(root: Path) -> Path:
@@ -56,6 +60,20 @@ def _fact_shape(name: str, value: object, parser: str) -> str | None:
     if name == "skip_labels":
         ok = isinstance(value, list) and len(value) <= _MAX_SKIP_LABELS and all(_one_line(label, 128) for label in value)
         return None if ok else "skip_labels must list the labels whose messages are left out, and may be empty"
+    if name == "item_kind":
+        return None if _one_line(value, 64) else "item_kind must name the Source kind of each item"
+    if name == "suffix_word":
+        ok = _one_line(value, 64) and value.isascii() and not any(char.isspace() or char in "./\\()" for char in value)
+        return None if ok else "suffix_word must be the one word that Takeout puts between a photo's name and `.json`"
+    if name in ("sidecar_name_limit", "media_name_limit"):
+        ok = isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= _MAX_NAME_LIMIT
+        return None if ok else f"{name} must be a whole number of characters between 1 and {_MAX_NAME_LIMIT}"
+    if name == "replaced":
+        ok = (
+            isinstance(value, Mapping) and 0 < len(value) <= _MAX_REPLACED
+            and all(isinstance(char, str) and len(char) == 1 and isinstance(other, str) and len(other) == 1 for char, other in value.items())
+        )
+        return None if ok else "replaced maps each character that Takeout replaces in a file name to the one that takes its place"
     if name == "roles":
         ok = (
             isinstance(value, Mapping) and bool(value)
@@ -80,13 +98,11 @@ def _check(entry: registry.Entry, entries: Mapping[str, registry.Entry]) -> None
     # A pattern over a member's own name, so it holds no path; it must keep a literal character, or it would match every file.
     if not _one_line(pattern, 255) or "/" in pattern or "\\" in pattern or pattern.startswith(".") or not pattern.strip("*?"):
         raise registry.RegistryError("INVALID_SOURCE_FORMAT: file_glob must be one file name pattern, such as conversations*.json")
-    if not _one_line(attributes.get("item_kind"), 64):
-        raise registry.RegistryError("INVALID_SOURCE_FORMAT: item_kind must name the Source kind of each item")
     needed = _COMMON | PARSERS[parser].needs
     if extra := sorted(set(attributes) - needed):
         raise registry.RegistryError(
             f"INVALID_SOURCE_FORMAT: {parser} does not read {', '.join(extra)}; it reads {', '.join(sorted(needed))}")
-    for name in sorted(needed - {"file_glob", "parser", "item_kind"}):
+    for name in sorted(needed - {"file_glob", "parser"}):
         if name not in attributes:
             raise registry.RegistryError(f"INVALID_SOURCE_FORMAT: {parser} needs {name}")
         if (wrong := _fact_shape(name, attributes[name], parser)) is not None:
@@ -152,10 +168,13 @@ SPEC = registry.RegistrySpec(
     overlay=registry_path,
     adapter=_Adapter(PACK, lambda: SPEC, _check),
     fields=frozenset({"label", "description", "status", "attributes"}),
-    attributes=frozenset({*_COMMON, "item_keys", "root", "label_header", *_CHANGEABLE}),
+    attributes=frozenset({
+        *_COMMON, "item_keys", "item_kind", "root", "label_header", "suffix_word", "sidecar_name_limit", "media_name_limit",
+        "replaced", *_CHANGEABLE}),
     immutable=frozenset({
         "attributes.file_glob", "attributes.item_keys", "attributes.parser", "attributes.item_kind", "attributes.root",
-        "attributes.label_header"}),
+        "attributes.label_header", "attributes.suffix_word", "attributes.sidecar_name_limit", "attributes.media_name_limit",
+        "attributes.replaced"}),
     # Agents meet export formats only through a filing view, not the bootstrap.
     summarize_keys=False,
 )
@@ -172,14 +191,18 @@ class SourceFormat:
     file_glob: str
     item_keys: tuple[str, ...]  # JSON: the keys that every item carries
     parser: str
-    item_kind: str
-    roles: Mapping[str, str]  # JSON: the author roles that a transcript shows, with their labels
-    untitled: str  # the title of an item that has none; its date follows when it has one
-    attachment: str  # JSON: the word that heads a quoted attachment
+    item_kind: str = ""  # the Source kind of each item; a parser that derives items needs it
+    roles: Mapping[str, str] = field(default_factory=dict)  # JSON: the author roles that a transcript shows, with their labels
+    untitled: str = ""  # the title of an item that has none; its date follows when it has one
+    attachment: str = ""  # JSON: the word that heads a quoted attachment
     root: str | None = None  # XML: the name of the document's root element
     label_header: str | None = None  # mbox: the header that carries a message's labels
     skip_labels: tuple[str, ...] = ()  # mbox: the labels whose messages are left out
     words: Mapping[str, str] = field(default_factory=dict)  # the parser's other display words, by its closed key set
+    suffix_word: str = ""  # photo sidecar: the word between a photo's name and `.json`
+    sidecar_name_limit: int = 0  # photo sidecar: the characters of a sidecar's name before `.json` that Takeout keeps
+    media_name_limit: int = 0  # photo sidecar: the characters of a photo's name before its extension that Takeout keeps
+    replaced: Mapping[str, str] = field(default_factory=dict)  # photo sidecar: the characters Takeout replaces in a name
 
     def names(self, member: str) -> bool:
         """Whether a member's own name matches the entry's `file_glob`, as a provider's conflict-copy patterns match: without regard to case."""
@@ -195,9 +218,11 @@ def formats(vault_root: Path) -> tuple[SourceFormat, ...]:
     return tuple(
         SourceFormat(
             entry.key, entry.attributes["file_glob"], tuple(entry.attributes.get("item_keys", ())), entry.attributes["parser"],
-            entry.attributes["item_kind"], dict(entry.attributes.get("roles", {})), entry.attributes["untitled"],
+            entry.attributes.get("item_kind", ""), dict(entry.attributes.get("roles", {})), entry.attributes.get("untitled", ""),
             entry.attributes.get("attachment", ""), entry.attributes.get("root"), entry.attributes.get("label_header"),
-            tuple(entry.attributes.get("skip_labels", ())), dict(entry.attributes.get("words", {})))
+            tuple(entry.attributes.get("skip_labels", ())), dict(entry.attributes.get("words", {})),
+            entry.attributes.get("suffix_word", ""), entry.attributes.get("sidecar_name_limit", 0),
+            entry.attributes.get("media_name_limit", 0), dict(entry.attributes.get("replaced", {})))
         for entry in registry.load(SPEC, vault_root).active
     )
 
@@ -221,7 +246,10 @@ def recognise(vault_root: Path, path: Path) -> SourceFormat | None:
     the entry's root element, or an mbox. A file that is not that container, or is cut off before the check can
     tell, is not recognised, and files as an ordinary file.
     """
-    for candidate in (candidate for candidate in formats(vault_root) if candidate.names(path.name)):
+    # An entry whose parser derives no items (a sidecar) is read by its own pass, so a sidecar is never an export.
+    for candidate in (
+        candidate for candidate in formats(vault_root) if candidate.names(path.name) and PARSERS[candidate.parser].read is not None
+    ):
         try:
             with open_export(path) as stream:
                 if PARSERS[candidate.parser].recognise(stream, candidate):

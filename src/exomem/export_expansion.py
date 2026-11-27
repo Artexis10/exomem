@@ -17,6 +17,10 @@ that a call that runs out of budget resumes where it stopped. It is a folder, `<
 An export file stays out of filing while it is `working`, because filing consumes it and a later call still has to read it.
 A stage with no recognised export has no record. The export is untrusted content: its text is written as data and
 no step follows, runs or interprets it.
+
+A Google Photos Takeout derives no files, so it is not an export in this sense. Its sidecars are read by one pass
+(`export_sidecars`) that `expand` runs first, in the same record and under the same budget: its rows and its one state
+entry sit beside the exports' and no export reads them.
 """
 
 from __future__ import annotations
@@ -31,7 +35,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from . import cloud_import, export_parsers, export_transcripts, import_stage, source_formats
+from . import (
+    cloud_import,
+    export_parsers,
+    export_sidecars,
+    export_transcripts,
+    import_stage,
+    source_formats,
+)
 from .export_transcripts import Skipped, Transcript, Unreadable
 
 WORKING, DONE, PARTIAL = "working", "done", "partial"  # nosemgrep: ep-word-set -- the closed states of an export in the expansion record.
@@ -62,8 +73,9 @@ class Reading:
     files: int  # derived files written: transcripts and attachments
     failed: int  # items that could not be read, or found no free name
     skipped: int  # items that the entry's own rule leaves out; not failed, and not a partial read
-    partial: int  # exports that were read in part
+    partial: int  # exports that were read in part, and the sidecar pass when it ended in part
     stop: dict | None  # why the expansion waits for the person: its code and the export, when the volume is full
+    sidecars: str | None = None  # the state of the sidecar pass, or None for a stage with no sidecar to read
 
 
 def _entry(format_key: str | None = None, kind: str | None = None, size: int = 0) -> dict:
@@ -75,14 +87,31 @@ def _entry(format_key: str | None = None, kind: str | None = None, size: int = 0
 class _Record:
     """One stage's expansion as its rows say it, with the state that caches them."""
 
-    def __init__(self, import_id: str, exports: dict[str, dict], stop: dict | None, rows_size: int) -> None:
+    def __init__(
+        self, import_id: str, exports: dict[str, dict], stop: dict | None, rows_size: int, sidecars: dict | None = None,
+    ) -> None:
         self.import_id = import_id
         self.exports = exports
         self.stop = stop
         self.rows_size = rows_size
+        self.sidecars = sidecars  # the sidecar pass's one state entry (`export_sidecars`); None before the pass found a JSON file
+
+    def append(self, root: Path, rows: list[dict]) -> None:
+        """Append rows of the sidecar pass, durably, and count them; the pass's rows are repeatable, so a crash after them loses nothing."""
+        self.rows_size = import_stage.append_expansion_rows(root, self.import_id, rows)
+        for row in rows:
+            self.apply(row)
+
+    def save(self, root: Path) -> None:
+        _save(root, self)
 
     def apply(self, row: dict) -> None:
         """Count one row into its export. A row whose position its export has passed is one that a crash repeated, and counts once."""
+        if export_sidecars.is_row(row):
+            if self.sidecars is None:
+                self.sidecars = export_sidecars.new_entry(None)
+            export_sidecars.apply(self.sidecars, row)
+            return
         export, after = row.get("export"), row.get("next")
         if not isinstance(export, str) or not isinstance(after, int) or isinstance(after, bool):
             return
@@ -104,7 +133,7 @@ class _Record:
     def document(self) -> dict:
         return {
             "version": RECORD_VERSION, "import_id": self.import_id, "rows_size": self.rows_size, "exports": self.exports,
-            "stop": self.stop}
+            "stop": self.stop, "sidecars": self.sidecars}
 
     def files(self) -> int:
         return sum(entry["files"] for entry in self.exports.values())
@@ -126,7 +155,7 @@ def _load(root: Path, import_id: str) -> _Record:
     )
     record = _Record(
         import_id, state["exports"] if valid else {}, state.get("stop") if valid and isinstance(state.get("stop"), dict) else None,
-        state["rows_size"] if valid else 0)
+        state["rows_size"] if valid else 0, state["sidecars"] if valid and isinstance(state.get("sidecars"), dict) else None)
     for after, row in import_stage.read_expansion_rows(root, import_id, offset=record.rows_size):
         record.apply(row)
         record.rows_size = after
@@ -159,8 +188,9 @@ def read(root: Path, import_id: str) -> Reading:
         kinds={_folder_of(path): state["kind"] for path, state in exports.items() if isinstance(state.get("kind"), str)},
         files=record.files(), failed=sum(state["failed"] for state in exports.values()),
         skipped=sum(state["skipped"] for state in exports.values()),
-        partial=sum(1 for state in exports.values() if state.get("state") == PARTIAL and state.get("code")),
-        stop=record.stop)
+        partial=sum(1 for state in exports.values() if state.get("state") == PARTIAL and state.get("code"))
+        + int(record.sidecars is not None and record.sidecars["state"] == export_sidecars.PARTIAL and bool(record.sidecars.get("code"))),
+        stop=record.stop, sidecars=None if record.sidecars is None else record.sidecars["state"])
 
 
 def unfiled(root: Path, import_id: str) -> list[dict]:
@@ -181,6 +211,9 @@ def unfiled(root: Path, import_id: str) -> list[dict]:
     members += [
         import_stage.residual_member(f"{path} items", 0, entry["code"])
         for path, entry in state.exports.items() if entry.get("state") == PARTIAL and entry.get("code")]
+    if state.sidecars is not None and state.sidecars["state"] == export_sidecars.PARTIAL and state.sidecars.get("code"):
+        fault = state.sidecars.get("fault")
+        members.append(import_stage.residual_member(f"sidecars from {fault}" if fault else "sidecars", 0, state.sidecars["code"]))
     return members
 
 
@@ -199,11 +232,49 @@ def expand(root: Path, import_id: str, *, keep_going: Callable[[], bool], rewalk
     lost = any(entry["format"] is None for entry in record.exports.values())
     if (rewalk or lost or not record.exports) and _walk(root, import_id, record):
         _save(root, record)  # before the first row, so that a crash never leaves rows whose export has no format
+    if (record.sidecars is None or record.sidecars["state"] == export_sidecars.WORKING) and not _read_sidecars(
+        root, record, keep_going
+    ):
+        return
     for export, state in record.exports.items():
         if state.get("state") != WORKING:
             continue
         if not _slice(root, record, export, state, keep_going):
             return
+
+
+def _read_sidecars(root: Path, record: _Record, keep_going: Callable[[], bool]) -> bool:
+    """Run the sidecar pass for this call; False when it is out of budget or waits for room, so the call ends here.
+
+    The pass is read first: the photos of a Takeout wait for it, and a stage that holds both a Takeout and an
+    app export gives the Takeout the call's budget before the export. A full volume stops the call with the record's `stop`.
+    """
+    listing = sorted(import_stage.staged_files(root, record.import_id))
+    try:
+        return export_sidecars.advance(root, record, listing=listing, skip=_derived_by(root, record), keep_going=keep_going)
+    except OSError as error:
+        if error.errno not in _FULL_DISK:
+            raise
+        record.stop = {"code": CODE_SPACE, "export": "the photo sidecars", "free_bytes": _free_bytes(root)}
+        _save(root, record)
+        return False
+
+
+def _derived_by(root: Path, record: _Record) -> Callable[[str], bool]:
+    """Whether a staged path is one that the sender did not send: a file that an expansion wrote, or a hidden one.
+
+    Nothing under a recorded export's `items` and `files` folders is the sender's, and a stage with no manifest still expands.
+    """
+    derived = import_stage.derived_files(root, record.import_id)
+    folders = tuple(f"{folder}/" for export in record.exports for folder in (_folder_of(export), _files_folder_of(export)))
+    return lambda path: path in derived or path.startswith(folders) or any(part.startswith(".") for part in PurePosixPath(path).parts)
+
+
+def _free_bytes(root: Path) -> int | None:
+    try:
+        return shutil.disk_usage(root).free
+    except OSError:
+        return None
 
 
 def _walk(root: Path, import_id: str, record: _Record) -> bool:
@@ -212,18 +283,15 @@ def _walk(root: Path, import_id: str, record: _Record) -> bool:
     A file that an expansion wrote is never an export: not a path of the rows, and nothing under a recorded export's
     `items` and `files` folders. A stage with no manifest therefore still expands.
     """
-    known = source_formats.formats(root)
+    known = [candidate for candidate in source_formats.formats(root) if export_parsers.derives(candidate)]
     base = root / import_stage.STAGE_DIR / import_id
-    derived = import_stage.derived_files(root, import_id)
-    folders = tuple(
-        f"{folder}/" for export in record.exports for folder in (_folder_of(export), _files_folder_of(export)))
+    not_sent = _derived_by(root, record)
     found = False
     for path, size in sorted(import_stage.staged_files(root, import_id)):
         held = record.exports.get(path)
         if (
-            (path in record.exports and (held or {}).get("format") is not None) or path in derived or path.startswith(folders)
+            (path in record.exports and (held or {}).get("format") is not None) or not_sent(path)
             or not any(candidate.names(PurePosixPath(path).name) for candidate in known)
-            or any(part.startswith(".") for part in PurePosixPath(path).parts)
         ):
             continue
         fmt = source_formats.recognise(root, base / path)
@@ -281,11 +349,7 @@ def _halt(root: Path, record: _Record, export: str, code: str) -> bool:
     """End the call's read of an export with `code`: a full volume waits for room, and any other code ends the export as partial."""
     state = record.exports[export]
     if code == CODE_SPACE:
-        record.stop = {"code": code, "export": export}
-        try:
-            record.stop["free_bytes"] = shutil.disk_usage(root).free
-        except OSError:
-            record.stop["free_bytes"] = None
+        record.stop = {"code": code, "export": export, "free_bytes": _free_bytes(root)}
         _save(root, record)
         return False
     state["state"], state["code"] = PARTIAL, code
