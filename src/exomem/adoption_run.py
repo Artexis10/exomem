@@ -107,6 +107,11 @@ STOP_FOR_WAITING_WRITE = "interactive_write_waiting"
 STOP_FOR_BUDGET = "call_budget_spent"
 # The `stop_reason` of a `finish` that removed staged copies and left its checks (recall, coverage, manifest) to the next call.
 STOP_FOR_TAIL = "finish_check_next_call"
+
+
+def _unfinished_sentence(action: str) -> str:
+    """The lead of a `plan` or `finish` reply that ended before its end: the person reads it, and the agent acts on it."""
+    return f"The import's {action} step has not finished: call {action} again with the continuation until it has."
 # An item loop (`plan`, the removal of staged copies in `finish`) that a waiting writer interrupts first works this
 # long. A call pays a fixed cost before its first item (the read of the earlier imports, the saved run, the reply), and
 # an item costs milliseconds, so two import calls that yield to each other after one item each would pay that cost
@@ -1416,10 +1421,17 @@ def _next_actions(run: dict) -> list[dict]:
                                 "apply with the run_id, plan_id and continuation resumes it."}
             )
     elif phase in _FINISH_PHASES:
-        actions.append(
-            {"action": "finish", "status": "available",
-             "description": "Prove recall and get a ready-to-run first question."}
-        )
+        if _open_cursor(run, "finish"):
+            actions.append(
+                {"action": "finish", "status": "available",
+                 "description": "Finish stopped before its end; call finish again with the continuation, yourself, "
+                                "until the reply reports phase done. The residual is in finish.residual only then."}
+            )
+        else:
+            actions.append(
+                {"action": "finish", "status": "available",
+                 "description": "Prove recall and get a ready-to-run first question."}
+            )
         if phase == "partial":
             actions.append(
                 {"action": "apply", "status": "available",
@@ -2474,7 +2486,7 @@ def plan(
         }
         if draft["next"] < len(selected):
             token = _issue_cursor(run, "plan")
-            reply = {"progress": progress, "continuation": token}
+            reply = {"progress": progress, "continuation": token, "outcome": _unfinished_sentence("plan")}
             if stop_reason is not None:
                 reply["stop_reason"] = stop_reason
             if entry is not None:
@@ -4351,8 +4363,11 @@ def apply(
             run["inflight"] = True
             # Read once here, before the first chunk's timer, so the pacer does not price it into items.
             index_started = time.monotonic()
+            # A recovery replays the frozen chunk under the identity that was interrupted: a stop here would end the
+            # call with the chunk unreplayed and its reply stored, and the guard above would then ignore the chunk.
+            recovering = reconciling or bool(invocation and invocation.get("publication"))
             opened = reads.open_sources(
-                root, run, stop=lambda: _stop_now(root, budget) is not None, floor=index_floor
+                root, run, stop=None if recovering else lambda: _stop_now(root, budget) is not None, floor=index_floor
             )
             index_seconds = time.monotonic() - index_started
             _note_sources_read(root, run, not opened)
@@ -4823,8 +4838,9 @@ def _consume_filed_text(
     It returns the copies it removed and, when it stopped with copies left, the reason (`_stop_now`): the budget
     runs low or a writer waits. A call handles at least one copy before it stops, so each makes progress, and the
     marks it made are kept: the next `finish` carries on from them, and no copy it did not reach is reported as
-    unverified until the last call has run. A copy that stays, or one that is gone already, is handled but removed
-    nothing, so it does not hold the checks of `finish` back.
+    unverified until the last call has run. A copy that is gone already is handled but removed nothing, so it does
+    not hold the checks of `finish` back. A copy marked `stays` is decided: no later call reads or hashes it again,
+    so a writer that always waits cannot hold the calls on the same kept copies.
     """
     if not run.get("consume", True):
         return 0, None
@@ -4838,7 +4854,7 @@ def _consume_filed_text(
     for planned in (run.get("plan") or {}).get("items") or []:
         outcome = outcomes.get(planned["original_path"])
         if (
-            planned["form"] != "text" or outcome is None or outcome.get("consumed")
+            planned["form"] != "text" or outcome is None or outcome.get("consumed") or outcome.get("stays")
             or outcome.get("status") not in _APPLIED_STATUSES
             or outcome.get("kept_speech")  # a page whose result went to its recording's Source has no text Source to check
         ):
@@ -4865,8 +4881,15 @@ def finish(
     *,
     run_id: str,
     write_manifest: bool = True,
+    continuation: str | None = None,
     today: dt.date | None = None,
 ) -> dict:
+    """Prove recall, report coverage and the residual, and close the page.
+
+    A call that removed staged copies, or that a waiting writer or the budget stopped, returns a ``continuation``
+    and leaves the phase: the agent on the step path calls `finish` again with it until the phase is ``done``, as it
+    does `plan` and `apply`. The `file` chain re-runs `finish` itself and reads the phase.
+    """
     root = Path(root)
     run_date = _today(today)
     store = AdoptionRunStore(root)
@@ -4876,6 +4899,13 @@ def finish(
             raise AdoptionRunError(
                 "INVALID_PHASE", f"finish requires phase 'applied' or 'partial', got {run['phase']!r}"
             )
+        entry = None
+        if continuation:
+            entry = _cursor_entry(run, "finish", continuation)
+            if entry["state"] == "used":
+                return _present(root, run, **(entry.get("reply") or {}))
+        else:
+            _supersede_cursors(run, "finish")
         budget = _call_budget()
         removed, stop = _consume_filed_text(root, run, budget)
         if stop is None and removed:
@@ -4884,10 +4914,16 @@ def finish(
             # page that is searchable. It costs the page one more call.
             stop = STOP_FOR_TAIL
         if stop is not None:
-            # Copies remain, or the tail is next: keep the marks made so far and leave the phase, so the next
-            # `finish` (the `file` chain re-runs it) resumes.
+            # Copies remain, or the tail is next: keep the marks made so far and leave the phase. The reply's
+            # continuation sends the agent on the step path back; the `file` chain re-runs `finish` without it.
+            reply = {
+                "stop_reason": stop, "continuation": _issue_cursor(run, "finish"),
+                "outcome": _unfinished_sentence("finish"),
+            }
+            if entry is not None:
+                entry["state"], entry["reply"] = "used", reply
             store.save(run)
-            return _present(root, run, stop_reason=stop)
+            return _present(root, run, **reply)
         recall = _recall_check(root, run, budget)
         coverage = _coverage(root, run, budget, recall=recall)
         # Empty folders go only for a run that consumes; the residual is reported for any recorded stage.
@@ -4931,6 +4967,8 @@ def finish(
             "manifest_path": manifest_path,
         }
         run["phase"] = "done"
+        if entry is not None:
+            entry["state"], entry["reply"] = "used", {}
         store.save(run)
     return _present(root, run, coverage=coverage)
 

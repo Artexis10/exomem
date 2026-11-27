@@ -266,6 +266,26 @@ def test_an_agents_hand_off_with_wait_false_is_filed_at_once_and_not_after_the_q
     assert done["state"] == "done" and len(_sources(vault)) == len(FILES)
 
 
+def test_an_agent_that_repeats_an_earlier_call_does_not_take_the_views_counts_back_to_that_reply(vault: Path) -> None:
+    """Catches a repeat of an earlier `file` call, answered with its stored reply, that writes the older counts with a new `as_of`."""
+    import_id = _stage(vault, filing=None)
+    filer = import_filing.Filer(vault)
+    filer.register(import_id, principal=_owner(), surface=None)
+    older = {"filed": 2, "skipped_duplicates": 0, "failed": 0}
+    newer = {"filed": 5, "skipped_duplicates": 1, "failed": 0}
+    for counts in (older, newer):
+        filer.agent_began(import_id)
+        filer.agent_ended(import_id, working=True, counts=counts)
+    kept = import_filing.read_record(vault, import_id)
+
+    filer.agent_began(import_id)
+    filer.agent_ended(import_id, working=True, counts=older)  # the stored reply of the first call, answered again
+
+    repeated = import_filing.read_record(vault, import_id)
+    assert kept["progress"] == newer and repeated["progress"] == newer
+    assert repeated["as_of"] == kept["as_of"] and repeated["calls"] == kept["calls"]
+
+
 def test_the_filers_own_file_call_does_not_list_its_stage_with_itself_again(vault: Path) -> None:
     """Catches a filer whose own `file` call listed the stage again: that reset its due time, so no back-off held."""
     import_id = _stage(vault, filing=None)

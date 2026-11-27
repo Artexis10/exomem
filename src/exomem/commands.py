@@ -12783,7 +12783,7 @@ def op_adoption_studio(
             return adoption_run_module.cancel(vault_root, run_id=run_id, why=why)
         if action == "finish":
             return adoption_run_module.finish(
-                vault_root, run_id=run_id, write_manifest=write_manifest
+                vault_root, run_id=run_id, write_manifest=write_manifest, continuation=continuation
             )
         proposals_module = _load_adoption_proposals()
         if action == "work-item":

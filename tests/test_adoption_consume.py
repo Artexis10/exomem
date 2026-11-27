@@ -379,12 +379,46 @@ def test_finish_stops_starting_removals_when_its_budget_runs_low_and_the_next_ca
     left = [name for name in notes if _staged(vault, staged, name).exists()]
     assert stopped["stop_reason"] == adoption_run.STOP_FOR_BUDGET and run["phase"] == "applied" and run["finish"] is None
     assert len(left) == 2 and adoption_run._consumed_count(run["outcomes"]) == 1
+    # The step path repeats an action only while its reply carries a continuation, so a stopped `finish` carries one.
+    assert stopped["continuation"] and "finish again" in stopped["next_actions"][0]["description"]
 
     finished = _finish(vault, run_id)
 
     residual = finished["finish"]["residual"]
     assert not any(_staged(vault, staged, name).exists() for name in notes) and finished["finish"]["consumed"] == 3
     assert residual["files"] == 0 and "unchecked" not in residual["by_reason"]
+
+
+def test_finish_does_not_read_a_kept_copy_again_so_a_writer_that_always_waits_cannot_hold_it_on_the_same_copies(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Catches a `finish` that re-reads and re-hashes each kept copy on every call and so never reaches the copies after them."""
+    vault = _vault(tmp_path)
+    kept = {f"a-kept-{n}.md": f"# Kept {n}\n\nInvented kept text {n}.\n".encode() for n in range(4)}
+    gone = {f"b-gone-{n}.md": f"# Gone {n}\n\nInvented text {n}.\n".encode() for n in range(2)}
+    staged = _stage(tmp_path, vault, {**kept, **gone})
+    run_id, _plan_id, reply = _adopt(vault, staged["start_path"])
+    for name in kept:
+        source = vault / _outcome(reply, staged, name)["target_path"]
+        source.write_text(source.read_text(encoding="utf-8").replace("Invented", "Edited"), encoding="utf-8")
+    # A writer waits throughout and a turn is no time, so each call handles one copy and ends.
+    monkeypatch.setattr(adoption_run, "_writer_waits", lambda root: True)
+    monkeypatch.setattr(adoption_run, "TURN_SECONDS", 0.0)
+    hashed: list[str] = []
+    real_holds = adoption_run._text_source_holds
+    monkeypatch.setattr(
+        adoption_run, "_text_source_holds", lambda root, target, planned: hashed.append(target) or real_holds(root, target, planned)
+    )
+
+    calls, finished = 0, adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    while finished.get("continuation") and calls < 12:
+        calls += 1
+        finished = adoption_run.finish(vault, run_id=run_id, continuation=finished["continuation"], today=TODAY)
+
+    assert finished["phase"] == "done", (calls, finished.get("stop_reason"))
+    assert not any(_staged(vault, staged, name).exists() for name in gone)
+    assert all(_staged(vault, staged, name).exists() for name in kept)
+    # Each source was read once for the first decision about its copy, never again for a kept one.
+    assert len(hashed) == len(set(hashed)) == len(kept) + len(gone), hashed
 
 
 def test_a_finish_that_removed_copies_leaves_its_checks_to_the_next_call_which_has_the_whole_room(
@@ -399,6 +433,7 @@ def test_a_finish_that_removed_copies_leaves_its_checks_to_the_next_call_which_h
 
     run = adoption_run.AdoptionRunStore(vault).load(run_id)
     assert removing["stop_reason"] == adoption_run.STOP_FOR_TAIL and run["phase"] == "applied" and run["finish"] is None
+    assert removing["continuation"]
     assert not any(_staged(vault, staged, name).exists() for name in notes)
     assert adoption_run._consumed_count(run["outcomes"]) == 3
 

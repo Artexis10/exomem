@@ -144,6 +144,43 @@ def test_partial_chunk_completes_only_frozen_components_and_logs_once(tmp_path, 
         assert {path: path.read_bytes() for path in snapshot} == snapshot
 
 
+def test_a_recovery_apply_replays_its_frozen_chunk_though_a_writer_waits_and_the_sources_must_be_read_in_full(
+    tmp_path, monkeypatch,
+):
+    """Catches a recovery that stops its read of the Sources for a waiting writer, so the frozen chunk is never replayed."""
+    original = b"representative binary bytes\x00\xff" * 128
+    root = _vault(tmp_path, {"Coll/document.bin": original})
+    run_id, planned = _import(root, path="Coll", include=["Coll"])
+    plan_id = planned["plan"]["plan_id"]
+    item = planned["plan"]["items"][0]
+
+    class Interrupted(BaseException):
+        pass
+
+    def interrupt_after_destination(path):
+        if path == root / item["target_path"]:
+            raise Interrupted()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(vault_module, "_after_batch_destination_published", interrupt_after_destination)
+        with writer_lease.active_mutation_claim_context(
+            claim_token="a" * 24, command_digest="a" * 64, identity_digest="1" * 64,
+        ):
+            with pytest.raises(Interrupted):
+                adoption_run.apply(root, run_id=run_id, plan_id=plan_id, today=TODAY)
+    # The Source the interrupted chunk wrote breaks the run's seal, so the recovery must read the index in full.
+    monkeypatch.setattr(adoption_run, "_writer_waits", lambda root: True)
+
+    with writer_lease.active_mutation_claim_context(
+        claim_token="b" * 24, command_digest="a" * 64, identity_digest="1" * 64, reconciling=True,
+    ):
+        recovered = adoption_run.apply(root, run_id=run_id, plan_id=plan_id, today=TODAY, index_floor=0)
+
+    held = adoption_run.AdoptionRunStore(root).load(run_id)["apply_invocations"]["1" * 64]
+    assert recovered["phase"] == "applied" and recovered["progress"]["remaining"] == 0, recovered
+    assert "publication" not in held, held
+
+
 def test_a_crash_while_a_repeat_files_its_own_source_recovers_that_source_under_the_same_identity(
     tmp_path, monkeypatch,
 ):

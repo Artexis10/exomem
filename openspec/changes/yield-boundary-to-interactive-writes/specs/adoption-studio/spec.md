@@ -73,6 +73,12 @@
 - **AND** a later `finish` removes the remaining copies, each once, and completes the run
 - **AND** the recall check, the coverage and the manifest run only in a call that removed no copy
 
+#### Scenario: A stopped finish or plan tells the step path to call it again
+
+- **WHEN** a `finish` or a `plan` call on the step path ends before its end, for a waiting writer, the budget, or the removal of copies
+- **THEN** the reply carries a `continuation`, a lead that says the step has not finished, and a next action to call it again
+- **AND** an agent that repeats the action with each `continuation` reaches `phase: "done"` on `finish`, and a copy marked as staying is not read again
+
 #### Scenario: Work that no step can split runs to its end
 
 - **WHEN** a call is inside a piece of work that cannot stop part-way, such as the first summary of a stage
@@ -94,12 +100,6 @@
 ### Requirement: Each Call Of An Import Step Moves Its Page On
 
 An item loop of `plan`, of the removal of staged copies in `finish`, and of the reading of an app export SHALL work for a turn of at least one second before a waiting interactive writer ends its call, unless the call's budget is spent. Two callers that file one stage SHALL each move its page on in every call, and the stage SHALL reach its end.
-
-#### Scenario: An agent and the cell's filer file one stage
-
-- **WHEN** an agent's `file` calls and the cell's filer's `file` calls plan one page of many items in turn
-- **THEN** each call plans at least a turn of items
-- **AND** the page is planned in a bounded number of calls, each item once
 
 #### Scenario: Two agents file one stage
 

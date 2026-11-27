@@ -667,7 +667,7 @@ _REMAINING = {
         _row("plan", "import_memory", ("run_id", "continuation"), ("run_id",), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("apply", "import_memory", ("run_id", "plan_id", "continuation", "retry_failed", "only_paths"), ("run_id", "plan_id"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("cancel", "import_memory", ("run_id", "why"), ("run_id",), verb="discarded"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
-        _row("finish", "import_memory", ("run_id", "write_manifest"), ("run_id",), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("finish", "import_memory", ("run_id", "write_manifest", "continuation"), ("run_id",), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("work-item", "read_import", ("run_id", "sources", "max_sources", "max_chars_per_source"), ("run_id",)),
         _row("propose", "import_memory", ("run_id", "proposals"), ("run_id",), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("apply-proposal", "import_memory", ("ref", "expected_fingerprint", "why", "expected_hash"), ("ref", "expected_fingerprint", "why"), destructive=True, verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.

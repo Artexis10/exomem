@@ -1174,13 +1174,16 @@ def test_a_continuing_apply_call_does_not_open_the_sources_an_earlier_run_filed(
     run_id, planned = _import(vault, path="New", include=["New"])
     own_pages = {item["target_path"] for item in planned["plan"]["items"]}
     opened: list[str] = []
-    real_entries = adoption_plan.read_import_entries
+    real_entries = adoption_plan.page_import_entries
 
     def recording_entries(root: Path, page: Path):
         opened.append(page.relative_to(root).as_posix())
         return real_entries(root, page)
 
-    monkeypatch.setattr(adoption_plan, "read_import_entries", recording_entries)
+    # Every read of a Source page, the full read of the index and the read of one page alike, goes through this function.
+    # The cache of pages the plan read is emptied, so that a call which read the index in full would open the earlier run's pages.
+    monkeypatch.setattr(adoption_plan, "page_import_entries", recording_entries)
+    adoption_plan._SOURCE_PAGES.clear()
 
     applied, calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
 

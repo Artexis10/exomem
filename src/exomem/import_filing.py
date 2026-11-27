@@ -53,7 +53,7 @@ STOP_REPLY_UNREADABLE = "IMPORT_FILING_REPLY_UNREADABLE"
 #: The stage's `working` replies showed no movement for `adoption_run.FILING_STALL_CALLS` calls in a row; the filer waits and tries again.
 STOP_STALLED = "IMPORT_FILING_STALLED"
 #: What the filing view says of a `working` stage that an agent files, while the cell stands aside from it.
-AGENT_FILING_NOTE = "an agent is filing this import; the cell files it if the agent stops calling"
+AGENT_FILING_NOTE = "An assistant is filing this import now. If it stops, Evermatter carries on by itself."
 #: The mutation protocol's final answer for an identity: its outcome will never be known, so the next call has a new one.
 _OUTCOME_UNKNOWN = "MUTATION_OUTCOME_UNKNOWN"
 #: A continuation that `file` no longer knows: the next call names the stage alone and carries on its newest scan.
@@ -125,13 +125,17 @@ def _write_record(vault_root: Path, record: dict) -> None:
     private_state.sync_directory(store)
 
 
-def _update(vault_root: Path, import_id: str, change: Callable[[dict], None]) -> dict | None:
-    """Read the record, let `change` edit it in place and write it durably; None when there is no record."""
+def _update(vault_root: Path, import_id: str, change: Callable[[dict], bool | None]) -> dict | None:
+    """Read the record, let `change` edit it in place and write it durably; None when there is no record.
+
+    A `change` that returns False leaves the record as it is: nothing is written and `as_of` stays.
+    """
     with _RECORD_LOCK:
         record = read_record(vault_root, import_id)
         if record is None:
             return None
-        change(record)
+        if change(record) is False:
+            return record
         record["as_of"] = _now()
         _write_record(vault_root, record)
         return record
@@ -147,6 +151,16 @@ def _fresh_record(
         "total": total, "progress": None, "left_out": None, "stop": None, "needs": [], "person": [],
         "mark": None, "unmoved": 0, "stalls": 0, "calls": [[time.time(), 0]] if baseline else [], "busy": [], "as_of": _now(),
     }
+
+
+def _handled(counts: dict[str, int]) -> int:
+    """The files a reply's counts say were handled: filed, or skipped because the bytes were already stored."""
+    return counts["filed"] + counts["skipped_duplicates"]
+
+
+def _add_rate_sample(record: dict, counts: dict[str, int]) -> None:
+    """Add the sample that a finished call's counts give `rate`, keeping the newest `_RATE_CALLS`."""
+    record["calls"] = [*record["calls"], [time.time(), _handled(counts)]][-_RATE_CALLS:]
 
 
 def _rate(samples: list) -> dict | None:
@@ -379,12 +393,16 @@ class Filer:
 
     def _record_agent_counts(self, import_id: str, counts: dict[str, int]) -> None:
         """Store what an agent's call filed, as a filer call's reply would; never raises, the agent's call is done."""
-        def change(record: dict) -> None:
+        def change(record: dict) -> bool | None:
             if record["state"] in (DONE, DISCARDED):
-                return
+                return False
+            earlier = _counts(record.get("progress"))
+            if earlier is not None and _handled(counts) < _handled(earlier):
+                # An agent that repeats an earlier call is answered with that call's stored reply, which is behind the record.
+                return False
             record["progress"] = counts
-            handled = counts["filed"] + counts["skipped_duplicates"]
-            record["calls"] = [*record["calls"], [time.time(), handled]][-_RATE_CALLS:]
+            _add_rate_sample(record, counts)
+            return None
         try:
             _update(self.vault_root, import_id, change)
         except Exception:  # noqa: BLE001 - a store fault must not fail the agent's own file call
@@ -618,8 +636,7 @@ class Filer:
             record["continuation"] = None if filing == _REPLY_DONE else continuation
             record["stop"] = stop if filing == _REPLY_STOPPED else None
             if counts is not None:
-                handled = counts["filed"] + counts["skipped_duplicates"]
-                record["calls"] = [*record["calls"], [time.time(), handled]][-_RATE_CALLS:]
+                _add_rate_sample(record, counts)
 
         record = _update(self.vault_root, import_id, change)
         if filing == _REPLY_DONE:

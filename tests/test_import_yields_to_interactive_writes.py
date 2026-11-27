@@ -434,6 +434,55 @@ def test_a_finish_call_ends_for_a_waiting_write_and_the_next_call_removes_the_re
     assert not any((vault / staged / f"note{number}.md").exists() for number in range(STAGED_FILES))
 
 
+def test_an_agent_that_follows_the_skills_step_path_reaches_done_though_each_step_ends_for_a_waiting_write(
+    vault: Path, scaled_boundary: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a `plan`, `apply` or `finish` reply that ends early with no continuation or with a lead that reads "Saved".
+
+    The skill sends an agent to the step path for own-note rules and older servers, and tells it to repeat an action
+    only while the reply carries a `continuation`. A `finish` that ended with no continuation made that agent stop
+    with the page unfinished and report it saved.
+    """
+    staged = _stage(vault, {f"note{number}.md": f"# Note {number}\n\nInvented text {number}.\n".encode() for number in range(STAGED_FILES)})
+    # A writer waits throughout, so each step ends after the one item that every call handles.
+    monkeypatch.setattr(adoption_run, "_writer_waits", lambda root: True)
+    stopped: list[dict] = []
+
+    async def step(client: Client, operation: dict) -> dict:
+        result = await client.call_tool(*public_call("import_memory", {"operation": operation}), raise_on_error=False)
+        reply = result.structured_content
+        assert "error" not in reply, reply
+        return reply
+
+    async def until_it_stops_asking(client: Client, operation: dict) -> dict:
+        reply = await step(client, operation)
+        for _ in range(40):
+            if not reply.get("continuation"):
+                return reply
+            stopped.append(reply)
+            reply = await step(client, {**operation, "continuation": reply["continuation"]})
+        raise AssertionError(f"{operation['kind']} still carried a continuation after 40 calls: {reply}")
+
+    async def journey() -> dict:
+        async with Client(server.build_server(require_auth=False)) as client:
+            run_id = (await step(client, {"kind": "start", "path": staged, "collection": "Field Notes"}))["run_id"]
+            await step(client, {"kind": "select", "run_id": run_id, "include": [staged]})
+            planned = await until_it_stops_asking(client, {"kind": "plan", "run_id": run_id})
+            applied = await until_it_stops_asking(
+                client, {"kind": "apply", "run_id": run_id, "plan_id": planned["plan_id"]}
+            )
+            assert applied["phase"] == "applied", applied
+            return await until_it_stops_asking(client, {"kind": "finish", "run_id": run_id})
+
+    finished = asyncio.run(journey())
+
+    assert finished["phase"] == "done" and "residual" in finished["finish"], finished
+    for reply in (reply for reply in stopped if reply["phase"] in {"applied", "partial"}):
+        assert "finish" in reply["user_summary"] and not reply["user_summary"].startswith("Saved"), reply
+        assert any("continuation" in action["description"] for action in reply["next_actions"]), reply
+    assert any(reply["phase"] == "applied" for reply in stopped), "finish never ended early, so nothing was proved"
+
+
 def test_a_slow_first_read_of_the_sources_ends_for_a_waiting_write_and_the_plan_goes_on(
     vault: Path, scaled_boundary: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -728,7 +777,7 @@ CALLS_TO_PLAN_THE_PAGE = 20
 
 
 class _TwoImporters:
-    """A stage whose plan costs what a rehearsal page's costs, scaled down, and the two callers that file it."""
+    """A stage whose plan costs what a rehearsal page's costs, scaled down, and the agents that file it."""
 
     def __init__(self, vault: Path, import_id: str, planned: list[int]) -> None:
         self.vault, self.import_id, self.planned = vault, import_id, planned
@@ -743,12 +792,6 @@ class _TwoImporters:
             state["continuation"] = filing_tests._file_call(self.vault, self.import_id, **arguments).get("continuation")
 
         return call
-
-    def filer(self):
-        """The resident filer's loop: `run_once` on the stage, as its thread does."""
-        filer = import_filing.Filer(self.vault)
-        assert filer.register(self.import_id, principal=filing_tests._owner(), surface=None)
-        return lambda: filer.run_once(self.import_id)
 
     def file_until_planned(self, callers: list) -> int:
         """Each caller calls at once after its last reply, in its own thread, until the page is planned; the calls made."""
@@ -794,15 +837,6 @@ def two_importers(
     import_id = filing_tests._stage(
         vault, files={f"note{number}.md": f"# Note {number}\n\nInvented text {number}.\n".encode() for number in range(PLANNED_FILES)})
     return _TwoImporters(vault, import_id, planned)
-
-
-def test_an_agent_and_the_cell_filer_filing_one_stage_move_its_page_on_each_turn(
-    scaled_boundary: Path, two_importers: _TwoImporters
-) -> None:
-    """Catches two importers that each yield to the other after one item, so the page crawls one item per call."""
-    calls = two_importers.file_until_planned([two_importers.agent(), two_importers.filer()])
-
-    assert calls <= CALLS_TO_PLAN_THE_PAGE, (calls, two_importers.calls, two_importers.planned)
 
 
 def test_two_agents_filing_one_stage_move_its_page_on_each_turn(
