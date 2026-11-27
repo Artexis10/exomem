@@ -49,6 +49,11 @@ _CHUNK = 1024 * 1024
 #: Bytes that the reader feeds with no event from the parser: expat holds a whole comment, instruction or attribute value
 #: before it reports one, so a token this long would hold memory far past the content bound. The export ends there.
 _MAX_QUIET_BYTES = 64 * 1024 * 1024
+#: Bounds on the document's shape, far above what the export format uses (about 5 levels and a few dozen names; note text
+#: is CDATA). The parser keeps a stack entry per open element and a table entry per distinct name, so a crafted file of
+#: unclosed or ever-new elements would hold memory many times its size. The export ends there.
+_MAX_DEPTH = 64
+_MAX_NAMES = 4096
 #: The part of a document that decides whether it is an Evernote export: its root element comes before any note.
 _RECOGNISE_BYTES = 64 * 1024
 _MAX_FIELD_CHARS = 64 * 1024
@@ -197,6 +202,7 @@ class _Target:
         self._files = 0
         self._index = 0
         self._path: list[str] = []
+        self._names: set[str] = set()  # the distinct element and attribute names met so far
         self._note: _Note | None = None
         self._resource: _Resource | None = None
         self._mode: str | None = None  # what the characters now arriving belong to: a small field, the content or a resource's data
@@ -222,6 +228,12 @@ class _Target:
 
     def start(self, tag: str, attrib: Mapping[str, str]) -> None:
         self._event()
+        if len(self._path) >= _MAX_DEPTH:
+            raise ValueError(f"the document nests elements deeper than {_MAX_DEPTH} levels")
+        self._names.add(tag)
+        self._names.update(attrib)
+        if len(self._names) > _MAX_NAMES:
+            raise ValueError(f"the document uses more than {_MAX_NAMES} distinct element and attribute names")
         self._path.append(tag)
         if len(self._path) == 1:
             self.root = tag

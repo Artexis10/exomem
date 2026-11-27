@@ -301,6 +301,21 @@ print(items, resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, len(fault) > 0)
 """
 
 
+@pytest.mark.parametrize("crafted", [
+    b"<a>" * 1_000 + b"</a>" * 1_000,  # deep nesting: the parser keeps a stack entry per open element
+    b"".join(b"<e%d/>" % number for number in range(10_000)),  # ever-new names: the parser keeps a table entry per name
+], ids=["deep nesting", "distinct names"])
+def test_an_enex_of_a_crafted_shape_ends_as_partial_and_keeps_the_notes_before_it(vault: Path, crafted: bytes) -> None:
+    """Catches a reader whose parser memory grows with the document's shape: 20 MiB of such tags held over 1 GB."""
+    data = enex([enex_note(0), enex_note(1)])
+    crafted_data = data.replace(b"</en-export>", crafted + b"</en-export>")
+
+    view = file_to_done(vault, stage_export(vault, crafted_data, name="notebook.enex"))
+
+    assert len(notes_of(vault)) == 2
+    assert view["state"] == "done" and view["left_out"]["by_reason"] == {"IMPORT_EXPORT_PARTIAL": 1}
+
+
 def test_an_enex_with_one_huge_comment_ends_as_partial_in_bounded_memory_and_keeps_the_notes_before_it(tmp_path: Path, vault: Path) -> None:
     """Catches a reader that lets the parser hold a whole comment or attribute value: a 150 MiB one more than doubled the peak."""
     size = 150 * 1024 * 1024
