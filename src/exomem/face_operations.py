@@ -8,6 +8,7 @@ surface with that disclosure and the command, and changes nothing.
 
 from __future__ import annotations
 
+import logging
 import math
 import sqlite3
 from collections.abc import Mapping
@@ -18,6 +19,8 @@ from typing import Any
 
 from . import face_groups, face_naming, face_scan, face_search, face_store
 from .cli_ops import OpError
+
+log = logging.getLogger(__name__)
 
 #: What a person reads before turning faces on, on every surface that mentions turning them on.
 DISCLOSURE = (
@@ -268,9 +271,14 @@ def delete(vault_root: Path) -> dict[str, Any]:
     """
     from . import find
 
-    turn_off(vault_root)
+    try:
+        turn_off(vault_root)
+    except sqlite3.DatabaseError:
+        # A damaged or newer face index cannot record "off". Erasing it below turns faces off all the same.
+        log.warning("faces: the face index could not record off before its delete", exc_info=True)
     # Faces may have been off already, with an earlier backfill still finishing its picture.
     face_scan.stop_backfill(vault_root, timeout=30)
+    face_scan.unload()
     earlier = face_store.read_deletion_receipt(vault_root)
     finishing = earlier is not None and earlier.get("deletion") == "partial"
     if not face_store.store_dir(vault_root).exists() and not finishing:
