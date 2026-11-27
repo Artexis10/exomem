@@ -15991,6 +15991,19 @@ def refusal_before_queueing(command: Command, arguments: Mapping[str, Any]) -> E
     return None
 
 
+def declared_refusal_before_queueing(
+    command: Command, arguments: Mapping[str, Any], vault_root: Path
+) -> Exception | None:
+    """The refusal that a save's values get from what the vault declares, or None.
+
+    `refusal_before_queueing` reads nothing. This one reads a declaration (a collection's manifest),
+    so the intake runs it only for a save that is about to queue.
+    """
+    if command.name == "record_memory":
+        return record_memory_module.value_refusal(vault_root, arguments)
+    return None
+
+
 _MCRC = frozenset({"mcp", "rest", "cli"})
 _RC = frozenset({"rest", "cli"})
 # `get_video_frames` returns MCP image content blocks (a FastMCP ToolResult) —

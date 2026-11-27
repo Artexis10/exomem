@@ -959,6 +959,52 @@ def _require_one_history_selector(given: Mapping[str, Any]) -> None:
         )
 
 
+#: The argument that carries a manifest's text. A save that sends it can change what a collection declares.
+_MANIFEST_ARGUMENT = "manifest_text"
+_RESEND_WITH_A_DECLARED_VALUE = (
+    "Nothing was saved and nothing is held. Send the call again with a value the collection declares."
+)
+
+
+def value_refusal(vault_root: Path, arguments: Mapping[str, Any]) -> OpError | None:
+    """The refusal that the collection's declared fields give an append's `item` or an update's `changes`, or None.
+
+    The busy intake raises it instead of queueing a save whose replay would refuse the same value.
+    It reads one manifest by its path and takes no lock. Whatever is not certain answers None and
+    the save queues as before: a title, UUID or reference (each resolves by a sweep of the vault's
+    manifests), a collection the store owns (only the store's thread reads it), a manifest that this
+    caller may not see, and any queued save that carries a manifest text, because it may change what
+    the collection declares before this save replays.
+    """
+    action = arguments.get("action")
+    values = arguments.get("item") if action == "append" else arguments.get("changes") if action == "update" else None
+    collection = arguments.get("collection")
+    if (
+        not isinstance(values, Mapping)
+        or not values
+        or type(collection) is not str
+        or not collection_refs.names_a_manifest_path(collection)
+    ):
+        return None
+    try:
+        manifest = record_governance.require_records_profile(
+            record_governance.resolve_collection_for_mutation(vault_root, collection)
+        )
+    except Exception:  # noqa: BLE001 - an unknown, withheld or unreadable collection keeps the replay's own refusal
+        return None
+    refusal = records.supplied_value_refusal(manifest, values)
+    if refusal is None:
+        return None
+    from . import write_intake
+
+    queued = write_intake.open_arguments(vault_root, "record_memory")
+    if queued is None or any(_MANIFEST_ARGUMENT in earlier for earlier in queued):
+        return None
+    return OpError(
+        refusal.code, refusal.reason, _RESEND_WITH_A_DECLARED_VALUE, details=_json_safe_details(refusal.details)
+    )
+
+
 def refuse_arguments(detail: str) -> Never:
     """Raise this command's own argument refusal with `detail` as its explanation."""
     _invalid_arguments(detail)

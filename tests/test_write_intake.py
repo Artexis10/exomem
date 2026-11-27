@@ -21,6 +21,7 @@ import pytest
 from _public_call import public_call
 from conftest import _drain_background_threads
 from fastmcp import Client
+from record_fixtures import LEDGER_COLLECTION_PATH, ledger_item, setup_ledger_collection
 
 from exomem import (
     auth_sessions,
@@ -531,6 +532,92 @@ def test_a_record_call_with_arguments_its_action_refuses_behind_the_queue_is_nev
     assert [item["ref"] for item in write_intake.read(vault)["items"]] == [first["queued_write"]["ref"]]
     paused.set()
     _wait_for_state(vault, first["queued_write"]["ref"], "applied")
+
+
+def _ledger_declaring_a_status(vault: Path) -> str:
+    """The ledger collection with one more field, whose declared values are `draft` and `published`."""
+    manifest = setup_ledger_collection(vault)
+    text = manifest.read_text(encoding="utf-8")
+    declared = "    status:\n      type: enum\n      enum: [draft, published]\n    exact_text:\n"
+    manifest.write_text(text.replace("    exact_text:\n", declared, 1), encoding="utf-8")
+    return LEDGER_COLLECTION_PATH
+
+
+def _status_call(collection: str, action: str, status: str) -> dict:
+    if action == "append":
+        return {"action": "append", "collection": collection, "item": ledger_item(status=status),
+                "why": "record a published entry"}
+    return {"action": "update", "collection": collection, "item_key": "quarterly-note",
+            "changes": {"status": status}, "expected_container_hash": "0" * 64,
+            "expected_item_version": "0" * 64, "why": "correct an entry"}
+
+
+def _queue_one_save_and_hold_the_replay(vault: Path, holder, monkeypatch: pytest.MonkeyPatch):
+    """Queue an ordinary save under a held boundary and keep the drainer from applying it, so a backlog stands."""
+    plain = {
+        "path": "Knowledge Base/Notes/Insights/percentage-based-feature-flag-rollout.md",
+        "operation": "add", "category": "operating_constraint", "content": "A busy vault must not lose a save",
+    }
+    paused = threading.Event()
+    real_claim = write_intake._claim_head
+    monkeypatch.setattr(write_intake, "_claim_head", lambda root: 0.05 if not paused.is_set() else real_claim(root))
+    with _Hold(holder, vault):
+        first = _send(_command("observe_memory"), vault, plain)
+    return first["queued_write"]["ref"], paused
+
+
+@pytest.mark.parametrize("action", ["append", "update"])
+def test_a_record_value_its_collection_never_declares_is_refused_behind_the_queue_and_never_queued(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
+    """Defect: a value outside a declared enum came back "Queued, not saved yet" and failed only at the replay."""
+    _writer, holder = managers
+    collection = _ledger_declaring_a_status(vault)
+    first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
+    with pytest.raises(OpError) as refused:
+        _send(_command("record_memory"), vault, _status_call(collection, action, "resolved"),
+              scope="principal:session-b")
+    assert refused.value.code == "SCHEMA_ENUM"
+    assert refused.value.message.endswith('allowed: "draft", "published"')
+    assert refused.value.details["field"] == "status"
+    assert "held" not in refused.value.details
+    assert [item["ref"] for item in write_intake.read(vault)["items"]] == [first]
+    paused.set()
+    _wait_for_state(vault, first, "applied")
+
+
+def test_a_record_value_its_collection_declares_is_still_queued_behind_the_queue_and_lands(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _writer, holder = managers
+    collection = _ledger_declaring_a_status(vault)
+    first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
+    receipt = _send(_command("record_memory"), vault, _status_call(collection, "append", "published"),
+                    scope="principal:session-b")
+    assert receipt["state"] == "queued"
+    paused.set()
+    _wait_for_state(vault, first, "applied")
+    _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
+
+
+def test_an_undeclared_record_value_behind_a_queued_manifest_revision_is_queued_not_refused(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The earlier queued save may declare the value before this one replays, so only its replay can tell."""
+    _writer, holder = managers
+    collection = _ledger_declaring_a_status(vault)
+    manifest_text = (vault / collection).read_text(encoding="utf-8").replace("[draft, published]", "[draft, resolved]")
+    first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
+    revision = _send(_command("record_memory"), vault, {
+        "action": "revise", "collection": collection, "manifest_text": manifest_text,
+        "expected_manifest_hash": "0" * 64, "expected_container_hash": "0" * 64, "why": "declare a new status",
+    }, scope="principal:session-b")
+    assert revision["state"] == "queued"
+    receipt = _send(_command("record_memory"), vault, _status_call(collection, "update", "resolved"),
+                    scope="principal:session-c")
+    assert receipt["state"] == "queued"
+    paused.set()
+    _wait_for_state(vault, first, "applied")
 
 
 def test_a_revisit_save_with_relations_behind_a_backlog_is_told_only_the_exit_that_lands(
