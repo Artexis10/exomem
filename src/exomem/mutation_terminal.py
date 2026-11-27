@@ -2596,13 +2596,20 @@ def _related_pages_projection(leaf: Any) -> list[Any] | None:
     return None
 
 
+def _is_adoption_leaf(leaf: Any) -> bool:
+    """Whether the leaf is an Adoption Studio call's reply, which carries its run's id."""
+    return isinstance(leaf, Mapping) and isinstance(leaf.get("run_id"), str) and leaf["run_id"].startswith("adr-")
+
+
 def _stated_outcome(leaf: Any) -> str | None:
-    """The sentence an approval leaf states itself.
+    """The sentence a leaf states itself in place of the generic "Saved" lead.
 
     An approval has no page `path` for `_user_summary` to name, and its outcome (approved, already
     approved, revoked, moved aside) depends on the ledger's state, so the leaf carries the sentence.
+    An import step that stopped before its end (`plan` or `finish` with a continuation) says so, because a
+    reader who stops at "Saved" never calls the step again.
     """
-    if not isinstance(leaf, Mapping) or leaf.get("operation") != "approve_procedure":
+    if not isinstance(leaf, Mapping) or not (leaf.get("operation") == "approve_procedure" or _is_adoption_leaf(leaf)):
         return None
     sentence = leaf.get("outcome")
     return sentence if isinstance(sentence, str) and sentence else None
@@ -2820,11 +2827,7 @@ def project_terminal(
                 if key in leaf
             }
         )
-    elif (
-        isinstance(leaf, Mapping)
-        and isinstance(leaf.get("run_id"), str)
-        and str(leaf["run_id"]).startswith("adr-")
-    ):
+    elif _is_adoption_leaf(leaf):
         # An Adoption Studio call: the caller carries on with the run id, the plan id
         # and the continuation cursor, so these must survive the compact view. A `file`
         # reply is built small for this view: its state, summary, stop, person list and

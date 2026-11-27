@@ -2,7 +2,7 @@
 name: evermatter-reflect
 description: 'Turn a session or project episode into reusable memory: decisions, failures, patterns, open questions and next actions. Use when the user asks what was learned, to reflect, to wrap up or close an episode, or to extract patterns from a session.'
 metadata:
-  skill_contract: da3151c83f98a377fd2a8e15861b7c75ec43636fa97365c001667aab74d14b13
+  skill_contract: bf9aa6a127035ab5df81c265245a1cd7b7b1627792259859192f1c8af2cd7f6f
   version: "0.2.0"
 ---
 
