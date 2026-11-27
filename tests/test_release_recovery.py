@@ -233,6 +233,46 @@ def test_upload_publishes_release_assets_without_build_metadata(tmp_path, monkey
     assert uploaded == expected
 
 
+def _upload_file(monkeypatch, tmp_path, *, published):
+    """Run `upload-file` for a notes file with the release's assets as given: a name to its bytes."""
+    notes = tmp_path / "release-notes.json"
+    notes.write_bytes(b'{"schema": 2, "releases": []}\n')
+    monkeypatch.setattr(recovery, "release_assets", lambda tag: [{"name": name} for name in published])
+
+    def download(tag, names, directory):
+        for name in names:
+            (directory / name).write_bytes(published[name])
+
+    monkeypatch.setattr(recovery, "download_release", download)
+    # An older tag has no Cloud archives or other files this command may need to read.
+    monkeypatch.setattr(recovery, "project", lambda tag: pytest.fail("upload-file read the tag's distributions"))
+    monkeypatch.setattr(recovery, "cloud_files", lambda tag: pytest.fail("upload-file read the tag's Cloud archives"))
+    monkeypatch.setattr(
+        "sys.argv",
+        ["release-recovery", "upload-file", "--tag", "v1.2.3", "--directory", str(tmp_path / "dist"), "--file", str(notes)],
+    )
+    return notes
+
+
+def test_upload_file_adds_a_missing_notes_file_without_reading_the_tags_other_artifacts(tmp_path, monkeypatch):
+    notes = _upload_file(monkeypatch, tmp_path, published={})
+    uploaded = []
+    monkeypatch.setattr(recovery, "run", lambda *args: uploaded.append(args))
+
+    recovery.main()
+
+    assert uploaded == [("gh", "release", "upload", "v1.2.3", str(notes))]
+
+
+def test_upload_file_refuses_to_replace_a_published_file_with_other_bytes(tmp_path, monkeypatch):
+    """The refusal that keeps published bytes fixed also stops a notes job, and only that job."""
+    _upload_file(monkeypatch, tmp_path, published={"release-notes.json": b"published earlier"})
+    monkeypatch.setattr(recovery, "run", lambda *args: pytest.fail("replaced a published file"))
+
+    with pytest.raises(ValueError, match="immutable release asset differs: release-notes.json"):
+        recovery.main()
+
+
 def test_partial_release_receipts_can_be_completed_from_original_artifact(tmp_path):
     release = tmp_path / "release"
     artifact = tmp_path / "artifact"
