@@ -391,6 +391,33 @@ def _write(
     raise AssertionError("unreachable")  # pragma: no cover
 
 
+def argument_refusal(arguments: dict[str, Any]) -> EpisodeError | None:
+    """The refusal that a `record` call's own arguments are certain to get, or None.
+
+    The busy intake raises it instead of queueing a recap that its replay would refuse. It
+    reads no state: the clock and the audience only name the page, so neither changes a verdict.
+    """
+    if arguments.get("action") != "record":
+        return None
+    try:
+        episode_capture.prepare(
+            episode=arguments.get("episode"),
+            subject=arguments.get("subject"),
+            summary=arguments.get("summary"),
+            worked_on=arguments.get("worked_on"),
+            decided=arguments.get("decided"),
+            open=arguments.get("open"),
+            said=arguments.get("said"),
+            about=arguments.get("about"),
+            client=arguments.get("client"),
+            when=dt.datetime.now().astimezone(),
+            audience="",
+        )
+    except EpisodeError as error:
+        return error
+    return None
+
+
 def record(
     vault_root: Path,
     source_schema: Any,

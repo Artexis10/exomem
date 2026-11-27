@@ -1155,13 +1155,19 @@ class Admission:
 
     def _run_in_flight(self, call: Callable[[], Any], started: float, deadline: float) -> Any:
         try:
-            behind = self.drainer.has_backlog() and not self.drainer.wait_for_empty_queue(deadline)
+            backlog = self.drainer.has_backlog()
+        except Exception:  # noqa: BLE001 - an intake fault must not stop an ordinary save
+            log.warning("write intake could not read its queue", exc_info=True)
+            backlog = False
+        if backlog and self.refusal is not None:
+            # Refused whether it runs after the queue or never: waiting would only delay the answer.
+            raise self.refusal
+        try:
+            behind = backlog and not self.drainer.wait_for_empty_queue(deadline)
         except Exception:  # noqa: BLE001 - an intake fault must not stop an ordinary save
             log.warning("write intake could not wait behind its queue", exc_info=True)
             behind = False
         if behind:
-            if self.refusal is not None:
-                raise self.refusal
             try:
                 # Behind earlier queued saves: run after them, never before.
                 return self._accept(reason="queue_not_empty", started=started)

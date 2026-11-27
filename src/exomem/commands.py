@@ -15900,16 +15900,32 @@ def busy_intake_applies(command: Command, arguments: Mapping[str, Any]) -> bool:
     return operations.queues_when_busy(action, arguments)
 
 
-def refusal_before_queueing(command: Command, arguments: Mapping[str, Any]) -> ValueError | None:
+def refusal_before_queueing(command: Command, arguments: Mapping[str, Any]) -> Exception | None:
     """The refusal that a save's arguments alone are certain to get, or None.
 
     A queued receipt promises a save, and a replay that the arguments already condemn would
-    fail only later. The check reads no page; `observe_memory` is the one command that has it.
+    fail only later. Each check reads no page, so a save that depends on an earlier queued
+    save is never refused for what that save has not written yet.
     """
-    if command.name != "observe_memory":
+    if command.name == "observe_memory":
+        error = observe_memory_module.argument_refusal(arguments)
+        return None if error is None else error.leaf_error()
+    if command.name == "episode_memory":
+        return episode_memory_module.argument_refusal(dict(arguments))
+    rules = _ARGUMENT_RULES.get(command.name)
+    operations = None if rules is None else operation_entries.register_operations(command.name)
+    if rules is None or operations is None or operations.selector is None:
         return None
-    error = observe_memory_module.argument_refusal(arguments)
-    return None if error is None else error.leaf_error()
+    # These rules take the caller's own selector value and refuse an unknown one themselves; the
+    # tool-level arguments its renderings declare are not operation fields.
+    skipped = {operations.selector, *(name for rendering in _renderings_for(command.name)
+                                      for name in rendering.tool_arguments)}
+    fields = {key: value for key, value in arguments.items() if key not in skipped}
+    try:
+        rules.validate(arguments.get(operations.selector), fields)
+    except Exception as error:  # noqa: BLE001 - the command's own refusal, whatever its type
+        return error
+    return None
 
 
 _MCRC = frozenset({"mcp", "rest", "cli"})
