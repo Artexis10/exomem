@@ -189,8 +189,9 @@ A wrong refusal temporarily delays semantic readers while the existing backgroun
 Raw pages, existence, path lists and complete inbound links remain available; ordinary registry lag retains its notice without a refusal.
 Status exposes the completed and required parser versions.
 The stored candidate now applies indexed proposals and exact selected membership to kinds, keys and families before lane caps.
-Exact dimension checks have a per-request work cap of eight candidate windows, for kinds, keys and families, in file mode and store mode.
-A lexical scan stops after that many rows fail the filter, and the vector lane's newest-member read stops after that many members.
+Exact dimension checks on a pushed lexical scan have a per-pass work cap of eight candidate windows, for kinds, keys and families, in file mode and store mode; each widened pass gets a doubled cap.
+A lexical scan stops after that many rows fail the filter, and the vector lane's newest-member read stops after that many members or that many rows that fail the filter.
+Two exact-check paths stay unbounded and are recorded debt: a dimension under `$and` with a `unit.kind` or `unit.category` seed reads every eligible seeded row, and a request without query text widens its prefix until it fills the limit.
 A stop is designed partial coverage, not a lane failure. It sets the `partial_coverage` marker (`dimension_scan_bound`), which stays out of `degraded`.
 So the result cache keeps the result with its marker, degradation counts ignore the stop, and the agent reads the dimension notice, not the failed-method notice.
 Index-exact kind and key predicates reject almost no proposed rows, so in practice only a sparse family reaches the cap.
