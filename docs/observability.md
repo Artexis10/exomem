@@ -387,6 +387,7 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `read.prepare.resolve_path` | Check the literal and shortcut paths, then resolve the canonical vault path. Exclusion checks follow this phase. |
 | `read.prepare.resolve_physical`, `read.prepare.inspect`, `read.prepare.held_read` | Resolve the physical spelling, inspect its identity, then acquire the held byte snapshot. These intervals include nested identity work. |
 | `reserved.identity.baseline_build`, `reserved.identity.baseline_wait` | Build the cold baseline catalogue, or wait on another caller's build. These spans carry no flight or holder identity. A background builder without a call token emits no request span. |
+| `reserved.identity.warm_wait` | A recall turn in a fresh process waits, up to its warm-up deadline, for the background build of the baseline catalogue. |
 
 Spans are aggregated by name within a call, so a phase entered once per changed
 path reports a count and a total rather than hundreds of rows. Instrumentation

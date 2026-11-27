@@ -270,23 +270,25 @@ CONTINUITY_THREAD_MAX_NS = 7 * 24 * 3600 * 1_000_000_000
 
 READY = "ready"
 
-#: The longest a fresh process's first turn waits for its in-memory warm-up (the identity inventory,
-#: the recall seed) before it answers warming. A small vault warms within it; a mature one keeps
-#: warming in the background and the turn abstains as before.
+#: The longest a recall waits for a fresh process's in-memory warm-up (the identity inventory, the
+#: recall seed) before it answers warming. A small vault warms within it; a mature one keeps warming in
+#: the background and the turn abstains as before.
 FIRST_TURN_WARM_WAIT_SECONDS = 10.0
 
 
 def first_turn_warm_wait_seconds() -> float:
-    """How long this request may wait for the warm-up: the cap, and at most half its remaining budget.
+    """How long this recall may wait for the warm-up, all waits together.
 
-    The other half stays for the recall the wait makes possible.
+    None without a request budget: the boot warm, background passes and the CLI never wait. With one,
+    the cap, at most a quarter of the budget, so a short door budget keeps most of its time, and at
+    most half of what remains, so the recall the wait makes possible still has time to run.
     """
     from . import request_budget
 
     budget = request_budget.current()
     if budget is None:
-        return FIRST_TURN_WARM_WAIT_SECONDS
-    return max(0.0, min(FIRST_TURN_WARM_WAIT_SECONDS, budget.remaining() / 2))
+        return 0.0
+    return max(0.0, min(FIRST_TURN_WARM_WAIT_SECONDS, budget.seconds / 4, budget.remaining() / 2))
 
 
 _CACHE_LOCK = threading.Lock()
@@ -1110,8 +1112,12 @@ def ensure_index(
     recall_checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
     visible: Callable[[str], bool] | None = None,
     registry_visible: bool = True,
+    warm_wait: Callable[[], float] | None = None,
 ) -> tuple[str, working_set_index.WorkingSetIndex | None, bool]:
     """Return a usable, current index — or say why there is not one yet.
+
+    `warm_wait` gives the seconds a cold process may wait for its identity inventory before it
+    answers warming. Only the recall turn passes one; it is called only when the inventory is cold.
 
     The third element is `index_stale`: True when the catalogue is behind the
     request's freshness key and this runtime could not bring it forward inside
@@ -1140,11 +1146,11 @@ def ensure_index(
         if not reserved_paths.identity_catalogue_ready(root):
             # A cold private-identity inventory is built by a whole-vault walk
             # under the all-domain identity gate, and every governed read below
-            # needs it. The walk runs in the background. A fresh process's first
-            # turn waits a bounded time for it, since a small vault warms in
-            # seconds, and abstains only when the walk is still running.
+            # needs it. The walk runs in the background. A caller that passes
+            # `warm_wait` (the recall turn) waits that long for it, since a small
+            # vault warms in seconds; every other caller abstains at once.
             reserved_paths.schedule_identity_catalogue_warm(root)
-            if not reserved_paths.await_identity_catalogue_warm(root, first_turn_warm_wait_seconds()):
+            if warm_wait is None or not reserved_paths.await_identity_catalogue_warm(root, warm_wait()):
                 return WARMING, None, False
     if not index.readable():
         return UNAVAILABLE, None, False

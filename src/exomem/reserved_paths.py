@@ -3701,14 +3701,20 @@ def await_identity_catalogue_warm(vault_root: Path, timeout: float) -> bool:
 
     A fresh process has no inventory until its first warm finishes, which takes seconds on a small
     vault. Waiting that long lets the first turn get its context instead of a warming outcome. The
-    reader only waits on the build already scheduled: it never starts or leads one.
+    reader only waits on the build already scheduled: it never starts or leads one. For a reader that
+    holds no boundary.
     """
 
+    if _identity_coordination_active(vault_root):
+        # The build needs the identity coordination this caller holds: waiting would only run out the clock.
+        return identity_catalogue_ready(vault_root)
     vault_key = _vault_identity_key(vault_root)
     deadline = time.monotonic() + max(0.0, timeout)
     # The build registers its flight on its own thread, so it can be absent for a moment after scheduling.
     followed = False
-    with foreground_priority.awaiting_bulk():
+    # The caller is a read holding no boundary, so it leaves the in-flight count rather than releasing
+    # every bulk pass: other requests keep their priority while it waits.
+    with foreground_priority.outside_foreground():
         while not identity_catalogue_ready(vault_root):
             left = deadline - time.monotonic()
             if left <= 0:
