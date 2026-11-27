@@ -1,136 +1,137 @@
 ## Context
 
-`classify-sensitive-material-at-capture` added the `sensitivity-classes` registry, the `sensitivity` field and the classify operation. A class is a label on one page or row. Governance already restricts disclosure by scope: a page's ceiling is the minimum over the scopes that select it (`governance-kernel`, "Pure order-free disclosure evaluator"), so a scope that selects more pages can only lower what a reader sees.
+`classify-sensitive-material-at-capture` added the `sensitivity-classes` registry, the `sensitivity` field and the classify operation. A class is a label on one page or row.
 
-Three gaps stop a class from restricting safely:
+Governance restricts disclosure by scope. A page's ceiling is the minimum over the scopes that select it (`governance-kernel`, "Pure order-free disclosure evaluator"). The residual scope selects a page only when no other scope does ("A residual scope selects what no other scope selects"). So a new scope that selects a page can raise that page's ceiling, by taking it out of a `default_deny` residual scope.
+
+Today's gaps:
 
 1. A page written from classified material carries no class.
-2. A page whose class is not yet derived can be released while its derivation catches up.
-3. About 110 call sites read the vault store snapshot (`vault_store/read.py` `snapshot` and `owned_page`). The snapshot filters nothing; release safety depends on each door calling egress.
+2. A page whose class is still deriving can be released. Store reads serve pending rows with a derived-behind notice (`make-vault-store-canonical` D2, D3).
+3. Membership subjects (`membership.MarkdownSubject`) carry no class at all.
 
-The store is the canonical read path (`make-vault-store-canonical`), and every write runs through one plan function (`one-write-pipeline`). D4 of that change names a pre-plan step that every surface calls and that the plan function checks, and names `connector_boundary.require_write` in the plan function as the hook point for sensitivity governance.
+Every tool result passes `egress.postfilter` and `_withheld_cross_check` in `writer_lease.invoke_command`, for MCP, REST, hosted and CLI callers. Every write runs through one plan function, with a pre-plan names step that every surface calls (`one-write-pipeline` D4).
 
-Load target (unchanged, `make-vault-store-canonical` D13): 20,000 pages, about 120,000 edges, a hub with 10,000 links. A restricted first read after a commit targets about one second. A store-thread hold stays under 100 ms at p99. A withheld refusal keeps the existing 55 ms floor.
+Load target (`make-vault-store-canonical` D13): 20,000 pages, about 120,000 edges, a hub with 10,000 links. A restricted first read after a commit targets about one second. Derivation runs on the store thread in slices of at most `SLICE_SECONDS` (1 s). A withheld refusal keeps the existing 55 ms floor.
 
 ## Goals / Non-Goals
 
-Goals: effective classes that follow derivation, live; missing for anything not proven current; one egress decision for every non-owner release; a policy selector that uses effective classes.
+Goals: classes that follow derivation, live; missing for anything not proven current; effective classes in the one egress decision; a policy selector that can only restrict.
 
-Non-goals: audience and purpose registries, `restrict` and `unrestrict`, expiry, keeping authenticators on insist, and live enablement. They belong to `restrict-disclosure-per-audience`.
+Non-goals: audience and purpose registries, `restrict` and `unrestrict`, expiry, keeping authenticators on insist, who may clear or mask a class once a policy restricts by it, and live enablement. They belong to `restrict-disclosure-per-audience`.
 
 ## Decisions
 
-### D1. Effective classes are own ∪ write-time floor ∪ live lineage
+### D1. Effective classes, stored in one column
 
-A page's effective classes are the union of three sets:
+```
+inherited(P) = ∪ effective(S) for each S that P derives from
+effective(P) = (own(P) ∪ floor(P) ∪ inherited(P)) − mask(P)
+```
 
 | Set | Where it lives | Who changes it |
 |---|---|---|
-| own | `sensitivity` frontmatter (Phase A) | capture, classify, a plain edit on a compiled page |
-| floor | `inherited_sensitivity` frontmatter, a protocol-owned page field | the pre-plan step (adds only); classify (may clear, with a reason) |
-| lineage | `page_lineage` store object | the store thread only |
+| own | `sensitivity` frontmatter (Phase A) | capture, classify, a plain edit of a compiled page |
+| floor | `inherited_sensitivity` frontmatter, a protocol-owned key held in `page_fields.py` | the carry-over step adds; classify clears |
+| mask | `sensitivity_mask` frontmatter, a pointer field with writer `classify` | classify only, with a reason |
+| inherited, effective | `page_sensitivity` store object | the store thread only |
 
-A row's effective classes are its own classes, its collection floor (Phase A), and the effective classes of the pages its source refs name.
+`page_sensitivity(path PRIMARY KEY, effective, inherited, generation)` is a derived owner object. Every consumer reads `effective`: membership subjects, row decisions, the projection catalog and egress. A membership subject without a current `effective` value is `UNRESOLVED` for any scope with a `sensitivity` selector. That reuses the existing fail-closed `UNRESOLVED` contract of "Query-time scope membership". Page facts do not change, so `FACTS_VERSION` stays 1. The membership memo header gains the `page_sensitivity` revision.
 
-Rejected: a byte cascade that rewrites every dependent page when a source gains a class. Each dependent costs one byte write under the 100 ms hold bar. A restricted writer's out-of-ceiling side effects are skipped, so the cascade fails open for it. A raise on a 10,000-dependent hub would take about 22 minutes of projection (inferred from 7.5 files per second).
+A row's effective classes are its own classes, its collection floor, and the `effective` values of the pages its current row version names in `item_sources`.
 
-### D2. Carry-over at write time, through `sources`
+A mask stops a class at that page: its dependents inherit `effective`, which excludes the masked class. A mask is the owner's remedy for over-restriction. Clearing a floor alone would not help while the class still arrives by inheritance.
 
-Every write surface calls one pre-plan step, beside the names step of `one-write-pipeline` D4. It computes the floor as the union of the effective classes of:
+Rejected: a byte cascade that rewrites each dependent when a source gains a class. A restricted writer's out-of-ceiling side effects are skipped, so the cascade fails open for it. A raise on a 10,000-dependent hub would take about 22 minutes of projection (inferred from 7.5 files per second).
 
-- the pages the write names in `sources` (create and supersede already take it; this change adds it to `edit_note`, `add_observation`, `add_record` and `edit_record`);
-- the page the write edits;
-- the episode's `about` refs, for `save_episode`.
+### D2. Carry-over at authored writes
 
-The step writes the union into `inherited_sensitivity` and merges the named refs into the page's `sources` field, or into a row's source refs. The plan function refuses a write whose floor holds fewer classes than the step computes. That refusal catches a surface that skipped the step.
+An authored write calls one pre-plan carry-over step, beside the names step of `one-write-pipeline` D4. The step adds to the floor the effective classes of:
 
-The agent decides what a write drew on, as it decides a class in Phase A. Instructions tell it to name in `sources` every page whose content the write uses, cited in the text or not.
+- the pages named in `sources` (`create_note`, `supersede_note`, and newly `add_record` and `edit_record`);
+- the pages named in `links` whose relation carries `inherits_sensitivity` (`add_observation`, `edit_note`);
+- an episode's `about` refs;
+- the page the write edits.
 
-Rejected: a separate `drew_on` argument. It would be a second name for what `sources` already means on `create_note`, and each new argument costs tool-schema bytes.
+The step resolves each ref under the writer's own visibility. A ref the writer cannot read refuses as a missing page, and no result reports a class taken from a page the writer cannot read.
 
-Rejected: a whole-session carry-over, where every write takes the classes of everything the session read. One conversation often covers unrelated subjects, and this would label most writes with classes they do not hold.
+The plan function refuses an authored write whose floor lacks a class that the step computes. Classify and mechanical rewrites (link repair after a rename, folder merges, relocations) do not run the step and keep the floor they find. Otherwise a mechanical rewrite would freeze inherited classes into hundreds of floors, and a later clear could not flow down.
 
-### D3. Live lineage in a derived store object
+The agent decides what a write drew on, as it decides a class in Phase A. A read result that releases a page with effective classes adds one line: if a write uses this page, name it in `sources`.
 
-`page_lineage(path PRIMARY KEY, classes, generation)` is a derived owner object in the vault store. It is not part of `page_admission`: that row's currency proof is the page's own sha256, and a source's class change leaves the dependent's bytes unchanged.
+Rejected:
+- A separate `drew_on` argument. `sources` and `links` already mean "drew on".
+- Whole-session carry-over. One conversation often covers unrelated subjects.
+- A session read record that lists shown-but-unused pages in write results. No principal resolver sets `RequestPrincipal.session_id`, and hook-injected recall arrives on another channel. So the record could not key reads to the write's session.
 
-- **Edges.** Lineage follows `graph_edges` whose relation carries a new closed behaviour `inherits_sensitivity`. The core pack assigns it to `derived_from`, `evidenced_by`, `cites`, `refines`, `duplicates` and `supersedes`. These are the derivation edges the owner chose on 2026-11-01, minus the two that are not graph relations: episode `about` and record source refs. An overlay relation may take the behaviour. Path parents (parts, frames) keep their existing membership rule.
-- **Recompute.** The store thread recomputes lineage in the same derivation transaction that changes a page's own classes, its floor, or one of its `inherits_sensitivity` edges. A recursive query walks the dependents through the indexed `dst_page_key`. A cycle terminates because the walk keeps a set.
-- **Episodes.** A task maps `about` onto a graph edge with the behaviour if the graph does not already hold one. Until then, an episode's lineage is its floor.
-- **Rows.** A row's lineage is joined at decision time from its source refs to `page_lineage`. `item_sources` gains an index on the source ref, so a page's lineage change finds the dependent rows.
-- **Generation.** A page's generation increases whenever its lineage classes change. `admission_memo`, the store-mode membership map (`make-vault-store-canonical` D13) and the collection view decisions (D14) key on (sha256, generation). V4 projected item scopes republish when a generation moves.
-- **Large raises.** A raise on a hub becomes chunked derivation work, each chunk under the 100 ms hold. Pending dependents answer missing to a restricted caller until their chunk commits.
-- **Version.** `page_lineage` takes the next owner version in `vault_store/rederive.py` (6 today; the second of this change and `make-vault-store-canonical` task 5.2 to merge rebases). `FACTS_VERSION` stays 1.
-- **Pages outside the graph.** The graph indexes only Knowledge Base Markdown outside the scan-excluded folders (`epistemic_graph._is_graph_page`). A class on a page the graph does not index would give its dependents no edges, so they would fail open. Capture, classify and a plain edit therefore refuse a class on such a page with `SENSITIVITY_PAGE_UNTRACKED`. A release check lists already-classified pages outside the graph so the owner can move or clear them.
+### D3. Live inheritance
 
-Rejected: lineage in `page_admission`. It would need a second currency proof and `FACTS_VERSION 2` for every page.
+- **Edges.** Inheritance follows `graph_edges` whose relation carries a new closed behaviour `inherits_sensitivity`. The core pack assigns it to `derived_from`, `evidenced_by`, `cites`, `refines`, `duplicates` and `supersedes`; an extension relation inherits its parent's behaviours. Episode `about` gets a graph edge with the behaviour if it has none. When stored relationships (`make-vault-store-canonical` D10) land, they are an inheritance input from that release.
+- **Recompute.** A derivation that changes a page's own classes, floor, mask or one of its derivation edges marks the page's dependents pending in the same transaction. The store then recomputes them in derivation slices, walking dependents through the indexed `dst_page_key`. A cycle terminates because the walk keeps a set. A page's generation increases whenever its `effective` value changes.
+- **Rows.** `item_sources` gains an index on the source ref, restricted to current row versions, so an `effective` change finds the dependent rows.
+- **Caches.** Every cache that holds a scope set or a decision keys on the `page_sensitivity` revision: `admission_memo`, membership `_MEMO`, `_SNAPSHOT_MEMO` and `_PATH_MEMO`, the store-mode membership map (`make-vault-store-canonical` D13) and the collection view decisions (D14).
+- **Catalog.** Projected rows carry their page's generation. Projected retrieval under a policy with a `sensitivity` scope re-checks the sensitivity scopes against `effective` at query time, rather than trusting the scope ids stored at publish. Republish then catches up in the background.
+- **Owner reads.** Inheritance work is derivation, not a write intent, so owner reads do not wait on it.
+- **Version.** `page_sensitivity` takes the next owner version in `vault_store/rederive.py` (6; owner version is 5 today). Of this change and `make-vault-store-canonical` task 5.2, the second to merge rebases.
+- **Pages outside the graph.** The graph indexes only Knowledge Base Markdown outside the scan-excluded folders (`epistemic_graph._is_graph_page`). A class on a page outside the graph would reach no dependent. Capture, classify and a plain edit refuse it with `SENSITIVITY_PAGE_UNTRACKED`. The release check lists already-classified pages outside the graph.
 
-### D4. Removals flow down; the floor keeps what a write saw
+Rejected: inheritance in `page_admission`. That row's currency proof is the page's own sha256, which a source's class change does not move.
 
-Clearing a class on a source recomputes lineage, so dependents that hold the class only through lineage lose it. A page written after the class was set keeps it, because the pre-plan step wrote it into that page's floor. Only classify lowers a floor, with a reason record that allows a revert. The owner chose this on 2026-11-27.
+### D4. Removals flow down; floors keep what an authored write saw
 
-### D5. The currency proof and withheld equals missing
+Clearing a class on a source recomputes inheritance, so dependents that hold the class only by inheritance lose it. A page whose authored write came after the class was set holds the class in its floor and keeps it. This was decided on 2026-11-27.
 
-`read.py` supplies a proof; egress decides. The proof says that, at the read's pinned revision, no derivation is pending for the page or for any page in its lineage ancestry, graph catch-up included.
+### D5. The currency proof is one watermark
 
-The check runs only when the active policy has a scope that selects by `sensitivity` and the caller is not the owner. Owner reads pay nothing.
+The store keeps two revisions: the last revision that marked inheritance work pending, and the revision up to which `page_sensitivity` is complete. At a read's pinned snapshot:
 
-Without the proof, egress answers missing (`make-vault-store-canonical` D2), with the response shape and timing of a page that does not exist. Inline derivation keeps the existing `UNDERIVED_CAP` bound in `vault_store/derivation.py`; beyond it, the pages answer missing.
+- When the second is at least the first, every page's `effective` is current. The check is O(1).
+- Otherwise the store computes the pending set once per snapshot: the pending pages and their dependents. Egress answers missing for those pages and decides the rest as usual.
 
-### D6. One egress decision for every non-owner release door
+The check runs only when the active policy has a `sensitivity` scope and the caller is not the owner. For those callers it replaces the derived-behind notice of `make-vault-store-canonical` D2 and D3 with a missing answer, in the shape and timing of a page that does not exist. Owner reads keep D2 and D3 unchanged.
 
-A non-owner release door is any code path that returns page, row or binary content, or a fact derived from it, to a caller other than the owner. Each one reads the store through `snapshot` or `owned_page` and releases only what egress decides.
+### D6. One egress decision, proved by behaviour
 
-The door list starts from the egress entry points and the doors the 2026-11-27 code reading named:
+`egress.postfilter` and `_withheld_cross_check`, which `invoke_command` runs for every surface, decide on `effective` through membership. No per-door annotation is added.
 
-- search, `recall_context`, `read_page` and section reads;
-- graph context, edge views and inbound or suggested links;
-- records queries, row reads, stored rollups and v4 projected retrieval;
-- episodes, review queues and planning items;
-- binary downloads, which decide by their Evidence page's classes;
-- confined writers' preview and result echoes.
+Some facts leave without naming a path, and the postfilter cannot see them by path. Each one gets its own check, and task 4.1 lists them from the code: counts, stored rollups, aggregates, snippets, titles, link names and suggestion lists. Binary downloads decide by their Evidence page's `effective` value.
 
-Task 4.1 completes the list from every caller of `snapshot` and `owned_page`. Each call site declares its reader as owner-only or egress-decided, with a one-line reason. A test parses the package and fails when a call site declares neither. Owner-only readers are Markdown export, backup and maintenance that serve the owner only.
+The proof is behavioural. A test builds a synthetic vault with classified canaries: a direct page, a cited page, an episode `about` page, a row with a classified source, and a binary with a classified Evidence page. It runs every registered read operation under a restricted caller and fails when any canary's path, title, text or count appears in a result. The test enumerates operations from the command registry, so a new door joins it without anyone editing the test.
 
-### D7. The session read record is evidence, never a floor
+### D7. The `sensitivity` selector restricts only
 
-The governance sidecar (`Knowledge Base/.governance.sqlite`) gains one table. A row holds the session id (`RequestPrincipal.session_id`), the page path, the classes released and the time.
+`sensitivity` joins `_SCOPE_SELECTOR_FIELDS` in `governance/policy.py`, with three rules:
 
-- A read boundary commits the row before egress releases the bytes, once per top-level read, for any principal. So a crash cannot release unrecorded material.
-- Rows older than 30 days are deleted at the next sidecar maintenance. The limit is a setting.
-- Each write result lists the classified pages the session was shown that the write did not name in `sources`, edit, or name in `about`. The agent can then add them or leave them out on purpose.
-- No class reaches a write because of a row.
+- A scope that uses it has no other selector, so its meaning stays "pages of these classes".
+- `exclude` does not accept it. An exclusion by class would release pages from a restricting scope when a hub gains a class.
+- A match by a `sensitivity` scope never removes the residual scope from a page. The scope can then only lower a ceiling.
 
-The plan's B3 asked for receipts of every read that releases classified material. The receipt chain (`disclosure-evidence`) deliberately writes nothing for an ungoverned owner read, and its hash-chained append is the wrong cost for every owner recall. This record covers owner reads; governed non-owner reads keep their existing receipts.
+An unknown key is a compile error. A vault without the store refuses a policy that uses the selector, with an error that names the store; this was decided on 2026-11-27 as temporary until those vaults run the store. An owner-only class is such a scope with `default_deny`.
 
-Rejected: the table in the vault store. A read would become a store write against the 100 ms hold bar, and a store rollback would drop session state that cannot be derived again.
+A binary from before this change refuses a policy that uses the selector. A process that is already running keeps enforcing its last good policy until it restarts, then blocks the policy.
 
-### D8. The `sensitivity` selector, in store mode only
+### D8. Path selectors ignore case
 
-`sensitivity` joins `_SCOPE_SELECTOR_FIELDS` and `exclude` in `governance/policy.py`. It matches a page or row whose effective classes intersect the listed keys. Each key must be registered; an unknown key is a compile error. The field set is closed, so an older binary refuses a policy that uses the selector: it fails closed.
-
-A vault without the store has no `page_lineage`. Its policy compile refuses a scope that selects by `sensitivity`, with an error that names the store as the requirement. This was decided on 2026-11-27, as temporary until those vaults run the store.
-
-An owner-only class is a scope with this selector and `default_deny`. Phase C supplies the registries and operations that write such a policy.
-
-### D9. Two earlier leaks close here
-
-- **Case.** `membership._matches_paths` uses `fnmatchcase`, so a scope on `Health/**` misses `health/x.md`, which a case-insensitive file system treats as the same folder. Path selectors match after casefolding both sides.
-- **Create oracle.** A create whose target path holds a page the caller cannot read refuses with the answer a caller gets for a path outside its writable scopes. It never answers `FILE_EXISTS`.
+`membership._matches_paths` uses `fnmatchcase`, so a scope on `Health/**` misses `health/x.md`, which a case-insensitive file system treats as the same folder. Path selectors and exclusions match after casefolding both sides.
 
 ## Risks / Trade-offs
 
-- **An agent omits a source.** An uncited paraphrase carries no class. Mitigations: the write result lists the classified pages the session was shown; instructions ask for every source; the re-attack lane measures uncited paraphrase. The residual risk stays an agent-judgement risk, as classification is in Phase A.
-- **Over-restriction.** A class reaches every page derived from a classified one. A note that cites a health Source for one figure becomes health. The owner lowers a floor with classify. A clear needs no owner role here; Phase C decides that.
-- **Derivation lag hides pages.** A restricted caller sees pending pages as missing. The owner never does.
-- **Deploy cost.** The first derivation after release computes lineage for every page: one recursive walk over 120,000 edges, chunked under the hold bar.
+- **Spread.** Inheritance is transitive. An entity page that takes observations from many sources can collect several classes and pass them on. Task 0.1 measures the spread on a read-only copy of the owner's graph before inheritance is built; a large spread reopens D1's transitive rule. Masks are the owner's per-page remedy.
+- **Granularity stays the page.** One cited figure from a health Source makes a note health. Finer granularity is out of scope.
+- **Uncited paraphrase.** A write that names no source carries no class. The read-result prompt and the instructions reduce this; the re-attack lane measures it. It remains an agent-judgement risk, as classification is in Phase A.
+- **Existence bits for confined writers.** A confined writer that creates, moves or links onto a path inside its writable scope can learn that a page it cannot read holds that path: `FILE_EXISTS`, `DEST_EXISTS`, `ENTITY_EXISTS`, `ARTIFACT_EXISTS`, a records key conflict, the names step's numbered suffix or a folder respelling. None of these reveals content, title or class. This change does not close them; the re-attack lane rates them, and Phase C decides before any confined writer gets a shared audience.
+- **Mixed versions.** Until every process restarts on this release, an older process keeps the previous policy.
+- **Derivation lag hides pages** from restricted callers during a hub raise. The owner never sees this.
+- **Owner reads are not receipted.** The receipt chain writes nothing for an ungoverned owner read (`disclosure-evidence`), and this change keeps that. Non-owner reads of classified pages are governed, so they are receipted.
 
 ## Migration
 
-None in page bytes. After release, the store derives `page_lineage` on its next derivation. Pages gain a floor on their next write. The release check reports classified pages outside the graph.
+None in page bytes. The store derives `page_sensitivity` on its next derivation: one walk over the derivation edges, in slices. The release check reports classified pages outside the graph.
 
 ## Proof
 
-- A twin-world canary rig run with four synthetic canaries: a classified Source, a note citing it, an episode about it, and an uncited copy. A fresh `security-reviewer` re-attack lane on Opus must find no leak and no withheld-versus-missing oracle. This change merges only after it passes.
-- Scoped tests per door, plus the call-site test from D6.
+- Task 0.1: the spread measurement.
+- The behavioural egress test from D6.
+- Scoped tests for carry-over, removal, mask, the watermark and the residual rule.
 - A before and after on the latency suite for a restricted first read and a hub raise, on generated data at the load target.
+- The twin-world canary rig with four synthetic canaries (direct, cited, episode `about`, uncited copy), then a fresh `security-reviewer` re-attack lane on Opus. It must find no leak and no withheld-versus-missing oracle beyond the existence bits listed above. This change merges only after it passes.

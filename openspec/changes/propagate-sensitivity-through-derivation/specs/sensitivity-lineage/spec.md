@@ -1,86 +1,99 @@
 ## ADDED Requirements
 
-### Requirement: Effective classes are own, floor and lineage
+### Requirement: Effective classes combine own, floor and inherited classes, minus a mask
 
-A page's effective classes SHALL be the union of its own `sensitivity` field, its `inherited_sensitivity` field and its live lineage classes. A row's effective classes SHALL be the union of its own classes, its collection floor and the effective classes of the pages its source refs name. Every governance decision that reads a class SHALL read the effective classes.
+A page's effective classes SHALL be the union of its own `sensitivity` field, its `inherited_sensitivity` floor and its inherited classes, minus the classes in its `sensitivity_mask`. Its inherited classes SHALL be the union of the effective classes of the pages it derives from. Every governance decision that reads a class SHALL read the effective classes.
 
 #### Scenario: A note cites a classified Source
 
 - **WHEN** a Source carries `sensitivity: [health]` and a note names it in `sources`
 - **THEN** the note's effective classes include `health`
 
-#### Scenario: A row names a classified page as its source
+### Requirement: A row's effective classes include its sources
 
-- **WHEN** a row's source ref names a page with effective class `financial`
+A row's effective classes SHALL be the union of its own classes, its collection floor and the effective classes of the pages its current row version names as sources.
+
+#### Scenario: A row names a classified Source
+
+- **WHEN** a row's current version names a Source with own class `financial`
 - **THEN** the row's effective classes include `financial`
 
-### Requirement: A write carries the classes of what it drew on
+### Requirement: An authored write carries the classes of what it drew on
 
-Every write surface SHALL call one pre-plan step that sets `inherited_sensitivity` to the union of the effective classes of the pages the write names in `sources`, the page it edits and, for an episode, its `about` refs. The step SHALL merge those refs into the page's `sources` field or the row's source refs. The plan function SHALL refuse a write whose `inherited_sensitivity` holds fewer classes than the step computes. A write SHALL NOT take a class only because its session read a page.
+Every authored write SHALL call one pre-plan step that adds to `inherited_sensitivity` the effective classes of the pages it names in `sources`, the pages it names in `links` whose relation carries `inherits_sensitivity`, an episode's `about` refs and the page it edits. The step SHALL resolve each ref under the writer's visibility. The plan function SHALL refuse an authored write whose floor lacks a class that the step computes.
 
-#### Scenario: An observation drew on a classified page
+#### Scenario: An observation links a classified page
 
-- **WHEN** an agent adds an observation to an entity page with `sources` naming a page of class `identity`
-- **THEN** the entity page's `inherited_sensitivity` includes `identity`, and its `sources` field names that page
+- **WHEN** an agent adds an observation to an entity page with a `derived_from` link to a page of class `identity`
+- **THEN** the entity page's `inherited_sensitivity` includes `identity`
 
-#### Scenario: A surface skips the pre-plan step
+#### Scenario: A surface skips the step
 
-- **WHEN** a write reaches the plan function with an `inherited_sensitivity` that lacks a class of a page it names in `sources`
+- **WHEN** an authored write reaches the plan function with a floor that lacks a class of a page it names in `sources`
 - **THEN** the plan function refuses the write and names the missing class
 
-#### Scenario: A session read a classified page the write did not use
+#### Scenario: A source the writer cannot read
 
-- **WHEN** a session was shown a `health` page and then writes a note that does not name it
-- **THEN** the note takes no `health` class, and the write result lists that page as shown but not used
+- **WHEN** a restricted writer names in `sources` a page withheld from it
+- **THEN** the write refuses as it would for a page that does not exist, and the result reports no class from that page
 
-### Requirement: Every compiled write surface accepts sources
+### Requirement: Record writes accept sources
 
-`edit_note`, `add_observation`, `add_record` and `edit_record` SHALL accept an optional `sources` list, as `create_note` and `supersede_note` do.
+`add_record` and `edit_record` SHALL accept an optional `sources` list, stored as the row's source refs.
 
-#### Scenario: An edit names its sources
+#### Scenario: A row names its source
 
-- **WHEN** an agent edits a note with `sources` naming a page
-- **THEN** the note's `sources` field names that page after the write
+- **WHEN** an agent adds a row with `sources` naming a page
+- **THEN** the row's current version names that page as a source
 
-### Requirement: Only classify lowers a floor
+### Requirement: Mechanical rewrites and classify keep the floor
 
-`inherited_sensitivity` SHALL be protocol-owned. An edit SHALL NOT remove a class from it. The classify operation SHALL clear or lower it with a required reason and a reason record that allows a revert.
+Classify and mechanical rewrites, such as link repair after a rename, folder merges and relocations, SHALL NOT run the carry-over step and SHALL keep the floor they find. No edit SHALL remove a class from `inherited_sensitivity`; only classify SHALL clear it, with a reason record that allows a revert.
 
-#### Scenario: An edit drops the field
+#### Scenario: A rename rewrites links
 
-- **WHEN** an agent edits a page's frontmatter and leaves out `inherited_sensitivity`
-- **THEN** the write keeps the field's classes
+- **WHEN** a page is renamed and the store rewrites the links on 300 pages that cite it
+- **THEN** none of those pages' floors change
 
-### Requirement: Lineage follows derivation edges and stays current
+### Requirement: The owner masks an inherited class on one page
 
-The vault store SHALL hold a derived `page_lineage` object with each page's lineage classes and a generation. Lineage SHALL follow the graph edges whose relation carries the `inherits_sensitivity` behaviour, transitively. The store thread SHALL recompute it in the same derivation transaction that changes a page's own classes, its floor or one of those edges. The generation SHALL increase whenever the lineage classes change.
+Classify SHALL set or clear `sensitivity_mask` on a page, with a required reason and a revert. A masked class SHALL leave the page's effective classes and SHALL NOT reach its dependents through it.
+
+#### Scenario: Masking a class on a note
+
+- **WHEN** a note inherits `health` from a cited Source and the owner masks `health` on the note
+- **THEN** the note's effective classes exclude `health`, and a page that cites only the note does not inherit `health`
+
+### Requirement: Inheritance follows derivation edges and stays current
+
+The vault store SHALL hold a derived `page_sensitivity` object with each page's effective and inherited classes and a generation. Inheritance SHALL follow the graph edges whose relation carries `inherits_sensitivity`, transitively. A derivation that changes a page's own classes, floor, mask or derivation edges SHALL mark its dependents pending in the same transaction. The generation SHALL increase whenever the effective classes change.
 
 #### Scenario: A Source is classified after a note cites it
 
 - **WHEN** a note cites a Source, and later the owner classifies the Source as `identity`
-- **THEN** after the next derivation the note's effective classes include `identity` without any change to the note's bytes
+- **THEN** after derivation the note's effective classes include `identity`, and the note's bytes are unchanged
 
 #### Scenario: A cycle of derivation edges
 
 - **WHEN** two pages cite each other and one gains a class
 - **THEN** both carry the class and the recompute terminates
 
-### Requirement: Governance caches key on the lineage generation
+### Requirement: Governance caches key on the inheritance revision
 
-Every cache of a governance decision or scope set SHALL key on the page's lineage generation as well as its content identity.
+Every cache of a scope set or a governance decision SHALL key on the `page_sensitivity` revision as well as its existing inputs. Projected retrieval under a policy with a `sensitivity` scope SHALL check that scope against the current effective classes, not against scope ids stored at publish.
 
 #### Scenario: A cached decision after a raise
 
 - **WHEN** a restricted caller's decision for a note is cached and the note's Source then gains a class
-- **THEN** the next read decides the note again under its new generation
+- **THEN** the next read decides the note under the new effective classes
 
 ### Requirement: Removals flow down only to pages written before the class
 
-Clearing a class on a page SHALL remove it from dependents that hold it only through lineage. A dependent whose `inherited_sensitivity` holds the class SHALL keep it.
+Clearing a class on a page SHALL remove it from dependents that hold it only by inheritance. A dependent whose floor holds the class SHALL keep it.
 
 #### Scenario: A class is cleared on a Source
 
-- **WHEN** note A cited a Source before the Source was classified `health`, note B cited it after, and the owner then clears `health` on the Source
+- **WHEN** note A cited a Source before the Source was classified `health`, note B's authored write cited it after, and the owner then clears `health` on the Source
 - **THEN** note A no longer carries `health` and note B still does
 
 ### Requirement: A class needs a page the graph indexes
@@ -92,20 +105,20 @@ Capture, classify and a plain edit SHALL refuse a class on a page the graph does
 - **WHEN** the owner classifies a Markdown page in a scan-excluded folder
 - **THEN** the classify refuses with `SENSITIVITY_PAGE_UNTRACKED` and the page's bytes are unchanged
 
-### Requirement: Unproven lineage answers as missing
+### Requirement: Uncurrent inheritance answers as missing
 
-When the active policy has a scope that selects by `sensitivity` and the caller is not the owner, a page SHALL be released only with a proof that no derivation is pending at the read's pinned revision for the page or any page in its lineage ancestry, graph catch-up included. Without the proof, the page SHALL answer as a page that does not exist, in response shape and in timing. Owner reads SHALL NOT pay this check.
+When the active policy has a `sensitivity` scope and the caller is not the owner, a page SHALL be released only when its effective classes are current at the read's pinned snapshot. A page in the pending set or below it SHALL answer as a page that does not exist, in response shape and in timing. Owner reads SHALL NOT wait on inheritance work or pay this check.
 
 #### Scenario: A raise is still deriving
 
-- **WHEN** a hub Source gains `health` and a restricted caller searches while a chunk of its dependents is still pending
+- **WHEN** a hub Source gains `health` and a restricted caller searches while some dependents are still pending
 - **THEN** the pending dependents answer as missing, and the answer cannot be told apart from one where those pages do not exist
 
-### Requirement: The session read record is bounded evidence
+### Requirement: A classified read asks the agent to name its sources
 
-The governance sidecar SHALL record, for every principal, each classified page a top-level read boundary released and the classes it released, keyed by session id. The row SHALL commit before egress releases the bytes. Rows older than a retention setting, 30 days by default, SHALL be deleted. A write result SHALL list the classified pages its session was shown that the write did not name in `sources`, edit or name in `about`. The record SHALL NOT be an input to any class or disclosure decision.
+A read result that releases a page with effective classes SHALL tell the agent, in one line, to name the page in `sources` if a write uses it.
 
-#### Scenario: The sidecar cannot commit the row
+#### Scenario: Reading a health page
 
-- **WHEN** the read record cannot commit for a read that would release a classified page
-- **THEN** the read releases nothing for that page and reports the failure
+- **WHEN** an agent reads a page with effective class `health`
+- **THEN** the result asks it to name the page in `sources` when a write uses it

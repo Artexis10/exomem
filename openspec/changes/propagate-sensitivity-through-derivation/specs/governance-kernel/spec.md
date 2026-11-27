@@ -2,7 +2,7 @@
 
 ### Requirement: A scope may select by sensitivity class
 
-A scope and its `exclude` SHALL accept a `sensitivity` selector: a list of registered `sensitivity-classes` keys. It SHALL match a page or row whose effective classes intersect the list. An unregistered key SHALL be a compile error. The selector set SHALL stay closed, so a binary without this selector refuses such a policy.
+A scope SHALL accept a `sensitivity` selector: a list of registered `sensitivity-classes` keys. It SHALL match a page or row whose effective classes intersect the list. A scope that uses it SHALL have no other selector, and `exclude` SHALL NOT accept it. An unregistered key SHALL be a compile error. The selector set SHALL stay closed, so a binary without this selector refuses such a policy.
 
 #### Scenario: An owner-only class
 
@@ -14,9 +14,14 @@ A scope and its `exclude` SHALL accept a `sensitivity` selector: a list of regis
 - **WHEN** a note cites a `health` Source and a scope selects `sensitivity: [health]`
 - **THEN** the scope selects the note as well
 
+#### Scenario: An exclusion by class
+
+- **WHEN** a policy's scope declares `exclude: {sensitivity: [health]}`
+- **THEN** the compile refuses and names the rule
+
 ### Requirement: A class-selecting policy needs the vault store
 
-A vault that does not run the vault store SHALL refuse to compile a policy with a scope or exclusion that selects by `sensitivity`. The error SHALL name the vault store as the requirement.
+A vault that does not run the vault store SHALL refuse to compile a policy with a scope that selects by `sensitivity`. The error SHALL name the vault store as the requirement.
 
 #### Scenario: A file-mode vault
 
@@ -32,20 +37,20 @@ Path selectors and path exclusions SHALL match after casefolding both the patter
 - **WHEN** a scope selects `paths: [Health/**]` and a page lives at `health/visit.md`
 - **THEN** the scope selects the page
 
-### Requirement: A create refusal does not reveal an unreadable page
+### Requirement: The egress decision reads effective classes
 
-A create whose target path holds a page the caller cannot read SHALL refuse with the answer that the caller gets for a path outside its writable scopes. It SHALL NOT answer `FILE_EXISTS`.
+The result postfilter that every surface's results pass SHALL decide membership on effective classes. A fact released without a path, such as a count, a rollup, a snippet, a title or a suggestion, SHALL be decided for the pages it derives from. A binary SHALL be decided by its Evidence page's effective classes. A test SHALL run every registered read operation under a restricted caller over synthetic classified pages and fail when any of their paths, titles, text or counts appears in a result.
 
-#### Scenario: A confined writer creates over a withheld page
+#### Scenario: A new read operation
 
-- **WHEN** a confined writer creates a note at the path of a page withheld from it
-- **THEN** the refusal matches the refusal for an unwritable path, in shape and in timing
+- **WHEN** a change registers a read operation that returns a classified page's title to a restricted caller
+- **THEN** the test suite fails and names the operation
 
-### Requirement: Every non-owner release door decides through egress
+### Requirement: A class scope never takes a page out of the residual scope
 
-Every code path that releases page, row or binary content, or a fact derived from it, to a caller other than the owner SHALL release only what the egress decision allows. Every call site of the store snapshot reader SHALL declare its reader as owner-only or egress-decided, with a reason. A test SHALL fail when a call site declares neither. A binary SHALL be decided by its Evidence page's effective classes.
+When residual membership is assigned, a match by a scope whose selector is `sensitivity` SHALL NOT count as another scope selecting the item. Such a scope SHALL only ever lower an item's ceiling. An item's effective sensitivity classes SHALL count as part of the item for the rule that membership is a function of the item, its path and the compiled policy.
 
-#### Scenario: A new door reads the snapshot
+#### Scenario: A class scope keeps the residual restriction
 
-- **WHEN** a change adds a call to the store snapshot reader without a reader declaration
-- **THEN** the test suite fails and names the call site
+- **WHEN** a residual scope declares `default_deny`, a scope selects `sensitivity: [health]`, a rule grants the health scope to an audience, and a page with effective class `health` matches no other scope
+- **THEN** the page keeps the residual scope as well, and that audience still gets it as missing
