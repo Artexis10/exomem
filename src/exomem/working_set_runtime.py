@@ -1448,7 +1448,7 @@ def lexical_selection_scope(
     with (
         lexstore.admitted_catalog_scope(vault_root),
         lexstore.catalog_selection_scope(
-            vault_root, lag_dispatch=_defer_lexical_repair,
+            vault_root, lag_dispatch=_defer_lexical_repair, borrow_request_view=True,
         ) as selection,
     ):
         captured = None if selection is None else selection.checkpoints.get("kb")

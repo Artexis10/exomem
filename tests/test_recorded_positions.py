@@ -113,10 +113,12 @@ def test_a_save_published_during_the_request_leaves_its_positions_and_leads_as_t
     vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Another save published to the catalogue while the request ran; every exact lane then read the catalogue past
-    the request's checkpoint, answered stale, and the person's recorded positions vanished from recall."""
+    the request's checkpoint, answered stale, and the person's recorded positions vanished from recall. Its later
+    selections then read the save as catalogue lag, revoked retrieval readiness and scheduled a repair the current
+    catalogue did not need."""
     import threading
 
-    from exomem import freshness, working_set_runtime
+    from exomem import freshness, readiness, working_set_runtime
 
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     position = "I prefer a slow candle before the glaze firing ramps this week"
@@ -128,13 +130,27 @@ def test_a_save_published_during_the_request_leaves_its_positions_and_leads_as_t
     warm_managed_cell(vault)
     _built(vault).close()
     working_set_runtime.reset_caches_for_tests()
-    # The catalogue publishes only by the save below, never by a repair the stale lanes would schedule.
-    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", lambda *_args, **_kwargs: None)
     store = lexstore.get_store(vault)
     requested = lexstore.checkpoint_state(store.published_recall_checkpoint("kb"))
     discover = working_set.task_candidates
     published: list[object] = []
     discovered: list[str] = []
+    # What the request did after the save landed. The save's own thread finishes before `published` is set.
+    after_save: list[str] = []
+    revoke = readiness.mark_unready
+
+    def recorded_revoke(name: str, *args, **kwargs):
+        if published:
+            after_save.append(f"revoked {name}")
+        return revoke(name, *args, **kwargs)
+
+    def recorded_repair(*_args, **_kwargs) -> None:
+        # The catalogue publishes only by the save below, never by a repair.
+        if published:
+            after_save.append("scheduled a catalogue repair")
+
+    monkeypatch.setattr(readiness, "mark_unready", recorded_revoke)
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", recorded_repair)
 
     def save_elsewhere() -> None:
         (vault / later).write_text(
@@ -173,6 +189,7 @@ def test_a_save_published_during_the_request_leaves_its_positions_and_leads_as_t
     assert later not in discovered
     assert later not in {item["source_ref"] for item in packet["task_context"]["candidates"]}
     assert "pos-m" not in str(block)
+    assert after_save == []
 
 
 def test_a_position_served_or_held_as_stance_is_not_repeated(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:

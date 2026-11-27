@@ -502,12 +502,24 @@ it with the current path on the reference corpus.
   had already read. `request_catalogue_view` opens a slot around the map's
   compilation. The first bind at the request's checkpoint, or the bind in
   `pin_lexical_checkpoint` at the checkpoint it pinned, captures one SQL
-  snapshot whose stored checkpoint has that state. Exact reads borrow the
-  snapshot only on a matching explicit checkpoint, and selections read it
-  without closing it. The request closes it after compilation, then
-  dispatches any lag that it showed. The final evidence checks run after it
-  closes, on live state. The view is never an admission: it stays out of the
-  admitted-catalogue slot that find reads.
+  snapshot whose stored checkpoint has that state. A bind that finds another
+  state is recorded, and a second bind at that state captures nothing. Exact
+  reads borrow the snapshot only on a matching explicit checkpoint, and the
+  lexical selections read it without closing it. The request accounted for
+  the view's lag when it bound, so those selections report none: a later
+  publication is the view's age, not catalogue lag, and revokes no readiness.
+  The request closes the view after compilation, then dispatches any lag that
+  it showed. The final evidence checks run after it closes, on live state.
+  The view is never an admission: find's selections capture their own view,
+  and the view stays out of the admitted-catalogue slot that find reads.
+
+  The view binds at the start of the map's compilation, not at the request's
+  freshness snapshot. Binding at the snapshot would hold the reader through
+  the index warm wait, where it could make a repair's publish decline, so a
+  publication between the snapshot and the bind still makes the exact reads
+  stale. A catalogue that already trails the request's checkpoint, other than
+  by pages withheld from the reader, binds no view; that case is out of scope
+  here.
 
   A foreground delta cannot replace the held view. The catalogue keeps only
   each page's newest rows, so once a later save has published, no read of
@@ -515,16 +527,31 @@ it with the current path on the reference corpus.
 
   A Source erasure fences the view. The view reads the Source retirement
   generation before its snapshot pins, and a view with no readable
-  generation is not captured. Readiness rejects the view once the
-  generation has advanced, and a query that completes after an advance
-  answers stale. The eraser drops the rows before it advances the
-  generation, so no erased row survives in a read that the fence passes.
+  generation is not bound. The eraser advances the generation when it
+  starts and again after it drops the rows. Readiness rejects the view once
+  the generation has advanced, and a query that completes after an advance
+  answers stale; neither schedules a catalogue repair, because the eraser
+  drops the rows from the catalogue itself. So the fence retires every view
+  bound before the erasure started. A view bound after the start keeps the
+  guarantee reads had before it existed: every lane it serves checks what it
+  serves against the page's own bytes. Positions decide units from the
+  page's bytes, task leads project the page, units match its hash, and titles
+  come from the page cache, which rereads the file. Readers that borrow a
+  selection's connection, such as `units_of`, are not fenced; in the maps
+  packet they choose lenses or decide which pages a reader may not see, and
+  serve no text. Only the request-held view is fenced, and a
+  selection's own view keeps its behaviour, unreadable generation included.
 
-  Holding the view costs WAL retention, not writer progress. SQLite readers
-  never block writers, so saves and publications proceed. The snapshot
-  stops the WAL from checkpointing past it only while the packet compiles.
-  During that window `rebuild_atomic` declines with `wal_busy`, as it does
-  for any other reader.
+  Holding the view retains the WAL; it never blocks a writer. SQLite readers
+  never block writers, so saves and publications proceed, but the WAL cannot
+  checkpoint past the snapshot while the view is held. The view is held for
+  the map's compilation, which field measurements put at 14 to 36 seconds,
+  and never past the deadline of the request budget it opened under (50
+  seconds for an MCP call). A borrow past that deadline closes the view on
+  its owner thread, and later reads read the live catalogue. While a view is
+  held, `rebuild_atomic` cannot fold the live WAL, so its publish declines
+  with `wal_busy`, and the repair worker keeps the declined pass for a later
+  flight, as it does for any other reader.
 
   Selection exit sends activation's lag repair through its existing deferred
   repair queue. Repair dispatch waits until the activation request ends, so
@@ -1235,7 +1262,11 @@ it, and the timing table keeps one row per stage:
 - **[Risk] A request session pins an old catalogue generation.** → Selection
   retains one catalogue transaction bound to the admitted checkpoints and
   closes it before model loading, encoding and reranking
-  (`keep-recall-available-during-pending-recovery`). An ordinary data
+  (`keep-recall-available-during-pending-recovery`). The maps packet's
+  request read view is the one exception: it stays open across the packet's
+  compilation, query encodes included, and closes before final evidence
+  checks or at the deadline of its request budget, whichever comes first.
+  An ordinary data
   publication during the request leaves the selected rows, membership and
   statistics unchanged, and the response discloses the lag known at
   admission. An access-policy

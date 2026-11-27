@@ -1406,7 +1406,8 @@ def test_admission_readers_still_require_an_explicit_checkpoint_inside_selection
 def test_a_source_erasure_retires_the_request_held_view(
     vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A request's view predates an erasure that ran on another thread; a later read of it served the erased rows."""
+    """A request's view predates an erasure that ran on another thread; a later read of it served the erased rows.
+    Refusing that read then scheduled a catalogue repair, though the eraser had already dropped the rows."""
     import threading
 
     from exomem import source_custody, writer_lease
@@ -1414,7 +1415,15 @@ def test_a_source_erasure_retires_the_request_held_view(
     page = vault / "Knowledge Base/Notes/erased-during-request.md"
     page.write_text("# Erased\n\n- [config] erasedduringrequest marker ^erased-unit\n", encoding="utf-8")
     warm_managed_cell(vault)
-    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", lambda *_args, **_kwargs: None)
+    reader = threading.get_ident()
+    repairs: list[str] = []
+
+    def recorded_repair(*_args, **_kwargs) -> None:
+        # The eraser's own thread may ask for repairs; only the request's are recorded.
+        if threading.get_ident() == reader:
+            repairs.append("scheduled a catalogue repair")
+
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", recorded_repair)
     store = lexstore.get_store(vault)
     rel = page.relative_to(vault).as_posix()
     erased: list[bool] = []
@@ -1448,3 +1457,4 @@ def test_a_source_erasure_retires_the_request_held_view(
     assert erased == [True, True, True]
     assert rel not in {hit.parent_path for hit in after.value or ()}
     assert (after.readiness.status, after.value) == ("stale", None)
+    assert repairs == []

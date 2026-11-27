@@ -111,7 +111,8 @@ class _CatalogReadView:
     connection: sqlite3.Connection | None
     checkpoints: Mapping[str, object]
     semantic_identity: str
-    #: The Source retirement generation read before the snapshot pinned (`_capture_read_view`).
+    #: The Source retirement generation read before the snapshot pinned, for a request-held view only
+    #: (`retain_request_view`). None for a selection's own view, which closes before provider work.
     retired_through: int | None = None
     page_hashes: dict[str, str | None] = field(default_factory=dict)
     incomplete: bool = False
@@ -174,6 +175,15 @@ class _CatalogReadView:
                 conn.rollback()
             finally:
                 conn.close()
+
+    def retired(self) -> bool:
+        """Whether a Source erasure started after this request-held view read the generation; its snapshot may hold
+        the erased rows."""
+        from . import source_custody
+
+        return self.retired_through is not None and source_custody.retired_since(
+            self.store.vault_root, self.retired_through
+        )
 
 
 _ADMITTED_CATALOG: ContextVar[
@@ -419,8 +429,15 @@ class _RequestCatalog:
 
     root: Path
     owner_thread: int = field(default_factory=threading.get_ident)
+    #: The monotonic deadline of the budget the slot opened under; the view is not borrowed or bound past it.
+    deadline: float | None = None
     view: _CatalogReadView | None = None
     lagging: tuple[str, ...] = ()
+    #: The checkpoint state a bind found no view for, so a second bind at that state does not capture again.
+    declined: object | None = None
+
+    def expired(self) -> bool:
+        return self.deadline is not None and time.monotonic() >= self.deadline
 
 
 _REQUEST_CATALOG: ContextVar[_RequestCatalog | None] = ContextVar("request_catalog_view", default=None)
@@ -433,10 +450,13 @@ def request_catalog_view(vault_root: Path, *, lag_dispatch: Callable[[Path], Non
     The slot opens empty; `retain_request_view` binds a view at the request's checkpoint. A read at that
     checkpoint then reads the view's snapshot, so a publication by another write during the request cannot
     turn the read stale. The view is never the request's ambient admission (`_ADMITTED_CATALOG`): only a read
-    that names the view's checkpoint borrows it, and a selection scope inside the request. On exit the view
-    closes first, then a lag the view showed when it bound is dispatched, so the repair never meets this reader.
+    that names the view's checkpoint borrows it, and a lexical selection scope inside the request. The view
+    holds a WAL reader, so it closes at the deadline of the budget it opened under at the latest: a borrow past
+    that deadline closes it, and later reads read the live catalogue. On exit the view closes first, then a lag
+    the view showed when it bound is dispatched, so the repair never meets this reader.
     """
-    slot = _RequestCatalog(Path(vault_root).resolve())
+    budget = request_budget.current()
+    slot = _RequestCatalog(Path(vault_root).resolve(), deadline=None if budget is None else budget.deadline)
     token = _REQUEST_CATALOG.set(slot)
     try:
         yield
@@ -455,25 +475,27 @@ def retain_request_view(vault_root: Path, checkpoint: object) -> object | None:
     """Bind this request's catalogue read view at `checkpoint`; the kb checkpoint the bound view holds, or None.
 
     A view binds only when its kb catalogue state equals `checkpoint`'s. No delta is applied to make them match:
-    a view at another state is not a read at this checkpoint. None without a request slot or off the slot's
-    thread, as SQLite handles cannot follow a context to another thread. A request whose view did not bind
-    reads as it did before. A bound view stays bound, so a second call returns its checkpoint.
+    a view at another state is not a read at this checkpoint. None without a request slot, off the slot's
+    thread (SQLite handles cannot follow a context to another thread) or past the slot's deadline. A request
+    whose view did not bind reads as it did before, and a second bind at a state that found no view returns
+    None without a second capture. A bound view stays bound, so a second call returns its checkpoint.
     """
     from . import freshness as freshness_module
 
     root = Path(vault_root).resolve()
     slot = _REQUEST_CATALOG.get()
-    if slot is None or slot.root != root or slot.owner_thread != threading.get_ident():
+    if slot is None or slot.root != root or slot.owner_thread != threading.get_ident() or slot.expired():
         return None
     if slot.view is not None:
         return slot.view.checkpoints.get("kb")
-    if checkpoint_state(checkpoint) is None:
+    state = checkpoint_state(checkpoint)
+    if state is None or state == slot.declined:
         return None
-    view = get_store(root)._capture_read_view()
-    if view is None:
-        return None
-    if checkpoint_state(view.checkpoints.get("kb")) != checkpoint_state(checkpoint):
-        view.close()
+    view = get_store(root)._capture_read_view(fenced=True)
+    if view is None or checkpoint_state(view.checkpoints.get("kb")) != state:
+        if view is not None:
+            view.close()
+        slot.declined = state
         return None
     slot.view = view  # The slot closes it from here, also when the lag check below raises.
     slot.lagging = tuple(
@@ -484,12 +506,20 @@ def retain_request_view(vault_root: Path, checkpoint: object) -> object | None:
 
 
 def _request_catalog_view(vault_root: Path) -> _CatalogReadView | None:
-    """The read view this request bound for `vault_root`, on the thread that bound it, or None."""
+    """The read view this request bound for `vault_root`, on the thread that bound it, or None.
+
+    Past the slot's deadline the view closes here, on its owner thread, unless a selection is reading it now:
+    that selection keeps its snapshot to its end.
+    """
     slot = _REQUEST_CATALOG.get()
     if slot is None or slot.root != Path(vault_root).resolve():
         return None
     view = slot.view
     if view is None or view.owner_thread != threading.get_ident() or view.connection is None:
+        return None
+    if slot.expired() and _admitted_catalog_view(slot.root) is not view:
+        slot.view = None
+        view.close()
         return None
     return view
 
@@ -502,12 +532,14 @@ def request_view_checkpoint(vault_root: Path) -> object | None:
 
 @contextlib.contextmanager
 def catalog_selection_scope(
-    vault_root: Path, *, lag_dispatch: Callable[[Path], None] | None = None
+    vault_root: Path, *, lag_dispatch: Callable[[Path], None] | None = None,
+    borrow_request_view: bool = False,
 ):
     """Admit and retain SQL selection, closing before provider work begins.
 
-    Inside a request that holds a read view (`request_catalog_view`) the selection reads that view, and the
-    request closes it.
+    With `borrow_request_view`, inside a request that holds a read view (`request_catalog_view`), the selection
+    reads that view and the request closes it. The request accounted for that view's lag when it bound, so the
+    selection reports none: a publication after the bind is the view's age, not catalogue lag.
     """
     from . import freshness as freshness_module
 
@@ -516,7 +548,7 @@ def catalog_selection_scope(
     if current is None or current[0] != root:
         raise RuntimeError("catalogue selection requires its request scope")
     store = get_store(root)
-    held = _request_catalog_view(root)
+    held = _request_catalog_view(root) if borrow_request_view else None
     view = held if held is not None else store._capture_read_view()
     if view is None:
         yield None
@@ -524,10 +556,11 @@ def catalog_selection_scope(
     token = _ADMITTED_CATALOG.set((root, view.checkpoints, view))
     lagging: tuple[str, ...] = ()
     try:
-        lagging = tuple(
-            scope for scope, checkpoint in view.checkpoints.items()
-            if freshness_module.live_recall_checkpoint(root, scope) != checkpoint
-        )
+        if view is not held:
+            lagging = tuple(
+                scope for scope, checkpoint in view.checkpoints.items()
+                if freshness_module.live_recall_checkpoint(root, scope) != checkpoint
+            )
         yield RecallProjectionAdmission(dict(view.checkpoints), lagging)
     finally:
         try:
@@ -6980,21 +7013,27 @@ class LexicalStore:
 
     # -------------------------------------------------------------- plumbing
 
-    def _capture_read_view(self) -> _CatalogReadView | None:
-        """Capture both published scopes from one already-pinned transaction."""
+    def _capture_read_view(self, *, fenced: bool = False) -> _CatalogReadView | None:
+        """Capture both published scopes from one already-pinned transaction.
+
+        `fenced` is for the request-held view (`retain_request_view`), which a Source erasure retires
+        (`_CatalogReadView.retired`). A selection's own view closes before provider work and is not fenced.
+        """
         from . import freshness as freshness_module
         from . import source_custody
         from .vocabulary.registry import RegistryError
 
         if backend() == "python" or self._failed or not self.path.exists():
             return None
-        # Read before the transaction pins its snapshot. An eraser drops a page's rows and then advances the
-        # generation, so a value read after the pin could pair the new generation with rows from before the drop.
-        retired_through = source_custody.retirement_generation(self.vault_root)
-        if retired_through is None:
-            # An unreadable generation cannot rule out a Source erasure, as in `rebuild_atomic`. The cost when it
-            # fires wrongly: no retained selection while vault state stays unreadable.
-            return None
+        retired_through: int | None = None
+        if fenced:
+            # Read before the transaction pins its snapshot. An eraser advances the generation again after it
+            # drops the rows, so a value read after the pin could pair that advance with rows from before the drop.
+            retired_through = source_custody.retirement_generation(self.vault_root)
+            if retired_through is None:
+                # An unreadable generation cannot rule out a Source erasure, as in `rebuild_atomic`. The cost when
+                # it fires wrongly: the request reads as it did before this view existed.
+                return None
         conn: sqlite3.Connection | None = None
         try:
             conn = self._connect()
@@ -7049,16 +7088,15 @@ class LexicalStore:
     ) -> CatalogReadiness:
         """Validate interpretation while ordinary publication may advance.
 
-        A Source erasure since the view was captured invalidates it: its snapshot may still hold the erased rows.
+        A Source erasure that started after a request-held view read the generation retires it
+        (`_CatalogReadView.retired`): its snapshot may still hold the erased rows.
         """
-        from . import source_custody
-
         conn = view.connection
         target = view.checkpoints.get(scope)
         valid = (
             view.store is self and conn is not None and conn.in_transaction
             and target is not None
-            and not source_custody.retired_since(self.vault_root, view.retired_through)
+            and not view.retired()
             and (checkpoint is None or checkpoint_state(checkpoint) == checkpoint_state(target))
             and _checkpoint_policy_current(self.vault_root, target)
             and self._schema_is_current(conn)
@@ -14465,23 +14503,21 @@ class LexicalStore:
                 # The request's own snapshot at exactly this checkpoint, which a later publication cannot move.
                 view = held
         if view is not None:
-            from . import source_custody
-
             try:
                 with call_spans.span("lexical.readiness"):
                     readiness = self._catalogue_view_status(view, scope, recall_checkpoint)
                 if not readiness.complete:
-                    # Only metadata disagrees (view, checkpoint, policy, schema or
-                    # identity); the worker's catch-up must prove the catalogue
-                    # exactly current, or the full pass runs.
-                    _schedule_runtime_catalog_repair(
-                        self.vault_root, lag_only=True, cause=RepairCause.CATALOGUE_LAG
-                    )
+                    if not view.retired():
+                        # Only metadata disagrees (view, checkpoint, policy, schema or
+                        # identity); the worker's catch-up must prove the catalogue
+                        # exactly current, or the full pass runs.
+                        _schedule_runtime_catalog_repair(
+                            self.vault_root, lag_only=True, cause=RepairCause.CATALOGUE_LAG
+                        )
+                    # A retired view schedules nothing: the eraser drops the rows from the catalogue itself.
                     return CatalogQueryResult(None, readiness)
                 result = self._query_within_budget(view.connection, query_fn, readiness)
-                if result.readiness.complete and source_custody.retired_since(
-                    self.vault_root, view.retired_through
-                ):
+                if result.readiness.complete and view.retired():
                     # A Source erased while the query ran may be in the rows it read from the older snapshot.
                     return CatalogQueryResult(None, CatalogReadiness("stale", False, readiness.backend))
                 return result

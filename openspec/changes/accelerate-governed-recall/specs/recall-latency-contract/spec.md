@@ -336,13 +336,21 @@ selection. A request MAY use a cache-probe selection and a selection after
 encoding. Activation MAY use an initial lexical selection and a selection for
 synchronous compilation after semantic evidence. Each selection SHALL close
 before provider work or final evidence checks, respectively, except that the
-maps packet SHALL hold one request read view at its pinned lexical checkpoint
-across its compilation, query encodes included. Its exact catalogue reads at
-that checkpoint and its selections SHALL read that view, and the request SHALL
-close it before final evidence checks. A catalogue publication by another
-write during the request SHALL NOT make those reads stale. A Source erasure
-that completes after the view opened SHALL make each later read of the view
-answer stale. Activation SHALL
+maps packet SHALL hold one request read view from the point it binds, at the
+start of its compilation and at its pinned lexical checkpoint, across that
+compilation, query encodes included. The request SHALL close the view before
+final evidence checks, and at the latest at the deadline of the request budget
+it opened under. Its exact catalogue reads at that checkpoint and its lexical
+selections SHALL read that view; find's catalogue selections SHALL NOT. While
+the view is bound, a catalogue publication by another write SHALL NOT make
+those reads stale, and a lexical selection that reads the view SHALL report no
+catalogue lag for it. A publication between the request's freshness snapshot
+and the bind still makes those reads stale. A Source erasure that advances
+the retirement generation after the view read it SHALL make each exact
+catalogue read of the view answer stale, and SHALL NOT make the request
+schedule a catalogue repair. A view that read the generation after an erasure
+started keeps the guarantee those reads had before the view existed: each lane
+checks what it serves against the page's own bytes. Activation SHALL
 defer its lag repair until the request ends, preserving its pinned checkpoint
 between selections. Independent readers SHALL retain their current proof, and
 an absent checkpoint SHALL NOT gain authority from a retained view.
@@ -378,22 +386,31 @@ hash that supplies their disclosed excerpt or frame annotation.
 
 #### Scenario: Activation retains a checkpoint across its selection phases
 
-- **WHEN** activation pins a catalogue checkpoint that trails only on withheld pages
-- **THEN** its initial lexical selection and its compilation selection read at that checkpoint
-- **AND** every catalogue view they read closes before final evidence checks
+- **WHEN** the anchors packet pins a catalogue checkpoint that trails only on withheld pages
+- **THEN** its initial lexical selection closes before encoding
+- **AND** its compilation selection closes before final evidence checks
+- **AND** lag repair runs after the activation ends, so it cannot replace that checkpoint between selections
+
+#### Scenario: The maps packet's selections read its request view
+
+- **WHEN** the maps packet pins a catalogue checkpoint that trails only on withheld pages and its request read view binds at that checkpoint
+- **THEN** its lexical selections read that view across its query encodes
+- **AND** the view closes before final evidence checks
 - **AND** lag repair runs after the activation ends, so it cannot replace that checkpoint between selections
 
 #### Scenario: A save published during activation leaves the map's lanes as the request read them
 
-- **WHEN** another write publishes a page to the lexical catalogue after the maps packet pinned its checkpoint
-- **THEN** the packet's positions and task-context lanes answer from the pinned checkpoint, not stale
+- **WHEN** another write publishes a page to the lexical catalogue after the maps packet's request read view bound
+- **THEN** the packet's positions and task-context lanes answer from the bound checkpoint, not stale
 - **AND** the published page and its positions appear in none of them
+- **AND** the request revokes no retrieval readiness and schedules no catalogue repair for that publication
 
 #### Scenario: A Source erasure retires the request's read view
 
-- **WHEN** a Source erasure drops catalogue rows while a request holds a read view that predates it
-- **THEN** the next read of that view answers stale with no rows
+- **WHEN** a Source erasure advances the retirement generation after a request's read view read it
+- **THEN** the next exact catalogue read of that view answers stale with no rows
 - **AND** the erased page is not served from the older snapshot
+- **AND** the request schedules no catalogue repair for that read
 
 #### Scenario: A retained view preserves admission checks
 
