@@ -84,6 +84,10 @@ APPLY_CHUNK_ITEMS = 250
 APPLY_CHUNK_BYTES = 64 * 1024 * 1024
 # A chunk is also cut so its predicted cost stays at most this share of the call's budget.
 APPLY_CHUNK_BUDGET_SHARE = 0.1
+# A chunk is at most this many times the largest chunk the pacer has timed. Its price is a fit through the chunks it
+# timed, and a fit through a 1-item and a 16-item chunk priced a 253-item chunk at a fraction of the 19.6 s that chunk
+# took, which held the boundary for 30.7 s (2026-11-27 rehearsal).
+APPLY_CHUNK_GROWTH = 2
 # The `stop_reason` of a call that ended after a chunk because a write waited for the boundary.
 STOP_FOR_WAITING_WRITE = "interactive_write_waiting"
 # The `stop_reason` of a `finish` that ended with work left because its budget could not cover the delivery reserve.
@@ -152,6 +156,8 @@ _NOTE_PRICE_FRESH_SECONDS = 300.0
 # A carried price sizes a call's first batch at this share of the room, so notes that cost
 # up to twice the carried price still fit; the call re-prices from that batch.
 _CARRIED_PRICE_ROOM_SHARE = 0.5
+# The key, on the plan draft and on the run, for how many Source pages a read that a stop ended has read so far.
+_SOURCES_READ = "sources_read"
 # The run-object key for the item-chunk timings of the run's last call that filed, with the wall-clock time
 # they were recorded. The next call starts from them while they are as fresh as a carried note price.
 _APPLY_PACE = "apply_pace"
@@ -1200,7 +1206,7 @@ def _materialize_selection(
 # presentation helpers
 # --------------------------------------------------------------------------- #
 # Run-object keys that drive the lifecycle but are not part of what a caller reads.
-_INTERNAL_KEYS = frozenset({"plan_draft", "cursors", "inflight", "scope", "apply_invocations", _NOTE_PRICE, "sources_seal", _APPLY_PACE, _INDEX_OWED, _RECORD_INTENT, _GENERATION})  # nosemgrep: ep-word-set -- run-object keys that this module writes, not a vocabulary
+_INTERNAL_KEYS = frozenset({"plan_draft", "cursors", "inflight", "scope", "apply_invocations", _NOTE_PRICE, "sources_seal", _SOURCES_READ, _APPLY_PACE, _INDEX_OWED, _RECORD_INTENT, _GENERATION})  # nosemgrep: ep-word-set -- run-object keys that this module writes, not a vocabulary
 
 
 def _plan_warning_lines(run: dict) -> list[str]:
@@ -2137,6 +2143,7 @@ def plan(
                 root, lambda: _stop_now(root, budget) is not None, floor=index_floor
             )
             measured["entries"] = len(entries or ())
+        _note_sources_read(root, draft, entries is None)
         index = adoption_plan.ImportIndex(entries or ())
         notes = adoption_plan.NoteIndex(root)
         destinations = adoption_plan.Destinations.frozen_by(root, draft["items"])
@@ -2576,8 +2583,13 @@ class _ApplyPacer:
             - self._owed_after_loop(chunk, self._deferred_artifacts + self._media(chunk))
         )
 
-    def next_chunk(self, pending: list[dict], *, first: bool) -> list[dict]:
-        """The next chunk, trimmed to fit; empty when none fits. The first is never empty."""
+    def next_chunk(self, pending: list[dict], *, first: bool, writer_waits: bool = False) -> list[dict]:
+        """The next chunk, trimmed to fit; empty when none fits. The first is never empty.
+
+        While a writer waits for the boundary, a chunk lasts one turn (`TURN_SECONDS`), or up to twice its fixed
+        commit part when that is longer: the call's first chunk runs before any check for a waiting writer, so its
+        size is the writer's wait.
+        """
         share = max(APPLY_CHUNK_BUDGET_SHARE * self._budget.seconds, 2 * self._commit_seconds)
         limit = APPLY_CHUNK_ITEMS
         timed = {size for size, _ in self._item_chunks}
@@ -2585,6 +2597,10 @@ class _ApplyPacer:
             # A second size, twice the first, so the fit can tell the fixed part from the per-item rate.
             limit = min(APPLY_CHUNK_ITEMS, 2 * next(iter(timed)))
             share = float("inf")
+        elif timed:
+            limit = min(APPLY_CHUNK_ITEMS, APPLY_CHUNK_GROWTH * max(timed))
+        if writer_waits:
+            share = min(share, max(TURN_SECONDS, 2 * self._commit_seconds))
         chunk = _take_chunk(pending, limit)
         cost, allowed = self._cost(chunk), min(share, self._room(chunk))
         while len(chunk) > 1 and cost > allowed:
@@ -3882,6 +3898,7 @@ def apply(
             opened = reads.open_sources(
                 root, run, stop=lambda: _stop_now(root, budget) is not None, floor=index_floor
             )
+            _note_sources_read(root, run, not opened)
 
         pacer = _ApplyPacer(root, budget, carried=run.get(_APPLY_PACE))
         # A call whose read of the Sources ended for time files nothing: the next resumes the read.
@@ -3889,7 +3906,8 @@ def apply(
         stop_reason = STOP_FOR_WAITING_WRITE if stopped and _writer_waits(root) else None
         chunks = 0
         while pending and opened:
-            if chunks and _writer_waits(root):
+            waiting = _writer_waits(root)
+            if chunks and waiting:
                 # Each chunk is committed whole, so the call may end here: the writer that waits commits
                 # when this call releases the boundary, and the continuation resumes the import.
                 stopped, stop_reason = True, STOP_FOR_WAITING_WRITE
@@ -3908,7 +3926,7 @@ def apply(
                 if len(chunk) != len(members):
                     raise AdoptionRunError("IMPORT_RECOVERY_UNRESOLVED", "the frozen chunk's pending membership changed")
             else:
-                chunk = pacer.next_chunk(pending, first=not chunks)
+                chunk = pacer.next_chunk(pending, first=not chunks, writer_waits=waiting)
             if not chunk:
                 stopped = True
                 break
@@ -4482,8 +4500,9 @@ def _write_run_manifest(
 FILING_STATES = ("working", "stopped", "done")  # nosemgrep: ep-word-set -- the closed states of a `file` reply.
 FILING_COUNTS = ("filed", "skipped_duplicates", "failed", "remaining", "pages_done")  # nosemgrep: ep-word-set -- the closed counts of a `file` reply.
 _WORKING, _STOPPED, _DONE = FILING_STATES
-# A driver of `file` (the Cloud CLI, the cell's resident filer) gives up on a stage whose `working` replies show no
-# movement this many calls in a row: no count moved and the page's position stayed the same (`filing_mark`).
+# A driver of `file` (the Cloud CLI, the cell's resident filer) stops calling at once on a stage whose `working` replies
+# show no movement this many calls in a row: no count moved and the page's position stayed the same (`filing_mark`).
+# The CLI leaves the stage staged on the cell; the filer waits and tries again.
 FILING_STALL_CALLS = 5
 
 
@@ -4910,11 +4929,39 @@ def _page_number(run: dict) -> int:
     return (run.get("paging") or {}).get("page", 1)
 
 
+def _note_sources_read(root: Path, holder: dict, stopped: bool) -> None:
+    """Keep in `holder` (the plan draft or the run) how far a stopped read of the Sources has reached, else drop it.
+
+    A read of Sources this process has not read yet takes many calls under a waiting writer and changes no count
+    meanwhile. The number is the page position's proof that the read moves (`_page_position`).
+    """
+    if stopped:
+        holder[_SOURCES_READ] = adoption_plan.sources_remembered(root)
+    else:
+        holder.pop(_SOURCES_READ, None)
+
+
+def _copies_settled(run: dict) -> int:
+    """The staged copies that `finish` has settled for a page: removed (`consumed`) or kept with a reason (`stays`)."""
+    return sum(1 for o in (run.get("outcomes") or {}).values() if o.get("consumed") or o.get("stays"))
+
+
 def _page_position(run: dict) -> dict:
-    """Where the newest page stands: its number, its phase and how many selected files `plan` has read so far."""
+    """Where the newest page stands: its number, its phase and how many selected files `plan` has read so far.
+
+    A step that moves with no count changing adds what it has done, so a caller that calls again can tell a step
+    that goes on from one that is stuck (`filing_mark`): the Sources a stopped read has read (`sources_read`, by
+    `plan` or `apply`), and the copies `finish` has settled (`copies_settled`). A field is there only while its step
+    is the one running.
+    """
     draft = run.get("plan_draft")
     planned = draft["next"] if draft else len((run.get("selection") or {}).get("paths") or []) if run.get("plan") else 0
-    return {"number": _page_number(run), "phase": run["phase"], "planned": planned}
+    position = {"number": _page_number(run), "phase": run["phase"], "planned": planned}
+    if (read := (draft or run).get(_SOURCES_READ)) is not None:
+        position["sources_read"] = read
+    if run["phase"] in _FINISH_PHASES:
+        position["copies_settled"] = _copies_settled(run)
+    return position
 
 
 def _files(count: int) -> str:

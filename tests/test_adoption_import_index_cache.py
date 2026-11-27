@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from test_adoption_paging import _vault
 
-from exomem import adoption_plan
+from exomem import adoption_plan, adoption_run
 
 
 def _source(vault: Path, name: str, original: str, text: str = "# Page\n") -> Path:
@@ -107,3 +107,34 @@ def test_a_source_page_that_the_filesystem_refuses_for_now_ends_the_read_and_is_
 
     assert first is None  # not an index that lacks the page
     assert second is not None and _originals(second) == ["Legacy/0.md", "Legacy/1.md", "Legacy/2.md"]
+
+
+def test_an_apply_that_reads_the_sources_over_many_calls_shows_how_far_the_read_has_reached(
+    tmp_path: Path, reads: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches an apply whose cold read of the Sources changes nothing a caller sees, so a driver takes it for a stall."""
+    vault = _vault(tmp_path)
+    (vault / "Legacy").mkdir()
+    (vault / "Legacy" / "a.md").write_text("# A\n\nBody.\n", encoding="utf-8")
+    run_id = adoption_run.start(vault, path="Legacy", consume=False)["run_id"]
+    adoption_run.select(vault, run_id=run_id, include=["Legacy"])
+    plan_id = adoption_run.plan(vault, run_id=run_id)["plan"]["plan_id"]
+    for number in range(6):  # filed by someone else after the plan: its seal breaks, so only a full read can tell
+        _source(vault, f"later-{number}", f"Elsewhere/{number}.md")
+    adoption_plan._SOURCE_PAGES.clear()  # a process that has read no Source yet
+    monkeypatch.setattr(adoption_plan, "INDEX_READ_FLOOR", 1)
+    monkeypatch.setattr(adoption_run, "_writer_waits", lambda root: True)
+
+    store = adoption_run.AdoptionRunStore(vault)
+    positions, continuation = [], None
+    for _ in range(10):
+        reply = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, continuation=continuation)
+        positions.append(adoption_run._page_position(store.load(run_id)))
+        continuation = reply.get("continuation")
+        if continuation is None:
+            break
+
+    read = [position.get("sources_read") for position in positions]
+    # Each call that ends for the writer has read one page more, and the call that has read them all shows none.
+    assert len(read) > 5 and read[:-1] == list(range(1, len(read))) and read[-1] is None, read
+    assert positions[-1]["phase"] == "applied"

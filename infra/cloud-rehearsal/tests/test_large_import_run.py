@@ -379,13 +379,28 @@ def test_a_call_that_the_boundary_refuses_every_time_fails_the_run_instead_of_wa
 
 
 def test_the_journal_count_is_the_refusals_it_gained_and_unknown_when_it_cannot_say():
-    before = {"rows": 10, "busy_by_command": {"adoption_studio": 1}}
-    after = {"rows": 40, "busy_by_command": {"adoption_studio": 3, "create_note": 2}}
+    before = {"rows": 10, "busy_by_command": {"adoption_studio": 1}, "inode": 7}
+    after = {"rows": 40, "busy_by_command": {"adoption_studio": 3, "create_note": 2}, "inode": 7}
 
     assert large_import.journal_refusals(before, after) == {
         "count": 4, "by_command": {"adoption_studio": 2, "create_note": 2}}
     assert large_import.journal_refusals(before, None)["count"] is None
     assert large_import.journal_refusals(after, before)["count"] is None  # the journal rotated: fewer rows than before
+
+
+def test_a_journal_that_rotated_and_grew_past_its_old_row_count_reads_as_unknown():
+    """A rotation followed by growth shows more rows than before, so only the file's identity tells it from growth."""
+    before = {"rows": 10, "busy_by_command": {"adoption_studio": 1}, "inode": 7}
+    rotated_and_grown = {"rows": 40, "busy_by_command": {"adoption_studio": 3}, "inode": 9}
+
+    assert large_import.journal_refusals(before, rotated_and_grown) == {"count": None, "by_command": None}
+
+
+def test_a_journal_that_did_not_exist_at_the_first_reading_counts_what_it_gained():
+    before = {"rows": 0, "busy_by_command": {}, "inode": None}
+    after = {"rows": 6, "busy_by_command": {"adoption_studio": 2}, "inode": 9}
+
+    assert large_import.journal_refusals(before, after)["count"] == 2
 
 
 def test_a_refusal_from_the_tool_is_not_retried(no_waiting):

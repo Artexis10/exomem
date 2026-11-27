@@ -1256,6 +1256,73 @@ def test_a_slow_media_request_prices_media_for_its_own_call_and_not_for_the_call
     assert admitted == len(measured_alone.next_chunk(photos[2:], first=False)) > 1
 
 
+def _pacer_with_chunks_timed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *timed: tuple[int, float]):
+    """A pacer with a 50 s budget that has timed `(size, seconds)` chunks of text items, and the items left to file."""
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(request_budget, "time", types.SimpleNamespace(monotonic=lambda: clock["now"]))
+    monkeypatch.setattr(writer_lease, "active_derived_batch_custody", lambda root: True)
+    monkeypatch.setattr(
+        writer_lease, "owed_custody_handoff_seconds",
+        lambda root, more_batches: adoption_run.CUSTODY_RESERVE_FLOOR_SECONDS,
+    )
+    pacer = adoption_run._ApplyPacer(tmp_path, request_budget.RequestBudget(seconds=50.0, entry=clock["now"]))
+    pending = [{"form": "text", "original_bytes": 1500} for _ in range(400)]
+    for size, seconds in timed:
+        pacer.record(pending[:size], seconds, [])
+    return pacer, pending
+
+
+def test_a_chunk_is_never_more_than_twice_the_largest_the_pacer_timed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches a price extrapolated far beyond what was timed.
+
+    A 1-item and a 16-item chunk of nearly equal seconds fit to a near-zero rate per item, which priced a
+    253-item chunk at a fraction of the 19.6 s it took and held the boundary for 30.7 s.
+    """
+    pacer, pending = _pacer_with_chunks_timed(tmp_path, monkeypatch, (1, 0.100), (16, 0.104))
+
+    assert len(pacer.next_chunk(pending, first=False)) == 2 * 16
+
+
+def test_a_chunk_that_a_waiting_writer_would_outwait_lasts_one_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call's first chunk is committed before it looks for a waiting writer, so its size is that writer's wait."""
+    pacer, pending = _pacer_with_chunks_timed(tmp_path, monkeypatch, (10, 1.0), (20, 1.5))  # 0.5 s fixed, 50 ms per item
+
+    free = pacer.next_chunk(pending, first=True)
+    waited_for = pacer.next_chunk(pending, first=True, writer_waits=True)
+
+    assert len(free) == 40
+    assert 0 < len(waited_for) <= 10  # 0.5 s fixed + 10 items at 50 ms is the one second of a turn
+
+
+def test_the_first_chunk_of_an_apply_is_cut_to_a_turn_when_a_writer_waits_for_the_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches the wiring: `apply` must tell its pacer that a writer waits, or the first chunk outlasts the turn."""
+    sizes: list[int] = []
+    real_record = adoption_run._ApplyPacer.record
+    monkeypatch.setattr(
+        adoption_run._ApplyPacer, "record",
+        lambda self, chunk, elapsed, extractions: (sizes.append(len(chunk)), real_record(self, chunk, elapsed, extractions))[1],
+    )
+
+    def first_chunk(name: str, *, writer_waits: bool) -> int:
+        monkeypatch.setattr(adoption_run, "_writer_waits", lambda root: writer_waits)
+        files = {f"Coll/note-{n:03d}.md": f"# Note {n}\n\ntext {n}\n" for n in range(30)}
+        vault = _vault(tmp_path / name, files)
+        run_id, planned = _import(vault, path="Coll", include=["Coll"])
+        sizes.clear()
+        adoption_run.apply(vault, run_id=run_id, plan_id=planned["plan"]["plan_id"], today=TODAY)
+        return sizes[0]
+
+    # A pacer that has timed nothing prices an item at INITIAL_ITEM_SECONDS, so a turn holds two of them at most.
+    assert first_chunk("alone", writer_waits=False) > first_chunk("waited-for", writer_waits=True)
+    assert sizes[0] <= adoption_run.TURN_SECONDS / adoption_run.INITIAL_ITEM_SECONDS
+
+
 def test_a_chunk_that_ran_slower_than_its_size_does_not_let_the_pacer_start_a_chunk_past_the_deadline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -49,7 +49,7 @@ STOP_LOGIN_ENDED = "IMPORT_FILING_LOGIN_ENDED"
 STOP_NOT_REPLAYABLE = "IMPORT_FILING_LOGIN_NOT_REPLAYABLE"
 #: The `file` reply could not be read as a reply.
 STOP_REPLY_UNREADABLE = "IMPORT_FILING_REPLY_UNREADABLE"
-#: The stage's `working` replies showed no movement for `adoption_run.FILING_STALL_CALLS` calls in a row; a new `file` call resumes it.
+#: The stage's `working` replies showed no movement for `adoption_run.FILING_STALL_CALLS` calls in a row; the filer waits and tries again.
 STOP_STALLED = "IMPORT_FILING_STALLED"
 #: The mutation protocol's final answer for an identity: its outcome will never be known, so the next call has a new one.
 _OUTCOME_UNKNOWN = "MUTATION_OUTCOME_UNKNOWN"
@@ -78,6 +78,9 @@ MAX_BACKOFF_SECONDS = 300.0
 SPACE_CHECK_SECONDS = 3600.0
 #: A stage that waits on a read-only cell asks again this often; a `file` call or a restart asks sooner.
 READ_ONLY_CHECK_SECONDS = 60.0
+#: A stage whose calls move nothing waits this long, doubling at each stall to the cap, and then calls once more.
+STALL_FIRST_BACKOFF_SECONDS = 60.0
+STALL_MAX_BACKOFF_SECONDS = 900.0
 #: What a fault that no call explains waits before the filer looks at the stage again.
 _FAULT_BACKOFF_SECONDS = 60.0
 _IDLE_WAIT_SECONDS = 3600.0
@@ -133,7 +136,7 @@ def _fresh_record(
         "version": RECORD_VERSION, "import_id": import_id, "state": WORKING, "principal": principal,
         "surface": surface, "collection": collection, "seq": 0, "call": None, "next_action": None, "continuation": None,
         "total": total, "progress": None, "left_out": None, "stop": None, "needs": [], "person": [],
-        "mark": None, "unmoved": 0, "calls": [[time.time(), 0]] if baseline else [], "busy": [], "as_of": _now(),
+        "mark": None, "unmoved": 0, "stalls": 0, "calls": [[time.time(), 0]] if baseline else [], "busy": [], "as_of": _now(),
     }
 
 
@@ -514,6 +517,8 @@ class Filer:
             record.update(call=None, progress=counts, left_out=left_out, needs=needs, person=person, busy=[])
             repeated = stored_mark is not None and record.get("mark") == stored_mark
             record["unmoved"] = record.get("unmoved", 0) + 1 if repeated else 0
+            if not repeated:
+                record["stalls"] = 0  # a call that moved, or any other reply, ends the run of stalls
             record["mark"] = stored_mark
             if total is not None:
                 record["total"] = total
@@ -530,11 +535,7 @@ class Filer:
         if filing == _REPLY_WORKING:
             if record is not None and record["unmoved"] >= adoption_run.FILING_STALL_CALLS:
                 # Calling again at once would repeat this for ever, and keep the boundary busy while it does.
-                self._park(
-                    import_id, STOP_STALLED,
-                    f"filing made no progress in {record['unmoved']} calls in a row; it stays staged on the cell",
-                    person=[], needs=[{"need": NEED_SUPPORT}])
-                return None
+                return self._stall(import_id, record["unmoved"])
             from .writer_lease import get_manager
 
             # The call released the boundary, and the next one asks for it at once. A writer that polls for it, above
@@ -602,6 +603,25 @@ class Filer:
             return None
         tries = len(record["busy"])
         return 0.0 if new_call else min(MAX_BACKOFF_SECONDS, FIRST_BACKOFF_SECONDS * 2 ** max(0, tries - 1))
+
+    def _stall(self, import_id: str, calls: int) -> float:
+        """Show why a stage whose calls move nothing waits, and give the seconds until its next call.
+
+        The wait doubles at each stall in a row, from `STALL_FIRST_BACKOFF_SECONDS` to `STALL_MAX_BACKOFF_SECONDS`, so a
+        stage that stays stuck costs the boundary one call each quarter hour. The stage stays on the list and asks
+        for no support: a stall is not a fault the person can mend, and a step that is only slow moves on later.
+        """
+        waits: list[float] = []
+
+        def change(record: dict) -> None:
+            stalls = record.get("stalls", 0)
+            waits.append(min(STALL_MAX_BACKOFF_SECONDS, STALL_FIRST_BACKOFF_SECONDS * 2 ** min(stalls, 16)))
+            record.update(
+                state=PARKED, needs=[], person=[], stalls=stalls + 1,
+                stop={"code": STOP_STALLED, "reason": f"filing made no progress in {calls} calls; it will try again"})
+
+        _update(self.vault_root, import_id, change)
+        return waits[0] if waits else STALL_FIRST_BACKOFF_SECONDS
 
     def _park(
         self, import_id: str, code: str, reason: str, *, person: list, needs: list[dict], clear_call: bool = False,

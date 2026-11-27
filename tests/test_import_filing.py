@@ -6,6 +6,7 @@ filer calls `adoption_studio file` through the real dispatcher. Each test names 
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import threading
 import time
@@ -16,6 +17,7 @@ import test_adoption_consume as consume
 from test_adoption_series import _window
 
 from exomem import (
+    adoption_plan,
     adoption_run,
     cloud_import_job,
     import_filing,
@@ -253,30 +255,98 @@ def test_a_read_only_cell_parks_the_stage_for_a_later_check_and_files_it_when_th
     assert len(_sources(vault)) == len(FILES)
 
 
-def test_a_stage_whose_calls_move_nothing_is_parked_with_its_reason_after_the_stall_limit(vault: Path, monkeypatch) -> None:
-    """Catches a filer that calls again at once for ever on a stage that cannot move, and keeps the boundary busy doing it."""
-    plans: list[int] = []
-    monkeypatch.setattr(adoption_run, "plan", lambda root, **_options: plans.append(1))  # a plan that makes no progress
+def test_a_stage_whose_calls_move_nothing_waits_longer_and_tries_again_without_asking_for_support(
+    vault: Path, monkeypatch
+) -> None:
+    """Catches a filer that calls again at once for ever on a stage that cannot move, or one that gives up on it for good."""
+    stuck, plans = [True], []
+    real_plan = adoption_run.plan
+
+    def plan(root, **options):
+        plans.append(1)
+        return None if stuck[0] else real_plan(root, **options)  # a stuck plan makes no progress
+
+    monkeypatch.setattr(adoption_run, "plan", plan)
     import_id = _stage(vault)
     filer = import_filing.Filer(vault)
     filer.register(import_id, principal=_owner(), surface=None)
 
-    delays = []
-    while len(delays) < 20 and (delay := filer.run_once(import_id)) is not None:
-        delays.append(delay)
-    parked = import_filing.read_view(vault, import_id)
+    waits = []
+    while len(waits) < 12:
+        delay = filer.run_once(import_id)
+        assert delay is not None, "a stall must not take the stage off the list"
+        if delay > 0:
+            waits.append(delay)
+    shown = import_filing.read_view(vault, import_id)
 
-    assert len(plans) == adoption_run.FILING_STALL_CALLS + 1, plans
-    assert parked["state"] == "parked" and parked["stop"]["code"] == import_filing.STOP_STALLED
-    assert str(adoption_run.FILING_STALL_CALLS) in parked["stop"]["reason"] and parked["needs"] == [{"need": "support"}]
+    assert len(plans) == adoption_run.FILING_STALL_CALLS + 1 + len(waits) - 1, plans  # one call after each wait
+    assert waits[:4] == [60.0, 120.0, 240.0, 480.0] and set(waits[4:]) == {import_filing.STALL_MAX_BACKOFF_SECONDS}
+    assert shown["state"] == "parked" and shown["stop"]["code"] == import_filing.STOP_STALLED
+    assert shown["stop"]["reason"] == f"filing made no progress in {adoption_run.FILING_STALL_CALLS + len(waits) - 1} calls; it will try again"
+    assert shown["needs"] == []  # a stall is not a fault the person can mend
 
-    # An agent's own `file` call lists the stage again, and the stage gets its full count of calls once more.
-    filer.register(import_id, principal=_owner(), surface=None)
+    stuck[0] = False  # the step moves on at a retry, and nothing needed waking
     while filer.run_once(import_id) is not None:
         pass
+    done = import_filing.read_view(vault, import_id)
 
-    assert len(plans) == 2 * (adoption_run.FILING_STALL_CALLS + 1), plans
-    assert import_filing.read_view(vault, import_id)["stop"]["code"] == import_filing.STOP_STALLED
+    assert done["state"] == "done" and done["stop"] is None and done["needs"] == []
+    assert len(_sources(vault)) == len(FILES)
+
+
+def _every_call_ends_for_a_waiting_writer(monkeypatch) -> None:
+    """Make each step end at its first item boundary, as a writer that waits does, and the turn last no time."""
+    monkeypatch.setattr(adoption_run, "_writer_waits", lambda root: True)
+    monkeypatch.setattr(adoption_run, "TURN_SECONDS", 0.0)
+
+
+def _file_to_done_without_a_stall(vault: Path, import_id: str, *, calls: int = 120) -> int:
+    """Call the filer until the stage leaves the list; return the most calls in a row that moved nothing."""
+    filer = import_filing.Filer(vault)
+    filer.register(import_id, principal=_owner(), surface=None)
+    unmoved = 0
+    for _ in range(calls):
+        if filer.run_once(import_id) is None:
+            break
+        unmoved = max(unmoved, import_filing.read_record(vault, import_id)["unmoved"])
+    assert import_filing.read_view(vault, import_id)["state"] == "done"
+    return unmoved
+
+
+def test_a_read_of_many_unread_sources_under_a_waiting_writer_is_not_a_stall(vault: Path, monkeypatch) -> None:
+    """Catches a filer that parks a plan whose cold read of the Sources takes more calls than the stall limit.
+
+    The read moves no count and no planned file until it ends, so only the pages it has read show that it goes on.
+    """
+    sources = vault / "Knowledge Base" / "Sources"
+    for number in range(adoption_run.FILING_STALL_CALLS + 4):
+        page = sources / f"earlier-{number}.md"
+        page.write_text(
+            f"---\nimported_from: Elsewhere/earlier-{number}.md\noriginal_sha256: {number:064x}\ncaptured: 2026-10-27\n---\n# E\n",
+            encoding="utf-8")
+        os.utime(page, (1_700_000_000, 1_700_000_000))  # settled long ago, so the process remembers what it read
+    adoption_plan._SOURCE_PAGES.clear()  # a process that has read no Source yet
+    monkeypatch.setattr(adoption_plan, "INDEX_READ_FLOOR", 1)
+    _every_call_ends_for_a_waiting_writer(monkeypatch)
+
+    unmoved = _file_to_done_without_a_stall(vault, _stage(vault))
+
+    assert unmoved < adoption_run.FILING_STALL_CALLS, unmoved
+    assert len(_sources(vault)) == len(FILES) + adoption_run.FILING_STALL_CALLS + 4
+
+
+def test_a_finish_that_removes_its_staged_copies_over_many_calls_is_not_a_stall(vault: Path, monkeypatch) -> None:
+    """Catches a filer that parks a `finish` whose removals take more calls than the stall limit.
+
+    A removed copy changes no count and not the page's phase, so only the copies settled show that `finish` goes on.
+    """
+    files = {f"note-{number}.md": f"# Note {number}\n".encode() for number in range(adoption_run.FILING_STALL_CALLS + 3)}
+    _every_call_ends_for_a_waiting_writer(monkeypatch)
+
+    unmoved = _file_to_done_without_a_stall(vault, _stage(vault, files=files))
+
+    assert unmoved < adoption_run.FILING_STALL_CALLS, unmoved
+    assert len(_sources(vault)) == len(files)
 
 
 def test_a_vault_with_no_knowledge_base_is_created_by_the_filer_and_the_stage_is_filed_once(vault: Path) -> None:

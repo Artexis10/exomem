@@ -126,15 +126,34 @@ An item loop of `plan`, of the removal of staged copies in `finish`, and of the 
 - **THEN** the recall check is `pending` and the sample starts no further search
 - **AND** the searches the sample did not reach count as `pending`, not as missed or failed
 
-### Requirement: The Cell's Filer Parks A Stage That Moves Nothing
+### Requirement: The Cell's Filer Backs Off A Stage That Moves Nothing
 
-The cell's filer SHALL stop calling `file` on a stage once `adoption_run.FILING_STALL_CALLS` `working` replies in a row have repeated the counts and the page position of the reply before them. It SHALL park the stage with the stop `IMPORT_FILING_STALLED` and a reason that names the number of calls, and a later `file` call SHALL list the stage again.
+The cell's filer SHALL stop calling `file` on a stage once `adoption_run.FILING_STALL_CALLS` `working` replies in a row have repeated the counts and the page position of the reply before them. It SHALL park the stage with the stop `IMPORT_FILING_STALLED` and a reason that names the number of calls and says it will try again, ask for no support, and call again after a delay that doubles from 60 s to a cap of 15 minutes.
 
 #### Scenario: A stage cannot move
 
 - **WHEN** the filer's `file` calls on a stage return `working` with the same counts and page position, for the stall limit
-- **THEN** the stage is parked with `IMPORT_FILING_STALLED` and the filer makes no further call on it
+- **THEN** the stage is parked with `IMPORT_FILING_STALLED`, with no need and the reason "filing made no progress in N calls; it will try again"
+- **AND** the filer calls again after the delay, and a stall in a row doubles it up to 15 minutes
 - **AND** an agent's `file` call lists it again with its full count of calls
+
+### Requirement: A Step That Moves Shows Its Progress In The Page Position
+
+The page position of a `file` reply SHALL change while a step makes progress with no count changing: `sources_read` while the plan or the apply reads the Sources over several calls, and `copies_settled` while a `finish` removes staged copies. A field SHALL be present only while its step runs.
+
+#### Scenario: A cold read of the Sources spans more than the stall limit
+
+- **WHEN** a read of the Sources takes more calls than the stall limit under a waiting writer
+- **THEN** each reply's page position carries a larger `sources_read`, and the filer counts no stall
+
+### Requirement: A Chunk's Size Is Bounded By Its Timed Evidence
+
+A chunk SHALL be at most `APPLY_CHUNK_GROWTH` times the largest chunk the run has timed. While a writer waits for the boundary, the first chunk of a call SHALL last about one turn, and the call SHALL end after it.
+
+#### Scenario: A pacer has timed only small chunks
+
+- **WHEN** the run's largest timed chunk has 16 items and 253 are pending
+- **THEN** the next chunk has at most 32 items
 
 ### Requirement: A File Call Reads An App Export As A Step Of Its Own
 

@@ -100,11 +100,12 @@ print(json.dumps({'laps': laps, 'entries': len(index), 'sources': sources}))
 """
 # The cell's mutation journal, one row per mutation attempt: how many rows it holds and how many refused writes
 # (`MUTATION_BUSY`) it recorded, by command. The row names no cause (`holder_overdue`); the agent's own refusals do.
-REFUSAL_SCRIPT = """import json
+REFUSAL_SCRIPT = """import json, os
 from exomem import mutation_journal
-busy, rows = {}, 0
+busy, rows, inode = {}, 0, None
 try:
     with open(mutation_journal.journal_path(), encoding='utf-8') as handle:
+        inode = os.fstat(handle.fileno()).st_ino
         for line in handle:
             rows += 1
             try:
@@ -116,7 +117,7 @@ try:
                 busy[name] = busy.get(name, 0) + 1
 except FileNotFoundError:
     pass
-print(json.dumps({'rows': rows, 'busy_by_command': busy}))
+print(json.dumps({'rows': rows, 'busy_by_command': busy, 'inode': inode}))
 """
 # The queues that hold files still to be indexed. A reading that fails is None, never 0.
 DRAIN_SCRIPT = """import json
@@ -418,10 +419,13 @@ def journal_refusals(before: Mapping[str, Any] | None, after: Mapping[str, Any] 
     """The refused writes (`MUTATION_BUSY`) that the cell's mutation journal gained between two readings.
 
     Every caller's write is in the journal: the agent's `file` calls, the cell's filer and any other writer. A
-    reading that failed, or a journal that rotated between the two (fewer rows after than before), leaves the
-    count unknown (None), never 0.
+    reading that failed, or a journal that rotated between the two, leaves the count unknown (None), never 0.
+    A rotation shows as another file (its inode differs) or as fewer rows; a rotation followed by growth past
+    the old row count shows only as the other file, so the inode is the proof. A journal that did not exist yet
+    at the first reading (no inode) is no rotation.
     """
-    if before is None or after is None or after["rows"] < before["rows"]:
+    if (before is None or after is None or after["rows"] < before["rows"]
+            or before.get("inode") not in (None, after.get("inode"))):
         return {"count": None, "by_command": None}
     by_command = {name: count - before["busy_by_command"].get(name, 0)
                   for name, count in after["busy_by_command"].items() if count > before["busy_by_command"].get(name, 0)}

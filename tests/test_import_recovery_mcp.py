@@ -917,9 +917,9 @@ def test_cancel_reports_a_failed_bookkeeping_batch_and_keeps_the_rows_owed_inste
     run_id, planned = _import(root, path="Coll", include=["Coll"])
     real_next, calls = adoption_run._ApplyPacer.next_chunk, []
 
-    def stop_after_the_first_chunk(self, pending, *, first):
+    def stop_after_the_first_chunk(self, pending, **pacing):
         calls.append(1)
-        return real_next(self, pending, first=first) if len(calls) == 1 else []
+        return real_next(self, pending, **pacing) if len(calls) == 1 else []
 
     with monkeypatch.context() as patch:
         patch.setattr(adoption_run._ApplyPacer, "next_chunk", stop_after_the_first_chunk)

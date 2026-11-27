@@ -598,7 +598,9 @@ def test_own_note_continuations_leave_time_for_mandatory_custody(
 
     command = replace(command, leaf=observed_leaf)
     manager, continuation = _manager(tmp_path), None
-    for call in range(6):
+    # A call ends inside the boundary hold's room (30 s), which is narrower than the 50 s request budget, so
+    # nine notes at 8 s each take nine calls; the old bound of six assumed the 50 s budget ended each call.
+    for call in range(12):
         began, clock["charged"] = clock["now"], False
         arguments = {"action": "apply", "run_id": run_id, "plan_id": plan_id}
         if continuation:

@@ -400,6 +400,16 @@ def _refresh_import_index(
     return (index, True) if complete else ([], False)
 
 
+def sources_remembered(root: Path) -> int:
+    """How many Source pages this process has read for the vault: the position of a read that a stop ended.
+
+    A stopped pass keeps every page it read, so the number only grows while a read goes on, and it stays put
+    while the held filesystem refuses a page for now. A new process starts at zero: it reads the pages again.
+    """
+    with _SOURCE_PAGES_LOCK:
+        return len(_SOURCE_PAGES.get(os.path.realpath(root), {}))
+
+
 def read_import_index(root: Path) -> list[EarlierImport]:
     """Every import that a Source page's parsed front matter records: its original and each mapped path.
 
