@@ -25,6 +25,7 @@ PACK = "sensitivity-classes.yaml"
 FIELD = "sensitivity"
 UNKNOWN_CODE = "SENSITIVITY_CLASS_UNKNOWN"
 #: How a result says where a page's classes came from.
+# nosemgrep: ep-word-set -- The closed `basis` values of the capture result schema, not vocabulary.
 BASIS_DECLARED, BASIS_KIND_DEFAULT, BASIS_COLLECTION_FLOOR, BASIS_NONE = (
     "declared", "kind-default", "collection-floor", "none")
 
