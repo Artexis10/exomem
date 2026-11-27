@@ -16,6 +16,11 @@ Folder identity for writes and merges SHALL be the folder key: the name after NF
 - **WHEN** `Evidence/Garden/shared-docs/` exists and a capture names the category `shared_docs`
 - **THEN** the artifact lands in `Evidence/Garden/shared-docs/`
 
+#### Scenario: A capture names a scope with a project's folder spelling
+
+- **WHEN** the project registry names the folder `Garden Tools`, `Evidence/garden-tools/` exists, and a capture names the scope `Garden Tools`
+- **THEN** the artifact lands in `Evidence/garden-tools/`
+
 #### Scenario: A note placement folder is steered
 
 - **WHEN** `Notes/garden-tools/` exists and a note's placement folder is `Notes/garden tools`
@@ -26,33 +31,38 @@ Folder identity for writes and merges SHALL be the folder key: the name after NF
 - **WHEN** `Notes/C/` exists and a write names `Notes/C++/intro.md`
 - **THEN** the page lands at `Notes/C++/intro.md`
 
-#### Scenario: A leading underscore keeps a system folder apart
+#### Scenario: A leading underscore keeps two names apart
 
-- **WHEN** the managed root holds `_Schema/` and a write names `Notes/Schema/plan.md` beside `Notes/_Schema/`
-- **THEN** the page lands at `Notes/Schema/plan.md`
+- **WHEN** `Notes/_Drafts/` exists and a write names `Notes/Drafts/plan.md`
+- **THEN** the page lands at `Notes/Drafts/plan.md`
 
 #### Scenario: A group never gains a third spelling
 
-- **WHEN** `Notes/Garden-Tools/` holds three entries, `Notes/garden_tools/` holds one, and a write names `Notes/gardentools/plan.md`
-- **THEN** the page lands at `Notes/Garden-Tools/plan.md`
+- **WHEN** `Notes/garden_tools/` holds three entries, `Notes/Garden-Tools/` holds one, and a write names `Notes/gardentools/plan.md`
+- **THEN** the page lands at `Notes/garden_tools/plan.md`
 
-### Requirement: A write keeps the caller's spelling where steering would be wrong
+### Requirement: The separator rule keeps the caller's spelling where code reads a folder by its exact spelling
 
-A file name SHALL keep the caller's spelling. A folder at the top of the vault or of the managed root, and a spelling that the layout declares or the project registry names, SHALL keep the caller's spelling. A move SHALL NOT treat the folder it vacates as a target.
+The separator rule SHALL NOT change a file name, a folder at the top of the vault or of the managed root, a folder that the layout declares, or a project folder that the registry names in the research folder. These exceptions SHALL apply only to the separator rule. Case and Unicode-form steering SHALL stay as "The vault holds no two siblings with one portable name" requires.
 
 #### Scenario: A file name is not steered
 
 - **WHEN** `Notes/garden-tools.md` exists and a write names `Notes/gardentools.md`
 - **THEN** the page lands at `Notes/gardentools.md`
 
-#### Scenario: A move renames a folder to its own look-alike
+#### Scenario: A top-level folder keeps its spelling
 
-- **WHEN** a move renames `Notes/garden_tools/` to `Notes/garden-tools/`
-- **THEN** the folder is renamed
+- **WHEN** the vault top holds `Shared-Docs/` and a write names `SharedDocs/plan.md`
+- **THEN** the page lands at `SharedDocs/plan.md`
+
+#### Scenario: A registered project folder keeps its spelling
+
+- **WHEN** the project registry names the folder `Garden Tools`, the research folder holds `Garden-Tools/`, and a write names `Notes/Research/Garden Tools/plan.md`
+- **THEN** the page lands at `Notes/Research/Garden Tools/plan.md`
 
 ### Requirement: The preview merges separator variants like case splits
 
-The `path-variants` preview SHALL group sibling folders by the folder key, so a group whose names differ only by case, Unicode form or separators is one split with one canonical spelling. The audit SHALL report such a group as a defect whose fix is the preview. A group equal only after NFKC folding and keeping letters and digits SHALL stay a candidate. Export SHALL keep refusing only on names equal after NFC and casefold.
+A split SHALL be a group of sibling names equal after NFC and casefold, or a group of sibling folders equal under the folder key. The `path-variants` preview SHALL list both kinds, each with one canonical spelling. Export SHALL keep refusing only on names equal after NFC and casefold.
 
 #### Scenario: The preview lists a separator pair
 
@@ -60,8 +70,62 @@ The `path-variants` preview SHALL group sibling folders by the folder key, so a 
 - **THEN** the preview lists one split with canonical spelling `garden-tools` and one move
 - **AND** its apply moves the file into `Evidence/garden-tools/` and removes the emptied folder
 
+#### Scenario: Two pages that differ only by a hyphen are no split
+
+- **WHEN** a folder holds the pages `garden-tools.md` and `gardentools.md`
+- **THEN** the preview lists no split for them
+
+## MODIFIED Requirements
+
+### Requirement: A read-only audit lists path variants
+
+`maintain_memory(mode="audit")` SHALL run the category `path_variants` by default, over the names an export keeps. It SHALL report as defects the sibling groups equal after NFC and casefold, and the sibling folder groups equal under the folder key. Groups equal only after NFKC folding and keeping only letters and digits SHALL be candidates. A defect finding for a folder group SHALL name the `path-variants` preview as its fix. The audit SHALL NOT change the vault.
+
+#### Scenario: The audit finds a case group and an NFC group
+
+- **WHEN** a folder holds `Food` and `food`, and another holds a precomposed and a decomposed spelling of one name
+- **THEN** the audit reports one defect group for each
+
+#### Scenario: A default audit shows a split
+
+- **WHEN** an owner runs `maintain_memory(mode="audit")` without naming categories, and a folder holds `Food` and `food`
+- **THEN** the report holds a `path_variants` defect for that group
+- **AND** the finding names the `path-variants` preview
+
+#### Scenario: The audit reports a separator pair
+
+- **WHEN** a folder holds the folders `garden-tools` and `gardentools`
+- **THEN** the audit reports one defect group for them
+- **AND** the finding names the `path-variants` preview
+
 #### Scenario: A looser look-alike stays a candidate
 
-- **WHEN** a folder holds `C` and `C++`
-- **THEN** the audit reports no defect for them
+- **WHEN** a folder holds the folders `C` and `C++`
+- **THEN** the audit reports them as a candidate, not a defect
 - **AND** the preview lists no split for them
+
+### Requirement: A write into a split folder lands under its canonical spelling
+
+When a destination passes through, or ends at, a folder that has a variant sibling (a split), the write SHALL land under the split's canonical spelling, whichever spelling the caller named. A variant sibling is a name equal after NFC and casefold, or, below the vault top and the managed root, a folder equal under the folder key. A destination whose path already exists as a file at the requested spelling SHALL keep it. The write SHALL still warn about the split and name the `path_variants` audit.
+
+#### Scenario: A capture names the smaller side of a split
+
+- **WHEN** `Evidence/Garden/` holds three files, `Evidence/garden/` holds one, and a capture names the scope `garden`
+- **THEN** the artifact lands in `Evidence/Garden/`
+- **AND** the result warns about the split
+
+#### Scenario: A capture names the smaller side of a split category folder
+
+- **WHEN** `Evidence/Garden/Shared/` holds three files, `Evidence/Garden/shared/` holds one, and a capture names the category `shared`
+- **THEN** the artifact lands in `Evidence/Garden/Shared/`
+
+#### Scenario: A write names the smaller side of a separator pair
+
+- **WHEN** `Notes/garden-tools/` holds three pages, `Notes/gardentools/` holds one, and a write names `Notes/gardentools/plan.md`
+- **THEN** the page lands at `Notes/garden-tools/plan.md`
+- **AND** the result warns about the split
+
+#### Scenario: An existing path keeps its spelling
+
+- **WHEN** a split exists and the destination file already exists under the non-canonical spelling
+- **THEN** the destination keeps the requested spelling

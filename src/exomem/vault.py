@@ -6067,6 +6067,8 @@ def sibling_name_variants(parent: Path, name: str) -> list[str]:
 def folder_split_warnings(vault_root: Path, directory: Path) -> list[str]:
     """One warning per folder on the way to `directory` that already has a variant sibling.
 
+    A variant shares the folder's `vault_name_key`, or is a folder that shares its `folder_lookalike_key`.
+
     An old split never blocks a write; it is named so the owner can merge it.
     """
     try:
@@ -6077,9 +6079,20 @@ def folder_split_warnings(vault_root: Path, directory: Path) -> list[str]:
 
     warnings: list[str] = []
     current = Path(vault_root)
-    for part in relative.parts:
-        variants = sibling_name_variants(current, part)
-        if variants and (current / part).is_dir():
+    for index, part in enumerate(relative.parts):
+        try:
+            with os.scandir(current) as entries:
+                listed = {entry.name: entry.is_dir() for entry in entries}
+        except OSError:
+            listed = {}
+        # As in `_split_spelling`, a separator pair at the vault top or the managed root is no split.
+        separated = "/".join(relative.parts[:index]) not in {"", managed_root_rel()}
+        variants = sorted(
+            set(held_fs.name_variants(listed, part))
+            | {name for name in folder_variants(listed, part) if separated and listed[name]}
+        )
+        # A folding volume may answer for a spelling it does not list.
+        if variants and (listed[part] if part in listed else (current / part).is_dir()):
             preview_call = active_call_text("maintain_memory", {"mode": "path-variants"})
             warnings.append(
                 f"folder '{part}' also exists as {', '.join(repr(v) for v in variants)}; "
@@ -7937,7 +7950,8 @@ def _split_spelling(
 ) -> str:
     """The spelling an existing folder `part` on a destination's way takes.
 
-    Without a listed variant sibling it is `part`. With one it is the split's canonical spelling,
+    Without a listed variant sibling (one with the same `vault_name_key` or `folder_lookalike_key`)
+    it is `part`. With one it is the split's canonical spelling,
     unless the destination is a file that already exists under `part` (`exists`): a write to it
     must not fork it into the other spelling. A destination folder that exists is steered, so a
     caller that respells only a folder lands in the canonical one.
@@ -7946,9 +7960,11 @@ def _split_spelling(
     if part not in listed:
         # A folding volume answered for a spelling it does not list: no split here.
         return part
+    # The separator rule stays off at the vault top and the managed root, as for a new folder there.
+    lookalikes = set() if prefix in {"", managed_root_rel()} else set(folder_variants(listed, part))
     variants = [
         name
-        for name in held_fs.name_variants(listed, part)
+        for name in sorted(set(held_fs.name_variants(listed, part)) | lookalikes)
         if (f"{prefix}/{name}" if prefix else name) != replacing
     ]
     if not variants or exists(part):
@@ -7996,8 +8012,8 @@ def _steered_folder(
     with the same `folder_lookalike_key`; the path that a move vacates is no target. One target gives
     its spelling. Several give their canonical spelling (`canonical_variant`), so the write adds no
     third spelling. None keeps the caller's spelling: no target, the top of the vault or of the managed
-    root (code reads those folders by exact spelling), or a spelling the layout or the project
-    registry names.
+    root (code reads those folders by exact spelling), a folder the layout declares, or a project
+    folder the registry names in the research folder, the one place code reads it by exact spelling.
     """
     if prefix in {"", managed_root_rel()}:
         return None
@@ -8008,8 +8024,10 @@ def _steered_folder(
     ]
     if not targets:
         return None
+    from . import project_keys
+
     declared, registered = _exact_spellings(vault_root)
-    if f"{prefix}/{part}" in declared or part in registered:
+    if f"{prefix}/{part}" in declared or (part in registered and prefix == project_keys.research_parent_rel()):
         return None
     return targets[0] if len(targets) == 1 else canonical_variant(vault_root, prefix, targets, entries)
 

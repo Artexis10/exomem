@@ -1,10 +1,11 @@
 ## 1. Folder key and write-time steering
 
 - [x] 1.1 Add `vault.folder_lookalike_key` (NFC casefold; Unicode Zs, Pd and Pc removed; a leading run of Pc kept).
-- [x] 1.2 Add `leaf_is_folder` to `respell_new_path`; in it and `_respell_in_store`, steer a folder the walk would create into its one look-alike sibling folder, or the group's `canonical_variant`; skip the vault top, the managed root, declared or registered spellings, file leaves and the vacated path.
+- [x] 1.2 Add `leaf_is_folder` to `respell_new_path`; in it and `_respell_in_store`, steer a folder the walk would create into its one look-alike sibling folder, or the group's `canonical_variant`; skip the vault top, the managed root, declared folders, a registered project folder in the research folder, file leaves and the vacated path.
 - [x] 1.3 Pass `leaf_is_folder=True` from Evidence capture, note placement, client artifact folders and create_directory.
-- [x] 1.4 Compute Evidence family tags from the landed segments.
+- [x] 1.4 Compute Evidence family tags, the activity line and the log entry from the landed segments.
 - [x] 1.5 Match project-key folder planning by the folder key.
+- [x] 1.6 Steer a write into an existing separator pair's canonical spelling, and name the pair in `folder_split_warnings`.
 
 ## 2. Merge and audit
 

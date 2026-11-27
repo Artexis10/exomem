@@ -997,12 +997,12 @@ def preserve(
         # Index + log updates.
         rel_artifact_for_summary = managed_relative(rel_artifact)
         activity_summary = (
-            f"`{rel_artifact_for_summary}` (evidence, {scope_safe}/{category_safe}, "
+            f"`{rel_artifact_for_summary}` (evidence, {folder.parent.name}/{folder.name}, "
             f"mobile via exomem)"
         )
         log_body = (
-            f"Mobile preserve via exomem. scope={scope_safe}, "
-            f"category={category_safe}, filename={filename_safe}."
+            f"Mobile preserve via exomem. scope={folder.parent.name}, "
+            f"category={folder.name}, filename={filename_safe}."
         )
         if description and description.strip():
             desc_one_line = description.strip().replace("\n", " ")

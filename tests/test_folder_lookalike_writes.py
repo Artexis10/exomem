@@ -133,19 +133,19 @@ def test_a_group_never_gains_a_third_spelling(vault: Path) -> None:
     assert not (notes / "gardentools").exists()
 
 
-def test_a_move_may_name_a_folder_as_its_own_look_alike(vault: Path) -> None:
-    """Defect: the folder a move vacates is the only look-alike, so the rename lands back where it started."""
+def test_a_write_naming_the_smaller_side_of_a_separator_pair_lands_in_the_fuller_one_and_warns(
+    vault: Path,
+) -> None:
+    """Defect: an existing pair keeps growing on both sides, with no word that it is a split."""
     notes = vault / KB / "Notes"
-    _page(notes / "garden_tools" / "a.md")
+    for name in ("a", "b", "c"):
+        _page(notes / "garden-tools" / f"{name}.md")
+    _page(notes / "gardentools" / "d.md")
 
-    renamed = vault_module.respell_new_path(
-        vault,
-        f"{KB}/Notes/garden-tools",
-        replacing=f"{KB}/Notes/garden_tools",
-        leaf_is_folder=True,
-    )
+    result = create_file(vault, path=f"{KB}/Notes/gardentools/plan.md", content="Plan.\n")
 
-    assert renamed == f"{KB}/Notes/garden-tools"
+    assert result.path == f"{KB}/Notes/garden-tools/plan.md"
+    assert any("gardentools" in warning and "path-variants" in warning for warning in result.warnings)
 
 
 def test_a_page_moved_into_a_look_alike_of_its_own_folder_names_that_folder(vault: Path) -> None:
@@ -173,6 +173,11 @@ def test_a_folder_at_the_top_of_the_vault_or_the_managed_root_keeps_its_spelling
 
     assert vault_module.respell_new_path(vault, "SharedDocs/plan.md") == "SharedDocs/plan.md"
     assert vault_module.respell_new_path(vault, f"{KB}/sidenotes/plan.md") == f"{KB}/sidenotes/plan.md"
+    (vault / "Knowledge-Base").mkdir()
+    _page(vault / KB / "No-tes" / "old.md")
+    assert vault_module.respell_new_path(vault, "Knowledge-Base/plan.md") == "Knowledge-Base/plan.md"
+    assert vault_module.respell_new_path(vault, f"{KB}/No-tes/plan.md") == f"{KB}/No-tes/plan.md"
+    assert vault_module.folder_split_warnings(vault, vault / KB / "Notes") == []
 
 
 def test_a_project_registry_spelling_keeps_its_spelling(vault: Path) -> None:
@@ -186,6 +191,21 @@ def test_a_project_registry_spelling_keeps_its_spelling(vault: Path) -> None:
     assert vault_module.respell_new_path(vault, f"{KB}/Notes/Research/Garden Tools/plan.md") == (
         f"{KB}/Notes/Research/Garden Tools/plan.md"
     )
+
+
+def test_a_capture_scope_named_as_a_project_folder_is_still_steered_outside_the_research_folder(
+    vault: Path,
+) -> None:
+    """Defect: the project's spelling `Garden Tools` opens a second Evidence folder beside `garden-tools`."""
+    project_keys.register_project_key(vault, "garden-tools")
+    _page(vault / KB / "Evidence" / "garden-tools" / "shared" / "old.md")
+
+    result = preserve_module.preserve(
+        vault, scope="Garden Tools", category="shared", filename="note.txt", content="trowel"
+    )
+
+    assert result.path.startswith(f"{KB}/Evidence/garden-tools/shared/")
+    assert not (vault / KB / "Evidence" / "Garden Tools").exists()
 
 
 def test_a_folder_the_layout_declares_keeps_its_spelling(vault: Path) -> None:

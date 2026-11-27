@@ -36,6 +36,7 @@ from .vault import (
     corrected_title_name,
     folder_variants,
     kb_root,
+    managed_root_rel,
     read_bytes_without_pinning,
     read_guarded_text,
 )
@@ -319,6 +320,11 @@ def reuse_folder_spelling(folder: str, existing: Iterable[str]) -> str:
     if folder in names:
         return folder
     return next(iter(folder_variants(names, folder)), folder)
+
+
+def research_parent_rel() -> str:
+    """The vault-relative folder that holds each registered project's research folder."""
+    return f"{managed_root_rel()}/Notes/Research"
 
 
 def child_folder_names(directory: Path) -> list[str]:
