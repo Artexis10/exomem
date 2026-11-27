@@ -2,7 +2,7 @@
 name: evermatter-media
 description: 'Find, view, cite and keep media in Evermatter: PDFs, images, audio and video, with their transcripts, pages and frames. Use when the user asks about a recording, photo, scan or video, wants to look inside one, or shares media to keep.'
 metadata:
-  skill_contract: cab3177457264a95c9d99fc3ea11d6dbe2f9b19ea456bdad690600a908e8b42b
+  skill_contract: 38dfb3bf0b85505ee1a87fbc137c090f1787ac77e099d0b1148d98b9f1889d23
   version: "0.2.0"
 ---
 
