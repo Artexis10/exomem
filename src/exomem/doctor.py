@@ -3899,9 +3899,15 @@ def _check_mcp_clients() -> DoctorCheck:
     calls: dict[tuple[str, str], dict[str, object]] = {}
     read = 0
     oldest: dt.datetime | None = None
-    reached_window_start = False
+    reached_floor = False
     archive_unreadable = False
     try:
+        # A failed append left a call with no row, so the count starts after it. Only the
+        # failure marker counts: the doctor is a new process, and its own start says nothing
+        # about when the cell's writer began, which the activity feed uses for its bound.
+        failed_at = call_ledger.last_append_failure()
+        failure_in_window = failed_at is not None and failed_at > cutoff
+        floor = failed_at if failure_in_window else cutoff
         try:
             archives = latency_watch.archive_generations_newest_first(call_ledger.archive_dir())
         except OSError:
@@ -3920,8 +3926,8 @@ def _check_mcp_clients() -> DoctorCheck:
             except (ValueError, KeyError, TypeError):
                 continue  # a damaged row names no time; the chain check reports it, not this census
             at = at if at.tzinfo else at.replace(tzinfo=dt.UTC)
-            if at < cutoff:
-                reached_window_start = True
+            if at <= floor:
+                reached_floor = True
                 break
             oldest = at
             key = (
@@ -3937,19 +3943,18 @@ def _check_mcp_clients() -> DoctorCheck:
                 withheld = row.get("client_extensions_other")
                 if isinstance(withheld, int):
                     entry["other"] = max(entry["other"], withheld)
-        complete_from = activity.ledger_complete_from()
     except OSError as error:
         return _check(
             "mcp_clients", "warn", f"The call ledger could not be read: {type(error).__name__}.",
             "Check the call ledger directory and its permissions.",
         )
-    # Complete only when the read reached the window's start and no call in the window can be
-    # missing a row. Otherwise the history starts inside the window (a new install), the row
-    # bound stopped the read, or a failed append may have left a call without a row, and the
-    # census says from when it counts instead of claiming 24 hours.
+    # Complete only when the read reached the start of the window, or the failed append that
+    # starts it. Otherwise the history starts inside the window (a new install) or the row bound
+    # stopped the read, and the census says from when it counts instead of claiming 24 hours.
+    # The count holds only rows later than `covered_since`, so the label and the count agree.
     covered_since: dt.datetime | None = None
     reason: str | None = None
-    if not reached_window_start:
+    if not reached_floor:
         covered_since = oldest
         if read >= _CLIENT_CENSUS_MAX_ROWS:
             reason = f"stopped at {_CLIENT_CENSUS_MAX_ROWS} rows"
@@ -3957,8 +3962,8 @@ def _check_mcp_clients() -> DoctorCheck:
             reason = "the archived ledger could not be listed"
         elif oldest is not None:
             reason = "the ledger starts there"
-    if complete_from is not None and complete_from > (covered_since or cutoff):
-        covered_since, reason = complete_from, "a call before then may have left no row"
+    if failure_in_window and (reached_floor or oldest is None):
+        covered_since, reason = failed_at, "a call before then may have left no row"
     if reason is None:
         window = "in the last 24 hours"
     elif covered_since is None:

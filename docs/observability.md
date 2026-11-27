@@ -276,13 +276,15 @@ it with `exomem logs verify`.
   fields are absent when the request does not say (a stateless call on an older
   revision keeps no handshake, and a server-side call has no client) and on rows
   written before the census. Extension ids are client-chosen text, and rows
-  cannot be scrubbed once chained, so content-private logging keeps only ids in
-  the specification's `io.modelcontextprotocol/` namespace and records the rest
-  as the count `client_extensions_other`. `exomem doctor` reads the last 24 hours
-  of these rows, from the live ledger and its archive, and prints one line that
-  names each client and revision with its declared extensions, counted per tool
-  call. It says "partial" and from when it counts when the history is shorter
-  than a day, a call may have left no row, or the read hit its row bound.
+  cannot be scrubbed once chained, so content-private logging keeps only the
+  official identifiers (the specification's published extensions and the
+  `elicitation:<mode>` entries) and records the number of the rest as
+  `client_extensions_other`. `exomem doctor` reads the last 24 hours of these
+  rows, from the live ledger and its archive, and prints one line that names
+  each client and revision with its declared extensions, counted per tool call.
+  It says "partial" and from when it counts when the history is shorter than a
+  day, the read hit its row bound, or a failed append left a call without a
+  row. After a failed append it counts only the calls later than that failure.
 - **`principal_kind`** says which kind of caller that is: `owner` (stdio, the
   CLI or the REST key), `owner-oauth` (a remote sign-in the host bound as the
   owner with `EXOMEM_OWNER_OAUTH_SUBJECT`), `principal`, or `unresolved`. An

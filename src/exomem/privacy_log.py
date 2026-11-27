@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import logging
 import os
@@ -92,10 +93,28 @@ def log_client_version(value: object, *, env: Mapping[str, str] | None = None) -
     return text if _CLIENT_VERSION.fullmatch(text) else None
 
 
-#: The extension namespace the MCP specification itself fixes; every other id is a name the client chose.
-_SPEC_EXTENSION_NAMESPACE = "io.modelcontextprotocol/"
-#: The two elicitation modes the specification defines, as the census records them.
-_ELICITATION_ENTRIES = frozenset({"elicitation:form", "elicitation:url"})  # nosemgrep: ep-word-set -- the specification's closed elicitation modes, not text to interpret
+#: The prefix of a census entry that names a declared elicitation mode.
+ELICITATION_ENTRY_PREFIX = "elicitation:"
+#: Named in the specification's own client-capabilities text; the SDK exports no constant for it.
+_OAUTH_CLIENT_CREDENTIALS_ID = "io.modelcontextprotocol/oauth-client-credentials"
+
+
+@functools.cache
+def _official_extension_entries() -> frozenset[str]:
+    """The extension entries a census row may carry in content-private mode.
+
+    A closed set that the specification and the SDK fix: the official extension
+    identifiers the installed packages export, the one the specification's own
+    client-capabilities text names (the SDK exports no constant for it), and the
+    elicitation modes of the SDK's own model. Any other id is text the client chose.
+    """
+    from fastmcp.utilities.tasks import TASKS_EXTENSION_ID
+    from mcp.server.apps import EXTENSION_ID as APPS_EXTENSION_ID
+    from mcp_types import ElicitationCapability
+
+    modes = {f"{ELICITATION_ENTRY_PREFIX}{mode}" for mode in ElicitationCapability.model_fields}
+    # nosemgrep: ep-word-set -- the specification's published extension identifiers, a closed set the spec fixes
+    return frozenset({TASKS_EXTENSION_ID, APPS_EXTENSION_ID, _OAUTH_CLIENT_CREDENTIALS_ID, *modes})
 
 
 def log_client_extensions(
@@ -103,18 +122,16 @@ def log_client_extensions(
 ) -> tuple[list[str], int]:
     """The declared extension ids a log row may carry, and how many it withheld.
 
-    Kept verbatim outside content-private mode. Inside it, an id is caller-chosen text,
-    so only the specification's own namespace and the elicitation entries survive and
-    the rest is counted, the way `client_family` reduces a client name to a family.
+    Kept verbatim outside content-private mode. Inside it, an id is caller-chosen text
+    and rows are hash-chained, so only the official identifiers survive and the rest
+    is counted, the way `client_family` reduces a client name to a family.
     """
 
     kept = sorted(set(names))
     if not content_private_logging_enabled(env):
         return kept, 0
-    safe = [
-        name for name in kept
-        if name.startswith(_SPEC_EXTENSION_NAMESPACE) or name in _ELICITATION_ENTRIES
-    ]
+    official = _official_extension_entries()
+    safe = [name for name in kept if name in official]
     return safe, len(kept) - len(safe)
 
 

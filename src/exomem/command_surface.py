@@ -1358,6 +1358,8 @@ def mcp_protocol_features() -> dict[str, typing.Any]:
 
     Never raises. Outside an MCP call both values are `None`.
     """
+    from .privacy_log import ELICITATION_ENTRY_PREFIX
+
     features: dict[str, typing.Any] = {"protocol_version": None, "client_extensions": None}
     dependencies = _request_dependencies()
     if dependencies is None:
@@ -1382,7 +1384,7 @@ def mcp_protocol_features() -> dict[str, typing.Any]:
         # The modes are the typed model's own fields, which drops any mode the client invented.
         # An empty object is the 2025-06-18 spelling of form mode, which 2025-11-25 keeps.
         modes = [mode for mode in type(elicitation).model_fields if getattr(elicitation, mode) is not None]
-        names.update(f"elicitation:{mode}" for mode in modes or ["form"])
+        names.update(f"{ELICITATION_ENTRY_PREFIX}{mode}" for mode in modes or ["form"])
     features["client_extensions"] = sorted(names)
     return features
 

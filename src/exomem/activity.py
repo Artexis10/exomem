@@ -54,7 +54,7 @@ def payload(vault_root: Path) -> dict[str, Any]:
     if not call_ledger.enabled():
         raise _unavailable("the call ledger is disabled on this server")
     try:
-        since, events = _events(lines_newest_first(call_ledger.ledger_path()), ledger_complete_from())
+        since, events = _events(lines_newest_first(call_ledger.ledger_path()), _known_from())
     except (OSError, ValueError) as error:  # ValueError: a tampered row the reader cannot use
         raise _unavailable("the call ledger could not be read") from error
     return {
@@ -65,7 +65,7 @@ def payload(vault_root: Path) -> dict[str, Any]:
     }
 
 
-def ledger_complete_from() -> dt.datetime | None:
+def _known_from() -> dt.datetime | None:
     """The time after which every call left a row, as far as the reader can know.
 
     A failed append left a call with no row. On a Cloud cell, a restarted
@@ -95,7 +95,7 @@ def _events(
     scan did not read was appended earlier, so its time is no later than the
     boundary: the stopping row's time, or the oldest time read when the
     stopping row is damaged or rotation archived the older rows. `known_from`
-    (see `ledger_complete_from`) is a boundary too.
+    (see `_known_from`) is a boundary too.
     """
     from . import commands
     from .privacy_log import client_family

@@ -364,11 +364,44 @@ def test_the_census_reads_the_archived_ledger_to_reach_the_start_of_the_day(ledg
     assert check.details["complete"] is True
 
 
+def _mark_a_failed_append(ledger_dir: Path, *, age: dt.timedelta) -> None:
+    """Leave the marker a failed append leaves beside the ledger, as another process wrote it."""
+    marker = call_ledger.gap_marker_path()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+    at = (dt.datetime.now(dt.UTC) - age).timestamp()
+    os.utime(marker, (at, at))
+
+
+def test_a_failed_append_starts_the_count_after_it(ledger_dir: Path) -> None:
+    # Five calls are older than the failure and two are newer. The label says "since the
+    # failure", so the count must hold only the two.
+    rows = [
+        _ledger_row(number, age=dt.timedelta(hours=6 + number * 0.5), client="before-the-gap")
+        for number in range(1, 6)
+    ]
+    rows.sort(key=lambda row: row["ts_utc"])
+    rows.append(_ledger_row(6, age=dt.timedelta(hours=1), client="after-the-gap"))
+    rows.append(_ledger_row(7, age=dt.timedelta(minutes=20), client="after-the-gap"))
+    _write_rows(ledger_dir / "ledger.jsonl", rows)
+    _mark_a_failed_append(ledger_dir, age=dt.timedelta(hours=2))
+
+    check = doctor._check_mcp_clients()
+
+    assert check.message.startswith("2 tool call(s) since ")
+    assert check.message.endswith(
+        f"UTC (partial: a call before then may have left no row): after-the-gap on {LEGACY_VERSION} (not recorded)"
+    )
+    assert "before-the-gap" not in check.message
+    assert check.details["complete"] is False
+    assert [client["tool_calls"] for client in check.details["clients"]] == [2]
+
+
 @pytest.mark.skipif(
     not hasattr(os, "geteuid") or os.geteuid() == 0,
     reason="needs POSIX permissions that bind the caller",
 )
-def test_a_failed_append_makes_the_census_partial_from_that_moment(ledger_dir: Path) -> None:
+def test_a_real_failed_append_leaves_no_older_call_in_the_count(ledger_dir: Path) -> None:
     _write_rows(ledger_dir / "ledger.jsonl", [
         _ledger_row(1, age=dt.timedelta(hours=30), client="before-the-window"),
         _ledger_row(2, age=dt.timedelta(hours=2), client="codex/0.5"),
@@ -383,5 +416,45 @@ def test_a_failed_append_makes_the_census_partial_from_that_moment(ledger_dir: P
 
     check = doctor._check_mcp_clients()
 
+    assert check.message.startswith("No tool calls since ")
     assert "(partial: a call before then may have left no row)" in check.message
     assert check.details["complete"] is False
+
+
+def test_a_cloud_cell_doctor_reports_a_complete_day_for_calls_older_than_its_own_start(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The doctor is a new process on every run. Its own start is not a gap in the ledger.
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    _write_rows(ledger_dir / "ledger.jsonl", [
+        _ledger_row(1, age=dt.timedelta(hours=30), client="before-the-window"),
+        *[
+            _ledger_row(number, age=dt.timedelta(hours=7 - number), client="claude-code")
+            for number in range(2, 5)
+        ],
+    ])
+
+    check = doctor._check_mcp_clients()
+
+    assert check.message.startswith("3 tool call(s) in the last 24 hours: ")
+    assert "partial" not in check.message
+    assert check.details["complete"] is True
+
+
+@pytest.mark.anyio
+async def test_content_private_logging_counts_an_id_under_the_specifications_prefix_that_is_not_official(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A client can write free text after the prefix, and a chained row cannot be scrubbed.
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    async with _client(stateless=True) as client:
+        await _call_modern(
+            client,
+            capabilities={"extensions": {"io.modelcontextprotocol/patient-has-diagnosis-x": {}}},
+            client_info={"name": "claude-code", "version": "2.9"},
+        )
+
+    [row] = _rows(ledger_dir)
+    assert row["client_extensions"] == []
+    assert row["client_extensions_other"] == 1
+    assert "patient-has-diagnosis" not in (ledger_dir / "ledger.jsonl").read_text(encoding="utf-8")
