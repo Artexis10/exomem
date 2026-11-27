@@ -420,7 +420,7 @@ class _Decide:
         self.read, self.vault_root, self.calls = read, vault_root, calls
         #: The pages this request decides, for the observability span (`StoreServer.call`).
         self.pages = len(calls)
-        #: When a request's read must stop deciding pages (``StoreServer.read_deadline``); None outside a request.
+        #: When a request's read must stop deciding pages: its budget's deadline; None outside a request.
         self.deadline = None
 
     def __call__(self):
@@ -456,10 +456,11 @@ def _request(server, decisions, work):
     """
     from ..cli_ops import OpError
 
-    if request_budget.current() is not None or request_budget.current_checkpoint() is not None:
-        # A read beside the store thread runs on the request's own thread: it stops deciding pages where a
-        # queued read would have been refused, so the pages it has not decided are withheld together.
-        work.deadline = server.read_deadline()
+    if (budget := request_budget.current()) is not None:
+        # A read beside the store thread runs on the request's own thread, so it stops deciding pages at the
+        # deadline of the stage it serves, and the pages it has not decided are withheld together. A bound
+        # read checkpoint already stops it at each page (`request_budget.checkpoint`).
+        work.deadline = budget.deadline
     try:
         try:
             return server.read_beside(work, initial=None, progress=False)

@@ -1781,10 +1781,6 @@ class StoreServer:
                 if reader.in_transaction:
                     reader.execute("ROLLBACK")
 
-    def read_deadline(self):
-        """When a read that starts now must finish: the completion deadline a queued read gets (``call``)."""
-        return self._deadlines(time.monotonic(), request_budget.current_checkpoint())[1]
-
     def missed_read(self):
         """The retryable refusal of a read that did not finish within its completion deadline."""
         return self._busy_refusal("the collection store did not finish this read within its completion deadline")

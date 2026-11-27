@@ -264,7 +264,7 @@ def test_a_slow_store_decision_stops_at_the_request_deadline_and_withholds_the_s
         real_init(self, slow_read, vault_root, calls)
 
     monkeypatch.setattr(preview._Decide, "__init__", slow_decisions)
-    # A 9 s budget leaves a 4 s read allowance after the delivery reserve, so the stop falls inside a batch.
+    # The slice's stages end a second before this 9 s budget, so the stop falls inside a batch.
     budget = request_budget.RequestBudget(seconds=9)
     token = request_budget.set_current(budget)
     started = time.monotonic()
@@ -277,6 +277,24 @@ def test_a_slow_store_decision_stops_at_the_request_deadline_and_withholds_the_s
     assert elapsed < 9.0, f"the activation ran {elapsed:.1f} s on a 9 s budget"
     assert not set(_refs(packet)) & {_store_ref(index) for index in range(PAGE_COUNT)}
     assert packet["generation"]["collection_store"] == "unavailable"
+
+
+def test_the_activation_door_serves_store_pages_its_short_budget_has_time_for(
+    service, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """The service's activation door runs on a few seconds. Store pages decided well inside that budget are
+    served; the stop at the deadline never withholds them early."""
+    from exomem import readiness
+
+    root = service.root
+    _seed(root, "owner")
+    _activate(root, OWNER, turn=PHRASE + " " + TITLES)
+    monkeypatch.setattr(readiness, "_runtime_managed", True)
+
+    packet = _activate(root, OWNER, turn=PHRASE + " " + TITLES)
+
+    assert set(_refs(packet)) & {_store_ref(index) for index in range(PAGE_COUNT)}
+    assert "collection_store" not in packet["generation"]
 
 
 @pytest.mark.timeout(180)
