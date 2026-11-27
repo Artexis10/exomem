@@ -18,4 +18,4 @@
 
 ## 4. Closure
 
-- [ ] 4.1 Synchronize and archive after merge, with the strict gate before and after.
+- [x] 4.1 Synchronize and archive after merge, with the strict gate before and after.
