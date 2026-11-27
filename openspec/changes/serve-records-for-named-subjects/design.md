@@ -49,7 +49,7 @@ Both states lead with a `reason` and name no page and no collection. One residua
 
 ## Load target
 
-The Records load target for a filtered query applies per (anchor, collection): p95 at most 300 ms at 5,000 cited rows and at most 1 s at 100,000. `benchmarks/subject_records/latency.py` measures `subject_records.summaries` on a generated ledger in both encodings. It runs outside the pull-request tier. The recorded run meets the target: served p95 at most 26.06 ms at 5,000 rows and 258.11 ms at 100,000. A served call runs 39 statements on typed rows and 33 on JSON rows; a gated call runs 14 and 11. Those counts do not change with the rows. A collection whose manifest declares no `subject` adds none of them.
+The Records load target for a filtered query applies per (anchor, collection): p95 at most 300 ms at 5,000 cited rows and at most 1 s at 100,000. `benchmarks/subject_records/latency.py` measures `subject_records.summaries` on a generated ledger in both encodings. It runs outside the pull-request tier. The recorded run, with amounts in cents, meets the target: served p95 at most 24.72 ms at 5,000 rows and 317.89 ms at 100,000. A served call runs 39 statements on typed rows and 33 on JSON rows; a gated call runs 14 and 11. Those counts do not change with the rows. A collection whose manifest declares no `subject` adds none of them.
 
 ## Risks / Trade-offs
 

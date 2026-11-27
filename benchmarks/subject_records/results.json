@@ -1,5 +1,5 @@
 {
-  "exomem_git_sha": "5bba0ce67",
+  "exomem_git_sha": "53b9cb42d",
   "python": "3.14.6",
   "sqlite": "3.53.1",
   "cpu_count": 20,
@@ -10,10 +10,10 @@
     "N=5000,typed": {
       "rows_in_collection": 5555,
       "rows_citing_anchor": 5000,
-      "build_s": 2.4,
+      "build_s": 2.6,
       "served": {
-        "p50_ms": 18.72,
-        "p95_ms": 26.06,
+        "p50_ms": 21.04,
+        "p95_ms": 24.72,
         "samples": 30,
         "states": [
           "ready"
@@ -21,7 +21,7 @@
         "statements_per_call": 39,
         "row_statements_per_call": 2,
         "entry": {
-          "summary": "Ada Lindqvist in Tab: amount sums to 38941 over 5000 rows (provisional 12942 over 1667 rows, settled 25999 over 3333 rows); 56 rows have no amount; 56 rows have no day; newest day 2026-12-28.",
+          "summary": "Ada Lindqvist in Tab: amount sums to -60465.02 over 5000 rows (provisional -20158.13 over 1667 rows, settled -40306.89 over 3333 rows); 56 rows have no amount; 56 rows have no day; newest day 2026-12-28.",
           "anchor": {
             "ref": "exomem://memory/b2b2b2b2-0000-4000-8000-00000000b2b2",
             "title": "Ada Lindqvist"
@@ -37,17 +37,17 @@
           "by_state": [
             {
               "state": "provisional",
-              "sum": 12942,
+              "sum": -20158.13,
               "rows": 1667
             },
             {
               "state": "settled",
-              "sum": 25999,
+              "sum": -40306.89,
               "rows": 3333
             }
           ],
           "total": {
-            "sum": 38941,
+            "sum": -60465.02,
             "rows": 5000
           },
           "unknown": {
@@ -57,8 +57,8 @@
         }
       },
       "gated": {
-        "p50_ms": 1.98,
-        "p95_ms": 2.39,
+        "p50_ms": 1.91,
+        "p95_ms": 2.36,
         "samples": 30,
         "states": [],
         "statements_per_call": 14,
@@ -68,10 +68,10 @@
     "N=5000,json": {
       "rows_in_collection": 5555,
       "rows_citing_anchor": 5000,
-      "build_s": 7.1,
+      "build_s": 6.7,
       "served": {
-        "p50_ms": 17.4,
-        "p95_ms": 20.88,
+        "p50_ms": 17.96,
+        "p95_ms": 19.37,
         "samples": 30,
         "states": [
           "ready"
@@ -79,7 +79,7 @@
         "statements_per_call": 33,
         "row_statements_per_call": 2,
         "entry": {
-          "summary": "Ada Lindqvist in Tab: amount sums to 38941 over 5000 rows (provisional 12942 over 1667 rows, settled 25999 over 3333 rows); 56 rows have no amount; 56 rows have no day; newest day 2026-12-28.",
+          "summary": "Ada Lindqvist in Tab: amount sums to -60465.02 over 5000 rows (provisional -20158.13 over 1667 rows, settled -40306.89 over 3333 rows); 56 rows have no amount; 56 rows have no day; newest day 2026-12-28.",
           "anchor": {
             "ref": "exomem://memory/b2b2b2b2-0000-4000-8000-00000000b2b2",
             "title": "Ada Lindqvist"
@@ -95,17 +95,17 @@
           "by_state": [
             {
               "state": "provisional",
-              "sum": 12942,
+              "sum": -20158.13,
               "rows": 1667
             },
             {
               "state": "settled",
-              "sum": 25999,
+              "sum": -40306.89,
               "rows": 3333
             }
           ],
           "total": {
-            "sum": 38941,
+            "sum": -60465.02,
             "rows": 5000
           },
           "unknown": {
@@ -115,8 +115,8 @@
         }
       },
       "gated": {
-        "p50_ms": 2.31,
-        "p95_ms": 3.32,
+        "p50_ms": 1.64,
+        "p95_ms": 2.09,
         "samples": 30,
         "states": [],
         "statements_per_call": 11,
@@ -126,10 +126,10 @@
     "N=100000,typed": {
       "rows_in_collection": 111111,
       "rows_citing_anchor": 100000,
-      "build_s": 41.1,
+      "build_s": 34.3,
       "served": {
-        "p50_ms": 237.96,
-        "p95_ms": 258.11,
+        "p50_ms": 297.37,
+        "p95_ms": 317.89,
         "samples": 30,
         "states": [
           "ready"
@@ -137,7 +137,7 @@
         "statements_per_call": 39,
         "row_statements_per_call": 2,
         "entry": {
-          "summary": "Ada Lindqvist in Tab: amount sums to 790382 over 100000 rows (provisional 263481 over 33333 rows, settled 526901 over 66667 rows); 1112 rows have no amount; 1111 rows have no day; newest day 2026-12-28.",
+          "summary": "Ada Lindqvist in Tab: amount sums to 736211.72 over 100000 rows (provisional 245422.92 over 33333 rows, settled 490788.8 over 66667 rows); 1112 rows have no amount; 1111 rows have no day; newest day 2026-12-28.",
           "anchor": {
             "ref": "exomem://memory/b2b2b2b2-0000-4000-8000-00000000b2b2",
             "title": "Ada Lindqvist"
@@ -153,17 +153,17 @@
           "by_state": [
             {
               "state": "provisional",
-              "sum": 263481,
+              "sum": 245422.92,
               "rows": 33333
             },
             {
               "state": "settled",
-              "sum": 526901,
+              "sum": 490788.8,
               "rows": 66667
             }
           ],
           "total": {
-            "sum": 790382,
+            "sum": 736211.72,
             "rows": 100000
           },
           "unknown": {
@@ -173,8 +173,8 @@
         }
       },
       "gated": {
-        "p50_ms": 1.97,
-        "p95_ms": 2.51,
+        "p50_ms": 1.75,
+        "p95_ms": 2.34,
         "samples": 30,
         "states": [],
         "statements_per_call": 14,
@@ -184,10 +184,10 @@
     "N=100000,json": {
       "rows_in_collection": 100000,
       "rows_citing_anchor": 90000,
-      "build_s": 162.9,
+      "build_s": 142.7,
       "served": {
-        "p50_ms": 215.68,
-        "p95_ms": 243.25,
+        "p50_ms": 281.3,
+        "p95_ms": 305.62,
         "samples": 30,
         "states": [
           "ready"
@@ -195,7 +195,7 @@
         "statements_per_call": 33,
         "row_statements_per_call": 2,
         "entry": {
-          "summary": "Ada Lindqvist in Tab: amount sums to 711601 over 90000 rows (provisional 237154 over 30000 rows, settled 474447 over 60000 rows); 1000 rows have no amount; 1000 rows have no day; newest day 2026-12-28.",
+          "summary": "Ada Lindqvist in Tab: amount sums to 666585.0 over 90000 rows (provisional 222181.66 over 30000 rows, settled 444403.34 over 60000 rows); 1000 rows have no amount; 1000 rows have no day; newest day 2026-12-28.",
           "anchor": {
             "ref": "exomem://memory/b2b2b2b2-0000-4000-8000-00000000b2b2",
             "title": "Ada Lindqvist"
@@ -211,17 +211,17 @@
           "by_state": [
             {
               "state": "provisional",
-              "sum": 237154,
+              "sum": 222181.66,
               "rows": 30000
             },
             {
               "state": "settled",
-              "sum": 474447,
+              "sum": 444403.34,
               "rows": 60000
             }
           ],
           "total": {
-            "sum": 711601,
+            "sum": 666585.0,
             "rows": 90000
           },
           "unknown": {
@@ -231,8 +231,8 @@
         }
       },
       "gated": {
-        "p50_ms": 1.9,
-        "p95_ms": 2.49,
+        "p50_ms": 1.71,
+        "p95_ms": 2.29,
         "samples": 30,
         "states": [],
         "statements_per_call": 11,

@@ -3,8 +3,8 @@
     python benchmarks/subject_records/latency.py --out latency.json [--sizes 5000,100000]
 
 Each run builds a temporary vault and store: one person page, one Records ledger whose rows cite it
-(`size` rows, plus one row in ten citing a second person), with one null amount and one undated row in
-every hundred. It times `subject_records.summaries` for that page, which is all the work the block adds
+(`size` rows, plus one row in ten citing a second person), with amounts in cents, so every sum rounds its
+decimals, and with one null amount and one undated row in every hundred. It times `subject_records.summaries` for that page, which is all the work the block adds
 to an activation, in two cases: a turn that touches the ledger's claims (the block is served) and one
 that does not (the gate refuses it, the cost every other activation with a cited ledger pays). Each
 sample opens its own read session, as an activation does. Machine state goes under a temporary
@@ -57,7 +57,7 @@ def manifest(layout: str) -> str:
             "claims:\n  terms: [owe, owes, lent, borrowed]\n"
             "subject: {field: person, measure: amount, state: status, order: day, show: [note]}\n"
             f"{STORAGE[layout]}item_schema:\n  natural_key: [label]\n  fields:\n"
-            "    label: {type: string, required: true}\n    person: {type: link}\n    amount: {type: integer}\n"
+            "    label: {type: string, required: true}\n    person: {type: link}\n    amount: {type: number}\n"
             "    status: {type: enum, enum: [settled, provisional]}\n    day: {type: date}\n    note: {type: string}\n---\n")
 
 
@@ -70,7 +70,7 @@ def person(root: Path, name: str, identity: str) -> None:
 def row(number: int) -> dict:
     cited = OTHER if number % 10 == 9 else ANCHOR
     item = {"label": f"r{number}", "person": f"exomem://memory/{cited}", "status": ("settled", "provisional")[number % 3 == 0],
-            "amount": None if number % 100 == 7 else (number % 97) - 40, "note": f"entry {number}"}
+            "amount": None if number % 100 == 7 else ((number % 9700) - 4000) / 100, "note": f"entry {number}"}
     if number % 100 != 11:
         item["day"] = f"20{20 + number % 7}-{1 + number % 12:02}-{1 + number % 28:02}"
     return item
