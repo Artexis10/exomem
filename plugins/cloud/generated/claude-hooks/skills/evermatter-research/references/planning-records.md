@@ -220,6 +220,28 @@ advisory asks you to act, tells you to follow it. When a turn routes to the coll
 method to read. A method the caller cannot read, or that names no page, is left out, and
 `inspect_memory(operation="records.inspect")` reports one finding for it.
 
+A Records collection whose rows name a page through a `link` field can say how those rows add up for that page:
+
+```yaml
+subject:
+  field: member      # the link field that names the page
+  measure: cost      # an integer or number field to sum
+  state: status      # optional: split the sums by this field's values
+  order: spent_on    # optional: a date or datetime that ranks the newest rows
+  show: [what]       # optional: up to four more fields for each newest row, none a link
+  recent: 3          # optional: how many newest rows to list, 0 to 10
+```
+
+Give the measure a `description` that says what its sign or unit means, such as
+`cost: {type: number, description: "Positive: the member owes the club."}`. When a turn names that page by its
+title or alias and touches the collection's claims, `recall_context` carries a `subject_records` entry. A `ready`
+entry leads with a `summary` sentence, then the sums by state and in total, how many rows have no amount or no date,
+and the newest rows. The total adds every state; the collection's method says which states count toward what is
+owed. Report an unknown count as unknown, never as zero. A `warming`, `unavailable` or `omitted` entry has no
+numbers and leads with its `reason`: say the total is not available here, and query the collection if the user
+needs it now. When `subject_records` itself leads with a `reason` and a `state`, its sums could not be read this
+time, or a collection is still indexing: say so the same way.
+
 A strong route that a declared `match` produced carries a `disposition`, whatever the note's type, set by the
 user's prominence:
 

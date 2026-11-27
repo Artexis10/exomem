@@ -1,0 +1,243 @@
+{
+  "exomem_git_sha": "5bba0ce67",
+  "python": "3.14.6",
+  "sqlite": "3.53.1",
+  "cpu_count": 20,
+  "samples_per_case": 30,
+  "scope": "invented data, single run, not a gate",
+  "target": "p95 <= 300 ms at 5,000 rows and <= 1 s at 100,000 rows per (anchor, collection) pair",
+  "runs": {
+    "N=5000,typed": {
+      "rows_in_collection": 5555,
+      "rows_citing_anchor": 5000,
+      "build_s": 2.4,
+      "served": {
+        "p50_ms": 18.72,
+        "p95_ms": 26.06,
+        "samples": 30,
+        "states": [
+          "ready"
+        ],
+        "statements_per_call": 39,
+        "row_statements_per_call": 2,
+        "entry": {
+          "summary": "Ada Lindqvist in Tab: amount sums to 38941 over 5000 rows (provisional 12942 over 1667 rows, settled 25999 over 3333 rows); 56 rows have no amount; 56 rows have no day; newest day 2026-12-28.",
+          "anchor": {
+            "ref": "exomem://memory/b2b2b2b2-0000-4000-8000-00000000b2b2",
+            "title": "Ada Lindqvist"
+          },
+          "collection": {
+            "ref": "exomem://memory/a1a1a1a1-0000-4000-8000-00000000a1a1",
+            "title": "Tab"
+          },
+          "measure": {
+            "field": "amount"
+          },
+          "state": "ready",
+          "by_state": [
+            {
+              "state": "provisional",
+              "sum": 12942,
+              "rows": 1667
+            },
+            {
+              "state": "settled",
+              "sum": 25999,
+              "rows": 3333
+            }
+          ],
+          "total": {
+            "sum": 38941,
+            "rows": 5000
+          },
+          "unknown": {
+            "measure": 56,
+            "order": 56
+          }
+        }
+      },
+      "gated": {
+        "p50_ms": 1.98,
+        "p95_ms": 2.39,
+        "samples": 30,
+        "states": [],
+        "statements_per_call": 14,
+        "row_statements_per_call": 0
+      }
+    },
+    "N=5000,json": {
+      "rows_in_collection": 5555,
+      "rows_citing_anchor": 5000,
+      "build_s": 7.1,
+      "served": {
+        "p50_ms": 17.4,
+        "p95_ms": 20.88,
+        "samples": 30,
+        "states": [
+          "ready"
+        ],
+        "statements_per_call": 33,
+        "row_statements_per_call": 2,
+        "entry": {
+          "summary": "Ada Lindqvist in Tab: amount sums to 38941 over 5000 rows (provisional 12942 over 1667 rows, settled 25999 over 3333 rows); 56 rows have no amount; 56 rows have no day; newest day 2026-12-28.",
+          "anchor": {
+            "ref": "exomem://memory/b2b2b2b2-0000-4000-8000-00000000b2b2",
+            "title": "Ada Lindqvist"
+          },
+          "collection": {
+            "ref": "exomem://memory/a1a1a1a1-0000-4000-8000-00000000a1a1",
+            "title": "Tab"
+          },
+          "measure": {
+            "field": "amount"
+          },
+          "state": "ready",
+          "by_state": [
+            {
+              "state": "provisional",
+              "sum": 12942,
+              "rows": 1667
+            },
+            {
+              "state": "settled",
+              "sum": 25999,
+              "rows": 3333
+            }
+          ],
+          "total": {
+            "sum": 38941,
+            "rows": 5000
+          },
+          "unknown": {
+            "measure": 56,
+            "order": 56
+          }
+        }
+      },
+      "gated": {
+        "p50_ms": 2.31,
+        "p95_ms": 3.32,
+        "samples": 30,
+        "states": [],
+        "statements_per_call": 11,
+        "row_statements_per_call": 0
+      }
+    },
+    "N=100000,typed": {
+      "rows_in_collection": 111111,
+      "rows_citing_anchor": 100000,
+      "build_s": 41.1,
+      "served": {
+        "p50_ms": 237.96,
+        "p95_ms": 258.11,
+        "samples": 30,
+        "states": [
+          "ready"
+        ],
+        "statements_per_call": 39,
+        "row_statements_per_call": 2,
+        "entry": {
+          "summary": "Ada Lindqvist in Tab: amount sums to 790382 over 100000 rows (provisional 263481 over 33333 rows, settled 526901 over 66667 rows); 1112 rows have no amount; 1111 rows have no day; newest day 2026-12-28.",
+          "anchor": {
+            "ref": "exomem://memory/b2b2b2b2-0000-4000-8000-00000000b2b2",
+            "title": "Ada Lindqvist"
+          },
+          "collection": {
+            "ref": "exomem://memory/a1a1a1a1-0000-4000-8000-00000000a1a1",
+            "title": "Tab"
+          },
+          "measure": {
+            "field": "amount"
+          },
+          "state": "ready",
+          "by_state": [
+            {
+              "state": "provisional",
+              "sum": 263481,
+              "rows": 33333
+            },
+            {
+              "state": "settled",
+              "sum": 526901,
+              "rows": 66667
+            }
+          ],
+          "total": {
+            "sum": 790382,
+            "rows": 100000
+          },
+          "unknown": {
+            "measure": 1112,
+            "order": 1111
+          }
+        }
+      },
+      "gated": {
+        "p50_ms": 1.97,
+        "p95_ms": 2.51,
+        "samples": 30,
+        "states": [],
+        "statements_per_call": 14,
+        "row_statements_per_call": 0
+      }
+    },
+    "N=100000,json": {
+      "rows_in_collection": 100000,
+      "rows_citing_anchor": 90000,
+      "build_s": 162.9,
+      "served": {
+        "p50_ms": 215.68,
+        "p95_ms": 243.25,
+        "samples": 30,
+        "states": [
+          "ready"
+        ],
+        "statements_per_call": 33,
+        "row_statements_per_call": 2,
+        "entry": {
+          "summary": "Ada Lindqvist in Tab: amount sums to 711601 over 90000 rows (provisional 237154 over 30000 rows, settled 474447 over 60000 rows); 1000 rows have no amount; 1000 rows have no day; newest day 2026-12-28.",
+          "anchor": {
+            "ref": "exomem://memory/b2b2b2b2-0000-4000-8000-00000000b2b2",
+            "title": "Ada Lindqvist"
+          },
+          "collection": {
+            "ref": "exomem://memory/a1a1a1a1-0000-4000-8000-00000000a1a1",
+            "title": "Tab"
+          },
+          "measure": {
+            "field": "amount"
+          },
+          "state": "ready",
+          "by_state": [
+            {
+              "state": "provisional",
+              "sum": 237154,
+              "rows": 30000
+            },
+            {
+              "state": "settled",
+              "sum": 474447,
+              "rows": 60000
+            }
+          ],
+          "total": {
+            "sum": 711601,
+            "rows": 90000
+          },
+          "unknown": {
+            "measure": 1000,
+            "order": 1000
+          }
+        }
+      },
+      "gated": {
+        "p50_ms": 1.9,
+        "p95_ms": 2.49,
+        "samples": 30,
+        "states": [],
+        "statements_per_call": 11,
+        "row_statements_per_call": 0
+      }
+    }
+  }
+}

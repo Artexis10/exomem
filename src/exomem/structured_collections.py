@@ -93,6 +93,21 @@ _MAX_CLAIM_MATCH_VALUES = 24
 #: `capture` keys. One today: the vault page that holds how to capture into this collection.
 _CAPTURE_KEYS = ("method",)
 MAX_CAPTURE_METHOD_CHARS = 512
+#: The manifest key that declares how the rows that cite one page add up (`parse_subject`).
+SUBJECT_KEY = "subject"
+#: `subject` keys: the link field whose rows a named page's ledger summary covers, and how to sum them.
+# nosemgrep: ep-word-set -- the declaration's own closed key names, which `_subject_json_schema` publishes.
+_SUBJECT_KEYS = ("field", "measure", "state", "order", "show", "recent")
+MAX_SUBJECT_SHOW = 4
+MAX_SUBJECT_RECENT = 10
+DEFAULT_SUBJECT_RECENT = 3
+#: The declared field types each `subject` role accepts. They are the schema's own closed type tokens.
+_SUBJECT_MEASURE_TYPES = ("integer", "number")
+# nosemgrep: ep-word-set -- the item schema's closed field type tokens that hold one exact value to group by.
+_SUBJECT_STATE_TYPES = ("enum", "string", "boolean", "integer")
+_SUBJECT_ORDER_TYPES = ("date", "datetime")
+# A link is left out: its value names a page the caller may not be able to read, and the row's own ref rides with it.
+_SUBJECT_SHOW_TYPES = tuple(sorted(_PRESENTATION_SCALAR_TYPES - {"link"}))
 _MUTABLE_FILENAME_FIELDS = frozenset(
     {
         "status",
@@ -230,6 +245,7 @@ def manifest_authoring_contract(*, store: bool = False) -> dict[str, Any]:
             "items": {"$ref": "#/$defs/field"},
             "units": {"type": "array", "items": {"type": "string"}},
             "link_kind": {"type": "string"},
+            "description": {"type": "string"},
             # A `link` field's relation names a registry relation whose origins include
             # `collection_link`; create and revise list the admissible keys when it names another.
             "relation": {"type": "string"},
@@ -327,6 +343,7 @@ def manifest_authoring_contract(*, store: bool = False) -> dict[str, Any]:
             "item_presentation": _item_presentation_json_schema(),
             "claims": _claims_json_schema(),
             "capture": _capture_json_schema(),
+            SUBJECT_KEY: _subject_json_schema(),
         },
         "additionalProperties": True,
         "$defs": {"field": field_schema},
@@ -420,6 +437,19 @@ def manifest_authoring_contract(*, store: bool = False) -> dict[str, Any]:
                 "survives a rename or a move and needs no link resolver. A quoted wiki link, method: "
                 "\"[[Page title]]\", may not be served on a turn until the link resolver is warm. "
                 "Routing never depends on it"
+            ),
+        },
+        SUBJECT_KEY: {
+            "keys": list(_SUBJECT_KEYS),
+            "required": ["field", "measure"],
+            "purpose": (
+                "how the rows that cite one page add up for that page. field is a declared link field; "
+                "measure a declared integer or number field its rows sum; state an optional declared field "
+                "whose values split the sums; order an optional date or datetime field that ranks the newest "
+                f"rows; show up to {MAX_SUBJECT_SHOW} more fields each newest row carries; recent how many "
+                f"newest rows to list (0 to {MAX_SUBJECT_RECENT}, default {DEFAULT_SUBJECT_RECENT}). When a "
+                "turn names a page these rows cite and touches this collection's claims, recall serves the "
+                "page's sums, unknown counts and newest rows. A field description says what the measure means"
             ),
         },
         "item_representation": {
@@ -800,6 +830,27 @@ def _capture_json_schema() -> dict[str, Any]:
     }
 
 
+def _subject_json_schema() -> dict[str, Any]:
+    name = {"type": "string", "minLength": 1, "maxLength": 128}
+    return {
+        "type": "object",
+        "required": ["field", "measure"],
+        "properties": {
+            "field": name,
+            "measure": name,
+            "state": name,
+            "order": name,
+            "show": {"type": "array", "maxItems": MAX_SUBJECT_SHOW, "uniqueItems": True, "items": name},
+            "recent": {"type": "integer", "minimum": 0, "maximum": MAX_SUBJECT_RECENT},
+        },
+        "additionalProperties": False,
+        "description": (
+            "Sums the rows that cite one page through a link field, for a turn that names that page and "
+            "touches this collection's claims. Every key names a declared field of this collection."
+        ),
+    }
+
+
 def _record_presentation_json_schema() -> dict[str, Any]:
     """Expose the parser's closed, bounded v1 authoring shape."""
     descriptor = {
@@ -955,6 +1006,9 @@ class FieldSpec:
     properties: Mapping[str, FieldSpec] = field(default_factory=lambda: MappingProxyType({}))
     depends_on: tuple[str, ...] = ()
     references: FieldReference | None = None
+    #: What the author says the field means, as written. A reader shows it beside the value (a ledger's
+    #: amount says which sign means what); it never changes what a value is, so it is no part of equality.
+    description: str | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1129,6 +1183,23 @@ class RecordPresentation:
 
 
 @dataclass(frozen=True, slots=True)
+class SubjectDeclaration:
+    """`subject`: how the rows that cite one page through a link field add up for that page.
+
+    `field` is a top-level link field; `measure` the number its rows sum; `state` splits the sums by its
+    values; `order` ranks the newest rows; `show` names up to four more fields a newest row carries; and
+    `recent` how many newest rows a summary lists.
+    """
+
+    field: str
+    measure: str
+    state: str | None = None
+    order: str | None = None
+    show: tuple[str, ...] = ()
+    recent: int = DEFAULT_SUBJECT_RECENT
+
+
+@dataclass(frozen=True, slots=True)
 class CollectionManifest:
     collection_id: str
     title: str
@@ -1158,6 +1229,8 @@ class CollectionManifest:
     claim_match: Mapping[str, tuple[str, ...]] | None = None
     #: `capture.method`: the wiki link or ref of the one vault page that holds how to capture here, as authored.
     capture_method: str | None = None
+    #: `subject`: how the rows citing one page add up for that page, as declared; None when undeclared.
+    subject: SubjectDeclaration | None = None
     #: `items` (default) renders a view per row; `summary` keeps rows store-only.
     view_mode: str = "items"
     #: A derived summary collection takes rows only from imports and rebuilds them from its import log.
@@ -2165,6 +2238,7 @@ def _manifest_from_frontmatter(
     claim_match = _parse_claim_match(frontmatter.get("claims"))
     capture_method = parse_capture(frontmatter.get("capture"))
     derived = _parse_derived(frontmatter.get("derived", False), view_mode)
+    subject = parse_subject(frontmatter.get(SUBJECT_KEY), schema, derived=derived, profile=profile)
     if derived and (found := declared_references(schema)):
         raise CollectionError(
             "INVALID_FIELD_REFERENCE",
@@ -2197,6 +2271,7 @@ def _manifest_from_frontmatter(
         claims=claims,
         claim_match=claim_match,
         capture_method=capture_method,
+        subject=subject,
         view_mode=view_mode,
         derived=derived,
         ignored_recipes=ignored_recipes,
@@ -3393,7 +3468,9 @@ def _parse_field_spec(value: object, depth: int = 0, at: str = "item_schema.fiel
     return FieldSpec(kind, required, enum, items, tuple(units_raw), link_kind, relation, offset, classification,
                      MappingProxyType({name: _parse_field_spec(spec, depth + 1, f"{at}.properties.{name}")
                                        for name, spec in properties.items()}),
-                     tuple(dependencies), references=_parse_field_reference(raw.get("references"), at))
+                     tuple(dependencies), references=_parse_field_reference(raw.get("references"), at),
+                     # Free text that field declarations have always accepted unread; a non-string stays unread.
+                     description=description if type(description := raw.get("description")) is str else None)
 
 
 def _parse_field_reference(value: object, at: str) -> FieldReference | None:
@@ -3604,6 +3681,92 @@ def parse_capture(value: object) -> str | None:
             "INVALID_COLLECTION_CAPTURE", f"capture.method exceeds {MAX_CAPTURE_METHOD_CHARS} characters"
         )
     return method.strip()
+
+
+def _subject_error(key: str, message: str, received: object, expected: str, example: str) -> CollectionError:
+    return CollectionError("INVALID_COLLECTION_SUBJECT", f"subject.{key} {message}",
+                           {"field": f"subject.{key}", "received": received, "expected": expected,
+                            "example": f"subject: {{{example}}}"})
+
+
+def _subject_field(value: object, key: str, schema: ItemSchema, kinds: tuple[str, ...], example: str) -> str:
+    """One `subject` role's field: a declared top-level field of one of `kinds`, named exactly."""
+    candidates = sorted(name for name, spec in schema.fields.items() if spec.type in kinds)
+    if type(value) is not str or value not in schema.fields or schema.fields[value].type not in kinds:
+        found = schema.fields.get(value) if type(value) is str else None
+        problem = "names no declared field" if found is None else f"names the {found.type} field {value}"
+        expected = f"a declared {' or '.join(kinds)} field"
+        if candidates:
+            expected += f", one of: {', '.join(candidates)}"
+        raise _subject_error(key, f"{problem}; it must name {expected}", value, expected, example)
+    return value
+
+
+def parse_subject(value: object, schema: ItemSchema, *, derived: bool = False,
+                  profile: str = "records") -> SubjectDeclaration | None:
+    """Parse `subject` against the collection's own fields; every name it holds must be declared and of its kind.
+
+    Nothing here knows a field name or a state value: the declaration names them, and the schema types them.
+    """
+    if value is None:
+        return None
+    example = "field: person, measure: amount, state: status, order: date"
+    if not isinstance(value, Mapping):
+        raise CollectionError(
+            "INVALID_COLLECTION_SUBJECT",
+            f"subject must be a mapping of {', '.join(_SUBJECT_KEYS)}; offending entry: {value!r}",
+            {"field": "subject", "received": value, "expected": "a mapping", "example": f"subject: {{{example}}}"},
+        )
+    unknown = sorted(str(key) for key in value if key not in _SUBJECT_KEYS)
+    if unknown:
+        raise CollectionError(
+            "INVALID_COLLECTION_SUBJECT",
+            f"subject has unknown key {unknown[0]}; remove it (subject takes only {', '.join(_SUBJECT_KEYS)})",
+            {"field": f"subject.{unknown[0]}", "received": unknown[0], "allowed": list(_SUBJECT_KEYS),
+             "example": f"subject: {{{example}}}"},
+        )
+    if profile != "records":
+        raise CollectionError(
+            "INVALID_COLLECTION_SUBJECT",
+            "only a Records collection declares subject; remove it",
+            {"field": "subject", "received": f"semantic_profile: {profile}", "expected": "semantic_profile: records",
+             "example": "remove the subject declaration"},
+        )
+    if derived:
+        raise CollectionError(
+            "INVALID_COLLECTION_SUBJECT",
+            "a derived collection keeps its rows outside the store, so no page's rows can be summed; remove subject",
+            {"field": "subject", "received": "derived: true", "expected": "a collection whose rows live in the store",
+             "example": "remove the subject declaration"},
+        )
+    for required in ("field", "measure"):
+        if required not in value:
+            raise _subject_error(required, "is required", None, "a declared field name", example)
+    links = [d.dotted for d in declared_links(schema)]
+    field_name = value["field"]
+    if type(field_name) is not str or field_name not in links:
+        expected = "a declared link field" + (f", one of: {', '.join(links)}" if links else "; declare one first")
+        found = schema.fields.get(field_name) if type(field_name) is str else None
+        problem = "names no declared field" if found is None else f"names the {found.type} field {field_name}"
+        raise _subject_error("field", f"{problem}; it must name {expected}", field_name, expected, example)
+    measure = _subject_field(value["measure"], "measure", schema, _SUBJECT_MEASURE_TYPES, example)
+    state = (_subject_field(value["state"], "state", schema, _SUBJECT_STATE_TYPES, example)
+             if value.get("state") is not None else None)
+    order = (_subject_field(value["order"], "order", schema, _SUBJECT_ORDER_TYPES, example)
+             if value.get("order") is not None else None)
+    show_raw = value.get("show", [])
+    if not isinstance(show_raw, list) or len(show_raw) > MAX_SUBJECT_SHOW:
+        raise _subject_error("show", f"must be a list of at most {MAX_SUBJECT_SHOW} field names", show_raw,
+                             f"a list of at most {MAX_SUBJECT_SHOW} declared fields", "..., show: [note]")
+    show = tuple(_subject_field(name, "show", schema, _SUBJECT_SHOW_TYPES, "..., show: [note]") for name in show_raw)
+    if len(set(show)) != len(show):
+        raise _subject_error("show", "names a field twice; list each field once", show_raw,
+                             "distinct declared fields", "..., show: [note]")
+    recent = value.get("recent", DEFAULT_SUBJECT_RECENT)
+    if type(recent) is not int or not 0 <= recent <= MAX_SUBJECT_RECENT:
+        raise _subject_error("recent", f"must be a whole number from 0 to {MAX_SUBJECT_RECENT}", recent,
+                             f"an integer 0..{MAX_SUBJECT_RECENT}", "..., recent: 3")
+    return SubjectDeclaration(field_name, measure, state, order, show, recent)
 
 
 def _parse_templates(root: Path, manifest_rel: str, value: object) -> tuple[TemplateSpec, ...]:

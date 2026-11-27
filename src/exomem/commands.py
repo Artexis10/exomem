@@ -28,7 +28,7 @@ import os
 import re
 import shlex
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from contextlib import ExitStack, nullcontext, suppress
 from dataclasses import dataclass, replace
 from functools import partial, wraps
@@ -7178,28 +7178,39 @@ def _search_notice(envelope: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _cite_packet_leads(vault_root: Path, packet: dict[str, Any]) -> None:
+def _packet_leads(packet: dict[str, Any]) -> list[dict[str, Any]]:
+    """The first ten page leads of a served packet: the turn slice's anchors, or the rollback packet's `anchors`."""
+    if packet.get("abstained"):
+        return []
+    slice_items = (packet.get("turn_slice") or {}).get("items") or []
+    return [lead for lead in (slice_items or packet.get("anchors") or [])[: _page_citations().RECALL_HITS]
+            if isinstance(lead, dict)]
+
+
+def _cite_packet_leads(vault_root: Path, packet: dict[str, Any],
+                       listed: Mapping[str, Collection[tuple[str, str]]] | None = None) -> None:
     """Give each of the first ten page leads of a served packet its citations, charged to the packet's budget.
 
-    The leads are the turn slice's anchors, or the rollback packet's `anchors`; each is cited by the memory
-    ref it already carries, so no path lookup runs here. A lead keeps the citations that fit under
-    `limit_chars`, counted at their serialized length; one that does not fit keeps its count, and one whose
-    count does not fit is left as it was. Never raises: a citation never breaks an activation.
+    Each lead (`_packet_leads`) is cited by the memory ref it already carries, so no path lookup runs here.
+    A lead keeps the citations that fit under `limit_chars`, counted at their serialized length; one that
+    does not fit keeps its count, and one whose count does not fit is left as it was. ``listed`` maps a lead
+    to the (collection, link field) pairs whose rows its ledger entry (`subject_records`) already lists: the
+    citation read counts them and lists the lead's citations from every other field. Never raises: a
+    citation never breaks an activation.
     """
     try:
-        if packet.get("abstained"):
+        leads = _packet_leads(packet)
+        if not leads:
             return
-        slice_items = (packet.get("turn_slice") or {}).get("items") or []
-        leads = [lead for lead in (slice_items or packet.get("anchors") or [])[: _page_citations().RECALL_HITS]
-                 if isinstance(lead, dict)]
-        found = _page_citations().for_hits([lead.get("ref") for lead in leads], vault_root)
+        found = _page_citations().for_hits([lead.get("ref") for lead in leads], vault_root, unlisted=listed)
         budget = packet.setdefault("budget", {})
         for lead in leads:
             added = found.get(lead.get("ref"))
             if not added:
                 continue
             # The full citations first, then the count alone, then nothing.
-            for candidate in (added, {key: value for key, value in added.items() if key != "cited_by"}):
+            count = {key: value for key, value in added.items() if key != "cited_by"}
+            for candidate in (added, count) if "cited_by" in added else (count,):
                 size = len(json.dumps(candidate))
                 if int(budget.get("used_chars") or 0) + size <= int(budget.get("limit_chars") or 0):
                     lead.update(candidate)
@@ -7499,7 +7510,12 @@ def op_activate_context(
                         sensed_model.for_packet(vault_root, packet)
                         # The citations are decided under the purpose the request declared, as its leads were.
                         with principal_module.declared_purpose_scope(purpose):
-                            _cite_packet_leads(vault_root, packet)
+                            # A named page's ledger rides its lead, so a starved task context cannot drop it,
+                            # and it is charged before the leads' citations, so a full packet cannot either.
+                            from . import subject_records
+
+                            listed = subject_records.for_packet(vault_root, packet, turn, _packet_leads(packet))
+                            _cite_packet_leads(vault_root, packet, listed)
                         from . import due_state as due_state_module
 
                         # Guarded material supplies relevance; the agent decides whether to raise it.
