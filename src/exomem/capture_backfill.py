@@ -53,8 +53,6 @@ READER_UNAVAILABLE = "this host has no decoder for the original's kind"
 RETIREMENT_UNCONFIRMED = "the Trash retirement of the original is unconfirmed"
 UNREADABLE_FOR_MATCHING = "the image could not be decoded for matching"
 CHANGED_WHILE_READ = "the page or its original kept changing while this run read it; rerun to include it"
-#: The codes of the vault's walk and reads for a page, folder or original that moved or left during the read.
-_CHANGE_CODES = ("IDENTITY_CHANGED", "MISSING")
 #: Pages read between two progress updates of the census.
 _PROGRESS_PAGES = 50
 
@@ -132,19 +130,24 @@ def backfill(
     try:
         plan = _plan(root, archive, recovering)
     except reserved_paths.ReservedPathLeafError as error:
-        # A changed page is a skip, not this: what is left is a folder that moved, or a page it cannot read safely.
-        moved = error.code in _CHANGE_CODES
-        raise OpError(
-            error.code,
-            "a folder was moved or removed while this run read the pages, so it stopped and changed no page"
-            if moved else (
-                f"this run could not read every page safely ({error.code}), for example a linked file or folder, "
-                "so it stopped and changed no page"
-            ),
-            "Run the preview again." if moved
-            else "Replace any linked file or folder in the vault with the item itself, then run the preview again.",
-            details={"status": "terminal", "committed": False},
-        ) from error
+        # A changed page is a skip, not this: what is left is a folder that moved, a linked item, or a failed read.
+        if error.code in reserved_paths.CHANGE_CODES:
+            message, fix = (
+                "a folder was moved or removed while this run read the pages, so it stopped and changed no page",
+                "Run the preview again.",
+            )
+        elif error.code == "UNSAFE_PATH":
+            message, fix = (
+                "the vault holds a linked file or folder, or a name this run cannot read safely, "
+                "so it stopped and changed no page",
+                "Replace any linked file or folder in the vault with the item itself, then run the preview again.",
+            )
+        else:
+            message, fix = (
+                f"the file system refused a read of the vault ({error.code}), so this run stopped and changed no page",
+                "Run the preview again. If it stops the same way, check that this service can read every vault folder.",
+            )
+        raise OpError(error.code, message, fix, details={"status": "terminal", "committed": False}) from error
     fresh = maintenance_jobs.plan_identity(MODE, flags, plan.entries())
     report: dict[str, Any] = {
         "dry_run": dry_run,
@@ -387,7 +390,7 @@ def _left_volume(root: Path, snapshot: Any) -> str | None:
     except originals.RetirementUnconfirmed:
         return RETIREMENT_UNCONFIRMED
     except reserved_paths.ReservedPathLeafError as error:
-        if error.code not in _CHANGE_CODES:
+        if error.code not in reserved_paths.CHANGE_CODES:
             raise
         return CHANGED_WHILE_READ  # the census read this binding a moment ago
     return None if state in ("local", "cached") else BYTES_NOT_ON_VOLUME
