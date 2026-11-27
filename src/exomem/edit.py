@@ -1252,6 +1252,7 @@ def commit_edit(
         log.exception("partial write during edit(); some files may be updated")
         warnings.append(f"partial write — reconcile on desktop: {e}")
         raise
+    warnings.extend(committed.review_field_warnings())
 
     # Suggestions are measurements, never dispositions. They run only after
     # the guarded semantic batch succeeds, so validation/blocking paths cannot

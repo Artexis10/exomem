@@ -16,9 +16,9 @@
 - [x] 3.1 `tests/test_vault_store_read_surface.py`: record the filing classifier's reads with `invocation_writes_outside_writer` patched to return False, instead of subtracting every argument it reads. Verify: the read-surface guard passes, and it fails when a read is removed from the classifier.
 - [x] 3.2 Route `write_intake._replay` through `write_intake.invoke_in_background`, and make its `principal`, `descriptor` and `command` arguments positional-only. Verify: the write-intake and governance principal-binding guard tests pass.
 - [x] 3.3 `cloud_import_client.resumed_choices` returns None when the checkpoint's `state["source"]` differs from the current source. Verify: reusing a checkpoint for another source reports `CHECKPOINT_MISMATCH`, not `CHECKPOINT_OPTIONS_CHANGED`.
-- [ ] 3.4 Make the home-import rehearsal (`infra/cloud-rehearsal/src/cloud_rehearsal/home_import.py`) restart the cell while the filing view says `working`. Restart on the first `working` read, with a fixture large enough to outlast the restart. Verify: a dispatched rehearsal run on main reports each file filed once after the restart.
+- [x] 3.4 Make the home-import rehearsal (`infra/cloud-rehearsal/src/cloud_rehearsal/home_import.py`) restart the cell while the filing view says `working`. Restart on the first `working` read, with a fixture large enough to outlast the restart. Verify: a dispatched rehearsal run on main reports each file filed once after the restart.
 
 ## 4. Delivery checks
 
-- [ ] 4.1 Run the scoped suites for adoption, import filing, page fields, the vocabulary registry and the whole-tree guards in `tests/pr_guard_modules.txt`.
+- [x] 4.1 Run the scoped suites for adoption, import filing, page fields, the vocabulary registry and the whole-tree guards in `tests/pr_guard_modules.txt`.
 - [ ] 4.2 Before the release note goes out, file one real ChatGPT export and one real Claude export, each from an owner's own account, into a sandbox cell. Check that the conversation counts match the export and the created times match.

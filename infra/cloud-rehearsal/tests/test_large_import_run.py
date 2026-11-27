@@ -122,6 +122,42 @@ def test_the_sample_script_reads_each_thread_of_the_other_processes():
     assert all(isinstance(sample["threads"][tid][1], int) for tid in tids)
 
 
+def test_the_sample_script_reads_the_cgroups_pressure_and_io_counters_and_leaves_a_missing_one_unknown(tmp_path):
+    """Catches counters that are summed wrongly across devices, or a missing file that reads as 0 stall seconds."""
+    (tmp_path / "cpu.pressure").write_text("some avg10=0.00 avg60=0.00 avg300=0.00 total=1500\n"
+                                           "full avg10=0.00 avg60=0.00 avg300=0.00 total=700\n")
+    (tmp_path / "io.pressure").write_text("some avg10=1.00 avg60=0.50 avg300=0.10 total=2500\n"
+                                          "full avg10=0.80 avg60=0.40 avg300=0.10 total=900\n")
+    (tmp_path / "io.stat").write_text("8:0 rbytes=100 wbytes=50 rios=1 wios=1 dbytes=0 dios=0\n"
+                                      "8:16 rbytes=20 wbytes=5 rios=1 wios=1 dbytes=0 dios=0\n")
+    bare = tmp_path / "bare"
+    bare.mkdir()
+
+    def sample(cgroup):
+        script = large_import.SAMPLE_SCRIPT.replace("cg = '/sys/fs/cgroup/'", f"cg = {str(cgroup) + '/'!r}")
+        return json.loads(subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=True,
+                                         timeout=60).stdout)
+
+    full, none = sample(tmp_path), sample(bare)
+
+    assert [full[key] for key in large_import.COUNTER_KEYS] == [1500, 2500, 900, 120, 55]
+    assert [none[key] for key in large_import.COUNTER_KEYS] == [None] * 5
+
+
+def test_counter_growth_charges_a_phase_only_what_grew_in_it_and_restarts_from_zero_with_the_pod():
+    rows = [{"label": "paging", "io_read_bytes": 100, "io_pressure_some_usec": 5},
+            {"label": "paging", "io_read_bytes": 400, "io_pressure_some_usec": 5},
+            {"label": "paging", "cell_error": "CommandFailed"},
+            {"label": "index", "io_read_bytes": 450, "io_pressure_some_usec": 9},
+            {"label": "index", "io_read_bytes": 30, "io_pressure_some_usec": 1}]  # the pod restarted
+
+    paging, index = large_import.counter_growth(rows, "paging"), large_import.counter_growth(rows, "index")
+
+    assert paging["io_read_bytes"] == 400 and paging["io_pressure_some_usec"] == 5
+    assert index["io_read_bytes"] == 50 + 30 and index["io_pressure_some_usec"] == 4 + 1
+    assert paging["io_write_bytes"] is None and large_import.counter_growth(rows, "blind")["io_read_bytes"] is None
+
+
 # --- filing ---------------------------------------------------------------------------------
 
 
@@ -215,6 +251,31 @@ def test_the_first_folder_bootstraps_the_knowledge_base_with_one_start_and_the_s
     assert "start" not in [kind for kind, _ in media.asked]
 
 
+def test_the_start_call_reports_the_cpu_the_cells_threads_used_during_it():
+    """Catches a calibration that charges the call with CPU the cell used before it, or reads a failed reading as 0."""
+    before = {"threads": {"7": ["worker", 5_000_000], "9": ["index", 2_000_000]}}
+    after = {"threads": {"7": ["worker", 24_000_000], "9": ["index", 3_000_000], "11": ["new", 1_000_000]}}
+    done = _done("r1", filed=1, residual=_residual(0, {}))
+    agent = Scripted({"start": [{"run_id": "r1"}], "file": [done],
+                      STATUS: [_stored(["a"], finish=_recorded(1, residual=_residual(0, {})))]})
+    readings = iter([before, after])
+
+    async def read_threads():
+        return next(readings)
+
+    notes, media = _folder(name="notes"), _folder(name="media")
+    asyncio.run(large_import.file_pages(agent, _plan(), notes, read_threads))
+
+    start = notes.report["start_call"]
+    assert (start["busiest_thread"], start["busiest_thread_cpu_seconds"], start["all_threads_cpu_seconds"]) == ("worker", 19.0, 21.0)
+    assert start["cpu_seconds_by_thread"] == {"worker": 19.0, "index": 1.0, "new": 1.0} and start["wall_seconds"] == 0.5
+    # A reading that failed leaves the CPU unknown, and the second folder has no `start` call to measure.
+    unread = large_import.start_call_cpu(None, after, 3.0)
+    assert unread["busiest_thread_cpu_seconds"] is None and unread["all_threads_cpu_seconds"] is None
+    asyncio.run(large_import.file_pages(Scripted({"file": [done], STATUS: [_stored(["a"])]}), _plan(), media, read_threads))
+    assert "start_call" not in media.report
+
+
 def test_a_stop_for_lack_of_space_ends_filing_and_is_reported():
     stopped = {"run_id": "r1", "filing": "stopped", "stop": {"code": "INSUFFICIENT_SPACE"}, "person": [{"need": "free_space", "text": "t"}],
                "progress": {"filed": 0, "failed": 0, "remaining": 5, "pages_done": 0}}
@@ -270,6 +331,32 @@ def test_each_file_call_keeps_its_counts_and_the_page_shows_files_per_call_and_p
     (page,) = folder.report["pages"]
     assert [(step["files"], step["filing"]) for step in page["file_steps"]] == [(40, "working"), (60, "done")]
     assert page["files_per_second"] == 100.0  # 100 files over two calls of 0.5 s
+    assert folder.report["file_seconds_by_page"] == [
+        {"page": 1, "calls": 2, "file_seconds": 1.0, "longest_call_seconds": 0.5}]
+
+
+def test_the_projection_reaches_the_whole_stage_from_the_rate_of_all_pages_and_of_the_newest_page():
+    """Catches a report that needs arithmetic by hand to say whether the import ends inside its deadline."""
+    fast = {"seconds": 50.0, "files": 500, "filed": 0, "remaining": 0}
+    slow = {"seconds": 100.0, "files": 500, "filed": 0, "remaining": 0}
+    pages = [{"file_steps": [fast, {**fast, "filed": 1000, "remaining": 1500}]},
+             {"file_steps": [slow, {**slow, "filed": 2000, "remaining": 500}]}]
+
+    projection = large_import.import_projection(pages, deadline_seconds_left=600.4)
+
+    assert projection == {
+        "files_filed": 2000, "files_remaining": 500,
+        "files_per_second_all_pages": 6.67, "files_per_second_newest_page": 5.0,  # 2,000 files in 300 s; 1,000 in 200 s
+        "seconds_to_finish_at_all_pages_rate": 75, "seconds_to_finish_at_newest_page_rate": 100,
+        "deadline_seconds_left": 600}
+
+
+def test_a_projection_with_an_unknown_count_leaves_what_depends_on_it_unknown():
+    steps = [large_import.file_step({}, 2.0, before=0)]  # a reply with no counts
+
+    projection = large_import.import_projection([{"file_steps": steps}], deadline_seconds_left=10.0)
+
+    assert projection["files_per_second_all_pages"] is None and projection["seconds_to_finish_at_all_pages_rate"] is None
 
 
 def test_a_page_that_filed_more_files_than_it_consumed_shows_the_staged_copies_that_stayed():
@@ -310,6 +397,45 @@ def test_a_deadline_that_stops_filing_still_reports_the_calls_made():
 
     (page,) = folder.report["pages"]
     assert [step["files"] for step in page["file_steps"]] == [40, 50]
+    assert folder.report["file_projection"]["files_filed"] == 90  # kept current before the deadline check, as the pages are
+    assert folder.report["file_seconds_by_page"] == [
+        {"page": 1, "calls": 2, "file_seconds": 1.0, "longest_call_seconds": 0.5}]
+
+
+def test_a_deadline_that_stops_paging_still_reports_the_refusals_counted_so_far(monkeypatch):
+    """Catches the journal refusal count that was written only when paging ended normally, so the run most in need lost it."""
+    readings = iter([{"rows": 5, "busy_by_command": {}, "inode": 7},
+                     {"rows": 9, "busy_by_command": {"adoption_studio": 2}, "inode": 7}])
+
+    async def read_journal(ctx):
+        return next(readings)
+
+    class Refused(Scripted):
+        refusals = []
+
+        async def import_op(self, kind, **fields):
+            self.refusals.append({"cause": "holder_overdue", "waited_ms": 5100})
+            return await super().import_op(kind, **fields)
+
+    monkeypatch.setattr(large_import, "read_refusal_journal", read_journal)
+    agent = Refused({"file": [_working("r1", filed=40, token="a")]})
+    folder = _folder(name="media")
+    plan = _plan()
+    checks = []
+
+    def require_time(what, *, seconds=0):
+        checks.append(what)
+        if len(checks) == 2:
+            raise large_import.OutOfTime(f"the scenario's deadline came before {what}")
+
+    plan.require_time = require_time
+
+    with pytest.raises(large_import.OutOfTime):
+        asyncio.run(large_import.page_stage(None, agent, plan, folder))
+
+    reported = folder.report["paging_refusals"]
+    assert reported["journal"] == {"count": 2, "by_command": {"adoption_studio": 2}}
+    assert reported["agent_calls"]["count"] == 1 and reported["agent_calls"]["by_cause"] == {"holder_overdue": 1}
 
 
 def test_a_reply_without_counts_leaves_its_files_and_the_rate_unknown_not_zero():
@@ -371,6 +497,53 @@ def test_a_warming_mutation_is_retried_after_the_wait_it_names(no_waiting):
     body, _ = asyncio.run(agent.call("manage_memory", {}))
 
     assert body == {"ok": True} and agent.retries == ["manage_memory: MUTATION_WARMING"]
+
+
+def _busy(cause):
+    return _reply({"error": {"code": "MUTATION_BUSY", "details": {"cause": cause, "waited_ms": 5100}}}, is_error=True)
+
+
+def test_a_refused_write_is_repeated_and_counted_with_the_cause_the_cell_gave(no_waiting):
+    agent = large_import.Agent(Client([_busy("holder_overdue"), _busy("holder_overdue"), _reply({"ok": True})]))
+
+    body, _ = asyncio.run(agent.call("manage_memory", {}, kind="file"))
+
+    assert body == {"ok": True}
+    assert large_import.refusal_counts(agent.refusals) == {
+        "count": 2, "by_cause": {"holder_overdue": 2}, "longest_wait_ms": 5100}
+
+
+def test_a_call_that_the_boundary_refuses_every_time_fails_the_run_instead_of_waiting_for_ever(no_waiting):
+    agent = large_import.Agent(Client([_busy("holder_overdue") for _ in range(large_import.BUSY_RETRIES + 1)]))
+
+    with pytest.raises(StepFailure, match="MUTATION_BUSY"):
+        asyncio.run(agent.call("manage_memory", {}, kind="file"))
+    assert len(agent.refusals) == large_import.BUSY_RETRIES
+
+
+def test_the_journal_count_is_the_refusals_it_gained_and_unknown_when_it_cannot_say():
+    before = {"rows": 10, "busy_by_command": {"adoption_studio": 1}, "inode": 7}
+    after = {"rows": 40, "busy_by_command": {"adoption_studio": 3, "create_note": 2}, "inode": 7}
+
+    assert large_import.journal_refusals(before, after) == {
+        "count": 4, "by_command": {"adoption_studio": 2, "create_note": 2}}
+    assert large_import.journal_refusals(before, None)["count"] is None
+    assert large_import.journal_refusals(after, before)["count"] is None  # the journal rotated: fewer rows than before
+
+
+def test_a_journal_that_rotated_and_grew_past_its_old_row_count_reads_as_unknown():
+    """A rotation followed by growth shows more rows than before, so only the file's identity tells it from growth."""
+    before = {"rows": 10, "busy_by_command": {"adoption_studio": 1}, "inode": 7}
+    rotated_and_grown = {"rows": 40, "busy_by_command": {"adoption_studio": 3}, "inode": 9}
+
+    assert large_import.journal_refusals(before, rotated_and_grown) == {"count": None, "by_command": None}
+
+
+def test_a_journal_that_did_not_exist_at_the_first_reading_counts_what_it_gained():
+    before = {"rows": 0, "busy_by_command": {}, "inode": None}
+    after = {"rows": 6, "busy_by_command": {"adoption_studio": 2}, "inode": 9}
+
+    assert large_import.journal_refusals(before, after)["count"] == 2
 
 
 def test_a_refusal_from_the_tool_is_not_retried(no_waiting):

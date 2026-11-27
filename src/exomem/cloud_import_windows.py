@@ -63,9 +63,6 @@ WAIT_POLL_SECONDS = 30
 WAIT_LIMIT_SECONDS = 7200
 LIST_LIMIT = 50
 GIB = 1 << 30
-# Filing a window to its end gives up on a window whose replies show no movement this many times in a row: no count
-# moved, and the page's position (its number, its phase and the files planned) stayed the same.
-FILING_STALL_CALLS = 5
 # The states of the cell's `file` reply, from the module that builds it.
 WORKING, STOPPED, DONE = adoption_run.FILING_STATES
 # The CLI's own state for a `file` call that the cell refused with an error; no `file` reply has it.
@@ -321,14 +318,13 @@ class FilingReply:
                 raise FilingUnavailable
             return cls.refused(code, error.get("message"))
         progress, stop = reply.get("progress"), reply.get("stop")
-        if reply.get("filing") not in adoption_run.FILING_STATES or not isinstance(progress, dict) or any(
-                type(progress.get(name)) is not int for name in adoption_run.FILING_COUNTS):
+        mark = adoption_run.filing_mark(progress)
+        if reply.get("filing") not in adoption_run.FILING_STATES or mark is None:
             return cls.refused("FILING_REPLY_UNREADABLE", "the reply lacks the state or the counts of a file reply")
         stop = stop if isinstance(stop, dict) else {}
         person = reply.get("person") if isinstance(reply.get("person"), list) else []
         return cls(reply["filing"], reply.get("continuation") if isinstance(reply.get("continuation"), str) else None,
-                   tuple(progress[name] for name in adoption_run.FILING_COUNTS),
-                   json.dumps(progress.get("page"), sort_keys=True), safe_code(stop.get("code")), _bounded(stop.get("reason")),
+                   *mark, safe_code(stop.get("code")), _bounded(stop.get("reason")),
                    frozenset(item["need"] for item in person if isinstance(item, dict) and isinstance(item.get("need"), str)))
 
 
@@ -575,7 +571,7 @@ class _Run:
         if reply.state == CALL_ERROR and reply.code in _REPEAT_ONCE:  # nosemgrep: ep-lexical-intent -- `reply` is the cell's parsed envelope; this compares closed protocol states and outcome codes, not text.
             reply = await call()
         waits = 0
-        while reply.state == CALL_ERROR and reply.code == _REPEAT_AFTER_WAIT and waits < FILING_STALL_CALLS:  # nosemgrep: ep-lexical-intent -- `reply` is the cell's parsed envelope; this compares closed protocol states and outcome codes, not text.
+        while reply.state == CALL_ERROR and reply.code == _REPEAT_AFTER_WAIT and waits < adoption_run.FILING_STALL_CALLS:  # nosemgrep: ep-lexical-intent -- `reply` is the cell's parsed envelope; this compares closed protocol states and outcome codes, not text.
             await self.sleep(self.poll)
             reply = await call()
             waits += 1
@@ -637,7 +633,7 @@ class _Run:
                     self.stopped.pop(import_id, None)
                     if not to_the_end:
                         break
-                    if same >= FILING_STALL_CALLS:
+                    if same >= adoption_run.FILING_STALL_CALLS:
                         self.stopped[import_id] = "FILING_STALLED"
                         del self.unfiled[import_id]
                         self.progress.say(f"Filing window {self._number(import_id)} made no progress in {same} calls; "

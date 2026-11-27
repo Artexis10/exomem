@@ -217,7 +217,8 @@ it with `exomem logs verify`.
 `session_id`, `client_name`, `client_version`, `transport`,
 `caller_principal_hash`, `principal_kind`, `tool`, `arg_names`, `args`,
 `target_paths`, `outcome`, `error_code`, `duration_ms`, `total_ms`,
-`request_bytes`, `truncated`, `access`, `item_count`.
+`request_bytes`, `truncated`, `access`, `item_count`, and, when the request says,
+`protocol_version` and `client_extensions`.
 
 - **Latency, on every call — read, write, success, refusal.** `duration_ms` is
   the tool leaf, the number the prose trace and `exomem_tool_duration_ms` have
@@ -265,6 +266,28 @@ it with `exomem logs verify`.
   identity. A stateless request carries no handshake; there the name comes
   from `User-Agent`. On a cloud cell, the gateway's `x-exomem-oauth-client`
   header comes first, because the gateway forwards no `User-Agent`.
+- **`protocol_version` / `client_capabilities` / `client_extensions`** say which
+  MCP revision the call used, which capabilities the client set and which
+  extensions it declared. The SDK reads them from the initialize handshake, or
+  on 2026-07-28 from each request's own envelope. `client_capabilities` names
+  the set top-level capabilities (`roots`, `sampling`, `tasks` and so on) and
+  `elicitation.<mode>` for each declared mode (`elicitation: {}` counts as
+  `elicitation.form`). `client_extensions` is the sorted extension ids, official
+  ones first, at most 16 of 64 characters each; a longer list records the dropped
+  count in `client_extensions_truncated`. `[]` is a client that declares nothing.
+  The fields are absent when the request does not say (a stateless call on an
+  older revision keeps no handshake, and a server-side call has no client) and
+  on rows written before the census. Extension ids are client-chosen text, and
+  rows cannot be scrubbed once chained, so content-private logging keeps only the
+  ids that the installed MCP packages name and records the number of the rest as
+  `client_extensions_other`. It also keeps `protocol_version` only when it has
+  the shape of a date. Capability names are fields of the SDK's own model, so it
+  keeps them. `exomem doctor` reads the last 24 hours of these rows, from the
+  live ledger and its archive, and prints one line that names each client and
+  revision with its capabilities and extensions, counted per tool call. It says
+  "partial" and from when it counts when the history is shorter than a day, the
+  read hit its row bound, or a failed append left a call without a row. After a
+  failed append it counts only the calls later than that failure.
 - **`principal_kind`** says which kind of caller that is: `owner` (stdio, the
   CLI or the REST key), `owner-oauth` (a remote sign-in the host bound as the
   owner with `EXOMEM_OWNER_OAUTH_SUBJECT`), `principal`, or `unresolved`. An

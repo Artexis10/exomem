@@ -58,11 +58,11 @@
         },
         "as_of": {
           "type": "string",
-          "description": "ISO date this starts to hold; needs a rich `kind`."
+          "description": "ISO date this starts to hold; with no `kind`, saves in a dated block."
         },
         "until": {
           "type": "string",
-          "description": "ISO date this stops holding; needs a rich `kind`."
+          "description": "ISO date this stops holding; with no `kind`, saves in a dated block."
         },
         "check_by": {
           "type": "string",
@@ -70,7 +70,7 @@
         },
         "unlinked_reason": {
           "type": "string",
-          "description": "Why your review found no useful link; never added to note text."
+          "description": "Why your review found no useful link; never added to note text. Only active pages of a compiled type take a link review."
         },
         "review": {
           "type": "string",
@@ -246,7 +246,7 @@
         },
         "unlinked_reason": {
           "type": "string",
-          "description": "Why your review found no useful link; never added to note text."
+          "description": "Why your review found no useful link; never added to note text. Only active pages of a compiled type take a link review."
         },
         "vocabulary_decision": {
           "additionalProperties": false,
@@ -511,7 +511,7 @@
         },
         "as_of": {
           "type": "string",
-          "description": "supersede_observation, edit_observation: the ISO date the claim started holding."
+          "description": "supersede_observation, edit_observation: the ISO date the claim started holding. Dating a compact unit moves it to a dated block."
         },
         "category": {
           "type": "string",
@@ -547,7 +547,7 @@
         },
         "unlinked_reason": {
           "type": "string",
-          "description": "Why your review found no useful link; never added to note text."
+          "description": "Why your review found no useful link; never added to note text. Only active pages of a compiled type take a link review."
         },
         "review": {
           "type": "string",
@@ -1585,7 +1585,7 @@
         },
         "unlinked_reason": {
           "type": "string",
-          "description": "Why your review found no useful link; never added to note text."
+          "description": "Why your review found no useful link; never added to note text. Only active pages of a compiled type take a link review."
         },
         "vocabulary_decision": {
           "additionalProperties": false,
