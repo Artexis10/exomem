@@ -12816,13 +12816,18 @@ def op_adoption_studio(
                 if staged.stopped is not None:
                     return {"path": staged.path, **staged.stopped}
                 path = staged.path
-            # The cell finishes the stage after this call: a serving runtime registers it with its import filer.
-            import_filing_module.note_file_call(vault_root, path, collection)
+            # The cell finishes the stage after this call, and leaves it to this caller while it files: a serving
+            # runtime registers the stage with its import filer, which stands aside from it (`agent_filing`).
             # Like `apply`, one call commits a bounded share of the import, so it is one batch at its terminal.
-            with due_state_module.batch_scope(vault_root), state_paths_module.resolution_scope():
+            with (
+                import_filing_module.agent_filing(vault_root, path, collection) as filing_call,
+                due_state_module.batch_scope(vault_root),
+                state_paths_module.resolution_scope(),
+            ):
                 filed = adoption_run_module.file(
                     vault_root, path=path, collection=collection, continuation=continuation
                 )
+                filing_call.returned(filed)
             if upload is not None:
                 # An upload's caller has no other way to learn the staged folder, and a later call may name it.
                 filed = {"path": path, **filed}
@@ -12833,7 +12838,7 @@ def op_adoption_studio(
             return adoption_run_module.cancel(vault_root, run_id=run_id, why=why)
         if action == "finish":
             return adoption_run_module.finish(
-                vault_root, run_id=run_id, write_manifest=write_manifest
+                vault_root, run_id=run_id, write_manifest=write_manifest, continuation=continuation
             )
         proposals_module = _load_adoption_proposals()
         if action == "work-item":

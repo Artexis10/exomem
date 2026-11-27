@@ -324,6 +324,12 @@ class ReservedPathLeafError(Exception):
         return self.code
 
 
+#: The codes of a walk or read whose entry was replaced, moved or removed while it was read: a change, not a refusal.
+CHANGE_CODES = frozenset({"IDENTITY_CHANGED", "MISSING"})
+#: How many times a walk that takes changes lists one folder before a listing that keeps changing ends the walk.
+_LISTING_ATTEMPTS = 3
+
+
 class SqliteIdentityBusyError(RuntimeError):
     """A live SQLite family changed while its retained identities were sampled."""
 
@@ -2706,7 +2712,7 @@ def _list_candidate_records(
     descend: Callable[[str], bool] | None = None,
     checkpoint: request_budget.ReadCheckpoint | None = None,
     leave_out: Callable[[str], bool] | None = None,
-    tolerate_change: bool = False,
+    entry_changed: Callable[[str, str], None] | None = None,
 ) -> tuple[held_fs.SagaRecord, ...]:
     """Walk safe ordinary children without following or exposing aliases.
 
@@ -2714,11 +2720,23 @@ def _list_candidate_records(
     walk enters it. A folder it refuses is still listed as a child of its parent; nothing below it is.
     `leave_out` receives each entry's path, relative to the walked folder, before the walk takes the
     entry's identity: an entry it names is never stat'ed or opened. A complete census omits it.
-    `tolerate_change` keeps a complete census's refusal of every omission, such as an alias, and
-    takes a name that came or went while the folder was listed as a change rather than a refusal.
+    `entry_changed` keeps a complete census's refusal of every omission, such as an alias, and takes a
+    change instead of refusing it: a name that came or went while the folder was listed, a listing that a
+    save interrupted, and a file with a second name. It receives each changed entry's path, relative to the
+    walked folder, and its kind ("file" or "directory"), so its caller reads a file again and accounts for a
+    folder that left; a file that keeps its second name is refused there.
     """
 
+    tolerate_change = entry_changed is not None
     records: list[held_fs.SagaRecord] = []
+
+    def list_children(directory: held_fs.HeldDirectory, name_filter: Callable[[str], bool]):
+        """The folder's children; a walk that takes changes lists again when a save interrupts the listing."""
+        for _attempt in range(_LISTING_ATTEMPTS if tolerate_change else 1):
+            listed = filesystem.children(directory, name_filter=name_filter)
+            if listed.ok or listed.error is None or listed.error.code not in CHANGE_CODES:
+                break
+        return listed
 
     def walk(directory: held_fs.HeldDirectory, prefix: str) -> None:
         if checkpoint is not None:
@@ -2742,7 +2760,7 @@ def _list_candidate_records(
         names = None
         if require_complete:
             names = {name for name in filesystem.iter_names(directory) if admit_name(name)}
-        children = (filesystem.children(directory, name_filter=admit_name)
+        children = (list_children(directory, admit_name)
                     if require_complete or checkpoint is not None or leave_out is not None
                     else filesystem.children(directory))
         if not children.ok:
@@ -2755,7 +2773,7 @@ def _list_candidate_records(
                 raise ReservedPathLeafError("UNSAFE_PATH")
             # A name the folder still lists but the walk cannot open is an alias; one that came or went is a change.
             missing = names - listed
-            again = filesystem.children(directory, name_filter=lambda name: name in missing and admit_name(name))
+            again = list_children(directory, lambda name: name in missing and admit_name(name))
             if not again.ok:
                 raise ReservedPathLeafError(again.error.code if again.error is not None else "IO_REFUSED")
             found = again.require()
@@ -2771,7 +2789,6 @@ def _list_candidate_records(
                 if prefix
                 else record.relative_path
             )
-            records.append(held_fs.SagaRecord(relative, record.identity))
             child = (
                 relative
                 if source_relative == "."
@@ -2779,10 +2796,13 @@ def _list_candidate_records(
             )
             classification = classify_logical(child)
             descriptor_id = identities.descriptor_for(record.identity) if identities else None
-            if require_complete and (
-                classification.disposition is PathDisposition.INVALID
-                or (descriptor_id is None and record.identity.kind == "file" and record.identity.link_count != 1)
-            ):
+            linked = descriptor_id is None and record.identity.kind == "file" and record.identity.link_count != 1
+            if require_complete and tolerate_change and linked and classification.disposition is not PathDisposition.INVALID:
+                # A save links its new file to the page's name before it drops the staged name; the caller reads it again.
+                entry_changed(relative, "file")
+                continue
+            records.append(held_fs.SagaRecord(relative, record.identity))
+            if require_complete and (classification.disposition is PathDisposition.INVALID or linked):
                 raise ReservedPathLeafError("UNSAFE_PATH")
             blocked = (
                 classification.blocked
@@ -2798,7 +2818,8 @@ def _list_candidate_records(
             if not retained.ok:
                 code = retained.error.code if retained.error is not None else "IO_REFUSED"
                 if tolerate_change and code == "MISSING":
-                    continue  # the folder left since the listing
+                    entry_changed(relative, "directory")  # the folder left since the listing, perhaps under another name
+                    continue
                 raise ReservedPathLeafError(code)
             with retained.require() as child_directory:
                 if child_directory.identity != record.identity:
@@ -2996,7 +3017,7 @@ def open_generic_tree(
     descend: Callable[[str], bool] | None = None,
     markdown_header_limit: int | None = None,
     markdown_header_failed: Callable[[str, Exception], None] | None = None,
-    entry_changed: Callable[[str], None] | None = None,
+    entry_changed: Callable[[str, str], None] | None = None,
     checkpoint: request_budget.ReadCheckpoint | None = None,
     leave_out: Callable[[str], bool] | None = None,
 ):
@@ -3012,7 +3033,8 @@ def open_generic_tree(
     path and error to it, yields no entry for it and goes on. The completeness check still covers it.
 
     A file that is replaced, removed or edited while the walk holds it also ends the walk, unless the
-    caller passes `entry_changed`: then the walk reports that entry's relative path to it and goes on.
+    caller passes `entry_changed`: then the walk reports that entry's relative path and kind ("file" or
+    "directory") to it and goes on.
     It yields no entry for a file that changed before its yield, and reports one that changed while the
     caller held it when the caller asks for the next entry. A census (`require_complete`) that passes it
     still refuses every omission, such as a linked file or folder, and takes only change: a name that
@@ -3078,7 +3100,7 @@ def _iter_generic_tree_held(
     descend: Callable[[str], bool] | None = None,
     markdown_header_limit: int | None = None,
     markdown_header_failed: Callable[[str, Exception], None] | None = None,
-    entry_changed: Callable[[str], None] | None = None,
+    entry_changed: Callable[[str, str], None] | None = None,
     checkpoint: request_budget.ReadCheckpoint | None = None,
     leave_out: Callable[[str], bool] | None = None,
 ) -> Iterator[GenericTreeEntry]:
@@ -3106,7 +3128,7 @@ def _iter_generic_tree_held(
                     identities=identities,
                     require_complete=require_complete,
                     recursive=recursive, descend=descend, checkpoint=checkpoint, leave_out=leave_out,
-                    tolerate_change=entry_changed is not None,
+                    entry_changed=entry_changed,
                 )
             else:
                 enumerated = filesystem.children(
@@ -3189,7 +3211,7 @@ def _iter_generic_tree_held(
                 if not parent_result.ok:
                     code = parent_result.error.code if parent_result.error is not None else "IO_REFUSED"
                     if entry_changed is not None and code == "MISSING":
-                        entry_changed(record.relative_path)  # its folder left since the listing
+                        entry_changed(record.relative_path, "file")  # its folder left since the listing
                         continue
                     raise ReservedPathLeafError(code)
                 with parent_result.require() as parent:
@@ -3197,7 +3219,7 @@ def _iter_generic_tree_held(
                     if not file_result.ok:
                         code = file_result.error.code if file_result.error is not None else "IO_REFUSED"
                         if entry_changed is not None and code == "MISSING":
-                            entry_changed(record.relative_path)  # removed since the listing
+                            entry_changed(record.relative_path, "file")  # removed since the listing
                             continue
                         raise ReservedPathLeafError(code)
                     with file_result.require() as file:
@@ -3205,7 +3227,7 @@ def _iter_generic_tree_held(
                         if file.identity != record.identity:
                             if entry_changed is None:
                                 raise ReservedPathLeafError("IDENTITY_CHANGED")
-                            entry_changed(record.relative_path)  # replaced since the listing
+                            entry_changed(record.relative_path, "file")  # replaced since the listing
                             continue
                         descriptor = getattr(file, "descriptor", None)
                         if not isinstance(descriptor, int):
@@ -3230,10 +3252,9 @@ def _iter_generic_tree_held(
                             try:
                                 require_current()
                             except (ReservedPathLeafError, held_fs.HeldFsError) as error:
-                                # The two codes, of this walk and of the held file system, that say the file moved.
-                                if error.code not in ("IDENTITY_CHANGED", "MISSING"):
+                                if error.code not in CHANGE_CODES:
                                     raise
-                                entry_changed(relative)
+                                entry_changed(relative, "file")
                                 return False
                             return True
 

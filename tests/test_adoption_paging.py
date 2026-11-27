@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+import test_adoption_consume as consume
 
 from exomem import adoption_run, cloud_import_job, state_migration, state_paths
 
@@ -230,7 +231,7 @@ def test_finish_of_a_page_that_later_pages_follow_does_not_offer_to_discard_thei
     first = adoption_run.start(vault, path=stage, collection="Field Notes", max_candidates=2, today=TODAY)
     _apply_page(vault, first, stage)
 
-    finished_early = adoption_run.finish(vault, run_id=first["run_id"], today=TODAY)
+    finished_early = consume._finish(vault, first["run_id"])
     early = finished_early["finish"]["residual"]
 
     assert (early["more_pages"], early["files"], early["discard"]) == (True, 2, None)
@@ -239,7 +240,7 @@ def test_finish_of_a_page_that_later_pages_follow_does_not_offer_to_discard_thei
     last = adoption_run.start(vault, path=stage, after=first["next_after"], today=TODAY)
     _apply_page(vault, last, stage)
 
-    finished_last = adoption_run.finish(vault, run_id=last["run_id"], today=TODAY)
+    finished_last = consume._finish(vault, last["run_id"])
     final = finished_last["finish"]["residual"]
 
     assert final["more_pages"] is False and final["by_reason"] == {"ineligible": {"files": 1, "bytes": len(b"hidden bytes")}}
@@ -258,7 +259,7 @@ def test_finish_of_a_page_removes_only_its_own_text_and_a_later_page_still_links
     first = adoption_run.start(vault, path=stage, collection="Field Notes", max_candidates=2, today=TODAY)
     _apply_page(vault, first, stage)
 
-    adoption_run.finish(vault, run_id=first["run_id"], today=TODAY)
+    consume._finish(vault, first["run_id"])
 
     assert [name for name in notes if (vault / stage / name).exists()] == ["c.md"]
     last = adoption_run.start(vault, path=stage, after=first["next_after"], today=TODAY)
@@ -266,7 +267,7 @@ def test_finish_of_a_page_removes_only_its_own_text_and_a_later_page_still_links
     planned = adoption_run.AdoptionRunStore(vault).load(last["run_id"])["plan"]["items"]
     links = next(item for item in planned if item["collection_path"] == "c.md")["links"]
     assert {link["raw"] for link in links["resolved"]} == {"a", "b"} and links["unresolved"] == []
-    finished = adoption_run.finish(vault, run_id=last["run_id"], today=TODAY)
+    finished = consume._finish(vault, last["run_id"])
     assert finished["finish"]["residual"]["files"] == 0
 
 
@@ -279,10 +280,10 @@ def test_the_last_page_reports_an_earlier_page_s_failed_file_as_failed_before_it
     plan_id = _plan_page(vault, first, stage)
     (vault / stage / "a.pdf").write_bytes(PDF + b"changed after the plan")
     adoption_run.apply(vault, run_id=first["run_id"], plan_id=plan_id, today=TODAY)
-    adoption_run.finish(vault, run_id=first["run_id"], today=TODAY)
+    consume._finish(vault, first["run_id"])
     last = adoption_run.start(vault, path=stage, after=first["next_after"], today=TODAY)
     _apply_page(vault, last, stage)
 
-    final = adoption_run.finish(vault, run_id=last["run_id"], today=TODAY)["finish"]["residual"]
+    final = consume._finish(vault, last["run_id"])["finish"]["residual"]
 
     assert {reason: row["files"] for reason, row in final["by_reason"].items()} == {"failed": 1}

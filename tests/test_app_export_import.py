@@ -212,7 +212,7 @@ def test_an_expansion_that_outlasts_one_call_resumes_and_files_each_item_once(va
     def one_item_a_call(root, import_id, *, keep_going, rewalk=False):
         """The call's budget is spent after its first item, so every call yields."""
         calls_that_expanded.append(1)
-        expand(root, import_id, keep_going=lambda: False, rewalk=rewalk)
+        return expand(root, import_id, keep_going=lambda: False, rewalk=rewalk)
 
     monkeypatch.setattr(export_expansion, "expand", one_item_a_call)
     import_id = stage_export(vault, [claude_conversation(number) for number in range(6)])
@@ -423,7 +423,10 @@ def test_a_staged_file_at_a_name_the_expansion_would_use_is_never_overwritten_an
     folder = "conversations items"
     sender = {f"{folder}/{item_id}.md": b"The sender's own note, first.\n"}
 
-    view = file_to_done(vault, stage_export(vault, export, beside=sender))
+    import_id = stage_export(vault, export, beside=sender)
+    # A first call scans before it reads the export, and filing consumes the sender's notes; expanding first meets the clash.
+    export_expansion.expand(vault, import_id, keep_going=lambda: True)
+    view = file_to_done(vault, import_id)
 
     pages = source_pages(vault).values()
     texts = [text for _frontmatter, text in pages]
@@ -441,7 +444,10 @@ def test_an_item_that_finds_no_free_name_is_counted_failed_with_its_own_reason_n
     folder = "conversations items"
     sender = {f"{folder}/{item_id}.md": b"first\n", f"{folder}/{item_id}-2.md": b"second\n"}  # the item's names: its id, then its id and position
 
-    view = file_to_done(vault, stage_export(vault, export, beside=sender))
+    import_id = stage_export(vault, export, beside=sender)
+    # A first call scans before it reads the export, and filing consumes the sender's notes; expanding first meets the clash.
+    export_expansion.expand(vault, import_id, keep_going=lambda: True)
+    view = file_to_done(vault, import_id)
 
     pages = source_pages(vault).values()
     assert not any(frontmatter["title"] == title_of(1) for frontmatter, _text in pages)
