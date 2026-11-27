@@ -210,6 +210,36 @@ def test_a_restored_people_store_counts_each_rescanned_face_once(vault: Path, tm
     np.testing.assert_allclose(face_store.unpack_vector(blob), unit(1, 0.02), atol=1e-6)
 
 
+def test_a_store_that_another_process_deleted_is_never_written_through_a_connection_this_one_kept(vault: Path) -> None:
+    """Catches faces written into an erased file, or a deleted store recreated, by a process that kept it open."""
+    turn_on(vault)
+    face_groups.record_page(vault, "Photos/garden.jpg", [face(unit(1, 0))], model_id=MODEL)
+
+    remove_face_store(vault)  # Another process erases the store; this one still holds its connections.
+    with pytest.raises(face_groups.FacesStopped):
+        face_groups.record_page(vault, "Photos/porch.jpg", [face(unit(0, 1))], model_id=MODEL)
+    assert not face_store.index_path(vault).exists() and not face_store.people_path(vault).exists()
+
+    turn_on(vault)  # The owner turns faces on again: a new store.
+    face_groups.record_page(vault, "Photos/street.jpg", [face(unit(0, 1))], model_id=MODEL)
+    assert len(faces_of(vault, "Photos/street.jpg")) == 1
+
+
+def test_a_cleared_name_is_left_in_no_file_of_the_people_store(vault: Path) -> None:
+    """Catches a removed name kept in the write-ahead log, which a Cloud cell's backup copies as it is."""
+    turn_on(vault)
+    [group] = face_groups.record_page(vault, "Photos/garden.jpg", [face(unit(1, 0))], model_id=MODEL)
+    face_naming.name_group(vault, group, "Rowan Example")
+
+    face_naming.clear_person(vault, "Rowan Example")
+
+    store_files = sorted(face_store.store_dir(vault).glob("people.sqlite*"))
+    assert store_files  # The store is still there, so the check reads real files.
+    for path in store_files:
+        held = path.read_bytes().lower()
+        assert b"rowan example" not in held, path.name
+
+
 @pytest.fixture(autouse=True)
 def _no_loaded_face_models():
     face_scan.unload()

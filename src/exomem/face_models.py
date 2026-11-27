@@ -99,7 +99,8 @@ class FaceDetector:
         # OpenCV feeds BGR values 0..255, padded with zeros on the right and the bottom.
         blob = np.zeros((1, 3, padded_height, padded_width), dtype=np.float32)
         blob[0, :, :height, :width] = pixels[:, :, ::-1].transpose(2, 0, 1)
-        outputs = dict(zip(self._names, self._session.run(self._names, {self._input: blob}), strict=True))
+        with runtime_resources.model_execution():  # Takes its turn with every other model call in the process.
+            outputs = dict(zip(self._names, self._session.run(self._names, {self._input: blob}), strict=True))
         count = len(self._strides)
         boxes, landmarks, scores = [], [], []
         for index, stride in enumerate(self._strides):
@@ -234,7 +235,8 @@ class FaceEmbedder:
         """The unit vector of an aligned RGB crop, or None when the model returns no usable vector."""
         # OpenCV feeds the aligned crop as RGB values 0..255 (`blobFromImage` with swapRB).
         blob = crop.astype(np.float32).transpose(2, 0, 1)[None]
-        vector = np.asarray(self._session.run([self._output], {self._input: blob})[0], dtype=np.float32)
+        with runtime_resources.model_execution():
+            vector = np.asarray(self._session.run([self._output], {self._input: blob})[0], dtype=np.float32)
         if vector.shape != (1, self._width) or not np.isfinite(vector).all():
             return None
         norm = float(np.linalg.norm(vector[0]))

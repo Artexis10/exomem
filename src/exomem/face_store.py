@@ -137,10 +137,11 @@ def people_path(vault_root: Path) -> Path:
     return state_paths.vault_state_dir(vault_root) / reserved_paths.FACE_PEOPLE_PATH
 
 
-def _open(path: Path, schema: str, *, synchronous: str, create: bool) -> sqlite3.Connection:
+def _open(path: Path, schema: str, *, synchronous: str, create: bool, shared: bool) -> sqlite3.Connection:
     # Without `create`, a missing database raises `sqlite3.OperationalError` instead of starting an empty one.
+    # A `shared` connection serves the threads that take turns under the caller's lock.
     target, uri = (path, False) if create else (path.as_uri() + "?mode=rw", True)
-    connection = sqlite3.connect(target, uri=uri, timeout=BUSY_TIMEOUT_MS / 1000)
+    connection = sqlite3.connect(target, uri=uri, timeout=BUSY_TIMEOUT_MS / 1000, check_same_thread=not shared)
     try:
         connection.execute("PRAGMA secure_delete=ON")
         connection.execute("PRAGMA foreign_keys=ON")
@@ -151,6 +152,8 @@ def _open(path: Path, schema: str, *, synchronous: str, create: bool) -> sqlite3
         # A store that a newer release wrote may hold rows this one would misread or drop.
         if version > SCHEMA_VERSION:
             raise sqlite3.DatabaseError(f"{path.name} has schema version {version}; this release reads {SCHEMA_VERSION}")
+        if version == SCHEMA_VERSION:
+            return connection  # The schema is in place; writing it again would cost a synced transaction.
         with connection:
             connection.executescript(schema)
             connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -160,7 +163,7 @@ def _open(path: Path, schema: str, *, synchronous: str, create: bool) -> sqlite3
     return connection
 
 
-def connect_index(vault_root: Path, *, create: bool = True) -> sqlite3.Connection:
+def connect_index(vault_root: Path, *, create: bool = True, shared: bool = False) -> sqlite3.Connection:
     """Open the face index, creating the owner-only store and the schema when absent.
 
     With `create=False` a missing face index raises `sqlite3.OperationalError`: face work in flight must not
@@ -169,18 +172,18 @@ def connect_index(vault_root: Path, *, create: bool = True) -> sqlite3.Connectio
     if create:
         private_state.store(vault_root, reserved_paths.FACES_DIRNAME)
     # A lost last transaction on power loss costs a re-scan of one picture.
-    connection = _open(index_path(vault_root), _INDEX_SCHEMA, synchronous="NORMAL", create=create)
+    connection = _open(index_path(vault_root), _INDEX_SCHEMA, synchronous="NORMAL", create=create, shared=shared)
     with connection:
         connection.execute("INSERT OR IGNORE INTO face_setting (id, epoch) VALUES (1, ?)", (secrets.token_hex(8),))
     return connection
 
 
-def connect_people(vault_root: Path, *, create: bool = True) -> sqlite3.Connection:
+def connect_people(vault_root: Path, *, create: bool = True, shared: bool = False) -> sqlite3.Connection:
     """Open the people store, creating the owner-only store and the schema when absent (see `connect_index`)."""
     if create:
         private_state.store(vault_root, reserved_paths.FACES_DIRNAME)
     # Names and corrections exist nowhere else, so each commit waits for the disk.
-    return _open(people_path(vault_root), _PEOPLE_SCHEMA, synchronous="FULL", create=create)
+    return _open(people_path(vault_root), _PEOPLE_SCHEMA, synchronous="FULL", create=create, shared=shared)
 
 
 def read_setting(vault_root: Path) -> FaceSetting | None:

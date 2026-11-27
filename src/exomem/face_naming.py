@@ -124,7 +124,7 @@ def name_group(vault_root: Path, group_id: int, name: str) -> int:
 def rename_person(vault_root: Path, name: str, new_name: str) -> int:
     """Rename a person. A new name that another person has joins both into that person. Returns its id."""
     display, folded = _folded(new_name)
-    with Writing(vault_root) as writing:
+    with Writing(vault_root, scrub=True) as writing:
         people = writing.people
         person_id = _person(people, name)
         row = people.execute("SELECT id FROM people WHERE folded_name = ?", (folded,)).fetchone()
@@ -143,7 +143,7 @@ def rename_person(vault_root: Path, name: str, new_name: str) -> int:
 
 def clear_group(vault_root: Path, group_id: int) -> None:
     """Take the name off one group; its person goes when it names no other group."""
-    with Writing(vault_root) as writing:
+    with Writing(vault_root, scrub=True) as writing:
         previous = _group(writing, group_id)
         if previous is not None:
             _unname(writing, [group_id])
@@ -153,7 +153,7 @@ def clear_group(vault_root: Path, group_id: int) -> None:
 
 def clear_person(vault_root: Path, name: str) -> None:
     """Remove a person's name from all of its groups."""
-    with Writing(vault_root) as writing:
+    with Writing(vault_root, scrub=True) as writing:
         people = writing.people
         person_id = _person(people, name)
         groups = [row[0] for row in people.execute("SELECT group_id FROM group_people WHERE person_id = ?", (person_id,))]

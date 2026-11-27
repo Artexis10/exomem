@@ -289,7 +289,7 @@ def turn_off(vault_root: Path) -> dict[str, Any]:
         face_store.record_opt_out(index)
     face_scan.stop_backfill(vault_root, timeout=30)
     face_scan.unload()
-    face_groups.forget_centroids(vault_root)
+    face_groups.release(vault_root)
     return {
         "outcome": "Faces are off. Stored faces and names are kept until the owner deletes them.",
         "state": "off",

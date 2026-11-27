@@ -2010,6 +2010,7 @@ class MediaWorker:
             self._vault_root, operation="background_media_clip_commit"
         )
         persist_scene_frames = False
+        face_page: tuple[str, float] | None = None
         with clip_guard:
             if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
                 return
@@ -2032,8 +2033,12 @@ class MediaWorker:
             else:
                 self._clip_index.upsert(rel, vec, mtime)
                 log.info("CLIP-indexed %s", job.binary_path.name)
-            # Under the same identity check as the CLIP rows, so faces never describe changed media.
-            face_scan.commit(self._vault_root, rel, faces, mtime=mtime)
+            face_page = (rel, mtime)
+        # The faces commit after the guard is released, so a foreground write never waits for grouping. They
+        # carry the scanned bytes' mtime; a change since then has its own CLIP job, which scans them again.
+        # Without faces the commit only drops faces of changed bytes, by mtime, so it needs no identity check.
+        if face_page is not None and (faces is None or self._identity(job) == expected_binary):
+            face_scan.commit(self._vault_root, face_page[0], faces, mtime=face_page[1])
         if persist_scene_frames:
             # The frames take their own hold once the projection guard is released: encoding them
             # runs with no boundary held, and only the commit of their files holds it.

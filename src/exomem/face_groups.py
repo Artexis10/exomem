@@ -316,45 +316,133 @@ class FacesStopped(RuntimeError):
     """The face store was deleted, or faces were turned off, before this write took the store lock."""
 
 
+@dataclass(frozen=True)
+class _Held:
+    """This process's open connections to one vault's face stores, and the files (device, inode) they opened."""
+
+    people: sqlite3.Connection
+    index: sqlite3.Connection
+    files: tuple[tuple[int, int] | None, tuple[int, int] | None]
+
+
+#: Per face index path, the connections that writes reuse: opening and closing a store costs more than the
+#: write. Guarded by `_WRITE_LOCK`. An open connection keeps its file's inode, so a store that another
+#: process removed and created again always has another inode, and the next write reopens it.
+_OPEN: dict[str, _Held] = {}
+#: The vaults whose connections stay open at once. A service serves one vault; a process that writes to
+#: more, such as a test run, closes the least recently opened instead of holding a descriptor per vault.
+_OPEN_LIMIT = 4
+
+
+def _file_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        found = path.stat()
+    except FileNotFoundError:
+        return None
+    return found.st_dev, found.st_ino
+
+
+def _close_held(vault_root: Path) -> None:
+    _close_key(str(face_store.index_path(vault_root)))
+
+
+def _close_key(key: str) -> None:
+    held = _OPEN.pop(key, None)
+    if held is None:
+        return
+    for connection in (held.people, held.index):
+        try:
+            connection.close()
+        except sqlite3.Error:
+            log.warning("faces: a face store connection could not close", exc_info=True)
+
+
+def _held(vault_root: Path) -> _Held:
+    """The open connections, reopened when a store file was removed or replaced. Never creates the face index."""
+    index_file, people_file = face_store.index_path(vault_root), face_store.people_path(vault_root)
+    files = (_file_identity(index_file), _file_identity(people_file))
+    held = _OPEN.get(str(index_file))
+    if held is not None and held.files == files:
+        return held
+    _close_held(vault_root)
+    if files[0] is None:
+        raise FacesStopped("the face store does not exist")
+    try:
+        index = face_store.connect_index(vault_root, create=False, shared=True)
+    except sqlite3.OperationalError as error:
+        if index_file.is_file():
+            raise
+        raise FacesStopped("the face store does not exist") from error
+    try:
+        # The people store starts with the first name, inside the directory the face index holds.
+        people = face_store.connect_people(vault_root, create=files[1] is None, shared=True)
+    except BaseException:
+        index.close()
+        raise
+    held = _Held(people, index, (_file_identity(index_file), _file_identity(people_file)))
+    while len(_OPEN) >= _OPEN_LIMIT:
+        _close_key(next(iter(_OPEN)))
+    _OPEN[str(index_file)] = held
+    return held
+
+
 class Writing:
     """One write to both face stores: the people store first, then the face index, each held immediately.
 
     Every writer takes the two locks in this order, so two writers never wait on each other. A crash
-    between the two commits leaves a centroid that counts faces the face index lost; the page stays
-    unscanned and its next scan adds them again, which moves no centroid's direction.
+    between the two commits leaves a centroid that counts faces the face index lost; loading the groups
+    counts a named group over the faces the index holds again (`_named_groups_as_indexed`).
 
     A write never creates the face store: turning faces on creates it, and a delete removes it under the
     same lock. With `require_on`, the write also checks inside its transaction that faces are still on, so
     face work that was in flight when the owner turned faces off stores nothing. Raises `FacesStopped`.
+
+    With `scrub`, the write removes the owner's data from the people store: after the commit it checkpoints
+    the people store and empties its write-ahead log, so no old copy of a removed name stays in that file.
+    A Cloud cell's backup copies the people store's files as they are, the write-ahead log included.
     """
 
-    def __init__(self, vault_root: Path, *, require_on: bool = True) -> None:
+    def __init__(self, vault_root: Path, *, require_on: bool = True, scrub: bool = False) -> None:
         self.vault_root = vault_root
         self.require_on = require_on
+        self.scrub = scrub
+
+    def _abandon(self, *, close: bool) -> None:
+        for connection in (self.people, self.index):
+            if connection.in_transaction:
+                connection.rollback()
+        if close:
+            _close_held(self.vault_root)
+
+    def _empty_people_log(self) -> None:
+        """Checkpoint the people store and truncate its write-ahead log. The removal is committed either way."""
+        try:
+            busy, _, _ = self.people.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        except sqlite3.Error:
+            busy = True
+        if busy:
+            # A reader held the log past the busy timeout; the next write that scrubs empties it.
+            log.warning("faces: the people store's write-ahead log could not be emptied after a removal")
 
     def __enter__(self) -> Writing:
         _WRITE_LOCK.acquire()
         try:
-            # The face index first and never created: a delete in another process may have removed it. The
-            # people store starts with the first name, inside the directory the face index holds.
+            held = _held(self.vault_root)
+            self.people, self.index = held.people, held.index
             try:
-                self.index = face_store.connect_index(self.vault_root, create=False)
-            except sqlite3.OperationalError as error:
-                if face_store.index_path(self.vault_root).is_file():
-                    raise
-                raise FacesStopped("the face store does not exist") from error
-            self.people = face_store.connect_people(
-                self.vault_root, create=not face_store.people_path(self.vault_root).is_file()
-            )
-            self.people.execute("BEGIN IMMEDIATE")
-            self.index.execute("BEGIN IMMEDIATE")
-            if self.require_on and not self.index.execute("SELECT enabled FROM face_setting WHERE id = 1").fetchone()[0]:
-                raise FacesStopped("faces are off")
+                self.people.execute("BEGIN IMMEDIATE")
+                self.index.execute("BEGIN IMMEDIATE")
+                if self.require_on and not self.index.execute(
+                    "SELECT enabled FROM face_setting WHERE id = 1"
+                ).fetchone()[0]:
+                    raise FacesStopped("faces are off")
+            except FacesStopped:
+                self._abandon(close=False)
+                raise
+            except BaseException:
+                self._abandon(close=True)  # A connection in an unknown state is not reused.
+                raise
         except BaseException:
-            for name in ("index", "people"):
-                connection = getattr(self, name, None)
-                if connection is not None:
-                    connection.close()
             _WRITE_LOCK.release()
             raise
         return self
@@ -364,12 +452,14 @@ class Writing:
             if kind is None:
                 self.people.commit()
                 self.index.commit()
+                if self.scrub:
+                    self._empty_people_log()
             else:
-                self.people.rollback()
-                self.index.rollback()
+                self._abandon(close=False)
+        except BaseException:
+            self._abandon(close=True)
+            raise
         finally:
-            self.people.close()
-            self.index.close()
             _WRITE_LOCK.release()
 
 
@@ -383,6 +473,7 @@ def erase(vault_root: Path) -> tuple[Counts | None, list[str]]:
     writer holds a store past the busy timeout; nothing is removed then.
     """
     with _WRITE_LOCK:
+        _release(vault_root)
         held = []
         try:
             # Both write locks, in the order every writer takes them, then let go: nothing writes after this.
@@ -402,20 +493,23 @@ def erase(vault_root: Path) -> tuple[Counts | None, list[str]]:
             for connection in reversed(held):
                 connection.rollback()
                 connection.close()
-        _drop_held_centroids(vault_root)
         return found, face_store.remove_store(vault_root)
 
 
-def forget_centroids(vault_root: Path) -> None:
-    """Drop this vault's centroids held in memory: they are face data too, and off or delete must not keep them."""
+def release(vault_root: Path) -> None:
+    """Close this process's face store connections and drop its centroids, which are face data too.
+
+    Off and delete call it, so a process keeps no face data in memory and no store file open after them.
+    """
     with _WRITE_LOCK:
-        _drop_held_centroids(vault_root)
+        _release(vault_root)
 
 
-def _drop_held_centroids(vault_root: Path) -> None:
+def _release(vault_root: Path) -> None:
     people_key = str(face_store.people_path(vault_root))
     for key in [key for key in _CACHE if key[0] == people_key]:
         del _CACHE[key]
+    _close_held(vault_root)
 
 
 def _exclusions(writing: Writing, page: str) -> list[tuple[int, float | None, tuple[float, ...]]]:
@@ -550,7 +644,7 @@ def forget_pages(vault_root: Path, pages: Sequence[str]) -> int:
     if not held:
         return 0
     try:
-        with Writing(vault_root, require_on=False) as writing:
+        with Writing(vault_root, require_on=False, scrub=True) as writing:
             removed = _drop_faces(writing, keys)
             for store in (writing.people, writing.index):
                 store.execute("DELETE FROM exclusions WHERE page IN (SELECT value FROM json_each(?))", (wanted,))
