@@ -60,12 +60,13 @@ def _jpeg(
 
 
 def _file(
-    vault: Path, name: str, data: bytes, *, text: str = "A harbour at dusk.", extension: str = "jpg"
+    vault: Path, name: str, data: bytes, *, text: str = "A harbour at dusk.", extension: str = "jpg",
+    scope: str = "Photos",
 ) -> tuple[str, str]:
     """A photo filed and extracted before capture metadata existed: its page has text and no capture fields."""
     with library_scope():
         filed = preserve.preserve_bytes(
-            vault, scope="Photos", category="image", filename=f"{name}.{extension}", data=data,
+            vault, scope=scope, category="image", filename=f"{name}.{extension}", data=data,
             content_type="image/jpeg",
         )
         preserve.update_sidecar_extraction(vault, vault / filed.sidecar_path, text=text, engine="ocr")
@@ -432,12 +433,16 @@ def test_a_page_removed_while_the_preview_lists_its_folder_is_left_out_instead_o
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the move is injected into the POSIX folder open")
-def test_a_folder_moved_while_the_preview_reads_is_listed_as_a_skip_instead_of_dropped(vault, monkeypatch):
-    """Catches a preview that leaves out the photos of a folder renamed during the run and reports the rest as whole."""
+@pytest.mark.parametrize("scope", ["Photos", "Trip.md"])
+def test_a_folder_moved_while_the_preview_reads_is_listed_as_a_skip_instead_of_dropped(vault, monkeypatch, scope):
+    """Catches a preview that leaves out the photos of a folder renamed during the run and reports the rest as whole.
+
+    A folder whose name looks like a page's is still a folder.
+    """
     from exomem import _held_fs_posix
 
-    _photo, page = _file(vault, "phone", _jpeg(taken="2024:06:01 14:03:22", gps=HELSINKI))
-    folder = (vault / page).parent
+    pages = [_file(vault, name, _jpeg(taken="2024:06:01 14:03:22"), scope=scope)[1] for name in ("one", "two", "three")]
+    folder = next(parent for parent in (vault / pages[0]).parents if parent.name == scope)
     real_parent = _held_fs_posix.PosixHeldFilesystem.parent
     moved: list[str] = []
 
@@ -451,7 +456,7 @@ def test_a_folder_moved_while_the_preview_reads_is_listed_as_a_skip_instead_of_d
 
     preview = _backfill(vault)
 
-    folder_path = folder.relative_to(vault).as_posix()
     assert moved
-    assert preview["skipped_listed"] == [{"path": folder_path, "reason": capture_backfill.CHANGED_WHILE_READ}]
+    assert preview["skipped"] == {capture_backfill.FOLDER_MOVED: 1}
+    assert preview["skipped_listed"] == [{"path": folder.relative_to(vault).as_posix(), "reason": capture_backfill.FOLDER_MOVED}]
     assert preview["would_update"] == 0

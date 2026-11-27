@@ -53,6 +53,7 @@ READER_UNAVAILABLE = "this host has no decoder for the original's kind"
 RETIREMENT_UNCONFIRMED = "the Trash retirement of the original is unconfirmed"
 UNREADABLE_FOR_MATCHING = "the image could not be decoded for matching"
 CHANGED_WHILE_READ = "the page or its original kept changing while this run read it; rerun to include it"
+FOLDER_MOVED = "this folder was moved or removed while this run read it, so its pages are left out; rerun to include them"
 #: Pages read between two progress updates of the census.
 _PROGRESS_PAGES = 50
 
@@ -136,7 +137,7 @@ def backfill(
                 "a folder was moved or removed while this run read the pages, so it stopped and changed no page",
                 "Run the preview again.",
             )
-        elif error.code == "UNSAFE_PATH":
+        elif error.code in ("UNSAFE_PATH", "RESERVED_PATH"):  # a linked item, or a name the walk must not read
             message, fix = (
                 "the vault holds a linked file or folder, or a name this run cannot read safely, "
                 "so it stopped and changed no page",
@@ -221,7 +222,7 @@ def _read_plan(root: Path, archive_folder: Path | None, recovering: bool) -> _Pl
     archive = originals.ArchiveReads(root)
     # The canonical pages, which a store-mode vault keeps in its store and may not have projected to disk.
     # A page saved while the census reads it is read again; only one that keeps changing is skipped.
-    pages = media_bindings._pages(root, join_request=True, changed=lambda rel: plan.skip(rel, CHANGED_WHILE_READ))  # noqa: SLF001 - the census's page source
+    pages = media_bindings._pages(root, join_request=True, changed=lambda rel, kind: plan.skip(rel, FOLDER_MOVED if kind == "directory" else CHANGED_WHILE_READ))  # noqa: SLF001 - the census's page source
     for read_so_far, (rel, body) in enumerate(foreground_priority.yielding_in_bulk(pages)):
         if read_so_far % _PROGRESS_PAGES == 0:
             maintenance_jobs.checkpoint("reading pages", read_so_far)

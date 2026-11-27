@@ -559,15 +559,17 @@ def follow_store(vault: Path, *, batch: int = 256) -> bool:
 
 
 def _pages(
-    vault: Path, *, join_request: bool = False, headers_only: bool = False, changed: Callable[[str], None] | None = None,
+    vault: Path, *, join_request: bool = False, headers_only: bool = False,
+    changed: Callable[[str, str], None] | None = None,
 ):
     """Every canonical page under the managed root. A census reads a fresh snapshot; a request may join its own.
 
     A disk walk refuses a tree that changes while it reads it, unless the caller passes `changed`: then
     a page added or removed elsewhere is no failure, and a page that is replaced, removed or edited while
     the walk reads it is read once more after the walk, and so is a page that a save gave a second name for a
-    moment. A page that is gone by then is no page; one that changes again during that read, and a folder that
-    left during the walk, go to `changed` by their path instead of being yielded. Each page it yields was
+    moment. A page that is gone by then is no page. A page that changes again during that read, and a folder
+    that left during the walk, go to `changed` with their path and kind ("file" or "directory") instead of
+    being yielded; the folder's pages may sit under another name now. Each page it yields was
     confirmed unchanged after its read. Either way the walk refuses a page it cannot read safely, such as a
     linked file or folder, rather than leave it out.
     """
@@ -587,7 +589,7 @@ def _pages(
                 "SELECT path, body FROM store_pages WHERE path >= ? AND path < ? ORDER BY path",
                 (prefix, prefix + "\U0010ffff"))
             return  # Every ordinary companion is a store-owned page; disk is only its projection.
-        flagged: dict[str, None] = {}  # the entries the walk saw change, in walk order
+        flagged: dict[str, str] = {}  # each entry the walk saw change, with its kind, in walk order
 
         def is_page(rel: str) -> bool:
             return rel.lower().endswith(".md")
@@ -596,7 +598,9 @@ def _pages(
             vault, managed_root_rel(), require_complete=True,
             select=lambda candidates: (rel for rel, kind in candidates if kind == "file" and is_page(rel)),
             markdown_header_limit=SEMANTIC_SOURCE_MAX_BYTES if headers_only else None,
-            entry_changed=None if changed is None else (lambda relative: flagged.setdefault(managed_join(relative))),
+            entry_changed=None if changed is None else (
+                lambda relative, kind: flagged.setdefault(managed_join(relative), kind)
+            ),
         ) as entries:
             if changed is None:
                 for entry in entries:
@@ -622,7 +626,10 @@ def _pages(
                     waiting = (rel, entry.markdown)
             if waiting is not None and waiting[0] not in flagged:
                 yield waiting
-        for rel in flagged:
+        for rel, kind in flagged.items():
+            if kind == "directory":
+                changed(rel, kind)
+                continue
             if read.serves(vault, rel):
                 continue
             page = is_page(rel)
@@ -635,9 +642,9 @@ def _pages(
                     raise reserved_paths.ReservedPathLeafError("UNSAFE_PATH") from error
                 if error.code not in reserved_paths.CHANGE_CODES:
                     raise
-                if error.code == "IDENTITY_CHANGED" or not page:
-                    changed(rel)  # it changed again, or a folder left the walk and its pages may sit elsewhere now
-                continue  # a page that left is no page
+                if error.code == "IDENTITY_CHANGED" and page:
+                    changed(rel, kind)  # it changed again while it was read
+                continue  # a page that left is no page, and a photo is counted through its page
             if page:
                 yield rel, data
 
