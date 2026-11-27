@@ -28,28 +28,28 @@
 - [x] 4.1 Incremental nearest-centroid assignment with `join_similarity`, `join_margin`, `min_face_side` and `min_detection_score` read from settings; model calibrations from the manifest, policy defaults from one shipped data record, overrides from the face store.
 - [x] 4.2 Test: a face within `join_margin` of two groups starts a new group. Catches: a doubtful face merged into the wrong person.
 - [x] 4.3 Test: processing the same embeddings twice in the same order gives identical groups. Catches: non-deterministic grouping that moves names between runs.
-- [ ] 4.4 `faces.name`: name, rename and clear a group or person; NFKC case-folded comparison; a second group with an existing name joins that person; move one face out, recorded as an exclusion.
+- [x] 4.4 `faces.name`: name, rename and clear a group or person; NFKC case-folded comparison; a second group with an existing name joins that person; move one face out, recorded as an exclusion.
   The store operations exist in `face_naming`; the `faces.name` door operation lands with 5.1.
 - [x] 4.5 Test: a face moved out of a group does not rejoin it after further faces arrive. Catches: owner corrections undone by the next backfill.
 
 ## 5. Owner operations
 
 - [ ] 5.1 Door operations `faces.status` (read), `faces.set`, `faces.name` and `faces.delete` (write) in `operation_entries`, one leaf each, reachable through MCP, `exomem faces ...` and REST. Help text: owner only, call only when the owner asks in this conversation.
-- [ ] 5.2 Owner gate: every operation and `people` require `raw_protection.has_unrestricted_access`, decided before the store opens. Test: an audience-bound connector session and a projected search get `FACES_OWNER_ONLY`, and a spy shows the store never opened. Catches: face data or face-derived page membership served to another principal.
-- [ ] 5.3 Two-step turn-on: the first `faces.set` returns the disclosure and a token; the second, with the token, turns faces on and records consent time and surface. Test: a single call leaves faces off and queues nothing. Catches: biometric processing enabled by one call that no disclosure preceded.
-- [ ] 5.4 Test: a vault imported from an account with faces on arrives with faces off. Catches: an opt-in that travels with the vault into another account.
-- [ ] 5.5 `faces.status` lists groups by size with pagination and up to three sample `page` and `region` pairs; with `page`, it lists that picture's faces and their groups.
+- [x] 5.2 Owner gate: every operation and `people` require `raw_protection.has_unrestricted_access`, decided before the store opens. Test: an audience-bound connector session and a projected search get `FACES_OWNER_ONLY`, and a spy shows the store never opened. Catches: face data or face-derived page membership served to another principal.
+- [x] 5.3 Turn-on only in the CLI: `exomem faces on` prints the disclosure and requires the typed confirmation (without a terminal, `--confirm` with the exact text), then records consent time and surface `cli` and starts the backfill. `faces.set` with on from MCP or REST returns the disclosure and that command and changes nothing. Test: an agent's `faces.set` on leaves faces off and queues nothing; the CLI turns faces on only with the confirmation and records `cli`. Catches: biometric processing enabled by a call that no person confirmed.
+- [x] 5.4 Test: a vault imported from an account with faces on arrives with faces off. Catches: an opt-in that travels with the vault into another account.
+- [x] 5.5 `faces.status` lists groups by size with pagination and up to three sample `page` and `region` pairs; with `page`, it lists that picture's faces and their groups.
 
 ## 6. Search restriction
 
-- [ ] 6.1 `search_memory.people` with the description in design D8; leaf `people` on `ask_memory` and `find`; CLI flag. Regenerate the tool schema fixtures and record the measured bytes in `tests/test_tool_schema_budget.py`.
-- [ ] 6.2 `find`: resolve names once, intersect each person's page set into the eligible set, mark the search as restricted to pictures, and open no face store for a search without `people`.
-- [ ] 6.3 Test: `people` plus `file_types` `["image"]` plus a capture-date filter returns only images of that person in that month. Catches: a restriction that does not compose with the other filters.
-- [ ] 6.4 Test: two names return only pages with both people. Catches: OR semantics where the description promises each person.
-- [ ] 6.5 Test: a person seen only in a video keyframe returns the video's page. Catches: keyframe faces that never surface their video.
-- [ ] 6.6 Test: refusals `FACES_OFF`, `FACES_UNAVAILABLE` and `UNKNOWN_PERSON` lead with a repeatable sentence and name the fix, and none returns unrestricted hits. Catches: a silent fallback that shows photos of other people.
-- [ ] 6.7 Find cache key includes `people` and the face store generation. Test: after a rename, the cached search with the old name is refused. Catches: stale results after naming, correction or delete.
-- [ ] 6.8 Query-count test: a restriction issues the same number of face store queries at 1,000 and 200,000 faces. Catches: a query per face, page or group.
+- [x] 6.1 `search_memory.people` with the description in design D8; leaf `people` on `ask_memory` and `find`; CLI flag. Regenerate the tool schema fixtures and record the measured bytes in `tests/test_tool_schema_budget.py`.
+- [x] 6.2 `find`: resolve names once, intersect each person's page set into the eligible set, mark the search as restricted to pictures, and open no face store for a search without `people`.
+- [x] 6.3 Test: `people` plus `file_types` `["image"]` plus a capture-date filter returns only images of that person in that month. Catches: a restriction that does not compose with the other filters.
+- [x] 6.4 Test: two names return only pages with both people. Catches: OR semantics where the description promises each person.
+- [x] 6.5 Test: a person seen only in a video keyframe returns the video's page. Catches: keyframe faces that never surface their video.
+- [x] 6.6 Test: refusals `FACES_OFF`, `FACES_UNAVAILABLE` and `UNKNOWN_PERSON` lead with a repeatable sentence and name the fix, and none returns unrestricted hits. Catches: a silent fallback that shows photos of other people.
+- [x] 6.7 Find cache key includes `people` and the face store generation. Test: after a rename, the cached search with the old name is refused. Catches: stale results after naming, correction or delete.
+- [x] 6.8 Query-count test: a restriction issues the same number of face store queries at 1,000 and 200,000 faces. Catches: a query per face, page or group.
 
 ## 7. Off and delete
 
