@@ -14,11 +14,19 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-SCHEMA = 1
+SCHEMA = 2
 #: The shape of a version in the file and of a release tag after its `v`: `X.Y.Z`, a field format, not a reading of text.
 _VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
 Version = tuple[int, int, int]
+
+
+@dataclass(frozen=True)
+class Note:
+    """One user note: the sentence, and the short title that opens it. `title` is None for a note written without one."""
+
+    title: str | None
+    text: str
 
 
 @dataclass(frozen=True)
@@ -28,7 +36,7 @@ class Release:
     version: str
     parsed: Version
     released_on: str
-    notes: tuple[str, ...]
+    notes: tuple[Note, ...]
 
 
 def parse_version(text: object) -> Version | None:
@@ -40,15 +48,33 @@ def version_text(version: Version) -> str:
     return ".".join(map(str, version))
 
 
+def note_object(note: Note) -> dict[str, str | None]:
+    """A note as the file and the cell's `whats_new` answer carry it."""
+    return {"title": note.title, "text": note.text}
+
+
 def document(releases: Iterable[Release]) -> dict:
     """The file's content for `releases`, in the order given."""
     return {
         "schema": SCHEMA,
         "releases": [
-            {"version": release.version, "released_on": release.released_on, "notes": list(release.notes)}
+            {
+                "version": release.version,
+                "released_on": release.released_on,
+                "notes": [note_object(note) for note in release.notes],
+            }
             for release in releases
         ],
     }
+
+
+def _note(entry: object, version: object) -> Note:
+    if not isinstance(entry, dict) or set(entry) != {"title", "text"}:
+        raise ValueError(f"release {version} has a note that is not an object with a title and a text")
+    title, text = entry["title"], entry["text"]
+    if not isinstance(text, str) or not text.strip() or not (title is None or isinstance(title, str) and title.strip()):
+        raise ValueError(f"release {version} has a note whose text or title is not text")
+    return Note(title, text)
 
 
 def _release(entry: object) -> Release:
@@ -64,9 +90,9 @@ def _release(entry: object) -> Release:
         canonical = False
     if not canonical:
         raise ValueError(f"release {version} has released_on {released_on!r}, not YYYY-MM-DD")
-    if not isinstance(notes, list) or not notes or not all(isinstance(note, str) and note.strip() for note in notes):
-        raise ValueError(f"release {version} has no notes, or a note that is not text")
-    return Release(version, parsed, released_on, tuple(notes))
+    if not isinstance(notes, list) or not notes:
+        raise ValueError(f"release {version} has no notes")
+    return Release(version, parsed, released_on, tuple(_note(note, version) for note in notes))
 
 
 def parse_document(text: str) -> tuple[Release, ...]:

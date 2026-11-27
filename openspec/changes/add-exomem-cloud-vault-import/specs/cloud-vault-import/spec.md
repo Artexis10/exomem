@@ -133,12 +133,21 @@ While a restore's prior directory exists, a cell SHALL NOT start on an empty vau
 
 A failed import SHALL leave existing canonical content intact. Interrupted member preservation MAY leave unreferenced RAW-protected blobs. When an import ends, the archive object, any unfinished upload and the import's identity SHALL be deleted. The tenant SHALL see the import's state and, on failure, its typed error, with no content in either.
 
-Import logs SHALL be content-free: counts, sizes, durations and error codes only, never member names or paths.
+Import logs SHALL be content-free: counts, sizes, durations, error codes and the cause of a failure, never member names or paths.
 
 #### Scenario: An import fails partway
 
 - **WHEN** unpacking fails after some members were written to staging
 - **THEN** the staging folder is removed, existing notes are untouched, and the archive object and identity are deleted
+
+### Requirement: A failed import Job's log names its cause without content
+
+The log of a failed import Job SHALL name its cause: the exception class and function, the class and number of the operating system error behind it, the container's termination reason and exit code, and the Job's failure condition reason. It SHALL NOT carry member names, paths, addresses or exception text. A Job that the kernel killed for memory and that left no report SHALL end with `IMPORT_OUT_OF_MEMORY`, and any other end without a report with `IMPORT_KILLED`.
+
+#### Scenario: A killed import names its cause without content
+
+- **WHEN** the kernel kills the import Job's container for memory and the Job leaves no report
+- **THEN** the import ends with `IMPORT_OUT_OF_MEMORY`, and the controller's log names the container's reason and exit code before it deletes the Job, with no member name, path or exception text
 
 ### Requirement: Protected ZIP imports preserve members without readable staging
 

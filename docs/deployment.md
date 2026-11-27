@@ -1861,6 +1861,31 @@ A request with a local token acts as the owner and is recorded as
 `principal_kind: owner-local`; access log lines carry `ingress=local` and the
 client label, never the token. Tokens give attribution and revocation, not
 isolation: any process running as your user that can read the file can use it.
+A token that nobody revokes stays valid until someone does. The command does
+not check who runs it: any process that runs as your user and can read the
+service configuration can issue, list and revoke local tokens.
+
+An agent that needs a token, for `exomem attach` or to redeem a held upload,
+needs the same command. Issuing needs `EXOMEM_JWT_SIGNING_KEY`, which can
+forge any owner session, so give the agent a wrapper instead of the key. The
+wrapper:
+
+- keeps the signing key out of the agent's environment, so it never reaches the agent's context, transcript or child processes; the agent can still read the service configuration;
+- passes a neutral task id as the client label, never a description that
+  could name a person or client, because the label reaches every access log
+  line;
+- logs each session id;
+- revokes the token with `exomem auth revoke -- SESSION_ID` when the task
+  ends.
+
+A refusal that a wrapper makes, such as for a caller of another tenant or for
+an output path inside a git work tree, guards against mistakes. It is not a
+security boundary, because any process of your user can read the service
+configuration and run the command directly. To keep an excluded tenant away
+from this owner's memory, use a separate OS user or machine.
+`exomem auth revoke` does not check who issued a session. `--all` ends every
+session, remote ones included. Nothing enforces who runs it, so a wrapper for
+agents should never offer `--all`; leave it to the operator.
 
 A client then points at `http://127.0.0.1:8764/mcp` with
 `Authorization: Bearer <token file contents>`. Two helpers use the token file:
@@ -2473,7 +2498,7 @@ sc.exe start exomem
 | Edits to `.env` not picked up | service didn't restart | Restart the service (elevated on Windows). Confirm the python process restarted. |
 | 404 / Funnel "no service" | Tunnel disabled or pointing at the wrong port | `tailscale funnel status` (or check `cloudflared`); re-run the tunnel command from step 2. |
 | `KB vault not found` on startup | vault path moved or `EXOMEM_VAULT_PATH` wrong | set `EXOMEM_VAULT_PATH` to the absolute vault root in `.env`. |
-| Schema parse error on startup | `_Schema/references/frontmatter.md` shape changed | diff against the version that was working; the parser is conservative on purpose. |
+| Schema parse error on startup | `_Schema/references/page-types.md` source section shape changed | diff against the version that was working; the parser is conservative on purpose. |
 | Connector setup stalls mid-burst behind ngrok | Free-tier rate limit (120 req/min) | Check the ngrok agent console for `429`s. Wait and retry, or upgrade / switch to Cloudflare Tunnel. |
 | OAuth redirect hangs the first time behind ngrok free | The one-time browser interstitial | Open the public URL once in a browser and click through the interstitial; it does not recur. |
 | `add` fails with `INVALID_SOURCE` | missing required field (url for article/paper/video; non-empty content/title) | the error payload names the missing field; fix and retry. |

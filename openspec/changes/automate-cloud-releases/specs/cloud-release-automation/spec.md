@@ -1,12 +1,8 @@
-## Purpose
-
-Moves each successful Exomem release into Cloud's `cell_image` without an operator step, unless the release needs a platform upgrade or crosses an upgrade barrier, and alerts the operator when a rollout stops.
-
 ## ADDED Requirements
 
 ### Requirement: A release sets the cell image only after its attestation verifies
 
-The `cloud-deploy` workflow SHALL run on a dispatch on `main`. The release workflow's tag run SHALL send that dispatch after it publishes and attests the release's images. It SHALL act only on the newest published release. It SHALL set `cell_image` through Substrate's release route only after the cell image's attestation verifies as this repository's release workflow on the release tag. It SHALL send the digest with its verified release tag.
+The `cloud-deploy` workflow SHALL run on a dispatch on `main`. The release workflow's tag run SHALL send that dispatch after it publishes and attests the release's images. It SHALL target the newest release, or the newest older one the platform carries when a gate stops it. It SHALL set `cell_image` through Substrate's release route only after the cell image's attestation verifies as this repository's release workflow on the release tag. It SHALL send the digest with its verified release tag.
 
 #### Scenario: An attested release passes every gate
 
@@ -116,7 +112,7 @@ Substrate's deploy principal SHALL be able to read the rollout view and to set `
 
 ### Requirement: Cells move only when the platform carries the release
 
-The workflow SHALL set `cell_image` only when the newest successful platform Deployment names a release whose chart and controller build inputs equal the new release's. The build inputs SHALL be the files under `infra/helm/platform/` and `infra/cellctl/`, except Markdown files and test directories. Otherwise, or with no platform Deployment, the workflow SHALL set nothing and raise `cloud-release-platform-needed` through the alert receiver. After a person upgrades the platform, the platform upgrade command or the runbook step SHALL dispatch the workflow on `main`. The workflow SHALL then resolve the alert when the gate passes.
+The workflow SHALL set `cell_image` only when the newest successful platform Deployment names a release whose chart and controller build inputs equal the new release's. The build inputs SHALL be the files under `infra/helm/platform/` and `infra/cellctl/`, except Markdown files and test directories. Otherwise, it SHALL NOT set that release and SHALL raise `cloud-release-platform-needed` through the alert receiver, and it SHALL set nothing when no older release qualifies. With no platform Deployment, it SHALL set nothing and raise the alert. After a person upgrades the platform, the platform upgrade command or the runbook step SHALL dispatch the workflow on `main`. The workflow SHALL then resolve the alert when the gate passes.
 
 #### Scenario: The release changes no platform build input
 
@@ -126,7 +122,7 @@ The workflow SHALL set `cell_image` only when the newest successful platform Dep
 #### Scenario: The release changes the chart
 
 - **WHEN** the new release changes a template or value file under `infra/helm/platform/` since the platform Deployment's release
-- **THEN** the workflow sets nothing, raises `cloud-release-platform-needed`, and fails
+- **THEN** the workflow does not set that release, raises `cloud-release-platform-needed`, and sets the newest older release that the platform carries, or sets nothing and fails when none qualifies
 
 #### Scenario: The release changes only controller tests and docs
 
@@ -145,17 +141,17 @@ The workflow SHALL set `cell_image` only when the newest successful platform Dep
 
 ### Requirement: Upgrade barriers stop the automation
 
-The barrier file SHALL list each release that is one-way or needs an operator step, with its scope, kind and runbook section. A pull request that adds such a change SHALL add its entry. From phase 1, the workflow SHALL read the barrier file. It SHALL set nothing while an entry of either scope lies at or below the new release and no successful platform Deployment lists it in `barriers_crossed`. The platform upgrade command SHALL refuse to cross a `platform` entry without `--crossed`. Crossing a one-way entry SHALL never roll back automatically.
+The barrier file SHALL list each release that is one-way or needs an operator step, with its scope, kind and runbook section. A pull request that adds such a change SHALL add its entry. From phase 1, the workflow SHALL read the barrier file. It SHALL NOT set a release while an entry of either scope lies at or below it and no successful platform Deployment lists the entry in `barriers_crossed`. The platform upgrade command SHALL refuse to cross a `platform` entry without `--crossed`. Crossing a one-way entry SHALL never roll back automatically.
 
 #### Scenario: A release crosses an uncrossed barrier
 
 - **WHEN** an entry lies at or below the new release, and no successful platform Deployment lists it as crossed
-- **THEN** the workflow sets nothing, raises `cloud-release-barrier` with the entry's ID, and fails
+- **THEN** the workflow does not set that release, raises `cloud-release-barrier` with the entry's ID, and sets the newest older release that no entry stops and that the platform carries, or sets nothing and fails when none qualifies
 
 #### Scenario: A platform barrier outside the gated paths
 
 - **WHEN** an uncrossed `platform` entry lies at or below a release that changes no chart or controller build input
-- **THEN** the workflow sets nothing and raises `cloud-release-barrier`
+- **THEN** the workflow does not set that release and raises `cloud-release-barrier`
 
 #### Scenario: A person crossed the barrier
 

@@ -200,6 +200,13 @@ def install_skill(
     records: list[dict] = []
     for item in targets:
         mode = _mirror_tree(item["source"], item["target"], link=link)
+        if item["kind"] == "workflow" and mode == "copy":
+            # A workflow skill links the authoring contract and other references beside it; copy the same
+            # payload the archives and the plugin ship, so a standalone install resolves those links.
+            for relative, text in package_skills.skill_payload(item["name"]).items():
+                path = item["target"] / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8", newline="\n")
         files = _count_files(item["source"] if mode == "symlink" else item["target"])
         records.append(
             {

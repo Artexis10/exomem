@@ -103,12 +103,12 @@ def test_a_correction_teaches_a_name_the_next_session_uses(journey_vault: Path) 
 
     _edit(
         journey_vault,
-        name["path"],
+        name["call"]["args"]["path"],
         {
             "kind": "patch_frontmatter",
-            "field": name["field"],
-            "value": [*name["current"], "Schlitten"],
-            "expected_hash": name["expected_hash"],
+            "field": name["call"]["args"]["operation"]["field"],
+            "value": [*name["call"]["args"]["operation"]["value"], "Schlitten"],
+            "expected_hash": name["call"]["args"]["operation"]["expected_hash"],
         },
         why="the user calls the cargo sled 'Schlitten'",
     )
@@ -151,18 +151,18 @@ def test_a_correction_teaches_a_referential_cue_in_another_language(journey_vaul
     }
     validated = commands.op_schema_memory(
         journey_vault,
-        subject=cue["subject"],
+        subject=cue["call"]["args"]["subject"],
         operation="validate",
         proposal=proposal,
     )
     assert validated["valid"] is True, validated["findings"]
     commands.op_schema_memory(
         journey_vault,
-        subject=cue["subject"],
-        operation=cue["operation"],
+        subject=cue["call"]["args"]["subject"],
+        operation=cue["call"]["args"]["operation"],
         proposal=proposal,
         why="the user resumes work in French",
-        expected_hash=cue["expected_hash"],
+        expected_hash=cue["call"]["args"]["expected_hash"],
     )
 
     _fresh_session()
@@ -194,7 +194,7 @@ def test_reverting_a_learned_name_restores_abstention(journey_vault: Path) -> No
             "kind": "patch_frontmatter",
             "field": "learned_aliases",
             "value": ["Schlitten"],
-            "expected_hash": name["expected_hash"],
+            "expected_hash": name["call"]["args"]["operation"]["expected_hash"],
         },
     )
     _fresh_session()

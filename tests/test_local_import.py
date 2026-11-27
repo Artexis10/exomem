@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from exomem import __main__ as cli
-from exomem import adoption_run, commands, import_stage, local_import, state_migration, state_paths
+from exomem import adoption_run, commands, extraction_parts, import_stage, local_import, state_migration, state_paths
 from exomem.cli_progress import Progress
 from exomem.local_import import LocalImportError, stage
 
@@ -95,6 +95,21 @@ def test_folder_is_staged_verified_and_adoption_scans_it_under_the_folder_name(t
     prefix = result["start_path"] + "/Field Notes/"
     assert run["collection"]["label"] == "Field Notes"
     assert {row["path"] for row in run["inventory"]} == {prefix + rel for rel in copied}
+
+
+@not_root
+def test_a_long_transcript_is_staged_with_its_hidden_part_folder_without_the_hidden_flag(tmp_path):
+    parts = extraction_parts.folder_for(Path("talk.md")).as_posix()
+    files = {"talk.md": b"first part", f"{parts}/part-02.md": b"second part", ".other/x.txt": b"hidden"}
+    folder = _folder(tmp_path, files)
+
+    result = stage(folder, _vault(tmp_path))
+
+    staged = tmp_path / "vault" / result["start_path"] / "Field Notes"
+    assert _tree(staged) == {rel: files[rel] for rel in ("talk.md", f"{parts}/part-02.md")}
+    assert result["part_folders"] == 1
+    codes = {record["path"]: record["code"] for record in _manifest(result) if record["kind"] == "left_out"}
+    assert codes == {".other": "HIDDEN"}
 
 
 def test_folder_larger_than_the_free_space_is_refused_before_anything_is_copied(tmp_path):

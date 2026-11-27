@@ -1,0 +1,32 @@
+schema_version: 1
+registry: source-formats
+# App exports that filing recognises and files one Source per item. Each entry is the facts of one
+# vendor format. A file is that format when its name matches `file_glob` and the first item of its JSON
+# array carries every key of `item_keys`; a ChatGPT export since February 2026 is several numbered files.
+# `parser` names the reader that code implements, `item_kind` the Source kind that each item files as,
+# and `roles` the vendor's author roles that a transcript shows, each with its display label. `untitled`
+# titles a conversation that has no title and `attachment` heads a quoted attachment, so a format brings
+# the words of its own language. A vault may retire an entry or change `roles`, `untitled` and `attachment`.
+entries:
+  chatgpt-conversations:
+    label: ChatGPT conversations
+    description: The conversations.json of a ChatGPT data export, or each numbered conversations-000.json shard of it.
+    attributes:
+      file_glob: conversations*.json
+      item_keys: [mapping, current_node]
+      parser: chatgpt-conversations
+      item_kind: session
+      roles: {user: You, assistant: ChatGPT}
+      untitled: Untitled conversation
+      attachment: Attachment
+  claude-conversations:
+    label: Claude conversations
+    description: The conversations.json of a Claude data export.
+    attributes:
+      file_glob: conversations.json
+      item_keys: [chat_messages, uuid]
+      parser: claude-conversations
+      item_kind: session
+      roles: {human: You, assistant: Claude}
+      untitled: Untitled conversation
+      attachment: Attachment

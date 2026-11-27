@@ -26,7 +26,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from . import markdown_relations
+from . import call_spans, markdown_relations
 from . import review_state as review_state_module
 
 log = logging.getLogger(__name__)
@@ -243,6 +243,7 @@ def _is_entity(frontmatter: Mapping[str, Any]) -> bool:
     return str(frontmatter.get("type") or "") == "entity"
 
 
+@call_spans.timed("post_commit.promotions")
 def record_page_write(
     vault_root: Path,
     path: str,

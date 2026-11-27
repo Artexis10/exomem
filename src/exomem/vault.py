@@ -150,7 +150,7 @@ APPEND_ONLY_KB_SUBPATHS: tuple[str, ...] = (
 )
 
 # Frontmatter keys the schema deliberately excludes (see _scaffold's
-# references/frontmatter.md), each with the remedy its refusal states: a claim carries no
+# references/page-types.md), each with the remedy its refusal states: a claim carries no
 # confidence score (trust is citations + link count, and a degree of belief is its own belief
 # unit), and knowledge does not expire on a schedule. Governed write paths refuse them so the
 # documented "no confidence floats / no retention decay" stance is actually enforced, not just
@@ -9602,7 +9602,7 @@ def store_inbound_sources(conn, rels: Iterable[str]) -> frozenset[str]:
 
 def _underived_inbound(
     conn, paths: Iterable[str] | None = None
-) -> dict[str, tuple[str, list[tuple[int, str, str, str]]] | None]:
+) -> dict[str, tuple[str, tuple[tuple[int, str, str, str], ...]] | None]:
     """The rows that each page whose derivation trails its stored bytes will hold, from those bytes.
 
     A failed or waiting derivation leaves a page's inbound rows describing bytes that the store no
@@ -9611,19 +9611,23 @@ def _underived_inbound(
     reach it, or its bytes are not UTF-8), as the drain writes them once it succeeds. No link guard
     or link rewrite then trusts a row that its page no longer gives. With ``paths`` the read covers
     those pages alone; without, it covers every pending page, which any of them could change a link
-    for, and ``derivation.underived`` refuses it when the backlog passes ``UNDERIVED_CAP``.
+    for, and ``derivation.underived_parsed`` refuses it when the backlog passes ``UNDERIVED_CAP``.
     """
     from .vault_store import derivation
     from .vault_store import read as store_read
 
-    given: dict[str, tuple[str, list[tuple[int, str, str, str]]] | None] = {}
-    for rel, raw in derivation.underived(conn, paths).items():
+    def rows(rel: str, raw: bytes) -> tuple[str, tuple[tuple[int, str, str, str], ...]] | None:
         try:
-            given[rel] = (None if raw is None or not store_read.walk_member(rel)
-                          else inbound_rows(rel, raw.decode("utf-8")))
+            if not store_read.walk_member(rel):
+                return None
+            stem, links = inbound_rows(rel, raw.decode("utf-8"))
         except UnicodeDecodeError:
-            given[rel] = None
-    return given
+            return None
+        return stem, tuple(links)  # every check that reads this page shares the result
+
+    # A failed page stays pending for as long as it fails: each page is parsed once while its bytes
+    # stay the same, not on every check (``derivation.underived_parsed``).
+    return derivation.underived_parsed(conn, paths, "inbound", rows)
 
 
 def _store_inbound(
@@ -10138,7 +10142,75 @@ class WikilinkCandidate:
 
 def _wikilink_path_key(path: str) -> str:
     """Keep the legacy canonical key separate from the indexed physical path."""
-    return path.removesuffix(".md")
+    return wikilink_keys(path, None)[0]
+
+
+def wikilink_keys(path: str, title: str | None) -> tuple[str, str, str | None]:
+    """One physical page's resolver keys, shared by the full resolver and indexed projection."""
+    path_key = path.removesuffix(".md")
+    return path_key, path_key.rsplit("/", 1)[-1], _keyed_title(title)[0]
+
+
+@dataclass(frozen=True, slots=True)
+class WikilinkMatches:
+    """Admitted physical witnesses; exhaustion proves zero/one, two witnesses prove ambiguity."""
+
+    candidates: tuple[WikilinkCandidate, ...]
+    complete: bool
+
+
+@dataclass(frozen=True, slots=True)
+class WikilinkResolution:
+    """A pure selector's outcome, including the next lookup needed by an incomplete selection."""
+
+    status: Literal["resolved", "ambiguous", "missing", "incomplete"]
+    canonical: str = ""
+    matches: WikilinkMatches | None = None
+    axis: str = ""
+    key: str = ""
+
+    @property
+    def candidate(self) -> WikilinkCandidate | None:
+        return self.matches.candidates[0] if self.status == "resolved" and self.matches else None
+
+    @property
+    def diagnostics(self) -> dict[str, Any]:
+        witnesses = self.matches.candidates if self.matches else ()
+        count = "match_count" if self.matches is not None and self.matches.complete else "match_count_lower_bound"
+        return {"status": self.status, count: len(witnesses), "witnesses": [item.path for item in witnesses]}
+
+
+def wikilink_lookup_stages(target: str) -> list[tuple[str, str]]:
+    """The `(axis, key)` lookups that resolve `target`, in precedence order; none for a blank one."""
+    cleaned = wikilink_page_key(split_wikilink_target(target)[0])
+    if not cleaned:
+        return []
+    stages = [("path", cleaned), ("path", managed_join(cleaned))]
+    if "/" not in cleaned:
+        stages.extend((("stem", cleaned), ("title", title_key(cleaned))))
+    return stages
+
+
+def select_wikilink(
+    target: str, lookup: Callable[[str, str], WikilinkMatches | None],
+) -> WikilinkResolution:
+    """Apply normalizer precedence to prepared proofs without I/O or legacy fallbacks."""
+    anchor = split_wikilink_target(target)[1]
+    stages = wikilink_lookup_stages(target)
+    if not stages:
+        return WikilinkResolution("missing")
+    for axis, key in stages:
+        matches = lookup(axis, key)
+        if matches is None:
+            return WikilinkResolution("incomplete", axis=axis, key=key)
+        if len(matches.candidates) >= 2:
+            return WikilinkResolution("ambiguous", matches=matches, axis=axis, key=key)
+        if not matches.complete:
+            return WikilinkResolution("incomplete", matches=matches, axis=axis, key=key)
+        if matches.candidates:
+            return WikilinkResolution("resolved", _wikilink_path_key(matches.candidates[0].path) + anchor,
+                                      matches, axis, key)
+    return WikilinkResolution("missing")
 
 
 def wikilink_candidates(
@@ -10357,7 +10429,7 @@ class WikilinkResolver:
         )
         self.full_paths.add(no_ext)
         self.kb_stripped.add(managed_relative(no_ext))
-        _insert_into_bucket(self.stems, no_ext.rsplit("/", 1)[-1], no_ext)
+        _insert_into_bucket(self.stems, wikilink_keys(rel_path, None)[1], no_ext)
         if title_lower:
             _insert_into_bucket(self.titles, title_lower, no_ext)
 
@@ -10828,11 +10900,6 @@ def _normalize_wikilink(
         resolver = resolver_factory() if resolver_factory is not None else WikilinkResolver(vault_root)
     contains = targeted_namespace_contains if targeted else resolver.full_paths.__contains__
 
-    def _matches(keys: Iterable[str], *, title_key: str | None = None) -> list[WikilinkCandidate]:
-        return wikilink_candidates(
-            resolver.candidates_by_key, keys, title_key=title_key, visible=visible
-        )
-
     def _selected(
         matches: list[WikilinkCandidate], kind: str,
     ) -> tuple[str, str | None, WikilinkCandidate | None]:
@@ -10850,7 +10917,9 @@ def _normalize_wikilink(
             f"by {kind}; left unchanged. Files: {paths}"
         ), None
 
-    # Full paths take precedence over Knowledge-Base-relative paths.
+    # Full paths take precedence over Knowledge-Base-relative paths. A path that a page left
+    # and a visible live page claims names the claimant, so that check runs before the live
+    # path, stem and title selection below.
     for key in (cleaned, managed_join(cleaned)):
         if contains(key):
             # The resolver's kept claims answer the common case, a path that no page left,
@@ -10863,9 +10932,29 @@ def _normalize_wikilink(
                     return _selected(claimed, "prior path")
             if targeted:
                 return key + anchor, None, None
-            matches = _matches((key,))
-            if matches:
-                return _selected(matches, "path")
+            # A live page at this key wins over a squatted later key, as it does for
+            # main's per-key order; select_wikilink then resolves this key's path axis.
+            if wikilink_candidates(resolver.candidates_by_key, (key,), visible=visible):
+                break
+
+    if not targeted:
+        def prepared(axis: str, key: str) -> WikilinkMatches:
+            if axis == "path":
+                keys = (key,) if contains(key) else ()
+            elif axis == "stem":
+                keys = resolver.stems.get(key, ())
+            else:
+                keys = resolver.titles.get(key, ())
+            return WikilinkMatches(tuple(wikilink_candidates(
+                resolver.candidates_by_key, keys,
+                title_key=key if axis == "title" else None, visible=visible,
+            )), True)
+
+        selected = select_wikilink(target, prepared)
+        if selected.status == "resolved":
+            return selected.canonical, None, selected.candidate
+        if selected.status == "ambiguous":
+            return _selected(list(selected.matches.candidates), selected.axis)
 
     # A path that a moved page left names that page while exactly one visible live page claims it.
     if "/" in cleaned:

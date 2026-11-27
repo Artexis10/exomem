@@ -14,7 +14,7 @@ import logging
 import math
 import sqlite3
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -362,18 +362,26 @@ def _fts_posting_bytes(text: str, *, trigram: bool) -> int:
     return terms * (1 + 2 * 9 + 3 + 2 + 2 * 9) + term_bytes + occurrences * position
 
 
+def _record_bytes(values: Iterable[Any]) -> int:
+    return sum(9 + (len(value.encode()) if isinstance(value, str) else 8) for value in values)
+
+
 def _lexical_allocation_bytes(rows: lexstore.PageRows | None) -> int:
     if rows is None:
         return 0
-    documents = (rows.stemmed, *(unit.stemmed for unit in rows.units))
+    documents = (rows.stemmed, rows.title_stemmed, *(unit.stemmed for unit in rows.units))
     columns = (rows.title_lower, rows.body_lower)
     units = (rows.columns, *(unit.columns for unit in rows.units))
     structure_size = len((rows.structure_json or "").encode())
-    records = sum(
-        sum(9 + (len(value.encode()) if isinstance(value, str) else 8)
-            for value in unit.values())
-        for unit in units
-    ) + structure_size
+    records = sum(_record_bytes(unit.values()) for unit in units) + structure_size
+    # Key rows hold short values once in the table and once in each index over it: `unit_row_keys`
+    # has its primary key and one index, `wikilink_keys` its primary key and three indexes.
+    records += sum(
+        3 * (9 + _record_bytes((unit.columns["parent_path"], unit.columns["unit_ref"], key)))
+        for unit in rows.units for key in unit.row_keys
+    )
+    path = rows.columns["path"]
+    records += 5 * (9 + _record_bytes((path, *vault.wikilink_keys(path, rows.columns["title"]))))
     if not lexstore.fts5_available():
         return records
     content = sum(len(text.encode()) for text in (*documents, *columns))

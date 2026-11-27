@@ -80,9 +80,9 @@ requiring the missing structure.
 | Temporal: created/updated/captured + recency lane + evolution narrative | PARTIAL | `find_policy.py`, `evolution.py` |
 | Bitemporal valid-from/valid-to; as-of queries; event-time vs ingestion-time | **ABSENT** | no such fields anywhere in `src/exomem/` |
 | First-class disputed/contested state | **ABSENT** (detection exists, state does not) | lifecycle = draft/active/superseded/archived |
-| Numeric confidence/uncertainty fields | **ABSENT** *(by design)* | `_Schema/references/frontmatter.md` "No confidence floats" |
+| Numeric confidence/uncertainty fields | **ABSENT** *(by design)* | `_Schema/references/page-types.md` (a claim carries no confidence score) |
 | Prompt-injection defenses on ingested content | **ABSENT** | one prose principle; no detector/quarantine/trust tier; no tests |
-| Belief-level revocation primitive | **ABSENT** *(by design — supersede/archive instead)* | `frontmatter.md` "deletion happens by archive" |
+| Belief-level revocation primitive | **ABSENT** *(by design — supersede/archive instead)* | `_Schema/references/supersession.md` (archive, never delete) |
 
 The five ABSENT rows are first-class benchmark targets, not footnotes: Track B
 contains as-of, disputed-state, calibration, injection-as-data, and

@@ -21,8 +21,8 @@ from membench.clock import week_date
 from membench.generate import _lint_vocabulary
 
 from benchmarks.membench.world import core
-from benchmarks.membench.world.core import Vocabulary
-from benchmarks.membench.world.keys import write_keys
+from benchmarks.membench.world.core import Vocabulary, source_ref
+from benchmarks.membench.world.keys import key_spec, write_keys
 from benchmarks.membench.world.loader import load_catalogue
 from benchmarks.membench.world.pack import PACKS_DIR, load_pack
 from benchmarks.membench.world.planner import PLANTED, RoundSpec, Thread, plan_world
@@ -277,10 +277,10 @@ def test_a_probe_that_can_only_use_a_form_of_its_own_thread_shares_a_surface_for
     tmp_path: Path,
 ) -> None:
     def one_form_for_both(raw: dict[str, Any]) -> None:
-        raw["forms"].remove(form(raw, "probe-state-1"))
+        raw["forms"].remove(form(raw, "probe-state-kind"))
         shared = form(raw, "question-stated-1")
         shared["serves"], shared["text"] = (
-            ["statement.question", "probe.state"],
+            ["statement.question", "probe.state.kind_tag.kind"],
             "Which {about} for {subject}?",
         )
 
@@ -296,6 +296,42 @@ def test_a_probe_that_can_only_use_a_form_of_its_own_thread_shares_a_surface_for
 def test_a_bank_of_another_split_cannot_render_a_world() -> None:
     train = plan_world(RoundSpec(SLICE_ONE), CATALOGUE, PACK, VOCABULARY, "train", 7)
     assert refused_codes(BANK, train, STATED) == {"wrong-bank"}
+
+
+def test_a_statement_request_keeps_its_resolvable_source_record_target() -> None:
+    """Two statements about one attribute must remain distinct task targets."""
+    world = PLAN.world()
+    rendering = render(PLAN, CATALOGUE, BANK, STATED)
+    statements = 0
+    for probe in rendering.probes:
+        thread = next(t for t in PLAN.threads if t.id == probe.thread)
+        part = key_spec(CATALOGUE, thread, probe.form)["value"]
+        target = thread.resolve(part["of"])
+        if isinstance(target, str) and target in world.statements:
+            assert source_ref(target) in probe.text
+            assert any(source_ref(target) in d.text for d in rendering.documents.values())
+            statements += 1
+    assert statements > 0
+
+
+def test_a_generic_action_form_cannot_hide_a_missing_reading_request(tmp_path: Path) -> None:
+    """Missing attribution wording must fail before actors receive a generic action request."""
+    def replace_request(raw: dict[str, Any]) -> None:
+        form(raw, "probe-act-attribution")["serves"] = ["probe.act"]
+
+    with pytest.raises(RenderRefused) as refused:
+        render(PLAN, CATALOGUE, bank_with(tmp_path, replace_request), STATED)
+    assert {r.code for r in refused.value.refusals} == {"no-form"}
+    assert all("probe.act.holder_ledger.holders" in r.detail for r in refused.value.refusals)
+
+
+def test_a_probe_selector_cannot_name_an_unknown_reading(tmp_path: Path) -> None:
+    def mistype_reading(raw: dict[str, Any]) -> None:
+        form(raw, "probe-act-attribution")["serves"] = ["probe.act.holder_ledger.missing"]
+
+    with pytest.raises(BankRefused) as refused:
+        bank_with(tmp_path, mistype_reading)
+    assert {r.code for r in refused.value.refusals} == {"unknown-reference"}
 
 
 def test_a_text_that_holds_a_value_it_must_not_hold_is_named() -> None:

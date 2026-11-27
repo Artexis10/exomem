@@ -221,7 +221,7 @@ def test_a_discard_that_fails_for_a_reason_a_retry_may_fix_carries_no_retry_valu
 
     result = _run_discard(monkeypatch, vault, import_id, tmp_path=tmp_path)
 
-    assert result == {"ok": False, "error": "IMPORT_FAILED"}
+    assert result["error"] == "IMPORT_FAILED" and "retry" not in result
 
 
 # 4

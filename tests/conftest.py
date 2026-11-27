@@ -36,6 +36,7 @@ from exomem import find as find_module
 from exomem import graph_sync as graph_sync_module
 from exomem import schema as schema_module
 from exomem import semantic_contract as semantic_contract_module
+from exomem.vault_store import derivation as store_derivation_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
@@ -976,6 +977,18 @@ def _reset_corpus_context_cache():
     yield
     semantic_contract_module.reset_corpus_context_cache()
     activation_manifest_module.reset_manifest_cache()
+
+
+@pytest.fixture(autouse=True)
+def _reset_parsed_pages():
+    """Every test starts with no kept parse of a failed store page.
+
+    The parses are kept by path and bytes, which a test vault reuses under another test's patched
+    parser or counter; a per-test reset keeps one test's parse from answering another's check.
+    """
+    with store_derivation_module._PARSED_LOCK:
+        store_derivation_module._PARSED.clear()
+    yield
 
 
 @pytest.fixture

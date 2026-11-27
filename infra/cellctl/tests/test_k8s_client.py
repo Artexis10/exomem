@@ -4,6 +4,7 @@ restore Jobs count as the current hold's."""
 from __future__ import annotations
 
 import json
+import uuid
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace as NS
@@ -17,6 +18,8 @@ from urllib3.response import HTTPResponse
 
 from cellctl import manifests
 from cellctl.export_layout import PACK, PAUSE, UPLOAD, job_name, legacy_job_name
+from cellctl.imports import ImportRow, decide_import
+from cellctl.imports import job_name as import_job_name
 from cellctl.k8s_client import (
     CELL_LABEL,
     VERIFICATION_SLOT_KEY,
@@ -30,6 +33,7 @@ from cellctl.manifests import (
     JOB_KIND_LABEL,
     hold_job_name,
 )
+from cellctl.state import CellRow, ClusterObservation
 
 CELL_ID = "aaaaaaaaaaaaaaaa"
 NAMESPACE = f"exo-cell-{CELL_ID}"
@@ -102,10 +106,12 @@ def _matches(labels: dict[str, str], selector: str | None) -> bool:
     return True
 
 
-def _job(*, succeeded: bool = False, failed: bool = False, active: bool = False, created: datetime | None = None):
+def _job(*, succeeded: bool = False, failed: bool = False, active: bool = False, created: datetime | None = None,
+         failed_reason: str | None = None):
+    conditions = [NS(type="Failed", status="True", reason=failed_reason)] if failed_reason else None
     return NS(metadata=NS(creation_timestamp=created),
               status=NS(succeeded=1 if succeeded else None, failed=1 if failed else None,
-                        active=1 if active else None, start_time=None))
+                        active=1 if active else None, start_time=None, conditions=conditions))
 
 
 def _job_pod(job_name: str, *, snapshot_id: str, running_since: datetime | None = None):
@@ -401,6 +407,65 @@ def test_a_failed_exports_reason_survives_its_job_without_logging_private_text(c
     assert "RESOURCE_LIMIT_EXCEEDED" in caplog.text and "max_file_bytes" in caplog.text
     assert '"cause": "OSError"' in caplog.text and '"errno": 28' in caplog.text
     assert "private-record" not in caplog.text
+
+
+def _failed_import(import_id: str, *, report: dict | None, reason: str, exit_code: int):
+    """A cluster whose import Job failed in a container that ended as given; no report is a container killed from outside."""
+    name = import_job_name(import_id, "import")
+    pod = _job_pod(name, snapshot_id=json.dumps(report) if report else "")
+    pod.status.phase = "Failed"
+    pod.status.container_statuses[0].state.terminated.exit_code = exit_code
+    pod.status.container_statuses[0].state.terminated.reason = reason
+    return _client(hold_started_at=None, jobs={name: _job(failed=True)}, pods=[pod])
+
+
+@pytest.mark.parametrize(("reason", "exit_code", "code"), [("OOMKilled", 137, "IMPORT_OUT_OF_MEMORY"),
+                                                            ("Error", 143, "IMPORT_KILLED")])
+def test_an_import_killed_without_a_report_ends_with_the_code_for_its_container_reason(
+        reason, exit_code, code, caplog):
+    """Defect: a container killed for memory leaves no message, so the import ended with the same IMPORT_FAILED
+    as an unexpected exception, and the log lost the pod's reason once the controller deleted the Job."""
+    import_id = "00000000-0000-4000-8000-000000000002"
+    client = _failed_import(import_id, report=None, reason=reason, exit_code=exit_code)
+    row = CellRow(CELL_ID, uuid.UUID("00000000-0000-4000-8000-000000000003"), 10, 0, "running", None, 1,
+                  hold_kind="import", hold_started_at=datetime(2026, 1, 1, tzinfo=UTC))
+    item = ImportRow(import_id, CELL_ID, "adopt", 4, 1, "uploaded", datetime(2026, 1, 1, tzinfo=UTC),
+                     recipient="age1" + "a" * 58)
+    observation = ClusterObservation(statefulset_exists=True, statefulset_image="example:cell",
+                                     statefulset_hold_kind="import")
+
+    decision = decide_import(row, item, observation, client.observe_import_jobs(NAMESPACE, import_id),
+                             now=datetime(2026, 1, 1, tzinfo=UTC))
+
+    assert decision.import_updates["error_code"] == code
+    assert f'"reason": "{reason}"' in caplog.text and f'"exit_code": {exit_code}' in caplog.text
+
+
+def test_a_failed_import_logs_its_diagnostic_without_private_text(caplog):
+    """Defect: the import Job's report kept only IMPORT_FAILED, and a log of its report fields could expose a member name."""
+    import_id = "00000000-0000-4000-8000-000000000002"
+    report = {"ok": False, "error": "IMPORT_FAILED", "diagnostic": {
+        "type": "PermissionError", "function": "unwritable_member", "errno": 13,
+        "message": "private-record", "path": "/private-record", "url": "https://private-record"}}
+    client = _failed_import(import_id, report=report, reason="Error", exit_code=1)
+
+    imported = client.observe_import_jobs(NAMESPACE, import_id)["import"]
+
+    assert imported.failed and imported.report["error"] == "IMPORT_FAILED"
+    assert '"type": "PermissionError"' in caplog.text and '"function": "unwritable_member"' in caplog.text
+    assert '"errno": 13' in caplog.text
+    assert "private-record" not in caplog.text
+
+
+def test_a_failed_import_whose_pod_is_gone_logs_the_jobs_own_failure_reason(caplog):
+    """Defect: with its pod gone, a failed import Job logged an empty diagnostic, so nothing named why it ended."""
+    import_id = "00000000-0000-4000-8000-000000000002"
+    name = import_job_name(import_id, "import")
+    client = _client(hold_started_at=None, jobs={name: _job(failed=True, failed_reason="DeadlineExceeded")}, pods=[])
+
+    client.observe_import_jobs(NAMESPACE, import_id)
+
+    assert '"job_reason": "DeadlineExceeded"' in caplog.text
 
 
 @pytest.mark.parametrize("remaining", ["job", "pod"])

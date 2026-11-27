@@ -185,9 +185,14 @@ class _Derivation:
         self.written, self.removed, self.refreshed = written, removed, refreshed
         # A store that an older build set up has no link tables until the registry pass creates
         # them and derives every page's rows (``rederive``), so a commit before then writes none.
-        self.links = tx.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'inbound_links'"
-        ).fetchone() is not None
+        # Released owner1 stores stay writable before the owner2 job creates its optional projections.
+        self.projections = frozenset(name for (name,) in tx.execute("SELECT name FROM sqlite_master WHERE type = 'table'"))
+        self.links = "inbound_links" in self.projections
+        # Both columns arrive together in the owner pass's DDL; a store lacking either writes neither.
+        self.graph_derived_columns = all(
+            any(row[1] == column for row in tx.execute(f"PRAGMA table_info({table})"))
+            for table, column in (("graph_dependencies", "body_link"), ("graph_edges", "raw_target"))
+        )
 
         self.admission = tx.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'page_admission'"
@@ -310,7 +315,7 @@ class _Derivation:
         entry for the page after the commit. A page that has no bytes any more loses its rows.
         """
         for rel in self.removed:
-            lexstore.delete_page_rows(self.tx, rel)
+            lexstore.delete_page_rows(self.tx, rel, projections=self.projections)
             memory_refs.replace_identity_row(self.tx, rel, None)
             self._replace_priors(rel, None)
             if self.admission:
@@ -318,7 +323,7 @@ class _Derivation:
         derived: dict[str, tuple[str | None, bool]] = {}
         for rel in (*self.written, *self.refreshed):
             found = self.source(rel)
-            lexstore.delete_page_rows(self.tx, rel)
+            lexstore.delete_page_rows(self.tx, rel, projections=self.projections)
             if found is None:
                 memory_refs.replace_identity_row(self.tx, rel, None)
                 self._replace_priors(rel, None)
@@ -335,7 +340,7 @@ class _Derivation:
                 )
             page, rows = prepared.page, prepared.rows
             if rows is not None:
-                lexstore.write_page_rows(self.tx, rows)
+                lexstore.write_page_rows(self.tx, rows, projections=self.projections)
             if self.admission:
                 if page is None and not (in_kb or in_vault) and rel.lower().endswith(".md"):
                     page = find_corpus.parse_page(
@@ -404,7 +409,7 @@ class _Derivation:
             epistemic_graph.drop_page_graph_rows(self.tx, rel)
         else:
             epistemic_graph.write_page_graph_rows(
-                self.tx, rows, graph.stamps,
+                self.tx, rows, graph.stamps, derived_columns=self.graph_derived_columns,
                 # Pages that link to an original re-derive in the same transaction, so their
                 # graph rows draw on the same reservation as the original's own.
                 before_write=self.reserve_graph if charge else None,

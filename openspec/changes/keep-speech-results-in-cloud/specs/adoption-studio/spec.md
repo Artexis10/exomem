@@ -31,7 +31,7 @@ Adoption SHALL pair a staged audio or video original with its sidecar-named page
 
 ### Requirement: A paired recording's Source keeps the page's speech result
 
-When adoption stores a paired original as a new Source, apply SHALL write the Source page from the paired page. The Source SHALL keep the extracted text with its timed lines, `speakers`, `speaker_verification`, `diarize_requested`, `extracted_by`, the `asr_` facts, and the part pages with their text unchanged. Apply SHALL set the artifact's provenance and the adoption provenance as for any adopted Source. The kept text SHALL pass the card-number and credential removal.
+Apply SHALL settle a paired page's result on the Source that adoption stored for its recording, by the same route as for a Source stored earlier. That Source SHALL keep the extracted text with its timed lines, `speakers`, `speaker_verification`, `diarize_requested`, `extracted_by`, the `asr_` facts, and the part pages with their text unchanged. The Source SHALL keep the provenance that adoption set for it. The kept text SHALL pass the card-number and credential removal.
 
 #### Scenario: A recording keeps its transcript and labels
 
@@ -65,7 +65,7 @@ The extraction request that follows the commit of a paired original SHALL admit 
 
 ### Requirement: A paired page is not filed on its own
 
-A paired page and its part pages SHALL NOT be filed as Sources of their own. Apply SHALL repeat the pairing checks with the bytes it writes. A page or part that changed after the plan SHALL give the item `SOURCE_CHANGED`.
+A paired page and its part pages SHALL NOT be filed as Sources of their own. Apply SHALL repeat the pairing checks with the bytes it writes. A page or part that changed after the plan SHALL give the page's item `SOURCE_CHANGED`, and its recording is stored as usual with a pending extraction.
 
 #### Scenario: No text Source holds a paired page
 
@@ -80,7 +80,7 @@ A paired page and its part pages SHALL NOT be filed as Sources of their own. App
 #### Scenario: A page changed after the plan
 
 - **WHEN** a paired page changes between `plan` and `apply`
-- **THEN** the item records `SOURCE_CHANGED`, and nothing is written for it
+- **THEN** the page's item records `SOURCE_CHANGED`, and nothing is written for the page
 
 ### Requirement: A page whose original is already stored pairs with that Source
 
@@ -144,6 +144,40 @@ The selection rules that `exomem import` and `exomem cloud import` share SHALL s
 
 - **WHEN** the folder also holds a hidden folder that is no page's part folder
 - **THEN** the selection holds nothing from that folder, and the report counts it under the hidden reason
+
+### Requirement: A page waits for a recording that another window has yet to file
+
+A complete page whose recording no Source holds yet SHALL wait while another window of the same import series still holds that recording and its filing is unfinished. It SHALL wait as a retryable item with the code `KEPT_EXTRACTION_RECORDING_PENDING`, and apply SHALL write no Source and record no outcome for it. A later `apply` or `file` call SHALL pair the page once the recording is stored.
+
+#### Scenario: A page whose window is filed before its recording's window
+
+- **WHEN** a series files the window that holds a page before the window that holds its recording
+- **THEN** the page's window stops with `KEPT_EXTRACTION_RECORDING_PENDING` and files no text Source
+- **AND** after the recording's window files, the next call settles the page on the recording's Source
+
+### Requirement: A page stops waiting when no window will file its recording
+
+A page SHALL wait in the same way, under `KEPT_EXTRACTION_LOOKUP_UNAVAILABLE`, while the duplicate index fails for now. When no window is still to file the recording, or the configuration turns the index off, the page SHALL file as a text Source and the result SHALL count it under `KEPT_EXTRACTION_NO_RECORDING`, which is not a mismatch.
+
+#### Scenario: The recording's window is discarded
+
+- **WHEN** a page waits and the person discards the window that held its recording
+- **THEN** the next call files the page as a text Source and counts it under `KEPT_EXTRACTION_NO_RECORDING`
+
+#### Scenario: The recording's window is cancelled
+
+- **WHEN** a page waits and the person cancels the run of the window that held its recording
+- **THEN** the next call files the page as a text Source and counts it under `KEPT_EXTRACTION_NO_RECORDING` once
+
+#### Scenario: The configuration turns the duplicate index off
+
+- **WHEN** a page's recording is stored nowhere and the configuration turns the duplicate index off
+- **THEN** the page files as a text Source and no call waits for it
+
+#### Scenario: The duplicate index cannot answer
+
+- **WHEN** the duplicate index cannot answer for a page, and then can
+- **THEN** the page waits under `KEPT_EXTRACTION_LOOKUP_UNAVAILABLE`, and the next call pairs it
 
 ### Requirement: An unpaired page is filed as before and counted
 

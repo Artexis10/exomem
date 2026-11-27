@@ -518,6 +518,8 @@ class UnitStructure:
     fingerprint: str | None = None
     as_of: str | None = None
     until: str | None = None
+    verdict: str | None = None
+    check_by: str | None = None
     # The projected `UNIT_ROW_KEYS`, read from the stored rows as the parser reads them.
     credence: str | None = None
     credence_holder: str | None = None
@@ -789,6 +791,10 @@ def interpret_structural_summary(
             row["start_offset"], unit_ref, fingerprint,
             as_of=calendar_date(row.get("metadata", {}).get("as_of")),
             until=calendar_date(row.get("metadata", {}).get("until")),
+            verdict=language_registry.resolve_label(
+                semantic_labels.VERDICTS, row.get("metadata", {}).get("verdict", "")
+            ),
+            check_by=calendar_date(row.get("metadata", {}).get("check_by")),
             **(
                 governed_row_values(row["metadata"], kind=kind, language=language_registry)
                 if form == "rich" else {}

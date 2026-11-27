@@ -1,6 +1,6 @@
 """Empty-provenance warning on compiled notes.
 
-`references/frontmatter.md` marks `sources:` required for research-note, insight,
+`references/page-types.md` marks `sources:` required for research-note, insight,
 failure, and pattern, but nothing in the writer ever said so. These tests pin the
 warning — and, just as importantly, pin that it never blocks a write, because a
 conclusion drawn from live work with nothing captured is an honest empty list.

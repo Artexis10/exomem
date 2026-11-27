@@ -46,7 +46,7 @@ jobs:
             echo "::notice::The base revision has no scripts/user_notes.py yet, so this pull request, which introduces the check, is not checked."
             exit 0
           fi
-          # The parser's version is the one in pyproject.toml, so the pin lives in one place.
-          python3 -m pip install --disable-pip-version-check "$(grep -o -m1 'markdown-it-py==[0-9.]*' pyproject.toml)"
+          # Both parsers install at the exact versions the repository pins: markdown-it-py in pyproject.toml and PyYAML in uv.lock.
+          python3 -m pip install --disable-pip-version-check "$(grep -o -m1 'markdown-it-py==[0-9.]*' pyproject.toml)" "pyyaml==$(python3 -c "import tomllib; print(next(p['version'] for p in tomllib.load(open('uv.lock', 'rb'))['package'] if p['name'] == 'pyyaml'))")"
           python3 scripts/user_notes.py check --repo pull-request --base HEAD^1 --head HEAD \
             --title "$PR_TITLE" --body "$PR_BODY"

@@ -1408,20 +1408,29 @@ def _rich_kind_remediation(
     return f"{hint}Pass `kind` with one of the admitted kinds: {', '.join(kinds)}."
 
 
-def _compact_metadata_refusal(*, passed: tuple[str, ...], kinds: str) -> ObserveMemoryError:
+def _compact_metadata_refusal(
+    *, passed: tuple[str, ...], kinds: str, with_relations: bool = False
+) -> ObserveMemoryError:
     """Governed metadata sent with a compact unit: name each field and both exits.
 
     The refusal for converting a rich unit to compact names no field, and its exits (convert
     the unit, edit the page to drop its rows) do not apply to a compact unit, which has no
     rows. Both exits here are a retry of the same call; `kinds` says which rich kinds to pass.
+    A call that also passes relations keeps only the rich-kind exit: without its metadata, the
+    page may still refuse its relations for the same reason.
     """
     fields = ", ".join(passed)
+    remediation = (
+        f"Keep {fields} and the relations by passing a rich kind. {kinds}"
+        if with_relations
+        else f"Retry one of two ways: omit {fields} to keep a compact observation, or keep "
+        f"{fields} by passing a rich kind. {kinds}"
+    )
     return ObserveMemoryError(
         "COMPACT_METADATA_REQUIRES_RICH_KIND",
         f"Governed unit metadata ({fields}) needs a rich kind, and a compact observation "
         "carries no metadata",
-        f"Retry one of two ways: omit {fields} to keep a compact observation, or keep "
-        f"{fields} by passing a rich kind. {kinds}",
+        remediation,
     )
 
 
@@ -1436,7 +1445,11 @@ def argument_refusal(arguments: Mapping[str, Any]) -> ObserveMemoryError | None:
     passed = _compact_names_passed(arguments)
     if not passed:
         return None
-    return _compact_metadata_refusal(passed=passed, kinds=_core_kinds_remediation())
+    return _compact_metadata_refusal(
+        passed=passed,
+        kinds=_core_kinds_remediation(),
+        with_relations=bool(arguments.get("relations")),
+    )
 
 
 def _compact_names_passed(arguments: Mapping[str, Any]) -> tuple[str, ...] | None:
@@ -1490,7 +1503,8 @@ def refusal_before_page(
     the arguments, so the caller refuses before it looks the page up. Only an add qualifies: an
     update keeps the unit's own kind and form, which only the page knows. Every refusal that
     `observe_memory` decides from the arguments before this one (category, tags, context, relations,
-    dates and date order) is left to it, so it still wins. A refusal decided by the page (a missing
+    dates and date order) is left to it, so it still wins. A call that passes relations is left to
+    the page, which decides whether they refuse first. A refusal decided by the page (a missing
     path, an unknown reference, a stale hash, the page's verdict vocabulary, relations the page
     cannot lift) comes after this one.
 
@@ -1510,7 +1524,9 @@ def refusal_before_page(
         "operation": op, "kind": kind,
         **dict(zip(_GOVERNED_ARGUMENT_KEYS, (verdict, check_by, as_of, until), strict=True)),
     })
-    if not passed:
+    if not passed or relations:
+        # Relations on a compact unit are refused before its metadata unless every one can move to
+        # a page field, which only the page's relation registry and their targets decide.
         return None
     try:
         origin_bindings.extract_origin_metadata(str(content))

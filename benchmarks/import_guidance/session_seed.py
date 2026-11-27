@@ -7,13 +7,13 @@ The caller pins every state root and the vault path in the environment (`session
 reaches no real state. The scaffold comes from the arm's `init_vault`, so each arm's vault carries that arm's own
 `_Schema` and registries; the pages are the same files for both arms.
 
-A seeded vault has no relation graph, and the product marks nothing from relations while the graph is unknown. A live
-vault has one, because its writes build it. `--ready-graph` brings a seeded vault to that state before anything reads it:
-the arm's own `exomem maintain --reconcile` (the reconcile that `maintain_memory` runs) rewrites no page of the seed, and
-then the arm's own graph index proves its state is `available`, independently of the activation packet, and the arm's
-activation index and context catalogue are built, so the actor's first recall is served warm.
-`record_worker.py` runs the same two steps (`reconcile`, then `wait_for_graph`). The process prints one JSON line: the graph state
-it saw and the seconds it took.
+A seeded vault has no relation graph, and the product marks nothing from relations while the graph is unknown.
+A live vault has one because its writes build it. `--ready-graph` prepares that state before anything reads the seed.
+The arm's own `exomem maintain --reconcile` builds derived state without rewriting seed pages.
+This process then initializes its recall projection and resolver, adopts the published graph, and proves availability.
+Last, it builds the arm's activation index and context catalogue, so the actor's first recall is served warm.
+`record_worker.py` prepares the same process state after building its server, before waiting for the graph or reading it.
+The process prints one JSON line: the graph state it saw and the seconds it took.
 """
 
 from __future__ import annotations
@@ -47,6 +47,7 @@ def main(seed: Path, vault: Path, product_root: Path, ready_graph: bool = False)
         return None
     started = time.monotonic()
     reconcile()
+    prepare_recall(vault)
     state = wait_for_graph(vault)
     return {"graph": state, "catalogue": warm_catalogue(vault), "seconds": round(time.monotonic() - started, 1)}
 
@@ -105,6 +106,34 @@ def open_server(vault: Path) -> Callable[[str, dict], dict]:
         return json.loads(result.content[0].text)
 
     return call
+
+
+def prepare_recall(vault: Path) -> None:
+    """Prepare the reconciled fixture's live projection, resolver and graph in this process.
+
+    This prepares required read state without optional model or CPU warm-up.
+    Incomplete fixture state fails preparation instead of producing a product score.
+    """
+    from exomem import find, freshness, warmup
+    from exomem.epistemic_graph import EpistemicGraphIndex
+
+    projection = freshness.rebaseline(vault)
+    if not all(projection.values()):
+        failed = ", ".join(scope for scope, ready in projection.items() if not ready)
+        raise SystemExit(f"ready_graph fixture preparation failed: no live recall projection for {failed}")
+    # Rebaseline replaces event lineage; a cached resolver must rebuild for that exact checkpoint.
+    find.evict_resolver_caches(vault)
+    warmup.prime_recall_resolver(vault)
+    adoption = EpistemicGraphIndex(vault).adopt_published_snapshot()
+    if not adoption.adopted:
+        raise SystemExit(f"ready_graph fixture preparation failed: published graph adoption reported {adoption.reason}")
+    checkpoint = freshness.live_recall_checkpoint(vault, "vault")
+    if (
+        checkpoint is None
+        or find.recall_resolver_snapshot_at_checkpoint(vault, checkpoint) is None
+        or not freshness.recall_checkpoint_is_current(vault, "vault", checkpoint)
+    ):
+        raise SystemExit("ready_graph fixture preparation failed: no current recall checkpoint and resolver")
 
 
 def wait_for_graph(

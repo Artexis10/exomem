@@ -21,7 +21,12 @@ from contextlib import closing
 from pathlib import Path, PurePosixPath
 
 import pytest
+from test_connector_boundary import SCOPE
+from test_connector_boundary import configured_boundary as configured_boundary  # noqa: F401
 from test_managed_collections_migration import coordinator_url  # noqa: F401
+from test_private_vocabulary_instances import private_instances as private_instances  # noqa: F401
+from test_vault_store_embeddings import catch_up
+from test_vault_store_embeddings import encoder as encoder  # noqa: F401
 from test_vault_store_migration import (  # noqa: F401
     build_indexes,
     migrate_apply,
@@ -35,8 +40,9 @@ from test_vault_store_readers import (
     damage_every_owned_projection,
     restrict_external,
 )
-from test_vault_store_rederive import PROFILES, project, settle_to_the_end
+from test_vault_store_rederive import PROFILES, project, settle_to_the_end, store_writer
 from test_vault_store_write_path import commits_since
+from test_vault_store_write_path import served as served  # noqa: F401
 
 from exomem import (
     access,
@@ -909,6 +915,544 @@ def test_the_correction_context_of_a_unit_reads_the_store_snapshot(vault):  # no
         in_store_mode = unit_corrections.discover(vault, [reference], accept=lambda _row: True)
 
     assert in_store_mode == in_file_mode
+
+
+@pytest.mark.parametrize("mode", ["keyword", "hybrid", "vector"])
+def test_stored_family_dimensions_fill_the_limit_before_ranking(stored, writer, encoder, mode):  # noqa: F811
+    """Better-ranked nonmembers cannot hide the units whose authored relations qualify them."""
+    source = "Knowledge Base/Notes/Family source.md"
+    target = "Knowledge Base/Notes/Family target.md"
+    body = "# Family source\n\n" + "\n".join(
+        f"## Claim\n- id: noise-{index}\n\nSignal signal signal signal.\n"
+        for index in range(24)
+    )
+    body += "\n".join(
+        f"## Claim\n- id: member-{index}\n- relations: derived_from: [[Family target]]\n\n"
+        f"The signal has qualifying source material for outcome {index}.\n"
+        for index in range(3)
+    )
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=(
+        write.PagePut(source, body.encode()), write.PagePut(target, b"# Family target\n\nSurvey material.\n"),
+    )))
+    if mode != "keyword":
+        catch_up(stored)
+    result = commands.op_ask_memory(
+        stored, query="signal", scope="kb-only", mode=mode, result_level="unit",
+        filters={"unit.dimension": {"$eq": "provenance"}}, limit=2, graph=False,
+    )
+    assert len(result["hits"]) == 2
+    assert all("qualifying source material" in hit["excerpt"] for hit in result["hits"])
+    if mode == "keyword":
+        positive = {"unit.dimension": {"$eq": "provenance"}}
+        for expression in (
+            {"$not": positive},
+            {"unit.dimension": {"$ne": "provenance"}},
+            {"$and": [{"unit.dimension": {"$eq": "kind"}}, {"$not": positive}]},
+        ):
+            negative = commands.op_ask_memory(
+                stored, query="signal", scope="kb-only", mode=mode, result_level="unit",
+                filters=expression, limit=2, graph=False,
+            )
+            assert len(negative["hits"]) == 2
+            assert all("Signal signal signal signal." in hit["excerpt"] for hit in negative["hits"])
+        nested = commands.op_ask_memory(
+            stored, query="signal", scope="kb-only", mode=mode, result_level="unit",
+            filters={"$or": [positive, {"unit.kind": {"$eq": "question"}}]}, limit=2, graph=False,
+        )
+        assert len(nested["hits"]) == 2
+        assert all("qualifying source material" in hit["excerpt"] for hit in nested["hits"])
+        from exomem import request_budget
+
+        for expression in (positive, {"$not": positive}):
+            token = request_budget.set_current(request_budget.RequestBudget(seconds=0))
+            try:
+                with pytest.raises(find.RetrievalIndexWarming):
+                    commands.op_ask_memory(
+                        stored, query="signal qualifying", scope="kb-only", mode=mode, result_level="unit",
+                        filters=expression, limit=2, graph=False,
+                    )
+            finally:
+                request_budget.reset_current(token)
+
+
+def test_a_family_dimension_ranks_its_first_hits_the_same_at_any_limit(stored, writer, encoder):  # noqa: F811
+    """A small limit must not rank members by the eligible set's own term statistics.
+
+    Corpus statistics favour the rare `alpha`; among the members `beta` is the rare term. Noise
+    outranks every member in both lanes, so only the small limit's windows miss the members.
+    """
+    def claim(name, text, relation=""):
+        return f"## Claim\n- id: {name}\n{relation}\n{text}\n"
+
+    derived = "- relations: derived_from: [[Family target]]\n"
+    members = [claim(f"a-{index}", f"Beta material for case {index}.", derived) for index in range(3)]
+    members += [claim(
+        f"b-{index}", f"Alpha material for case {index}, with many further words about other matters "
+        "that make this claim much longer than the rest.", derived,
+    ) for index in range(10)]
+    noise = [claim(f"noise-{index}", "Beta gamma delta beta gamma delta beta gamma delta.") for index in range(40)]
+    filler = [
+        write.PagePut(f"Knowledge Base/Notes/Filler {page}.md", (f"# Filler {page}\n\n" + "\n".join(
+            claim(f"filler-{index}", f"Unrelated filler number {index}.") for index in range(10)
+        )).encode())
+        for page in range(8)
+    ]
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=(
+        write.PagePut("Knowledge Base/Notes/Family source.md",
+                      ("# Family source\n\n" + "\n".join(members)).encode()),
+        write.PagePut("Knowledge Base/Notes/Noise.md", ("# Noise\n\n" + "\n".join(noise)).encode()),
+        write.PagePut("Knowledge Base/Notes/Family target.md", b"# Family target\n\nSurvey material.\n"),
+        *filler,
+    )))
+    catch_up(stored)
+
+    def first_hits(limit):
+        result = commands.op_ask_memory(
+            stored, query="alpha beta gamma delta", scope="kb-only", mode="hybrid", result_level="unit",
+            filters={"unit.dimension": {"$eq": "provenance"}}, limit=limit, graph=False,
+        )
+        return [hit["excerpt"] for hit in result["hits"]]
+
+    assert first_hits(3) == first_hits(60)[:3]
+
+
+def test_a_family_dimension_finds_members_the_vector_ranks_last_in_one_read(
+    stored, writer, encoder, monkeypatch,  # noqa: F811
+):
+    """Catches vector reads that grow with the other units of a member's page, and a filtered search
+    that stops short of members that both lanes rank last."""
+    body = "# Family source\n\n" + "\n".join(
+        f"## Claim\n- id: noise-{index}\n\nSignal number {index}.\n" for index in range(300)
+    )
+    # The members carry no query word: both lanes rank all 300 nonmembers above them.
+    body += "\n".join(
+        f"## Claim\n- id: member-{index}\n- relations: derived_from: [[Family target]]\n\n"
+        f"Qualifying source material for outcome {index}.\n"
+        for index in range(3)
+    )
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=(
+        write.PagePut("Knowledge Base/Notes/Family source.md", body.encode()),
+        write.PagePut("Knowledge Base/Notes/Family target.md", b"# Family target\n\nSurvey material.\n"),
+    )))
+    catch_up(stored)
+    reads = []
+    real = find._vector_unit_candidates
+    monkeypatch.setattr(
+        find, "_vector_unit_candidates", lambda *a, **k: reads.append(k["candidate_limit"]) or real(*a, **k),
+    )
+
+    result = commands.op_ask_memory(
+        stored, query="signal", scope="kb-only", mode="hybrid", result_level="unit",
+        filters={"unit.dimension": {"$eq": "provenance"}}, limit=2, graph=False,
+    )
+
+    assert len(reads) == 1, f"the vector lane read windows of {reads}"
+    assert len(result["hits"]) == 2
+    assert all("Qualifying source material" in hit["excerpt"] for hit in result["hits"])
+    assert "notice" not in result
+
+
+def test_a_stopped_scan_says_more_matches_may_exist_when_the_vector_lane_cannot_return_every_member(
+    stored, writer, encoder,  # noqa: F811
+):
+    """Catches a hybrid result that drops the partial-coverage notice because the member read was
+    complete, although the vector lane returns only one window and more members than that exist."""
+    body = "# Family source\n\n" + "\n".join(
+        f"## Claim\n- id: noise-{index}\n\nSignal number {index}.\n" for index in range(300)
+    )
+    # Forty-one members: more than the vector lane's window at limit 2, so it cannot return them all.
+    body += "\n".join(
+        f"## Claim\n- id: member-{index}\n- relations: derived_from: [[Family target]]\n\n"
+        f"Qualifying source material for outcome {index}.\n"
+        for index in range(40)
+    )
+    body += (
+        "\n## Claim\n- id: member-last\n- relations: derived_from: [[Family target]]\n\n"
+        "Signal xylophone member.\n"
+    )
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=(
+        write.PagePut("Knowledge Base/Notes/Family source.md", body.encode()),
+        write.PagePut("Knowledge Base/Notes/Family target.md", b"# Family target\n\nSurvey material.\n"),
+    )))
+    catch_up(stored)
+
+    result = commands.op_ask_memory(
+        stored, query="signal", scope="kb-only", mode="hybrid", result_level="unit",
+        filters={"unit.dimension": {"$eq": "provenance"}}, limit=2, graph=False,
+    )
+
+    assert len(result["hits"]) == 2
+    assert result.get("notice") == commands._SEARCH_NOTICE_DIMENSION
+
+
+@pytest.mark.parametrize(
+    ("mode", "restricted"), [("keyword", False), ("hybrid", False), ("hybrid", True)],
+    ids=["keyword", "hybrid", "hybrid-restricted"],
+)
+def test_a_sparse_family_dimension_checks_no_more_rows_as_the_corpus_grows(
+    stored, writer, encoder, monkeypatch, mode, restricted,  # noqa: F811
+):
+    """Catches exact checks that grow with the corpus when a family's members are one unit in nine
+    and lack the query word, a stopped scan whose result does not say more matches may exist or
+    calls it a failed search method, and a stopped scan that is not cached like a full one.
+    A restricted caller ranks its lexical lane by admitted statistics, a separate branch."""
+    def sources(first):
+        return tuple(
+            write.PagePut(f"Knowledge Base/Notes/Source {index:02d}.md", (
+                f"# Source {index}\n\n"
+                + "\n".join(f"## Claim\n- id: noise-{unit}\n\nSignal note {unit}.\n" for unit in range(8))
+                + f"\n## Claim\n- id: member-{index}\n- relations: derived_from: [[Family target]]\n\n"
+                f"Qualifying source material {index}.\n"
+            ).encode())
+            for index in range(first, first + 8)
+        )
+
+    # One window of rejected rows stops a scan, so eight pages already pass the bound.
+    monkeypatch.setattr(find, "_DIMENSION_MEMBER_WINDOWS", 1)
+    if restricted:
+        restrict_external(stored, 'tags: ["secret"]')
+    checks: list[str] = []
+    real = lexstore._SelectedUnits.matches_filter
+    monkeypatch.setattr(
+        lexstore._SelectedUnits, "matches_filter", lambda self, row, unit: checks.append(row[1]) or real(self, row, unit),
+    )
+
+    def ask(filters):
+        checks.clear()
+        with request_scope(EXTERNAL) if restricted else contextlib.nullcontext():
+            result = commands.op_ask_memory(
+                stored, query="signal", scope="kb-only", mode=mode, result_level="unit",
+                filters=filters, limit=2, graph=False,
+            )
+        return result, len(checks)
+
+    grouped = {"unit.dimension": {"$eq": "provenance"}}
+    # A filter that asks for dimension groups is never cached, so the repeat names the same members
+    # through `$or`, which asks for none.
+    ungrouped = {"$or": [{"unit.dimension": {"$eq": "provenance"}}, {"unit.dimension": {"$eq": "currency"}}]}
+
+    def search(*puts):
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=puts))
+        if mode != "keyword":
+            catch_up(stored)
+        find.clear_cache()
+        return ask(grouped)
+
+    smaller, smaller_checks = search(
+        *sources(0), write.PagePut("Knowledge Base/Notes/Family target.md", b"# Family target\n\nSurvey material.\n"),
+    )
+    larger, larger_checks = search(*sources(8), *sources(16))
+    first, first_checks = ask(ungrouped)
+    repeat, repeat_checks = ask(ungrouped)
+
+    assert larger_checks == smaller_checks
+    for result in (smaller, larger, first, repeat):
+        # The agent reads that the filter covered the best matches only, not that a method failed.
+        assert result["notice"] == commands._SEARCH_NOTICE_DIMENSION
+        # Keyword search needs the query word, which no member holds; the vector lane ranks members.
+        assert len(result["hits"]) == (0 if mode == "keyword" else 2)
+        assert all("Qualifying source material" in hit["excerpt"] for hit in result["hits"])
+    assert repeat["hits"] == first["hits"]
+    # The cache serves the repeat with its notice; a restricted caller's search is never cached.
+    assert first_checks > 0
+    assert repeat_checks == (first_checks if restricted else 0)
+
+
+@pytest.mark.parametrize(
+    ("limit", "superseded", "notice"), [(5, 0, False), (10, 0, False), (5, 2, True)],
+    ids=["limit-5", "limit-10", "newest-pages-superseded"],
+)
+def test_a_stopped_keyword_scan_says_more_matches_may_exist_only_when_release_keeps_too_few(
+    stored, writer, limit, superseded, notice,  # noqa: F811
+):
+    """Catches a keyword notice decided on the over-fetch pool, which a policy makes larger than the
+    caller's limit: a scan that stops after the limit is full still said more matches may exist.
+    A unit of a superseded page ranks after every active match, including those past the stop."""
+    def source(page):
+        status = "status: superseded\n" if page >= 10 - superseded else ""
+        body = "\n".join(f"## Claim\n- id: noise-{unit}\n\nSignal note {unit}.\n" for unit in range(18))
+        body += "".join(
+            f"\n## Claim\n- id: member-{member}\n- relations: derived_from: [[Family target]]\n\n"
+            f"Signal from member {page}{member}.\n"
+            for member in "ab"
+        )
+        return write.PagePut(
+            f"Knowledge Base/Notes/Source {page}.md",
+            f"---\nupdated: 2026-01-{10 + page}\n{status}---\n# Source {page}\n\n{body}".encode(),
+        )
+
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=(
+        *(source(page) for page in range(10)),
+        write.PagePut("Knowledge Base/Notes/Family target.md", b"# Family target\n\nSurvey material.\n"),
+    )))
+    # Any policy makes release over-fetch, so the search asks for about twice the caller's limit.
+    restrict_external(stored, 'tags: ["secret"]')
+
+    result = commands.op_ask_memory(
+        stored, query="signal", scope="kb-only", mode="keyword", result_level="unit",
+        filters={"unit.dimension": {"$eq": "provenance"}}, limit=limit, graph=False,
+    )
+
+    excerpts = [hit["excerpt"] for hit in result["hits"]]
+    assert len(excerpts) == limit
+    if not superseded:
+        # The newest members in recency order, as a scan without a bound returns them.
+        newest = [f"Signal from member {page}{member}." for page in range(9, -1, -1) for member in "ab"]
+        assert excerpts == newest[:limit]
+    assert (result.get("notice") == commands._SEARCH_NOTICE_DIMENSION) is notice
+
+
+def test_a_family_dimension_does_no_graph_work_for_unrelated_pages(stored, writer, monkeypatch):  # noqa: F811
+    """Pages that no family edge touches add no per-unit membership work to a filtered search."""
+    source = "Knowledge Base/Notes/Family source.md"
+    target = "Knowledge Base/Notes/Family target.md"
+    body = "# Family source\n\n" + "\n".join(
+        f"## Claim\n- id: member-{index}\n- relations: derived_from: [[Family target]]\n\n"
+        f"The signal has qualifying source material for outcome {index}.\n"
+        for index in range(3)
+    )
+
+    def unrelated(first, count):
+        return tuple(
+            write.PagePut(f"Knowledge Base/Notes/Unrelated {index}.md", (f"# Unrelated {index}\n\n" + "\n".join(
+                f"## Claim\n- id: noise-{unit}\n\nSignal signal signal from page {index}.\n" for unit in range(5)
+            )).encode())
+            for index in range(first, first + count)
+        )
+
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=(
+        write.PagePut(source, body.encode()), write.PagePut(target, b"# Family target\n\nSurvey material.\n"),
+        *unrelated(0, 10),
+    )))
+    calls = []
+    counted = epistemic_graph.dependency_keys_for_page
+
+    def counting(path, title):
+        calls.append(path)
+        return counted(path, title)
+
+    monkeypatch.setattr(epistemic_graph, "dependency_keys_for_page", counting)
+
+    def membership_reads():
+        calls.clear()
+        for ranking in ("keyword", "hybrid"):
+            result = commands.op_ask_memory(
+                stored, query="signal", scope="kb-only", mode=ranking, result_level="unit",
+                filters={"unit.dimension": {"$eq": "provenance"}}, limit=2, graph=False,
+            )
+            assert len(result["hits"]) == 2
+        return len(calls)
+
+    small = membership_reads()
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=unrelated(10, 40)))
+    assert membership_reads() == small
+
+
+def test_stored_family_dimensions_keep_the_authors_private_meaning(vault, private_instances):  # noqa: F811
+    """The query's same-named extension cannot replace a private author's family."""
+    from exomem import relation_registry, semantic_language_registry
+    from exomem.vocabulary import instances
+
+    dimension = (
+        "schema_version: 1\ndimensions:\n  family_view:\n    labels: {en: Family view}\n"
+        "    description: Selected relation families\n    members: {families: [derivation]}\n"
+    )
+    categories = instances.select(vault, semantic_language_registry.CATEGORY_SPEC).overlay(vault)
+    categories.parent.mkdir(parents=True, exist_ok=True)
+    categories.write_text(dimension)
+    for scope, parent in ((None, "contradicts"), (SCOPE, "derived_from")):
+        overlay = instances.select(vault, relation_registry.SPEC, scope).overlay(vault)
+        overlay.parent.mkdir(parents=True, exist_ok=True)
+        overlay.write_text(
+            "schema_version: 1\nextensions:\n"
+            f"  x.explains: {{parent: {parent}, description: Explains an observation}}\n"
+            "  x.old_explanation: {parent: contradicts, description: Previous wording, "
+            "status: deprecated, replaced_by: x.explains}\n",
+        )
+    source = "Knowledge Base/Notes/Private explanation.md"
+    target = "Knowledge Base/Notes/Family survey.md"
+    write_pages(vault, {
+        source: (
+            f"---\ntype: insight\nprojects: [private-project]\nregistry_scope: {SCOPE}\n---\n"
+            "# Private explanation\n\n## Claim\n- id: private-origin\n"
+            "- relations: x.explains: [[Family survey#landing]]\n\nSignal from a private origin.\n\n"
+            "## Claim\n- id: core-origin\n- relations: core.derived_from: [[Family survey#landing]]\n\n"
+            "Signal from a qualified core origin.\n\n"
+            "## Claim\n- id: old-origin\n- relations: x.old_explanation: [[Family survey#landing]]\n\n"
+            "Signal from an old private origin.\n\n"
+            "## Claim\n- id: self\n- relations: core.derived_from: [[#self]]\n\nSignal from a self reference.\n"
+        ),
+        target: (
+            "---\ntype: note\n---\n# Family survey\n\n## Claim\n- id: landing\n\nA survey target.\n\n"
+            "## Claim\n- id: other\n\nAn unrelated survey target.\n"
+        ),
+    })
+    relation_registry.clear_cache()
+    with request_scope(private_instances("full")):
+        build_indexes(vault)
+        assert migrate_apply(vault) == 0
+        answer = commands.op_ask_memory(
+            vault, query="signal", mode="keyword", scope="kb-only", result_level="unit",
+            filters={"$and": [
+                {"unit.dimension": {"$eq": "provenance"}}, {"page.type": {"$eq": "insight"}},
+            ]}, limit=3, graph=False,
+        )
+        landed = commands.op_ask_memory(
+            vault, query="survey", mode="keyword", scope="kb-only", result_level="unit",
+            filters={"$and": [
+                {"unit.dimension": {"$eq": "provenance"}}, {"page.type": {"$eq": "note"}},
+            ]}, limit=10, graph=False,
+        )
+        before = commands.op_ask_memory(
+            vault, query="", mode="keyword", scope="kb-only", result_level="unit",
+            filters={"unit.dimension": {"$eq": "family_view"}}, limit=100, graph=False,
+        )
+        with store_writer(vault) as editing:
+            write.commit(editing, put(categories.relative_to(vault).as_posix(),
+                                      dimension.replace("[derivation]", "[contradiction]").encode()))
+        semantic_language_registry.clear_cache()
+        find.clear_cache()
+        after = commands.op_ask_memory(
+            vault, query="", mode="keyword", scope="kb-only", result_level="unit",
+            filters={"unit.dimension": {"$eq": "family_view"}}, limit=100, graph=False,
+        )
+    assert len(answer["hits"]) == 3
+    assert {hit["excerpt"] for hit in answer["hits"]} == {
+        "Signal from a private origin.", "Signal from a qualified core origin.", "Signal from an old private origin.",
+    }
+    assert all(hit["display"]["origin"]["from"] for hit in answer["hits"])
+    assert [hit["excerpt"] for hit in landed["hits"]] == ["A survey target."]
+    assert {hit["excerpt"] for hit in before["hits"]} == {
+        "Signal from a private origin.", "Signal from a qualified core origin.", "Signal from an old private origin.",
+        "A survey target.",
+    }
+    assert after["hits"] == []
+
+
+def test_stored_dimension_resolves_an_unreturned_author_without_parsing_its_page(
+    stored, writer, monkeypatch, record_testsuite_property,  # noqa: F811
+):
+    """Withholding a title competitor reveals an incoming edge without reopening its author."""
+    source = "Knowledge Base/Notes/Survey explanation.md"
+    target = "Knowledge Base/Notes/Survey results.md"
+    twin = "Knowledge Base/Notes/Hidden survey.md"
+    restrict_external(stored, 'tags: ["secret"]')
+    target_body = (
+        b"---\ntitle: Shared survey\n---\n# Survey results\n\n"
+        b"## Claim\n- id: first\n\nBeacon output increased.\n\n"
+        b"## Claim\n- id: second\n\nBeacon output stayed stable.\n"
+    )
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "notes", puts=(
+        write.PagePut(source, b"# Survey explanation\n\n## Claim\n- relations: derived_from: [[Shared survey]]\n\nAn explanation.\n"),
+        write.PagePut(target, target_body),
+        write.PagePut(twin, b"---\ntitle: Shared survey\ntags: [secret]\n---\n# Hidden survey\n\nA competitor.\n"),
+    )))
+    from exomem import call_spans
+
+    parsed, family_parsed = [], []
+    phase, prepared = 0, 0
+    parse_page = find.find_corpus.parse_page
+    real_span = call_spans.span
+
+    @contextlib.contextmanager
+    def observing_span(name, fields=None):
+        nonlocal phase, prepared
+        family = name in {"dimension.prepare", "dimension.display"}
+        if family:
+            phase += 1
+            prepared += 1
+        try:
+            with real_span(name, fields) as measured:
+                yield measured
+        finally:
+            if family:
+                phase -= 1
+
+    def parsing(path, *args, **kwargs):
+        parsed.append(kwargs.get("resolved_relative") or Path(path).relative_to(stored).as_posix())
+        if phase:
+            family_parsed.append(parsed[-1])
+        return parse_page(path, *args, **kwargs)
+
+    monkeypatch.setattr(call_spans, "span", observing_span)
+    monkeypatch.setattr(find.find_corpus, "parse_page", parsing)
+    monkeypatch.setattr(find, "_parse_page", parsing)
+    with request_scope(EXTERNAL):
+        answer = commands.op_ask_memory(
+            stored, query="beacon", mode="keyword", scope="kb-only", result_level="unit",
+            filters={"unit.dimension": {"$eq": "provenance"}}, limit=2, graph=False,
+        )
+    assert len(answer["hits"]) == 2
+    assert {hit["parent_path"] for hit in answer["hits"]} == {target}
+    record_testsuite_property("stored_dimension_whole_call_parsed_pages", len(parsed))
+    record_testsuite_property("stored_dimension_family_phase_parsed_pages", len(family_parsed))
+    assert prepared > 0
+    assert set(family_parsed) <= {target}
+
+
+def test_dimension_preparation_reuses_facts_only_inside_the_same_live_snapshot(stored, writer):  # noqa: F811
+    """A second borrowed preparation cannot reuse a closed view or a preceding snapshot's positive membership."""
+    from exomem import epistemic_dimensions, relation_registry, semantic_language_registry
+
+    source = "Knowledge Base/Notes/Origin.md"
+    target = "Knowledge Base/Notes/Stable target.md"
+    other = "Knowledge Base/Notes/Other target.md"
+    body = b"# Stable target\n\n## Claim\n- id: stable\n\nA stable claim.\n"
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "notes", puts=(
+        write.PagePut(source, b"# Origin\n\n## Relations\n- derived_from [[Stable target]]\n- derived_from [[Other target]]\n"),
+        write.PagePut(target, body), write.PagePut(other, body.replace(b"Stable", b"Other")),
+    )))
+    dimensions = epistemic_dimensions.StoredUnitDimensions(
+        stored, epistemic_dimensions.membership(semantic_language_registry.core_registry(),
+                                                relation_registry.load_registry(stored), only=("provenance",)),
+        keep=None, needs_edges=True,
+    )
+    page = {"path": target}
+    # The incoming edge ends at the page, so its membership does not depend on the target's unchanged occurrence.
+    unit = {"kind": "claim", "form": "rich", "row_keys": ()}
+    with read.request_snapshot(stored):
+        dimensions.prepare({target})
+        dimensions.prepare({other})
+        assert "provenance" in dimensions(page, unit)
+    write.commit(writer, put(source, b"# Origin\n\nThe origin no longer cites either target.\n"))
+    with read.request_snapshot(stored):
+        dimensions.prepare({target})
+        assert "provenance" not in dimensions(page, unit)
+
+
+def test_a_retired_collection_alias_cannot_supply_an_ordinary_family_endpoint(served, writer):  # noqa: F811
+    """A legacy alias still resolves to its row but cannot qualify a unit through a removed item file."""
+    from test_collection_store_migration import WORK
+
+    from exomem.collection_store import aliases, conversion
+
+    (retired,) = writer.connection.execute(
+        "SELECT i.view_path FROM items i JOIN collections c USING(collection_id) WHERE c.manifest_path = ? LIMIT 1",
+        (WORK,),
+    ).fetchone()
+    assert conversion.convert(served, WORK, why="Retire item files for a boundary check")["phase"] == "complete"
+    assert not (served / retired).exists()
+    assert aliases.retired(writer.connection, retired) is not None
+    with read.request_snapshot(served):
+        canonical, warning = vaults.normalize_wikilink(
+            retired.removesuffix(".md"), served,
+            resolver=vaults.WikilinkResolver.from_entries(served, ()),
+        )
+    assert (canonical, warning) == (retired.removesuffix(".md"), None)
+    source = "Knowledge Base/Notes/Retired origin.md"
+    write.commit(writer, put(source, (
+        "# Retired origin\n\n## Claim\n- relations: derived_from: [[" + retired + "]]\n\n"
+        "The archived signal has no ordinary page endpoint.\n"
+    ).encode()))
+    unfiltered = commands.op_ask_memory(
+        served, query="archived signal", mode="keyword", scope="kb-only", result_level="unit", limit=2, graph=False,
+    )
+    assert source in {hit["parent_path"] for hit in unfiltered["hits"]}
+    answer = commands.op_ask_memory(
+        served, query="archived signal", mode="keyword", scope="kb-only", result_level="unit",
+        filters={"unit.dimension": {"$eq": "provenance"}}, limit=2, graph=False,
+    )
+    assert answer["hits"] == []
 
 
 def test_a_relation_filter_answers_from_the_store_when_the_sidecar_file_is_gone(

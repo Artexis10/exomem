@@ -1026,3 +1026,146 @@ def test_order_in_time_leaves_a_unit_between_two_in_a_cycle_where_its_date_puts_
 
     assert [units[i].node for i in view.order] == ["a", "b", "c"]
     assert sorted(units[i].node for i in view.order_conflict) == ["a", "c"]
+
+
+def test_restricted_holder_projection_keeps_group_and_pack_membership_for_all_target_states(
+    tmp_path: Path,
+) -> None:
+    """Optional attribution must not reveal whether a linked holder exists or is withheld."""
+    raw = "Research [[Holder|the team]] team"
+    answers = []
+    for state in ("visible", "withheld", "absent"):
+        pages = {
+            "Analysis": (
+                f"## Claim\n- asserted_by: {raw}\n- relations: derived_from: [[Survey]]\n\n"
+                "Exports come first on the roadmap."
+            ),
+            "Survey": "## Claim\n\nNine of ten users asked for exports.",
+        }
+        if state != "absent":
+            pages["Holder"] = "A synthetic attribution target."
+        root = _vault(tmp_path, pages, name=state)
+        write_scope(root, paths="Notes/Holder.md")
+        write_rule(root, ceiling=egress.LEVEL_FULL if state == "visible" else egress.LEVEL_NONE)
+        filters = {"unit.dimension": {"$in": ["provenance", "attribution"]}}
+        if state == "visible":
+            with principal.request_scope(principal.owner_principal(surface="library")):
+                owner = _search(root, filters)
+            claim = next((hit for hit in owner["hits"] if hit["excerpt"] == "Exports come first on the roadmap."), None)
+            assert claim is not None, owner
+            assert claim["display"]["origin"]["by"] == raw
+        with principal.request_scope(_external()):
+            reply = _search(root, filters, deep=True)
+        claim = next(hit for hit in reply["hits"] if hit["excerpt"] == "Exports come first on the roadmap.")
+        assert claim["display"]["origin"]["by"] == "Research  team"
+        packed = _packed(reply)[claim["unit_ref"]]
+        assert packed["display"] == claim["display"]
+        duplicates = [entry for group in reply["dimension_groups"] for entry in group["units"]
+                      if entry.get("shown_in") and entry["unit_ref"] == claim["unit_ref"]]
+        assert duplicates and all(entry["display"]["origin"]["by"] == "Research  team" for entry in duplicates)
+        answers.append(([(hit["unit_ref"], hit.get("display")) for hit in reply["hits"]],
+                        reply["dimension_groups"], reply["pack"]["groups"]))
+    assert answers[0] == answers[1] == answers[2]
+
+
+def test_plain_holder_prose_survives_restricted_grouped_search(tmp_path: Path) -> None:
+    root = _display_vault(tmp_path)
+    with principal.request_scope(_external()):
+        reply = _search(root, {"unit.dimension": {"$eq": "attribution"}})
+    claim = next(hit for hit in reply["hits"] if hit["excerpt"] == "Exports come first on the roadmap.")
+    assert claim["display"]["origin"]["by"] == "Research team"
+
+
+@pytest.mark.parametrize("inferred", [False, True])
+def test_terminal_metadata_projection_batches_canonical_refs_and_refunds_only_annotations(
+    tmp_path: Path, inferred: bool,
+) -> None:
+    """Canonical targets omitted from a packet remain guarded, without removing their visible claim."""
+    import copy
+
+    from exomem import memory_refs, working_set, working_set_conversation
+
+    root = _vault(tmp_path, {"Visible": "A visible claim.", "Patterns/Hidden": "A hidden target."})
+    hidden = f"{NOTES}/Patterns/Hidden.md"
+    identity = "77777777-7777-4777-8777-777777777777"
+    path = root / hidden
+    path.write_text(path.read_text().replace("type: insight", f"type: insight\nexomem_id: {identity}"))
+    memory_refs.ReferenceIndex(root).rebuild_all()
+    write_scope(root)
+    write_rule(root, ceiling=egress.LEVEL_NONE)
+    visible = context_refs.vault_ref(f"{NOTES}/Visible.md")
+    denied = f"exomem://memory/{identity}#target"
+    unknown = "exomem://memory/88888888-8888-4888-8888-888888888888#target"
+    unit = {
+        "ref": visible, "text": "A visible claim.", "role": "material",
+        "provenance": {"path": f"{NOTES}/Visible.md"},
+        "display": {"origin": {"by": "Research [[Unresolved|alias]] team", "from": [denied, visible, unknown], "more": 4},
+                    "replaced": {"by": denied}, "open": True},
+    }
+    history = {**copy.deepcopy(unit), "ref": visible + "#history", "display": {"replaced": True}}
+    packet = {"units": [unit, history], "budget": {"limit_chars": 6000}, "generation": {}}
+    if inferred:
+        packet = working_set_conversation.InferredPacket(packet)
+        packet["budget"]["used_chars"] = working_set_conversation.subject_chars(packet)
+    else:
+        packet["budget"]["used_chars"] = sum(working_set.served_chars("units", entry) for entry in packet["units"])
+    with principal.request_scope(_external()):
+        reply = egress.postfilter("activate_context", packet, root, request_kwargs={"purpose": "research"})
+        repeated = egress.postfilter("activate_context", copy.deepcopy(reply), root, request_kwargs={"purpose": "research"})
+    assert [entry["ref"] for entry in reply["units"]] == [visible, visible + "#history"]
+    assert reply["units"][0]["display"] == {"origin": {"by": "Research  team", "from": [visible]}, "open": True}
+    assert reply["units"][1]["display"] == {"replaced": True}
+    if inferred:
+        assert reply["budget"]["used_chars"] == working_set_conversation.subject_chars(reply)
+    else:
+        assert reply["budget"]["used_chars"] == sum(working_set.served_chars("units", entry) for entry in reply["units"])
+    assert repeated["units"] == reply["units"]
+    assert repeated["budget"] == reply["budget"]
+
+
+@pytest.mark.usefixtures("anchors_packet")
+@pytest.mark.parametrize("holder_field", ["asserted_by", "credence_holder"])
+@pytest.mark.parametrize("raw, expected", [("Research [[Holder|alias]] team", "Research  team"), ("Holder", "Holder")])
+def test_holder_provenance_matches_the_display_without_disclosing_target_state(
+    tmp_path: Path, holder_field: str, raw: str, expected: str,
+) -> None:
+    """The shared packet must project holder prose even when automatic display marks are absent."""
+    from test_working_set_withheld_twins import _withhold
+
+    from exomem import lexstore, working_set_index, working_set_runtime
+
+    heading = "Claim" if holder_field == "asserted_by" else "Belief"
+    belief = ("- credence: 0.6\n- credence_basis: A synthetic sample.\n"
+              "- relations: assesses: [[Neutral target#claim]]\n" if holder_field == "credence_holder" else "")
+    hub_ref = "exomem://memory/11111111-1111-4111-8111-111111111111"
+    replies = []
+    for state in ("absent", "withheld", "visible"):
+        root = _vault(tmp_path, {}, name=state, graph=False)
+        hub = f"{NOTES}/Holder notebook.md"
+        _write(root, hub,
+               "---\ntype: insight\nstatus: active\ntags: [hub]\n"
+               "exomem_id: 11111111-1111-4111-8111-111111111111\n---\n# Holder notebook\n\n"
+               "A synthetic overview.\n\n"
+               f"## {heading}\n- id: exports\n- {holder_field}: {raw}\n"
+               + belief + "\nExports come first on the roadmap.\n")
+        _write(root, f"{NOTES}/Neutral target.md",
+               "---\ntype: insight\n---\n# Neutral target\n\n## Claim\n- id: claim\n\nA synthetic claim.\n")
+        if state != "absent":
+            _write(root, f"{NOTES}/Holder.md", "---\ntype: insight\n---\n# Holder\n\nA synthetic attribution target.\n")
+        lexstore.ensure_fresh(root)
+        epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
+        working_set_index.WorkingSetIndex(root).rebuild()
+        working_set_runtime.reset_caches_for_tests()
+        if state == "withheld":
+            _withhold(root, f"{NOTES}/Holder.md", ceiling=0)
+        with principal.request_scope(_external()):
+            packet = commands.op_activate_context(
+                root, turn="In the holder notebook, what about exports?", max_chars=6000, anchor=hub_ref,
+            )
+        assert not packet["abstained"], packet
+        claim = next(unit for unit in packet["units"] if unit["text"] == "Exports come first on the roadmap.")
+        assert claim["provenance"][holder_field] == expected, claim
+        if claim.get("display"):
+            assert claim["display"]["origin"]["by"] == expected, claim
+        replies.append(([unit["ref"] for unit in packet["units"]], claim["provenance"], claim.get("display"), packet["budget"]))
+    assert replies[0] == replies[1] == replies[2]

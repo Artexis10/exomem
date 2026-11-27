@@ -105,6 +105,12 @@ def test_rows_derive_from_the_given_bytes_not_from_the_page_on_disk(tmp_path: Pa
         assert rows.execute(
             "SELECT DISTINCT raw_target FROM graph_dependencies ORDER BY raw_target"
         ).fetchall() == [("Beta",), ("Beta#^obs",)]
+        assert rows.execute(
+            "SELECT DISTINCT raw_target, body_link FROM graph_dependencies ORDER BY raw_target"
+        ).fetchall() == [("Beta", 1), ("Beta#^obs", 0)]
+        assert {json.loads(raw)["raw_target"] for (raw,) in rows.execute(
+            "SELECT metadata FROM graph_edges WHERE origin = 'markdown_relation'"
+        )} == {"Beta", "Beta#^obs"}
         # The page and the unit that the links name are in the store only: both resolve.
         edges = {
             relation: (dst_key, target_kind, json.loads(metadata).get("fragment_resolution"))

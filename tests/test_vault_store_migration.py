@@ -50,7 +50,7 @@ from exomem import vault as pages
 from exomem.collection_store import capability, connection, custody, replica, schema
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import library_scope
-from exomem.vault_store import derivation, migrate, mode, ownership, write
+from exomem.vault_store import derivation, migrate, mode, ownership, verify, write
 
 ALPHA = "Knowledge Base/Notes/Alpha.md"
 BETA = "Knowledge Base/Notes/Beta.md"
@@ -206,7 +206,7 @@ def test_a_migration_stores_every_file_and_the_rows_equal_the_sidecars_and_no_va
             ("migrate", "drill")
         ]
         with sidecar(lexstore.lexical_path(vault)) as lexical:
-            for table in ("pages", "fts", "semantic_units", "unit_fts"):
+            for table in ("pages", "fts", "title_fts", "wikilink_keys", "semantic_units", "unit_row_keys", "unit_fts"):
                 assert table_rows(store, table) == table_rows(lexical, table)
             assert table_rows(lexical, "pages"), (
                 "the lexical catalogue must hold pages for this check to mean anything"
@@ -254,6 +254,43 @@ def test_a_sidecar_row_that_no_longer_matches_its_file_refuses_the_migration_and
         state_migration.VAULT_STORE_COMPATIBILITY_ID
         not in state_migration.recorded_descriptor_ids(vault)
     )
+
+
+def test_a_graph_sidecar_edge_to_a_page_that_left_the_catalogue_is_replaced_by_the_files_rows_and_reported(
+    vault, capsys, tmp_path
+):
+    """A migration that refuses, or copies a stale edge, because the graph sidecar kept what a vanished page's linker authored."""
+    (vault / BETA).unlink()
+    # The catalogue and the references follow the files. The graph sidecar drops the vanished page's own
+    # rows and keeps Alpha's edge toward it, as when the path that removed a target missed its linkers.
+    lexstore.search_bm25(vault, "lighthouse", 3, scope="kb", repair=True)
+    memory_refs.ReferenceIndex(vault).rebuild_all()
+    with closing(epistemic_graph.EpistemicGraphIndex(vault)._connect()) as graph, graph:
+        epistemic_graph.drop_page_graph_rows(graph, BETA)
+    with sidecar(epistemic_graph.sidecar_path(vault)) as graph:
+        kept = graph.execute(
+            "SELECT edge_key FROM graph_edges WHERE source_path = ? AND dst_page_key = ?",
+            (ALPHA, f"file:{BETA}"),
+        ).fetchall()
+    assert kept, "the sidecar must hold the stale edge for this check to mean anything"
+
+    assert migrate_apply(vault) == 0, capsys.readouterr().err
+
+    applied = printed(capsys)
+    assert applied["status"] == "migrated"
+    stale = applied["graph_sidecar"]
+    assert stale["differing_rows"] >= len(kept)
+    assert stale["tables"]["graph_edges"]["keys"]
+    expected = tmp_path / "expected.sqlite"
+    verify.derive_expected(vault, expected)
+    with closing(sqlite3.connect(expected)) as derived, closing(
+        connection.open_reader(connection.store_path(vault))
+    ) as store:
+        for table in ("graph_nodes", "graph_edges", "graph_parent_refs", "graph_dependencies"):
+            assert table_rows(store, table) == table_rows(derived, table)
+        assert not store.execute(
+            "SELECT 1 FROM graph_edges WHERE dst_page_key = ?", (f"file:{BETA}",)
+        ).fetchall()
 
 
 def test_an_identity_row_that_differs_from_its_page_refuses_the_migration_and_names_the_table(
@@ -845,11 +882,13 @@ def test_a_migration_dry_run_reports_queued_graph_work_and_leaves_it_queued(vaul
     assert deferred_index.graph_queue_age(vault)[0] == queued
 
 
-@pytest.mark.parametrize("drain", ["clears nothing", "raises", "outlasts the ceiling"])
-def test_queued_graph_work_that_cannot_drain_refuses_before_any_staging(
+@pytest.mark.parametrize(
+    "drain", ["clears nothing", "raises", "outlasts the ceiling", "cannot start"]
+)
+def test_queued_graph_work_that_cannot_drain_still_migrates_and_says_where_it_stopped(
     vault, capsys, monkeypatch, drain
 ):
-    """A migration that stages and proves a whole vault, or reports a traceback, when its catch-up cannot converge."""
+    """A migration that refuses, or reports a traceback, when its graph catch-up cannot converge."""
     _leave_graph_repair_queued(vault)
     if drain == "clears nothing":
         monkeypatch.setattr(index_sync, "drain_graph_work", lambda *args, **keywords: 0)
@@ -859,24 +898,25 @@ def test_queued_graph_work_that_cannot_drain_refuses_before_any_staging(
             raise RuntimeError("the graph sidecar is busy")
 
         monkeypatch.setattr(index_sync, "drain_graph_work", failing)
+    elif drain == "cannot start":
+
+        def no_projection(*args, **keywords):
+            raise RuntimeError("the recall projection cannot be published")
+
+        monkeypatch.setattr(
+            epistemic_graph.EpistemicGraphIndex, "publish_recall_projection", no_projection
+        )
     else:
         monkeypatch.setattr(migrate, "CATCH_UP_SECONDS", 0)
-    staged = []
-    stage = migrate.stage
-    monkeypatch.setattr(
-        migrate, "stage", lambda *args, **keywords: staged.append(1) or stage(*args, **keywords)
-    )
-    objects = store_objects(vault)
     capsys.readouterr()
 
-    assert migrate_apply(vault) == 1
+    assert migrate_apply(vault) == 0, capsys.readouterr().err
 
-    error = capsys.readouterr().err
-    assert "VAULT_STORE_GRAPH_NOT_CAUGHT_UP" in error
-    assert "exomem maintain --reconcile --rebuild-graph" in error
-    assert staged == []
-    assert store_objects(vault) == objects
-    assert not mode.store_mode_active(vault)
+    applied = printed(capsys)
+    assert applied["status"] == "migrated"
+    assert applied["graph_catch_up"]["left"] > 0
+    assert applied["graph_catch_up"]["stopped"] != "the queue drained"
+    assert mode.store_mode_active(vault)
 
 
 def test_a_store_migrated_before_the_change_journal_gets_it_at_its_next_derivation(vault, tmp_path):

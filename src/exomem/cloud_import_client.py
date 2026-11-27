@@ -71,6 +71,8 @@ class CloudImportError(Exception):
         self.resume = resume
         # True when Cloud reported that the import itself ended (failed, expired or discarded).
         self.ended = False
+        # For an ended import: False when a rerun would meet the same stop, so the folder run says nothing to rerun.
+        self.rerun_helps = True
         # Set when the client abandoned a checkpoint it could not resume; Cloud's import may still be open.
         self.why: str | None = None
 
@@ -83,6 +85,23 @@ _STOP_ON_CLOUD = (f"press Cancel in {_HOME_IMPORT_STATUS}, or ask your assistant
 
 class _SourceChanged(Exception):
     """A file or folder changed while it was archived, so the archive would mix two versions."""
+
+
+# The cell's controller fixes these two codes for an import step that left no report of its own: what each means for
+# the person, and whether running the command again can help. A new run after an out-of-memory stop meets the same
+# archive under the same limit, and a large vault takes hours to upload, so that message asks for a report first.
+_ENDED_WITHOUT_REPORT = {
+    "IMPORT_OUT_OF_MEMORY": ("the cell ran out of memory while it imported, and the checkpoint is removed. "
+                             "Report the import id; a new run on the same archive will likely stop the same way", False),
+    "IMPORT_KILLED": ("the import was stopped on your cell before it could say why, and the checkpoint is removed. "
+                      "Run the command again to start a new import; if it stops the same way, report the import id", True),
+}
+
+
+def _ended_without_finishing(code: str) -> tuple[str, bool]:
+    """What happened to an import that Cloud ended, with what the person can do, and whether a rerun can help."""
+    return _ENDED_WITHOUT_REPORT.get(
+        code, ("the Cloud import ended without finishing, and the checkpoint is removed; a new run starts a new import", True))
 
 
 def safe_code(value: object) -> str | None:
@@ -177,15 +196,18 @@ def _resumed_choices(now: Choices, state: dict) -> Choices:
     return plain
 
 
-def resumed_choices(checkpoint: Path, now: Choices) -> Choices | None:
+def resumed_choices(checkpoint: Path, now: Choices, source: Path) -> Choices | None:
     """The choices of the import that `checkpoint` holds, once this run's flags match them; None for a new import.
 
     A caller asks before it probes the cell, so a rerun builds the archive the first run chose. A record that
-    cannot be read gives None here, and the import reads it again and stops on it as it always did.
+    cannot be read, or that belongs to another source, gives None here, and the import reads it again and
+    stops on it as it always did.
     """
     try:
         state = json.loads((checkpoint / CHECKPOINT_RECORD).read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        return None
+    if state.get("source") != str(source):
         return None
     return _resumed_choices(now, state)
 
@@ -558,10 +580,10 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
             if item["observed_state"] in ("failed", "expired", "discarded"):
                 ciphertext.unlink(missing_ok=True)
                 record.unlink(missing_ok=True)
-                ended = CloudImportError(where.phase, safe_code(item.get("error_code")) or "IMPORT_ENDED",
-                                         "the Cloud import ended without finishing, and the checkpoint is removed; "
-                                         "a new run starts a new import", state["import_id"], resume=False)
-                ended.ended = True
+                code = safe_code(item.get("error_code")) or "IMPORT_ENDED"
+                message, rerun_helps = _ended_without_finishing(code)
+                ended = CloudImportError(where.phase, code, message, state["import_id"], resume=False)
+                ended.ended, ended.rerun_helps = True, rerun_helps
                 raise ended
             if predicate(item):
                 return item

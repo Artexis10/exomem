@@ -47,6 +47,97 @@ def material_vault(vault: Path) -> Path:
     return vault
 
 
+def test_unique_title_contact_serves_units_with_no_body_contact_in_each_project(material_vault: Path):
+    """The title can identify a page's material without making another project a naming competitor."""
+    for project, name in (("harbor-study", "harbor"), ("orchard-survey", "orchard")):
+        _write(material_vault, f"Knowledge Base/Notes/{name}-cobalt.md",
+            f"---\ntype: note\nproject: {project}\nstatus: active\n---\n# Cobalt guide\n\n"
+            "- [contact] Call the private extension. ^private\n\n"
+            "## Claim\n\nKeep the fasteners dry.\n\n## Claim\n\nSeal the outer casing.\n")
+    lexstore.ensure_fresh(material_vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(material_vault).rebuild()
+
+    for project, name in (("harbor-study", "harbor"), ("orchard-survey", "orchard")):
+        packet = working_set.compile_packet(material_vault, turn=f"{project} cobalt guide")
+        units = [unit for unit in packet["units"] if unit["role"] == "material"]
+        assert [unit["text"] for unit in units] == ["Keep the fasteners dry.", "Seal the outer casing."]
+        assert {unit["provenance"]["path"] for unit in units} == {f"Knowledge Base/Notes/{name}-cobalt.md"}
+        assert {unit["provenance"]["category"] for unit in units} == {"claim"}
+
+    subject = working_set.compile_packet(material_vault, turn="harbor-study")
+    assert not any(unit["role"] == "material" for unit in subject["units"])
+    both = working_set.compile_packet(material_vault,
+        turn="In harbor-study, cobalt guide. In orchard-survey, cobalt guide.")
+    assert {unit["provenance"]["path"] for unit in both["units"] if unit["role"] == "material"} == {
+        "Knowledge Base/Notes/harbor-cobalt.md", "Knowledge Base/Notes/orchard-cobalt.md",
+    }
+
+    path = material_vault / "Knowledge Base/Notes/harbor-cobalt.md"
+    path.write_text(path.read_text().replace("Keep the fasteners dry.", "Keep the cobalt guide fasteners dry."))
+    lexstore.ensure_fresh(material_vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(material_vault).rebuild()
+    combined = working_set.compile_packet(material_vault, turn="harbor-study cobalt guide")
+    assert [unit["text"] for unit in combined["units"] if unit["role"] == "material"] == [
+        "Keep the cobalt guide fasteners dry.", "Seal the outer casing.",
+    ]
+
+    _write(material_vault, "Knowledge Base/Notes/cobalt-rival.md",
+        "---\ntype: note\nproject: harbor-study\nstatus: active\n---\n# Cobalt guide\n\n"
+        "## Claim\n\nInspect the enclosure.\n")
+    lexstore.ensure_fresh(material_vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(material_vault).rebuild()
+    ambiguous = working_set.compile_packet(material_vault, turn="harbor-study cobalt guide")
+    assert [unit["text"] for unit in ambiguous["units"] if unit["role"] == "material"] == [
+        "Keep the cobalt guide fasteners dry.",
+    ]
+
+
+def test_title_fallback_keeps_a_body_pointer_ahead_of_its_new_units(material_vault):
+    """A latent title match must not spend the slots an existing prose match already earned."""
+    path = _write(material_vault, "Knowledge Base/Notes/copper-service.md",
+        "---\ntype: note\nproject: harbor-study\nstatus: active\n---\n# Copper service\n\n"
+        "Copper service requires a supervised review.\n\n"
+        "## Claim\n\nKeep the fasteners dry.\n\n## Claim\n\nSeal the outer casing.\n\n"
+        "## Claim\n\nMark the drain.\n")
+    lexstore.ensure_fresh(material_vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(material_vault).rebuild()
+    packet = working_set.compile_packet(material_vault, turn="harbor-study copper service")
+    assert [pointer["ref"] for pointer in packet["pointers"] if pointer["role"] == "material"] == [path]
+    assert [unit["text"] for unit in packet["units"] if unit["role"] == "material"] == [
+        "Keep the fasteners dry.", "Seal the outer casing.",
+    ]
+
+
+@pytest.mark.parametrize("status", ["stale", lexstore.DEADLINE_STATUS])
+def test_unknown_title_contact_keeps_body_material_and_reports_the_missing_lookup(material_vault, monkeypatch, status):
+    """An optional title projection cannot erase real body hits or masquerade as a complete miss."""
+    with monkeypatch.context() as patch:
+        patch.setattr(lexstore.LexicalStore, "title_contact_paths_result", lambda *args, **kwargs:
+            lexstore.CatalogQueryResult(None, lexstore.CatalogReadiness(status, False, "sqlite")))
+        packet = working_set.compile_packet(material_vault, turn="harbor-study turbine calibration")
+    material = [unit for unit in packet["units"] if unit["role"] == "material"]
+    assert [unit["provenance"]["path"] for unit in material] == ["Knowledge Base/Notes/older.md"]
+    reason = "budget" if status == lexstore.DEADLINE_STATUS else "unavailable"
+    assert {"role": "material", "reason": f"task_lookup_{reason}"} in packet["missing"]
+
+
+def test_project_title_contact_preserves_the_original_unspaced_run(material_vault):
+    for name, title in (("weak-a", "調査案内"), ("weak-b", "調査場所"), ("strong", "紅色灯台")):
+        _write(material_vault, f"Knowledge Base/Notes/{name}.md",
+            f"---\ntype: note\nproject: harbor-study\nstatus: active\n---\n# {title}\n\n"
+            "## Claim\n\nKeep the fasteners dry.\n")
+    lexstore.ensure_fresh(material_vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(material_vault).rebuild()
+    packet = working_set.compile_packet(material_vault, turn="harbor-study 紅色灯台調査")
+    material = [unit for unit in packet["units"] if unit["role"] == "material"]
+    assert [unit["provenance"]["path"] for unit in material] == ["Knowledge Base/Notes/strong.md"]
+
+
 def test_project_material_is_relevant_scoped_and_does_not_bypass_contact(material_vault: Path):
     # Catches both categorical exclusion and a recency sort erasing content rank.
     packet = working_set.compile_packet(material_vault, turn="harbor-study turbine calibration")

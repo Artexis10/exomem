@@ -645,7 +645,8 @@ class _Planner:
         placed = {}
         for slot, gap in zip(slots, [0, *gaps], strict=True):
             week += gap
-            placed[slot] = week_date(week, day)
+            # Weekly main work ingests every filed document before its probes run.
+            placed[slot] = week_date(week, _WEEK - 1 if slot in probed else day)
         return placed
 
     # -- footprints ----------------------------------------------------------------------------
