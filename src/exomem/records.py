@@ -280,7 +280,9 @@ def _registered_classes(
     try:
         canonical = sensitivity_classes.validated(root, own)
     except sensitivity_classes.SensitivityError as error:
-        raise collections.CollectionError(error.code, error.reason) from error
+        issue = {"field": governance.SENSITIVITY, "code": error.code, "reason": error.reason}
+        raise collections.CollectionError(
+            error.code, error.reason, {"field": governance.SENSITIVITY, "issues": [issue]}) from error
     return {**values, governance.SENSITIVITY: list(canonical)}
 
 
@@ -1221,9 +1223,15 @@ def _bulk_sources_field(manifest: collections.CollectionManifest) -> bool:
 
 
 def _bulk_row_values(
-    manifest: collections.CollectionManifest, item: Mapping[str, Any], source_rel: str
+    manifest: collections.CollectionManifest, item: Mapping[str, Any], source_rel: str, *, root: Path | None
 ) -> dict[str, Any]:
-    """A bulk row's validated values: its item plus, where declared, a link to its source."""
+    """A bulk row's validated values: its item plus, where declared, a link to its source.
+
+    With a vault ``root`` the row's own `sensitivity` classes take the registry check, so the file bulk path, the
+    store bulk path, an import batch and its preview refuse the same rows. ``None`` is for a derived collection
+    only: its rows keep no governance metadata, and a rebuild replays the import log, which a class retired since
+    the import must not refuse.
+    """
     values = dict(item)
     if _bulk_sources_field(manifest):
         link = _bulk_source_link(source_rel)
@@ -1232,7 +1240,8 @@ def _bulk_row_values(
             values["sources"] = [link]
         elif isinstance(listed, list) and link not in listed:
             values["sources"] = [*listed, link]
-    return _validate_values(manifest, values)
+    validated = _validate_values(manifest, values)
+    return validated if root is None else dict(_registered_classes(root, manifest, validated))
 
 
 def resolve_preserved_source(
@@ -1462,7 +1471,7 @@ def bulk_upsert_records(
                     )
                     continue
                 source_rel, source_guard_row = resolved.path, resolved.guard
-                values = _bulk_row_values(manifest, _registered_classes(root, manifest, raw["item"]), source_rel)
+                values = _bulk_row_values(manifest, raw["item"], source_rel, root=root)
             except collections.CollectionError as error:
                 outcomes.append(_bulk_error_row(index, error))
                 continue
