@@ -34,6 +34,7 @@ STAYS: Mapping[str, tuple[bool, str]] = MappingProxyType({  # nosemgrep: ep-word
     "unchecked": (False, "{n} not yet verified against their Source page"),
     "text": (True, "{n} text"),
     "kept": (True, "{n} artifact"),
+    "kept_speech": (True, "{n} transcript kept with its recording"),
 })
 
 
@@ -171,15 +172,27 @@ def _page_classifier(page: dict, filed_statuses: tuple[str, ...]):
     selected = set((page.get("selection") or {}).get("paths") or [])
     outcomes = page.get("outcomes") or {}
     removes_copies = page.get("consume", True)  # a run that opted out never checks or removes a copy
+    # The part pages of a kept transcript are no plan items: they follow their page.
+    kept_with = {
+        member: item for item in items.values()
+        for member in (item.get("kept") or {}).get("members") or () if member != item["original_path"]
+    }
 
     def classify(path: str) -> str | None:
-        item = items.get(path)
+        item = items.get(path) or kept_with.get(path)
         if item is not None:
-            outcome = outcomes.get(path) or {}
+            outcome = outcomes.get(item["original_path"]) or {}
             status = outcome.get("status")
             if status == "failed":
                 return "over_ceiling" if outcome.get("code") == adoption_plan.OVER_CEILING else "failed"
             if status in filed_statuses:
+                settled = outcome.get("kept_speech")  # the page's result went to its recording's Source
+                if path != item["original_path"]:  # a part page of a transcript
+                    if settled is None:
+                        return "ineligible"  # its page filed as a text Source, so no part is kept
+                    return "failed" if settled.get("outcome") == "failed" else "kept_speech"
+                if settled is not None:
+                    return "kept_speech"
                 if outcome.get("stays"):
                     return outcome["stays"]  # `finish` recorded why it kept this copy: a result key of `STAYS`
                 if item["form"] == "text" and removes_copies and not outcome.get("consumed"):

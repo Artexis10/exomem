@@ -713,9 +713,7 @@ def reconcile_media(
             store = media_jobs.MediaJobStore(vault)
             durable_job = store.get_by_binary(binary)
             attached = False
-            requested_clip = media_type in media_types.VISUAL_KINDS and not os.environ.get(
-                "EXOMEM_DISABLE_CLIP"
-            )
+            requested_clip = wants_frame_vectors(media_type)
             # A switched-off engine gets no stage, so no job bound to fail; the
             # pending sidecar waits and reconciliation queues it once it is enabled.
             extraction_on = media_engines.stage_enabled(media_type)
@@ -1475,7 +1473,7 @@ def _enqueue(
             "MEDIA_BUSY", "the file is being processed now; ask again when that run ends"
         )
     if job.do_clip:  # the request row carries the extraction stage only
-        store.enqueue(replace(job, do_ocr=False))
+        store.enqueue(_frame_vector_job(job.binary_path, job.sidecar_path, job.media_type))
     return row_id, True
 
 
@@ -1623,6 +1621,33 @@ def _queue_extraction(
         requeued=1,
         attached=True,
     )
+
+
+def wants_frame_vectors(media_type: str) -> bool:
+    """Whether a recording of this kind gets visual (frame-vector) indexing: a visual kind, unless the operator turned it off."""
+    from . import embeddings  # numpy loads with it, which a caller that never reads frames need not pay for
+
+    return media_type in media_types.VISUAL_KINDS and embeddings.clip_enabled()
+
+
+def _frame_vector_job(binary: Path, sidecar: Path, media_type: str) -> media_jobs.MediaJob:
+    """The job that indexes frame vectors alone: no extraction stage. The scan that the worker runs at its start queues this shape."""
+    return media_jobs.MediaJob(
+        binary_path=binary, sidecar_path=sidecar, media_type=media_type, do_ocr=False, do_clip=True
+    )
+
+
+def queue_frame_vectors(vault: Path, binary: Path, media_type: str) -> bool:
+    """Queue the frame-vector job alone for a visual original whose extraction is already complete.
+
+    A completed sidecar admits no job, and the worker queues frame vectors for a completed video only when it
+    starts. A video that arrives with its transcript (`kept_speech`) asks for them here instead.
+    True when a job is queued.
+    """
+    if not wants_frame_vectors(media_type):
+        return False
+    media_jobs.MediaJobStore(vault).enqueue(_frame_vector_job(binary, originals.sidecar_path(binary), media_type))
+    return True
 
 
 def _retire_completed_ocr(

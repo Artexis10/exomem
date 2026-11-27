@@ -14,14 +14,22 @@ import shutil
 import stat
 import time
 import uuid
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import httpx2
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
-from . import adoption_run, import_selection, import_stage, media_capacity, operation_entries
+from . import (
+    adoption_run,
+    extraction_parts,
+    import_selection,
+    import_stage,
+    media_capacity,
+    operation_entries,
+)
 from .cell_init import _ensure_private_directory
 from .cli_progress import Progress, human_bytes
 from .cloud_import import STORAGE_ALLOWANCE_EXCEEDED
@@ -674,21 +682,24 @@ class _Run:
         if unadmitted:
             return [], 0, unadmitted
         taken, cost, plain = [], series_cost, len(series_file)
-        for member in pool:
-            if cost + member.cost > limit or (admitted is not None and plain + member.size > admitted):
+        groups = _groups(pool)
+        for group in groups:
+            weight, size = sum(member.cost for member in group), sum(member.size for member in group)
+            if cost + weight > limit or (admitted is not None and plain + size > admitted):
                 break
-            taken.append(member)
-            cost, plain = cost + member.cost, plain + member.size
+            taken.extend(group)
+            cost, plain = cost + weight, plain + size
         if taken:
             return taken, cost, None
-        need, pinned = series_cost + pool[0].cost, reading.pinned.bytes
+        first = sum(member.cost for member in next(_groups(pool)))
+        need, pinned = series_cost + first, reading.pinned.bytes
         if ceiling is not None and need > ceiling:
             raise self.stop("WINDOW_REFUSED_FOR_SPACE", "the Job refused a window for space and the next member cannot form a smaller one")
         if need > reading.reachable.bytes + pinned:
             raise self.stop(
                 "BAND_TOO_SMALL",
                 f"band too small: the window budget is {reading.budget.bytes} bytes, the reachable budget is "
-                f"{reading.reachable.bytes} bytes, {pinned} bytes are job-pinned, and the next member needs {pool[0].cost} bytes")
+                f"{reading.reachable.bytes} bytes, {pinned} bytes are job-pinned, and the next member needs {first} bytes")
         if need > reading.reachable.bytes:
             return [], 0, (f"the next member needs {need} bytes; claimed jobs keep {pinned} bytes of originals on the "
                            "volume, which free up when their jobs end")
@@ -1085,8 +1096,27 @@ async def _preflight(run: _Run, members: list[Member], reading: Reading) -> None
 
 
 
+def _page_of(path: str) -> str:
+    """The Source page that a part page belongs to; any other path is its own."""
+    page = extraction_parts.source_page_for(PurePosixPath(path))
+    return page.as_posix() if page is not None else path
+
+
 def _sorted(members: list[Member]) -> list[Member]:
-    return sorted(members, key=lambda member: (_CLASS_ORDER[member.klass], member.path))
+    """Artifacts first and text last, each in path order; a page's part pages follow the page (OpenSpec `keep-speech-results-in-cloud`, D4)."""
+    return sorted(members, key=lambda member: (_CLASS_ORDER[member.klass], _page_of(member.path), member.path != _page_of(member.path), member.path))
+
+
+def _groups(pool: list[Member]) -> Iterator[list[Member]]:
+    """The pool as the units a window takes whole: a page with its part pages, or one member."""
+    group: list[Member] = []
+    for member in pool:
+        if group and _page_of(member.path) != _page_of(group[0].path):
+            yield group
+            group = []
+        group.append(member)
+    if group:
+        yield group
 
 
 def _classify(kept: import_selection.Kept, reading: Reading) -> Member:

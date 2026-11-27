@@ -3522,6 +3522,14 @@ def _catalog_usable() -> bool:
     return backend() != "python"
 
 
+def duplicate_index_configured() -> bool:
+    """Whether the configuration keeps the duplicate index at all; False is a final answer and never a reason to retry.
+
+    `payload_candidates` also answers None while the index is rebuilding or failed, which is a temporary state.
+    """
+    return _catalog_usable()
+
+
 def _term_units(units) -> list[list[object]]:
     """`[stem, unit, needed]` rows for the corroboration filter.
 

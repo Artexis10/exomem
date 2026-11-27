@@ -74,6 +74,8 @@ FIRST_BACKOFF_SECONDS = 5.0
 MAX_BACKOFF_SECONDS = 300.0
 #: A stage that stopped for free space asks again this often; a `file` call or a restart asks sooner.
 SPACE_CHECK_SECONDS = 3600.0
+#: A stage that holds transcript pages for recordings that another window files asks again this often.
+HOLD_CHECK_SECONDS = 120.0
 #: A stage that waits on a read-only cell asks again this often; a `file` call or a restart asks sooner.
 READ_ONLY_CHECK_SECONDS = 60.0
 #: What a fault that no call explains waits before the filer looks at the stage again.
@@ -233,8 +235,17 @@ def _left_out(vault_root: Path, import_id: str) -> dict:
     }
 
 
+def _held(stop: dict | None) -> bool:
+    """Whether a stop is a hold on transcript pages that wait for their recordings, which no person can lift."""
+    from . import kept_speech
+
+    return isinstance(stop, dict) and stop.get("code") in kept_speech.HOLD_CODES
+
+
 def _stopped_needs(vault_root: Path, reply: dict, person: list) -> list[dict]:
-    """What a stop asks of the person: free space (with the bytes the run records) or, for any other stop, support."""
+    """What a stop asks of the person: nothing for a hold, free space (with the bytes the run records) or, for any other stop, support."""
+    if _held(reply.get("stop")):
+        return []  # another window's filing, or the index, lifts it
     if not any(isinstance(entry, dict) and entry.get("need") == _PERSON_FREE_SPACE for entry in person):
         return [{"need": NEED_SUPPORT}]
     from . import adoption_run
@@ -517,7 +528,8 @@ class Filer:
         if filing == _REPLY_WORKING:
             return 0.0
         if continuation is not None:
-            return SPACE_CHECK_SECONDS  # a stop with a continuation is the free-space stop: ask again later
+            # A stop with a continuation is a hold or the free-space stop: ask again later.
+            return HOLD_CHECK_SECONDS if _held(stop) else SPACE_CHECK_SECONDS
         if self._discarded(import_id):
             _update(self.vault_root, import_id, lambda held: held.update(state=DISCARDED, stop=None, needs=[], person=[]))
         return None
