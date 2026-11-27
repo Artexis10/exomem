@@ -6,7 +6,7 @@ A Cloud user's cell upgrades often, sometimes daily, and nothing tells the perso
 
 ## What Changes
 
-- A pull request whose change a user would notice adds one plain sentence for users as a file under `user-notes/`. A pull request without one is not mentioned to users.
+- A pull request whose change a user would notice adds one plain sentence and a short title for users as a file under `user-notes/`. A pull request without one is not mentioned to users.
 - A CI check asks every `feat`, `fix` or `perf` pull request to decide: it adds a `user-notes/` file or its body carries the line `User note: none`. The check reads only the title type, the changed paths and that marker line; it never judges the wording.
 - The release build derives each release's notes from the release tags and bakes them into the image as package data, newest first and bounded.
 - `bootstrap(profile="compact", section="whats_new")` returns the running version and the recent releases' notes. Substrate's Home reads it like the activity section.

@@ -30,7 +30,7 @@ from typing import Any
 
 from filelock import FileLock, Timeout
 
-from .release_notes_format import Release, Version, parse_document, parse_version
+from .release_notes_format import Release, Version, note_object, parse_document, parse_version
 
 _log = logging.getLogger(__name__)
 
@@ -83,6 +83,7 @@ def releases() -> tuple[Release, ...] | None:
 def payload() -> dict[str, Any]:
     """`{"whats_new": {version, releases, notes_available}}`: the running version and the notes of each recent release.
 
+    Each release lists its notes as `{"title", "text"}`; `title` is null for a note written without one.
     `releases` is empty both when the image has no notes and when it has none to give; `notes_available`
     tells the two apart, so Home never reads an unknown list as an empty one.
     """
@@ -91,7 +92,7 @@ def payload() -> dict[str, Any]:
         "whats_new": {
             "version": running_version(),
             "releases": [
-                {"version": release.version, "released_on": release.released_on, "notes": list(release.notes)}
+                {"version": release.version, "released_on": release.released_on, "notes": [note_object(note) for note in release.notes]}
                 for release in known or ()
             ],
             "notes_available": known is not None,
@@ -239,7 +240,7 @@ def update_notice(vault_root: Path, app_id: str) -> dict[str, str] | None:
     if not recorded or before_parsed is None:
         return None
     arrived = [
-        note
+        note.text
         for release in notes
         if before_parsed < release.parsed <= running_parsed
         for note in release.notes

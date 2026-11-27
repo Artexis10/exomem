@@ -2,7 +2,7 @@
 
 ### Requirement: The cell serves its release notes
 
-`bootstrap(profile="compact", section="whats_new")` SHALL return `whats_new` with the running `version`, `releases` from the image's notes file, newest first, and `notes_available`, which is `false` when the notes file is missing or unusable and `true` otherwise. It SHALL read no vault content and SHALL answer from memory after the first read.
+`bootstrap(profile="compact", section="whats_new")` SHALL return `whats_new` with the running `version`, `releases` from the image's notes file, newest first, each with `notes` as `{title, text}` objects (`title` is null for a note without one), and `notes_available`, which is `false` when the notes file is missing or unusable and `true` otherwise. It SHALL read no vault content and SHALL answer from memory after the first read.
 
 #### Scenario: Home reads the notes
 
@@ -47,7 +47,7 @@ On a cloud cell, the cell SHALL keep, for each canonical gateway app id, the las
 
 ### Requirement: The update notice is one bounded sentence for the assistant
 
-`update_notice` SHALL carry `version` and `say`. `say` SHALL begin "Tell the user once in this conversation: ", give the newest note, count the other notes and point to What's new on Home, within 400 characters. It MUST carry no vault content.
+`update_notice` SHALL carry `version` and `say`. `say` SHALL begin "Tell the user once in this conversation: ", give the newest note's text, count the other notes and point to What's new on Home, within 400 characters. It MUST carry no vault content.
 
 #### Scenario: Three notes since the app's version
 

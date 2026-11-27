@@ -659,8 +659,8 @@ jobs:
         env:
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
-          # The generator applies the note shape rule, which reads Markdown with the parser pinned in pyproject.toml.
-          python3 -m pip install --disable-pip-version-check "$(grep -o -m1 'markdown-it-py==[0-9.]*' pyproject.toml)"
+          # The generator applies the note shape rule: markdown-it-py reads the Markdown and PyYAML the front matter, both as declared in pyproject.toml.
+          python3 -m pip install --disable-pip-version-check "$(grep -o -m1 'markdown-it-py==[0-9.]*' pyproject.toml)" "$(grep -o -m1 'pyyaml>=[0-9.]*' pyproject.toml)"
           python3 .release-tools/scripts/user_notes.py generate --version "$VERSION" --output src/exomem/user_release_notes.json
 
       - name: Build and push native cloud image

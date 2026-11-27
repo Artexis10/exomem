@@ -31,6 +31,11 @@ def notes(monkeypatch):
     return module
 
 
+def note_file(title: str | None, sentence: str) -> str:
+    """A note file as authors write it: the title in front matter, then the sentence."""
+    return f"---\ntitle: {title}\n---\n{sentence}\n" if title is not None else f"{sentence}\n"
+
+
 class Repo:
     """A throwaway repository whose commits carry chosen dates, so tags and notes line up as in a release."""
 
@@ -67,25 +72,32 @@ def repo(tmp_path) -> Repo:
 def test_each_note_goes_to_the_earliest_release_that_contains_it_and_a_new_note_to_the_build(notes, repo, tmp_path):
     """A note that lands in the wrong release is shown to people as news on the wrong day; a release with
     no note must not appear at all; a note edited after its release stays with that release."""
-    repo.commit("2026-01-10", {"user-notes/README.md": "for authors\n", "user-notes/older.md": "Older change.\n"})
+    repo.commit("2026-01-10", {"user-notes/README.md": "for authors\n", "user-notes/older.md": note_file("Older", "Older change.")})
     repo.tag("v1.2.0")
     repo.commit("2026-01-20", {"code": "a"})
     repo.tag("v1.2.1")  # a release with no note
-    repo.commit("2026-02-01", {"user-notes/first-new.md": "First new change.\n"})
-    repo.commit("2026-02-02", {"user-notes/second-new.md": "Second new change.\n"})
+    repo.commit("2026-02-01", {"user-notes/first-new.md": note_file("First new", "First new change.")})
+    repo.commit("2026-02-02", {"user-notes/second-new.md": note_file("Second new", "Second new change.")})
     repo.tag("v1.3.0")
-    repo.commit("2026-02-05", {"user-notes/older.md": "Older change, reworded.\n"})
-    repo.commit("2026-03-01", {"user-notes/unreleased.md": "Not released yet.\n"})
+    repo.commit("2026-02-05", {"user-notes/older.md": note_file("Older, reworded", "Older change, reworded.")})
+    repo.commit("2026-03-01", {"user-notes/unreleased.md": "Not released yet.\n"})  # an older tree's note: no front matter
     output = tmp_path / "out" / "notes.json"
 
     assert notes.main(["generate", "--repo", str(repo.path), "--version", "1.4.0", "--output", str(output)]) == 0
 
+    def entry(title, text):
+        return {"title": title, "text": text}
+
     assert json.loads(output.read_text("utf-8")) == {
-        "schema": 1,
+        "schema": 2,
         "releases": [
-            {"version": "1.4.0", "released_on": "2026-03-01", "notes": ["Not released yet."]},
-            {"version": "1.3.0", "released_on": "2026-02-02", "notes": ["Second new change.", "First new change."]},
-            {"version": "1.2.0", "released_on": "2026-01-10", "notes": ["Older change, reworded."]},
+            {"version": "1.4.0", "released_on": "2026-03-01", "notes": [entry(None, "Not released yet.")]},
+            {
+                "version": "1.3.0",
+                "released_on": "2026-02-02",
+                "notes": [entry("Second new", "Second new change."), entry("First new", "First new change.")],
+            },
+            {"version": "1.2.0", "released_on": "2026-01-10", "notes": [entry("Older, reworded", "Older change, reworded.")]},
         ],
     }
     # The file as written must be one the cell's own reader accepts, not only one that looks right here.
@@ -117,7 +129,8 @@ def test_a_shallow_clone_is_refused_rather_than_dating_every_note_from_its_bound
         notes.generate(shallow, "1.0.0")
 
 
-GOOD = "Photos now keep the date they were taken, even when your chat app removed it."
+SENTENCE = "Photos now keep the date they were taken, even when your chat app removed it."
+GOOD = note_file("Photos keep their date", SENTENCE)
 
 
 def changed(notes, text: str | None = GOOD, *, added: bool = True, path: str = "user-notes/photos.md"):
@@ -163,19 +176,42 @@ def test_the_deciding_types_are_the_changelog_types_that_release_please_does_not
 @pytest.mark.parametrize(
     "text",
     [
-        "x" * 201,  # too long
-        "First line.\nSecond line.",  # two lines
-        "",  # empty
-        "- one item",  # a block that is not a paragraph
-        "Use **bold** words here.",  # inline syntax inside a paragraph
+        note_file("Photos keep their date", "x" * 201),  # too long
+        note_file("Photos keep their date", "First line.\nSecond line."),  # two lines
+        note_file("Photos keep their date", ""),  # empty
+        note_file("Photos keep their date", "- one item"),  # a block that is not a paragraph
+        note_file("Photos keep their date", "Use **bold** words here."),  # inline syntax inside a paragraph
     ],
 )
-def test_a_note_that_breaks_the_shape_rule_fails_whatever_the_title(notes, text):
+def test_a_note_that_breaks_the_shape_rule_fails_whatever_the_pull_request_type(notes, text):
     assert verdict(notes, "docs: x", "", changed(notes, text)) != []
 
 
-def test_a_plain_sentence_with_ordinary_punctuation_passes(notes):
-    text = "You can now save up to 5 photos at once, and it's faster (about 2x) for your chat app's files."
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        (SENTENCE + "\n", "the note has no title"),
+        (f"---\nkind: fixed\n---\n{SENTENCE}\n", "the front matter has no title"),
+        (f"---\ntitle:\n---\n{SENTENCE}\n", "the title is empty or not text"),
+        (f"---\ntitle: 2026\n---\n{SENTENCE}\n", "the title is empty or not text"),
+        (note_file("A" * 49, SENTENCE), "the title has 49 characters; the limit is 48"),
+        (note_file("Photos keep their date.", SENTENCE), "remove the full stop at the end of the title"),
+        (note_file("Photos **keep** their date", SENTENCE), "the title uses Markdown syntax"),
+        (note_file("Photos [keep](x) dates", SENTENCE), "the title uses Markdown syntax"),
+        (f"---\ntitle: |\n  two\n  lines\n---\n{SENTENCE}\n", "write the title on one line"),
+        (f"---\ntitle: Photos keep their date\nkind: fixed\n---\n{SENTENCE}\n", "unknown key(s) kind"),
+        (f"---\ntitle: Photos: dates\n---\n{SENTENCE}\n", "the front matter is not valid YAML"),
+        (f"---\ntitle: Photos keep their date\n{SENTENCE}\n", "never closes"),
+    ],
+)
+def test_a_note_whose_title_breaks_the_rules_fails_and_says_what_to_change(notes, text, message):
+    errors = verdict(notes, "feat: x", "", changed(notes, text))
+
+    assert any(message in error for error in errors)
+
+
+def test_a_plain_sentence_and_title_with_ordinary_punctuation_pass(notes):
+    text = note_file("Faster, for 5 photos (2x)", "You can now save up to 5 photos at once, and it's faster (about 2x) for your chat app's files.")
 
     assert verdict(notes, "feat: x", "", changed(notes, text)) == []
 
@@ -194,23 +230,23 @@ def test_the_authors_readme_does_not_count_as_a_note(notes, repo, capsys):
 def test_the_check_reads_the_added_note_from_the_pull_requests_files(notes, repo, capsys):
     repo.commit("2026-01-01", {"code": "a"})
     base = repo.git("rev-parse", "HEAD").strip()
-    repo.commit("2026-01-02", {"user-notes/photos.md": GOOD + "\n"})
+    repo.commit("2026-01-02", {"user-notes/photos.md": GOOD})
     argv = ["check", "--repo", str(repo.path), "--base", base, "--head", "HEAD", "--title", "fix: dates"]
 
     assert notes.main(argv) == 0
 
-    repo.commit("2026-01-03", {"user-notes/photos.md": "Use **bold**.\n"})
+    repo.commit("2026-01-03", {"user-notes/photos.md": note_file("Photos keep their date", "Use **bold**.")})
     assert notes.main(argv) == 1
     assert "user-notes/photos.md: the note uses Markdown syntax" in capsys.readouterr().err
 
 
 def test_a_note_that_skipped_the_pull_request_check_is_left_out_with_a_warning_and_the_build_goes_on(notes, repo, capsys):
-    repo.commit("2026-01-01", {"user-notes/good.md": "A good change.\n", "user-notes/bad.md": "Use **bold**.\n"})
+    repo.commit("2026-01-01", {"user-notes/good.md": note_file("Good", "A good change."), "user-notes/bad.md": note_file("Bad", "Use **bold**.")})
     repo.tag("v1.0.0")
 
     document = notes.generate(repo.path, "1.1.0")
 
-    assert [release["notes"] for release in document["releases"]] == [["A good change."]]
+    assert [release["notes"] for release in document["releases"]] == [[{"title": "Good", "text": "A good change."}]]
     assert capsys.readouterr().out == (
         "::warning file=user-notes/bad.md::left out of the release notes: the note uses Markdown syntax; write plain words\n"
     )
