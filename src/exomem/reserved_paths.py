@@ -30,7 +30,7 @@ from typing import IO, TYPE_CHECKING
 
 from rpds import HashTrieMap, HashTrieSet
 
-from . import call_spans, foreground_priority, held_fs, request_budget
+from . import build_record, call_spans, foreground_priority, held_fs, request_budget
 from .cli_ops import OpError
 from .kbdir import managed_join, managed_root_rel, managed_split_parts
 
@@ -3678,6 +3678,8 @@ class _BaselineFlight:
 
 
 _BASELINE_IDENTITY_FLIGHTS: dict[str, _BaselineFlight] = {}
+#: When the running build started and how the last ones failed, for a warming diagnostic.
+_IDENTITY_BUILDS = build_record.BuildRecord()
 
 #: How long a follower may wait on the one build already running.  Deliberately
 #: NOT the mutation-gate budget: a follower waits on an in-process Event, which
@@ -3762,6 +3764,53 @@ def identity_catalogue_ready(vault_root: Path) -> bool:
     """Whether a private-identity inventory is available without building one."""
 
     return _warm_baseline_identity_catalogue(vault_root) is not None
+
+
+def identity_catalogue_warm_state(vault_root: Path) -> dict[str, object]:
+    """The inventory build's state for a warming diagnostic (`build_record.BuildRecord.state`)."""
+
+    return _IDENTITY_BUILDS.state(_vault_identity_key(vault_root), ready=identity_catalogue_ready(vault_root))
+
+
+#: How often a reader looks for the background build before that build has registered its flight.
+_WARM_FLIGHT_POLL_SECONDS = 0.05
+
+
+@call_spans.timed("reserved.identity.warm_wait")
+def await_identity_catalogue_warm(vault_root: Path, timeout: float) -> bool:
+    """Wait at most ``timeout`` seconds for the background inventory build; True once one is ready.
+
+    A fresh process has no inventory until its first warm finishes, which takes seconds on a small
+    vault. Waiting that long lets the first turn get its context instead of a warming outcome. The
+    reader only waits on the build already scheduled: it never starts or leads one. For a reader that
+    holds no boundary.
+    """
+
+    if _identity_coordination_active(vault_root):
+        # The build needs the identity coordination this caller holds: waiting would only run out the clock.
+        return identity_catalogue_ready(vault_root)
+    vault_key = _vault_identity_key(vault_root)
+    deadline = time.monotonic() + max(0.0, timeout)
+    # The build registers its flight on its own thread, so it can be absent for a moment after scheduling.
+    followed = False
+    # The caller is a read holding no boundary, so it leaves the in-flight count rather than releasing
+    # every bulk pass: other requests keep their priority while it waits.
+    with foreground_priority.outside_foreground():
+        while not identity_catalogue_ready(vault_root):
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return False
+            with _PUBLISHED_IDENTITY_LOCK:
+                flight = _BASELINE_IDENTITY_FLIGHTS.get(vault_key)
+            if flight is not None:
+                followed = True
+                flight.done.wait(left)
+            elif followed:
+                # The build ended without an inventory (it failed or was stopped): nothing more is coming.
+                return False
+            else:
+                time.sleep(min(_WARM_FLIGHT_POLL_SECONDS, left))
+    return True
 
 
 def revalidate_identity_catalogue_generation(vault_root: Path) -> bool:
@@ -3970,9 +4019,14 @@ def _baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
         # This task already holds identity coordination, so it cannot wait on
         # another task's build: the leader needs the same boundary to prove its
         # snapshot.  Build inline under the boundary already held instead.
-        return _install_baseline_identity_catalogue(
-            vault_key, _build_baseline_identity_catalogue(vault_root)
-        )
+        try:
+            built = _build_baseline_identity_catalogue(vault_root)
+        except BaseException as error:
+            if not isinstance(error, foreground_priority.BulkCancelled):
+                _IDENTITY_BUILDS.failed(vault_key, error)
+            raise
+        _IDENTITY_BUILDS.succeeded(vault_key)
+        return _install_baseline_identity_catalogue(vault_key, built)
 
     # A follower's budget is one deadline across its waits, set when it first follows. When the leader's
     # own stop ended the build, a follower with no request budget (a background caller) claims the
@@ -3998,6 +4052,7 @@ def _baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
                         raise ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
                     leading = True
                     _BASELINE_IDENTITY_FLIGHTS[vault_key] = flight
+                    _IDENTITY_BUILDS.started(vault_key)
                 else:
                     flight = running
 
@@ -4013,14 +4068,17 @@ def _baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
             flight.catalogue = _install_baseline_identity_catalogue(
                 vault_key, _build_baseline_identity_catalogue(vault_root)
             )
+            _IDENTITY_BUILDS.succeeded(vault_key)
         except BaseException as error:
             # A leader's stop is its own: it is a BaseException that a follower's caller may not
             # handle, and it says nothing about the inventory. Followers build it themselves.
             if leading:
                 if isinstance(error, foreground_priority.BulkCancelled):
                     flight.cancelled = True
+                    _IDENTITY_BUILDS.ended(vault_key)
                 else:
                     flight.error = error
+                    _IDENTITY_BUILDS.failed(vault_key, error)
             raise
         finally:
             if leading:

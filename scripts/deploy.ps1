@@ -109,10 +109,11 @@ if (-not $serviceAppDirectory) {
 $resolvedVault = if ($Vault) { $Vault } else { Get-ExomemDotenvValue -RepoRoot $serviceAppDirectory -Name "EXOMEM_VAULT_PATH" }
 if (-not $resolvedVault) { $resolvedVault = Get-ExomemProcessSetting -Name "EXOMEM_VAULT_PATH" }
 if (-not $resolvedVault) {
-    Fail "no vault resolved (-Vault, .env, or EXOMEM_VAULT_PATH); offline state migration needs an explicit vault."
+    Fail "no vault resolved (-Vault, .env, or EVERMATTER_VAULT_PATH); offline state migration needs an explicit vault."
 }
 $bindingPath = Join-Path $serviceAppDirectory ".env"
 $managedStateRoot = Resolve-ExomemDotenvStateRootBinding -AppDirectory $serviceAppDirectory
+Assert-ExomemHostedStateRootUnambiguous -AppDirectory $serviceAppDirectory
 $endpoint = Get-ExomemServiceEndpoint -ServiceName $ServiceName
 $targetPort = [int]$endpoint.Port
 $transitionIdentity = @{

@@ -1800,7 +1800,8 @@ def test_describe_state_ledger_example_is_valid_and_teaches_backfill(tmp_path: P
     example = described["examples"]["state_ledger"]
     path = tmp_path / example["manifest_path"]
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(example["manifest_text"], encoding="utf-8")
+    # An example is create input with no fixed id; create writes the id it assigns.
+    path.write_text(collections.assign_missing_id(example["manifest_text"])[0], encoding="utf-8")
 
     manifest = collections.load_manifest(tmp_path, path)
 

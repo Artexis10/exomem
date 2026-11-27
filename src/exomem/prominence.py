@@ -109,6 +109,17 @@ def _saved_preference() -> dict:
 
 
 CANON = ("off", "light", "balanced", "maximal")
+
+
+def engages_any_subject(level: str | None) -> bool:
+    """Whether a level engages on any subject of the user's life or work without being asked.
+
+    `off` waits for the user's request and `light` for clear relevance; `balanced` and
+    `maximal` engage on any subject. The set ranges over the closed `CANON` enum.
+    """
+    # nosemgrep: ep-word-membership -- a closed subset of the CANON level enum.
+    return level in {"balanced", "maximal"}
+
 _ALIASES = {
     "none": "off",
     "silent": "off",
@@ -168,7 +179,7 @@ LEARNING_INSTRUCTION = (
     "claims as unverified. A file that proves something, such as a label, receipt or "
     "warranty, goes in Evidence in the same turn, cited in what you write about it. "
     "Files you work on in my own repositories are not handed files. Files that hold "
-    "secrets, such as keys, tokens, a .env file, a card number or a code, are not kept; "
+    "secrets, such as keys, tokens, a .env file, a payment card number or a security code, are not kept; "
     "ask me for a copy with the secret covered."
 )
 

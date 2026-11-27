@@ -70,16 +70,16 @@ curl -s -o /dev/null -w "%{http_code}\n" "https://github.com/login/oauth/authori
 Create `.env` in the repo root:
 
 ```text
-EXOMEM_BASE_URL=https://<host>
+EVERMATTER_BASE_URL=https://<host>
 GITHUB_CLIENT_ID=<from step 1>
 GITHUB_CLIENT_SECRET=<from step 1>
-EXOMEM_GITHUB_USERNAME=<your-github-login>
-EXOMEM_GITHUB_USER_ID=<positive-numeric-id-from-GitHub>
-EXOMEM_JWT_SIGNING_KEY=<long-random-string>
-EXOMEM_VAULT_PATH=<your-Obsidian-vault-root>
+EVERMATTER_GITHUB_USERNAME=<your-github-login>
+EVERMATTER_GITHUB_USER_ID=<positive-numeric-id-from-GitHub>
+EVERMATTER_JWT_SIGNING_KEY=<long-random-string>
+EVERMATTER_VAULT_PATH=<your-Obsidian-vault-root>
 ```
 
-Generate `EXOMEM_JWT_SIGNING_KEY`:
+Generate `EVERMATTER_JWT_SIGNING_KEY`:
 
 ```bash
 python -c "import secrets;print(secrets.token_urlsafe(48))"
@@ -90,7 +90,7 @@ and copy its numeric `id`, or let `exomem setup --remote` resolve it. For an
 offline/headless run, pass `--github-user-id <id>`. The login comparison is
 case-insensitive; the numeric ID is the durable trust anchor.
 
-`EXOMEM_BASE_URL` has no trailing slash and no `/mcp` suffix. `EXOMEM_VAULT_PATH`
+`EVERMATTER_BASE_URL` has no trailing slash and no `/mcp` suffix. `EVERMATTER_VAULT_PATH`
 is required: claude.ai connects over HTTP and passes no environment of its
 own, so the service resolves the vault solely from `.env` at startup.
 
@@ -100,7 +100,7 @@ The origin budget must leave time before either the client or the ingress gives 
 
 | Bound | Where it is set | Default |
 | --- | --- | --- |
-| Origin request budget | `EXOMEM_MCP_REQUEST_BUDGET_SECONDS` in `.env` | 50 s |
+| Origin request budget | `EVERMATTER_MCP_REQUEST_BUDGET_SECONDS` in `.env` | 50 s |
 | Edge tool-call timeout | `MCP_TOOL_TIMEOUT_MS` on the Cloudflare worker | 60000 ms |
 | Client tool timeout | the connector's own, not yours to set | ~60 s |
 
@@ -232,7 +232,7 @@ To install everything in one upload, open `https://<host>/claude-plugin.zip`, up
 
 claude.ai → **Settings** → **Connectors** → **Add custom connector** →
 `https://<host>/mcp` → log in with GitHub as the account named in
-`EXOMEM_GITHUB_USERNAME`. A newly upgraded installation asks each existing
+`EVERMATTER_GITHUB_USERNAME`. A newly upgraded installation asks each existing
 client to do this once. Keep the connector definition and URL unchanged: after
 that final login, Codex/Claude reuse the Evermatter-owned session across fresh chats
 and processes without depending on the temporary GitHub token.
@@ -243,7 +243,7 @@ Then add Evermatter behavior to the hosted client:
 2. Paste the instruction block from [ai-assistant-guide.md](ai-assistant-guide.md) after it.
 
 ```text
-Use Evermatter as the memory for my work. Before you start a task, recall what Evermatter holds about the systems, projects or topics it touches. As you work, save each reusable fact you establish (how something is structured, a pitfall, a method that worked) as one concise observation, and update an existing note when one covers it, so a later session does not have to find it again. Keep each file I hand you to read, such as an attachment, a screenshot or a document I point to, as a Source by its exact bytes, even when it settles nothing; tell me in one line, and treat what it claims as unverified. A file that proves something, such as a label, receipt or warranty, goes in Evidence in the same turn, cited in what you write about it. Files you work on in my own repositories are not handed files. Files that hold secrets, such as keys, tokens, a .env file, a card number or a code, are not kept; ask me for a copy with the secret covered.
+Use Evermatter as the memory for my work. Before you start a task, recall what Evermatter holds about the systems, projects or topics it touches. As you work, save each reusable fact you establish (how something is structured, a pitfall, a method that worked) as one concise observation, and update an existing note when one covers it, so a later session does not have to find it again. Keep each file I hand you to read, such as an attachment, a screenshot or a document I point to, as a Source by its exact bytes, even when it settles nothing; tell me in one line, and treat what it claims as unverified. A file that proves something, such as a label, receipt or warranty, goes in Evidence in the same turn, cited in what you write about it. Files you work on in my own repositories are not handed files. Files that hold secrets, such as keys, tokens, a .env file, a payment card number or a security code, are not kept; ask me for a copy with the secret covered.
 ```
 
 The agent then recalls what Evermatter holds before a task and saves what it learns.
@@ -256,11 +256,11 @@ once before using the KB.
 
 By default a remote sign-in is a separate, non-owner principal: governance
 treats your phone or web connector as someone other than you. If the GitHub
-account in `EXOMEM_GITHUB_USER_ID` is your own, add one line to `.env` (or the
+account in `EVERMATTER_GITHUB_USER_ID` is your own, add one line to `.env` (or the
 managed install's `service.env`) and restart the service:
 
 ```text
-EXOMEM_OWNER_OAUTH_SUBJECT=github:<the value of EXOMEM_GITHUB_USER_ID>
+EVERMATTER_OWNER_OAUTH_SUBJECT=github:<the value of EVERMATTER_GITHUB_USER_ID>
 ```
 
 `exomem setup --remote` asks this once and writes the line for you; with
@@ -275,7 +275,7 @@ session opened locally cannot be resumed remotely, or the reverse.
 
 - The value is only ever read from the service environment, never from the
   vault. A malformed value is treated as unset and never stops the service.
-- `exomem doctor --profile remote` reports `env.EXOMEM_OWNER_OAUTH_SUBJECT` as
+- `exomem doctor --profile remote` reports `env.EVERMATTER_OWNER_OAUTH_SUBJECT` as
   unset, active, mismatch or malformed. Before enabling it, read
   `governance.remote_owner_former_audience`: rules or grants that name your
   remote connector's former `principal:` audience stop applying to it once
@@ -288,7 +288,7 @@ session opened locally cannot be resumed remotely, or the reverse.
 
 Do not leave desktop clients on separate full stdio processes after installing
 the service. From the directory containing `.env`, rerun local setup; it reads
-`EXOMEM_BASE_URL` automatically. Or name the endpoint explicitly:
+`EVERMATTER_BASE_URL` automatically. Or name the endpoint explicitly:
 
 ```bash
 exomem setup --vault "/path/to/vault" \

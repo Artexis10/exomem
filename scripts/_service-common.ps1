@@ -114,7 +114,7 @@ function Resolve-ExomemSetting {
         # The closed set of settings that choose where data lives, defined by the package itself.
         if (($null -ne $evermatter) -and ($evermatter -cne $explicit) -and
             (@("VAULT_PATH", "STATE_ROOT", "HOSTED_STATE_ROOT") -contains $suffix)) {
-            throw "EVERMATTER_$suffix and EXOMEM_$suffix are set to different values in $Source, so it is unclear which to use. Delete one name of each pair, then run it again."
+            throw "EVERMATTER_$suffix and EXOMEM_$suffix are set to different values in $Source, so it is unclear which to use. Set each value once, under its EVERMATTER_ name, and remove or unset the other name, then run it again."
         }
         return $explicit
     }
@@ -123,20 +123,21 @@ function Resolve-ExomemSetting {
 }
 
 function Get-ExomemDotenvLiteral {
-    <# One literal name out of an exact dotenv file: its first value, or $null when unset. #>
+    <# One literal name out of an exact dotenv file: its last value (as python-dotenv takes it), or $null when unset. #>
     param([string]$EnvPath, [string]$Name)
 
     if (-not (Test-Path -LiteralPath $EnvPath -PathType Leaf)) { return $null }
+    $found = $null
     foreach ($line in Get-Content -LiteralPath $EnvPath) {
         if ($line -match "^\s*$([Regex]::Escape($Name))\s*=\s*(.*)\s*$") {
             $value = $Matches[1].Trim()
             if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
                 $value = $value.Substring(1, $value.Length - 2)
             }
-            return $value
+            $found = $value
         }
     }
-    return $null
+    return $found
 }
 
 function Get-ExomemMapSetting {
@@ -211,6 +212,31 @@ function Set-ExomemProcessEnvFromMap {
     }
 }
 
+function ConvertTo-ExomemPublishedSettings {
+    <#
+    .SYNOPSIS
+      A parsed dotenv map with each setting once, under its published name EVERMATTER_X.
+    .DESCRIPTION
+      The value is the one the package reads (EXOMEM_X, else EVERMATTER_X, else KB_MCP_X; a
+      placement conflict in the map throws), and the other spellings are dropped, so a unit
+      built from the result never holds two names for one setting. Other names pass through.
+    #>
+    param([System.Collections.IDictionary]$Map, [string]$Source = "the dotenv")
+
+    $published = [ordered]@{}
+    foreach ($key in @($Map.Keys)) {
+        $prefix = $script:ExomemSettingPrefixes | Where-Object { ([string]$key).StartsWith($_, [System.StringComparison]::Ordinal) } | Select-Object -First 1
+        if (-not $prefix) {
+            $published[[string]$key] = $Map[$key]
+            continue
+        }
+        $suffix = ([string]$key).Substring($prefix.Length)
+        if ($published.Contains("EVERMATTER_$suffix")) { continue }
+        $published["EVERMATTER_$suffix"] = Get-ExomemMapSetting -Map $Map -Name "EXOMEM_$suffix" -Source $Source
+    }
+    return $published
+}
+
 function Get-ExomemDefaultManagedStateRoot {
     <# Pin the installer/operator user's platform default for LocalSystem too. #>
     $base = if ($env:LOCALAPPDATA) {
@@ -271,6 +297,21 @@ function Resolve-ExomemDotenvStateRootBinding {
     return [System.IO.Path]::GetFullPath($selected)
 }
 
+function Assert-ExomemHostedStateRootUnambiguous {
+    <#
+    .SYNOPSIS
+      Refuse an EXOMEM_/EVERMATTER_ conflict on the hosted state root, in the dotenv or the process.
+    .DESCRIPTION
+      Call it with the vault and state-root reads, before the service stops or anything is
+      published: the first process that reads the hosted state root refuses a conflict, and by
+      then the service is down. Throws the resolver's message, which names both variables and no value.
+    #>
+    param([string]$AppDirectory)
+
+    $null = Get-ExomemDotenvValue -RepoRoot $AppDirectory -Name "EXOMEM_HOSTED_STATE_ROOT"
+    $null = Get-ExomemProcessSetting -Name "EXOMEM_HOSTED_STATE_ROOT"
+}
+
 function Ensure-ExomemDotenvStateRootBinding {
     <#
       Persist one no-secret-output state-root authority in the service dotenv.
@@ -294,18 +335,24 @@ function Ensure-ExomemDotenvStateRootBinding {
     }
     if (-not $existing) {
         $raw = [System.IO.File]::ReadAllText($envPath)
-        # An empty binding is filled under the name the dotenv already uses; EXOMEM_STATE_ROOT is
-        # appended only when the dotenv names the state root under no name, never beside an
-        # EVERMATTER_ line that would then differ from it.
-        $named = '(?m)^(\s*)(EXOMEM_STATE_ROOT|EVERMATTER_STATE_ROOT|KB_MCP_STATE_ROOT)\s*=[^\r\n]*'
+        # A binding that this writes is persisted as EVERMATTER_STATE_ROOT. An empty binding under
+        # any name is filled in that name's place and the dotenv's other names for it are removed,
+        # so the dotenv never holds two names for the state root.
+        $named = '(?m)^([ \t]*)(?:EXOMEM_STATE_ROOT|EVERMATTER_STATE_ROOT|KB_MCP_STATE_ROOT)[ \t]*=[^\r\n]*(\r?\n)?'
         if ($raw -match $named) {
-            $filled = [regex]::Replace($raw, $named, { param($m) "$($m.Groups[1].Value)$($m.Groups[2].Value)=$bound" })
+            $script:ExomemStateRootWritten = $false
+            $filled = [regex]::Replace($raw, $named, {
+                param($m)
+                if ($script:ExomemStateRootWritten) { return "" }
+                $script:ExomemStateRootWritten = $true
+                "$($m.Groups[1].Value)EVERMATTER_STATE_ROOT=$bound$($m.Groups[2].Value)"
+            })
             [System.IO.File]::WriteAllText($envPath, $filled, [System.Text.UTF8Encoding]::new($false))
         } else {
             $prefix = if ($raw.Length -eq 0 -or $raw.EndsWith("`n") -or $raw.EndsWith("`r")) { "" } else { "`r`n" }
             [System.IO.File]::AppendAllText(
                 $envPath,
-                "${prefix}EXOMEM_STATE_ROOT=$bound`r`n",
+                "${prefix}EVERMATTER_STATE_ROOT=$bound`r`n",
                 [System.Text.UTF8Encoding]::new($false)
             )
         }

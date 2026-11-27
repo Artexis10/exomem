@@ -1328,6 +1328,37 @@ def test_python_qualification_does_not_wait_for_image_publication() -> None:
     assert job["steps"][-1]["with"]["name"] == "python-qualification-${{ github.run_id }}-${{ github.run_attempt }}"
 
 
+@pytest.mark.parametrize(
+    ("ref", "dry_run", "writes"),
+    [
+        ("refs/heads/main", "false", True),  # the push that follows a merge
+        ("refs/tags/v1.2.3", "false", True),  # the publish run that a dispatch hands to the release tag
+        ("refs/heads/feature/notes", "false", False),  # a dispatch from a branch that no review has passed
+        ("refs/tags/v9.9.9", "false", False),  # another tag's run
+        ("refs/heads/main", "true", False),  # a dry run writes nothing
+    ],
+)
+def test_only_a_real_run_on_main_or_the_release_tag_writes_release_notes_to_github(ref: str, dry_run: str, writes: bool) -> None:
+    """Catches a dispatch from an unreviewed branch uploading `release-notes.json` to every recent release, where the upload path then refuses to replace it."""
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release-please.yml").read_text())
+    plan_step = next(step for step in workflow["jobs"]["plan"]["steps"] if step.get("id") == "plan")["run"]
+    start = plan_step.index("notes_publish=false")
+    decision = plan_step[start : plan_step.index("\nfi\n", start) + 4]  # the plan's own lines, run as they are
+
+    answer = subprocess.run(
+        ["bash", "-c", f'{decision}\necho "$notes_publish"'],
+        env={"GITHUB_REF": ref, "DRY_RUN": dry_run, "tag": "v1.2.3", "PATH": os.environ["PATH"]},
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    assert answer == ("true" if writes else "false")
+    # The notes job reads only that decision: it runs dry unless the plan says "true", and its group never shares a real run's.
+    notes = workflow["jobs"]["release-notes"]
+    assert workflow["jobs"]["plan"]["outputs"]["notes_publish"] == "${{ steps.plan.outputs.notes_publish }}"
+    assert notes["env"]["DRY_RUN"] == "${{ needs.plan.outputs.notes_publish != 'true' }}"
+    assert notes["concurrency"]["group"] == "release-notes-${{ needs.plan.outputs.notes_publish == 'true' && 'publish' || 'dry-run' }}"
+
+
 #: The worst cross-platform session observed, in seconds. No longer censored:
 #: with the cap above real runtime, all six Windows shards ran to completion at
 #: 1950s, 2575s, 2698s, 2788s, 2886s and 2896s. The previous value of 2705 was a

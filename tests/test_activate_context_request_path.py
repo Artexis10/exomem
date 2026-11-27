@@ -12,6 +12,7 @@ span.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import threading
 import time
@@ -265,7 +266,7 @@ def test_managed_cold_start_never_constructs_the_recall_projection(
     packet = commands.op_activate_context(vault, turn=TURN, include_timings=True)
 
     assert packet["abstained"] is True
-    assert packet["abstention"] == {"reason": "index_warming"}
+    assert packet["abstention"]["reason"] == "index_warming"
     assert scheduled == [vault]
     # No snapshot was even constructed: the span never opened.
     assert "working_set.freshness" not in packet["timings"]["stages"]
@@ -312,7 +313,8 @@ def test_managed_cold_start_abstains_warming_even_with_a_ready_anchor_index(
     packet = commands.op_activate_context(activation_vault, turn=TURN, include_timings=True)
 
     assert packet["abstained"] is True
-    assert packet["abstention"] == {"reason": "index_warming"}
+    assert packet["abstention"]["reason"] == "index_warming"
+    assert packet["abstention"]["diagnostics"]["waiting_on"] == "recall_seed"
     # The anchor index was already warm: no background build was scheduled.
     assert scheduled == []
     assert lexical_calls == []
@@ -1417,7 +1419,7 @@ def test_nested_refresh_deferral_dispatches_once_after_an_exception_and_preserve
     monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
     try:
         cold = commands.op_activate_context(activation_vault, turn=TURN)
-        assert cold["abstention"] == {"reason": "index_warming"}
+        assert cold["abstention"]["reason"] == "index_warming"
     finally:
         for worker in workers[1:]:
             worker.join(10)
@@ -1433,3 +1435,226 @@ def test_nested_refresh_deferral_dispatches_once_after_an_exception_and_preserve
             monkeypatch.setattr(working_set_runtime, "_schedule_build", failed_dispatch)
             raise original
     assert raised.value is original
+
+
+# --------------------------------------------------------------------------- #
+# A fresh process's first turn waits a bounded time for its in-memory warm-up
+# --------------------------------------------------------------------------- #
+
+
+def _drop_identity_inventory(root: Path) -> None:
+    """Forget this process's private-identity inventory, as a freshly started process has none."""
+    from exomem import reserved_paths
+
+    with reserved_paths._PUBLISHED_IDENTITY_LOCK:
+        reserved_paths._BASELINE_IDENTITY_CATALOGUES.pop(reserved_paths._vault_identity_key(root), None)
+    assert reserved_paths.identity_catalogue_ready(root) is False
+
+
+@pytest.mark.usefixtures("anchors_packet")  # the test vault builds no context catalogue for maps
+def test_a_first_turn_waits_for_a_short_identity_warm_instead_of_abstaining(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch, bind_budget
+) -> None:
+    """A fresh process has no private-identity inventory until its background walk ends. On a small
+    vault that takes about a second, and the first turn used to answer `index_warming` at once and
+    leave the agent without its context. It now waits for the walk and serves."""
+    from exomem import reserved_paths
+
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    _seed_live_recall(activation_vault)
+    real_build = reserved_paths._build_baseline_identity_catalogue
+
+    def slow_build(root: Path):
+        time.sleep(0.5)
+        return real_build(root)
+
+    monkeypatch.setattr(reserved_paths, "_build_baseline_identity_catalogue", slow_build)
+    _drop_identity_inventory(activation_vault)
+    bind_budget(request_budget.MCP_REQUEST_BUDGET_SECONDS)
+
+    packet = commands.op_activate_context(activation_vault, turn=TURN)
+
+    assert packet["abstained"] is False
+    assert reserved_paths.identity_catalogue_ready(activation_vault) is True
+
+
+def test_a_first_turn_still_abstains_when_the_identity_warm_outlasts_its_wait(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch, bind_budget
+) -> None:
+    """A mature vault's walk takes tens of seconds. The turn waits at most half its budget for it,
+    then answers `index_warming` as before, well inside the budget."""
+    from exomem import reserved_paths
+
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    _seed_live_recall(activation_vault)
+    release = threading.Event()
+    real_build = reserved_paths._build_baseline_identity_catalogue
+
+    def stalled_build(root: Path):
+        release.wait(30)
+        return real_build(root)
+
+    monkeypatch.setattr(reserved_paths, "_build_baseline_identity_catalogue", stalled_build)
+    _drop_identity_inventory(activation_vault)
+    bind_budget(2.0)
+    started = time.monotonic()
+    try:
+        packet = commands.op_activate_context(activation_vault, turn=TURN)
+    finally:
+        release.set()
+    elapsed = time.monotonic() - started
+
+    assert packet["abstained"] is True
+    assert packet["abstention"]["reason"] == "index_warming"
+    assert packet["abstention"]["diagnostics"]["waiting_on"] == "identity_inventory"
+    assert packet["abstention"]["diagnostics"]["build"]["state"] == "building"
+    assert elapsed < 2.0, f"the turn waited {elapsed:.1f} s on a 2 s budget"
+
+
+@pytest.mark.usefixtures("anchors_packet")  # the test vault builds no context catalogue for maps
+def test_a_first_turn_waits_for_a_short_boot_seed_instead_of_abstaining(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch, bind_budget
+) -> None:
+    """At boot the file watcher seeds the recall registry; until it is live a managed turn abstained
+    `index_warming`, even when the seed was a second from done. The turn now waits for the seed."""
+    from exomem import reserved_paths
+
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    reserved_paths._baseline_identity_catalogue(activation_vault)
+    freshness.announce_seed_pending(activation_vault, "kb")
+
+    def finish_seed() -> None:
+        time.sleep(0.5)
+        try:
+            _seed_live_recall(activation_vault)
+        finally:
+            freshness.clear_seed_pending(activation_vault, "kb")
+
+    seeder = threading.Thread(target=finish_seed)
+    bind_budget(request_budget.MCP_REQUEST_BUDGET_SECONDS)
+    seeder.start()
+    try:
+        packet = commands.op_activate_context(activation_vault, turn=TURN)
+    finally:
+        seeder.join()
+
+    assert packet["abstained"] is False, packet.get("abstention")
+
+
+def test_a_door_turn_with_both_warm_ups_pending_waits_once_inside_a_quarter_of_its_budget(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch, bind_budget
+) -> None:
+    """The seed and the identity walk both still running: the turn shares one warm-up deadline across
+    both waits, so a 6 s door budget waits at most 1.5 s in all and answers warming, where two separate
+    waits would each take their own share and spend most of the budget."""
+    from exomem import reserved_paths
+
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    release = threading.Event()
+    real_build = reserved_paths._build_baseline_identity_catalogue
+
+    def stalled_build(root: Path):
+        release.wait(30)
+        return real_build(root)
+
+    monkeypatch.setattr(reserved_paths, "_build_baseline_identity_catalogue", stalled_build)
+    _drop_identity_inventory(activation_vault)
+    freshness.announce_seed_pending(activation_vault, "kb")
+    bind_budget(6.0)
+    started = time.monotonic()
+    try:
+        packet = commands.op_activate_context(activation_vault, turn=TURN)
+    finally:
+        release.set()
+        freshness.clear_seed_pending(activation_vault, "kb")
+    elapsed = time.monotonic() - started
+
+    assert packet["abstention"]["reason"] == "index_warming"
+    assert packet["abstention"]["diagnostics"]["waiting_on"] == "recall_seed"
+    assert packet["abstention"]["diagnostics"]["build"]["state"] == "building"
+    assert elapsed < 3.0, f"the turn waited {elapsed:.1f} s on a 6 s budget"
+
+
+def test_a_turn_without_a_request_budget_never_waits_for_the_warm_up(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch, budget_free
+) -> None:
+    """The service's boot warm runs activation with no request budget, before the rest of start-up.
+    It must abstain at once on a cold inventory rather than hold start-up for the walk."""
+    from exomem import reserved_paths
+
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    _seed_live_recall(activation_vault)
+    release = threading.Event()
+    real_build = reserved_paths._build_baseline_identity_catalogue
+
+    def stalled_build(root: Path):
+        release.wait(30)
+        return real_build(root)
+
+    monkeypatch.setattr(reserved_paths, "_build_baseline_identity_catalogue", stalled_build)
+    _drop_identity_inventory(activation_vault)
+    started = time.monotonic()
+    try:
+        # The boot warm's own entry: the activation body, without the door's budget.
+        packet = commands._op_activate_context_body(activation_vault, turn=TURN)
+    finally:
+        release.set()
+    elapsed = time.monotonic() - started
+
+    assert packet["abstention"]["reason"] == "index_warming"
+    assert elapsed < 1.0, f"a budget-less turn waited {elapsed:.1f} s"
+
+def test_a_warming_turn_names_an_inventory_build_that_keeps_failing(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch, budget_free
+) -> None:
+    """A cell once answered `index_warming` for 13 hours, and nothing in the answer said why. Each cold
+    turn retries the inventory build. When every retry fails, the answer now names that build, the
+    failure's class and how many times it failed, so the cause can be found without the server's logs."""
+    from exomem import reserved_paths
+
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    _seed_live_recall(activation_vault)
+
+    def failing_build(root: Path):
+        raise RuntimeError("the walk failed")
+
+    monkeypatch.setattr(reserved_paths, "_build_baseline_identity_catalogue", failing_build)
+    _drop_identity_inventory(activation_vault)
+
+    for attempt in (1, 2):
+        # What each earlier cold turn did: retry the background build.
+        reserved_paths.schedule_identity_catalogue_warm(activation_vault)
+        deadline = time.monotonic() + 5
+        while (reserved_paths.identity_catalogue_warm_state(activation_vault).get("last_failure") or {}).get(
+            "failures"
+        ) != attempt:
+            assert time.monotonic() < deadline, "the background build never reported its failure"
+            time.sleep(0.01)
+
+    packet = commands._op_activate_context_body(activation_vault, turn=TURN)
+
+    diagnostics = packet["abstention"]["diagnostics"]
+    assert packet["abstention"]["reason"] == "index_warming"
+    assert diagnostics["waiting_on"] == "identity_inventory"
+    assert diagnostics["build"]["last_failure"]["error"] == "RuntimeError"
+    assert diagnostics["build"]["last_failure"]["failures"] >= 2
+    assert "the walk failed" not in json.dumps(packet), "a failure message can name a private path"
+
+
+
+def test_a_maps_turn_names_a_context_catalogue_that_has_not_built(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch, budget_free
+) -> None:
+    """The default maps turn needs the context catalogue, which a background fold builds. A fold that
+    never finishes answers warming on every turn; the answer names the catalogue as what it waits on."""
+    from exomem import context_catalogue, reserved_paths
+
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    _seed_live_recall(activation_vault)
+    reserved_paths._baseline_identity_catalogue(activation_vault)
+    monkeypatch.setattr(context_catalogue, "_schedule", lambda *_a, **_k: None)
+
+    packet = commands._op_activate_context_body(activation_vault, turn=TURN)
+
+    assert packet["abstention"]["reason"] == "index_warming"
+    assert packet["abstention"]["diagnostics"]["waiting_on"] == "context_catalogue"

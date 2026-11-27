@@ -124,6 +124,10 @@ spec:
                   key: {{ .Values.cloudGateway.controlPlaneKeySecretKey }}
             - name: EXOMEM_PUBLIC_BASE_URL
               value: {{ .Values.cloudGateway.publicBaseUrl | quote }}
+            {{- with .Values.cloudGateway.siteOrigin }}
+            - name: EVERMATTER_SITE_ORIGIN
+              value: {{ . | quote }}
+            {{- end }}
             - name: EXOMEM_CELL_PROTOCOL_VERSION
               value: {{ .Values.cloudGateway.cellProtocolVersion | quote }}
             - name: EXOMEM_GATEWAY_CONTROL_HOSTNAME

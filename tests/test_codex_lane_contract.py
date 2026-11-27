@@ -28,6 +28,9 @@ enforced, not where it was convenient.
 
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -167,3 +170,35 @@ def test_the_merge_gate_still_checks_what_the_sandbox_no_longer_does(
             f"verify must flag changes to the guarded path {guarded}; a worker "
             "with full access can edit its own gates"
         )
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or os.name == "nt", reason="the runner is a bash script")
+def test_the_preflight_probe_names_the_state_root_once_whatever_spelling_the_lane_shell_holds(
+    runner: str, tmp_path: Path
+) -> None:
+    """The failure: a lane shell holding EVERMATTER_STATE_ROOT made the probe's own process refuse the pair."""
+    start = runner.index("preflight_sandbox() {")
+    function = runner[start : runner.index("\n}\n", start) + 3]
+    seen = tmp_path / "seen-env"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_uv = bin_dir / "uv"
+    fake_uv.write_text(f'#!/bin/sh\nenv > "{seen}"\necho "1 passed"\n', encoding="utf-8")
+    fake_uv.chmod(0o755)
+    worktree = tmp_path / "worktree"
+    (worktree / ".task").mkdir(parents=True)
+
+    subprocess.run(
+        ["bash", "-c", f'{function}\npreflight_sandbox "{worktree}" probe'],
+        env={
+            **{k: v for k, v in os.environ.items() if not k.startswith(("EXOMEM_", "EVERMATTER_", "KB_MCP_"))},
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "CODEX_SANDBOX": "danger-full-access",
+            "EVERMATTER_STATE_ROOT": "/lane/shell/root",
+            "KB_MCP_STATE_ROOT": "/lane/shell/legacy",
+        },
+        capture_output=True, text=True, timeout=60, check=True,
+    )
+
+    names = [line.split("=", 1)[0] for line in seen.read_text(encoding="utf-8").splitlines() if "STATE_ROOT" in line]
+    assert names == ["EXOMEM_STATE_ROOT"]

@@ -7,7 +7,7 @@
 #     For release installs, pass -Release and the script creates/updates a sibling
 #     PyPI-backed service venv.
 #   - .env exists in the repo root with the GitHub OAuth vars set
-#     (EXOMEM_BASE_URL, EXOMEM_GITHUB_USERNAME, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET).
+#     (EVERMATTER_BASE_URL, EVERMATTER_GITHUB_USERNAME, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET).
 #
 # Usage:
 #   pwsh -File scripts/install-service.ps1 -Release
@@ -174,6 +174,13 @@ function Set-NssmEnvironment {
         $merged = [ordered]@{}
     }
     foreach ($entry in $Map.GetEnumerator()) {
+        # A setting is one entry whatever its name: an entry that an earlier install stored under
+        # another spelling is replaced, or the service would hold two names for one setting.
+        $prefix = $script:ExomemSettingPrefixes | Where-Object { ([string]$entry.Key).StartsWith($_, [System.StringComparison]::Ordinal) } | Select-Object -First 1
+        if ($prefix) {
+            $suffix = ([string]$entry.Key).Substring($prefix.Length)
+            foreach ($other in $script:ExomemSettingPrefixes) { $merged.Remove("$other$suffix") }
+        }
         $merged[$entry.Key] = [string]$entry.Value
     }
     $args = @("set", $ServiceName, "AppEnvironmentExtra")
@@ -250,10 +257,11 @@ function Install-ReleaseVenv {
 $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 $vault = Get-DotenvValue "EXOMEM_VAULT_PATH"
 if (-not $vault) {
-    throw "EXOMEM_VAULT_PATH is required in .env for explicit offline state migration."
+    throw "EVERMATTER_VAULT_PATH is required in .env for explicit offline state migration."
 }
 $bindingPath = Join-Path $repoRoot ".env"
 $pinnedStateRoot = Resolve-ExomemDotenvStateRootBinding -AppDirectory $repoRoot
+Assert-ExomemHostedStateRootUnambiguous -AppDirectory $repoRoot
 if ($existingService) {
     $existingAppDirectory = Get-ExomemServiceAppDirectory -ServiceName $ServiceName
     if (-not $existingAppDirectory -or [System.IO.Path]::GetFullPath($existingAppDirectory) -ne [System.IO.Path]::GetFullPath($repoRoot)) {
@@ -317,7 +325,7 @@ if ($existingTransition) {
 if ($Release) {
     $python = Install-ReleaseVenv
     # Wheel-backed service venv: `resolve_log_dir()` resolves an unset
-    # EXOMEM_LOG_DIR to %ProgramData%\exomem\logs there (not a checkout).
+    # EVERMATTER_LOG_DIR to %ProgramData%\exomem\logs there (not a checkout).
     # The last tier is spelled as a concatenation, exactly as the Python side
     # (`_user_log_dir()`, `mode.config_path()`) spells its own `"C:" + r"\ProgramData"`:
     # the literal must stay byte-identical to Python's, so `$env:SystemDrive` is
@@ -331,7 +339,7 @@ if ($Release) {
     if (-not (Test-Path $python)) {
         throw "Python venv not found at $python. Run 'uv sync' in $repoRoot first, or pass -Release to install a PyPI-backed service venv."
     }
-    # Editable checkout: `resolve_log_dir()` resolves an unset EXOMEM_LOG_DIR
+    # Editable checkout: `resolve_log_dir()` resolves an unset EVERMATTER_LOG_DIR
     # to <repo>\logs there -- the same $logDir this script already uses for
     # the NSSM stdout/stderr redirects, and the same folder `restart.ps1`
     # tails.
@@ -346,10 +354,10 @@ if ($existingTransition) {
     Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "installed"
 }
 
-# Pin EXOMEM_LOG_DIR explicitly rather than let the running service
+# Pin EVERMATTER_LOG_DIR explicitly rather than let the running service
 # independently re-derive its own fallback. `$pinnedLogDir` is computed per
 # install mode above to be the SAME value `resolve_log_dir()` (issue #552)
-# already resolves an unset EXOMEM_LOG_DIR to for the interpreter this
+# already resolves an unset EVERMATTER_LOG_DIR to for the interpreter this
 # install will actually run -- %ProgramData%\exomem\logs for the wheel-backed
 # -Release venv, <repo>\logs for a repo-mode editable checkout -- so the pin
 # changes behavior in NEITHER mode today. What it buys is that the service
@@ -363,7 +371,7 @@ if ($existingTransition) {
 $serviceEnv = Read-DotenvMap
 # The .env may name the log directory under any of its names; pin only when it names none.
 if ($null -eq (Get-ExomemMapSetting -Map $serviceEnv -Name "EXOMEM_LOG_DIR" -Source ".env")) {
-    $serviceEnv["EXOMEM_LOG_DIR"] = $pinnedLogDir
+    $serviceEnv["EVERMATTER_LOG_DIR"] = $pinnedLogDir
 }
 $appLogDir = Get-ExomemMapSetting -Map $serviceEnv -Name "EXOMEM_LOG_DIR" -Source ".env"
 Set-ExomemProcessEnvFromMap -Map $serviceEnv -Source ".env"
@@ -418,7 +426,7 @@ if ($existingService) {
 & $NssmPath set $ServiceName AppRestartDelay 5000
 & $NssmPath set $ServiceName AppThrottle 10000
 & $NssmPath set $ServiceName Description "exomem: Obsidian Knowledge Base MCP server for mobile claude.ai"
-Set-NssmEnvironment -Map $serviceEnv
+Set-NssmEnvironment -Map (ConvertTo-ExomemPublishedSettings -Map $serviceEnv -Source ".env")
 
 if ($existingTransition) {
     Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "doctor-passed"
@@ -513,4 +521,4 @@ if ($connectorPending) {
 } else {
     Write-Host "Installed, started, and connector-cleared service '$ServiceName' bound to ${BindHost}:${Port}."
 }
-Write-Host "Logs: $logDir\service.out.log (stdout), service.err.log (stderr, NSSM-rotated); $appLogDir\exomem.log (app, EXOMEM_LOG_DIR)"
+Write-Host "Logs: $logDir\service.out.log (stdout), service.err.log (stderr, NSSM-rotated); $appLogDir\exomem.log (app, EVERMATTER_LOG_DIR)"

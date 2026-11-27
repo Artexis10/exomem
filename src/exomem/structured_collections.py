@@ -260,7 +260,6 @@ def manifest_authoring_contract(*, store: bool = False) -> dict[str, Any]:
         "type": "object",
         "required": [
             "type",
-            "exomem_id",
             "title",
             "semantic_profile",
             "collection_version",
@@ -271,7 +270,11 @@ def manifest_authoring_contract(*, store: bool = False) -> dict[str, Any]:
         ],
         "properties": {
             "type": {"const": "collection"},
-            "exomem_id": {"type": "string", "format": "uuid"},
+            "exomem_id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Leave it out of a new collection: create assigns one and returns it as collection_id.",
+            },
             "title": {"type": "string", "minLength": 1},
             "semantic_profile": {"enum": profiles},
             "collection_version": {"enum": [COLLECTION_VERSION]},
@@ -513,7 +516,6 @@ def _manifest_authoring_examples(*, store: bool = False) -> dict[str, dict[str, 
     )
     minimal_text = f"""---
 type: collection
-exomem_id: 15dd81cd-9ae2-488c-bd9e-14771d86343e
 title: Observed events
 semantic_profile: records
 collection_version: 1
@@ -540,7 +542,6 @@ item_schema:
 """
     laboratory_text = f"""---
 type: collection
-exomem_id: 372ff95a-36f0-4859-9e11-9e487dd94f4b
 title: Laboratory panels
 semantic_profile: records
 collection_version: 1
@@ -575,7 +576,6 @@ Each panel is one observed event. Child analytes preserve reported values and pr
 """
     readable_text = """---
 type: collection
-exomem_id: 68297085-14fd-4c00-8a95-6814ea671c99
 title: Readable observations
 semantic_profile: records
 collection_version: 1
@@ -630,7 +630,6 @@ The frontmatter is canonical; the managed Markdown block is a readable projectio
 """
     state_ledger_text = f"""---
 type: collection
-exomem_id: a865a192-7c7a-4b7f-9b5d-03c807b205e2
 title: Observed state ledger
 semantic_profile: records
 collection_version: 1
@@ -1158,6 +1157,9 @@ class CollectionManifest:
     claim_match: Mapping[str, tuple[str, ...]] | None = None
     #: `capture.method`: the wiki link or ref of the one vault page that holds how to capture here, as authored.
     capture_method: str | None = None
+    #: The sensitivity classes the definition declares as a floor for every row. Only a store collection can
+    #: carry it, in its rows' governance metadata, so a file collection refuses it.
+    sensitivity: tuple[str, ...] = ()
     #: `items` (default) renders a view per row; `summary` keeps rows store-only.
     view_mode: str = "items"
     #: A derived summary collection takes rows only from imports and rebuilds them from its import log.
@@ -1313,6 +1315,45 @@ _MANIFEST_PARSE_CACHE: dict[
     tuple[str, str, str], tuple[CollectionManifest, tuple[str, str]]
 ] = {}
 _MANIFEST_PARSE_CACHE_CAP = 256
+
+
+def assign_missing_id(manifest_text: str) -> tuple[str, str | None]:
+    """Give a new collection's manifest an exomem_id when it names none.
+
+    A client with no shell has no UUID source, so create mints the id. Returns the text to use
+    and the assigned id, or the text unchanged and None when the manifest has no frontmatter or
+    names an id already: the parser then refuses a malformed id as before.
+    """
+    try:
+        rendered, identity = memory_refs.add_id_to_markdown(manifest_text)
+    except (memory_refs.ReferenceError, vault.FrontmatterError):
+        return manifest_text, None
+    return (rendered, identity) if rendered != manifest_text else (manifest_text, None)
+
+
+def fill_collection_id(manifest_text: str, collection_id: str | None) -> str:
+    """Give a revision's manifest that names no id the revised collection's own.
+
+    A manifest written from an id-less example keeps no id after create, so revising it with the
+    same text would otherwise fail. A manifest that names another id is left as it is and refused.
+    """
+    if collection_id is None:
+        return manifest_text
+    try:
+        return memory_refs.add_id_to_markdown(manifest_text, exomem_id=collection_id)[0]
+    except (memory_refs.ReferenceError, vault.FrontmatterError):
+        return manifest_text
+
+
+def note_assigned_id(result: Any, action: str, assigned_id: str | None) -> Any:
+    """Tell a validate caller that the id it sees is a placeholder: create mints its own."""
+    if assigned_id is None or action != "validate" or not isinstance(result, dict):
+        return result
+    note = {
+        "code": "COLLECTION_ID_ASSIGNED_AT_CREATE",
+        "message": "the manifest names no exomem_id, so create assigns one and reports it as collection_id",
+    }
+    return {**result, "warnings": [*result.get("warnings", []), note]}
 
 
 def parse_manifest_bytes(
@@ -2200,7 +2241,20 @@ def _manifest_from_frontmatter(
         view_mode=view_mode,
         derived=derived,
         ignored_recipes=ignored_recipes,
+        sensitivity=_parse_sensitivity(frontmatter.get("sensitivity")),
     )
+
+
+def _parse_sensitivity(value: object) -> tuple[str, ...]:
+    """`sensitivity: [class, ...]`: the shape only. The registry that holds the class keys checks them on create and revise."""
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise CollectionError(
+            "INVALID_COLLECTION_MANIFEST", "sensitivity must be a list of class keys",
+            {"field": "sensitivity", "received": value, "example": "sensitivity: [health]"},
+        )
+    return tuple(value)
 
 
 def _parse_derived(value: object, view_mode: str) -> bool:

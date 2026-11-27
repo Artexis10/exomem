@@ -1,10 +1,12 @@
 """Set a single KEY=VALUE line in .env, idempotently.
 
-A tiny helper for flipping non-secret feature flags (e.g. EXOMEM_VISION_CAPTION)
-without hand-editing .env. Replaces the line in place if the key already exists,
-otherwise appends it on a clean line. Restart the service to load the change.
+A tiny helper for flipping non-secret feature flags (e.g. EVERMATTER_VISION_CAPTION)
+without hand-editing .env. Replaces the line in place if the setting already exists
+under any of its names, otherwise appends it on a clean line. The line is written as
+`EVERMATTER_X`, and an `EXOMEM_X` or `KB_MCP_X` line for the same setting is removed.
+Restart the service to load the change.
 
-    uv run --no-sync python scripts/set-env.py EXOMEM_VISION_CAPTION 1
+    uv run --no-sync python scripts/set-env.py EVERMATTER_VISION_CAPTION 1
 
 For generated secrets use the dedicated helpers (set-rest-key.py,
 set-upload-token.py) instead — this one writes the literal value you pass.
@@ -16,13 +18,16 @@ import argparse
 import re
 from pathlib import Path
 
+from exomem import env_compat
+from exomem.remote_setup_wizard import parse_env, patch_env
+
 ENV = Path(__file__).resolve().parents[1] / ".env"
 _KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("key", help="env var name, e.g. EXOMEM_VISION_CAPTION")
+    ap.add_argument("key", help="env var name, e.g. EVERMATTER_VISION_CAPTION")
     ap.add_argument("value", help="value to set, e.g. 1")
     args = ap.parse_args()
 
@@ -32,29 +37,16 @@ def main() -> None:
     value = args.value.strip()
 
     text = ENV.read_text(encoding="utf-8") if ENV.exists() else ""
-    prefix = f"{key}="
-    present = any(line.strip().startswith(prefix) for line in text.splitlines())
-
-    if present:  # replace in place
-        lines = [
-            f"{key}={value}" if line.strip().startswith(prefix) else line
-            for line in text.splitlines()
-        ]
-        ENV.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        action = "updated"
-    else:  # append on a clean line
-        with ENV.open("a", encoding="utf-8") as fh:
-            if text and not text.endswith("\n"):
-                fh.write("\n")
-            fh.write(f"{key}={value}\n")
-        action = "set"
+    present = any(name in parse_env(text) for name in env_compat.names_for(key))
+    ENV.write_text(patch_env(text, {key: value}), encoding="utf-8")
+    action = "updated" if present else "set"
 
     try:
         ENV.chmod(0o600)
     except OSError:
         pass
 
-    print(f"{action} {key}={value}  (restart the service to load it)")
+    print(f"{action} {env_compat.emitted_name(key)}={value}  (restart the service to load it)")
 
 
 if __name__ == "__main__":

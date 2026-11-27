@@ -11,6 +11,7 @@ from types import MappingProxyType
 from .. import item_keys, record_formats
 from ..governance import policy, raw_protection
 from .connection import CollectionStoreError
+from .import_modes import HEADER_FORMATS
 
 # S1 fixes location and unresolved coverage as protection states, not a field-name vocabulary.
 UNRESOLVED = "unresolved"
@@ -120,7 +121,7 @@ class _MappingSources:
 
 def _mapping_sources(mapping, manifest, fmt):
     def source_path(raw):
-        return (raw,) if fmt == "csv" else tuple(raw.split("."))
+        return (raw,) if fmt in HEADER_FORMATS else tuple(raw.split("."))
 
     coverage = {source_path(path): declaration for path, declaration in mapping.get("coverage", {}).items()}
     fields = []

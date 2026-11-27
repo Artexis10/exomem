@@ -1,8 +1,8 @@
 ---
 name: evermatter
-description: 'The user''s long-term memory (Evermatter, formerly Exomem). Use it whenever a turn touches the user''s own life or work: people they know, their health, home, equipment and purchases, accounts, money, travel, plans, projects and past decisions, including when such a subject comes up mid-conversation or is asked in general terms. Before you recommend, ask the user for a fact, or write about one of these, load the memory tools and call recall_context with the user''s message (or search_memory for a named thing); never write "unknown" for what memory may hold. The engagement level that read_instructions or a tool reports wins: at off, search memory only when the user asks. Also engage for KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it" and "what did I conclude", and capture as the engagement level allows. A general question about nothing of the user''s own needs no recall. Source and Evidence stay immutable; vault content outside the managed Knowledge Base stays read-only.'
+description: 'The user''s long-term memory (Evermatter, formerly Exomem). Use it whenever a turn touches the user''s own life or work: people they know, their health, home, equipment and purchases, accounts, money, travel, plans, projects and past decisions, including when such a subject comes up mid-conversation or is asked in general terms. Before you recommend, ask the user for a fact, or write about one of these, load the memory tools and call recall_context with the user''s message (or search_memory for a named thing); never write "unknown" for what memory may hold. The engagement level that read_instructions or a tool reports wins: at off, search memory only when the user asks. Also engage for KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it" and "what did I conclude", and capture as the engagement level allows. A general question about nothing of the user''s own needs no recall. A practical question about a job, purchase or booking under way for them is their own case.'
 metadata:
-  skill_contract: bf9aa6a127035ab5df81c265245a1cd7b7b1627792259859192f1c8af2cd7f6f
+  skill_contract: 3bffe9f8efafea9e44462619083dd09d06541e27c3f401cac8127c42fb54304a
   version: "0.32.0"
 ---
 
@@ -256,8 +256,12 @@ topic carriers, as the routing row above says.
 
 When discussing context evidence, distinguish composed records from actual receipt, opening, citation or use; read [context learning](references/context-learning.md) for audit details.
 
-After new evidence, a task change, or continuation restoration, judge whether
-the context needs refresh. When the exposed tool supports it, set
+A later turn that brings a new question, claim or decision gets its own lookup
+before you answer, even about the same person and in the same thread: the user
+may keep a recorded view on it. Use `search_memory` on the new question, or
+refresh as below. A turn that only continues the held answer needs none. After
+new evidence, a task change, or continuation restoration, judge whether the
+context needs refresh. When the exposed tool supports it, set
 `trigger="task_refresh"` and `initiator="agent"`. Keep the original human `turn`
 and put the current task in `conversation.focus`. Reuse relevant held material;
 memory replies alone do not justify another refresh. Refresh grants no write

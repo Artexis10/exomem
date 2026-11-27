@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from exomem.env_compat import SETTING_PREFIXES
+
 ROOT = Path(__file__).resolve().parents[1]
 MIN_PAGES = 4
 MAX_PAGES = 8_000
@@ -172,7 +174,7 @@ def _base_environment() -> dict[str, str]:
     return {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith(("EXOMEM_", "BASIC_MEMORY_"))
+        if not key.startswith((*SETTING_PREFIXES, "BASIC_MEMORY_"))
     }
 
 

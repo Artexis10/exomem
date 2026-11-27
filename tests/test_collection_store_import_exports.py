@@ -253,9 +253,9 @@ def test_logged_import_reuses_validation_without_losing_superseded_values_or_ref
     job = agent(store, mode="start", source_ref=source, format="json-document", members="rows/*", mapping=mapping)
     validate, checked = records._bulk_row_values, []
 
-    def counted(*args):
+    def counted(*args, **kwargs):
         checked.append(args[1])
-        return validate(*args)
+        return validate(*args, **kwargs)
 
     monkeypatch.setattr(records, "_bulk_row_values", counted)
     done = finish(store, job)
