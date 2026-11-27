@@ -20,9 +20,10 @@ The sidecars are untrusted content: a value is kept as data, and nothing in a si
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any, Protocol
 
 from . import export_pairing, export_parsers, export_photos, import_stage, source_formats
@@ -40,6 +41,14 @@ CODE_APPLIED = "IMPORT_SIDECAR_APPLIED"
 CODE_EMPTY = "IMPORT_SIDECAR_EMPTY"
 CODE_PHOTO_NOT_FILED = "IMPORT_SIDECAR_PHOTO_NOT_FILED"
 CODE_UNPAIRED = "IMPORT_SIDECAR_UNPAIRED"
+#: Each settled reason as (whether the sidecar's content is in the Knowledge Base although its staged copy stays; how a
+#: residual summary counts such files, with `{n}` as their number). `adoption_consume.STAYS` reads these rows.
+STAYS: Mapping[str, tuple[bool, str]] = MappingProxyType({  # nosemgrep: ep-word-set, ep-word-dict -- this module's own closed reason codes, a protocol of the residual report and not vocabulary.
+    CODE_APPLIED: (True, "{n} sidecar whose date or caption went to its photo"),
+    CODE_EMPTY: (True, "{n} sidecar with no date or caption to give"),
+    CODE_PHOTO_NOT_FILED: (False, "{n} sidecar whose photo is not filed"),
+    CODE_UNPAIRED: (False, "{n} sidecar that no one photo fits"),
+})
 #: The rows are appended, fsynced and counted this many at a time, so a pass costs one fsync for each batch.
 _BATCH = 200
 _ROW_KEYS = ("sidecar", "pair", "sidecars_end")  # nosemgrep: ep-word-set -- the closed row keys of the pass: this module's own record format.

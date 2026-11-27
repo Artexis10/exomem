@@ -380,6 +380,30 @@ def test_a_caption_files_in_the_description_section_with_a_card_number_removed_a
         assert [hit.path for hit in hits] == list(source_pages(vault))
 
 
+def test_the_file_reply_names_each_sidecar_by_what_became_of_its_photo_and_none_as_not_selected(vault: Path) -> None:
+    """Catches a done reply that says the owner left a sidecar out when filing read it, and asks for a review of one that did its work."""
+    from exomem import adoption_run
+
+    import_id = stage_takeout(vault, {
+        f"{ALBUM}/IMG_50.jpg": photo("IMG_50.jpg"),
+        f"{ALBUM}/IMG_50.jpg.json": sidecar("IMG_50.jpg", taken=taken_at(30), caption="Dusk"),
+        f"{ALBUM}/IMG_51.jpg": photo("IMG_51.jpg"),
+        f"{ALBUM}/IMG_51.jpg.json": sidecar("IMG_51.jpg", taken=None),
+        f"{ALBUM}/IMG_52.jpg.json": sidecar("IMG_52.jpg", taken=taken_at(31)),
+    })
+    stage = f"_Imports/{import_id}"
+    reply = adoption_run.file(vault, path=stage)
+    for _ in range(200):
+        if reply["filing"] != "working":
+            break
+        reply = adoption_run.file(vault, path=stage, continuation=reply["continuation"])
+
+    residual = reply["filed"]["residual"]
+    assert reply["filing"] == "done"
+    assert {reason: entry["files"] for reason, entry in residual["by_reason"].items()} == {APPLIED: 1, EMPTY: 1, UNPAIRED: 1}
+    assert residual["unfiled"]["files"] == 1  # only the sidecar that fits no photo needs the person's look
+
+
 def _jpeg_file(*, taken: str | None, seed: int) -> bytes:
     """A small real JPEG that states `taken` (an EXIF time) or none, whose pixels differ by `seed`."""
     import io
@@ -394,14 +418,24 @@ def _jpeg_file(*, taken: str | None, seed: int) -> bytes:
     return out.getvalue()
 
 
-@pytest.mark.frame_codecs
-def test_the_media_worker_keeps_a_sidecar_date_only_where_the_picture_states_none(vault: Path, monkeypatch) -> None:
-    """Catches a worker that lets the sidecar override a time the picture states, drops the date of a picture that states none, or the caption."""
+def _read_again_by_the_media_worker(vault: Path, import_id: str, monkeypatch) -> dict[str, str]:
+    """Run the media worker over every filed photo, as it runs after a filing; return each page's text by the photo's path in the stage."""
     from exomem import extract, media_worker
     from exomem.ocr_models import OcrReading
 
     monkeypatch.setattr(extract, "_ocr_png", lambda _png: OcrReading("", ()))
     monkeypatch.setattr(extract, "_has_audio_stream", lambda _path: False)
+    texts = {}
+    for page, (frontmatter, _text) in source_pages(vault).items():
+        media_worker.MediaWorker(vault, execution_mode="inline")._process(media_worker._Job(
+            binary_path=vault / frontmatter["evidence_file"], sidecar_path=vault / page, media_type="image"))
+        texts[frontmatter["imported_from"].removeprefix(f"_Imports/{import_id}/")] = (vault / page).read_text(encoding="utf-8")
+    return texts
+
+
+@pytest.mark.frame_codecs
+def test_the_media_worker_keeps_a_sidecar_date_only_where_the_picture_states_none(vault: Path, monkeypatch) -> None:
+    """Catches a worker that lets the sidecar override a time the picture states, drops the date of a picture that states none, or the caption."""
     members = {
         f"{ALBUM}/received.jpg": _jpeg_file(taken=None, seed=1),
         f"{ALBUM}/camera.jpg": _jpeg_file(taken="2021:03:02 10:00:00", seed=2),
@@ -411,15 +445,38 @@ def test_the_media_worker_keeps_a_sidecar_date_only_where_the_picture_states_non
     import_id, pages, _view = one_photo_albums(vault, members)
     assert {pages[path][0]["capture_date_source"] for path in pages if path.endswith(".jpg")} == {"export-sidecar"}
 
-    after = {}
-    for page, (frontmatter, _text) in source_pages(vault).items():
-        stage_path = frontmatter["imported_from"].removeprefix(f"_Imports/{import_id}/")
-        media_worker.MediaWorker(vault, execution_mode="inline")._process(media_worker._Job(
-            binary_path=vault / frontmatter["evidence_file"], sidecar_path=vault / page, media_type="image"))
-        text = (vault / page).read_text(encoding="utf-8")
-        after[stage_path] = parse_frontmatter(text)[0]
-        assert "\n## Description\n\nSunday regatta\n" in text  # the caption stays where filing put it
+    texts = _read_again_by_the_media_worker(vault, import_id, monkeypatch)
 
-    received, camera = after[f"{ALBUM}/received.jpg"], after[f"{ALBUM}/camera.jpg"]
+    assert all("\n## Description\n\nSunday regatta\n" in text for text in texts.values())  # the caption stays where filing put it
+    received, camera = (parse_frontmatter(texts[f"{ALBUM}/{name}.jpg"])[0] for name in ("received", "camera"))
     assert (received["capture_date"], received["capture_date_source"]) == ("2022-09-12", "export-sidecar")
     assert (camera["capture_date"], camera["capture_date_source"]) == ("2021-03-02", "camera-exif")
+
+
+@pytest.mark.frame_codecs
+def test_a_date_in_the_name_the_owner_gave_a_filed_photo_outranks_its_sidecar_date(vault: Path, monkeypatch) -> None:
+    """Catches a worker that reads the name the filer stored the photo under, which states no date, so a photo named for its day keeps the later sidecar date."""
+    members = {
+        f"{ALBUM}/20200314_101112.jpg": _jpeg_file(taken=None, seed=3),
+        f"{ALBUM}/20200314_101112.jpg.json": sidecar("20200314_101112.jpg", taken=taken_at(70), caption=""),
+    }
+    import_id, pages, _view = one_photo_albums(vault, members)
+    assert pages[f"{ALBUM}/20200314_101112.jpg"][0]["capture_date_source"] == "export-sidecar"
+
+    texts = _read_again_by_the_media_worker(vault, import_id, monkeypatch)
+
+    named = parse_frontmatter(texts[f"{ALBUM}/20200314_101112.jpg"])[0]
+    assert (named["capture_time"], named["capture_date_source"]) == ("2020-03-14T10:11:12", "file-name")
+
+
+@pytest.mark.frame_codecs
+def test_a_filed_photo_with_a_dated_name_and_no_sidecar_takes_its_date_from_the_name(vault: Path, monkeypatch) -> None:
+    """Catches a worker that reads the stored name, so a Takeout photo with no sidecar never gets the date its name states."""
+    members = {f"{ALBUM}/20200314_101112.jpg": _jpeg_file(taken=None, seed=4)}
+    import_id, pages, _view = one_photo_albums(vault, members)
+    assert "capture_time" not in pages[f"{ALBUM}/20200314_101112.jpg"][0]
+
+    texts = _read_again_by_the_media_worker(vault, import_id, monkeypatch)
+
+    named = parse_frontmatter(texts[f"{ALBUM}/20200314_101112.jpg"])[0]
+    assert (named["capture_time"], named["capture_date_source"]) == ("2020-03-14T10:11:12", "file-name")

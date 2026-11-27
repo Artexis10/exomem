@@ -2061,12 +2061,26 @@ def unfiled_report(root: Path, import_id: str, runs: tuple[dict, ...] | None = N
     reading = export_sidecars.read(root, import_id)
     settled, counts = export_sidecars.settle(reading, _photo_filed(pages, f"{import_stage.STAGE_DIR}/{import_id}/"))
     unfiled = [
-        import_stage.residual_member(path, size, settled.get(path, reason))
-        for path, size, reason in adoption_consume.stage_reasons(import_id, list(files.items()), pages, _APPLIED_STATUSES)
+        import_stage.residual_member(path, size, reason)
+        for path, size, reason in adoption_consume.stage_reasons(import_id, list(files.items()), pages, _APPLIED_STATUSES, settled)
         if (path in settled or not adoption_consume.is_filed(reason)) and path != import_stage.SERIES_FILE
     ]
     # An item that could not be read or was left out and an export that was read in part have no staged file: the expansion record lists them.
     return [*unfiled, *export_expansion.unfiled(root, import_id)], counts
+
+
+def _stage_residual(root: Path, run: dict, pages: tuple[dict, ...]) -> dict | None:
+    """What is still in the run's stage (`adoption_consume.residual`), each recognised Takeout sidecar under what became of its photo.
+
+    `pages` are the run's page and the earlier ones, nearest first. A sidecar is never selected, so no scan says why it
+    stays and the scan's reason would be `unselected`, which says that the person left it out.
+    """
+    stage = run.get("stage")
+    stage_id = stage.get("stage") if isinstance(stage, dict) else None
+    settled = {}
+    if stage_id is not None:
+        settled = export_sidecars.settle(export_sidecars.read(root, stage_id), _photo_filed(pages, f"{import_stage.STAGE_DIR}/{stage_id}/"))[0]
+    return adoption_consume.residual(root, run, _APPLIED_STATUSES, pages[1:], settled)
 
 
 def _photo_filed(pages: tuple[dict, ...], prefix: str) -> Callable[[str], bool]:
@@ -4749,7 +4763,7 @@ def finish(
         _consume_filed_text(root, run, budget)
         # Empty folders go only for a run that consumes; the residual is reported for any recorded stage.
         removed_folders = adoption_consume.remove_empty_folders(root, run) if run.get("consume", True) else 0
-        stage_residual = adoption_consume.residual(root, run, _APPLIED_STATUSES, _earlier_pages(store, run))
+        stage_residual = _stage_residual(root, run, (run, *_earlier_pages(store, run)))
         if stage_residual is not None:
             stage_residual["removed_empty_folders"] = removed_folders
         # The counts the last `apply` recorded from its own re-hash — never a fresh
@@ -5343,7 +5357,7 @@ def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict 
         pages = (run, *_earlier_pages(store, run))
         finished = next((page for page in pages if page.get("finish")), None)
         # Read now from the stage, as `_unscanned` reads it, so a file put in the stage after the last `finish` is listed.
-        residual = adoption_consume.residual(root, run, _APPLIED_STATUSES, pages[1:])
+        residual = _stage_residual(root, run, pages)
         done: dict = {}
         if finished is not None:
             finish = _presented_finish(finished)
