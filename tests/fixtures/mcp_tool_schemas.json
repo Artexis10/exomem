@@ -841,6 +841,7 @@
             "media.replicate",
             "media.attach_speech",
             "media.rename_speakers",
+            "media.group_session",
             "review.set_family",
             "review.set_envelope",
             "review.decide_vocabulary",

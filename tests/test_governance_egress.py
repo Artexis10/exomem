@@ -3099,6 +3099,7 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "replicate": False,
             "attach-speech": False,
             "rename-speakers": False,
+            "group-session": False,
         },
         ("observe_memory", "operation"): {
             "add": False,

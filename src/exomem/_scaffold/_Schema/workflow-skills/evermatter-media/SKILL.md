@@ -2,7 +2,7 @@
 name: evermatter-media
 description: 'Find, view, cite and keep media in Evermatter: PDFs, images, audio and video, with their transcripts, pages and frames. Use when the user asks about a recording, photo, scan or video, wants to look inside one, or shares media to keep.'
 metadata:
-  skill_contract: bd2ab38739b8d66ed05294cf4a72b493751fc56fbbfd2c11d0df430e004f15de
+  skill_contract: 01ee9f1d6e3d41c89b47b9e89d89cc390daa8e436fa7e31eac7d9754d921399d
   version: "0.2.0"
 ---
 
@@ -37,6 +37,9 @@ When a recording's languages are unknown at ingest, ask the user once: "One lang
 Check the sidecar's `asr_language`, `asr_language_probability`, `asr_language_source`, `asr_language_mode` and `asr_speech_seconds` before trusting a transcript. A transcript in the wrong language, or one that repeats a line, is a processing fault, not content: fix it with `manage_memory(operation="media.reprocess", arguments={"path": ..., "language": <code>})`, or `"multilingual": true`. The old extraction stays on a linked prior page.
 ## Speech results from the owner's machine
 An owner's agent that transcribed or diarised a recording on its own machine attaches the result with `manage_memory(operation="media.attach_speech", arguments={"path": ..., "binary_sha256": ..., "binary_size": ..., "segments": [...], "turns": [...], "engine": ...})`. The call binds to the original by SHA-256 and size, fills a pending or failed Source, and replaces an unlabelled result while it keeps the old one on a linked prior page. A labelled or named result is replaced only with `"replace_labelled": true`, which the person asks for. A repeat writes nothing. Rename the labels afterwards with `manage_memory(operation="media.rename_speakers", arguments={"path": ..., "renames": {"Speaker A": ...}})`; it enrols no voice, which is the owner's `enroll-speaker` action. Process a page whose turns are merged, with no timestamps, again with speaker labels before an attach, because names carry only by timed lines.
+
+## One transcript for separate recordings of one event
+Separate recordings of one event, each from its own microphone, are grouped with `manage_memory(operation="media.group_session", arguments={"members": {"Host": <path>, "Guest": <path>}, "title": ...})`. Each key names a track and each value is that recording's governed path; two to sixteen recordings. The call writes one session transcript page that labels each line with its track, links each recording as a source, and keeps your own notes below its marker. The page lines the recordings up by the start time that each file publishes. When the files share no published start time, it says so and `alignment` reads `assumed-start`: every recording starts at 0:00 and every line stays. A repeat of the call writes nothing; the same title with other members regroups the page. A change to a member's transcript or speaker names renders the page again, and a reply with `sessions.stale` names a page that needs the call repeated.
 
 ## Output contract
 What the media shows or says, cited by timestamp, page or frame, and what was kept or written.

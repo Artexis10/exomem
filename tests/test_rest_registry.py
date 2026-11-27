@@ -1192,6 +1192,7 @@ def test_process_media_has_one_generated_registry_rest_and_openapi_contract(
     operation_param = next(param for param in command.params if param.name == "operation")
     expected_operations = (
         "process", "status", "retry", "reprocess", "replicate", "attach-speech", "rename-speakers",
+        "group-session",
     )
     assert get_args(get_type_hints(command.leaf)["operation"]) == expected_operations
     assert operation_param.choices == expected_operations
@@ -1215,7 +1216,7 @@ def test_process_media_has_one_generated_registry_rest_and_openapi_contract(
     assert set(schema["properties"]) == {
         "path", "paths", "operation", "language", "multilingual", "store", "response_detail",
         "diarize", "binary_sha256", "binary_size", "segments", "turns", "engine", "asr", "names",
-        "replace_labelled", "renames",
+        "replace_labelled", "renames", "members", "title",
     }
     assert schema["properties"]["diarize"]["type"] == "boolean"
     assert schema["properties"]["response_detail"]["enum"] == [

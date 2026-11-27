@@ -17,8 +17,9 @@ from .speaker_names import MAX_NAME_CHARS
 #: The two `process_media` operations that carry a speech result; the door, the commands and the reply view share them.
 ATTACH_OPERATION = "attach-speech"
 RENAME_OPERATION = "rename-speakers"
+GROUP_OPERATION = "group-session"
 # nosemgrep: ep-word-set -- the media tool's closed operations, each implemented by the speech modules.
-SPEECH_OPERATIONS = frozenset({ATTACH_OPERATION, RENAME_OPERATION})
+SPEECH_OPERATIONS = frozenset({ATTACH_OPERATION, RENAME_OPERATION, GROUP_OPERATION})
 
 # Bounds. They check a payload's shape against the recording, never what it says.
 #: A container states its duration rounded, and a last segment may run a moment past it.
@@ -105,6 +106,18 @@ Names = Annotated[
 Renames = Annotated[
     dict[_Label, Annotated[str, StringConstraints(min_length=1, max_length=MAX_NAME_CHARS)]],
     Field(min_length=1, max_length=MAX_NAMES, description="Label as the page shows it, mapped to the person's name."),
+]
+Members = Annotated[
+    dict[_Label, Annotated[str, StringConstraints(min_length=1, max_length=4096)]],
+    Field(
+        min_length=2, max_length=16,
+        description="Group-session: each track's name mapped to the path of its recording, one recording for each track.",
+    ),
+]
+SessionTitle = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=120),
+    Field(description="Group-session: the session's title. The same title again regroups the same page."),
 ]
 Engine = Annotated[
     str,
