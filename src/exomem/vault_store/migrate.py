@@ -14,7 +14,7 @@ import sqlite3
 import tempfile
 import time
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import closing, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -235,10 +235,10 @@ def _copy_sidecars(
 ) -> None:
     """Copy each table's rows and row ids as they are into the staged database.
 
-    The graph row tables come from the derivation, not the graph sidecar: file-mode graph sync
-    derives again only a page whose own bytes changed, so the sidecar can keep a page's edges to a
-    page that has left the catalogue, and a copy would carry them into the store. The derivation's
-    row ids keep a page's edges in the order of one write.
+    The graph row tables come from the derivation, not the graph sidecar: the sidecar can keep an
+    unchanged page's edges to a target that has since left the catalogue, when the path that removed
+    the target did not derive its linkers again, and a copy would carry them into the store. The
+    derivation's row ids keep a page's edges in the order of one write.
     """
     sources = (
         (lexstore.lexical_path(vault_root), staged.lexical_tables),
@@ -386,59 +386,62 @@ def queued_graph_work(vault_root: Path) -> dict | None:
 
 
 def catch_up_graph_work(vault_root: Path) -> dict | None:
-    """Drain the queued graph repair into the sidecar before staging; refuse if it stays behind.
+    """Drain the queued graph repair into the sidecar before staging, as far as it goes in time.
 
-    The offline owner holds the writer lease and this process never set the service's startup gate,
-    so the drain publishes. Passes repeat while any clears a receipt. The queue need not empty: a page
-    that the graph holds no rows for keeps its receipt, so the verdict is the graph's own status.
-    Staging takes the graph rows from the files, so what this misses never reaches the store.
+    Staging takes the graph rows from the files and a rollback rebuilds the graph, so nothing the
+    drain misses reaches the store or the file mode a rollback restores. It never refuses: it only
+    keeps queued work out of the graph sidecar drift that the apply reports, so that count names
+    sync defects. The offline owner holds the writer lease and this process never set the service's
+    startup gate, so the drain publishes. Passes repeat while any clears a receipt.
     """
     queued = queued_graph_work(vault_root)
     if queued is None:
         return None
     started = time.monotonic()
+    passes: int | str
+    try:
+        passes, stopped = _drain_graph_work(vault_root, started)
+    except Exception as error:  # noqa: BLE001 - the catch-up never refuses; the result names why it stopped, not a traceback
+        passes, stopped = "unknown", f"the catch-up failed with {type(error).__name__}: {error}"
+    return {
+        **queued,
+        "passes": passes,
+        "left": _or_unknown(lambda: deferred_index.graph_queue_age(vault_root)[0]),
+        "stopped": stopped,
+        "graph_current": _or_unknown(lambda: graph_state.is_current(vault_root)),
+        "seconds": round(time.monotonic() - started, 2),
+    }
+
+
+def _drain_graph_work(vault_root: Path, started: float) -> tuple[int, str]:
+    """Drain passes until the queue empties, the time runs out or passes stop clearing receipts."""
     if not freshness.recall_is_live(vault_root, "vault"):
         # A fresh process has no live recall projection, and the drain declines every receipt
         # without one; a service's watcher is what makes it live, and this process runs none.
         epistemic_graph.EpistemicGraphIndex(vault_root).publish_recall_projection()
     passes = stalled = 0
-    stopped = "the queue drained"
     while deferred_index.graph_queue_pending(vault_root):
         if time.monotonic() - started >= CATCH_UP_SECONDS:
-            stopped = f"{CATCH_UP_SECONDS:.0f} seconds passed"
-            break
+            return passes, f"{CATCH_UP_SECONDS:.0f} seconds passed"
         try:
             cleared = index_sync.drain_graph_work(vault_root)
-        except Exception as error:  # noqa: BLE001 - a failed pass ends the catch-up; the result or the refusal names its cause, not a traceback
-            stopped = f"a pass failed with {type(error).__name__}: {error}"
-            break
+        except Exception as error:  # noqa: BLE001 - a failed pass ends the catch-up; the result names its cause, not a traceback
+            return passes, f"a pass failed with {type(error).__name__}: {error}"
         passes += 1
         stalled = 0 if cleared else stalled + 1
         if stalled >= CATCH_UP_STALLED_PASSES:
-            stopped = f"{stalled} passes in a row cleared nothing"
-            break
+            return passes, f"{stalled} passes in a row cleared nothing"
         if stalled:
             time.sleep(CATCH_UP_RETRY_SECONDS)
-    left, _ = deferred_index.graph_queue_age(vault_root)
-    if not graph_state.is_current(vault_root):
-        raise OpError(
-            "VAULT_STORE_GRAPH_NOT_CAUGHT_UP",
-            f"the graph index is not current after {passes} catch-up pass(es), with {left} of "
-            f"{queued['receipts']} queued receipt(s) left ({stopped}), so nothing was staged",
-            "Run `exomem maintain --reconcile --rebuild-graph` to bring the graph index up to date, then run this command again.",
-            details={
-                "before": queued,
-                "left": left,
-                "recall_live": freshness.recall_is_live(vault_root, "vault"),
-            },
-        )
-    return {
-        **queued,
-        "passes": passes,
-        "left": left,
-        "stopped": stopped,
-        "seconds": round(time.monotonic() - started, 2),
-    }
+    return passes, "the queue drained"
+
+
+def _or_unknown(read: Callable[[], object]) -> object:
+    """A report field that a failed read shows as "unknown", never as a value it did not read."""
+    try:
+        return read()
+    except Exception:  # noqa: BLE001 - the field reports the failure as unknown; the catch-up never refuses
+        return "unknown"
 
 
 def _skipped_report(skipped: list[ownership.Skipped]) -> dict[str, int]:
@@ -546,8 +549,8 @@ def _cutover(root: Path, session, token, writer, *, why: str) -> dict:
             "a collection store operation is still pending; finish it before entering store mode",
         )
     _require_no_other_claim(root, writer)
-    # The graph sidecar is what a rollback returns to and what the report compares to the files,
-    # so the repair that a stopped service left queued goes in first.
+    # The report compares the graph sidecar with the files, so the repair that a stopped service
+    # left queued goes in first, and the count names only what the sync missed.
     caught_up = catch_up_graph_work(root)
     revision = _next_revision(writer.connection)
     # An activation that died before its commit left the id and no mode row; this run records the id again and goes on.
@@ -576,9 +579,9 @@ def _cutover(root: Path, session, token, writer, *, why: str) -> dict:
                     else ""
                 ),
                 (
-                    "The search or graph index is behind the files, as a service that stopped "
-                    "early leaves it. Run `exomem maintain --reconcile --rebuild-graph` to bring "
-                    "both up to date, then run this command again."
+                    "The search or reference index is behind the files, as a service that "
+                    "stopped early leaves it. Run `exomem maintain --reconcile` to bring them up "
+                    "to date, then run this command again."
                     if comparison.differences
                     else "The store cannot reproduce the named pages' bytes, so keep this vault "
                     "in file mode and report those pages."

@@ -262,7 +262,7 @@ def test_a_graph_sidecar_edge_to_a_page_that_left_the_catalogue_is_replaced_by_t
     """A migration that refuses, or copies a stale edge, because the graph sidecar kept what a vanished page's linker authored."""
     (vault / BETA).unlink()
     # The catalogue and the references follow the files. The graph sidecar drops the vanished page's own
-    # rows and keeps Alpha's edge toward it, because only a page whose bytes changed is derived again.
+    # rows and keeps Alpha's edge toward it, as when the path that removed a target missed its linkers.
     lexstore.search_bm25(vault, "lighthouse", 3, scope="kb", repair=True)
     memory_refs.ReferenceIndex(vault).rebuild_all()
     with closing(epistemic_graph.EpistemicGraphIndex(vault)._connect()) as graph, graph:
@@ -882,11 +882,13 @@ def test_a_migration_dry_run_reports_queued_graph_work_and_leaves_it_queued(vaul
     assert deferred_index.graph_queue_age(vault)[0] == queued
 
 
-@pytest.mark.parametrize("drain", ["clears nothing", "raises", "outlasts the ceiling"])
-def test_queued_graph_work_that_cannot_drain_refuses_before_any_staging(
+@pytest.mark.parametrize(
+    "drain", ["clears nothing", "raises", "outlasts the ceiling", "cannot start"]
+)
+def test_queued_graph_work_that_cannot_drain_still_migrates_and_says_where_it_stopped(
     vault, capsys, monkeypatch, drain
 ):
-    """A migration that stages and proves a whole vault, or reports a traceback, when its catch-up cannot converge."""
+    """A migration that refuses, or reports a traceback, when its graph catch-up cannot converge."""
     _leave_graph_repair_queued(vault)
     if drain == "clears nothing":
         monkeypatch.setattr(index_sync, "drain_graph_work", lambda *args, **keywords: 0)
@@ -896,24 +898,25 @@ def test_queued_graph_work_that_cannot_drain_refuses_before_any_staging(
             raise RuntimeError("the graph sidecar is busy")
 
         monkeypatch.setattr(index_sync, "drain_graph_work", failing)
+    elif drain == "cannot start":
+
+        def no_projection(*args, **keywords):
+            raise RuntimeError("the recall projection cannot be published")
+
+        monkeypatch.setattr(
+            epistemic_graph.EpistemicGraphIndex, "publish_recall_projection", no_projection
+        )
     else:
         monkeypatch.setattr(migrate, "CATCH_UP_SECONDS", 0)
-    staged = []
-    stage = migrate.stage
-    monkeypatch.setattr(
-        migrate, "stage", lambda *args, **keywords: staged.append(1) or stage(*args, **keywords)
-    )
-    objects = store_objects(vault)
     capsys.readouterr()
 
-    assert migrate_apply(vault) == 1
+    assert migrate_apply(vault) == 0, capsys.readouterr().err
 
-    error = capsys.readouterr().err
-    assert "VAULT_STORE_GRAPH_NOT_CAUGHT_UP" in error
-    assert "exomem maintain --reconcile --rebuild-graph" in error
-    assert staged == []
-    assert store_objects(vault) == objects
-    assert not mode.store_mode_active(vault)
+    applied = printed(capsys)
+    assert applied["status"] == "migrated"
+    assert applied["graph_catch_up"]["left"] > 0
+    assert applied["graph_catch_up"]["stopped"] != "the queue drained"
+    assert mode.store_mode_active(vault)
 
 
 def test_a_store_migrated_before_the_change_journal_gets_it_at_its_next_derivation(vault, tmp_path):

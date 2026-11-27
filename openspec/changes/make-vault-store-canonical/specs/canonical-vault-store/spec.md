@@ -403,7 +403,7 @@ In store mode, once stage 2 ships, every stored file SHALL carry a canonicity re
 - **THEN** it sees the file's origin, hash, size, format and derivation
 
 ### Requirement: Migration into the store is verified and reversible
-Exomem SHALL migrate a file-mode vault into store mode offline. The migration SHALL load every page's exact bytes, copy the lexical and reference rows, and stage the graph rows from one fresh derivation of the loaded bytes, in the derivation's row order and with its row ids. It SHALL verify before activation that every staged row equals that derivation and that a projection of every page reproduces the original bytes. It SHALL report how many rows the graph sidecar differed from the derivation by, with the first differing keys, and SHALL NOT refuse for that difference. Reverting to file mode SHALL first project every queued intent, including a full projection when projection was off. It SHALL refuse while held corrections or held deletions remain, unless they are exported for review. Exporting a held item SHALL move the person's held bytes into the export and project the store's version of that file, so the rebuild does not apply the held edit. It SHALL export the audit trail, the canonicity records and the stored relationships' history, which file mode has no tables for. After those steps, stopping the store and rebuilding the file-mode sidecars from the projected Markdown SHALL restore file mode with the same pages.
+Exomem SHALL migrate a file-mode vault into store mode offline. The migration SHALL load every page's exact bytes, copy the lexical and reference rows, and stage the graph rows from one fresh derivation of the files, in the derivation's row order and with its row ids. It SHALL verify before activation that every staged row equals that derivation, that a projection of every page reproduces the original bytes, and that no loaded file changed since it was loaded. It SHALL report how many graph rows were present in only one of the graph sidecar and the derivation, with the first differing keys, and SHALL NOT refuse for that difference. Reverting to file mode SHALL first project every queued intent, including a full projection when projection was off. It SHALL refuse while held corrections or held deletions remain, unless they are exported for review. Exporting a held item SHALL move the person's held bytes into the export and project the store's version of that file, so the rebuild does not apply the held edit. It SHALL export the audit trail, the canonicity records and the stored relationships' history, which file mode has no tables for. After those steps, stopping the store and rebuilding the file-mode sidecars from the projected Markdown SHALL restore file mode with the same pages.
 
 #### Scenario: Migration preserves every page byte
 - **WHEN** a vault is migrated and then fully projected to an empty directory
@@ -412,7 +412,7 @@ Exomem SHALL migrate a file-mode vault into store mode offline. The migration SH
 #### Scenario: A stale graph sidecar does not refuse the migration
 - **WHEN** an operator migrates a file-mode vault whose graph sidecar keeps a page's edges to a page that has left the catalogue
 - **THEN** the migration installs, and the store's graph rows equal a fresh derivation from the files
-- **AND** the result reports how many graph rows the sidecar differed by, with the first differing keys
+- **AND** the result reports how many graph rows were present in only one of the sidecar and the derivation, with the first differing keys
 - **AND** a dry run says that it did not check the sidecar against the files, and the apply will
 
 #### Scenario: Reverting rebuilds file mode from the projection
@@ -439,12 +439,12 @@ Exomem SHALL migrate a file-mode vault into store mode offline. The migration SH
 - **AND** a move that is refused stops the revert before the vault leaves store mode, and names the file
 
 ### Requirement: Migration catches up queued file-mode index work
-Before it stages, the migration SHALL drain the graph repair that a stopped file-mode service left queued, so the graph index that a rollback returns to is current. It SHALL refuse before staging, and name the reconcile command, when the graph index is not current after a bounded catch-up; receipts left while the graph is current do not refuse. A dry run SHALL report the queue's depth and the oldest receipt's age, and SHALL NOT refuse for a queue that the apply will drain.
+Before it stages, the migration SHALL drain, for a bounded time, the graph repair that a stopped file-mode service left queued. It SHALL NOT refuse when the drain stops early, and its result SHALL name the receipts left and why the drain stopped. A dry run SHALL report the queue's depth and oldest age, and SHALL drain nothing.
 
 #### Scenario: Migrate catches up queued file-mode index work before it stages
 - **WHEN** an operator migrates a file-mode vault whose stopped service left graph repair queued
-- **THEN** the migration drains that queue into the graph index before it stages, and the staged rows then equal the files
-- **AND** a graph index that is still not current after the catch-up refuses before staging and names the reconcile command
+- **THEN** the migration drains that queue into the graph index before it stages
+- **AND** a drain that stops early or fails does not refuse the migration, and the result names the receipts left and why the drain stopped
 - **AND** a dry run reports the queue's depth and age and drains nothing
 
 ### Requirement: Knowledge writes share the store's availability
