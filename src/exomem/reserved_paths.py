@@ -2706,6 +2706,7 @@ def _list_candidate_records(
     descend: Callable[[str], bool] | None = None,
     checkpoint: request_budget.ReadCheckpoint | None = None,
     leave_out: Callable[[str], bool] | None = None,
+    tolerate_change: bool = False,
 ) -> tuple[held_fs.SagaRecord, ...]:
     """Walk safe ordinary children without following or exposing aliases.
 
@@ -2713,6 +2714,8 @@ def _list_candidate_records(
     walk enters it. A folder it refuses is still listed as a child of its parent; nothing below it is.
     `leave_out` receives each entry's path, relative to the walked folder, before the walk takes the
     entry's identity: an entry it names is never stat'ed or opened. A complete census omits it.
+    `tolerate_change` keeps a complete census's refusal of every omission, such as an alias, and
+    takes a name that came or went while the folder was listed as a change rather than a refusal.
     """
 
     records: list[held_fs.SagaRecord] = []
@@ -2746,8 +2749,20 @@ def _list_candidate_records(
             code = children.error.code if children.error is not None else "IO_REFUSED"
             raise ReservedPathLeafError(code)
         observed = children.require()
-        if names is not None and names != {record.relative_path for record in observed}:
-            raise ReservedPathLeafError("UNSAFE_PATH")
+        listed = {record.relative_path for record in observed}
+        if names is not None and names != listed:
+            if not tolerate_change:
+                raise ReservedPathLeafError("UNSAFE_PATH")
+            # A name the folder still lists but the walk cannot open is an alias; one that came or went is a change.
+            missing = names - listed
+            again = filesystem.children(directory, name_filter=lambda name: name in missing and admit_name(name))
+            if not again.ok:
+                raise ReservedPathLeafError(again.error.code if again.error is not None else "IO_REFUSED")
+            found = again.require()
+            opened = {record.relative_path for record in found}
+            if any(name in missing and name not in opened for name in filesystem.iter_names(directory)):
+                raise ReservedPathLeafError("UNSAFE_PATH")
+            observed = sorted((*observed, *found), key=lambda record: record.relative_path)
         for record in observed:
             if checkpoint is not None:
                 checkpoint()
@@ -2782,13 +2797,18 @@ def _list_candidate_records(
             retained = filesystem.parent(child)
             if not retained.ok:
                 code = retained.error.code if retained.error is not None else "IO_REFUSED"
+                if tolerate_change and code == "MISSING":
+                    continue  # the folder left since the listing
                 raise ReservedPathLeafError(code)
             with retained.require() as child_directory:
                 if child_directory.identity != record.identity:
                     raise ReservedPathLeafError("IDENTITY_CHANGED")
                 _require_current_generic_directory(filesystem, child_directory)
                 walk(child_directory, relative)
-        if names is not None and names != {name for name in filesystem.iter_names(directory) if admit_name(name)}:
+        if (
+            names is not None and not tolerate_change
+            and names != {name for name in filesystem.iter_names(directory) if admit_name(name)}
+        ):
             raise ReservedPathLeafError("IDENTITY_CHANGED")
         _require_current_generic_directory(filesystem, directory)
 
@@ -2994,7 +3014,9 @@ def open_generic_tree(
     A file that is replaced, removed or edited while the walk holds it also ends the walk, unless the
     caller passes `entry_changed`: then the walk reports that entry's relative path to it and goes on.
     It yields no entry for a file that changed before its yield, and reports one that changed while the
-    caller held it when the caller asks for the next entry. A census (`require_complete`) omits it.
+    caller held it when the caller asks for the next entry. A census (`require_complete`) that passes it
+    still refuses every omission, such as a linked file or folder, and takes only change: a name that
+    came or went between listings, and an entry replaced, removed or edited. It skips the final re-list.
     """
     with (request_budget.checking(checkpoint) if checkpoint is not None else nullcontext()), \
             _generic_identity_catalogue_scope(vault_root, value, identities=identities) as current:
@@ -3084,6 +3106,7 @@ def _iter_generic_tree_held(
                     identities=identities,
                     require_complete=require_complete,
                     recursive=recursive, descend=descend, checkpoint=checkpoint, leave_out=leave_out,
+                    tolerate_change=entry_changed is not None,
                 )
             else:
                 enumerated = filesystem.children(
@@ -3273,7 +3296,8 @@ def _iter_generic_tree_held(
                             markdown,
                         )
                         unchanged()
-            if require_complete:
+            # A walk that takes changes has reported each one; a re-list would refuse what it already took.
+            if require_complete and entry_changed is None:
                 current_records = _list_candidate_records(
                     filesystem, source_directory, relative, identities=identities,
                     require_complete=True, recursive=recursive, descend=descend, checkpoint=checkpoint,

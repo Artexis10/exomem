@@ -258,13 +258,13 @@ def test_a_camera_raw_on_a_host_without_the_raw_decoder_is_skipped_not_counted_a
     assert preview["skipped"] == {capture_backfill.READER_UNAVAILABLE: 1}
 
 
-def test_saves_while_the_census_reads_skip_the_pages_they_touch_and_a_write_never_overwrites_a_moved_page(
-    vault, monkeypatch
-):
-    """Catches a backfill that fails as a whole whenever the owner saves a page while it reads the vault.
+def test_saves_while_the_census_reads_are_read_again_and_a_write_never_overwrites_a_moved_page(vault, monkeypatch):
+    """Catches a backfill that fails, or plans a stale or doubled page, whenever the owner saves while it reads.
 
-    A live vault takes saves during every daytime run. Each page a save touches mid-read is skipped and counted,
-    a page added elsewhere is no failure, and a page saved between the write's census and its commit keeps the save.
+    A live vault takes saves during every daytime run. A page saved mid-read is read again after the walk: a photo
+    is planned once from its new text, an ordinary note is not counted, a removed page is dropped, and only a page
+    that changes again during that read is skipped. A page saved between the write's census and its commit keeps
+    the save.
     """
     from contextlib import contextmanager
 
@@ -272,23 +272,29 @@ def test_saves_while_the_census_reads_skip_the_pages_they_touch_and_a_write_neve
     from exomem.kbdir import managed_join, managed_root_rel
 
     _original, photo = _file(vault, "phone", _jpeg(taken="2024:06:01 14:03:22", gps=HELSINKI))
-    replaced, removed = managed_join("zz-replaced-meanwhile.md"), managed_join("zz-removed-meanwhile.md")
-    for page in (replaced, removed):
+    replaced, removed, restless = (
+        managed_join(f"zz-{name}-meanwhile.md") for name in ("replaced", "removed", "restless")
+    )
+    for page in (replaced, removed, restless):
         (vault / page).write_text("---\ntitle: An ordinary note\n---\nText.\n", encoding="utf-8")
-    first_read: list[str] = []
+    saved: list[str] = []
 
-    def save_after_first_page(read: str) -> None:
-        """What the live service does while the census holds its first page: four ordinary saves."""
-        first_read.append(read)
-        (vault / managed_join("Notes/added-meanwhile.md")).write_text("---\ntitle: New\n---\nNew.\n", encoding="utf-8")
-        staged = vault / f"{replaced}.staged"
+    def replace_atomically(page: str) -> None:
+        staged = vault / f"{page}.staged"
         staged.write_text("---\ntitle: An ordinary note\n---\nRewritten.\n", encoding="utf-8")
-        staged.replace(vault / replaced)
-        with (vault / read).open("a", encoding="utf-8") as edited:
+        staged.replace(vault / page)
+
+    def save_after_the_photo_is_read() -> None:
+        """What the live service does while the census still holds the photo's page: five ordinary saves."""
+        saved.append(photo)
+        (vault / managed_join("Notes/added-meanwhile.md")).write_text("---\ntitle: New\n---\nNew.\n", encoding="utf-8")
+        replace_atomically(replaced)
+        replace_atomically(restless)
+        with (vault / photo).open("a", encoding="utf-8") as edited:
             edited.write("\nEdited in place.\n")
         (vault / removed).unlink()
 
-    real_walk = reserved_paths.open_generic_tree
+    real_walk, real_open = reserved_paths.open_generic_tree, reserved_paths.open_generic_binary
 
     @contextmanager
     def census_walk(vault_root, value, **options):
@@ -296,19 +302,28 @@ def test_saves_while_the_census_reads_skip_the_pages_they_touch_and_a_write_neve
             def interleaved():
                 for entry in entries:
                     yield entry
-                    if value == managed_root_rel() and not first_read:
-                        save_after_first_page(managed_join(entry.relative_path))
+                    if value == managed_root_rel() and not saved and managed_join(entry.relative_path) == photo:
+                        save_after_the_photo_is_read()
             yield interleaved()
 
+    @contextmanager
+    def second_read(vault_root, value, **options):
+        with real_open(vault_root, value, **options) as source:
+            if value == restless and saved and restless not in saved:
+                saved.append(restless)
+                with (vault / restless).open("a", encoding="utf-8") as edited:
+                    edited.write("Saved again.\n")
+            yield source
+
     monkeypatch.setattr(reserved_paths, "open_generic_tree", census_walk)
+    monkeypatch.setattr(reserved_paths, "open_generic_binary", second_read)
 
     preview = _backfill(vault)
 
-    assert first_read and first_read[0] not in (photo, replaced, removed)
-    touched = {first_read[0], replaced, removed}
-    assert preview["skipped"] == {capture_backfill.CHANGED_WHILE_READ: 3}
-    assert {entry["path"] for entry in preview["skipped_listed"]} == touched
-    assert preview["would_update"] == 1  # the photo nobody saved is still planned
+    assert saved == [photo, restless]
+    assert preview["skipped"] == {capture_backfill.CHANGED_WHILE_READ: 1}
+    assert preview["skipped_listed"] == [{"path": restless, "reason": capture_backfill.CHANGED_WHILE_READ}]
+    assert preview["would_update"] == 1  # the photo, planned once from the text it has now
 
     real_commit = maintenance_jobs.commit_pages
 
@@ -323,4 +338,32 @@ def test_saves_while_the_census_reads_skip_the_pages_they_touch_and_a_write_neve
 
     kept = (vault / photo).read_text(encoding="utf-8")
     assert (report["updated"], report["skipped_changed"]) == (0, 1)
-    assert "The owner's own line." in kept and "capture_time" not in kept
+    assert "Edited in place." in kept and "The owner's own line." in kept and "capture_time" not in kept
+
+
+def test_a_photo_folder_linked_into_the_vault_stops_the_preview_instead_of_leaving_its_photos_out(vault, tmp_path):
+    """Catches a preview that silently reads past a linked folder and reports a partial vault as the whole."""
+    _original, page = _file(vault, "phone", _jpeg(taken="2024:06:01 14:03:22", gps=HELSINKI))
+    folder = (vault / page).parent
+    folder.rename(tmp_path / "elsewhere")
+    folder.symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+
+    with pytest.raises(OpError) as refused:
+        _backfill(vault)
+
+    assert refused.value.code == "UNSAFE_PATH"
+    assert "linked file or folder" in refused.value.message
+
+
+def test_a_hard_linked_photo_page_stops_the_preview_instead_of_leaving_it_out(vault, tmp_path):
+    """Catches a preview that silently drops a page with a second name and reports a partial vault as the whole."""
+    import os
+
+    _file(vault, "phone", _jpeg(taken="2024:06:01 14:03:22", gps=HELSINKI))
+    _second, linked = _file(vault, "second", _jpeg(taken="2024:06:02 09:00:00"))
+    os.link(vault / linked, tmp_path / "second-copy.md")
+
+    with pytest.raises(OpError) as refused:
+        _backfill(vault)
+
+    assert refused.value.code == "UNSAFE_PATH"

@@ -52,7 +52,9 @@ AMBIGUOUS_BOUNDARY = "AMBIGUOUS_SIDECAR_BOUNDARY"
 READER_UNAVAILABLE = "this host has no decoder for the original's kind"
 RETIREMENT_UNCONFIRMED = "the Trash retirement of the original is unconfirmed"
 UNREADABLE_FOR_MATCHING = "the image could not be decoded for matching"
-CHANGED_WHILE_READ = "the page or its original changed while this run read it; rerun to include it"
+CHANGED_WHILE_READ = "the page or its original kept changing while this run read it; rerun to include it"
+#: The codes of the vault's walk and reads for a page, folder or original that moved or left during the read.
+_CHANGE_CODES = ("IDENTITY_CHANGED", "MISSING")
 #: Pages read between two progress updates of the census.
 _PROGRESS_PAGES = 50
 
@@ -130,14 +132,17 @@ def backfill(
     try:
         plan = _plan(root, archive, recovering)
     except reserved_paths.ReservedPathLeafError as error:
-        # The walk's own codes for a tree that changed under it; a changed page is a skip, not this.
-        moved = error.code in ("IDENTITY_CHANGED", "MISSING")
+        # A changed page is a skip, not this: what is left is a folder that moved, or a page it cannot read safely.
+        moved = error.code in _CHANGE_CODES
         raise OpError(
             error.code,
             "a folder was moved or removed while this run read the pages, so it stopped and changed no page"
-            if moved else f"this run could not read the pages ({error.code}), so it stopped and changed no page",
+            if moved else (
+                f"this run could not read every page safely ({error.code}), for example a linked file or folder, "
+                "so it stopped and changed no page"
+            ),
             "Run the preview again." if moved
-            else "Run the preview again; if it stops with the same code, check that the vault folder is readable.",
+            else "Replace any linked file or folder in the vault with the item itself, then run the preview again.",
             details={"status": "terminal", "committed": False},
         ) from error
     fresh = maintenance_jobs.plan_identity(MODE, flags, plan.entries())
@@ -212,7 +217,7 @@ def _read_plan(root: Path, archive_folder: Path | None, recovering: bool) -> _Pl
         )
     archive = originals.ArchiveReads(root)
     # The canonical pages, which a store-mode vault keeps in its store and may not have projected to disk.
-    # A page saved while the census reads it is skipped, not a failure: the write reads every page again.
+    # A page saved while the census reads it is read again; only one that keeps changing is skipped.
     pages = media_bindings._pages(root, join_request=True, changed=lambda rel: plan.skip(rel, CHANGED_WHILE_READ))  # noqa: SLF001 - the census's page source
     for read_so_far, (rel, body) in enumerate(foreground_priority.yielding_in_bulk(pages)):
         if read_so_far % _PROGRESS_PAGES == 0:
@@ -381,7 +386,9 @@ def _left_volume(root: Path, snapshot: Any) -> str | None:
         state = originals.original_state(root, snapshot.path).state
     except originals.RetirementUnconfirmed:
         return RETIREMENT_UNCONFIRMED
-    except (ValueError, reserved_paths.ReservedPathLeafError):
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code not in _CHANGE_CODES:
+            raise
         return CHANGED_WHILE_READ  # the census read this binding a moment ago
     return None if state in ("local", "cached") else BYTES_NOT_ON_VOLUME
 
