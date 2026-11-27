@@ -52,15 +52,15 @@ _MAX_FIELD_CHARS = 64 * 1024
 _MAX_SHOWN_CHARS = 2000
 _TIME_FORMAT = "%Y%m%dT%H%M%SZ"
 
-# nosemgrep: ep-word-set -- The element paths that Evernote's published export DTD fixes, each with the field it holds: a closed schema, not vocabulary.
-_TEXT_FIELDS: Mapping[tuple[str, ...], str] = {
-    ("title",): "title",
-    ("created",): "created",
-    ("updated",): "updated",
-    ("tag",): "tag",
-    ("note-attributes", "source-url"): "source",
-    ("resource", "mime"): "mime",
-    ("resource", "resource-attributes", "file-name"): "file-name",
+# nosemgrep: ep-word-set -- The element paths that Evernote's published export DTD fixes, each with the record and attribute it fills: a closed schema, not vocabulary.
+_TEXT_FIELDS: Mapping[tuple[str, ...], tuple[str, str]] = {
+    ("title",): ("note", "title"),
+    ("created",): ("note", "created"),
+    ("updated",): ("note", "updated"),
+    ("tag",): ("note", "tags"),
+    ("note-attributes", "source-url"): ("note", "source"),
+    ("resource", "mime"): ("resource", "mime"),
+    ("resource", "resource-attributes", "file-name"): ("resource", "name"),
 }
 _CONTENT = ("content",)
 _DATA = ("resource", "data")
@@ -197,7 +197,6 @@ class _Target:
         self._note: _Note | None = None
         self._resource: _Resource | None = None
         self._mode: str | None = None  # what the characters now arriving belong to: a small field, the content or a resource's data
-        self._field = ""
         self._buffer: list[str] = []
         self._buffered = 0
         self._blob: _Blob | None = None
@@ -227,7 +226,7 @@ class _Target:
             if attrib.get("encoding", "base64") == "base64":
                 self._mode, self._blob = "data", self._open_blob()
         elif key in _TEXT_FIELDS:
-            self._mode, self._field, self._buffer, self._buffered = "field", _TEXT_FIELDS[key], [], 0
+            self._mode, self._buffer, self._buffered = "field", [], 0
 
     def _open_blob(self) -> _Blob:
         self._workdir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -273,14 +272,14 @@ class _Target:
         if key == _CONTENT:
             return
         value = "".join(self._buffer).strip()
-        name = _TEXT_FIELDS[key]
-        resource = self._resource
-        if name == "tag":
+        record, attribute = _TEXT_FIELDS[key]
+        if record == "resource":
+            if self._resource is not None:
+                setattr(self._resource, attribute, value)
+        elif attribute == "tags":
             note.tags.append(value)
-        elif name in ("mime", "file-name") and resource is not None:
-            setattr(resource, "mime" if name == "mime" else "name", value)
-        elif name in ("title", "created", "updated", "source"):
-            setattr(note, name, value)
+        else:
+            setattr(note, attribute, value)
 
     def _finish_data(self) -> None:
         blob, resource = self._blob, self._resource
