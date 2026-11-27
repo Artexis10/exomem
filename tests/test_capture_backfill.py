@@ -256,3 +256,71 @@ def test_a_camera_raw_on_a_host_without_the_raw_decoder_is_skipped_not_counted_a
 
     assert (preview["would_update"], preview["no_capture_metadata"]) == (0, 0)
     assert preview["skipped"] == {capture_backfill.READER_UNAVAILABLE: 1}
+
+
+def test_saves_while_the_census_reads_skip_the_pages_they_touch_and_a_write_never_overwrites_a_moved_page(
+    vault, monkeypatch
+):
+    """Catches a backfill that fails as a whole whenever the owner saves a page while it reads the vault.
+
+    A live vault takes saves during every daytime run. Each page a save touches mid-read is skipped and counted,
+    a page added elsewhere is no failure, and a page saved between the write's census and its commit keeps the save.
+    """
+    from contextlib import contextmanager
+
+    from exomem import maintenance_jobs, reserved_paths
+    from exomem.kbdir import managed_join, managed_root_rel
+
+    _original, photo = _file(vault, "phone", _jpeg(taken="2024:06:01 14:03:22", gps=HELSINKI))
+    replaced, removed = managed_join("zz-replaced-meanwhile.md"), managed_join("zz-removed-meanwhile.md")
+    for page in (replaced, removed):
+        (vault / page).write_text("---\ntitle: An ordinary note\n---\nText.\n", encoding="utf-8")
+    first_read: list[str] = []
+
+    def save_after_first_page(read: str) -> None:
+        """What the live service does while the census holds its first page: four ordinary saves."""
+        first_read.append(read)
+        (vault / managed_join("Notes/added-meanwhile.md")).write_text("---\ntitle: New\n---\nNew.\n", encoding="utf-8")
+        staged = vault / f"{replaced}.staged"
+        staged.write_text("---\ntitle: An ordinary note\n---\nRewritten.\n", encoding="utf-8")
+        staged.replace(vault / replaced)
+        with (vault / read).open("a", encoding="utf-8") as edited:
+            edited.write("\nEdited in place.\n")
+        (vault / removed).unlink()
+
+    real_walk = reserved_paths.open_generic_tree
+
+    @contextmanager
+    def census_walk(vault_root, value, **options):
+        with real_walk(vault_root, value, **options) as entries:
+            def interleaved():
+                for entry in entries:
+                    yield entry
+                    if value == managed_root_rel() and not first_read:
+                        save_after_first_page(managed_join(entry.relative_path))
+            yield interleaved()
+
+    monkeypatch.setattr(reserved_paths, "open_generic_tree", census_walk)
+
+    preview = _backfill(vault)
+
+    assert first_read and first_read[0] not in (photo, replaced, removed)
+    touched = {first_read[0], replaced, removed}
+    assert preview["skipped"] == {capture_backfill.CHANGED_WHILE_READ: 3}
+    assert {entry["path"] for entry in preview["skipped_listed"]} == touched
+    assert preview["would_update"] == 1  # the photo nobody saved is still planned
+
+    real_commit = maintenance_jobs.commit_pages
+
+    def commit_after_a_save(root, operation, entries, *args, **kwargs):
+        with (vault / photo).open("a", encoding="utf-8") as edited:
+            edited.write("\nThe owner's own line.\n")
+        return real_commit(root, operation, entries, *args, **kwargs)
+
+    monkeypatch.setattr(maintenance_jobs, "commit_pages", commit_after_a_save)
+
+    report = _backfill(vault, dry_run=False, plan_id=preview["plan_id"])
+
+    kept = (vault / photo).read_text(encoding="utf-8")
+    assert (report["updated"], report["skipped_changed"]) == (0, 1)
+    assert "The owner's own line." in kept and "capture_time" not in kept

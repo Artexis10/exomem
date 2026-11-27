@@ -11,7 +11,7 @@ import json
 import logging
 import sqlite3
 import threading
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -558,8 +558,16 @@ def follow_store(vault: Path, *, batch: int = 256) -> bool:
             return applied and reached == head
 
 
-def _pages(vault: Path, *, join_request: bool = False, headers_only: bool = False):
-    """Every canonical page under the managed root. A census reads a fresh snapshot; a request may join its own."""
+def _pages(
+    vault: Path, *, join_request: bool = False, headers_only: bool = False, changed: Callable[[str], None] | None = None,
+):
+    """Every canonical page under the managed root. A census reads a fresh snapshot; a request may join its own.
+
+    A disk walk refuses a tree that changes while it reads it, unless the caller passes `changed`: then a
+    page that is replaced, removed or edited while the walk reads it goes to `changed` by its path instead
+    of being yielded, and a page added or removed elsewhere is no failure. Each page it yields is the
+    version the walk held, confirmed unchanged after its read.
+    """
     from contextlib import nullcontext
 
     from .kbdir import managed_join, managed_root_rel
@@ -576,11 +584,33 @@ def _pages(vault: Path, *, join_request: bool = False, headers_only: bool = Fals
                 "SELECT path, body FROM store_pages WHERE path >= ? AND path < ? ORDER BY path",
                 (prefix, prefix + "\U0010ffff"))
             return  # Every ordinary companion is a store-owned page; disk is only its projection.
+        flagged: set[str] = set()
+
+        def report(relative: str) -> None:
+            flagged.add(managed_join(relative))
+            changed(managed_join(relative))
+
         with reserved_paths.open_generic_tree(
-            vault, managed_root_rel(), require_complete=True,
+            vault, managed_root_rel(), require_complete=changed is None,
             select=lambda candidates: (rel for rel, kind in candidates if kind == "file" and rel.lower().endswith(".md")),
             markdown_header_limit=SEMANTIC_SOURCE_MAX_BYTES if headers_only else None,
+            entry_changed=None if changed is None else report,
         ) as entries:
+            if changed is not None:
+                # Each page waits until the walk moves on, which rechecks it, so the caller never takes a stale read.
+                waiting: tuple[str, bytes] | None = None
+                for entry in entries:
+                    if waiting is not None and waiting[0] not in flagged:
+                        yield waiting
+                    rel = managed_join(entry.relative_path)
+                    waiting = None
+                    if not read.serves(vault, rel):
+                        if entry.markdown is None:
+                            raise ValueError("a page cannot be read")
+                        waiting = (rel, entry.markdown)
+                if waiting is not None and waiting[0] not in flagged:
+                    yield waiting
+                return
             for entry in entries:
                 rel = managed_join(entry.relative_path)
                 if not read.serves(vault, rel):

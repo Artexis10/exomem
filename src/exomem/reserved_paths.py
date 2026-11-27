@@ -2976,6 +2976,7 @@ def open_generic_tree(
     descend: Callable[[str], bool] | None = None,
     markdown_header_limit: int | None = None,
     markdown_header_failed: Callable[[str, Exception], None] | None = None,
+    entry_changed: Callable[[str], None] | None = None,
     checkpoint: request_budget.ReadCheckpoint | None = None,
     leave_out: Callable[[str], bool] | None = None,
 ):
@@ -2989,6 +2990,11 @@ def open_generic_tree(
     A Markdown header that cannot be read, decoded or prepared within its own budget ends the walk,
     unless the caller passes `markdown_header_failed`: then the walk reports that entry's relative
     path and error to it, yields no entry for it and goes on. The completeness check still covers it.
+
+    A file that is replaced, removed or edited while the walk holds it also ends the walk, unless the
+    caller passes `entry_changed`: then the walk reports that entry's relative path to it and goes on.
+    It yields no entry for a file that changed before its yield, and reports one that changed while the
+    caller held it when the caller asks for the next entry. A census (`require_complete`) omits it.
     """
     with (request_budget.checking(checkpoint) if checkpoint is not None else nullcontext()), \
             _generic_identity_catalogue_scope(vault_root, value, identities=identities) as current:
@@ -2996,7 +3002,7 @@ def open_generic_tree(
             vault_root, value, recursive=recursive, identities=current,
             select=select, require_complete=require_complete, descend=descend,
             markdown_header_limit=markdown_header_limit, markdown_header_failed=markdown_header_failed,
-            checkpoint=checkpoint, leave_out=leave_out,
+            entry_changed=entry_changed, checkpoint=checkpoint, leave_out=leave_out,
         )
         try:
             yield entries
@@ -3050,6 +3056,7 @@ def _iter_generic_tree_held(
     descend: Callable[[str], bool] | None = None,
     markdown_header_limit: int | None = None,
     markdown_header_failed: Callable[[str, Exception], None] | None = None,
+    entry_changed: Callable[[str], None] | None = None,
     checkpoint: request_budget.ReadCheckpoint | None = None,
     leave_out: Callable[[str], bool] | None = None,
 ) -> Iterator[GenericTreeEntry]:
@@ -3157,23 +3164,26 @@ def _iter_generic_tree_held(
 
                 parent_result = filesystem.parent(parent_path)
                 if not parent_result.ok:
-                    raise ReservedPathLeafError(
-                        parent_result.error.code
-                        if parent_result.error is not None
-                        else "IO_REFUSED"
-                    )
+                    code = parent_result.error.code if parent_result.error is not None else "IO_REFUSED"
+                    if entry_changed is not None and code == "MISSING":
+                        entry_changed(record.relative_path)  # its folder left since the listing
+                        continue
+                    raise ReservedPathLeafError(code)
                 with parent_result.require() as parent:
                     file_result = filesystem.file(parent, leaf)
                     if not file_result.ok:
-                        raise ReservedPathLeafError(
-                            file_result.error.code
-                            if file_result.error is not None
-                            else "IO_REFUSED"
-                        )
+                        code = file_result.error.code if file_result.error is not None else "IO_REFUSED"
+                        if entry_changed is not None and code == "MISSING":
+                            entry_changed(record.relative_path)  # removed since the listing
+                            continue
+                        raise ReservedPathLeafError(code)
                     with file_result.require() as file:
                         _require_current_generic_directory(filesystem, parent)
                         if file.identity != record.identity:
-                            raise ReservedPathLeafError("IDENTITY_CHANGED")
+                            if entry_changed is None:
+                                raise ReservedPathLeafError("IDENTITY_CHANGED")
+                            entry_changed(record.relative_path)  # replaced since the listing
+                            continue
                         descriptor = getattr(file, "descriptor", None)
                         if not isinstance(descriptor, int):
                             raise ReservedPathLeafError("IO_REFUSED")
@@ -3188,6 +3198,21 @@ def _iter_generic_tree_held(
                             with filesystem.file(parent, leaf).require() as current:
                                 if current.version() != version:
                                     raise ReservedPathLeafError("IDENTITY_CHANGED")
+
+                        def unchanged(*, relative=record.relative_path) -> bool:
+                            """Whether the file is still the version read; a change ends the walk unless `entry_changed` takes it."""
+                            if entry_changed is None:
+                                require_current()
+                                return True
+                            try:
+                                require_current()
+                            except (ReservedPathLeafError, held_fs.HeldFsError) as error:
+                                # The two codes, of this walk and of the held file system, that say the file moved.
+                                if error.code not in ("IDENTITY_CHANGED", "MISSING"):
+                                    raise
+                                entry_changed(relative)
+                                return False
+                            return True
 
                         try:
                             info = os.fstat(descriptor)
@@ -3215,15 +3240,17 @@ def _iter_generic_tree_held(
                                 except (ValueError, runtime_resources.PreparationBudgetExceeded) as error:
                                     if markdown_header_failed is None:
                                         raise
-                                    require_current()  # A header that changed while it was read is the walk's failure.
-                                    markdown_header_failed(record.relative_path, error)
+                                    # A header that changed while it was read is a change, never the file's own failure.
+                                    if unchanged():
+                                        markdown_header_failed(record.relative_path, error)
                                     continue
-                                require_current()
+                                if not unchanged():
+                                    continue
                                 yield GenericTreeEntry(
                                     record.relative_path, "file", record.identity, info.st_size,
                                     info.st_mtime, markdown,
                                 )
-                                require_current()
+                                unchanged()
                                 del text, frontmatter, markdown
                             continue
                         if leaf.casefold().endswith(".md"):
@@ -3235,7 +3262,8 @@ def _iter_generic_tree_held(
                                     else "IO_REFUSED"
                                 )
                             markdown = read_result.require()
-                        require_current()
+                        if not unchanged():
+                            continue
                         yield GenericTreeEntry(
                             record.relative_path,
                             "file",
@@ -3244,7 +3272,7 @@ def _iter_generic_tree_held(
                             info.st_mtime,
                             markdown,
                         )
-                        require_current()
+                        unchanged()
             if require_complete:
                 current_records = _list_candidate_records(
                     filesystem, source_directory, relative, identities=identities,
