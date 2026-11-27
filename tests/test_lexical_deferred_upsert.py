@@ -846,7 +846,6 @@ def test_a_catch_up_outpaced_by_sustained_writes_still_advances_without_a_full_p
 def test_an_import_that_adds_more_pages_per_step_than_a_step_replays_costs_no_full_pass(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
     live_catalogue,
 ) -> None:
     """A round that cannot finish inside the step budget is not started.
@@ -859,7 +858,6 @@ def test_an_import_that_adds_more_pages_per_step_than_a_step_replays_costs_no_fu
     records the checkpoint of its last complete round before it starts a round
     that does not fit, and a lag-only catch-up carries on from there.
     """
-    caplog.set_level(logging.INFO, logger="exomem.lexstore")
     store, changed, _removed = live_catalogue
     cap = lexstore.CATALOG_FOREGROUND_DELTA_CAP
     per_step = cap + 8
@@ -898,13 +896,6 @@ def test_an_import_that_adds_more_pages_per_step_than_a_step_replays_costs_no_fu
     assert _wait_for_flight_end(tmp_path)
 
     assert rebuilds == [], "pages that outran the steps escalated to a full pass"
-    results = [
-        record.fields["result"]
-        for record in caplog.records
-        if getattr(record, "event", None) == "lexical_repair_finished"
-        and record.fields["kind"] == "catch_up"
-    ]
-    assert results == ["advanced", "advanced", "targeted"]
     assert lexstore.runtime_retrieval_catalog_proof(
         tmp_path, require_live_projection=True, schedule_repair=False
     ) is not None

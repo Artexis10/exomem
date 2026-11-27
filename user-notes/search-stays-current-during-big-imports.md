@@ -1,4 +1,4 @@
 ---
 title: Search stays current during big imports
 ---
-Searching while a large import runs now stays quick and finds new pages soon after they arrive, and the import no longer slows down while search catches up.
+Searching while a large import runs now stays quick and finds new pages soon after they arrive.

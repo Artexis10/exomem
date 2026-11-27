@@ -2138,6 +2138,42 @@ def test_a_rebuild_that_a_filling_volume_stopped_waits_for_the_room_it_had_befor
     assert store.rebuild_atomic() is True
 
 
+def test_a_rebuild_that_an_import_stopped_waits_for_its_own_footprint_not_for_the_room_the_import_took(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An import that fills the volume while the build runs takes bytes that the build never held. The retry
+    must wait for the reserve plus what the build's own temp had written, so a volume that has grown to
+    many times the catalogue publishes it; counting the import's bytes would keep search stale there."""
+    store = _a_catalogue_of_several_megabytes(tmp_path)
+    reserve = 200_000
+    monkeypatch.setenv("EXOMEM_IMPORT_RESERVE_BYTES", str(reserve))
+    live = _bytes_beside(store.path)
+    real_usage = shutil.disk_usage
+    reads: list[Any] = []
+    volume_has_grown = [False]
+
+    def an_import_takes_the_room_after_the_start_check(path: Any) -> Any:
+        reads.append(path)
+        if volume_has_grown[0]:
+            free = 100 * live - _bytes_beside(store.path)
+        else:
+            free = 1_000_000_000 if len(reads) == 1 else reserve - 50_000
+        return real_usage(path)._replace(free=free)
+
+    monkeypatch.setattr(lexstore.shutil, "disk_usage", an_import_takes_the_room_after_the_start_check)
+
+    assert store.rebuild_atomic() is False
+    assert store._last_rebuild_result == "waiting_for_space"
+    assert len(reads) == 2, "the build did not start, or the volume was not read where the import took its room"
+    needed, free = store._last_space_wait
+
+    volume_has_grown[0] = True
+    assert store.rebuild_atomic() is True, "the retry waited for room that the import took, not the build"
+    assert store._last_rebuild_result == "published"
+    assert reserve < needed < reserve + 3 * live, f"the need {needed} is not the reserve plus one copy of {live}"
+    assert free < reserve
+
+
 def test_a_killed_build_leaves_no_rollback_journal_behind_after_the_next_sweep(tmp_path: Path) -> None:
     """The build's temp is in rollback-journal mode, so a killed build leaves a hot `-journal` beside its temp.
     The journal is as big as the pages the build rewrote, and the sweep takes it with the temp."""
