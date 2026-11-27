@@ -515,7 +515,7 @@ class MediaWorker:
         if selected not in {"process", "inline"}:
             raise ValueError("media worker mode must be process or inline")
         self._execution_mode = selected
-        self._idle_seconds = idle_seconds if idle_seconds is not None else _idle_seconds()
+        self._idle_seconds = idle_seconds if idle_seconds is not None else idle_seconds_setting()
         self._q: queue.Queue[_Job | None] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -1963,11 +1963,15 @@ class MediaWorker:
             return
         if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
             return
-        from . import media_processing, media_store
+        from . import face_scan, face_store, media_processing, media_store
 
         is_video = job.media_type == "video"
         scene_pairs: list | None = None
         parent_clip_samples: tuple[projected_retrieval.ProjectionClipSample, ...] | None = None
+        # The face step reads the pictures this step decodes: each video keyframe it embeds, or the image.
+        faces_on = face_store.active(self._vault_root)
+        keyframes: list[tuple[float, object]] | None = [] if faces_on and is_video else None
+        faces = None
         expected_binary = self._identity(job)
         if expected_binary is None:
             log.warning("CLIP skip %s: media identity unavailable", job.binary_path.name)
@@ -1979,10 +1983,18 @@ class MediaWorker:
                     # representative images to persist (EXOMEM_VIDEO_SCENE_FRAMES).
                     frames, scene_pairs = embeddings.embed_video_scenes(view)
                     parent_clip_samples = scene_frames.projection_clip_samples(frames)
+                    if keyframes is not None:
+                        keyframes.extend((float(scene.rep_ts), image) for scene, image in scene_pairs)
+                elif is_video and keyframes is not None:
+                    frames = embeddings.embed_video_frames(view, keyframes_out=keyframes)
                 elif is_video:
                     frames = embeddings.embed_video_frames(view)
                 else:
                     vec = embeddings.embed_image(view)
+                if faces_on:
+                    # Never raises: a face failure leaves the CLIP result as it is.
+                    faces = face_scan.detect(self._vault_root, view, keyframes)
+                    keyframes = None
         except embeddings.ClipUnavailable as e:
             log.warning("CLIP unavailable for %s: %s", job.binary_path.name, e)
             return
@@ -1998,6 +2010,7 @@ class MediaWorker:
             self._vault_root, operation="background_media_clip_commit"
         )
         persist_scene_frames = False
+        face_page: tuple[str, float] | None = None
         with clip_guard:
             if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
                 return
@@ -2020,6 +2033,12 @@ class MediaWorker:
             else:
                 self._clip_index.upsert(rel, vec, mtime)
                 log.info("CLIP-indexed %s", job.binary_path.name)
+            face_page = (rel, mtime)
+        # The faces commit after the guard is released, so a foreground write never waits for grouping. They
+        # carry the scanned bytes' mtime; a change since then has its own CLIP job, which scans them again.
+        # Without faces the commit only drops faces of changed bytes, by mtime, so it needs no identity check.
+        if face_page is not None and (faces is None or self._identity(job) == expected_binary):
+            face_scan.commit(self._vault_root, face_page[0], faces, mtime=face_page[1])
         if persist_scene_frames:
             # The frames take their own hold once the projection guard is released: encoding them
             # runs with no boundary held, and only the commit of their files holds it.
@@ -3244,7 +3263,8 @@ def _join_with_timeout(q: queue.Queue, timeout: float) -> None:
         time.sleep(0.02)
 
 
-def _idle_seconds() -> float:
+def idle_seconds_setting() -> float:
+    """How long a media child waits without work before it exits and closes every file it holds."""
     try:
         return max(0.1, float(os.environ.get("EXOMEM_MEDIA_IDLE_SECONDS") or "300"))
     except ValueError:

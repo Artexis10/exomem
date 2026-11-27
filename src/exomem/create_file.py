@@ -456,6 +456,7 @@ def create_file(
             )
         except semantic_writes.SemanticWriteError as error:
             raise CreateFileError(error.code, error.reason) from error
+        warnings.extend(committed.review_field_warnings())
         semantic = committed.as_dict()
     else:
         writes = list(log_plan.writes)

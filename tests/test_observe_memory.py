@@ -1264,8 +1264,8 @@ def test_a_ref_addressed_add_with_compact_metadata_is_refused_without_a_vault_wa
     arguments = {
         "operation": "add",
         "category": "rule",
-        "content": "A dated rule",
-        "as_of": "2026-07-01",
+        "content": "A rule to revisit",
+        "check_by": "2026-07-01",
     }
     # The refusal as `observe_memory` words it once it has read the page.
     with pytest.raises(observe_memory.ObserveMemoryError) as after_page_read:
@@ -1284,7 +1284,7 @@ def test_a_ref_addressed_add_with_compact_metadata_is_refused_without_a_vault_wa
         commands.op_observe_memory(tmp_path, path=ref, **arguments)
     refusal, _, remediation = str(without_projection.value).partition(" Remediation: ")
     assert refusal == expected.partition(" Remediation: ")[0]
-    assert "omit as_of" in remediation
+    assert "omit check_by" in remediation
     assert "Pass `kind` with a core rich kind" in remediation
 
     freshness.rebaseline(tmp_path)
@@ -1294,13 +1294,79 @@ def test_a_ref_addressed_add_with_compact_metadata_is_refused_without_a_vault_wa
     assert str(with_projection.value) == expected
 
 
-def test_a_dated_add_whose_relations_need_a_rich_kind_gets_the_relations_refusal(
+def test_a_dated_add_that_also_sends_a_revisit_date_and_no_kind_is_never_told_to_drop_the_date(
+    tmp_path: Path,
+) -> None:
+    """Catches the exit "omit check_by, as_of": the caller sent the start date to keep it."""
+    page = _write_page(tmp_path)
+    before = page.read_bytes()
+    arguments = {
+        "operation": "add", "category": "rule", "content": "A rule to revisit",
+        "check_by": "2026-09-01", "as_of": "2026-07-01",
+    }
+
+    with pytest.raises(observe_memory.ObserveMemoryError) as from_the_page_path:
+        observe_memory.observe_memory(tmp_path, path=PAGE, **arguments)
+    from_the_busy_intake = observe_memory.argument_refusal(arguments)
+
+    for refusal in (from_the_page_path.value, from_the_busy_intake):
+        message = str(refusal.leaf_error())
+        assert "pass a rich kind to keep check_by, as_of" in message, message
+        assert "omit check_by to save as_of in a dated block" in message, message
+        assert "omit check_by, as_of" not in message and "omit as_of" not in message, message
+    assert page.read_bytes() == before
+
+
+def test_a_dated_add_that_names_the_compact_kind_is_told_to_leave_the_kind_out_not_the_date(
+    tmp_path: Path,
+) -> None:
+    page = _write_page(tmp_path)
+    before = page.read_bytes()
+
+    with pytest.raises(ValueError) as refused:
+        commands.op_observe_memory(
+            tmp_path, path=PAGE, operation="add", kind="observation", category="rule",
+            content="A rule", until="2026-12-31",
+        )
+
+    message = str(refused.value)
+    assert "pass a rich kind to keep until" in message, message
+    assert "omit kind to save until in a dated block" in message, message
+    assert "omit until" not in message
+    assert page.read_bytes() == before
+
+
+def test_naming_the_compact_kind_with_a_date_on_a_rich_unit_does_not_offer_to_convert_it(
+    tmp_path: Path,
+) -> None:
+    """Converting to compact clears dates, so a call that sends a date is not offered that."""
+    page = _write_page(tmp_path, source=_page_source(
+        "# Observe\n\n## Claim\n- as_of: 2026-01-01\n\nThe release slips.\n"
+    ))
+    state = semantic_index.current_parent_index_state(tmp_path, PAGE)
+    unit = next(unit for unit in state.document.units if unit.kind == "claim")
+
+    with request_scope(owner_principal(surface="cli")):
+        with pytest.raises(ValueError) as refused:
+            commands.op_observe_memory(
+                tmp_path, path=PAGE, operation="update", unit_ref=unit.unit_ref,
+                expected_fingerprint=unit.fingerprint, expected_hash=_page_hash(page),
+                kind="observation", category="finding", content="The release slips.",
+                as_of="2026-02-01",
+            )
+
+    message = str(refused.value)
+    assert "COMPACT_METADATA_REQUIRES_RICH_KIND" in message, message
+    assert "convert this unit to compact form" not in message, message
+
+
+def test_a_revisit_date_add_whose_relations_need_a_rich_kind_gets_the_relations_refusal(
     tmp_path: Path,
 ) -> None:
     """The early compact refusal must not answer for relations that only the page can judge.
 
-    A relation that cannot move to a page field is refused before the dates are read, so the reply
-    names the relations; advice to drop the date would lead straight into that refusal.
+    A relation that cannot move to a page field is refused before the revisit date is read, so the
+    reply names the relations; advice to drop the date would lead straight into that refusal.
     """
     _write_source_page(tmp_path)
     page = _write_page(tmp_path)
@@ -1314,10 +1380,37 @@ def test_a_dated_add_whose_relations_need_a_rich_kind_gets_the_relations_refusal
             category="config",
             content="Typed relation needs rich form",
             relations=[{"kind": "supersedes", "target": "applied-export"}],
-            as_of="2026-07-01",
+            check_by="2026-07-01",
         )
 
     assert page.read_bytes() == before
+
+
+def test_a_dated_add_with_a_relation_and_no_kind_saves_a_rich_unit_that_carries_the_relation(
+    tmp_path: Path,
+) -> None:
+    """The default dated kind is chosen before the relations: a rich unit keeps its own relations.
+
+    Without that order, this call would be refused for its relation even though the dates already
+    move the unit to a rich kind that can hold it.
+    """
+    _write_source_page(tmp_path)
+    page = _write_page(tmp_path)
+
+    result = commands.op_observe_memory(
+        tmp_path,
+        path=PAGE,
+        operation="add",
+        category="config",
+        content="Typed relation on a dated unit",
+        relations=[{"kind": "supersedes", "target": "applied-export"}],
+        as_of="2026-07-01",
+    )
+
+    assert result["kind_defaulted"]
+    text = page.read_text(encoding="utf-8")
+    assert "Typed relation on a dated unit" in text
+    assert "supersedes" in text and "2026-07-01" in text
 
 
 def test_an_early_compact_refusal_still_lets_a_malformed_date_win(tmp_path: Path) -> None:

@@ -8,12 +8,12 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 
 ## Summary
 
-- Product commands: 43
-- Tier 1 commands: 38
+- Product commands: 44
+- Tier 1 commands: 39
 - Tier 2 commands: 5
-- Public MCP tools: 35
-- REST commands: 40
-- CLI commands: 40
+- Public MCP tools: 36
+- REST commands: 41
+- CLI commands: 41
 - Hand-registered MCP tools: none
 
 ## Hosted Cell Capability Boundary
@@ -55,6 +55,7 @@ REST and CLI calls keep the grouped commands in the following registry.
 | import_memory | file, start, select, plan, apply, cancel, finish, propose, apply-proposal, acknowledge | adoption_studio |
 | inspect_name_drift | Direct inputs | inspect_name_drift |
 | maintain_memory | Direct inputs | maintain_memory |
+| manage_faces | Direct inputs | manage_faces |
 | manage_memory_file | Direct inputs | manage_memory_file |
 | observe_memory | Direct inputs | observe_memory |
 | plan_memory | Direct inputs | plan_memory |
@@ -88,7 +89,7 @@ REST and CLI calls keep the grouped commands in the following registry.
 | inspect_name_drift | 1 | MCP, REST, CLI | read | no | - | inspect_name_drift | cursor, limit | List pages whose file name no longer follows their title, with the name each would get today. |
 | coordination_status | 1 | MCP, REST, CLI | read | no | - | coordination_status | - | Read writer-lease health during outages. |
 | bootstrap | 1 | MCP, REST, CLI | read | no | - | bootstrap | profile, workflow, skill_contract, section, topic | Read Evermatter's contract and live settings when missing or changed; reuse while current. |
-| search_memory | 1 | MCP, REST, CLI | read | no | query | search, find | query, types, projects, tags, speakers, file_types, exclude_file_types, categories, kinds, source_kinds, domains, relations, relation_of, relation_direction, filters, result_level, limit, continuation, scope, mode, detail, deep, graph, rerank, rerank_max_candidates, prefer_compiled, prefer_active, prefer_used, widen_outside_kb, graph_enrich, include_timings, explain, purpose | Search compiled knowledge and originals for an evidence gap. |
+| search_memory | 1 | MCP, REST, CLI | read | no | query | search, find | query, types, projects, tags, speakers, file_types, exclude_file_types, categories, kinds, source_kinds, domains, relations, relation_of, relation_direction, filters, people, result_level, limit, continuation, scope, mode, detail, deep, graph, rerank, rerank_max_candidates, prefer_compiled, prefer_active, prefer_used, widen_outside_kb, graph_enrich, include_timings, explain, purpose | Search compiled knowledge and originals for an evidence gap. |
 | recall_context | 1 | MCP, REST, CLI | read | no | turn | activate_context | turn, max_chars, purpose, continuity, anchor, include_timings, client, session, workspace, conversation, trigger, initiator, native_skills | Recall authorized context; abstain if uncertain. |
 | read_memory | 1 | MCP, REST, CLI | read | no | path | fetch, get | path*, frontmatter_only, include_history, links, include_raw, unit_ref, purpose, history_limit, history_continuation, continuation, follow_corrections, offset, units, brief | Read a page, exact unit, exomem://map view, or topic brief. |
 | browse_memory | 1 | MCP, REST, CLI | read | no | path | overview, list_directory | path, mode, max_depth, include_hidden, samples, recursive, limit, cursor | Browse folders; read-only. |
@@ -116,6 +117,7 @@ REST and CLI calls keep the grouped commands in the following registry.
 | schema_memory | 1 | MCP, REST, CLI | write | yes | - | schema_memory | operation*, name, subject, project, page_type, save, expected_hash, strict, compare_to, proposal, why, include_model_suggestions, context, date_from, date_to, continuation, limit, query, requested_type, vocabulary_ref, vocabulary_fingerprint, detail, version, registry_scope, response_detail | Infer, validate, diff, or save governed memory schemas and workflow contracts. |
 | govern_memory | 2 | MCP, REST, CLI | write | yes | operation | - | operation*, session_action, documents, selector_paths, intent, ttl_seconds, target_ceiling, duration, proposal_id, scope, grant_id, scope_ids, audience, ceiling, token, authorization_session, purpose, duration_seconds, rule_ids, path, paths, backfill_action, companion_input, vocabulary_request_id, raw_release, response_detail | Manage opt-in confidential access policy. |
 | approve_procedure | 1 | MCP, REST, CLI | write | no | - | - | action*, ref, expected_version, response_detail | Approve, revoke or quarantine the owner's approval of a procedure page. |
+| manage_faces | 1 | MCP, REST, CLI | write | no | - | - | action*, state, thresholds, page, limit, cursor, group, person, face, name, clear, response_detail | Read or change the owner's face search: status, on or off, thresholds, names, delete. |
 | manage_memory_file | 2 | MCP, REST, CLI | write | yes | - | create_file, list_directory, move_file, delete, append_to_file, list_trash, recover_from_trash | operation, path, content, frontmatter, overwrite, allow_curated, kind, parents, recursive, include_hidden, old_path, new_path, source_kind, domain, artifact_path, reason, update_wikilinks, confirm, force_orphan, force_superseded, expected_dead_inbound, trash_path, restore_path, date, validate_only, draft_id, draft_hash, draft_token, semantic_transition_token, relation_disposition, relation_review_hash, relation_review_reason, promotion_reason, preview_digest, preview_run_id, cursor, response_detail | Manage files when typed tools do not fit. |
 | record_memory | 1 | MCP, REST, CLI | write | yes | - | record_memory | action*, collection, manifest_path, manifest_text, why, scaffold, view, filters, columns, sort_by, descending, limit, aggregate, date_from, date_to, date_column, expand_children, expand_child, continuation, include_agent_history, output_format, item, item_key, expected_container_hash, expected_manifest_hash, acknowledged_gap_codes, body, delivery, changes, expected_item_version, refresh_presentation, held, hold, rows, source, on_reject, import_request, query, item_id, automatic, new_collection, new_fields, natural_key, response_detail | Read or update observed state; Planning uses plan_memory; originals use Sources/Evidence. |
 | plan_memory | 1 | MCP, REST, CLI | write | yes | - | plan_memory | action*, collection, manifest_path, manifest_text, why, scaffold, view, filters, columns, sort_by, descending, limit, aggregate, date_from, date_to, date_column, lifecycle, hierarchy_mode, hierarchy_depth, hierarchy_limit, continuation, include_agent_history, output_format, item, plan_id, expected_manifest_hash, expected_container_hash, acknowledged_gap_codes, body, changes, transition, expected_item_version, item_id, response_detail | Manage intent; record_memory holds outcomes. |

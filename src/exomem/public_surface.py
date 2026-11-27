@@ -51,7 +51,7 @@ _AREAS: dict[str, str] = {  # nosemgrep: ep-word-dict -- the closed area names o
     "read_media": "media", "review_memory": "review", "review_item_context": "review",
     "connect_memory": "connections", "adopt_vault": "imports", "adoption_studio": "imports",
     "maintain_memory": "maintenance", "triage_memory": "review", "schema_memory": "schema", "govern_memory": "governance",
-    "record_memory": "records", "plan_memory": "plans", "approve_procedure": "procedures",
+    "record_memory": "records", "plan_memory": "plans", "approve_procedure": "procedures", "manage_faces": "faces",
     "observe_memory": "observations", "bootstrap": "instructions",
     "inspect_captured_sources": "sources",
     "inspect_name_drift": "maintenance",

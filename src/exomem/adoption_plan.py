@@ -19,13 +19,14 @@ import threading
 import time
 import unicodedata
 from collections import OrderedDict
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import (
     access,
+    call_spans,
     context_refs,
     duplicates,
     find_results,
@@ -313,13 +314,158 @@ def page_import_entries(root: Path, page: Path) -> list[EarlierImport]:
     return entries
 
 
+@dataclass(frozen=True, slots=True)
+class _SourcePage:
+    """What one Source page recorded, and the file state it was read at.
+
+    `signature` is None when the page must be read again on the next refresh: it could not be
+    read, or it changed too recently for its timestamps to prove a later change.
+    """
+
+    signature: tuple[int, int, int, int] | None
+    entries: tuple[EarlierImport, ...]
+
+
+_SOURCE_PAGES: OrderedDict[str, dict[str, _SourcePage]] = OrderedDict()
+_SOURCE_PAGES_LOCK = threading.Lock()
+# Pages a pass reads before its `stop` is asked: a call with almost no time left still moves the first read on.
+INDEX_READ_FLOOR = 2_000
+
+
+# The held filesystem's own refusals that say the read could not happen now, not that the page holds nothing: it
+# cannot be acquired (for example while the vault's identity catalogue is still being built), or the file changed under
+# the read. They belong to the boundary's closed set of codes.
+_REFUSED_FOR_NOW = frozenset({"CAPABILITY_UNAVAILABLE", "IDENTITY_CHANGED"})  # nosemgrep: ep-word-set -- the held filesystem's closed refusal codes.
+
+
+def _refused_for_now(refusal: Exception) -> bool:
+    return getattr(refusal, "code", None) in _REFUSED_FOR_NOW
+
+
+def _refresh_import_index(
+    root: Path, stop: Callable[[], bool] | None, floor: int | None = None
+) -> tuple[list[EarlierImport], bool]:
+    """The index and whether the pass read every page, reading only the pages whose file signature moved.
+
+    Reading every Source page on every plan call cost the Sources the vault holds each time, which a plan that
+    ends for a waiting writer pays again at each continuation. The signature rule is the note index's (`NoteIndex`).
+    With `stop`, the pass ends before a read when it returns True and gives no index (`[]`, `False`): the pages it
+    did read stay remembered, so the next pass carries on from them. It ends the same way at a page that the held
+    filesystem refuses for now (`_REFUSED_FOR_NOW`). It reads `floor` pages (default `INDEX_READ_FLOOR`) before it asks.
+    """
+    floor = INDEX_READ_FLOOR if floor is None else floor
+    key = os.path.realpath(root)
+    with _SOURCE_PAGES_LOCK:
+        known = _SOURCE_PAGES.get(key, {})
+    settled_before = time.time_ns() - _RACY_NS
+    pages: dict[str, _SourcePage] = {}
+    index: list[EarlierImport] = []
+    complete, read = True, 0
+    # A page the process knows costs one `lstat` and is never a stop point: a pass that ended here gives no index, so the
+    # call would plan nothing and the next call would walk the same pages again. The walk's cost per call is the
+    # follow-up change's to bound (design D1a, "What a writer waits for").
+    for page in _source_pages(root):
+        rel = page.relative_to(root).as_posix()
+        try:
+            info = page.lstat()
+        except OSError:
+            continue
+        signature = _page_signature(info)
+        seen = known.get(rel)
+        if seen is None or seen.signature != signature:
+            # Asked before a read, never before a page the process already knows.
+            if stop is not None and read >= floor and stop():
+                complete = False
+                break
+            read += 1
+            # The signature is taken before the read, so a change during the read shows next time.
+            settled = max(info.st_mtime_ns, info.st_ctime_ns) < settled_before
+            try:
+                seen = _SourcePage(signature if settled else None, tuple(page_import_entries(root, page)))
+            except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError) as refusal:
+                if stop is not None and _refused_for_now(refusal):
+                    # The page was not read, so a pass that went on would call it a page with no imports and a plan
+                    # would file a duplicate of what it records. The pass ends as a stopped one does; the next retries.
+                    complete = False
+                    break
+                seen = _SourcePage(None, ())
+        pages[rel] = seen
+        index.extend(seen.entries)
+    with _SOURCE_PAGES_LOCK:
+        # A pass that stopped keeps what it knew of the pages it did not reach.
+        _SOURCE_PAGES[key] = pages if complete else {**known, **pages}
+        _SOURCE_PAGES.move_to_end(key)
+        while len(_SOURCE_PAGES) > _KNOWN_VAULTS:
+            _SOURCE_PAGES.popitem(last=False)
+    return (index, True) if complete else ([], False)
+
+
+def sources_remembered(root: Path) -> int:
+    """How many Source pages this process has read for the vault: the position of a read that a stop ended.
+
+    A stopped pass keeps every page it read, so the number only grows while a read goes on, and it stays put
+    while the held filesystem refuses a page for now. A new process starts at zero: it reads the pages again.
+    """
+    with _SOURCE_PAGES_LOCK:
+        return len(_SOURCE_PAGES.get(os.path.realpath(root), {}))
+
+
 def read_import_index(root: Path) -> list[EarlierImport]:
     """Every import that a Source page's parsed front matter records: its original and each mapped path.
 
     The decision is the parsed ``imported_from`` field, never a substring of the
     page, so a page that merely quotes a path does not count as an import.
     """
-    return [entry for page in _source_pages(root) for entry in read_import_entries(root, page)]
+    return _refresh_import_index(root, None)[0]
+
+
+def read_import_index_until(
+    root: Path, stop: Callable[[], bool], *, floor: int | None = None
+) -> list[EarlierImport] | None:
+    """`read_import_index`, or None when `stop` ended the read first; the next call resumes where it left off.
+
+    A call that has run no step yet leaves `floor` at `INDEX_READ_FLOOR`, so it moves the read on whatever its
+    budget; a step that follows another in the same call passes 0, since the call has made progress already.
+    """
+    index, complete = _refresh_import_index(root, stop, floor)
+    return index if complete else None
+
+
+class ImportIndex:
+    """The earlier imports of a vault, keyed so that one original's lookups skip every other Source.
+
+    `latest_earlier_import` and `earlier_with_same_bytes` ask about every original of a page. Walking a plain list
+    made each ask cost the Sources filed before it, so a later page planned slower per file. The keys only narrow
+    which entries a lookup tests; both functions still decide with one predicate. Built from a list that stays as
+    it is while one plan call runs: an `apply` appends to its own list and keeps passing that.
+    """
+
+    def __init__(self, entries: Iterable[EarlierImport]) -> None:
+        self.entries = list(entries)
+        self._by_label: dict[tuple[str | None, str | None], list[int]] = {}
+        self._by_original: dict[str | None, list[int]] = {}
+        for position, entry in enumerate(self.entries):
+            self._by_label.setdefault((entry.import_collection, entry.collection_path), []).append(position)
+            self._by_original.setdefault(entry.imported_from, []).append(position)
+
+    def __iter__(self):
+        return iter(self.entries)
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def of_original(self, original_path: str) -> list[EarlierImport]:
+        """The entries that record this original path as the one they were imported from, in index order."""
+        return [self.entries[position] for position in self._by_original.get(nfc(original_path), ())]
+
+    def narrowed(
+        self, *, collection: str | None, collection_path: str | None, original_path: str
+    ) -> list[EarlierImport]:
+        """The entries that can match this original by its collection label or its path, in index order."""
+        positions = set(self._by_original.get(nfc(original_path), ()))
+        if collection is not None:
+            positions.update(self._by_label.get((nfc(collection), collection_path), ()))
+        return [self.entries[position] for position in sorted(positions)]
 
 
 def latest_earlier_import(
@@ -336,7 +482,11 @@ def latest_earlier_import(
     the pair existed still count.
     """
     matches = []
-    for entry in index:
+    candidates = (
+        index.narrowed(collection=collection, collection_path=collection_path, original_path=original_path)
+        if isinstance(index, ImportIndex) else index
+    )
+    for entry in candidates:
         if entry.import_collection is not None or entry.collection_path is not None:
             same = (
                 collection is not None
@@ -375,15 +525,16 @@ def earlier_with_same_bytes(
     an import of the same original path under another label counts: a subfolder
     imported first, then its parent.
     """
-    entries = list(index)
+    entries = index if isinstance(index, ImportIndex) else list(index)
     latest = latest_earlier_import(
         entries, collection=collection, collection_path=collection_path,
         original_path=original_path,
     )
     if latest is not None:
         return latest if latest.original_sha256 == sha256 else None
+    of_path = entries.of_original(original_path) if isinstance(entries, ImportIndex) else entries
     twins = [
-        entry for entry in entries
+        entry for entry in of_path
         if entry.imported_from == nfc(original_path) and entry.original_sha256 == sha256
     ]
     return max(twins, key=lambda entry: (entry.captured, entry.path)) if twins else None
@@ -991,7 +1142,8 @@ def plan_item(
     original are two forms, so neither is the other's duplicate, in the plan or in the vault. A write this call plans
     joins `seen`.
     """
-    read = read_facts(root, original_path, ceiling=ceiling, text_hint=text_hint, vouched=vouched)
+    with call_spans.span("adoption.plan_read"):
+        read = read_facts(root, original_path, ceiling=ceiling, text_hint=text_hint, vouched=vouched)
     if isinstance(read, dict):
         return {"path": original_path, **read}
     facts, text = read
@@ -1032,10 +1184,11 @@ def plan_item(
                 item["note"] = planned_note
         return item, text
 
-    earlier = earlier_with_same_bytes(
-        index, collection=collection, collection_path=item["collection_path"],
-        original_path=original_path, sha256=item["original_sha256"],
-    )
+    with call_spans.span("adoption.plan_earlier"):
+        earlier = earlier_with_same_bytes(
+            index, collection=collection, collection_path=item["collection_path"],
+            original_path=original_path, sha256=item["original_sha256"],
+        )
     if earlier is not None:
         item["action"] = "already-imported"
         item["target_path"] = earlier.path
@@ -1043,10 +1196,11 @@ def plan_item(
         item["existing_ref"] = item["target_ref"]
         item["artifact_path"] = artifact_of(root, earlier.path)
         return holds_source(item)
-    changed = latest_earlier_import(
-        index, collection=collection, collection_path=item["collection_path"],
-        original_path=original_path,
-    )
+    with call_spans.span("adoption.plan_earlier"):
+        changed = latest_earlier_import(
+            index, collection=collection, collection_path=item["collection_path"],
+            original_path=original_path,
+        )
     if changed is not None:
         item["previous_import"] = context_refs.source_ref(changed.path)
         if owes_note:
@@ -1074,10 +1228,11 @@ def plan_item(
             artifact_path=first["artifact_path"],
         )
         return holds_source(item)
-    lookup = duplicates.find_duplicate(
-        root, sha256=item["original_sha256"], lane=duplicates.SOURCES, protected=protected,
-        keeps_original=item["form"] == "artifact",
-    )
+    with call_spans.span("adoption.plan_duplicates"):
+        lookup = duplicates.find_duplicate(
+            root, sha256=item["original_sha256"], lane=duplicates.SOURCES, protected=protected,
+            keeps_original=item["form"] == "artifact",
+        )
     if not lookup.available:
         item["duplicate_check_unavailable"] = True
     # A copy that the caller cannot write takes no mapping, so this import keeps a copy of its own.
@@ -1335,6 +1490,7 @@ __all__ = [
     "OVER_CEILING",
     "Destinations",
     "EarlierImport",
+    "ImportIndex",
     "LinkResolver",
     "NoteIndex",
     "artifact_of",

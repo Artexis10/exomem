@@ -77,26 +77,36 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # The door operations `media.attach_speech` and `media.rename_speakers`, an owner's agent attaching a speech result it
 # computed and naming the speakers after the fact, added 41 B to the write door's enum on 2026-11-25
 # (keep-speech-results-in-cloud).
-TOTAL_BUDGET = 31_750
+# Search by person added 205 B on 2026-11-27 (add-face-search): `search_memory.people` 165 B, and the owner's door
+# operations `faces.status`, `faces.set` and `faces.name` 40 B to the two door enums. `faces.delete`, which erases
+# the face store, added 15 B to the write door's enum the same day. The wire measures 31,963 B.
+# `add_observation`'s `as_of` and `until` now say that a dated observation with no `kind` saves in a dated block, `edit_note`'s
+# `as_of` says that dating a compact unit moves it to a dated block, and `unlinked_reason` says that only active pages of a
+# compiled type take a link review, in `add_observation`, `create_note`, `edit_note` and `supersede_note`.
+# Together they added 315 B on 2026-11-27 (default-dated-observations-to-a-rich-kind): the wire measures 32,278 B, and
+# their four ceilings rise to 1,940 B, 1,900 B, 3,760 B and 1,410 B, and the total to 32,300 B.
+TOTAL_BUDGET = 32_300
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
-    "add_observation": 1850,
+    "add_observation": 1940,
     "add_plan_item": 500,
     "add_record": 940,
     "cancel_uploads": 600,
-    "create_note": 1850,
+    "create_note": 1900,
     "decide_review_item": 1000,
     "download_files": 550,
     # Claim-level supersede/assess/link actions joined edit_note on 2026-11-24
     # (add-unit-level-supersession).
-    "edit_note": 3700,
+    "edit_note": 3760,
     "edit_plan_item": 750,
     "edit_record": 850,
-    # inspect_name_drift joined the read door on 2026-11-23 (align-names-with-titles).
-    "inspect_memory": 2250,
+    # inspect_name_drift joined the read door on 2026-11-23 (align-names-with-titles); faces.status on 2026-11-27
+    # (add-face-search) took it to 2,265 B.
+    "inspect_memory": 2300,
     "list_review_items": 750,
-    "manage_memory": 2650,
+    # faces.set, faces.name and faces.delete joined the write door on 2026-11-27 (add-face-search): 2,679 B.
+    "manage_memory": 2700,
     "query_plan_items": 1050,
     # `options` names `query`, the typed version-1 query that a derived collection also answers, added 32 B on
     # 2026-11-25 (legacy arguments on a derived collection).
@@ -107,10 +117,11 @@ TOOL_CEILINGS: dict[str, int] = {
     "save_episode": 1100,
     "save_evidence": 1320,
     "save_source": 1550,
-    "search_memory": 1250,
+    # `people`, the restriction to pictures of named people, took it to 1,401 B on 2026-11-27 (add-face-search).
+    "search_memory": 1450,
     # A pointer to edit_note's supersede_observation joined 2026-11-24
     # (add-unit-level-supersession).
-    "supersede_note": 1400,
+    "supersede_note": 1410,
     "upload_files": 940,
 }
 

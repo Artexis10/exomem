@@ -350,6 +350,21 @@ def test_extract_eml_pulls_headers_and_body(tmp_path) -> None:
     assert r.media_type == "email"
 
 
+def test_extract_eml_with_only_an_html_body_files_its_text_not_its_markup(tmp_path) -> None:
+    from email.message import EmailMessage
+
+    msg = EmailMessage()
+    msg["From"] = "a@example.com"
+    msg["Subject"] = "Tide table"
+    msg.set_content("<html><body><h1>Tides</h1><p>Low at <b>06:10</b></p><script>tracker()</script></body></html>", subtype="html")
+    p = tmp_path / "m.eml"
+    p.write_bytes(msg.as_bytes())
+    r = extract.extract_text(p)
+    assert "Subject: Tide table" in r.text and "Low at 06:10" in r.text
+    assert "<" not in r.text and "tracker" not in r.text  # the markup and the script are not text
+    assert r.media_type == "email"
+
+
 def test_extract_ics_pulls_vevent_fields(tmp_path) -> None:
     ics = (
         "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\n"

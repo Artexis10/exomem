@@ -58,11 +58,11 @@
         },
         "as_of": {
           "type": "string",
-          "description": "ISO date this starts to hold; needs a rich `kind`."
+          "description": "ISO date this starts to hold; with no `kind`, saves in a dated block."
         },
         "until": {
           "type": "string",
-          "description": "ISO date this stops holding; needs a rich `kind`."
+          "description": "ISO date this stops holding; with no `kind`, saves in a dated block."
         },
         "check_by": {
           "type": "string",
@@ -70,7 +70,7 @@
         },
         "unlinked_reason": {
           "type": "string",
-          "description": "Why your review found no useful link; never added to note text."
+          "description": "Why your review found no useful link; never added to note text. Only active pages of a compiled type take a link review."
         },
         "review": {
           "type": "string",
@@ -246,7 +246,7 @@
         },
         "unlinked_reason": {
           "type": "string",
-          "description": "Why your review found no useful link; never added to note text."
+          "description": "Why your review found no useful link; never added to note text. Only active pages of a compiled type take a link review."
         },
         "vocabulary_decision": {
           "additionalProperties": false,
@@ -511,7 +511,7 @@
         },
         "as_of": {
           "type": "string",
-          "description": "supersede_observation, edit_observation: the ISO date the claim started holding."
+          "description": "supersede_observation, edit_observation: the ISO date the claim started holding. Dating a compact unit moves it to a dated block."
         },
         "category": {
           "type": "string",
@@ -547,7 +547,7 @@
         },
         "unlinked_reason": {
           "type": "string",
-          "description": "Why your review found no useful link; never added to note text."
+          "description": "Why your review found no useful link; never added to note text. Only active pages of a compiled type take a link review."
         },
         "review": {
           "type": "string",
@@ -714,6 +714,7 @@
             "files.create",
             "files.append",
             "files.move",
+            "faces.status",
             "episodes.material",
             "episodes.inspect",
             "episodes.candidates",
@@ -855,6 +856,9 @@
             "procedures.approve",
             "procedures.revoke",
             "procedures.quarantine",
+            "faces.set",
+            "faces.name",
+            "faces.delete",
             "episodes.input",
             "episodes.prepare",
             "episodes.disposition",
@@ -1498,6 +1502,13 @@
           "type": "array",
           "description": "Kinds to keep, e.g. [\"image\", \"video\"] for a photo, screenshot or video. If unsure a picture is meant, also search without it."
         },
+        "people": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Show only pictures and videos where each named person's face appears, e.g. [\"Fixture Person\"]."
+        },
         "filters": {
           "type": "object",
           "description": "Metadata filter, such as {\"page.status\": \"active\"}."
@@ -1574,7 +1585,7 @@
         },
         "unlinked_reason": {
           "type": "string",
-          "description": "Why your review found no useful link; never added to note text."
+          "description": "Why your review found no useful link; never added to note text. Only active pages of a compiled type take a link review."
         },
         "vocabulary_decision": {
           "additionalProperties": false,

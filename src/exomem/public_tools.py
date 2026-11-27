@@ -204,7 +204,10 @@ class FileHandle(Wire):
     )
 
 
-_UNLINKED = Field(default=None, description="Why your review found no useful link; never added to note text.")
+_UNLINKED = Field(
+    default=None,
+    description="Why your review found no useful link; never added to note text. Only active pages of a compiled type take a link review.",
+)
 _PREVIEW = Field(default=None)
 _DETAIL = Field(default=None)
 _REVIEW = Field(default=None, description="This call's preview `review_token`; a profile page's write needs it.")
@@ -250,6 +253,10 @@ class SearchMemory(Wire):
         default=None,
         description='Kinds to keep, e.g. ["image", "video"] for a photo, screenshot or video. If unsure a picture is meant, also search without it.',
     )
+    people: list[str] | None = Field(
+        default=None,
+        description='Show only pictures and videos where each named person\'s face appears, e.g. ["Fixture Person"].',
+    )
     filters: dict[str, Any] | None = Field(
         default=None, description='Metadata filter, such as {"page.status": "active"}.'
     )
@@ -280,7 +287,7 @@ def _search(wire: dict[str, Any], ctx: Context) -> Translated:
         "query": wire.get("query"), "types": wire.get("types"), "tags": wire.get("tags"),
         "filters": wire.get("filters"), "deep": wire.get("deep"), "limit": wire.get("limit"),
         "continuation": wire.get("more"), "detail": wire.get("detail"), "projects": wire.get("projects"),
-        "file_types": wire.get("file_types"),
+        "file_types": wire.get("file_types"), "people": wire.get("people"),
     }
     return "ask_memory", _leaf_call(wire, "options", ctx, "ask_memory", "search_memory", leaf)
 
@@ -399,8 +406,8 @@ class AddObservation(Wire):
     kind: str | None = Field(default=None, description="A rich kind, such as hypothesis; omit for a compact observation.")
     verdict: str | None = Field(default=None, description="Verdict in words, never a number; needs a rich `kind`. See inspect_memory schema.infer.")
     anchor: str | None = Field(default=None, description="Unique within the note; derived when omitted.")
-    as_of: str | None = Field(default=None, description="ISO date this starts to hold; needs a rich `kind`.")
-    until: str | None = Field(default=None, description="ISO date this stops holding; needs a rich `kind`.")
+    as_of: str | None = Field(default=None, description="ISO date this starts to hold; with no `kind`, saves in a dated block.")
+    until: str | None = Field(default=None, description="ISO date this stops holding; with no `kind`, saves in a dated block.")
     check_by: str | None = Field(default=None, description="ISO date to revisit; needs a rich `kind`.")
     unlinked_reason: str | None = _UNLINKED
     review: str | None = _REVIEW
@@ -482,7 +489,7 @@ class EditNote(Wire):
     verdict: str | None = Field(default=None, description="assess_observation, edit_observation: a governed verdict such as confirmed, qualified, or refuted.")
     check_by: str | None = Field(default=None, description="assess_observation: an ISO date to revisit the claim.")
     kind: str | None = Field(default=None, description="supersede_observation, assess_observation, link_observation, edit_observation: a governed rich kind; required to promote a compact observation.")
-    as_of: str | None = Field(default=None, description="supersede_observation, edit_observation: the ISO date the claim started holding.")
+    as_of: str | None = Field(default=None, description="supersede_observation, edit_observation: the ISO date the claim started holding. Dating a compact unit moves it to a dated block.")
     category: str | None = Field(default=None, description="edit_observation, supersede_observation.")
     text: str | None = Field(default=None, description="edit_observation, supersede_observation.")
     context: str | None = Field(default=None, description="edit_observation, supersede_observation.")

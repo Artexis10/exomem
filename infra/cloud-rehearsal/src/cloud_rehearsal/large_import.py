@@ -2,8 +2,11 @@
 
 A person's agent brings a large, realistic folder into a Cloud cell through the shipped CLI, files
 it page by page through the MCP tools, and discards what stays staged. A second, media-heavy folder
-follows into the same cell. The cell runs on a TopoLVM volume that cannot hold two copies of the
-first folder, so the run only fits if filing an artifact removes its staged copy.
+follows into the same cell. The cell runs on a TopoLVM volume sized for a run that consumes each staged copy: both folders once, what the
+cell derives from them and one more copy of its lexical catalogue while that rebuilds, taken in the order that
+the run goes (`large_import_fixture.fullest_volume_bytes`). The volume is below what a run that leaves the
+first folder's staged copies would need, and below twice the data, so the run only fits if filing removes
+each staged copy.
 
 The pass criteria come from the generator's manifest (`large_import_fixture`), never from the
 cell's own replies. Each measurement is stored with what it is, over which window and from which
@@ -20,7 +23,7 @@ import json
 import shutil
 import time
 from collections import Counter
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -49,15 +52,23 @@ INDEX_LAPS = {"notes": 1, "media": 3}
 GATEWAY_REQUIRED = "CLOUD_GATEWAY_REQUIRED"  # the cell's documented refusal of a control-plane tool
 APP_LOG_TAIL_BYTES = 20 << 20  # kept per file of the cell's app log; the pod's /tmp holds at most 64 MiB
 TRANSIENT_ATTEMPTS = 8
+MUTATION_BUSY = "MUTATION_BUSY"  # a write that the vault's write boundary refused; the call may be repeated
+BUSY_RETRIES = 30  # refusals of one call before the run calls it a livelock and fails it
 CELL_COLLECTION = {"notes": "Imported notes", "media": "Imported media"}
 
 # Everything below runs inside the cell's pod, against its volume, with the cell's own interpreter.
-CEILING_SCRIPT = """import os
-from exomem import client_artifacts, cloud_cell
+# The product values that the fixture and the volume are sized from: the adoption ceiling, then the import reserve
+# (the free space that a rebuild and an import leave to canonical writes). Both come from the product, never restated here.
+LIMITS_SCRIPT = """import os
+from exomem import client_artifacts, cloud_cell, cloud_import
 os.environ[cloud_cell.CLOUD_MODE_ENV] = '1'
 print(client_artifacts.adoption_ceiling())
+print(cloud_import.reserve_bytes_from_env())
 """
-POD_CEILING_SCRIPT = "from exomem import client_artifacts; print(client_artifacts.adoption_ceiling())"
+POD_LIMITS_SCRIPT = """import json
+from exomem import client_artifacts, cloud_import
+print(json.dumps([client_artifacts.adoption_ceiling(), cloud_import.reserve_bytes_from_env()]))
+"""
 RECEIPT_SCRIPT = """import json, sys
 from pathlib import Path
 from exomem import import_stage
@@ -95,6 +106,27 @@ sources = {}
 for entry in index:
     sources.setdefault(entry.imported_from, []).append(entry.original_sha256)
 print(json.dumps({'laps': laps, 'entries': len(index), 'sources': sources}))
+"""
+# The cell's mutation journal, one row per mutation attempt: how many rows it holds and how many refused writes
+# (`MUTATION_BUSY`) it recorded, by command. The row names no cause (`holder_overdue`); the agent's own refusals do.
+REFUSAL_SCRIPT = """import json, os
+from exomem import mutation_journal
+busy, rows, inode = {}, 0, None
+try:
+    with open(mutation_journal.journal_path(), encoding='utf-8') as handle:
+        inode = os.fstat(handle.fileno()).st_ino
+        for line in handle:
+            rows += 1
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get('error_code') == 'MUTATION_BUSY':
+                name = row.get('command') or 'unknown'
+                busy[name] = busy.get(name, 0) + 1
+except FileNotFoundError:
+    pass
+print(json.dumps({'rows': rows, 'busy_by_command': busy, 'inode': inode}))
 """
 # The queues that hold files still to be indexed. A reading that fails is None, never 0.
 DRAIN_SCRIPT = """import json
@@ -138,6 +170,26 @@ for line in (read(cg + 'cpu.stat') or '').splitlines():
 if cpu is None:
     legacy = number(read(cg + 'cpuacct/cpuacct.usage'))
     cpu = None if legacy is None else legacy // 1000
+# Microseconds that tasks of the cgroup stalled for the CPU and for io ('some': at least one task; 'full': all of them),
+# and the bytes it read and wrote. They only grow while the pod lives; a counter it cannot read is None.
+def pressure(name):
+    found = {}
+    for line in (read(cg + name) or '').splitlines():
+        kind, _, rest = line.partition(' ')
+        for part in rest.split():
+            key, _, value = part.partition('=')
+            if key == 'total' and value.isdigit():
+                found[kind] = int(value)
+    return found
+cpu_pressure, io_pressure = pressure('cpu.pressure'), pressure('io.pressure')
+io_read = io_write = None
+for line in (read(cg + 'io.stat') or '').splitlines():
+    for part in line.split()[1:]:
+        key, _, value = part.partition('=')
+        if value.isdigit() and key == 'rbytes':
+            io_read = (io_read or 0) + int(value)
+        elif value.isdigit() and key == 'wbytes':
+            io_write = (io_write or 0) + int(value)
 total = used = None
 try:
     fs = os.statvfs('/data')
@@ -179,6 +231,8 @@ except Exception:  # a stopped or starting server leaves the sample without read
     pass
 print(json.dumps({'memory_current': current, 'memory_anon': anon, 'memory_peak': peak, 'memory_limit': limit,
                   'cpu_usage_usec': cpu, 'mono': time.monotonic(),
+                  'cpu_pressure_some_usec': cpu_pressure.get('some'), 'io_pressure_some_usec': io_pressure.get('some'),
+                  'io_pressure_full_usec': io_pressure.get('full'), 'io_read_bytes': io_read, 'io_write_bytes': io_write,
                   'volume_total': total, 'volume_used': used, 'ready': ready, 'threads': threads}))
 """
 # The last bytes of each file in the cell's log folder (EXOMEM_LOG_DIR, set by the cell's manifest), compressed
@@ -208,6 +262,7 @@ class LargeImportPlan:
 
     sizing: fixture.Sizing
     ceiling: int
+    reserve: int
     cli_image: str
     deadline: float  # a time.monotonic() value
     free_bytes: int  # the runner's free disk when the sizing was made
@@ -231,25 +286,28 @@ def make_plan(*, run_id: str, workdir: Path, cli_image: str, files: int, target_
               deadline: float) -> LargeImportPlan:
     """Size the folders and the volume from the runner's free disk, once the images are built and loaded.
 
-    Without `smoke`, data that cannot show that the volume is below two copies is refused here,
-    before the cluster has a cell: the run could not prove its claim.
+    Without `smoke`, data that cannot show that the volume is below what a run that leaves the first folder's staged
+    copies would need, and below twice the data, is refused here, before the cluster has a cell: the run could not
+    prove its claim. The volume's pool must fit the runner's node disk, and the runner must hold the first folder's
+    peak with that volume.
     """
     free = shutil.disk_usage(workdir).free
-    ceiling = cloud_ceiling(cli_image, run_id)
-    sizing = fixture.plan_sizes(free_bytes=free, ceiling=ceiling, files=files, target_bytes=target_bytes)
+    ceiling, reserve = cloud_limits(cli_image, run_id)
+    sizing = fixture.plan_sizes(free_bytes=free, ceiling=ceiling, reserve=reserve, files=files, target_bytes=target_bytes)
     if not sizing.proves_one_copy_only and not smoke:
         raise fixture.SizingError(f"{sizing.note}; rerun on a runner with more free disk, or ask for a smoke run")
     if drill_cluster.pool_gib_for(sizing.volume_gib) > MAX_POOL_GIB:
         raise fixture.SizingError(f"a {sizing.volume_gib} GiB volume needs a pool of "
                                   f"{drill_cluster.pool_gib_for(sizing.volume_gib)} GiB, above the node disk's {MAX_POOL_GIB} GiB")
-    return LargeImportPlan(sizing, ceiling, cli_image, deadline, free, smoke)
+    return LargeImportPlan(sizing, ceiling, reserve, cli_image, deadline, free, smoke)
 
 
-def cloud_ceiling(image: str, run_id: str) -> int:
-    """The adoption ceiling a Cloud cell runs with, from the image itself, before any cell exists."""
+def cloud_limits(image: str, run_id: str) -> tuple[int, int]:
+    """The adoption ceiling and the import reserve a Cloud cell runs with, from the image itself, before any cell exists."""
     result = run(["docker", "run", "--rm", *docker_labels(run_id), "--network=none", "--tmpfs", "/data",
-                  "--entrypoint=python3", image, "-c", CEILING_SCRIPT])
-    return int(result.stdout.strip().splitlines()[-1])
+                  "--entrypoint=python3", image, "-c", LIMITS_SCRIPT])
+    ceiling, reserve = (int(line) for line in result.stdout.strip().splitlines()[-2:])
+    return ceiling, reserve
 
 
 # --- pure decisions ------------------------------------------------------------------------
@@ -311,6 +369,42 @@ def files_per_second(steps: Sequence[Mapping[str, Any]]) -> float | None:
     return round(sum(step["files"] for step in steps) / seconds, 2)
 
 
+def import_projection(pages: Sequence[Mapping[str, Any]], *, deadline_seconds_left: float) -> dict[str, Any] | None:
+    """What the `file` calls so far say about the whole import: its rate, and the seconds that the rest needs at it.
+
+    The rest is the newest reply's `remaining`, so the projection reaches the whole stage (about 69,300 files in the
+    large import) with no arithmetic by hand. Two rates, because the rate of a page falls as the vault grows: all
+    pages, and the newest page alone (partial when the run is still on it). The seconds are `file` call seconds, as
+    `files_per_second` counts them. A rate or a count that a reply does not carry stays None, never 0.
+    None until a `file` call has been made.
+    """
+    steps = [step for page in pages for step in page["file_steps"]]
+    if not steps:
+        return None
+    remaining = steps[-1]["remaining"]
+    overall, newest = files_per_second(steps), files_per_second(pages[-1]["file_steps"])
+
+    def seconds_needed(rate: float | None) -> int | None:
+        return round(remaining / rate) if rate and remaining is not None else None
+
+    return {"files_filed": steps[-1]["filed"], "files_remaining": remaining,
+            "files_per_second_all_pages": overall, "files_per_second_newest_page": newest,
+            "seconds_to_finish_at_all_pages_rate": seconds_needed(overall),
+            "seconds_to_finish_at_newest_page_rate": seconds_needed(newest),
+            "deadline_seconds_left": round(deadline_seconds_left)}
+
+
+def unconsumed_files(steps: Sequence[Mapping[str, Any]], consumed: int | None) -> int | None:
+    """Files that a page filed and `finish` did not consume, so a staged copy that stayed shows on its page.
+
+    The files are each call's rise in the stage's filed count. Unknown (None) when a call's rise or the page's
+    consumed count is unknown; never 0. A negative number means the page consumed more than its own calls filed.
+    """
+    if consumed is None or any(step["files"] is None for step in steps):
+        return None
+    return sum(step["files"] for step in steps) - consumed
+
+
 def is_drained(polls: Sequence[Mapping[str, int | None]], needed: int = DRAIN_POLLS) -> bool:
     """The index queues were all empty on the last `needed` readings. A failed reading is not empty."""
     last = polls[-needed:]
@@ -369,9 +463,33 @@ def thread_cpu(rows: Sequence[Mapping[str, Any]], label: str) -> dict[str, float
     return {name: round(usec / 1e6, 1) for name, usec in used.most_common()} if read else None
 
 
+# The cgroup counters that the sample script reads and that only grow while the pod lives.
+COUNTER_KEYS = ("cpu_pressure_some_usec", "io_pressure_some_usec", "io_pressure_full_usec", "io_read_bytes", "io_write_bytes")
+
+
+def counter_growth(rows: Sequence[Mapping[str, Any]], label: str) -> dict[str, int | None]:
+    """How far each cgroup counter grew in the ticks labelled `label`; None where no such tick read it.
+
+    A tick's share is the growth since the tick before it that read the counter, whatever its label; the first
+    reading counts from 0. A counter that fell is a restarted pod, and its new value counts from 0.
+    """
+    last: dict[str, int] = {}
+    grown: dict[str, int] = {}
+    for row in rows:
+        for key in COUNTER_KEYS:
+            value = row.get(key)
+            if value is None:
+                continue
+            if row["label"] == label:
+                before = last.get(key, 0)
+                grown[key] = grown.get(key, 0) + (value - before if value >= before else value)
+            last[key] = value
+    return {key: grown.get(key) for key in COUNTER_KEYS}
+
+
 def decide_verdict(folders: Mapping[str, Mapping[str, Sequence[str]] | None], volume_problems: Sequence[str],
                    findings: Sequence[Any], *, smoke: bool, proves_one_copy_only: bool) -> str:
-    """`pass` needs both folders judged with no problem, on a volume that cannot hold two copies.
+    """`pass` needs both folders judged with no problem, on a volume that cannot hold a staged copy beside the rest.
 
     `smoke_only` is the same result on data that cannot prove the volume claim, or when asked for.
     """
@@ -381,6 +499,39 @@ def decide_verdict(folders: Mapping[str, Mapping[str, Sequence[str]] | None], vo
     if any(problems for criteria in judged for problems in criteria.values()):
         return "fail"
     return "smoke_only" if smoke or not proves_one_copy_only else "pass"
+
+
+def refusal_counts(refusals: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """The refused writes of the agent's own calls: how many, by the cause the cell named, and the longest wait."""
+    waits = [item["waited_ms"] for item in refusals if isinstance(item.get("waited_ms"), (int, float))]
+    causes: dict[str, int] = {}
+    for item in refusals:
+        causes[str(item.get("cause"))] = causes.get(str(item.get("cause")), 0) + 1
+    return {"count": len(refusals), "by_cause": causes, "longest_wait_ms": max(waits) if waits else None}
+
+
+def journal_refusals(before: Mapping[str, Any] | None, after: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The refused writes (`MUTATION_BUSY`) that the cell's mutation journal gained between two readings.
+
+    Every caller's write is in the journal: the agent's `file` calls, the cell's filer and any other writer. A
+    reading that failed, or a journal that rotated between the two, leaves the count unknown (None), never 0.
+    A rotation shows as another file (its inode differs) or as fewer rows; a rotation followed by growth past
+    the old row count shows only as the other file, so the inode is the proof. A journal that did not exist yet
+    at the first reading (no inode) is no rotation.
+    """
+    if (before is None or after is None or after["rows"] < before["rows"]
+            or before.get("inode") not in (None, after.get("inode"))):
+        return {"count": None, "by_command": None}
+    by_command = {name: count - before["busy_by_command"].get(name, 0)
+                  for name, count in after["busy_by_command"].items() if count > before["busy_by_command"].get(name, 0)}
+    return {"count": sum(by_command.values()), "by_command": by_command}
+
+
+def file_seconds_by_page(pages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The `file` calls of every page: how many, their seconds in all, and the longest one's round trip."""
+    return [{"page": page["page"], "calls": len(page["file_steps"]), "file_seconds": page["file_seconds"],
+             "longest_call_seconds": max((step["seconds"] for step in page["file_steps"]), default=None)}
+            for page in pages]
 
 
 # --- the person's agent --------------------------------------------------------------------
@@ -394,13 +545,15 @@ class Agent:
         self.client = client
         self.retries: list[str] = []
         self.seconds: dict[str, list[float]] = {}
+        self.refusals: list[dict[str, Any]] = []
 
     async def call(self, name: str, arguments: dict[str, Any], *, kind: str = "",
                    tolerated: frozenset[str] = frozenset()) -> tuple[dict, float]:
         """One tool call; an error code in `tolerated` comes back as `{"error_code": ...}` instead of failing."""
         label = f"{name}.{kind}" if kind else name
         last = "no attempt"
-        for attempt in range(TRANSIENT_ATTEMPTS):
+        attempt = busy = 0
+        while attempt < TRANSIENT_ATTEMPTS:
             try:
                 async with self.client.mcp() as session:
                     result = await session.call(name, arguments)
@@ -408,10 +561,22 @@ class Agent:
                 last = f"{type(innermost(error)).__name__}: {str(innermost(error))[:200]}"
                 self.retries.append(f"{label}: {last}")
                 await asyncio.sleep(min(30, 2**attempt))
+                attempt += 1
                 continue
             if result.error_code == "MUTATION_WARMING":
                 self.retries.append(f"{label}: MUTATION_WARMING")
                 await asyncio.sleep(max(0.1, (result.structured.get("error") or {}).get("retry_after_ms", 500) / 1000))
+                attempt += 1
+                continue
+            if result.error_code == MUTATION_BUSY and busy < BUSY_RETRIES:
+                # The write was refused, not committed, so the call is repeated as it was. Each refusal is counted
+                # with the cause the cell gave (`holder_overdue`, `capture_wait_exhausted`); a call refused
+                # `BUSY_RETRIES` times is a livelock and fails below.
+                error = result.structured.get("error") or {}
+                details = error.get("details") or {}
+                busy += 1
+                self.refusals.append({"call": label, "cause": details.get("cause"), "waited_ms": details.get("waited_ms")})
+                await asyncio.sleep(max(1.0, error.get("retry_after_ms", 1000) / 1000))
                 continue
             if result.error_code in tolerated:
                 return {"error_code": result.error_code}, result.seconds
@@ -429,6 +594,7 @@ class Agent:
     def stats(self) -> dict[str, Any]:
         return {
             "retries": len(self.retries), "retry_examples": self.retries[:10],
+            "refusals": refusal_counts(self.refusals),
             "calls": {label: {"count": len(values), "total_seconds": round(sum(values), 1),
                               "p50_seconds": percentile(values, 0.5), "p95_seconds": percentile(values, 0.95),
                               "max_seconds": max(values)} for label, values in sorted(self.seconds.items())},
@@ -475,6 +641,15 @@ def thin_usage(node: drill_cluster.Agent) -> dict[str, int | None]:
             "thin_volume_allocated": max((v for v in volumes if v is not None), default=None)}
 
 
+def read_cell(ctx: Context) -> dict[str, Any] | None:
+    """One reading of the cell's cgroup, volume, readiness and threads (`SAMPLE_SCRIPT`); None while the cell has no pod."""
+    pod = ctx.runtime_pod(ctx.a.cell_id)
+    if pod is None:
+        return None
+    result = ctx.exec_in(namespace_name(ctx.a.cell_id), pod["metadata"]["name"], "python3", "-c", SAMPLE_SCRIPT)
+    return json.loads(result.stdout)
+
+
 class Sampler:
     """Reads the volume, the cell's memory and the runner's disk every few seconds, labelled by phase.
 
@@ -493,11 +668,7 @@ class Sampler:
         row: dict[str, Any] = {"at": round(time.monotonic() - self._started, 1), "label": self.label,
                                "runner_free": shutil.disk_usage(self.ctx.stack.workdir).free}
         try:
-            pod = self.ctx.runtime_pod(self.ctx.a.cell_id)
-            if pod is not None:
-                result = self.ctx.exec_in(namespace_name(self.ctx.a.cell_id), pod["metadata"]["name"],
-                                          "python3", "-c", SAMPLE_SCRIPT)
-                row.update(json.loads(result.stdout))
+            row.update(read_cell(self.ctx) or {})
         except Exception as error:  # noqa: BLE001 - an unread tick stays unknown
             row["cell_error"] = type(error).__name__
         if self.plan.node is not None:
@@ -521,7 +692,8 @@ class Sampler:
         labels = sorted({row["label"] for row in self.rows})
         return {"interval_seconds": SAMPLE_SECONDS, "all": peaks(self.rows),
                 "by_phase": {label: peaks([row for row in self.rows if row["label"] == label]) for label in labels},
-                "cpu_seconds_by_thread": {label: thread_cpu(self.rows, label) for label in labels}}
+                "cpu_seconds_by_thread": {label: thread_cpu(self.rows, label) for label in labels},
+                "cgroup_counter_growth_by_phase": {label: counter_growth(self.rows, label) for label in labels}}
 
 
 # --- the folders ---------------------------------------------------------------------------
@@ -557,7 +729,7 @@ async def generate(ctx: Context, plan: LargeImportPlan, name: str) -> Folder:
     total = plan.sizing.notes_bytes if first else plan.sizing.media_bytes
     workdir = ctx.stack.workdir
     free = shutil.disk_usage(workdir).free
-    need = fixture.peak_disk_bytes(total) if first else fixture.generation_need_bytes(total)
+    need = fixture.peak_disk_bytes(total, plan.volume_gib) if first else fixture.generation_need_bytes(total)
     if free < need:
         raise fixture.SizingError(f"{free / fixture.GIB:.1f} GiB free cannot hold the {name} folder, which needs {need / fixture.GIB:.1f} GiB")
     # Hidden files go to the cell for the first folder only; the second uses the client's defaults.
@@ -664,23 +836,62 @@ async def read_run(agent: Agent, run_id: str) -> dict[str, Any]:
     return body
 
 
-async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder) -> dict[str, list[str]]:
+def start_call_cpu(before: Mapping[str, Any] | None, after: Mapping[str, Any] | None, wall_seconds: float) -> dict[str, Any]:
+    """The CPU that the cell's threads used during the `start` call, read in the cell before and after it.
+
+    The call is the same work on every host (one scan of the same stage), so its CPU seconds say how fast the
+    cell's own CPU ran it. They calibrate the file seconds, which the runner's zlib calibration does not follow
+    (it said 1.2 times between two runners that ran this call 1.38 times apart). Nothing else runs in the cell
+    during the call, the cell's filer standing aside for an agent that files, so the busiest thread is the call's.
+    A reading that failed leaves the CPU None, never 0.
+    """
+    ticks = [{"label": "before", "threads": (before or {}).get("threads")},
+             {"label": "start", "threads": (after or {}).get("threads")}]
+    by_thread = thread_cpu(ticks, "start") if all(tick["threads"] is not None for tick in ticks) else None
+    busiest = next(iter(by_thread.items()), None) if by_thread else None
+    return {
+        "wall_seconds": round(wall_seconds, 1),
+        "busiest_thread": busiest[0] if busiest else None,
+        "busiest_thread_cpu_seconds": busiest[1] if busiest else None,
+        "all_threads_cpu_seconds": round(sum(by_thread.values()), 1) if by_thread else None,
+        "cpu_seconds_by_thread": dict(list(by_thread.items())[:8]) if by_thread else None,
+        "what": "CPU seconds per thread name of the other processes in the cell's container between a reading just "
+                "before the `start` call and one just after it (the eight busiest names); the busiest one calibrates",
+        "source": "/proc/<pid>/task/<tid>/stat in the cell's pod, the same read as cpu_seconds_by_thread",
+    }
+
+
+def record_paging(folder: Folder, pages: Mapping[str, dict[str, Any]], plan: LargeImportPlan) -> None:
+    """The report's view of the `file` calls so far: each page, the seconds by page and the projection.
+
+    Called before each deadline check as well as at the end, so a run that the deadline stops still reports each call.
+    """
+    calls = list(pages.values())
+    folder.report["pages"] = calls
+    folder.report["file_seconds_by_page"] = file_seconds_by_page(calls)
+    folder.report["file_projection"] = import_projection(calls, deadline_seconds_left=plan.deadline - time.monotonic())
+
+
+async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder,
+                     read_threads: Callable[[], Awaitable[dict[str, Any] | None]] | None = None) -> dict[str, list[str]]:
     """File the stage with `file` calls, each repeated with the continuation of the reply before, as an agent does.
 
     A cell with no Knowledge Base yet refuses `file`, so the first folder's first scan is a `start` that
-    bootstraps it; `file` then carries on that run. Returns the problems found, by criterion.
+    bootstraps it; `file` then carries on that run. `read_threads` reads the cell's threads, to measure the CPU
+    of that `start` call (`start_call_cpu`). Returns the problems found, by criterion.
     """
     stage_path = f"{fixture.STAGE_DIR}/{folder.import_id}"
     collection = CELL_COLLECTION[folder.name]
     problems: dict[str, list[str]] = {"manifest_proof": [], "no_space_failure": [], "filing": [], "compact_reply": []}
     if folder.name == "notes":
-        await agent.import_op("start", path=stage_path, collection=collection, initialize_kb=True)
+        before = await read_threads() if read_threads else None
+        _, started_in = await agent.import_op("start", path=stage_path, collection=collection, initialize_kb=True)
+        folder.report["start_call"] = start_call_cpu(before, await read_threads() if read_threads else None, started_in)
     pages: dict[str, dict[str, Any]] = {}
     fields: dict[str, Any] = {"path": stage_path, "collection": collection}
     filed_before: int | None = 0
     while True:
-        # Kept current before the deadline check, so a run that the deadline stops still reports each call.
-        folder.report["pages"] = list(pages.values())
+        record_paging(folder, pages, plan)
         plan.require_time(f"the {folder.name} folder was filed")
         reply, took = await agent.import_op("file", **fields)
         page = pages.setdefault(reply["run_id"], {"page": len(pages) + 1, "run_id": reply["run_id"], "file_seconds": 0.0,
@@ -709,7 +920,8 @@ async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder) -> dic
         recorded = stored.get("finish") or {}
         page.update({"rows": len(rows), "row_bytes": sum(int(row.get("bytes") or 0) for row in rows),
                      "hidden_files_skipped": stored.get("hidden_files_skipped"), "consumed": recorded.get("consumed"),
-                     "files_per_second": files_per_second(page["file_steps"])})
+                     "files_per_second": files_per_second(page["file_steps"]),
+                     "filed_not_consumed": unconsumed_files(page["file_steps"], recorded.get("consumed"))})
         if stored.get("stage") != {"stage": folder.import_id, "proof": folder.proof}:
             problems["manifest_proof"].append(f"page {page['page']} recorded the stage as {stored.get('stage')}, not its manifest proof")
         consumed += int(recorded.get("consumed") or 0)
@@ -722,14 +934,39 @@ async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder) -> dic
                 f"the compact done reply carried residual {reply['filed'].get('residual')!r}, the run holds {recorded.get('residual')!r}")
         print(f"[rehearsal] large-import {folder.name} page {page['page']}: {page['rows']} rows, "
               f"{len(page['file_steps'])} file calls in {page['file_seconds']}s ({page['files_per_second']} files per call second), "
-              f"consumed {page['consumed']}", flush=True)
-    folder.report["pages"] = list(pages.values())
+              f"consumed {page['consumed']}, filed but not consumed {page['filed_not_consumed']}", flush=True)
+    record_paging(folder, pages, plan)
+    print(f"[rehearsal] large-import {folder.name} projection: {folder.report['file_projection']}", flush=True)
     folder.residual = (reply.get("filed") or {}).get("residual")
     folder.consumed = consumed
     folder.report["residual_by_reason_files"] = fixture.residual_files_by_reason(folder.residual)
     folder.report["residual_files_left"] = int((folder.residual or {}).get("files", 0))
     folder.report["consumed"] = consumed
     return problems
+
+
+async def page_stage(ctx: Context, agent: Agent, plan: LargeImportPlan, folder: Folder) -> dict[str, list[str]]:
+    """File the stage and report what the vault's write boundary refused meanwhile: the whole cell's journal, and the
+    agent's own calls with their cause. The run counts the refusals; it does not require none.
+
+    The count is written even when the deadline or a failure ends the paging, because that is the run that most needs it.
+    """
+    refused_before, journal_before = len(agent.refusals), await read_refusal_journal(ctx)
+
+    async def read_threads() -> dict[str, Any] | None:
+        try:
+            return await asyncio.to_thread(read_cell, ctx)
+        except Exception:  # noqa: BLE001 - a reading that failed leaves the call's CPU unknown
+            return None
+
+    try:
+        return await file_pages(agent, plan, folder, read_threads)
+    finally:
+        folder.report["paging_refusals"] = {
+            "journal": journal_refusals(journal_before, await read_refusal_journal(ctx)),
+            "agent_calls": refusal_counts(agent.refusals[refused_before:]),
+            "what": "MUTATION_BUSY refusals of every write between the first and the last `file` call of the folder",
+        }
 
 
 def enospc_count(ctx: Context, seen: dict[str, int]) -> None:
@@ -796,6 +1033,26 @@ def save_import_failure_evidence(ctx: Context) -> dict[str, Any]:
     }
 
 
+def space_waits(log_text: str) -> dict[str, Any]:
+    """The rebuild's waits for space in a stretch of the cell's JSON-lines app log, with the figures it logged.
+
+    Public readiness shows only that a rebuild waits; the bytes it needed and found free are in the
+    `lexical_repair_finished` event, which is where the report reads them. A line that is not JSON is skipped.
+    """
+    waits: list[Mapping[str, Any]] = []
+    for line in log_text.splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        fields = record.get("fields") if isinstance(record, dict) else None
+        if isinstance(fields, dict) and record.get("event") == "lexical_repair_finished" \
+                and fields.get("result") == "waiting_for_space":
+            waits.append(fields)
+    return {"count": len(waits), "last": ({key: waits[-1].get(key) for key in ("space_needed_bytes", "space_free_bytes")}
+                                          if waits else None)}
+
+
 def save_cell_app_logs(ctx: Context, label: str) -> dict[str, Any]:
     """Keep the tail of each file in the cell's app log folder with the diagnostics, next to the pod log.
 
@@ -810,7 +1067,8 @@ def save_cell_app_logs(ctx: Context, label: str) -> dict[str, Any]:
     for name, item in found.items():
         tail = gzip.decompress(base64.b64decode(item["tail"]))
         (diagnostics / f"cell-app-{label}-{Path(name).name}").write_bytes(tail)
-        kept[name] = {"file_bytes": item["size"], "kept_bytes": len(tail)}
+        kept[name] = {"file_bytes": item["size"], "kept_bytes": len(tail),
+                      "space_waits": space_waits(tail.decode("utf-8", errors="replace"))}
     return kept
 
 
@@ -823,6 +1081,14 @@ async def keep_cell_app_logs(ctx: Context, label: str) -> dict[str, Any]:
         return await asyncio.to_thread(save_cell_app_logs, ctx, label)
     except Exception as error:  # noqa: BLE001 - reported in the result, as an unread value stays unknown
         return {"error": f"{type(error).__name__}: {str(error)[:300]}"}
+
+
+async def read_refusal_journal(ctx: Context) -> dict[str, Any] | None:
+    """The cell's mutation journal counts now, or None when the pod could not answer."""
+    try:
+        return await asyncio.to_thread(exec_json, ctx, REFUSAL_SCRIPT, attempts=2)
+    except StepFailure:
+        return None
 
 
 async def wait_import_state(ctx: Context, import_id: str, state: str, timeout: float) -> dict:
@@ -928,7 +1194,7 @@ async def run_folder(ctx: Context, agent: Agent, plan: LargeImportPlan, out: dic
     with phase("stage_proof"):
         criteria["manifest_proof"] = await prove_stage(ctx, agent, folder, row)
     with phase("paging"):
-        paging = await file_pages(agent, plan, folder)
+        paging = await page_stage(ctx, agent, plan, folder)
     await asyncio.to_thread(enospc_count, ctx, space)
     folder.report["pod_after_paging"] = await asyncio.to_thread(pod_health, ctx)
     criteria["manifest_proof"] += paging["manifest_proof"]
@@ -961,6 +1227,11 @@ async def volume_state(ctx: Context) -> dict[str, Any]:
             "pvc_storage_class": pvc["spec"].get("storageClassName"), "cell_row_storage_gib": cell.get("storage_gib")}
 
 
+# The busiest thread's CPU seconds of the `start` call (`start_call_cpu`) on the notes folder of a full-size run: scale only.
+# Only the ratio of two runs' calls matters, so it fixes the unit of `file_seconds_per_start_calibration`.
+REFERENCE_START_CPU_SECONDS = 19.27
+
+
 def calibrated_timings(out: Mapping[str, Any], environment: Mapping[str, Any]) -> dict[str, Any]:
     """The phases' seconds and each folder's page 1 filing seconds, raw and divided by the host's calibration ratio.
 
@@ -975,6 +1246,15 @@ def calibrated_timings(out: Mapping[str, Any], environment: Mapping[str, Any]) -
     def scaled(seconds: float | None) -> float | None:
         return host_speed.per_calibration(seconds, zlib_seconds)
 
+    # The `start` call of a smoke run scans a smaller stage, so only a full run's call matches the reference.
+    start = (out["folders"].get("notes") or {}).get("start_call") or {}
+    start_cpu = start.get("busiest_thread_cpu_seconds") if out.get("mode") == "full" else None
+
+    def per_start(seconds: float | None) -> float | None:
+        return host_speed.per_calibration(seconds, start_cpu, REFERENCE_START_CPU_SECONDS)
+
+    start_ratio = host_speed.calibration_ratio(start_cpu, REFERENCE_START_CPU_SECONDS)
+
     ratio = host_speed.calibration_ratio(zlib_seconds)
     first_pages = {name: (folder.get("pages") or [{}])[0] for name, folder in out["folders"].items()}
     return {
@@ -985,6 +1265,20 @@ def calibrated_timings(out: Mapping[str, Any], environment: Mapping[str, Any]) -
             "what": "the zlib seconds of the fixed single-threaded workload that the run took before the scenario, "
                     "over the reference; the SHA-256 seconds and the workload's definition are in environment",
         },
+        "start_call_scale": {
+            "basis": "start_call_thread_cpu", "mode": out.get("mode"), "start_call_cpu_seconds": start_cpu,
+            "reference_start_call_cpu_seconds": REFERENCE_START_CPU_SECONDS,
+            "calibration_ratio": None if start_ratio is None else round(start_ratio, 3),
+            "what": "the CPU seconds that the cell's busiest thread used in the notes folder's `start` call, over the "
+                    "reference of a full-size run; None for a smoke run, whose stage is smaller, and when the reading failed. "
+                    "The `file_seconds_per_start_calibration` values divide the raw file seconds by this ratio",
+            "source": "folders.notes.start_call, read in the cell's pod before and after the call",
+        },
+        "page_file_seconds_per_start_calibration": {
+            name: [{"page": page.get("page"), "file_seconds": page.get("file_seconds"),
+                    "file_seconds_per_start_calibration": per_start(page.get("file_seconds"))}
+                   for page in folder.get("pages") or []]
+            for name, folder in out["folders"].items()},
         "phase_seconds_per_calibration": {label: scaled(seconds) for label, seconds in out["phases"].items()},
         "page_1_file": {name: {"file_seconds": page.get("file_seconds"),
                                "file_seconds_per_calibration": scaled(page.get("file_seconds"))}
@@ -1033,7 +1327,7 @@ async def run_large_import(ctx: Context, plan: LargeImportPlan) -> None:
     """The stage body: write into `report.stages["large_import"]` as it goes, so partial results survive."""
     out = ctx.report.stages["large_import"]
     out.update({
-        "mode": "smoke" if plan.smoke else "full", "seed": plan.seed, "ceiling_bytes": plan.ceiling,
+        "mode": "smoke" if plan.smoke else "full", "seed": plan.seed, "ceiling_bytes": plan.ceiling, "import_reserve_bytes": plan.reserve,
         "sizing": asdict(plan.sizing), "runner_free_bytes_at_sizing": plan.free_bytes,
         "volume": {"gib": plan.volume_gib, "boundary": "TopoLVM thin volume on a loop-device pool; the chart caps "
                    "growth at this size, so the claim cannot be enlarged"},
@@ -1044,9 +1338,10 @@ async def run_large_import(ctx: Context, plan: LargeImportPlan) -> None:
     record = StepRecord(0, "large_import")
     await first_session(ctx.a.client, record)
     out["gateway_wait"] = record.evidence
-    in_cell = await asyncio.to_thread(exec_json, ctx, POD_CEILING_SCRIPT)
-    if in_cell != plan.ceiling:
-        raise RuntimeError(f"the cell's adoption ceiling is {in_cell}, the fixture was laid out for {plan.ceiling}")
+    in_cell = await asyncio.to_thread(exec_json, ctx, POD_LIMITS_SCRIPT)
+    if in_cell != [plan.ceiling, plan.reserve]:
+        raise RuntimeError(f"the cell's adoption ceiling and import reserve are {in_cell}, "
+                           f"the fixture and the volume were sized for {[plan.ceiling, plan.reserve]}")
     agent, sampler = Agent(ctx.a.client), Sampler(ctx, plan)
     task = asyncio.create_task(sampler.run())
     space: dict[str, int] = {}

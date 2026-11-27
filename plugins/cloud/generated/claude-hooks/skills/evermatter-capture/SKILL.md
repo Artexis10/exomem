@@ -2,7 +2,7 @@
 name: evermatter-capture
 description: 'Save what a conversation settled into Evermatter: a conclusion, a decision, a fact about a person or thing, a recurring item or measurement, or a proof file. Use when the user says save, remember, log or file this, or when the session lands on something durable that the engagement level allows you to capture.'
 metadata:
-  skill_contract: f6ea7d6fa01d99a9251274e1666272975b48464c06a54772adcbfec2143f32a6
+  skill_contract: d65c5a126f69a24ea6da66108e6b338b07e7950d07008ddb61c17a277407bf05
   version: "0.2.0"
 ---
 
@@ -46,7 +46,7 @@ is durable: save it when it is agreed, as `proactive_capture` allows.
 4. Planning: look for an existing item with `query_plan_items` before `add_plan_item`; change an item with `edit_plan_item`. An observed outcome never moves a plan item by itself.
 5. Entities: call `inspect_memory(operation="connections.resolve_entity", arguments={"name": ...})`. One match: add the fact with `add_observation` or `edit_note` on that page. No match, and the identity is stable, and central or recurring, and useful beyond this source: `manage_memory(operation="connections.create_entity", arguments={...})`. When the name you write is in another script than the user's spelling of it, add a native-script alias (`aliases` at create, or through `edit_note`). A stable fact about a resolved person, the vault owner's own entity included, goes to that entity under `proactive_capture`, not just in the reply that used it. Contact details (phone, address, email, identifiers) go on the same page in a dedicated `## Contact` section, each as its own `- [contact] ...` unit, never in the summary: recall serves them only when the turn asks to reach the person. Do not create a separate contact page or page type.
 6. Compiled notes: check for an existing note on the same question first, and prefer `edit_note`, `add_observation` or `supersede_note` over a parallel page. Otherwise call `create_note` with the note type that fits, `sources` naming what steps 2 and 3 saved, and the links you already know; ask `create_note(..., suggest_links=true)` or `inspect_memory(operation="connections.suggest_links", arguments={"path": "<page path>"})` (or `"draft_title"` and `"draft_body"` for an unsaved draft) when links are still unknown.
-7. Save each claim at its true strength: a held view attributed and with its uncertainty, an unsure report as unsure, an open question as open, settled values in full.
+7. Save each claim at its true strength: a held view attributed and with its uncertainty, an unsure report as unsure, an open question as open, settled values in full. Save what the person says about their aims, priorities, the people they know, their belongings or their past in the turn they say it, whatever the task: just that statement, on the known entity when one resolves.
 
 ## Output contract
 Report the `user_summary` of each write in one line, in the user's words; name a collection the way recall cites a page. The words Planning, Records, collection, schema and natural key never lead the report. If nothing durable was saved, say why.

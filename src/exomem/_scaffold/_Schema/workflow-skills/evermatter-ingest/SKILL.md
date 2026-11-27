@@ -2,7 +2,7 @@
 name: evermatter-ingest
 description: 'Add an external article, PDF, pasted text, dataset, image, audio, video or a whole folder to Evermatter: keep the original, then compile what matters. Use when the user says ingest, import, add this, process this source, or shares a file to keep.'
 metadata:
-  skill_contract: f6ea7d6fa01d99a9251274e1666272975b48464c06a54772adcbfec2143f32a6
+  skill_contract: d65c5a126f69a24ea6da66108e6b338b07e7950d07008ddb61c17a277407bf05
   version: "0.2.0"
 ---
 

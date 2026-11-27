@@ -388,6 +388,26 @@ def capped(seconds: float) -> Iterator[None]:
         yield
 
 
+@contextmanager
+def bound_to(seconds: float | None) -> Iterator[RequestBudget]:
+    """Run under the call's budget, cut to end `seconds` from now when that is nearer; `None` cuts nothing.
+
+    For work whose own limit is shorter than the request's, such as a hold of the vault's boundary that a waiting
+    writer is refused for once it is overdue. The cut budget is the bound one, so a reader that this work calls
+    (`find`, a lexical read, a wait for a build) obeys it too. A call with no budget, such as the import filer's,
+    gets a fresh one of the usual length. Skips and truncations are recorded on the parent too.
+    """
+    parent = current()
+    if parent is not None and (seconds is None or seconds >= parent.remaining()):
+        yield parent
+        return
+    parent = parent or RequestBudget(seconds=budget_seconds())
+    now = time.monotonic()
+    deadline = parent.deadline if seconds is None else min(parent.deadline, now + max(0.0, seconds))
+    with _running_until(parent, deadline, now):
+        yield current()
+
+
 class ReadBudgetExhausted(BaseException):
     """Stop owned read work without converting interruption into a fallback scan."""
 

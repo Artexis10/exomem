@@ -207,10 +207,12 @@ def _clip(value: object) -> str:
     return text if len(text) <= _MAX_FIELD_CHARS else text[:_MAX_FIELD_CHARS]
 
 
-#: Arguments that carry conversation text the caller never meant to persist:
-#: recorded by presence and byte length only, never hashed, in every mode. A
-#: hash of a short, guessable conversation is a confirmation oracle.
-_LENGTH_ONLY_ARG_NAMES = frozenset({"conversation"})
+#: Arguments that carry conversation text the caller never meant to persist, or
+#: the people a search by person names: recorded by presence and byte length
+#: only, never hashed, in every mode. A hash of a short, guessable conversation
+#: or name is a confirmation oracle, and it would outlive a delete of faces.
+# nosemgrep: ep-word-set -- argument names that the tool schemas fix, not vocabulary.
+_LENGTH_ONLY_ARG_NAMES = frozenset({"conversation", "people"})
 
 
 def _argument_shape(arguments: dict[str, Any]) -> tuple[list[str], dict[str, dict], bool]:
@@ -452,10 +454,19 @@ def build_row(
     access: str | None = None,
     released_items: int | None = None,
     rendering: str | None = None,
+    protocol_version: str | None = None,
+    client_capabilities: Sequence[str] | None = None,
+    client_extensions: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Assemble one complete, self-hashing ledger row."""
     from .cloud_cell import canonical_app_id
-    from .privacy_log import log_client_label, log_client_version, log_session_ref
+    from .privacy_log import (
+        log_client_extensions,
+        log_client_label,
+        log_client_version,
+        log_protocol_version,
+        log_session_ref,
+    )
 
     # Caller-chosen header and handshake text: bounded under content-private
     # logging, verbatim otherwise.
@@ -538,6 +549,31 @@ def build_row(
         # is always the command's execution identity. Absent on every direct call, so
         # a row from before renderings existed keeps the shape it was hashed with.
         row["rendering"] = _clip(rendering)
+    revision = log_protocol_version(protocol_version)
+    if revision:
+        # The revision's own date, so content-private logging keeps it when it has that shape.
+        # Absent when the request does not say, as on every row from before the census.
+        row["protocol_version"] = _clip(revision)
+    if client_capabilities is not None:
+        # The top-level capability names the client set, and `elicitation.<mode>` for each
+        # elicitation mode: all of them fields of the SDK's own model, so a closed set that
+        # content-private logging keeps. `[]` is a client that declares nothing; absent is a
+        # request that does not say (a pre-2026-07-28 call over stateless HTTP keeps no handshake).
+        row["client_capabilities"] = sorted({str(name) for name in client_capabilities})
+    if client_extensions is not None:
+        # Sorted extension ids the client declared, official ids first. The client chooses these
+        # strings, so count and length are capped like every other caller-chosen field, and
+        # content-private logging keeps only the official ids (see `log_client_extensions`)
+        # and counts the rest.
+        declared, withheld = log_client_extensions(
+            str(name)[:_MAX_EXTENSION_CHARS] for name in client_extensions
+        )
+        row["client_extensions"] = declared[:_MAX_EXTENSIONS]
+        if len(declared) > _MAX_EXTENSIONS:
+            # A cut list says so, as `spans_truncated` does.
+            row["client_extensions_truncated"] = len(declared) - _MAX_EXTENSIONS
+        if withheld:
+            row["client_extensions_other"] = withheld
     from .activation_result import project_block
 
     observation = project_block(activation_result)
@@ -554,6 +590,12 @@ def build_row(
 #: rows within `ROTATE_BYTES_DEFAULT`, about 4 KB a row, and 32 spans that carry
 #: fields already fill that. A row that drops spans counts them instead.
 _MAX_SPANS = 32
+
+#: Declared extensions kept in one row, and the characters kept of each. The client
+#: chooses both, and the row is hash-chained. A real client declares a handful of
+#: reverse-DNS identifiers, so the bounds cut only a client that stuffs the field.
+_MAX_EXTENSIONS = 16
+_MAX_EXTENSION_CHARS = 64
 
 
 def _clip_spans(spans: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -769,6 +811,9 @@ def record_call(
     budget: Mapping[str, Any] | None = None,
     activation_result: Mapping[str, Any] | None = None,
     rendering: str | None = None,
+    protocol_version: str | None = None,
+    client_capabilities: Sequence[str] | None = None,
+    client_extensions: Sequence[str] | None = None,
 ) -> dict[str, Any] | None:
     """Append exactly one ledger row. Never raises into the call path.
 
@@ -815,6 +860,9 @@ def record_call(
                 access=facts["access"],
                 released_items=facts["released"],
                 rendering=rendering,
+                protocol_version=protocol_version,
+                client_capabilities=client_capabilities,
+                client_extensions=client_extensions,
             )
             append_row(row, path=path)
             _state.update(sequence=row["sequence"], prev_hash=row["row_hash"])

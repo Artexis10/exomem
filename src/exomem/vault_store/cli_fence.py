@@ -91,6 +91,8 @@ ACCESS: dict[str, Declaration] = {
     "index": _pages(),
     # The voice-profile store is per-machine state.
     "enroll-speaker": _NONE,
+    # Writes the face store in the state directory and reads pictures through the media store, never a page.
+    "faces": _NONE,
     "list-speakers": _NONE,
     "remove-speaker": _NONE,
     "trace": _NONE,

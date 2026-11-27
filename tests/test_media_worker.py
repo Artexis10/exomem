@@ -2922,6 +2922,45 @@ def test_worker_clip_embeds_image(vault, monkeypatch: pytest.MonkeyPatch) -> Non
     assert embeddings.ClipIndex(vault).has(res.path)
 
 
+def test_an_image_processed_with_faces_off_acquires_and_loads_no_face_model(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Faces off must not download or load a biometric model, nor create the face store."""
+    from exomem import embedding_backend, face_models, face_store, media_models
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    res = preserve.preserve_bytes(
+        vault, scope="Rental", category="photos", filename="picnic.jpg", data=b"\xff\xd8\xff", text="picnic"
+    )
+    monkeypatch.setattr(embeddings, "embed_image", lambda p: np.ones(embeddings.CLIP_DIM, dtype=np.float32))
+    acquired: list[str] = []
+
+    def refuse_acquisition(model_name, served):
+        acquired.append(model_name)
+        raise embedding_backend.ModelFilesUnavailable(f"{model_name}: not fetched in this test")
+
+    monkeypatch.setattr(embedding_backend, "ensure_artifact", refuse_acquisition)
+    loaded: list[bool] = []
+    monkeypatch.setattr(face_models, "load", lambda: loaded.append(True))
+
+    media_worker.MediaWorker(vault)._process(
+        media_worker._Job(
+            binary_path=vault / res.path,
+            sidecar_path=vault / res.sidecar_path,
+            media_type="image",
+            do_ocr=False,
+            do_clip=True,
+        )
+    )
+
+    assert embeddings.ClipIndex(vault).has(res.path)
+    face_models_named = {media_models.model_spec(kind)["model"] for kind in (face_models.DETECT, face_models.EMBED)}
+    assert not face_models_named & set(acquired)
+    assert loaded == []
+    assert not face_store.store_dir(vault).exists()
+
+
 def test_a_clip_job_queued_before_clip_was_disabled_skips_clip(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     # A durable job outlives the switch: on the Cloud image every one of them
     # tried CLIP and warned, and with a CLIP stack it would still embed.
