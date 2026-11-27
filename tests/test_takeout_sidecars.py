@@ -1,6 +1,6 @@
 """A Google Photos Takeout is filed as photos that carry the caption of their sidecars, and no JSON Source, and no sidecar time.
 
-OpenSpec date-photos-from-takeout-sidecars, groups 1 and 2.2. A sidecar's time dates no page: it is read into the sidecar's row only. The vault is a temporary one with a real stage, and the
+OpenSpec carry-takeout-sidecar-captions, groups 1 and 2.2. A sidecar's time dates no page: it is read into the sidecar's row only. The vault is a temporary one with a real stage, and the
 cell's filer drives `adoption_studio file` through the dispatcher, as for any import. The folders, names and sidecars are
 invented, in the name forms that community tools report for Takeout. Each test names the failure it catches.
 """

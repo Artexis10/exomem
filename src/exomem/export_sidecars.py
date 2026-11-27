@@ -4,7 +4,7 @@
 each recognised sidecar (see `source_formats`, the `photo-sidecar` parser) it appends one row to the stage's expansion
 rows and moves the pass's cursor past it. A row holds the sidecar's path, its name key (`export_pairing.Key`) and the
 time and caption that it carries. The time is recorded and applied to no page: dating a photo from it is held until a
-measurement shows where Google's `photoTakenTime` comes from (OpenSpec `date-photos-from-takeout-sidecars`, task 3.2). A row
+measurement shows where Google's `photoTakenTime` comes from (OpenSpec `carry-takeout-sidecar-captions`, task 3.2). A row
 never holds a position. When the last sidecar is read, the pass decides every
 pair in one step and appends one `pair` row for each sidecar, then an `end` row:
 

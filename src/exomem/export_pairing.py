@@ -1,7 +1,7 @@
 """Pair each Takeout sidecar with the one photo it describes, from file names and titles alone.
 
 Google publishes no specification, so the rules follow the community tools that read a Takeout (OpenSpec
-`date-photos-from-takeout-sidecars`, Decision 2). A sidecar pairs only when its name and its `title` both fit one image
+`carry-takeout-sidecar-captions`, Decision 2). A sidecar pairs only when its name and its `title` both fit one image
 or video in its own folder, no other file fits it, and that file fits no other sidecar. Every vendor fact (the suffix
 word, the length limits, the replaced characters) is registry data on the entry (`source_formats`).
 
