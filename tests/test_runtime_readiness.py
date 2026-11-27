@@ -340,6 +340,33 @@ def test_retrieval_repair_progress_is_bounded_and_privacy_safe() -> None:
     assert "must-not-leak" not in repr(snapshot)
 
 
+def test_public_readiness_names_a_rebuild_waiting_for_space_without_the_volume_s_byte_figures() -> None:
+    snapshot = build_runtime_readiness(
+        coordination={
+            "enabled": False,
+            "role": "standalone",
+            "replica_id": None,
+            "coordinator_healthy": True,
+        },
+        release="1.2.3",
+        mcp_tool_surface_sha256="d" * 64,
+        retrieval={
+            "state": "unavailable",
+            "admitted": False,
+            "repair": {
+                "phase": "idle",
+                "last_result": "waiting_for_space",
+                "space_needed_bytes": 900,
+                "space_free_bytes": 400,
+            },
+        },
+    )
+
+    repair = snapshot["retrieval"]["repair"]
+    assert repair["last_result"] == "waiting_for_space"
+    assert set(repair) == {"phase", "age_seconds", "last_duration_seconds", "last_result"}
+
+
 def test_readiness_exposes_only_bounded_mutation_holder_metadata() -> None:
     snapshot = build_runtime_readiness(
         coordination={

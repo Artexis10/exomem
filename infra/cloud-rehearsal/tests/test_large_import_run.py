@@ -187,7 +187,7 @@ def _folder(entries=(), name="notes"):
 
 
 def _plan():
-    return large_import.LargeImportPlan(sizing=None, ceiling=1, cli_image="x", deadline=time.monotonic() + 60, free_bytes=0)
+    return large_import.LargeImportPlan(sizing=None, ceiling=1, reserve=1, cli_image="x", deadline=time.monotonic() + 60, free_bytes=0)
 
 
 STAGE = {"stage": "i-1", "proof": "cloud-receipt"}
@@ -357,6 +357,25 @@ def test_a_projection_with_an_unknown_count_leaves_what_depends_on_it_unknown():
     projection = large_import.import_projection([{"file_steps": steps}], deadline_seconds_left=10.0)
 
     assert projection["files_per_second_all_pages"] is None and projection["seconds_to_finish_at_all_pages_rate"] is None
+
+
+def test_a_page_that_filed_more_files_than_it_consumed_shows_the_staged_copies_that_stayed():
+    """Catches a leftover staged copy of text files, which the folder's total consumed count would show only at the end."""
+    empty = _residual(0, {})
+    agent = Scripted({"file": [_working("r1", filed=5, token="a"), _done("r2", filed=9, residual=empty)],
+                      STATUS: [_stored(["a"], finish=_recorded(3, residual=empty)), _stored(["b"], finish=_recorded(4, residual=empty))]})
+    folder = _folder(name="media")
+
+    asyncio.run(large_import.file_pages(agent, _plan(), folder))
+
+    assert [page["filed_not_consumed"] for page in folder.report["pages"]] == [2, 0]
+
+
+def test_a_page_without_a_finish_count_leaves_its_unconsumed_files_unknown_not_zero():
+    steps = [large_import.file_step({"progress": {"filed": 5}}, 1.0, before=0)]
+
+    assert large_import.unconsumed_files(steps, None) is None
+    assert large_import.unconsumed_files(steps, 5) == 0
 
 
 def test_a_deadline_that_stops_filing_still_reports_the_calls_made():
@@ -580,6 +599,32 @@ def test_each_folders_app_log_is_kept_under_its_own_name(monkeypatch, tmp_path):
 
     kept = {path.name: path.read_bytes() for path in (tmp_path / "diagnostics").iterdir()}
     assert kept == {"cell-app-notes-exomem.log": b"first pod", "cell-app-media-exomem.log": b"second pod"}
+
+
+def test_a_rebuild_waiting_for_space_shows_its_byte_figures_from_the_app_log_not_from_readiness(monkeypatch, tmp_path):
+    wait = {"event": "lexical_repair_finished",
+            "fields": {"result": "waiting_for_space", "space_needed_bytes": 900, "space_free_bytes": 400}}
+    published = {"event": "lexical_repair_finished", "fields": {"result": "published"}}
+    log = "\n".join([json.dumps(published), "not json at all", json.dumps(wait), json.dumps(wait)]).encode()
+    ctx = SimpleNamespace(stack=SimpleNamespace(workdir=tmp_path))
+    monkeypatch.setattr(large_import, "exec_json", lambda *_args, **_kwargs: _log_in_the_pod(log))
+
+    kept = asyncio.run(large_import.keep_cell_app_logs(ctx, "end"))
+
+    assert kept["exomem.log"]["space_waits"] == {"count": 2, "last": {"space_needed_bytes": 900, "space_free_bytes": 400}}
+
+
+def test_the_ceiling_and_the_import_reserve_come_from_one_run_of_the_image(monkeypatch):
+    calls = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        return SimpleNamespace(stdout="noise from the image\n209715200\n268435456\n")
+
+    monkeypatch.setattr(large_import, "run", fake_run)
+
+    assert large_import.cloud_limits("image:tag", "run-1") == (209715200, 268435456)
+    assert len(calls) == 1 and "image:tag" in calls[0]
 
 
 def _failure_ctx(tmp_path, *, log_returncode: int, log: str):

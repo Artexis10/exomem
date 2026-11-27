@@ -2,8 +2,11 @@
 
 A person's agent brings a large, realistic folder into a Cloud cell through the shipped CLI, files
 it page by page through the MCP tools, and discards what stays staged. A second, media-heavy folder
-follows into the same cell. The cell runs on a TopoLVM volume that cannot hold two copies of the
-first folder, so the run only fits if filing an artifact removes its staged copy.
+follows into the same cell. The cell runs on a TopoLVM volume sized for a run that consumes each staged copy: both folders once, what the
+cell derives from them and one more copy of its lexical catalogue while that rebuilds, taken in the order that
+the run goes (`large_import_fixture.fullest_volume_bytes`). The volume is below what a run that leaves the
+first folder's staged copies would need, and below twice the data, so the run only fits if filing removes
+each staged copy.
 
 The pass criteria come from the generator's manifest (`large_import_fixture`), never from the
 cell's own replies. Each measurement is stored with what it is, over which window and from which
@@ -54,12 +57,18 @@ BUSY_RETRIES = 30  # refusals of one call before the run calls it a livelock and
 CELL_COLLECTION = {"notes": "Imported notes", "media": "Imported media"}
 
 # Everything below runs inside the cell's pod, against its volume, with the cell's own interpreter.
-CEILING_SCRIPT = """import os
-from exomem import client_artifacts, cloud_cell
+# The product values that the fixture and the volume are sized from: the adoption ceiling, then the import reserve
+# (the free space that a rebuild and an import leave to canonical writes). Both come from the product, never restated here.
+LIMITS_SCRIPT = """import os
+from exomem import client_artifacts, cloud_cell, cloud_import
 os.environ[cloud_cell.CLOUD_MODE_ENV] = '1'
 print(client_artifacts.adoption_ceiling())
+print(cloud_import.reserve_bytes_from_env())
 """
-POD_CEILING_SCRIPT = "from exomem import client_artifacts; print(client_artifacts.adoption_ceiling())"
+POD_LIMITS_SCRIPT = """import json
+from exomem import client_artifacts, cloud_import
+print(json.dumps([client_artifacts.adoption_ceiling(), cloud_import.reserve_bytes_from_env()]))
+"""
 RECEIPT_SCRIPT = """import json, sys
 from pathlib import Path
 from exomem import import_stage
@@ -253,6 +262,7 @@ class LargeImportPlan:
 
     sizing: fixture.Sizing
     ceiling: int
+    reserve: int
     cli_image: str
     deadline: float  # a time.monotonic() value
     free_bytes: int  # the runner's free disk when the sizing was made
@@ -276,25 +286,28 @@ def make_plan(*, run_id: str, workdir: Path, cli_image: str, files: int, target_
               deadline: float) -> LargeImportPlan:
     """Size the folders and the volume from the runner's free disk, once the images are built and loaded.
 
-    Without `smoke`, data that cannot show that the volume is below two copies is refused here,
-    before the cluster has a cell: the run could not prove its claim.
+    Without `smoke`, data that cannot show that the volume is below what a run that leaves the first folder's staged
+    copies would need, and below twice the data, is refused here, before the cluster has a cell: the run could not
+    prove its claim. The volume's pool must fit the runner's node disk, and the runner must hold the first folder's
+    peak with that volume.
     """
     free = shutil.disk_usage(workdir).free
-    ceiling = cloud_ceiling(cli_image, run_id)
-    sizing = fixture.plan_sizes(free_bytes=free, ceiling=ceiling, files=files, target_bytes=target_bytes)
+    ceiling, reserve = cloud_limits(cli_image, run_id)
+    sizing = fixture.plan_sizes(free_bytes=free, ceiling=ceiling, reserve=reserve, files=files, target_bytes=target_bytes)
     if not sizing.proves_one_copy_only and not smoke:
         raise fixture.SizingError(f"{sizing.note}; rerun on a runner with more free disk, or ask for a smoke run")
     if drill_cluster.pool_gib_for(sizing.volume_gib) > MAX_POOL_GIB:
         raise fixture.SizingError(f"a {sizing.volume_gib} GiB volume needs a pool of "
                                   f"{drill_cluster.pool_gib_for(sizing.volume_gib)} GiB, above the node disk's {MAX_POOL_GIB} GiB")
-    return LargeImportPlan(sizing, ceiling, cli_image, deadline, free, smoke)
+    return LargeImportPlan(sizing, ceiling, reserve, cli_image, deadline, free, smoke)
 
 
-def cloud_ceiling(image: str, run_id: str) -> int:
-    """The adoption ceiling a Cloud cell runs with, from the image itself, before any cell exists."""
+def cloud_limits(image: str, run_id: str) -> tuple[int, int]:
+    """The adoption ceiling and the import reserve a Cloud cell runs with, from the image itself, before any cell exists."""
     result = run(["docker", "run", "--rm", *docker_labels(run_id), "--network=none", "--tmpfs", "/data",
-                  "--entrypoint=python3", image, "-c", CEILING_SCRIPT])
-    return int(result.stdout.strip().splitlines()[-1])
+                  "--entrypoint=python3", image, "-c", LIMITS_SCRIPT])
+    ceiling, reserve = (int(line) for line in result.stdout.strip().splitlines()[-2:])
+    return ceiling, reserve
 
 
 # --- pure decisions ------------------------------------------------------------------------
@@ -381,6 +394,17 @@ def import_projection(pages: Sequence[Mapping[str, Any]], *, deadline_seconds_le
             "deadline_seconds_left": round(deadline_seconds_left)}
 
 
+def unconsumed_files(steps: Sequence[Mapping[str, Any]], consumed: int | None) -> int | None:
+    """Files that a page filed and `finish` did not consume, so a staged copy that stayed shows on its page.
+
+    The files are each call's rise in the stage's filed count. Unknown (None) when a call's rise or the page's
+    consumed count is unknown; never 0. A negative number means the page consumed more than its own calls filed.
+    """
+    if consumed is None or any(step["files"] is None for step in steps):
+        return None
+    return sum(step["files"] for step in steps) - consumed
+
+
 def is_drained(polls: Sequence[Mapping[str, int | None]], needed: int = DRAIN_POLLS) -> bool:
     """The index queues were all empty on the last `needed` readings. A failed reading is not empty."""
     last = polls[-needed:]
@@ -465,7 +489,7 @@ def counter_growth(rows: Sequence[Mapping[str, Any]], label: str) -> dict[str, i
 
 def decide_verdict(folders: Mapping[str, Mapping[str, Sequence[str]] | None], volume_problems: Sequence[str],
                    findings: Sequence[Any], *, smoke: bool, proves_one_copy_only: bool) -> str:
-    """`pass` needs both folders judged with no problem, on a volume that cannot hold two copies.
+    """`pass` needs both folders judged with no problem, on a volume that cannot hold a staged copy beside the rest.
 
     `smoke_only` is the same result on data that cannot prove the volume claim, or when asked for.
     """
@@ -705,7 +729,7 @@ async def generate(ctx: Context, plan: LargeImportPlan, name: str) -> Folder:
     total = plan.sizing.notes_bytes if first else plan.sizing.media_bytes
     workdir = ctx.stack.workdir
     free = shutil.disk_usage(workdir).free
-    need = fixture.peak_disk_bytes(total) if first else fixture.generation_need_bytes(total)
+    need = fixture.peak_disk_bytes(total, plan.volume_gib) if first else fixture.generation_need_bytes(total)
     if free < need:
         raise fixture.SizingError(f"{free / fixture.GIB:.1f} GiB free cannot hold the {name} folder, which needs {need / fixture.GIB:.1f} GiB")
     # Hidden files go to the cell for the first folder only; the second uses the client's defaults.
@@ -896,7 +920,8 @@ async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder,
         recorded = stored.get("finish") or {}
         page.update({"rows": len(rows), "row_bytes": sum(int(row.get("bytes") or 0) for row in rows),
                      "hidden_files_skipped": stored.get("hidden_files_skipped"), "consumed": recorded.get("consumed"),
-                     "files_per_second": files_per_second(page["file_steps"])})
+                     "files_per_second": files_per_second(page["file_steps"]),
+                     "filed_not_consumed": unconsumed_files(page["file_steps"], recorded.get("consumed"))})
         if stored.get("stage") != {"stage": folder.import_id, "proof": folder.proof}:
             problems["manifest_proof"].append(f"page {page['page']} recorded the stage as {stored.get('stage')}, not its manifest proof")
         consumed += int(recorded.get("consumed") or 0)
@@ -909,7 +934,7 @@ async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder,
                 f"the compact done reply carried residual {reply['filed'].get('residual')!r}, the run holds {recorded.get('residual')!r}")
         print(f"[rehearsal] large-import {folder.name} page {page['page']}: {page['rows']} rows, "
               f"{len(page['file_steps'])} file calls in {page['file_seconds']}s ({page['files_per_second']} files per call second), "
-              f"consumed {page['consumed']}", flush=True)
+              f"consumed {page['consumed']}, filed but not consumed {page['filed_not_consumed']}", flush=True)
     record_paging(folder, pages, plan)
     print(f"[rehearsal] large-import {folder.name} projection: {folder.report['file_projection']}", flush=True)
     folder.residual = (reply.get("filed") or {}).get("residual")
@@ -1008,6 +1033,26 @@ def save_import_failure_evidence(ctx: Context) -> dict[str, Any]:
     }
 
 
+def space_waits(log_text: str) -> dict[str, Any]:
+    """The rebuild's waits for space in a stretch of the cell's JSON-lines app log, with the figures it logged.
+
+    Public readiness shows only that a rebuild waits; the bytes it needed and found free are in the
+    `lexical_repair_finished` event, which is where the report reads them. A line that is not JSON is skipped.
+    """
+    waits: list[Mapping[str, Any]] = []
+    for line in log_text.splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        fields = record.get("fields") if isinstance(record, dict) else None
+        if isinstance(fields, dict) and record.get("event") == "lexical_repair_finished" \
+                and fields.get("result") == "waiting_for_space":
+            waits.append(fields)
+    return {"count": len(waits), "last": ({key: waits[-1].get(key) for key in ("space_needed_bytes", "space_free_bytes")}
+                                          if waits else None)}
+
+
 def save_cell_app_logs(ctx: Context, label: str) -> dict[str, Any]:
     """Keep the tail of each file in the cell's app log folder with the diagnostics, next to the pod log.
 
@@ -1022,7 +1067,8 @@ def save_cell_app_logs(ctx: Context, label: str) -> dict[str, Any]:
     for name, item in found.items():
         tail = gzip.decompress(base64.b64decode(item["tail"]))
         (diagnostics / f"cell-app-{label}-{Path(name).name}").write_bytes(tail)
-        kept[name] = {"file_bytes": item["size"], "kept_bytes": len(tail)}
+        kept[name] = {"file_bytes": item["size"], "kept_bytes": len(tail),
+                      "space_waits": space_waits(tail.decode("utf-8", errors="replace"))}
     return kept
 
 
@@ -1281,7 +1327,7 @@ async def run_large_import(ctx: Context, plan: LargeImportPlan) -> None:
     """The stage body: write into `report.stages["large_import"]` as it goes, so partial results survive."""
     out = ctx.report.stages["large_import"]
     out.update({
-        "mode": "smoke" if plan.smoke else "full", "seed": plan.seed, "ceiling_bytes": plan.ceiling,
+        "mode": "smoke" if plan.smoke else "full", "seed": plan.seed, "ceiling_bytes": plan.ceiling, "import_reserve_bytes": plan.reserve,
         "sizing": asdict(plan.sizing), "runner_free_bytes_at_sizing": plan.free_bytes,
         "volume": {"gib": plan.volume_gib, "boundary": "TopoLVM thin volume on a loop-device pool; the chart caps "
                    "growth at this size, so the claim cannot be enlarged"},
@@ -1292,9 +1338,10 @@ async def run_large_import(ctx: Context, plan: LargeImportPlan) -> None:
     record = StepRecord(0, "large_import")
     await first_session(ctx.a.client, record)
     out["gateway_wait"] = record.evidence
-    in_cell = await asyncio.to_thread(exec_json, ctx, POD_CEILING_SCRIPT)
-    if in_cell != plan.ceiling:
-        raise RuntimeError(f"the cell's adoption ceiling is {in_cell}, the fixture was laid out for {plan.ceiling}")
+    in_cell = await asyncio.to_thread(exec_json, ctx, POD_LIMITS_SCRIPT)
+    if in_cell != [plan.ceiling, plan.reserve]:
+        raise RuntimeError(f"the cell's adoption ceiling and import reserve are {in_cell}, "
+                           f"the fixture and the volume were sized for {[plan.ceiling, plan.reserve]}")
     agent, sampler = Agent(ctx.a.client), Sampler(ctx, plan)
     task = asyncio.create_task(sampler.run())
     space: dict[str, int] = {}
