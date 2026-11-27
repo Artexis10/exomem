@@ -44,13 +44,14 @@ from .write import Origin, frontmatter_json
 #: A migration's private directory beside the live store; a run that died leaves one, and the next migrate or rollback removes it.
 STAGING_PREFIX = ".exomem-vault-store-migration-"
 _COPY_BATCH = 5000
-#: The longest that apply spends catching the graph up to the files, checked between passes. A pass clears at most
-#: `graph_drain.DRAIN_LIMIT` receipts and a whole-vault marker is one long pass, so a deep queue takes many.
-#: Past it, `exomem maintain --reconcile --rebuild-graph` (no ceiling) is the remedy.
+#: The longest that apply spends draining queued graph repair, checked between passes. A pass
+#: clears at most `graph_drain.DRAIN_LIMIT` receipts and a whole-vault marker is one long pass,
+#: so a deep queue takes many. Past it the apply goes on: the staged graph rows come from the
+#: files, and the result counts what is left.
 CATCH_UP_SECONDS = 600.0
 #: Consecutive passes that clear nothing end the catch-up. What is left is receipts the drain declines; each pass
 #: rotates declined ones behind the rest, so the stall rule steps past at most this many times `DRAIN_LIMIT` of them.
-#: A deeper residue ends the catch-up early, which refuses only if the graph is still behind (nothing is staged).
+#: A deeper residue ends the catch-up early; the apply goes on and names what is left.
 CATCH_UP_STALLED_PASSES = 3
 CATCH_UP_RETRY_SECONDS = 1.0
 
@@ -375,7 +376,8 @@ def preflight(vault_root: Path) -> dict:
         # Not a refusal: apply drains this queue before it stages, so the dry run only says so.
         report["queued_graph_work"] = {
             **queued,
-            "apply": "catches the graph index up to the files before it stages",
+            "apply": "drains this queue for a bounded time before it stages, "
+            "and goes on if it stops early",
         }
     return report
 
