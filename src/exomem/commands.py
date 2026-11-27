@@ -16118,6 +16118,43 @@ def refusal_before_queueing(command: Command, arguments: Mapping[str, Any]) -> E
     return None
 
 
+#: How long a busy save's declared check may read: the declaration, then the queue. It only buys an earlier
+#: refusal, so a slow read gives the save up to the queue it would have joined, which is what its caller was
+#: already going to wait on.
+_DECLARED_REFUSAL_SECONDS = 0.5
+
+
+def declared_refusal_before_queueing(
+    command: Command, arguments: Mapping[str, Any], vault_root: Path
+) -> Exception | None:
+    """The refusal that a save's values get from what the vault declares, or None.
+
+    `refusal_before_queueing` reads nothing. This one reads a declaration (a collection's manifest),
+    so the intake runs it only for a save that is about to queue. The refusal holds only while no open
+    queued save can change that declaration before this one replays: a save of a command that declares
+    `Command.sets_any_frontmatter_field`, whichever page it names, or a Records save that carries a
+    manifest's text. A declaration change made outside the queue and not committed at this check, such
+    as a direct revise that holds the boundary, is not seen: the check refuses a value that the change
+    adds, and the refusal tells the caller to send it again once that change has committed.
+    """
+    if command.name != operation_entries.RECORDS.command:
+        return None
+    from . import request_budget, write_intake
+
+    budget = request_budget.RequestBudget(seconds=_DECLARED_REFUSAL_SECONDS)
+    refusal = record_memory_module.value_refusal(vault_root, arguments, budget)
+    if refusal is None:
+        return None
+    changing = write_intake.may_change_declaration(
+        vault_root,
+        rewriting=tuple(item.name for item in PRODUCT_COMMANDS if item.sets_any_frontmatter_field),
+        manifest_command=operation_entries.RECORDS.command,
+        manifest_field=operation_entries.MANIFEST_TEXT_FIELD,
+        seconds=budget.remaining(),
+    )
+    return refusal if changing is False else None
+
+
 _MCRC = frozenset({"mcp", "rest", "cli"})
 _RC = frozenset({"rest", "cli"})
 # `get_video_frames` returns MCP image content blocks (a FastMCP ToolResult) —
@@ -16357,7 +16394,8 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "path",
         _MCRC,
         ("edit",),
-        {"public_title": "Edit a knowledge note", "preferred_name": "edit_note", "surface": "primary", "actions": ("update",), "first_run_safe": False},
+        {"public_title": "Edit a knowledge note", "preferred_name": "edit_note", "surface": "primary", "actions": ("update",), "first_run_safe": False,
+         "sets_any_frontmatter_field": True},
     ),
     (
         "observe_memory",
@@ -16980,6 +17018,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 outcome_verb=_COMMAND_OUTCOME_VERBS.get(name),
                 names_pages=name in _PAGE_NAMING_COMMANDS,
                 busy_intake=name in _BUSY_INTAKE_COMMANDS,
+                sets_any_frontmatter_field=bool(meta.get("sets_any_frontmatter_field", False)),
                 prepare_arguments=meta.get("prepare_arguments"),
             )
         )

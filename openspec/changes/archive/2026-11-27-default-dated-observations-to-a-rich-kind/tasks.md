@@ -20,5 +20,5 @@
 
 ## 4. Delivery
 
-- [ ] 4.1 Independent review of the finished batch.
-- [ ] 4.2 Merge, then archive this change with `openspec archive` in the same delivery as the merge or the next release.
+- [x] 4.1 Independent review of the finished batch. Evidence: #3338 approved by a blind review after three rounds.
+- [x] 4.2 Merge, then archive this change with `openspec archive` in the same delivery as the merge or the next release. Evidence: #3338 merged as 061b5b1c7; this delivery archives the change.

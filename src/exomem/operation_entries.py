@@ -378,8 +378,10 @@ _RECORD_QUERY_FIELDS = (
     "aggregate", "date_from", "date_to", "date_column", "expand_children", "expand_child",
     "continuation", "include_agent_history", "output_format", "query", "item_key",
 )
+#: The field that carries a manifest's whole text. A save that sends it can change what a collection declares.
+MANIFEST_TEXT_FIELD = "manifest_text"
 _MANIFEST_REVISION_FIELDS = (
-    "collection", "manifest_text", "expected_manifest_hash", "expected_container_hash", "why",
+    "collection", MANIFEST_TEXT_FIELD, "expected_manifest_hash", "expected_container_hash", "why",
 )
 _REBASELINE_FIELDS = (
     "collection", "expected_manifest_hash", "expected_container_hash",

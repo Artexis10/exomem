@@ -4716,6 +4716,22 @@ def _issue_refusal(issues: list[_Issue]) -> collections.CollectionError:
     return collections.CollectionError(first.code, first.headline or first.reason, details)
 
 
+def supplied_value_refusal(
+    manifest: collections.CollectionManifest, values: Mapping[str, Any]
+) -> collections.CollectionError | None:
+    """The refusal that a write of `values` gets from the manifest's per-field rules alone, or None.
+
+    It runs the collector that `_validate_values` runs, over the declared fields that `values` names.
+    Nothing else decides it: not a required field, an undeclared name or the row's round trip, which
+    another field, a held candidate or an earlier write can still change. A value it refuses, the commit
+    refuses with the same code, field and allowed values.
+    """
+    issues: list[_Issue] = []
+    supplied = {name: value for name, value in values.items() if name in manifest.schema.fields}
+    _collect_schema_issues(manifest.schema, supplied, issues, supplied, check_required=False)
+    return _issue_refusal(issues) if issues else None
+
+
 def _value_class(value: Any) -> str:
     """The received value's JSON class, never the value itself."""
     if value is None:
@@ -4740,12 +4756,14 @@ def _collect_schema_issues(
     values: Mapping[str, Any],
     issues: list[_Issue],
     written: Collection[str] | None,
+    *,
+    check_required: bool = True,
 ) -> dict[str, Any]:
     """Run the shipped per-field schema rules field by field, in declared order."""
     value = dict(values)
     for name, spec in schema.fields.items():
         supplied = written is None or name in written
-        if spec.required and (name not in value or (supplied and value[name] is None)):
+        if check_required and spec.required and (name not in value or (supplied and value[name] is None)):
             gap = "missing" if name not in value else "null"
             issues.append(
                 _Issue(

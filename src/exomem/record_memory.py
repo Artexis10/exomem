@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import math
 from collections.abc import Mapping
 from pathlib import Path
@@ -17,12 +18,15 @@ from . import (
     record_governance,
     record_history,
     records,
+    request_budget,
     structured_collections,
     writer_lease,
 )
 from .cli_ops import OpError, action_argument_contract
 from .query_compat import public_filter_annotation
 from .structured_collections import CollectionError, collection_remediation
+
+log = logging.getLogger(__name__)
 
 _QueryFilters = public_filter_annotation()
 
@@ -970,6 +974,71 @@ def _require_one_history_selector(given: Mapping[str, Any]) -> None:
             "history takes exactly one of " + ", ".join(operation_entries.HISTORY_SELECTORS)
             + (f"; got {', '.join(chosen)}" if chosen else "")
         )
+
+
+_RESEND_WITH_A_DECLARED_VALUE = (
+    "Nothing was saved and nothing is held. Send the call again with a value the collection declares. If a change"
+    " that declares this value is still being saved, send the same value again once that change has committed."
+)
+
+
+def _declared_manifest(
+    vault_root: Path, collection: str, budget: request_budget.RequestBudget
+) -> structured_collections.CollectionManifest | None:
+    """The Records manifest that `collection` names, as a request thread reads it now, or None where that is unknown.
+
+    A title, path, UUID or reference resolves as a read resolves it. A collection that the store owns is read
+    from the store's last commit beside the store thread (`read_served`): it never queues behind that thread
+    and never reads the projected `_collection.md`, which can lag the store. The read stops at `budget` and
+    answers None for any refusal, such as a busy or unserved store or a title that several collections carry.
+    It records no release: a refusal it answers None for reaches no caller, and a mutation's own resolution
+    of its collection records none either. Its decisions go to a collector that nothing emits, which a nested
+    read with its own receipt boundary joins instead of opening one that it would emit.
+    """
+    from .collection_store import runtime as store_runtime
+    from .governance import egress
+
+    def read() -> structured_collections.CollectionManifest:
+        with egress.disclosure_boundary(vault_root, "record_value_check", sink=True):
+            path = collection_refs.resolve_collection(vault_root, collection, profile="records")
+            return record_governance.require_records_profile(
+                record_governance.resolve_collection_without_receipt(vault_root, path)
+            )
+
+    try:
+        with request_budget.checking(request_budget.ReadCheckpoint(budget)):
+            return store_runtime.read_served(vault_root, read)
+    except request_budget.ReadBudgetExhausted:
+        return None
+    except Exception as error:  # noqa: BLE001 - an unknown, withheld or unreadable collection keeps the replay's own refusal
+        log.debug("a busy Records save could not read its collection's declaration: %s", type(error).__name__)
+        return None
+
+
+def value_refusal(
+    vault_root: Path, arguments: Mapping[str, Any], budget: request_budget.RequestBudget
+) -> OpError | None:
+    """The refusal that the collection's declared fields give an append's `item` or an update's `changes`, or None.
+
+    The busy intake raises it instead of queueing a save whose replay would refuse the same value
+    (`commands.declared_refusal_before_queueing`, which also decides whether a queued save may change the
+    declaration first). It takes no lock and no store writer, and reads within `budget`. Whatever is not
+    certain answers None: a collection this thread cannot read now, or a manifest that the caller may not see.
+    """
+    action = arguments.get("action")
+    values = arguments.get("item") if action == "append" else arguments.get("changes") if action == "update" else None
+    collection = arguments.get("collection")
+    if not isinstance(values, Mapping) or not values or type(collection) is not str:
+        return None
+    manifest = _declared_manifest(Path(vault_root), collection, budget)
+    if manifest is None:
+        return None
+    refusal = records.supplied_value_refusal(manifest, values)
+    if refusal is None:
+        return None
+    return OpError(
+        refusal.code, refusal.reason, _RESEND_WITH_A_DECLARED_VALUE, details=_json_safe_details(refusal.details)
+    )
 
 
 def refuse_arguments(detail: str) -> Never:
