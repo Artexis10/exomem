@@ -284,6 +284,23 @@ def _registered_classes(
     return {**values, governance.SENSITIVITY: list(canonical)}
 
 
+def _with_row_sensitivity(
+    root: Path, manifest: collections.CollectionManifest, values: Mapping[str, Any], result: dict[str, Any],
+    *, rel_path: str,
+) -> dict[str, Any]:
+    """A committed row's result with its own classes, as a page capture reports them. The classes are the
+    canonical ones `_registered_classes` already checked, so nothing is validated after the write; a row
+    without classes reports nothing, and a store collection's own report stays as it is."""
+    from . import sensitivity_classes
+    from .collection_store import governance
+
+    own = governance._own_classes(manifest.schema, values)
+    if not own or "sensitivity" in result:
+        return result
+    found = sensitivity_classes.Classification(tuple(own), sensitivity_classes.BASIS_DECLARED)
+    return {**result, "sensitivity": sensitivity_classes.report(root, found, rel_path=rel_path)}
+
+
 def append_record(
     vault_root: Path,
     collection: str | Path | collections.CollectionManifest,
@@ -630,6 +647,7 @@ def append_record(
     )
     sweep = _capture_sweep_carrier(root, after_manifest, key=key)
     committed = {"due_state": advisory, **committed} if advisory else committed
+    committed = _with_row_sensitivity(root, after_manifest, values, committed, rel_path=committed_path)
     return {"capture_sweep": sweep, **committed} if sweep else committed
 
 
@@ -1444,7 +1462,7 @@ def bulk_upsert_records(
                     )
                     continue
                 source_rel, source_guard_row = resolved.path, resolved.guard
-                values = _bulk_row_values(manifest, raw["item"], source_rel)
+                values = _bulk_row_values(manifest, _registered_classes(root, manifest, raw["item"]), source_rel)
             except collections.CollectionError as error:
                 outcomes.append(_bulk_error_row(index, error))
                 continue

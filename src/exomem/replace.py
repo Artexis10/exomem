@@ -65,6 +65,7 @@ from .vault import (
     render_wikilink_target,
     rotate_log_if_needed,
 )
+from .vocabulary import registry
 
 log = logging.getLogger(__name__)
 
@@ -640,10 +641,10 @@ def replace(
             vocabulary_decision=vocabulary_decision,
             # A replacement holds the same material, so it keeps the registered classes of the page it
             # supersedes. A class the registry no longer holds is not carried, and never stops the replacement.
-            sensitivity=[
-                key for key in sensitivity_classes.classes_of(old_parsed.frontmatter)
+            sensitivity=list(dict.fromkeys(
+                key for key in map(registry.token, sensitivity_classes.classes_of(old_parsed.frontmatter))
                 if key in sensitivity_classes.active_keys(root)
-            ] or None,
+            )) or None,
             _return_prepared=True,
             _supersedes_target=old_link_target,
             _preflight_operation="replacement",

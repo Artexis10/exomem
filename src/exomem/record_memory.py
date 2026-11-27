@@ -47,22 +47,6 @@ _QUERY_SHAPING_FIELDS = frozenset(
 )
 
 
-
-def _with_row_sensitivity(vault_root: Path, manifest: Any, item: Mapping[str, Any] | None, result: Any) -> Any:
-    """A file collection's append result with the row's own classes, as a page capture reports them.
-
-    A store collection reports them itself, and a row without classes reports nothing, as on a store.
-    """
-    from . import sensitivity_classes
-    from .collection_store import governance
-
-    own = governance._own_classes(manifest.schema, item or {})
-    if not own or not isinstance(result, dict) or "sensitivity" in result:
-        return result
-    classes = sensitivity_classes.validated(vault_root, own)
-    found = sensitivity_classes.Classification(classes, sensitivity_classes.BASIS_DECLARED)
-    return {**result, "sensitivity": sensitivity_classes.report(vault_root, found, rel_path=None)}
-
 def record_memory(
     vault_root: Path,
     action: Literal[
@@ -419,9 +403,7 @@ def record_memory(
                 append_kwargs["body"] = body
             if delivery is not None:
                 append_kwargs["delivery"] = delivery
-            return _with_row_sensitivity(
-                vault_root, manifest, item, records.append_record(vault_root, manifest, **append_kwargs)
-            )
+            return records.append_record(vault_root, manifest, **append_kwargs)
         if action == "bulk_upsert":
             assert collection is not None
             assert why is not None
