@@ -39,7 +39,7 @@ ALBUM = "Takeout/Google Photos/Lake trip"
 UPLOADED = dt.datetime(2025, 1, 9, 8, 30, tzinfo=dt.UTC)
 APPLIED, EMPTY = "IMPORT_SIDECAR_APPLIED", "IMPORT_SIDECAR_EMPTY"
 ALREADY, NOT_FILED = "IMPORT_SIDECAR_PHOTO_ALREADY_IMPORTED", "IMPORT_SIDECAR_PHOTO_NOT_FILED"
-UNPAIRED = "IMPORT_SIDECAR_UNPAIRED"
+UNPAIRED, UNREADABLE = "IMPORT_SIDECAR_UNPAIRED", "IMPORT_SIDECAR_UNREADABLE"
 
 
 def taken_at(number: int) -> dt.datetime:
@@ -356,6 +356,25 @@ def test_the_same_takeout_imported_again_files_nothing_and_counts_every_sidecar_
     assert view["left_out"]["sidecars"] == {"with_time": 0, "captioned": 0, "time_skipped": 0}
 
 
+def test_the_reply_to_a_second_import_says_the_sidecars_were_not_applied_because_the_vault_held_the_photos(vault: Path) -> None:
+    """Catches a reply that reads as if the new sidecars dated the photos, when the vault already held them and kept its own dates."""
+    from exomem import adoption_run
+
+    members = {f"{ALBUM}/IMG_80.jpg": photo("IMG_80.jpg"), f"{ALBUM}/IMG_80.jpg.json": sidecar("IMG_80.jpg", taken=taken_at(80), caption="Kept")}
+    file_to_done(vault, stage_takeout(vault, members), calls=200)
+    stage = f"_Imports/{stage_takeout(vault, members)}"
+
+    reply = adoption_run.file(vault, path=stage)
+    for _ in range(200):
+        if reply["filing"] != "working":
+            break
+        reply = adoption_run.file(vault, path=stage, continuation=reply["continuation"])
+
+    residual = reply["filed"]["residual"]
+    assert residual["unfiled"]["files"] == 0  # the photo is in the vault, so nothing needs the person
+    assert "time and caption were not applied, because the vault already held its photo" in residual["summary"]
+
+
 def test_an_album_copy_of_a_photo_already_filed_counts_its_sidecar_as_already_imported_and_not_for_review(vault: Path) -> None:
     """Catches a copy in a second album whose sidecar is reported as a photo that did not file, so the owner reviews a photo that is in the vault."""
     shared = JPEG + b"in two albums"
@@ -426,15 +445,15 @@ def test_a_sidecar_time_at_or_before_1970_gives_no_time() -> None:
         assert facts.time is None and not facts.time_skipped
 
 
-def test_a_sidecar_that_cannot_be_read_ends_the_pass_in_part_and_releases_the_photos(vault: Path) -> None:
-    """Catches a read fault that holds every photo back for good, or one that reads as a clean filing."""
+def test_a_sidecar_that_cannot_be_read_is_listed_alone_while_the_pass_reads_on_and_no_json_files(vault: Path) -> None:
+    """Catches a read fault that ends the pass early: every sidecar after it would file as a JSON Source, position data in plain text."""
     members = {}
     for number in range(4):
         name = f"IMG_{number}.jpg"
         members[f"{ALBUM}/{name}"] = photo(name)
-        members[f"{ALBUM}/{name}.json"] = sidecar(name, taken=taken_at(number))
+        members[f"{ALBUM}/{name}.json"] = sidecar(name, taken=taken_at(number), caption=f"Shot {number}")
     import_id = stage_takeout(vault, members)
-    unreadable = vault / "_Imports" / import_id / ALBUM / "IMG_2.jpg.json"
+    unreadable = vault / "_Imports" / import_id / ALBUM / "IMG_1.jpg.json"
     unreadable.unlink()
     os.symlink(vault / "_Imports" / import_id / ALBUM / "IMG_3.jpg.json", unreadable)  # a link, which the pass never follows
 
@@ -442,9 +461,11 @@ def test_a_sidecar_that_cannot_be_read_ends_the_pass_in_part_and_releases_the_ph
 
     pages = filed_files(vault, import_id)
     assert {path for path in pages if path.endswith(".jpg")} == {f"{ALBUM}/IMG_{number}.jpg" for number in range(4)}
-    assert time_of(pages, f"{ALBUM}/IMG_0.jpg") and time_of(pages, f"{ALBUM}/IMG_1.jpg")  # read before the fault
+    assert not {path for path in pages if path.endswith(".json")}  # no sidecar files as a Source, read or not
+    assert [time_of(pages, f"{ALBUM}/IMG_{number}.jpg") is not None for number in range(4)] == [True, False, True, True]  # read on after the fault
     assert view["state"] == "done"
-    assert "IMPORT_EXPORT_PARTIAL" in view["left_out"]["by_reason"]
+    assert view["left_out"]["by_reason"] == {APPLIED: 3, UNREADABLE: 1, "IMPORT_EXPORT_PARTIAL": 1}
+    assert [row["unreadable"] for row in expansion_rows(vault, import_id) if "unreadable" in row] == [f"{ALBUM}/IMG_1.jpg.json"]
     assert expansion_rows(vault, import_id)[-1]["sidecars_end"] == "partial"
 
 
@@ -452,7 +473,7 @@ def test_a_caption_files_in_the_description_section_with_a_card_number_removed_a
     """Catches a caption that files whole, card number included, or one that no search can reach."""
     from test_capture_metadata_index import _reset
 
-    _id, pages, _view = one_photo_albums(vault, {
+    import_id, pages, _view = one_photo_albums(vault, {
         f"{ALBUM}/IMG_60.jpg": photo("IMG_60.jpg"),
         f"{ALBUM}/IMG_60.jpg.json": sidecar(
             "IMG_60.jpg", taken=taken_at(60), caption="Regatta dinner, paid with card 4111 1111 1111 1111"),
@@ -462,6 +483,9 @@ def test_a_caption_files_in_the_description_section_with_a_card_number_removed_a
     # The description section alone: the rest of a page holds random ids, digests and times in which "4111" can occur by chance.
     section = text.split("\n## Description\n", 1)[1].split("\n## ", 1)[0]
     assert section.strip() == "Regatta dinner, paid with card [card number removed, ends 1111]"
+    # The stage's state folder keeps the sidecar's row until the stage is discarded: no card number may sit in it either.
+    captions = [row["caption"] for row in expansion_rows(vault, import_id) if "sidecar" in row]
+    assert captions == ["Regatta dinner, paid with card [card number removed, ends 1111]"]
     if lexstore.fts5_available():
         _reset(vault)
         found = {query: [hit.path for hit in find_module.find(vault, query=query, scope="kb-only", mode="keyword", graph=False, result_level="page", limit=10)]

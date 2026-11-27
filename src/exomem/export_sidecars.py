@@ -3,18 +3,21 @@
 `export_expansion.expand` runs this pass first, with the same call budget as an export's read. It derives no files. For
 each recognised sidecar (see `source_formats`, the `photo-sidecar` parser) it appends one row to the stage's expansion
 rows and moves the pass's cursor past it. A row holds the sidecar's path, its name key (`export_pairing.Key`) and the
-time and caption that it carries. It never holds a position. When the last sidecar is read, or a read fault ends the
-pass, the pass decides every pair in one step and appends one `pair` row for each sidecar, then an `end` row:
+time and caption that it carries. It never holds a position. When the last sidecar is read, the pass decides every
+pair in one step and appends one `pair` row for each sidecar, then an `end` row:
 
-- `{"sidecar": path, "base", "copy", "limit", "title", "time", "skip", "caption"}`: one sidecar that was read.
+- `{"sidecar": path, "base", "copy", "limit", "title", "time", "skip", "caption"}`: one sidecar that was read. Its caption
+  is redacted before the row is written, as an upload's description is, so no row keeps a card number or a credential.
+- `{"unreadable": path}`: a file that could be a sidecar and could not be read. The pass reads on past it.
 - `{"pair": path, "photo": photo path or None, "why": None | "no-photo" | "ambiguous"}`: the decision about it.
-- `{"sidecars_end": "done" | "partial", "code", "fault"}`: the pass ended; a fault names the file it could not read.
+- `{"sidecars_end": "done" | "partial", "code", "fault"}`: the pass ended; it is `partial` when a file could not be
+  read, and `fault` names the first such file.
 
 The record's state caches the pass as `{"format", "state", "code", "cursor", "fault"}`; a read replays the rows that
 came after the state. While the pass is `working`, the stage's images and videos, and the JSON files that it has not yet
 examined, stay out of selection (`Hold`), so that no photo files before its sidecar is read. A recognised sidecar never
-files as a Source. A stage with no sidecar has no row of the pass, and a stage with no record at all has no state of
-it either. A stage that grows after the pass ended is not read again.
+files as a Source, and neither does a file that could not be read. A stage with no sidecar has no row of the pass, and a
+stage with no record at all has no state of it either. A stage that grows after the pass ended is not read again.
 The sidecars are untrusted content: a value is kept as data, and nothing in a sidecar is followed, run or sent to a model.
 """
 
@@ -26,7 +29,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Protocol
 
-from . import export_pairing, export_parsers, export_photos, import_stage, source_formats
+from . import export_pairing, export_parsers, export_photos, import_stage, preserve, source_formats
 from .capture_metadata import KINDS
 from .media_types import media_type_for
 
@@ -42,6 +45,8 @@ CODE_EMPTY = "IMPORT_SIDECAR_EMPTY"
 CODE_PHOTO_ALREADY_IMPORTED = "IMPORT_SIDECAR_PHOTO_ALREADY_IMPORTED"
 CODE_PHOTO_NOT_FILED = "IMPORT_SIDECAR_PHOTO_NOT_FILED"
 CODE_UNPAIRED = "IMPORT_SIDECAR_UNPAIRED"
+#: A file that could be a sidecar and could not be read: it stays staged, and nothing is known of what it holds.
+CODE_UNREADABLE = "IMPORT_SIDECAR_UNREADABLE"
 #: What became of a paired photo in the import: its Source was stored now, an earlier Source already held its bytes (it
 #: is in the vault), or it did not file (it failed, or no outcome says otherwise). `adoption_run` reads the outcomes.
 STORED, ALREADY_IMPORTED, NOT_FILED = "stored", "already-imported", "not-filed"  # nosemgrep: ep-word-set -- the closed results of one photo's filing, this module's own protocol with `adoption_run`.
@@ -51,13 +56,14 @@ STORED, ALREADY_IMPORTED, NOT_FILED = "stored", "already-imported", "not-filed" 
 STAYS: Mapping[str, tuple[bool, str]] = MappingProxyType({  # nosemgrep: ep-word-set, ep-word-dict -- this module's own closed reason codes, a protocol of the residual report and not vocabulary.
     CODE_APPLIED: (True, "{n} sidecar paired with its filed photo, whose time applies only where the photo states none"),
     CODE_EMPTY: (True, "{n} sidecar paired with its filed photo, with no time or caption to give"),
-    CODE_PHOTO_ALREADY_IMPORTED: (True, "{n} sidecar whose photo was already in the vault"),
+    CODE_PHOTO_ALREADY_IMPORTED: (True, "{n} sidecar whose time and caption were not applied, because the vault already held its photo"),
     CODE_PHOTO_NOT_FILED: (False, "{n} sidecar whose photo did not file"),
     CODE_UNPAIRED: (False, "{n} sidecar that no one photo fits"),
+    CODE_UNREADABLE: (False, "{n} possible sidecar that could not be read"),
 })
 #: The rows are appended, fsynced and counted this many at a time, so a pass costs one fsync for each batch.
 _BATCH = 200
-_ROW_KEYS = ("sidecar", "pair", "sidecars_end")  # nosemgrep: ep-word-set -- the closed row keys of the pass: this module's own record format.
+_ROW_KEYS = ("sidecar", "unreadable", "pair", "sidecars_end")  # nosemgrep: ep-word-set -- the closed row keys of the pass: this module's own record format.
 
 
 class Record(Protocol):
@@ -73,10 +79,11 @@ class Record(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class Rows:
-    """The pass's rows: each sidecar that was read, by its path in the stage, and each decision about it."""
+    """The pass's rows: each sidecar that was read, by its path in the stage, each decision about it and each file that could not be read."""
 
     sidecars: dict[str, dict]
     pairs: dict[str, tuple[str | None, str | None]]  # sidecar path -> (photo path, None) or (None, why it is unpaired)
+    unreadable: frozenset[str]  # the paths that could not be read
     end: dict | None  # the row that ended the pass, if it ended
 
 
@@ -104,8 +111,8 @@ def is_row(row: dict) -> bool:
 
 
 def apply(entry: dict, row: dict) -> None:
-    """Count one row of the pass into its state entry: the cursor moves past a sidecar, and an end row ends the pass."""
-    path = row.get("sidecar")
+    """Count one row of the pass into its state entry: the cursor moves past a file read or not, and an end row ends the pass."""
+    path = row.get("sidecar") or row.get("unreadable")
     if isinstance(path, str) and path > entry["cursor"]:
         entry["cursor"] = path
     end = row.get("sidecars_end")
@@ -119,16 +126,19 @@ def read_rows(root: Path, import_id: str) -> Rows:
     """One pass over the expansion rows for the pass's own rows; when a sidecar or a pair has two rows, the last one counts."""
     sidecars: dict[str, dict] = {}
     pairs: dict[str, tuple[str | None, str | None]] = {}
+    unreadable: set[str] = set()
     end = None
     for _after, row in import_stage.read_expansion_rows(root, import_id):
         if isinstance(path := row.get("sidecar"), str) and _key_of(row) is not None:
             sidecars[path] = row
+        elif isinstance(path := row.get("unreadable"), str):
+            unreadable.add(path)
         elif isinstance(path := row.get("pair"), str):
             photo, why = row.get("photo"), row.get("why")
             pairs[path] = (photo if isinstance(photo, str) else None, why if isinstance(why, str) else None)
         elif row.get("sidecars_end") in (DONE, PARTIAL):
             end = row
-    return Rows(sidecars, pairs, end)
+    return Rows(sidecars, pairs, frozenset(unreadable - sidecars.keys()), end)  # a file that was read since counts as read
 
 
 def read(root: Path, import_id: str) -> Reading:
@@ -137,8 +147,9 @@ def read(root: Path, import_id: str) -> Reading:
     held = state.get("sidecars") if isinstance(state, dict) else None
     rows = read_rows(root, import_id)
     entry = held if isinstance(held, dict) else new_entry(None)
-    if rows.sidecars or rows.end is not None:
-        entry = {**entry, "cursor": max([entry["cursor"] if isinstance(entry.get("cursor"), str) else "", *rows.sidecars])}
+    if rows.sidecars or rows.unreadable or rows.end is not None:
+        cursor = entry["cursor"] if isinstance(entry.get("cursor"), str) else ""
+        entry = {**entry, "cursor": max([cursor, *rows.sidecars, *rows.unreadable])}
         if rows.end is not None:
             apply(entry, rows.end)  # the rows outrank a state that a crash left behind them
     elif not isinstance(held, dict):
@@ -161,13 +172,15 @@ def _key_of(row: dict) -> export_pairing.Key | None:
 class Hold:
     """Which staged files stay out of selection while the stage's sidecars are read, and which never file.
 
-    A recognised sidecar never files. While the pass works, an image or a video waits, and so does a JSON file that
-    the pass has not examined yet: it may be a sidecar. Both ends hold by media type and name, never as a list of paths.
+    A recognised sidecar never files, and neither does a file that the pass could not read: it may be a sidecar. While
+    the pass works, an image or a video waits, and so does a JSON file that the pass has not examined yet. The waiting
+    is by media type and name, never a list of paths.
     """
 
     def __init__(self, reading: Reading, known: tuple[source_formats.SourceFormat, ...], prefix: str) -> None:
         self.prefix = prefix  # what a path of the vault carries before its path in the stage
         self._sidecars = reading.rows.sidecars
+        self._unreadable = reading.rows.unreadable
         self._working = reading.working
         self._cursor = reading.cursor
         self._known = known
@@ -176,6 +189,8 @@ class Hold:
         """Why the staged file `path` (relative to the stage) stays out of selection, or None."""
         if path in self._sidecars:
             return CODE_READ
+        if path in self._unreadable:
+            return CODE_UNREADABLE
         if not self._working:
             return None
         if media_type_for(path) in KINDS:
@@ -221,17 +236,17 @@ def settle(reading: Reading, photo_filing: Callable[[str], str]) -> tuple[dict[s
     """Each sidecar, by its path in the stage, with the one reason that it stays, and the counts of the stage's sidecars.
 
     The reason follows the photo's filing result (`photo_filing` says, for the photo at a path in the stage, whether it
-    was `STORED`, was `ALREADY_IMPORTED` or did not file): an unpaired sidecar is `UNPAIRED`; one whose photo did not file
-    is `PHOTO_NOT_FILED`; one whose photo an earlier Source already holds is `PHOTO_ALREADY_IMPORTED`; any other is `APPLIED`
+    was `STORED`, was `ALREADY_IMPORTED` or did not file): a file that could not be read is `UNREADABLE`; an unpaired
+    sidecar is `UNPAIRED`; one whose photo did not file is `PHOTO_NOT_FILED`; one whose photo an earlier Source already holds is `PHOTO_ALREADY_IMPORTED`; any other is `APPLIED`
     when it carried a time or a caption, else `EMPTY`. `APPLIED` says that the sidecar was paired with a photo that filed
     now: its time applies only where the photo states none.
 
     The counts are over the sidecars whose photo filed now: those that carry a usable time (`with_time`), those that carry a
     caption, and those whose time was skipped as an upload time. A stage with no sidecar has no counts, never zero ones.
     """
+    codes = dict.fromkeys(reading.rows.unreadable, CODE_UNREADABLE)
     if not reading.rows.sidecars:
-        return {}, None
-    codes: dict[str, str] = {}
+        return codes, None
     counts = {"with_time": 0, "captioned": 0, "time_skipped": 0}
     for path, row in reading.rows.sidecars.items():
         photo = reading.rows.pairs.get(path, (None, None))[0]
@@ -258,8 +273,8 @@ def advance(
     """Read the stage's sidecars from the pass's cursor until all are read or `keep_going` says the call is out of budget.
 
     `listing` is the stage's files by path in the stage, sorted. True when the pass no longer works. A call always
-    reads one file, so a call that starts with no budget left still moves on. A file that cannot be read ends the
-    pass as `partial`: the sidecars read before it stay, and the photos are released.
+    reads one file, so a call that starts with no budget left still moves on. A file that cannot be read gets its own
+    `unreadable` row and the pass reads on, so no JSON file after it files unexamined; the pass then ends as `partial`.
     """
     known = photo_formats(root)
     entry = record.sidecars
@@ -275,16 +290,20 @@ def advance(
         return True  # a stage with no JSON file to read has no pass, and so no record
     base = root / import_stage.STAGE_DIR / record.import_id
     buffered: list[dict] = []
-    examined, fault, out_of_budget = cursor, None, False
+    examined, out_of_budget = cursor, False
     for handled, path in enumerate(candidates):
         if handled and not keep_going():
             out_of_budget = True
             break
         try:
             hit = _examine(base / path, known)
-        except OSError:
-            fault = path
-            break
+        except OSError:  # a file that is gone or cannot be opened: listed alone, and never filed unexamined
+            if record.sidecars is None:
+                record.sidecars = new_entry(None)
+                record.save(root)  # before the first row, as for the first sidecar
+            buffered.append({"unreadable": path})
+            examined = path
+            continue
         examined = path
         if hit is None:
             continue
@@ -309,7 +328,7 @@ def advance(
     if out_of_budget:
         record.save(root)
         return False
-    _end(root, record, [path for path, _size in listing if not skip(path)], known, fault)
+    _end(root, record, [path for path, _size in listing if not skip(path)], known)
     return True
 
 
@@ -324,15 +343,18 @@ def _examine(path: Path, known: tuple[source_formats.SourceFormat, ...]) -> tupl
 
 
 def _row(path: str, key: export_pairing.Key, facts: export_photos.Facts) -> dict:
+    """One sidecar's row. The caption is redacted as an upload's description is (`preserve`), before it reaches disk."""
+    _text, caption, _extracted, _warnings = preserve.redact_capture_text(description=facts.caption)
     return {
         "sidecar": path, "base": key.base, "copy": key.copy, "limit": key.at_limit, "title": key.title,
-        "time": facts.time, "skip": facts.time_skipped, "caption": facts.caption}
+        "time": facts.time, "skip": facts.time_skipped, "caption": caption}
 
 
-def _end(root: Path, record: Record, photos: list[str], known: tuple[source_formats.SourceFormat, ...], fault: str | None) -> None:
+def _end(root: Path, record: Record, photos: list[str], known: tuple[source_formats.SourceFormat, ...]) -> None:
     """End the pass: decide every pair from the rows, then record the end, as `done`, or as `partial` when a file could not be read."""
     entry: dict[str, Any] = record.sidecars  # type: ignore[assignment]
     rows = read_rows(root, record.import_id)
+    fault = min(rows.unreadable, default=None)  # the first file that could not be read, over every call of the pass
     if not rows.sidecars and fault is None:
         # No sidecar was found: the pass has no row to write. The state remembers it, so no call opens these files again,
         # but a stage that has no record (no export either) is left with none.

@@ -213,7 +213,7 @@ def unfiled(root: Path, import_id: str) -> list[dict]:
         for path, entry in state.exports.items() if entry.get("state") == PARTIAL and entry.get("code")]
     if state.sidecars is not None and state.sidecars["state"] == export_sidecars.PARTIAL and state.sidecars.get("code"):
         fault = state.sidecars.get("fault")
-        members.append(import_stage.residual_member(f"sidecars from {fault}" if fault else "sidecars", 0, state.sidecars["code"]))
+        members.append(import_stage.residual_member(f"sidecars, first unreadable file {fault}" if fault else "sidecars", 0, state.sidecars["code"]))
     return members
 
 

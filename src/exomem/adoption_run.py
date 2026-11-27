@@ -1542,7 +1542,9 @@ def _carry_sidecar(item: dict, paired: Mapping) -> None:
     """Put what a photo's paired Takeout sidecar states on its planned item: its path, the time and the caption.
 
     The caption passes through the redaction of an upload's description before the plan holds it, so no plan,
-    page or log keeps a card number or a credential that the owner typed. A sidecar that states neither leaves the item as it is.
+    page or log keeps a card number or a credential that the owner typed. The sidecar pass redacts it too, before it
+    writes the row; a second pass changes nothing in that text, and covers a row that an earlier pass wrote. A sidecar
+    that states neither leaves the item as it is.
     """
     from . import preserve
 

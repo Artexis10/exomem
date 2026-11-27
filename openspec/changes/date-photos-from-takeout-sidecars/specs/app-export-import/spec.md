@@ -96,7 +96,7 @@ A recognised Takeout sidecar SHALL pair with an image or video in its own staged
 
 ### Requirement: A Takeout sidecar is counted by its outcome, never filed
 
-A recognised sidecar SHALL never file as a Source. When filing reaches done, the filing view SHALL count each sidecar in `left_out` under exactly one reason, from its photo's filing result, and SHALL NOT add it to the stage total as a derived file. The reasons are `IMPORT_SIDECAR_APPLIED`, `IMPORT_SIDECAR_EMPTY`, `IMPORT_SIDECAR_PHOTO_ALREADY_IMPORTED`, `IMPORT_SIDECAR_PHOTO_NOT_FILED` and `IMPORT_SIDECAR_UNPAIRED`, which the view lists by path.
+A recognised sidecar SHALL never file as a Source. When filing reaches done, the filing view SHALL count each sidecar in `left_out` under exactly one reason, from its photo's filing result, and SHALL NOT add it to the stage total as a derived file. The reasons are `IMPORT_SIDECAR_APPLIED`, `IMPORT_SIDECAR_EMPTY`, `IMPORT_SIDECAR_PHOTO_ALREADY_IMPORTED`, `IMPORT_SIDECAR_PHOTO_NOT_FILED`, `IMPORT_SIDECAR_UNPAIRED` and `IMPORT_SIDECAR_UNREADABLE`, which the view lists by path.
 
 #### Scenario: A Takeout album
 
@@ -110,12 +110,13 @@ A recognised sidecar SHALL never file as a Source. When filing reaches done, the
 
 ### Requirement: A sidecar's reason says what became of its photo
 
-`IMPORT_SIDECAR_APPLIED` and `IMPORT_SIDECAR_EMPTY` SHALL mean that the sidecar was paired with a photo that filed now, and `IMPORT_SIDECAR_EMPTY` that it carried nothing. `IMPORT_SIDECAR_PHOTO_ALREADY_IMPORTED` SHALL mean that a Source in the vault already held the photo: the sidecar counts as filed and needs no review. `IMPORT_SIDECAR_PHOTO_NOT_FILED` SHALL mean that the photo did not file, which the person reviews.
+`IMPORT_SIDECAR_APPLIED` and `IMPORT_SIDECAR_EMPTY` SHALL mean that the sidecar was paired with a photo that filed now, and `EMPTY` that it carried nothing. `IMPORT_SIDECAR_PHOTO_ALREADY_IMPORTED` SHALL mean that the vault already held the photo, so the sidecar's time and caption were not applied: its reason text SHALL say so, and it counts as filed. `IMPORT_SIDECAR_PHOTO_NOT_FILED` SHALL mean that the photo did not file, which the person reviews.
 
 #### Scenario: The same Takeout imported again
 
 - **WHEN** the same Takeout is imported again unchanged
 - **THEN** every photo is skipped as already imported, no JSON Source files, and every sidecar counts as `IMPORT_SIDECAR_PHOTO_ALREADY_IMPORTED`, with `with_time`, `captioned` and `time_skipped` at 0
+- **AND** the reply says that the sidecars' time and caption were not applied, because the vault already held the photos
 
 #### Scenario: A photo in two albums
 
@@ -139,7 +140,7 @@ Over the sidecars whose photo filed now, the filing view SHALL count those that 
 
 ### Requirement: Photos wait for their sidecars
 
-The images and videos of a stage that holds recognised sidecars SHALL stay out of selection until the pass over the stage's sidecars ends: when every sidecar is read and the pairs are decided, or when a sidecar that cannot be read ends the pass in part. Each paired photo SHALL then file with its sidecar's time and caption. The pass SHALL run once per stage: a sidecar that reaches the stage after the pass ended SHALL file as an ordinary file.
+The images and videos of a stage that holds recognised sidecars SHALL stay out of selection until the pass over the stage's sidecars ends: when every JSON file is examined and the pairs are decided. A JSON file that cannot be read SHALL get its own record, and the pass SHALL read on past it and end in part. Each paired photo SHALL then file with its sidecar's time and caption. The pass SHALL run once per stage: a sidecar that reaches the stage after the pass ended SHALL file as an ordinary file.
 
 #### Scenario: A Takeout larger than one call's budget
 
@@ -149,14 +150,21 @@ The images and videos of a stage that holds recognised sidecars SHALL stay out o
 #### Scenario: A sidecar that cannot be read
 
 - **WHEN** a sidecar of the stage cannot be read
-- **THEN** the pass ends in part and the photos are released
-- **AND** the sidecars read before it keep their pairs, the sidecars after it file as ordinary files, and the filing view lists the partial read with `IMPORT_EXPORT_PARTIAL`
+- **THEN** the pass reads on, ends in part, and the photos are released
+- **AND** the sidecars before it and after it keep their pairs, and no JSON file of the stage files as a Source
+- **AND** the filing view counts the unreadable file as `IMPORT_SIDECAR_UNREADABLE`, lists it by path as needing review, and lists the partial read with `IMPORT_EXPORT_PARTIAL`
 
 ### Requirement: The owner's caption is kept on the photo
 
-A paired sidecar's non-empty `description` SHALL go into the photo Source's description section, through the same redaction as an upload's description.
+A paired sidecar's non-empty `description` SHALL go into the photo Source's description section, through the same redaction as an upload's description. No record of the pass SHALL hold the description unredacted.
 
 #### Scenario: A captioned photo
 
 - **WHEN** a paired sidecar's description is "first day at the lake house"
 - **THEN** the photo's Source holds that description, and a search for "lake house" finds the photo
+
+#### Scenario: A caption with a card number
+
+- **WHEN** a paired sidecar's description holds a card number
+- **THEN** the photo's Source holds the description with the number removed
+- **AND** the stage's sidecar record holds it removed too
