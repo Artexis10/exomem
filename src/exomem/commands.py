@@ -51,6 +51,7 @@ from . import attention as attention_module
 from . import audit as audit_module
 from . import audit_fix as audit_fix_module
 from . import bootstrap_core as bootstrap_core_module
+from . import build_record as build_record_module
 from . import call_spans as call_spans_module
 from . import capabilities as capabilities_module
 from . import capture_attempts as capture_attempts_module
@@ -7925,6 +7926,7 @@ def _compile_guarded_activation(
     return _CompiledActivation(guarded, True, thread)
 
 
+@build_record_module.warming_scoped
 def _op_activate_context_body(
     vault_root: Path,
     turn: str = "",
@@ -7973,7 +7975,6 @@ def _op_activate_context_body(
         generation: Mapping[str, Any] | None = None,
         budget_caused: bool = False,
         carry_thread: bool = True,
-        diagnostics: Mapping[str, Any] | None = None,
     ) -> dict:
         """One abstained packet, always carrying timings when they were asked
         for. Every early exit below must keep `serve`'s own promise — abstain,
@@ -8003,9 +8004,6 @@ def _op_activate_context_body(
         )
         if include_timings and timings is not None:
             packet["timings"] = timings.as_dict()
-        if diagnostics is not None:
-            # Marked apart from `reason`: the agent repeats the reason, an operator reads these.
-            packet["abstention"]["diagnostics"] = dict(diagnostics)
         if budget_caused:
             active_budget = request_budget_module.current()
             block = active_budget.as_response_block() if active_budget is not None else None
@@ -8167,12 +8165,8 @@ def _op_activate_context_body(
                 # request keep serving against a registry it could not prove
                 # current for this principal's access policy.
                 if exc.status == "warming":
-                    return _abstain(
-                        working_set_runtime_module.WARMING,
-                        diagnostics=working_set_runtime_module.warming_diagnostics(
-                            vault_root, working_set_runtime_module.WAITING_ON_RECALL_REGISTRY, site=exc.site
-                        ),
-                    )
+                    build_record_module.note_warming(build_record_module.WAITING_ON_RECALL_REGISTRY, site=exc.site)
+                    return _abstain(working_set_runtime_module.WARMING)
                 return _abstain(working_set_runtime_module.UNAVAILABLE)
             except Exception:  # noqa: BLE001 - unavailable freshness never grants disclosure
                 # Abstain right here rather than continuing in a half-state:
@@ -8213,11 +8207,11 @@ def _op_activate_context_body(
             state, index = working_set_runtime_module.UNAVAILABLE, None
     if index is not None:
         index.close()
-    if state == working_set_runtime_module.WARMING:
-        # A pending seed makes the turn abstain whatever the index answers, so it leads the diagnostic.
-        return _abstain(state, diagnostics=working_set_runtime_module.warming_diagnostics(
-            vault_root, working_set_runtime_module.WAITING_ON_RECALL_SEED if managed_cold else None
-        ))
+    if managed_cold and state in (working_set_runtime_module.READY, working_set_runtime_module.WARMING):
+        # A pending seed makes the turn abstain whatever the index answered, so the seed is its cause.
+        build_record_module.note_warming(
+            build_record_module.WAITING_ON_RECALL_SEED, freshness_module.seed_state(vault_root, "kb")
+        )
     if state != working_set_runtime_module.READY or index is None:
         return _abstain(state)
 
@@ -8226,12 +8220,7 @@ def _op_activate_context_body(
         # registry has never gone live: lexical evidence and role lanes
         # would have nothing current to read against, so activation
         # abstains here rather than either reprojecting or cold-walking.
-        return _abstain(
-            working_set_runtime_module.WARMING,
-            diagnostics=working_set_runtime_module.warming_diagnostics(
-                vault_root, working_set_runtime_module.WAITING_ON_RECALL_SEED
-            ),
-        )
+        return _abstain(working_set_runtime_module.WARMING)
 
     if packet_mode == "maps":
         if working_set_module.budget_exhausted("working_set.catalogue"):

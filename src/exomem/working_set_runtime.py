@@ -292,39 +292,9 @@ def first_turn_warm_wait_seconds() -> float:
     return max(0.0, min(FIRST_TURN_WARM_WAIT_SECONDS, budget.seconds / 4, budget.remaining() / 2))
 
 
-#: What an `index_warming` answer waited on: one protocol value per warm-up the request path checks.
-WAITING_ON_RECALL_SEED = "recall_seed"
-WAITING_ON_RECALL_REGISTRY = "recall_registry"
-WAITING_ON_IDENTITY_INVENTORY = "identity_inventory"
-WAITING_ON_ACTIVATION_INDEX = "activation_index"
-
-
-def warming_diagnostics(
-    vault_root: Path, waiting_on: str | None = None, *, site: str | None = None
-) -> dict[str, object]:
-    """The diagnostics part of an `index_warming` answer: the warm-up it waited on and that build's state.
-
-    With no `waiting_on`, `ensure_index` answered warming, and its checks are read again in its own
-    order. The read comes after the answer, so a build that finished in between reads as ready.
-    `site` is the recall registry's refusal site (`find.RETRIEVAL_WARMING_SITES`).
-    """
-    root = Path(vault_root)
-    build: dict[str, object] | None = None
-    if waiting_on == WAITING_ON_RECALL_SEED:
-        build = freshness.seed_state(root, "kb")
-    elif waiting_on is None:
-        from . import reserved_paths
-
-        if _managed() and not reserved_paths.identity_catalogue_ready(root):
-            waiting_on, build = WAITING_ON_IDENTITY_INVENTORY, reserved_paths.identity_catalogue_warm_state(root)
-        else:
-            waiting_on, build = WAITING_ON_ACTIVATION_INDEX, _BUILD_RECORD.state(root.absolute(), ready=False)
-    diagnostics: dict[str, object] = {"waiting_on": waiting_on}
-    if site is not None:
-        diagnostics["site"] = site
-    if build is not None:
-        diagnostics["build"] = build
-    return diagnostics
+def background_build_state(vault_root: Path) -> dict[str, object]:
+    """The state of the build in a vault's background slot, for a warming diagnostic."""
+    return _BUILD_RECORD.state(Path(vault_root).absolute(), ready=False)
 
 
 _CACHE_LOCK = threading.Lock()
@@ -1189,12 +1159,16 @@ def ensure_index(
             # vault warms in seconds; every other caller abstains at once.
             reserved_paths.schedule_identity_catalogue_warm(root)
             if warm_wait is None or not reserved_paths.await_identity_catalogue_warm(root, warm_wait()):
+                build_record.note_warming(
+                    build_record.WAITING_ON_IDENTITY_INVENTORY, reserved_paths.identity_catalogue_warm_state(root)
+                )
                 return WARMING, None, False
     if not index.readable():
         return UNAVAILABLE, None, False
     if not index.anchors():
         if _managed():
             _schedule_build(root, freshness_stamp=freshness_stamp)
+            build_record.note_warming(build_record.WAITING_ON_ACTIVATION_INDEX, background_build_state(root))
             return WARMING, None, False
         with _inline_lock(root.absolute()):
             # Re-check under the lock: the thread that held it may have built the
@@ -2740,7 +2714,6 @@ def _schedule_build(
             return
 
     def _warm() -> None:
-        _BUILD_RECORD.started(root, job=label)
         try:
             # A bulk pass: its walks yield to a request in flight, never under a lock one waits on.
             with foreground_priority.bulk(stop=stop):
@@ -2754,6 +2727,9 @@ def _schedule_build(
         except Exception as error:  # noqa: BLE001 - the optional stage stays soft-failing
             _BUILD_RECORD.failed(root, error, job=label)
             log.warning("%s background build failed", label, exc_info=True)
+        except BaseException:
+            _BUILD_RECORD.ended(root)
+            raise
         finally:
             with _CACHE_LOCK:
                 _BUILDS.pop(root, None)
@@ -2765,9 +2741,12 @@ def _schedule_build(
         if (stop is not None and stop.is_set()) or root in _BUILDS:
             return
         _BUILDS[root] = thread
+        # Recorded when the slot is taken, so a reader never sees a scheduled build as not started.
+        _BUILD_RECORD.started(root, job=label)
         try:
             thread.start()
-        except Exception:  # noqa: BLE001 - a thread-start failure cannot fail a read
+        except Exception as error:  # noqa: BLE001 - a thread-start failure cannot fail a read
+            _BUILD_RECORD.failed(root, error, job=label)
             _BUILDS.pop(root, None)
             log.warning("%s background build could not start", label, exc_info=True)
 

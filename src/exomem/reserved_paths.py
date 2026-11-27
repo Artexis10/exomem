@@ -4019,9 +4019,14 @@ def _baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
         # This task already holds identity coordination, so it cannot wait on
         # another task's build: the leader needs the same boundary to prove its
         # snapshot.  Build inline under the boundary already held instead.
-        return _install_baseline_identity_catalogue(
-            vault_key, _build_baseline_identity_catalogue(vault_root)
-        )
+        try:
+            built = _build_baseline_identity_catalogue(vault_root)
+        except BaseException as error:
+            if not isinstance(error, foreground_priority.BulkCancelled):
+                _IDENTITY_BUILDS.failed(vault_key, error)
+            raise
+        _IDENTITY_BUILDS.succeeded(vault_key)
+        return _install_baseline_identity_catalogue(vault_key, built)
 
     # A follower's budget is one deadline across its waits, set when it first follows. When the leader's
     # own stop ended the build, a follower with no request budget (a background caller) claims the

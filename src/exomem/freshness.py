@@ -1513,7 +1513,8 @@ def announce_seed_pending(vault_root: Path, scope: str) -> None:
     """
     with _lock:
         _seed_pending.add(_key(vault_root, scope))
-    _SEED_BUILDS.started(_key(vault_root, scope))
+        # Under the lock, so a reader that sees the seed pending also sees when it started.
+        _SEED_BUILDS.started(_key(vault_root, scope))
 
 
 def clear_seed_pending(vault_root: Path, scope: str) -> None:
@@ -1521,7 +1522,7 @@ def clear_seed_pending(vault_root: Path, scope: str) -> None:
     with _lock:
         _seed_pending.discard(_key(vault_root, scope))
         _seed_settled.notify_all()
-    _SEED_BUILDS.ended(_key(vault_root, scope))
+        _SEED_BUILDS.ended(_key(vault_root, scope))
 
 
 def seed_state(vault_root: Path, scope: str) -> dict[str, object]:

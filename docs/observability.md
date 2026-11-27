@@ -707,13 +707,15 @@ neither a ceiling nor a release.
 
 ### Why recall still answers `index_warming`
 
-An `index_warming` answer from `activate_context` carries `abstention.diagnostics`.
+An `index_warming` answer from `activate_context` carries `abstention.diagnostics`, set by the check that decided warming.
 The agent repeats only `abstention.reason`; the diagnostics are for the operator.
 
 - `waiting_on` names the warm-up the turn waited on:
   - `recall_seed` is the boot-time seed of the recall registry.
   - `identity_inventory` is the in-memory walk of private identities.
   - `activation_index` is the activation index build. Its slot is shared with the context catalogue fold.
+  - `context_catalogue` is the context catalogue fold, which a maps turn needs. It is also the cause when the catalogue lags by work a restricted caller cannot be told about, or moved while a profile was built.
+  - `context_lane` is a profile lane that failed, so the turn answers warming instead of serving the omission.
   - `recall_registry` is a refusal by the recall registry. `site` names the gate that refused.
 - `build` is that warm-up's state in this process:
   - `state`: `building`, `failed`, `not_started` or `ready`.

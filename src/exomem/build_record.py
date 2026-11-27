@@ -1,22 +1,76 @@
-"""What one process's single-flight background builds are doing, for a warming diagnostic.
+"""What an `index_warming` answer waits on, and what that build is doing.
 
-A request that answers `index_warming` names the build it waits on. Without that a
-warm-up that fails on every retry, or hangs, looks the same as one about to finish.
-The record lives in process memory, like the builds it describes.
+Each check that decides warming names its cause for the request (`note_warming`), and the
+abstained packet carries it. A `BuildRecord` holds each single-flight background build's start
+and failures, so the cause can say whether its build runs, failed or never started. Without
+that, a warm-up that fails on every retry, or hangs, looks the same as one about to finish.
+Both live in process memory, like the builds they describe.
 """
 
 from __future__ import annotations
 
+import functools
 import threading
 import time
-from collections.abc import Hashable
+from collections.abc import Callable, Hashable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import Any, TypeVar
 
 # The diagnostic's states are protocol values for the reader, not vault vocabulary.
 READY = "ready"
 BUILDING = "building"
 FAILED = "failed"
 NOT_STARTED = "not_started"
+
+#: What an `index_warming` answer waited on: one protocol value per place that decides warming.
+WAITING_ON_RECALL_SEED = "recall_seed"
+WAITING_ON_RECALL_REGISTRY = "recall_registry"
+WAITING_ON_IDENTITY_INVENTORY = "identity_inventory"
+WAITING_ON_ACTIVATION_INDEX = "activation_index"
+WAITING_ON_CONTEXT_CATALOGUE = "context_catalogue"
+WAITING_ON_CONTEXT_LANE = "context_lane"
+
+#: The cause the request's last warming decision named. Each site that decides warming sets it, so
+#: the answer states that site's own reason and never a cause re-derived after the fact.
+_WARMING_CAUSE: ContextVar[dict[str, object] | None] = ContextVar("exomem_warming_cause", default=None)
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def note_warming(
+    waiting_on: str, build: Mapping[str, object] | None = None, *, site: str | None = None
+) -> None:
+    """Record what this request's `index_warming` answer waits on; a later decision replaces it.
+
+    `build` is that warm-up's `BuildRecord.state`; `site` is a recall registry refusal site.
+    """
+    cause: dict[str, object] = {"waiting_on": waiting_on}
+    if site is not None:
+        cause["site"] = site
+    if build is not None:
+        cause["build"] = dict(build)
+    _WARMING_CAUSE.set(cause)
+
+
+def warming_cause() -> dict[str, object] | None:
+    """The diagnostics part for this request's `index_warming` answer, or None when no site named one."""
+    cause = _WARMING_CAUSE.get()
+    return None if cause is None else dict(cause)
+
+
+def warming_scoped(function: _F) -> _F:
+    """Start and end each call with no warming cause, so no request reads another's."""
+
+    @functools.wraps(function)
+    def scoped(*args: Any, **kwargs: Any) -> Any:
+        token = _WARMING_CAUSE.set(None)
+        try:
+            return function(*args, **kwargs)
+        finally:
+            _WARMING_CAUSE.reset(token)
+
+    return scoped  # type: ignore[return-value]
 
 
 @dataclass(frozen=True, slots=True)

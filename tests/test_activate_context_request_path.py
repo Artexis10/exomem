@@ -1640,3 +1640,21 @@ def test_a_warming_turn_names_an_inventory_build_that_keeps_failing(
     assert diagnostics["build"]["last_failure"]["failures"] >= 2
     assert "the walk failed" not in json.dumps(packet), "a failure message can name a private path"
 
+
+
+def test_a_maps_turn_names_a_context_catalogue_that_has_not_built(
+    activation_vault: Path, monkeypatch: pytest.MonkeyPatch, budget_free
+) -> None:
+    """The default maps turn needs the context catalogue, which a background fold builds. A fold that
+    never finishes answers warming on every turn; the answer names the catalogue as what it waits on."""
+    from exomem import context_catalogue, reserved_paths
+
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    _seed_live_recall(activation_vault)
+    reserved_paths._baseline_identity_catalogue(activation_vault)
+    monkeypatch.setattr(context_catalogue, "_schedule", lambda *_a, **_k: None)
+
+    packet = commands._op_activate_context_body(activation_vault, turn=TURN)
+
+    assert packet["abstention"]["reason"] == "index_warming"
+    assert packet["abstention"]["diagnostics"]["waiting_on"] == "context_catalogue"
