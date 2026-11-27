@@ -25,6 +25,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from cellctl.imports import JOB_FAILED_LOG_PHRASE
 from cellctl.manifests import namespace_name
 from kubernetes.utils.quantity import parse_quantity
 
@@ -32,7 +33,7 @@ from . import drill_cluster, host_speed, platform
 from . import large_import_fixture as fixture
 from .infra import docker_labels
 from .mcp_client import TenantClient, ToolResult
-from .native_import import retain_cli_diagnostics, run_cli_import
+from .native_import import UPLOAD_ONLY, retain_cli_diagnostics, run_cli_import
 from .report import StepFailure, StepRecord, innermost, percentile
 from .scenarios import Context, first_session
 from .shell import CommandFailed, run
@@ -143,6 +144,24 @@ try:
     total, used = fs.f_blocks * fs.f_frsize, (fs.f_blocks - fs.f_bfree) * fs.f_frsize
 except OSError:
     pass
+# Each thread of every other process in the container: its name and its user plus system CPU so far.
+threads = {}
+try:
+    tick = os.sysconf('SC_CLK_TCK')
+    for pid in os.listdir('/proc'):
+        if not pid.isdigit() or int(pid) == os.getpid():
+            continue
+        try:
+            tids = os.listdir('/proc/' + pid + '/task')
+        except OSError:
+            continue
+        for tid in tids:
+            stat = read('/proc/' + pid + '/task/' + tid + '/stat')
+            if stat and ')' in stat:
+                fields = stat.rsplit(')', 1)[1].split()
+                threads[tid] = [stat[stat.index('(') + 1:stat.rindex(')')], (int(fields[11]) + int(fields[12])) * 1000000 // tick]
+except Exception:  # an unread /proc leaves the tick without threads, never without memory
+    threads = None
 ready = None
 try:
     import urllib.error, urllib.request
@@ -160,7 +179,7 @@ except Exception:  # a stopped or starting server leaves the sample without read
     pass
 print(json.dumps({'memory_current': current, 'memory_anon': anon, 'memory_peak': peak, 'memory_limit': limit,
                   'cpu_usage_usec': cpu, 'mono': time.monotonic(),
-                  'volume_total': total, 'volume_used': used, 'ready': ready}))
+                  'volume_total': total, 'volume_used': used, 'ready': ready, 'threads': threads}))
 """
 # The last bytes of each file in the cell's log folder (EXOMEM_LOG_DIR, set by the cell's manifest), compressed
 # and encoded so that any byte survives the text channel of `kubectl exec`.
@@ -326,6 +345,30 @@ def peaks(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
+def thread_cpu(rows: Sequence[Mapping[str, Any]], label: str) -> dict[str, float] | None:
+    """CPU seconds per thread name in the ticks labelled `label`, busiest first; None when none read threads.
+
+    A tick's share is what each thread used since the tick before it that read threads, whatever its label;
+    the first such tick counts from each thread's start. A thread that ended between two ticks loses what it
+    used after the last tick that saw it.
+    """
+    last: dict[str, int] = {}
+    used: Counter[str] = Counter()
+    read = False
+    for row in rows:
+        threads = row.get("threads")
+        if threads is None:
+            continue
+        if row["label"] == label:
+            read = True
+            for tid, (name, usec) in threads.items():
+                before = last.get(tid, 0)
+                # A smaller count is a new thread that reuses the id.
+                used[name] += usec - before if usec >= before else usec
+        last = {tid: usec for tid, (_name, usec) in threads.items()}
+    return {name: round(usec / 1e6, 1) for name, usec in used.most_common()} if read else None
+
+
 def decide_verdict(folders: Mapping[str, Mapping[str, Sequence[str]] | None], volume_problems: Sequence[str],
                    findings: Sequence[Any], *, smoke: bool, proves_one_copy_only: bool) -> str:
     """`pass` needs both folders judged with no problem, on a volume that cannot hold two copies.
@@ -477,7 +520,8 @@ class Sampler:
     def summary(self) -> dict[str, Any]:
         labels = sorted({row["label"] for row in self.rows})
         return {"interval_seconds": SAMPLE_SECONDS, "all": peaks(self.rows),
-                "by_phase": {label: peaks([row for row in self.rows if row["label"] == label]) for label in labels}}
+                "by_phase": {label: peaks([row for row in self.rows if row["label"] == label]) for label in labels},
+                "cpu_seconds_by_thread": {label: thread_cpu(self.rows, label) for label in labels}}
 
 
 # --- the folders ---------------------------------------------------------------------------
@@ -547,9 +591,9 @@ async def generate(ctx: Context, plan: LargeImportPlan, name: str) -> Folder:
 
 
 async def upload(ctx: Context, plan: LargeImportPlan, folder: Folder) -> dict:
-    """The CLI import as a person runs it; returns the import's row once the cell has resumed."""
+    """The CLI upload with `--no-file`, so the agent files it; returns the import's row once the cell has resumed."""
     try:
-        cli = await run_cli_import(ctx, plan.cli_image, folder.source, label=folder.name,
+        cli = await run_cli_import(ctx, plan.cli_image, folder.source, label=folder.name, cli_args=UPLOAD_ONLY,
                                    include_hidden=folder.include_hidden, wait_seconds=int(max(300, min(2700, plan.remaining()))))
     finally:
         with contextlib.suppress(Exception):
@@ -635,6 +679,8 @@ async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder) -> dic
     fields: dict[str, Any] = {"path": stage_path, "collection": collection}
     filed_before: int | None = 0
     while True:
+        # Kept current before the deadline check, so a run that the deadline stops still reports each call.
+        folder.report["pages"] = list(pages.values())
         plan.require_time(f"the {folder.name} folder was filed")
         reply, took = await agent.import_op("file", **fields)
         page = pages.setdefault(reply["run_id"], {"page": len(pages) + 1, "run_id": reply["run_id"], "file_seconds": 0.0,
@@ -721,6 +767,33 @@ def save_cell_logs(ctx: Context) -> None:
     logs = ctx.kubectl("logs", "--namespace", namespace_name(ctx.a.cell_id), pod["metadata"]["name"],
                        "--container", "exomem", "--tail=3000", check=False)
     (ctx.stack.workdir / "diagnostics" / "cell-pod.log").write_text(logs.stdout + logs.stderr, encoding="utf-8")
+
+
+def save_import_failure_evidence(ctx: Context) -> dict[str, Any]:
+    """Keep what decides an out-of-memory kill of the import Job, before the run is torn down.
+
+    The runner's kernel log names a memory-cgroup kill and the process it chose. The Job's pod is gone by the time
+    anyone looks, so the log of cellctl's pod is kept too: it records the container's reason and exit code before the
+    controller deletes the Job. A read that failed says so by its return code, and its line list is null, never empty.
+    """
+    diagnostics = ctx.stack.workdir / "diagnostics"
+    diagnostics.mkdir(exist_ok=True)
+    kernel = run(["sudo", "--non-interactive", "dmesg", "--ctime"], check=False, timeout=60)
+    (diagnostics / "runner-dmesg.txt").write_text(kernel.stdout + kernel.stderr, encoding="utf-8")
+    controller = ctx.kubectl("logs", "--namespace", platform.CLOUD_NAMESPACE, "deployment/cellctl", "--tail=-1", check=False)
+    controller_log = controller.stdout + controller.stderr
+    (diagnostics / "cellctl-at-failure.log").write_text(controller_log, encoding="utf-8")
+    failures = ([line for line in controller_log.splitlines() if JOB_FAILED_LOG_PHRASE in line]
+                if controller.returncode == 0 else None)
+    return {
+        "runner_dmesg": {"returncode": kernel.returncode, "bytes": len((kernel.stdout + kernel.stderr).encode()),
+                         "file": "runner-dmesg.txt in the diagnostics artifact"},
+        "cellctl_log": {"returncode": controller.returncode, "bytes": len(controller_log.encode()),
+                        "file": "cellctl-at-failure.log in the diagnostics artifact"},
+        # The first 20 lines that name a failed import Job, and how many there were; both null when the read failed.
+        "import_job_failures": failures[:20] if failures is not None else None,
+        "import_job_failures_total": len(failures) if failures is not None else None,
+    }
 
 
 def save_cell_app_logs(ctx: Context, label: str) -> dict[str, Any]:
@@ -988,6 +1061,8 @@ async def run_large_import(ctx: Context, plan: LargeImportPlan) -> None:
             latest = await ctx.fetchrow("SELECT * FROM exomem_cloud_imports WHERE cell_id = $1 ORDER BY created_at DESC LIMIT 1",
                                         ctx.a.cell_id)
             out["findings"][-1]["latest_import"] = import_summary(latest or {})
+        with contextlib.suppress(Exception):
+            out["import_failure_evidence"] = await asyncio.to_thread(save_import_failure_evidence, ctx)
     finally:
         await sampler.stop(task)
         with contextlib.suppress(Exception):

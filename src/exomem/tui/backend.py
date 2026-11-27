@@ -536,6 +536,38 @@ class ExomemBackend:
 
         return readiness.snapshot()
 
+    def _vault_for_voice(self) -> Path:
+        if self._vault is None:
+            raise BackendError("KB_NOT_INITIALIZED", "choose or create a vault before keeping a voice")
+        return Path(self._vault).resolve()
+
+    def voice_sample(self, recording: str, label: str) -> dict:
+        """The lines a speaker label of a recording speaks, so the owner can confirm whose voice it is."""
+        from .. import enroll_speaker
+
+        root = self._vault_for_voice()
+        try:
+            text, _recorded = enroll_speaker.local_page(root, recording)
+            sample = enroll_speaker.sample_of(text, label)
+        except enroll_speaker.EnrollmentError as error:
+            raise BackendError(error.code, str(error)) from error
+        return {"label": sample.label, "spans": len(sample.spans), "lines": list(sample.lines)}
+
+    def voice_enroll(self, recording: str, label: str, name: str) -> dict:
+        """Keep the voice behind `label` as the profile `name`; the caller has shown the sample and been told yes."""
+        from .. import enroll_speaker
+
+        root = self._vault_for_voice()
+        try:
+            text, recorded = enroll_speaker.local_page(root, recording)
+            kept = enroll_speaker.enroll_from_recording(
+                text, recorded, label, name,
+                original=enroll_speaker.local_original(root, recording), confirm=lambda _sample: True, vault_root=root,
+            )
+        except enroll_speaker.EnrollmentError as error:
+            raise BackendError(error.code, str(error)) from error
+        return {"name": name, "samples": kept["samples"]}
+
     def packs_state(self) -> dict:
         from .. import knowledge_packs
 

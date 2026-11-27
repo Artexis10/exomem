@@ -2,7 +2,7 @@
 name: evermatter-media
 description: 'Find, view, cite and keep media in Evermatter: PDFs, images, audio and video, with their transcripts, pages and frames. Use when the user asks about a recording, photo, scan or video, wants to look inside one, or shares media to keep.'
 metadata:
-  skill_contract: c4be2885fab4ba588bbfd3f81eadf08e1792764d2d39e2ba9ab850dd37cd37df
+  skill_contract: bd2ab38739b8d66ed05294cf4a72b493751fc56fbbfd2c11d0df430e004f15de
   version: "0.2.0"
 ---
 
@@ -35,6 +35,9 @@ When a recording's languages are unknown at ingest, ask the user once: "One lang
 
 ## Faulty transcripts
 Check the sidecar's `asr_language`, `asr_language_probability`, `asr_language_source`, `asr_language_mode` and `asr_speech_seconds` before trusting a transcript. A transcript in the wrong language, or one that repeats a line, is a processing fault, not content: fix it with `manage_memory(operation="media.reprocess", arguments={"path": ..., "language": <code>})`, or `"multilingual": true`. The old extraction stays on a linked prior page.
+## Speech results from the owner's machine
+An owner's agent that transcribed or diarised a recording on its own machine attaches the result with `manage_memory(operation="media.attach_speech", arguments={"path": ..., "binary_sha256": ..., "binary_size": ..., "segments": [...], "turns": [...], "engine": ...})`. The call binds to the original by SHA-256 and size, fills a pending or failed Source, and replaces an unlabelled result while it keeps the old one on a linked prior page. A labelled or named result is replaced only with `"replace_labelled": true`, which the person asks for. A repeat writes nothing. Rename the labels afterwards with `manage_memory(operation="media.rename_speakers", arguments={"path": ..., "renames": {"Speaker A": ...}})`; it enrols no voice, which is the owner's `enroll-speaker` action. Process a page whose turns are merged, with no timestamps, again with speaker labels before an attach, because names carry only by timed lines.
+
 ## Output contract
 What the media shows or says, cited by timestamp, page or frame, and what was kept or written.
 

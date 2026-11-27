@@ -12,6 +12,10 @@ After a release, set its cell image as Substrate's `cell_image`, but only when:
 
 Then poll Substrate's bounded rollout view until the canary runs the target.
 
+When the newest release fails the platform gate or has an uncrossed barrier, the run still
+reports that alert. It then rolls out the newest older release that the fleet lacks and the
+deployed platform carries, which passes the same two gates, and the next run measures again.
+
 Once it has read the release and the rollout view, and before any later stop, every run
 also reports two alerts: the fleet has run an older release for too long, and cells are
 pinned to an image other than the fleet's. A run that ends on a failing stop with no alert
@@ -28,6 +32,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import http.client
 import json
 import os
 import subprocess
@@ -64,9 +69,10 @@ CELL_PINNED_ALERT = "cloud-cell-pinned"
 FAILING_ALERT = "cloud-deploy-failing"
 # A release gets two days for its rollout and any platform upgrade it needs before the fleet counts as behind.
 RELEASE_BEHIND_DEFAULT_HOURS = 48
+PAUSED_STOP = "ROLLOUT_PAUSED"
 # The failing stops that name their cause in an alert of their own, so `cloud-deploy-failing` stays quiet for them.
 # cellctl raises cloud-rollout-paused for a pause, so the pause stop counts as having its own alert.
-OWN_ALERT_STOPS = (PLATFORM_NEEDED_ALERT, BARRIER_ALERT, "ROLLOUT_PAUSED")
+OWN_ALERT_STOPS = (PLATFORM_NEEDED_ALERT, BARRIER_ALERT, PAUSED_STOP)
 # The off switch: a run without the deploy token does nothing, and sends no alert.
 NOT_CONFIGURED = "CLOUD_DEPLOY_NOT_CONFIGURED"
 # Substrate's two answers that say the release is not newer than the fleet: nothing to do.
@@ -97,10 +103,14 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 def urllib_transport(method: str, url: str, headers: dict[str, str], body: bytes | None) -> tuple[int, bytes]:
     request = urllib.request.Request(url, data=body, method=method, headers=headers)
     try:
-        with urllib.request.build_opener(_NoRedirect()).open(request, timeout=HTTP_TIMEOUT) as response:
-            return response.status, response.read()
-    except urllib.error.HTTPError as error:
-        return error.code, error.read()
+        try:
+            with urllib.request.build_opener(_NoRedirect()).open(request, timeout=HTTP_TIMEOUT) as response:
+                return response.status, response.read()
+        except urllib.error.HTTPError as error:
+            return error.code, error.read()
+    except http.client.HTTPException as error:
+        # A truncated or malformed answer, error statuses included, is a failed connection to callers, like a timeout.
+        raise OSError("bad HTTP answer") from error
 
 
 def parse_release(tag: str) -> tuple[int, int, int] | None:
@@ -161,15 +171,22 @@ class Settings:
 class GitHub:
     def __init__(self, settings: Settings, transport: Transport) -> None:
         self.settings, self.transport = settings, transport
+        self._releases: list[tuple[tuple[int, int, int], dict]] | Stop | None = None
 
     def _get(self, path: str) -> Any:
-        status, body = self.transport("GET", f"{self.settings.github_api}{path}", {
-            "Authorization": f"Bearer {self.settings.github_token}",
-            "Accept": "application/vnd.github+json",
-        }, None)
+        try:
+            status, body = self.transport("GET", f"{self.settings.github_api}{path}", {
+                "Authorization": f"Bearer {self.settings.github_token}",
+                "Accept": "application/vnd.github+json",
+            }, None)
+        except OSError as error:
+            raise Stop("GITHUB_API_FAILED", ok=False, detail="unreachable") from error
         if status != 200:
             raise Stop("GITHUB_API_FAILED", ok=False, detail=str(status))
-        return json.loads(body)
+        try:
+            return json.loads(body)
+        except ValueError as error:
+            raise Stop("GITHUB_API_FAILED", ok=False, detail="not JSON") from error
 
     def latest_release(self) -> str:
         release = self._get(f"/repos/{self.settings.repository}/releases/latest")
@@ -178,24 +195,47 @@ class GitHub:
             raise Stop("RELEASE_NOT_FOUND", ok=False)
         return tag
 
-    def first_release_after(self, fleet: tuple[int, int, int]) -> Release | None:
-        """The oldest published release newer than `fleet`, or None when the newest releases
-        hold none. One read, newest first. When the fleet is older than every release on the
-        page, the oldest one on it stands in, so the age it gives is a lower bound."""
+    def published_releases(self) -> list[tuple[tuple[int, int, int], dict]]:
+        """The (version, release) of each published release on the newest page. One read per run:
+        a later call reuses the answer, and a failed read stays failed."""
 
+        if self._releases is None:
+            try:
+                self._releases = self._read_releases()
+            except Stop as stop:
+                self._releases = stop
+        if isinstance(self._releases, Stop):
+            raise self._releases
+        return self._releases
+
+    def _read_releases(self) -> list[tuple[tuple[int, int, int], dict]]:
         releases = self._get(f"/repos/{self.settings.repository}/releases?per_page={RELEASE_SCAN_LIMIT}")
-        newer = []
+        found = []
         for release in releases if isinstance(releases, list) else []:
             if not isinstance(release, dict) or release.get("draft") or release.get("prerelease"):
                 continue  # `releases/latest` skips both, so the fleet is never behind one
             tag = release.get("tag_name")
             version = parse_release(tag) if isinstance(tag, str) else None
-            if version is not None and version > fleet:
-                newer.append((version, release))
+            if version is not None:
+                found.append((version, release))
+        return found
+
+    def first_release_after(self, fleet: tuple[int, int, int]) -> Release | None:
+        """The oldest published release newer than `fleet`, or None when the newest releases
+        hold none. When the fleet is older than every release on the page, the oldest one on it
+        stands in, so the age it gives is a lower bound."""
+
+        newer = [found for found in self.published_releases() if found[0] > fleet]
         if not newer:
             return None
         _, oldest = min(newer, key=lambda found: found[0])
         return Release(oldest["tag_name"], self._published_at(oldest.get("published_at")))
+
+    def releases_between(self, fleet: tuple[int, int, int], newest: tuple[int, int, int]) -> list[str]:
+        """The tags of the published releases newer than `fleet` and older than `newest`, newest first."""
+
+        between = [found for found in self.published_releases() if fleet < found[0] < newest]
+        return [release["tag_name"] for _, release in sorted(between, key=lambda found: found[0], reverse=True)]
 
     @staticmethod
     def _published_at(value: object) -> datetime | None:
@@ -360,13 +400,19 @@ def verify_attestation(image: str, tag: str) -> bool:
 
 def registry_image(tag: str) -> str | None:
     """The cell image index (`<repository>@<digest>`) that the release published as `<version>-cloud`,
-    under the newest repository that holds it; a release cut before the move is in the old one."""
+    under the newest repository that holds it; a release cut before the move is in the old one. A 404 means
+    not published (None). Any other failed lookup is a failing stop that names the tag and the error class."""
 
     sys.path.insert(0, str(Path(__file__).parent))
+    # Imported here so that loading this module needs no `packaging`, which the workflow installs in its own step.
     from release_recovery import image_digest
 
     for repository in CELL_IMAGE_BUILDERS:
-        digest = image_digest(f"{repository}:{tag.removeprefix('v')}-cloud")
+        try:
+            digest = image_digest(f"{repository}:{tag.removeprefix('v')}-cloud")
+        except (OSError, http.client.HTTPException, ValueError, KeyError) as error:
+            # The class alone: an error's message can carry the registry's URL.
+            raise Stop("REGISTRY_LOOKUP_FAILED", ok=False, detail=f"{tag} {type(error).__name__}") from error
         if digest:
             return f"{repository}@{digest}"
     return None
@@ -406,7 +452,7 @@ def report_release_behind(settings: Settings, tools: Tools, github: GitHub, tag:
         if fleet_version is not None and newest is not None and fleet_version < newest:
             try:
                 first_missed = github.first_release_after(fleet_version)
-            except (Stop, OSError):
+            except Stop:
                 # The list read only feeds this alert, so its failure must not stop the rollout.
                 first_missed = None
             if first_missed is None:
@@ -446,6 +492,55 @@ def report_run_outcome(settings: Settings, tools: Tools, stop: Stop) -> None:
     send_alert(settings, tools.transport, FAILING_ALERT, failing, tools.now())
 
 
+def release_block(tools: Tools, deployment: dict, tag: str, *,
+                  gate: tuple[list[str], list[str]], barriers: dict) -> tuple[str, str] | None:
+    """The alert and detail that stop `tag`, the platform gate first and then the barriers, or None when it is clear."""
+
+    include, exclude = gate
+    changed = platform_inputs(tools.changed_paths(deployment["ref"], tag), include, exclude)
+    if changed:
+        return PLATFORM_NEEDED_ALERT, f"{len(changed)} platform input(s) changed"
+    uncrossed = uncrossed_barriers(tag, deployment, barriers)
+    return (BARRIER_ALERT, " ".join(uncrossed)) if uncrossed else None
+
+
+def report_release_block(settings: Settings, tools: Tools, block: tuple[str, str] | None) -> None:
+    """Send the platform and barrier alerts for the newest release. A platform block stops the check before the
+    barriers, so it leaves `cloud-release-barrier` unmeasured and unsent."""
+
+    blocked_by = block[0] if block else None
+    send_alert(settings, tools.transport, PLATFORM_NEEDED_ALERT, blocked_by == PLATFORM_NEEDED_ALERT, tools.now())
+    if blocked_by != PLATFORM_NEEDED_ALERT:
+        send_alert(settings, tools.transport, BARRIER_ALERT, blocked_by == BARRIER_ALERT, tools.now())
+
+
+def covered_release(tools: Tools, github: GitHub, view: dict, deployment: dict, newest: str, *,
+                    gate: tuple[list[str], list[str]], barriers: dict) -> tuple[str, str] | None:
+    """The newest release between the fleet's and `newest` that no gate blocks and that has a published
+    image, as (tag, image). None when the fleet's release is unknown, none qualifies, or the fleet already
+    runs its image. A candidate sends no alert."""
+
+    release = view.get("release")
+    fleet = parse_release(release) if isinstance(release, str) else None
+    target = parse_release(newest)
+    if fleet is None or target is None:
+        return None
+    try:
+        candidates = github.releases_between(fleet, target)
+    except Stop:
+        return None  # The release list only feeds this fallback, so its failure leaves the original stop.
+    for tag in candidates:
+        # A diff that fails on a candidate raises PLATFORM_DIFF_FAILED, so the run fails loudly as it does for the newest release.
+        if release_block(tools, deployment, tag, gate=gate, barriers=barriers):
+            continue
+        image = tools.image(tag)
+        if not image:
+            print(f"cloud-deploy: CELL_IMAGE_NOT_PUBLISHED {tag}")
+            continue
+        return None if view.get("cell_image") == image else (tag, image)
+    return None
+
+
 def deploy(settings: Settings, tools: Tools, *, gate: tuple[list[str], list[str]], barriers: dict) -> None:
     if not settings.deploy_token or not settings.substrate_url:
         raise Stop(NOT_CONFIGURED, ok=True)
@@ -475,35 +570,44 @@ def deploy(settings: Settings, tools: Tools, *, gate: tuple[list[str], list[str]
     if view.get("cell_image") == image or view.get("release") == tag:
         raise Stop("CELL_IMAGE_CURRENT", ok=True)
 
-    # D2: the platform gate.
+    # D2 and D3: the platform gate, then the barriers.
     deployment = github.newest_platform_deployment()
-    include, exclude = gate
     ref = deployment["ref"] if deployment else None
     if deployment is None or not isinstance(ref, str):
         send_alert(settings, tools.transport, PLATFORM_NEEDED_ALERT, True, tools.now())
         raise Stop(PLATFORM_NEEDED_ALERT, ok=False, detail="NO_PLATFORM_DEPLOYMENT")
-    changed = platform_inputs(tools.changed_paths(ref, tag), include, exclude)
-    if changed:
-        send_alert(settings, tools.transport, PLATFORM_NEEDED_ALERT, True, tools.now())
-        raise Stop(PLATFORM_NEEDED_ALERT, ok=False, detail=f"{len(changed)} platform input(s) changed")
-    send_alert(settings, tools.transport, PLATFORM_NEEDED_ALERT, False, tools.now())
-
-    # D3: every barrier entry at or below the release must be crossed.
-    uncrossed = uncrossed_barriers(tag, deployment, barriers)
-    if uncrossed:
-        send_alert(settings, tools.transport, BARRIER_ALERT, True, tools.now())
-        raise Stop(BARRIER_ALERT, ok=False, detail=" ".join(uncrossed))
-    send_alert(settings, tools.transport, BARRIER_ALERT, False, tools.now())
+    block = release_block(tools, deployment, tag, gate=gate, barriers=barriers)
+    report_release_block(settings, tools, block)
+    covered = False
+    if block:
+        # The block's alert stays active. The fleet still lacks the newest release, so the run rolls out
+        # the newest release that the platform carries, or ends on the block.
+        block_line = f"cloud-deploy: {block[0]} {block[1]}"
+        try:
+            found = covered_release(tools, github, view, deployment, tag, gate=gate, barriers=barriers)
+        except Stop:
+            print(block_line)  # A failure in the search must not hide why the search began.
+            raise
+        if found is None:
+            raise Stop(block[0], ok=False, detail=block[1])  # The stop prints the block line, so print it once.
+        print(block_line)
+        tag, image = found
+        covered = True
+        if not tools.attest(image, tag):
+            raise Stop("ATTESTATION_UNVERIFIED", ok=False)
+        print(f"cloud-deploy: COVERED_RELEASE {tag}")
 
     # D1 step 6: set the image with its verified tag, and nothing else.
     refused = substrate.set_image(image, tag)
     if refused in NOT_NEWER:
+        # Also for a covered release: Substrate says the fleet has it or a newer one, so the run ends ok while the platform alert stays active.
         raise Stop(refused, ok=True)
     if refused is not None:
         raise Stop(f"SUBSTRATE_{refused}", ok=False)
     print("cloud-deploy: CELL_IMAGE_SET")
-    # The fleet now targets the newest release, so the lag this run reported is over.
-    if reported_behind:
+    # The fleet now targets the newest release, so the lag this run reported is over. A covered
+    # release leaves the newest one missing, so the next run measures the lag again.
+    if reported_behind and not covered:
         send_alert(settings, tools.transport, RELEASE_BEHIND_ALERT, False, tools.now())
 
     # D1 step 7: wait until the canary runs the target and is Ready.
@@ -522,7 +626,7 @@ def refuse_paused(view: dict) -> None:
     """Stop with the pause's code, and nothing else, when the rollout view says it is paused."""
 
     if view.get("paused") is True:
-        raise Stop("ROLLOUT_PAUSED", ok=False, detail=_code(view.get("error_code")))
+        raise Stop(PAUSED_STOP, ok=False, detail=_code(view.get("error_code")))
 
 
 def finish(stop: Stop) -> int:

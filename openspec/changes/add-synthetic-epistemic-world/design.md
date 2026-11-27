@@ -465,6 +465,30 @@ The memory-needed report uses the existing probe-reading classifier and counts p
 
 These corrections apply prospectively to every arm under its existing visibility rules. Existing source worlds, answers and judgments remain intact. Exposed-case checks must precede a fresh development world. A repair does not replace a failed answer within an earlier run or establish an actor gain.
 
+### 3. Expose task intent and recorded defeat
+
+The task contract uses the recipe's existing reading and target arguments. The surface bank selects a request through `probe.<form>.<mechanism>.<reading>`. One form can serve compatible selectors. The loader derives valid readings from `attributes.yaml`; it holds no second reading list. The renderer preserves opaque statement targets and explicit context, holder and historical-date arguments. A missing selector stops generation before model spend. Its cost is a refused development task that needs wording, rather than an incorrectly measured task.
+
+Attribution-only actions identify sources without selecting their claims as work inputs. Hedge requests ask about recorded qualifications without claiming independent verification. A trace distinguishes a specific statement from the current standing claim about an attribute. Shared task conventions reach every arm and the judge through the existing projection frame. Further key facts supply grading context; they create no additional answer request. Preservation of an unrelated statement can require leaving it untouched, without mentioning it.
+
+Effective rebuttal and undercut wording matches the existing defeat operation. Ordinary disagreement alone establishes no defeat. Source snapshots retain endpoint citations without publishing a winning value. The `over_flags` description concerns the requested property and target. A separate verification caveat does not invent a recorded hedge. Listed-trap reliance remains strict.
+
+This amendment changes task wording, relation wording and prospective grading descriptions. It is not an evidence-only repair. A new generator version distinguishes its manifests. Oracle readings, recipe bindings, thresholds and previous rounds remain unchanged. No paid replay or rescore follows from this amendment.
+
+The weekly runner consumes complete session files before creating memory snapshots and running probes. Probe slots therefore use the session's end-of-week date before key derivation. Source slots retain their existing weekday draw. This changes prospective key dates, without changing the oracle. Verification compares all other key fields and source records. It should check every workspace, reference prompt and preceding memory input for future documents; the current test checks the session files that weekly probes receive. Filtering H alone would leave future files in workspaces and persistent memory. Later expiry-sensitive or historical recipes need a separate freshness check.
+
+The existing renderer and runner supply selection, source closure, delivery and judging. The custom gap is reading-specific wording in the existing bank. Maintenance follows supported readings and split-owned language. No new evaluation framework is required. The primary evaluation reference is [Demystifying evals for AI agents](https://www.anthropic.com/research/demystifying-evals-for-ai-agents): task requirements must be clear to the actor.
+
+Free verification inventories reachable selectors, variants, targets, qualifiers and supported levels. It checks source-derived key equality, answer/trap overlap and source-to-session coverage. Independent source verification and contract review precede another scored round. Free checks establish readiness; fresh actors still must pass the existing H and N gates.
+
+### 4. Distinguish examination from adoption
+
+The shared actor frame and `trusts_stale` description use the same boundary. Adoption means that dependent work treats a claimed value as valid, including a provisional premise or operational setting. Reporting, questioning or proposing a test does not adopt that value when the work does not assume it holds. Neither reporting nor examination establishes the current value or independent verification. This applies across statement kinds, hedges and attributed claims. It supersedes amendment 1's broader proposed-input wording for prospective runs.
+
+This clarification adds no obligation to verify every claim. Attribution-only requests retain their explicit restriction on selecting a claimed value as a work input. Oracle readings, semantic keys, source records, dates and thresholds remain unchanged. Generator version 4 records the prospective contract. Earlier actor outputs and both judges' verdicts remain unchanged; they establish no accepted calibration gain.
+
+The existing projection frame and behaviour registry carry the clarification. No new grader or evaluation framework is needed. The relevant primary-source roster row is "I can't tell whether a change actually improved the agent". Its [Demystifying evals for AI agents](https://www.anthropic.com/research/demystifying-evals-for-ai-agents) reference supports matching actor-visible requirements to grading criteria. Free source comparison must preserve the same draws, semantic keys and source bytes. A real actor checks the exposed repair before a fresh development run.
+
 ## The catalogue
 
 `benchmarks/membench/world/catalogue/` holds the first catalogue as data.

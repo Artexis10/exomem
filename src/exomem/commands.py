@@ -100,6 +100,7 @@ from . import find as find_module
 from . import freshness as freshness_module
 from . import get_page as get_page_module
 from . import held_operation as held_operation_module
+from . import import_filing as import_filing_module
 from . import import_windows as import_windows_module
 from . import install_info as install_info_module
 from . import knowledge_packs as knowledge_packs_module
@@ -157,6 +158,7 @@ from . import semantic_writes as semantic_writes_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
 from . import source_coverage as source_coverage_module
+from . import speech_attach_schema as speech_attach_schema_module
 from . import state_paths as state_paths_module
 from . import structured_files as structured_files_module
 from . import topic_brief as topic_brief_module
@@ -919,6 +921,11 @@ def op_bootstrap(
         from . import activity as activity_module
 
         return activity_module.payload(vault_root)
+    if section == bootstrap_core_module.WHATS_NEW_SECTION:
+        # The release notes of the running image for Home: no vault content, no reference payload.
+        from . import release_notes as release_notes_module
+
+        return release_notes_module.payload()
 
     session_requested = profile == "session"
     session_unavailable: str | None = None
@@ -3079,6 +3086,7 @@ def op_find(
     degraded: list[str] = []
     failed: list[str] = []
     dimension_check: dict[str, int] = {}
+    partial_coverage: list[str] = []
     dimension_groups: list[dimension_display_module.GroupRequest] = []
     group_blocks: list[dict[str, Any]] | None = None
     projected_continuation: str | None = None
@@ -3169,6 +3177,7 @@ def op_find(
                 admit_path=admit_path,
                 dimension_check_out=dimension_check,
                 dimension_groups_out=dimension_groups,
+                partial_coverage_out=partial_coverage,
             )
         # Values of small datasets are a separate lane that `find` does not run. It answers an
         # unfiltered text query, and `annotate_hits` below releases its hits only at full level.
@@ -3209,12 +3218,15 @@ def op_find(
         with find_module._span(timings, "release_gate"):
             release = egress_module.annotate_hits(vault_root, hits, limit=limit, purpose=purpose)
             hits = release.hits
+        # A stopped keyword scan shortens the result only when release kept fewer hits than the limit.
+        find_module.settle_partial_coverage(partial_coverage, hits, limit=limit)
         if dimension_groups:
             # Grouping orders and marks the released hits; the limit has already cut them.
             with find_module._span(timings, "dimension_groups"):
                 grouped = dimension_display_module.group_hits(hits, dimension_groups[0])
             hits = grouped.hits
             group_blocks = grouped.groups
+            egress_module.project_grouped_displays(vault_root, hits, group_blocks, purpose=purpose)
     referents: dict[str, Any] | None = None
     if projection_runtime is None:
         # Referents compose over the released vault hits; the projected (hosted
@@ -3409,6 +3421,8 @@ def op_find(
         and dimension_check["checked"] >= retrieval_limit
         else None
     )
+    # An exact dimension scan stopped at its designed bound: no lane failed, and more matches may exist.
+    partial_coverage_marker = sorted(set(partial_coverage)) or None
     if (
         timings_dict is None
         and timings_suppressed is None
@@ -3418,6 +3432,7 @@ def op_find(
         and projected_continuation is None
         and budget_block is None
         and dimension_block is None
+        and partial_coverage_marker is None
         and group_blocks is None
         and registry_lag is None
     ):
@@ -3450,6 +3465,8 @@ def op_find(
         out["budget"] = budget_block
     if dimension_block is not None:
         out["dimension_check"] = dimension_block
+    if partial_coverage_marker is not None:
+        out["partial_coverage"] = partial_coverage_marker
     if group_blocks is not None:
         out["dimension_groups"] = group_blocks
     if registry_lag is not None:
@@ -7156,7 +7173,7 @@ def _search_notice(envelope: Mapping[str, Any]) -> str | None:
         return _SEARCH_NOTICE_DEGRADED
     if envelope.get("budget"):
         return _SEARCH_NOTICE_BUDGET
-    if envelope.get("dimension_check"):
+    if envelope.get("dimension_check") or envelope.get("partial_coverage"):
         return _SEARCH_NOTICE_DIMENSION
     return None
 
@@ -7211,8 +7228,8 @@ def _cite_search_hits(vault_root: Path, hits: list) -> None:
 def _agent_search_reply(result: list | dict, *, internals: bool) -> dict:
     """Shape a search result for the agent: a summary, the hits, and one notice when partial.
 
-    Index, warming, budget and dimension-check state become a `notice` sentence; a dimension check
-    that dropped hits after the limit also leads the summary with its count. A caller that asked
+    Index, warming, budget, dimension-check and partial-coverage state become a `notice` sentence; a
+    dimension check that dropped hits after the limit also leads the summary with its count. A caller that asked
     for timings or an explanation asked to see retrieval internals, so those raw blocks stay
     beside them.
     """
@@ -7228,7 +7245,7 @@ def _agent_search_reply(result: list | dict, *, internals: bool) -> dict:
         sentence for sentence in (_search_notice(envelope), envelope.pop("notice", None)) if sentence
     ) or None
     dimension_check = envelope.get("dimension_check")
-    for internal in ("warming", "degraded", "budget", "dimension_check", "lag"):
+    for internal in ("warming", "degraded", "budget", "dimension_check", "partial_coverage", "lag"):
         if internals:
             continue
         envelope.pop(internal, None)
@@ -9286,6 +9303,41 @@ def op_observe_memory(
         raise ValueError(
             "INVALID_PATH: observe_memory requires a governed KB-relative path or reference"
         )
+
+    def page_without_walk() -> str | None:
+        # The page this call names when finding it reads no more than the page: a vault path, a
+        # vault or source ref, or a memory ref that the current identity projection answers. A
+        # title would need the title index. A caller whose pages are filtered gets no page-specific
+        # wording, so the reply cannot tell it whether a page it cannot see exists.
+        if egress_module.caller_restricted(vault_root):
+            return None
+        if not raw_path.lower().startswith("exomem://"):
+            return raw_path
+        if raw_path.lower().startswith(memory_refs_module.REF_PREFIX):
+            return memory_refs_module.owner_without_walk(vault_root, raw_path)
+        decoded = memory_refs_module.resolve_identifier_read_only(vault_root, raw_path)
+        return decoded if is_in_managed_root(decoded) else None
+
+    early = observe_memory_module.refusal_before_page(
+        vault_root,
+        page=page_without_walk,
+        operation=operation,
+        category=category,
+        content=content,
+        kind=kind,
+        unit=unit,
+        unit_ref=unit_ref,
+        verdict=verdict,
+        check_by=check_by,
+        as_of=as_of,
+        until=until,
+        tags=tags,
+        context=context,
+        relations=relations,
+        validate_only=validate_only,
+    )
+    if early is not None:
+        raise early.leaf_error()
     if not raw_path.lower().startswith("exomem://"):
         path = page_names_module.resolve_page(
             vault_root, path, prefer=page_names_module.prefer_editable, field="path"
@@ -10346,7 +10398,9 @@ def op_transfer_artifact(
     return handoff
 
 
-ProcessMediaOperation = Literal["process", "status", "retry", "reprocess", "replicate"]
+ProcessMediaOperation = Literal[
+    "process", "status", "retry", "reprocess", "replicate", "attach-speech", "rename-speakers"
+]
 
 
 def op_process_media(
@@ -10358,21 +10412,44 @@ def op_process_media(
     multilingual: bool = False,
     store: str | None = None,
     diarize: bool | None = None,
+    binary_sha256: str | None = None,
+    binary_size: StrictInt | None = None,
+    segments: speech_attach_schema_module.Segments | None = None,
+    turns: speech_attach_schema_module.Turns = (),
+    engine: speech_attach_schema_module.Engine | None = None,
+    asr: speech_attach_schema_module.AttachedAsr | None = None,
+    names: speech_attach_schema_module.Names = (),
+    replace_labelled: bool = False,
+    renames: speech_attach_schema_module.Renames | None = None,
 ) -> dict:
-    """Check governed media; retry after remediation; extract again; replicate originals.
+    """Check governed media; retry after remediation; extract again; replicate originals; attach speech.
 
     Status reads; other operations change extraction state. Extraction normally runs
     automatically. Reprocess keeps the old text on a prior page. Replicate (owner
     only) queues an encrypted replica of every original in store `store` and returns
-    the queue counts; a repeat while it runs changes nothing.
+    the queue counts; a repeat while it runs changes nothing. Attach-speech stores a
+    transcript, with speaker turns when it has them, that the caller computed on its own
+    machine for one recording; the page records the engine as attached, unchecked. It
+    needs the original's SHA-256 and size, and a repeat of the same call changes nothing.
+    A merged-turn page is processed again with speaker labels before an attach. Rename-speakers
+    changes the speaker labels of one recording to the names a person gave; it keeps no voice.
 
     Args:
-        path: Governed KB media path; omit for bounded all-media work.
+        path: Governed KB media path; omit for bounded all-media work. Attach-speech and rename-speakers take one recording.
         paths: 1-32 unique governed paths, not for status.
         language: Speech language code; omit to detect.
         multilingual: Detect language per window (slower).
         store: Replicate only: the name of a store the vault declares.
         diarize: Request or skip speaker labels on selected audio or video. Omit to keep the item's preference.
+        binary_sha256: Attach-speech: SHA-256 of the recording's original, as its Source records it.
+        binary_size: Attach-speech: byte size of the recording's original.
+        segments: Attach-speech: the transcribed speech.
+        turns: Attach-speech: who spoke when; omit when the result has no speakers.
+        engine: Attach-speech: the engine and model that produced the result.
+        asr: Attach-speech: facts the engine reported (language and speech seconds).
+        names: Attach-speech: names for labels of `turns`.
+        replace_labelled: Attach-speech: replace a result that has speaker labels or names; the old one stays on a prior page.
+        renames: Rename-speakers: each label as the page shows it, mapped to a person's name.
     """
     from . import due_state as due_state_module
     from . import media_processing
@@ -10380,6 +10457,14 @@ def op_process_media(
     from .cli_ops import OpError
 
     validate_process_media_operation(operation)
+    if operation in {"attach-speech", "rename-speakers"}:
+        if any(value is not None for value in (paths, language, store, diarize)) or multilingual:
+            raise OpError("MEDIA_SPEECH_ARGUMENTS", f"{operation} takes one path and its own fields only")
+        return _speech_media(
+            vault_root, operation, path=path, binary_sha256=binary_sha256, binary_size=binary_size,
+            segments=segments, turns=turns, engine=engine, asr=asr, names=names,
+            replace_labelled=replace_labelled, renames=renames,
+        )
     if path is not None and paths is not None:
         raise OpError("MEDIA_PATH_SELECTOR_CONFLICT", "use either path or paths, not both")
     if diarize is not None:
@@ -10424,6 +10509,69 @@ def op_process_media(
     # `retry` re-enqueues in the machine-local job store and commits nothing, so
     # the commit gate inside the carrier keeps it silent — that is the contract,
     # not an omission.
+    return _carrying_batch_advisories(vault_root, result)
+
+
+def _speech_media(
+    vault_root: Path,
+    operation: str,
+    *,
+    path: str | None,
+    binary_sha256: str | None,
+    binary_size: int | None,
+    segments: Any,
+    turns: Any,
+    engine: str | None,
+    asr: Any,
+    names: Any,
+    replace_labelled: bool,
+    renames: Any,
+) -> dict:
+    """Attach a speech result to one recording's Source, or rename its speaker labels.
+
+    Each commits its page under the mutation guard alone (`speech_attach.commit_under_guard`), so the
+    request holds no wider boundary. Both refuse before the first write, and a repeat writes nothing.
+    """
+    from . import due_state as due_state_module
+    from . import media_processing, speaker_rename, speech_attach
+    from .cli_ops import OpError
+    from .writer_lease import active_manager, active_mutation_request_id
+
+    vault_root = Path(vault_root).resolve()
+    manager = active_manager()
+
+    def commit_guard():
+        return manager.mutation_guard(
+            vault_root,
+            request_id=active_mutation_request_id(),
+            operation=f"process_media_{operation}_commit",
+            holder_kind="command",
+        )
+
+    attaching = operation == speech_attach_schema_module.ATTACH_OPERATION
+    # The door's per-operation row lists the same fields; a direct caller is held to the required ones here.
+    required = (
+        {"binary_sha256": binary_sha256, "binary_size": binary_size, "segments": segments, "engine": engine}
+        if attaching else {"renames": renames}
+    )
+    missing = [name for name, value in {"path": path, **required}.items() if value is None]
+    if missing:
+        raise OpError("MEDIA_SPEECH_ARGUMENTS", f"{operation} needs {', '.join(missing)}")
+    try:
+        with due_state_module.batch_scope(vault_root):
+            if attaching:
+                result = speech_attach.attach(
+                    vault_root, path, binary_sha256=binary_sha256, binary_size=binary_size, segments=segments,
+                    engine=engine, turns=turns or None, names=names or None, asr=asr, replace_labelled=replace_labelled,
+                    commit_guard=commit_guard,
+                )
+            else:
+                result = speaker_rename.rename(vault_root, path, renames, commit_guard=commit_guard)
+    except media_processing.MediaProcessingError as error:
+        raise OpError(error.code, error.reason) from error
+    if result["outcome"] == "unchanged":
+        # A repeat wrote nothing, so it settles as a reuse instead of waiting for a commit that will not come.
+        result = mutation_terminal_module.as_reused(result)
     return _carrying_batch_advisories(vault_root, result)
 
 
@@ -12477,6 +12625,7 @@ def op_adoption_studio(
     limit: Annotated[int, Field(ge=1, le=adoption_run_module.STATUS_PAGE_ITEMS)] = adoption_run_module.STATUS_PAGE_ITEMS,
     revision: str | None = None,
     upload: str | None = None,
+    wait: bool = True,
 ) -> dict:
     """Review and import a collection in a resumable run.
 
@@ -12484,7 +12633,9 @@ def op_adoption_studio(
     Status/work-item read; others write. Apply commits the previewed plan or refuses.
 
     file imports a staged folder in one repeatable call: repeat it with the
-    `continuation` it returns until `filing` is not `working`. An archive sent
+    `continuation` it returns until `filing` is not `working`. A serving cell also
+    finishes a stage it was asked to file: read it with inspect_memory `imports.status` and `view="filing"`;
+    manage_memory `imports.file` with `wait` false registers a stage and files nothing in the call. An archive sent
     with upload_files (lane import) is filed with `upload`. Other actions are
     the step path. start scans; select chooses; plan previews; apply copies into
     Sources and drafts notes under own-note rules; cancel closes pre-apply; finish
@@ -12530,11 +12681,15 @@ def op_adoption_studio(
             with none is refused.
         view: For run `status`, summary by default; inventory, selection, plan,
             outcomes or stale pages. Full is the explicit browser compatibility view.
+            `filing` takes the staged `path` and no run_id: state, progress, left_out (when done), stop,
+            needs, person and rate of the cell's own filing; `unknown` is not zero.
         offset: For status pages, a zero-based row offset.
         limit: For status pages, from 1 to 100 rows, also bounded by response bytes.
         revision: For status pages, the preceding summary's revision; restart paging if it changed.
         upload: For `file`, the `token` that upload_files returned for lane import, in place of `path`.
             The first call unpacks the archive into a staged folder; repeats carry on. Its reply names `path`.
+        wait: For `file`, false only registers `path` for the cell to file under your login (it replaces an
+            ended one) and answers the `view="filing"` reply; it files nothing in the call.
     """
     action = (action or "").strip()
     if action not in _ADOPTION_STUDIO_ACTIONS:
@@ -12554,7 +12709,7 @@ def op_adoption_studio(
                     "IMPORT_REQUEST_INVALID", "status of one run takes no after, series_id or next_window_bytes")
             listing = adoption_run_module.status(
                 vault_root, run_id=run_id, path=path, view=view, offset=offset, limit=limit, revision=revision)
-            if run_id:
+            if run_id or view == "filing":
                 return listing
             return {**listing, **import_windows_module.report(
                 vault_root, after=after, series_id=series_id, next_window_bytes=next_window_bytes)}
@@ -12590,6 +12745,12 @@ def op_adoption_studio(
         if action == "file":
             from . import due_state as due_state_module
 
+            if wait is False:
+                if upload is not None or continuation:
+                    raise adoption_run_module.AdoptionRunError(
+                        "IMPORT_REQUEST_INVALID", "file with wait false takes the staged path alone")
+                import_filing_module.wake(vault_root, path or "", collection)
+                return adoption_run_module.status(vault_root, path=path, view="filing")
             if upload is not None:
                 from . import import_upload
 
@@ -12600,6 +12761,8 @@ def op_adoption_studio(
                 if staged.stopped is not None:
                     return {"path": staged.path, **staged.stopped}
                 path = staged.path
+            # The cell finishes the stage after this call: a serving runtime registers it with its import filer.
+            import_filing_module.note_file_call(vault_root, path, collection)
             # Like `apply`, one call commits a bounded share of the import, so it is one batch at its terminal.
             with due_state_module.batch_scope(vault_root), state_paths_module.resolution_scope():
                 filed = adoption_run_module.file(
@@ -12675,7 +12838,9 @@ def op_observe_transfer(
     2. status: the latest import (or import_id) and the export; poll until an adopt import
        is `done`.
     3. File it: manage_memory `imports.file` on the `next` path (`_Imports/<id>`), repeated with its
-       `continuation` until `filing` is not `working`. An older server refuses it: `imports.start` on
+       `continuation` until `filing` is not `working`. A cell asked to file finishes it: poll
+       inspect_memory `imports.status` (`view="filing"`) until `state` is `done`; `imports.file` with
+       `wait` false only registers it. An older server refuses it: `imports.start` on
        the path, and again with `next_after`; select, plan and apply (at `apply_stop`, stop
        until space is free); finish.
     4. Review the residual with the person; discard with transfer_memory.
@@ -12733,6 +12898,7 @@ def op_maintain_memory(
         "structured-files",
         "curation",
         "tag-variants",
+        "path-variants",
         "maintenance-job",
         "maintenance-job-cancel",
         "collections-store",
@@ -13089,6 +13255,33 @@ def op_maintain_memory(
                 vault_root, plan_id=plan_id, why=why, exclude=exclude_groups
             )
         return _carrying_batch_advisories(vault_root, reconciled)
+    if mode == "path-variants":
+        from . import path_variants as path_variants_module
+
+        if (
+            categories is not None
+            or apply is not None
+            or rebuild_embeddings
+            or rebuild_graph
+            or detail != "actionable"
+            or legacy_sample_limit != audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT
+            or collection is not None
+            or source_snapshot is not None
+        ):
+            raise ValueError("INVALID_ARGUMENTS: path-variants accepts only dry_run, plan_id and why")
+        # Merging moves files across the whole vault, protected captures included: it is the owner's.
+        refusal = egress_module.owner_only_aggregate(vault_root)
+        if refusal is not None:
+            return refusal
+        if dry_run is not False:
+            if plan_id is not None or why is not None:
+                raise ValueError("INVALID_ARGUMENTS: a path-variants preview takes no plan_id or why")
+            return path_variants_module.preview(vault_root)
+        if plan_id is None or why is None:
+            raise ValueError(
+                "INVALID_ARGUMENTS: a path-variants merge needs dry_run=false with the preview's plan_id and a why"
+            )
+        return path_variants_module.apply(vault_root, plan_id=plan_id, why=why)
     if mode == "maintenance-job" or mode == "maintenance-job-cancel":
         from . import maintenance_jobs as maintenance_jobs_module
 
@@ -13266,7 +13459,7 @@ def op_maintain_memory(
         return original_conversion.convert(vault_root, dry_run=True if dry_run is None else dry_run, plan_id=plan_id)
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
-        "backfill-ids, capture-metadata, convert-originals, structured-files, curation, tag-variants, maintenance-job, "
+        "backfill-ids, capture-metadata, convert-originals, structured-files, curation, tag-variants, path-variants, maintenance-job, "
         "maintenance-job-cancel, collections-store, collections-store-adopt-local, "
         "collections-store-export, collections-cutover, or held-resolve"
     )
@@ -15349,7 +15542,7 @@ def validate_process_media_operation(operation: Any) -> None:
 
         raise OpError(
             "INVALID_MEDIA_OPERATION",
-            "process_media operation must be process, status, retry, reprocess, or replicate",
+            "process_media operation must be process, status, retry, reprocess, replicate, attach-speech, or rename-speakers",
         )
 
 
@@ -15394,6 +15587,9 @@ def invocation_writes_outside_writer(command: Command, kwargs: dict[str, Any]) -
 
     The lease treats it as a read; read-only cells and the call ledger still treat it as a write.
     """
+    if command.name == "adoption_studio" and kwargs.get("action") == "file" and kwargs.get("wait") is False:
+        # Registers a stage in the cell's private filing record and files nothing, so it never waits for a filing call.
+        return True
     return command.name == "transfer_artifact" and kwargs.get("operation") == "cancel"
 
 
@@ -15713,16 +15909,32 @@ def busy_intake_applies(command: Command, arguments: Mapping[str, Any]) -> bool:
     return operations.queues_when_busy(action, arguments)
 
 
-def refusal_before_queueing(command: Command, arguments: Mapping[str, Any]) -> ValueError | None:
+def refusal_before_queueing(command: Command, arguments: Mapping[str, Any]) -> Exception | None:
     """The refusal that a save's arguments alone are certain to get, or None.
 
     A queued receipt promises a save, and a replay that the arguments already condemn would
-    fail only later. The check reads no page; `observe_memory` is the one command that has it.
+    fail only later. Each check reads no page, so a save that depends on an earlier queued
+    save is never refused for what that save has not written yet.
     """
-    if command.name != "observe_memory":
+    if command.name == "observe_memory":
+        error = observe_memory_module.argument_refusal(arguments)
+        return None if error is None else error.leaf_error()
+    if command.name == "episode_memory":
+        return episode_memory_module.argument_refusal(dict(arguments))
+    rules = _ARGUMENT_RULES.get(command.name)
+    operations = None if rules is None else operation_entries.register_operations(command.name)
+    if rules is None or operations is None or operations.selector is None:
         return None
-    error = observe_memory_module.argument_refusal(arguments)
-    return None if error is None else error.leaf_error()
+    # These rules take the caller's own selector value and refuse an unknown one themselves; the
+    # tool-level arguments its renderings declare are not operation fields.
+    skipped = {operations.selector, *(name for rendering in _renderings_for(command.name)
+                                      for name in rendering.tool_arguments)}
+    fields = {key: value for key, value in arguments.items() if key not in skipped}
+    try:
+        rules.validate(arguments.get(operations.selector), fields)
+    except Exception as error:  # noqa: BLE001 - the command's own refusal, whatever its type
+        return error
+    return None
 
 
 _MCRC = frozenset({"mcp", "rest", "cli"})

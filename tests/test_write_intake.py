@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import hashlib
+import json
 import threading
 import time
 from dataclasses import replace
@@ -20,7 +22,17 @@ from _public_call import public_call
 from conftest import _drain_background_threads
 from fastmcp import Client
 
-from exomem import auth_sessions, call_ledger, cloud_cell, commands, write_intake, writer_lease
+from exomem import (
+    auth_sessions,
+    call_ledger,
+    client_artifacts,
+    cloud_cell,
+    commands,
+    mutation_journal,
+    request_budget,
+    write_intake,
+    writer_lease,
+)
 from exomem import schema as schema_module
 from exomem import server as server_module
 from exomem.cli_ops import OpError
@@ -392,6 +404,27 @@ def test_a_save_sent_after_a_queued_one_runs_after_it(
     assert one["finished_at"] <= two["finished_at"]
 
 
+def test_a_save_behind_queued_saves_is_queued_at_once_without_the_intake_wait(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect: a save behind a backlog waited the whole intake wait for a queue that rarely empties."""
+    _writer, holder = managers
+    remember = _command("remember")
+    paused = threading.Event()
+    real_claim = write_intake._claim_head
+    monkeypatch.setattr(write_intake, "_claim_head", lambda root: 0.05 if not paused.is_set() else real_claim(root))
+    with _Hold(holder, vault):
+        first = _send(remember, vault, _remember_kwargs(vault, 6))
+    monkeypatch.setenv("EXOMEM_BUSY_INTAKE_AFTER_SECONDS", "30")
+    started = time.monotonic()
+    second = _send(remember, vault, _remember_kwargs(vault, 7), scope="principal:session-b")
+    assert second["state"] == "queued"
+    assert time.monotonic() - started < 5.0
+    paused.set()
+    _wait_for_state(vault, first["queued_write"]["ref"], "applied")
+    _wait_for_state(vault, second["queued_write"]["ref"], "applied")
+
+
 def test_a_compact_save_with_governed_metadata_behind_the_queue_is_refused_at_once_and_never_queued(
     vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -416,6 +449,215 @@ def test_a_compact_save_with_governed_metadata_behind_the_queue_is_refused_at_on
     paused.set()
     _wait_for_state(vault, first["queued_write"]["ref"], "applied")
     assert "as_of" in str(refused.value) and "`kind`" in str(refused.value)
+
+
+def test_an_oversized_recap_behind_the_queue_is_refused_at_once_and_never_queued(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect: a recap whose item broke a size cap came back queued and failed only at the replay."""
+    _writer, holder = managers
+    observe = _command("observe_memory")
+    plain = {
+        "path": "Knowledge Base/Notes/Insights/percentage-based-feature-flag-rollout.md",
+        "operation": "add", "category": "operating_constraint", "content": "A busy vault must not lose a save",
+    }
+    paused = threading.Event()
+    real_claim = write_intake._claim_head
+    monkeypatch.setattr(write_intake, "_claim_head", lambda root: 0.05 if not paused.is_set() else real_claim(root))
+    with _Hold(holder, vault):
+        first = _send(observe, vault, plain)
+    with pytest.raises(ValueError, match="EPISODE_TOO_LARGE"):
+        _send(_command("episode_memory"), vault, {
+            "action": "record", "subject": "Rollout review", "summary": "Reviewed the rollout steps.",
+            "decided": ["Keep the cohort steps " + "x" * 300],
+        }, scope="principal:session-b")
+    assert [item["ref"] for item in write_intake.read(vault)["items"]] == [first["queued_write"]["ref"]]
+    paused.set()
+    _wait_for_state(vault, first["queued_write"]["ref"], "applied")
+
+
+def test_a_record_call_with_arguments_its_action_refuses_behind_the_queue_is_never_queued(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A command that owns its argument rules is refused by them before queueing, not at the replay."""
+    _writer, holder = managers
+    observe = _command("observe_memory")
+    plain = {
+        "path": "Knowledge Base/Notes/Insights/percentage-based-feature-flag-rollout.md",
+        "operation": "add", "category": "operating_constraint", "content": "A busy vault must not lose a save",
+    }
+    paused = threading.Event()
+    real_claim = write_intake._claim_head
+    monkeypatch.setattr(write_intake, "_claim_head", lambda root: 0.05 if not paused.is_set() else real_claim(root))
+    with _Hold(holder, vault):
+        first = _send(observe, vault, plain)
+    with pytest.raises(Exception, match="arguments do not match the selected record action"):
+        _send(_command("record_memory"), vault, {"action": "append", "collection": "Reading list"},
+              scope="principal:session-b")
+    assert [item["ref"] for item in write_intake.read(vault)["items"]] == [first["queued_write"]["ref"]]
+    paused.set()
+    _wait_for_state(vault, first["queued_write"]["ref"], "applied")
+
+
+def test_a_dated_save_with_relations_behind_a_backlog_is_told_only_the_exit_that_lands(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dropping the date alone would meet the page's relations refusal, so only a rich kind is offered."""
+    _writer, holder = managers
+    observe = _command("observe_memory")
+    page = "Knowledge Base/Notes/Insights/percentage-based-feature-flag-rollout.md"
+    plain = {
+        "path": page, "operation": "add", "category": "operating_constraint",
+        "content": "A busy vault must not lose a save",
+    }
+    paused = threading.Event()
+    real_claim = write_intake._claim_head
+    monkeypatch.setattr(write_intake, "_claim_head", lambda root: 0.05 if not paused.is_set() else real_claim(root))
+    with _Hold(holder, vault):
+        first = _send(observe, vault, plain)
+    with pytest.raises(ValueError, match="COMPACT_METADATA_REQUIRES_RICH_KIND") as refused:
+        _send(observe, vault, {
+            **plain, "content": "Dated constraint", "as_of": "2026-11-25",
+            "relations": [{"kind": "supersedes", "target": "applied-export"}],
+        }, scope="principal:session-b")
+    paused.set()
+    _wait_for_state(vault, first["queued_write"]["ref"], "applied")
+
+    remediation = str(refused.value).partition(" Remediation: ")[2]
+    assert "omit as_of" not in remediation
+    assert "passing a rich kind" in remediation
+
+
+def _send_after_deadline(command, vault: Path, kwargs: dict, **send) -> object:
+    """Send a save whose call has used its whole budget by the time it would start saving."""
+    budget = request_budget.RequestBudget(seconds=50)
+    budget.deadline = time.monotonic() - 1.0
+    token = request_budget.set_current(budget)
+    try:
+        return _send(command, vault, kwargs, **send)
+    finally:
+        request_budget.reset_current(token)
+
+
+def test_a_save_that_used_its_call_time_preparing_is_queued_and_lands_once(
+    vault: Path, managers, drainer
+) -> None:
+    """A starved host once spent 13 minutes preparing a save whose client gave up at 60 s. The save
+    must come back queued while the client still listens, then land once, never be lost."""
+    receipt = _send_after_deadline(_command("remember"), vault, _remember_kwargs(vault, 31))
+
+    assert receipt["state"] == "queued"
+    assert receipt["committed"] is False
+    intake_id = receipt["queued_write"]["ref"].removeprefix(write_intake.REF_PREFIX)
+    rows = [json.loads(line) for line in mutation_journal.journal_path().read_text(encoding="utf-8").splitlines()]
+    # The journal row is how an operator counts saves queued because their call's time ran out.
+    (row,) = [r for r in rows if r.get("outcome") == "queued" and r.get("receipt_id") == intake_id[:16]]
+    assert row["error_code"] == "request_budget"
+    assert _pages_titled(vault, "Queued save 31") == []
+    _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
+    assert len(_pages_titled(vault, "Queued save 31")) == 1
+
+
+def test_a_write_the_intake_cannot_queue_still_lands_when_its_call_time_is_spent(
+    vault: Path, managers, drainer
+) -> None:
+    """A refusal could not queue this write, so refusing it would leave a slow write unable to land."""
+    not_a_save = replace(_command("remember"), busy_intake=False)
+    _send_after_deadline(not_a_save, vault, _remember_kwargs(vault, 32))
+
+    assert len(_pages_titled(vault, "Queued save 32")) == 1
+
+
+_FIGURES_CAPTURE = {
+    "title": "Fetched figures",
+    "source_type": "research-report",
+    "files": [{"download_url": "https://files.example/a", "file_id": "file-a"}],
+}
+
+
+def _fetch_figures(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
+    """Stand in for the download of a caller's file link; returns the file ids fetched."""
+    fetched: list[str] = []
+
+    def stage(file, _budget, **_kwargs):  # noqa: ANN001, ANN202
+        fetched.append(file["file_id"])
+        staged = tmp_path / "staged-figures.bin"
+        staged.write_bytes(b"quarterly figures")
+        return client_artifacts.StagedArtifact(
+            file_id=file["file_id"], path=staged, size=17,
+            sha256=hashlib.sha256(b"quarterly figures").hexdigest(),
+            content_type="application/octet-stream", filename="figures.bin",
+        )
+
+    monkeypatch.setattr(client_artifacts, "stage_artifact", stage)
+    return fetched
+
+
+def test_a_file_capture_past_its_call_time_commits_with_the_file_it_fetched(
+    vault: Path, managers, drainer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The server cannot fetch a caller's temporary file link again, so queuing the capture would
+    fetch it a second time or lose it once the link expired."""
+    fetched = _fetch_figures(monkeypatch, tmp_path)
+    result = _send_after_deadline(
+        _command("capture_source"), vault, _FIGURES_CAPTURE, injected=(schema_module.load_source_schema(vault),)
+    )
+
+    assert result.get("state") != "queued", result
+    assert fetched == ["file-a"]
+    assert [path.read_bytes() for path in vault.rglob("*.bin")] == [b"quarterly figures"]
+
+
+def test_a_file_capture_that_meets_a_busy_vault_goes_back_to_its_caller(
+    vault: Path, managers, drainer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A queued replay would fetch the caller's temporary file link again, or find it expired; only
+    the caller can send the capture again."""
+    _writer, holder = managers
+    monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "1")
+    fetched = _fetch_figures(monkeypatch, tmp_path)
+    with _Hold(holder, vault), pytest.raises(OpError) as refused:
+        _send(_command("capture_source"), vault, _FIGURES_CAPTURE,
+              injected=(schema_module.load_source_schema(vault),))
+
+    assert refused.value.code == "MUTATION_BUSY"
+    assert refused.value.details["committed"] is False
+    assert fetched == ["file-a"]
+    assert write_intake.read(vault)["items"] == []
+
+
+def test_a_file_capture_waits_out_a_short_busy_boundary_as_if_the_intake_were_off(
+    vault: Path, managers, drainer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never queued, the capture keeps the full capture wait, not the intake's short one."""
+    _writer, holder = managers
+    monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "8")
+    fetched = _fetch_figures(monkeypatch, tmp_path)
+    with _Hold(holder, vault) as hold:
+        threading.Timer(1.5, hold.release.set).start()
+        result = _send(_command("capture_source"), vault, _FIGURES_CAPTURE,
+                       injected=(schema_module.load_source_schema(vault),))
+
+    assert result.get("state") != "queued", result
+    assert fetched == ["file-a"]
+    assert [path.read_bytes() for path in vault.rglob("*.bin")] == [b"quarterly figures"]
+
+
+def test_a_commit_under_way_is_never_refused_when_its_call_time_runs_out(
+    vault: Path, managers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a call's first write guard is refused: a later guard belongs to a commit already started."""
+    writer, _holder = managers
+    monkeypatch.setattr(write_intake, "queues_busy_refusal", lambda: True)
+    budget = request_budget.RequestBudget(seconds=50)
+    token = request_budget.set_current(budget)
+    try:
+        with writer.mutation_guard(vault, operation="first step"):
+            budget.deadline = time.monotonic() - 1.0
+        with writer.mutation_guard(vault, operation="second step"):
+            pass
+    finally:
+        request_budget.reset_current(token)
 
 
 def test_a_write_the_intake_does_not_accept_keeps_the_busy_refusal(

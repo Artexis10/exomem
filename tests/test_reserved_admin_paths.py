@@ -257,6 +257,7 @@ _PATTERN_SAMPLES = (
     "..review-state.json.abc123_4.tmp",
     "..due-state-candidates.json.abc123_4.tmp",
     "..ownership-rotation.json.abc123_4.tmp",
+    "..app-update-notices.json.abc123_4.tmp",
     f".lexical.sqlite.rebuild-{_HEX32}.tmp-shm",
     ".lexical-staged-0123456789abcdef.sqlite-wal",
     f".lexical.sqlite-shm.quarantine-{_HEX32}",
@@ -345,6 +346,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         memory_refs,
         ownership_rotation,
         procedure_approval,
+        release_notes,
         review_state,
         served_context,
         source_custody,
@@ -357,6 +359,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
     from exomem.governance import policy as governance_policy
 
     expected = {
+        "app-update-notices",
         "authorization-projections",
         "batch-workspace",
         "brief-watermarks",
@@ -461,6 +464,8 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
             "graph-receipts",
         ),
         (review_state.state_path(root), "review-state"),
+        (release_notes.state_path(root), "app-update-notices"),
+        (release_notes.lock_path(root), "app-update-notices"),
         (served_context.sidecar_path(root), "served-context"),
         (brief_watermarks.sidecar_path(root), "brief-watermarks"),
         (

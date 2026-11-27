@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
+import sys
 import threading
 import time
 
@@ -50,3 +52,26 @@ def test_only_the_newest_dumps_are_kept(tmp_path):
         (tmp_path / f"thread-dump-2026010{index}T000000-1.txt").write_text("old")
     thread_dump.write_dump(tmp_path)
     assert len(list(tmp_path.glob("thread-dump-*.txt"))) == thread_dump._KEEP_DUMPS  # noqa: SLF001
+
+
+def test_a_thread_started_after_naming_shows_its_own_name_in_proc():
+    """Catches per-thread CPU in /proc that cannot tell the threads apart: before 3.14 each shows the process name."""
+    script = """
+import threading
+from pathlib import Path
+from exomem import thread_dump
+thread_dump.name_os_threads()
+names = {}
+def look():
+    names["worker"] = Path(f"/proc/self/task/{threading.get_native_id()}/comm").read_text().strip()
+worker = threading.Thread(target=look, name="exomem-filing-probe")
+worker.start()
+worker.join()
+print(names["worker"], Path("/proc/self/comm").read_text().strip())
+"""
+    worker, process = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                                     check=True, timeout=60).stdout.split()
+
+    assert worker != process
+    assert worker in "exomem-filing-probe"
+    assert process == os.path.basename(sys.executable)[:15]

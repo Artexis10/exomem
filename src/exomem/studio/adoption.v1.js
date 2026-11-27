@@ -640,7 +640,8 @@ function populatePreview() {
     const list = el("ul", "", "file-table");
     items.slice(0, 200).forEach((item) => {
       const li = el("li");
-      const action = item.action === "already-imported" ? "already in Evermatter as" : "copied in as";
+      const action = item.action === "already-imported" ? "already in Evermatter as"
+        : item.action === "keeps-extraction" ? "its finished transcript is kept with the recording" : "copied in as";
       li.append(el("span", `${item.original_path}  →  ${action} "${item.title || item.target_name || ""}"`));
       li.append(el("span", "We record where it came from and a checksum, so you can verify your original any time.", "fine-print"));
       list.append(li);

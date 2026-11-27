@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from . import doctor as doctor_module
+from . import env_compat
 
 # The keys this wizard owns in `.env`. Written/patched in place; every other
 # line (comments, unrelated keys) is preserved verbatim by `patch_env`.
@@ -132,6 +133,13 @@ def connector_url(base_url: str) -> str:
     return f"{base_url}/mcp"
 
 
+def plugin_url(base_url: str) -> str:
+    """Where this server serves its one-upload Claude plugin."""
+    from .self_hosted_plugin import ROUTE
+
+    return f"{base_url}{ROUTE}"
+
+
 def callback_url(base_url: str) -> str:
     """The GitHub OAuth App's Authorization callback URL."""
     return f"{base_url}/auth/callback"
@@ -176,13 +184,17 @@ def patch_env(existing: str, updates: dict[str, str | None]) -> str:
 
     An existing `KEY=` line is replaced IN PLACE (position, and any surrounding
     comments/blank lines, preserved); a new key is appended. A `None` value
-    removes every `KEY=` line instead. `export KEY=` lines count as `KEY` and
+    removes every `KEY=` line instead. The same setting under another prefix
+    (`EVERMATTER_`, `KB_MCP_`) is removed for every key in `updates`, because the
+    wizard writes the `EXOMEM_` name and an alias line would conflict with it or
+    bring a removed value back. `export KEY=` lines count as `KEY` and
     keep their prefix when replaced. Comments and keys the wizard doesn't own
     are never touched. Always returns text ending in a single newline (empty
     input with no updates returns "").
     """
     remaining = {key: value for key, value in updates.items() if value is not None}
-    removed = {key for key, value in updates.items() if value is None}
+    removed = {alias for key in updates for alias in env_compat.names_for(key)[1:]}
+    removed |= {key for key, value in updates.items() if value is None}
     out: list[str] = []
     for line in existing.splitlines():
         key, prefix = _env_line_key(line)
@@ -258,9 +270,7 @@ def _prompt_base_url(input_fn, print_fn, default: str) -> str:
 
 def _load_env(env_path: Path) -> None:
     """Reload `.env` into os.environ so doctor's remote checks see fresh values."""
-    from dotenv import load_dotenv
-
-    load_dotenv(env_path, override=True)
+    env_compat.load_dotenv(env_path, override=True)
 
 
 def run_remote_setup(
@@ -322,7 +332,11 @@ def run_remote_setup(
         return 2
 
     existing_text = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
-    existing = parse_env(existing_text)
+    # This command writes credentials, so a conflict between names refuses it rather than pick.
+    env_compat.refuse_process_conflicts(every_setting=True)
+    existing = env_compat.canonical_settings(
+        parse_env(existing_text), source="the .env file", refuse_all=True
+    )
 
     def _existing(key: str) -> str:
         return existing.get(key) or os.environ.get(key, "")
@@ -560,7 +574,8 @@ def run_remote_setup(
     # this run removed must not survive in the process environment (inherited
     # from the shell or service), or the gate would judge the old value.
     for removed_key in [key for key, value in updates.items() if value is None]:
-        os.environ.pop(removed_key, None)
+        for name in env_compat.names_for(removed_key):
+            os.environ.pop(name, None)
     load_env_fn(env_path)
     dr = doctor_fn(vault=vault_path, profile="remote", probe=probe)
     if dr.success:
@@ -579,10 +594,14 @@ def run_remote_setup(
 
     # 8. Success — print the connector URL and tunnel-specific next steps.
     print_fn("")
-    print_fn("Ready. Add the connector on claude.ai:")
-    print_fn("  Settings → Connectors → Add custom connector →")
+    print_fn("Ready. Install Evermatter in Claude with one upload:")
+    print_fn(f"  1. Download {plugin_url(base_url)}")
+    print_fn("  2. Upload that file as a plugin in Claude.")
+    print_fn("  3. Open the plugin's Connectors tab, connect Evermatter and sign in")
+    print_fn(f"     with the GitHub account: {github_username}")
+    print_fn("  The plugin brings the connection, every skill and the hooks. To add only")
+    print_fn("  the connection instead: Settings → Connectors → Add custom connector →")
     print_fn(f"      {connector_url(base_url)}")
-    print_fn(f"  then sign in with the GitHub account: {github_username}")
     print_fn("")
     if tunnel == "ngrok":
         print_fn("ngrok notes:")

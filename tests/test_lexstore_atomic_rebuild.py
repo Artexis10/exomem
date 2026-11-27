@@ -1549,6 +1549,94 @@ def test_foreground_delta_after_temp_target_rebases_replacement(
     assert not any("deletedcontent" in c for c in contents)
 
 
+def test_a_source_erasure_during_the_build_declines_the_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The temp copied a page's rows before a Source erasure; publishing it after would name the page again.
+
+    The erasure advances the retirement generation while the build runs, so the
+    rebuild declines and the live catalogue stays the one the eraser cleaned.
+    """
+    from exomem import source_custody
+
+    kept = _kb_file(tmp_path, "kept.md", "- [config] keptcontent ^u1")
+    erased = _kb_file(tmp_path, "erased.md", "- [config] erasedcontent ^u2")
+    _seed(tmp_path, [kept, erased])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    live_inode = store.path.stat().st_ino
+
+    real_fold = lexstore.LexicalStore._fold_to_single_file
+    state = {"erased": False}
+
+    def fold_then_erase(conn: Any) -> bool:
+        if not state["erased"]:
+            state["erased"] = True
+            erased.unlink()
+            freshness.on_files_changed(tmp_path, changed=[], deleted=[erased])
+            with writer_lease.active_manager().mutation_guard(tmp_path):
+                assert source_custody.advance_retirement_generation(tmp_path)
+        return real_fold(conn)
+
+    monkeypatch.setattr(store, "_fold_to_single_file", fold_then_erase)
+    published = store.rebuild_atomic()
+    monkeypatch.undo()
+
+    assert state["erased"]
+    assert published is False
+    assert store.path.stat().st_ino == live_inode
+
+
+@pytest.mark.parametrize("deleted", ["before the build", "during the build"])
+def test_a_rebuild_keeps_no_revision_or_journal_history_of_a_deleted_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, deleted: str
+) -> None:
+    """A page deleted before the build (the copy's reconcile drops it) or during it (the replay drops it)
+    leaves no unit revision in the replacement, and the copied journal history does not survive it: a
+    Source erasure may have restarted the live journal since the copy."""
+    kept = _kb_file(tmp_path, "kept.md", "- [config] keptcontent ^u1")
+    gone = _kb_file(tmp_path, "deleted.md", "- [config] deletedcontent ^u2")
+    _seed(tmp_path, [kept, gone])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    kept_rel = kept.relative_to(tmp_path).as_posix()
+    deleted_rel = gone.relative_to(tmp_path).as_posix()
+    with sqlite3.connect(store.path) as live:
+        assert live.execute(f"SELECT count(*) FROM {lexstore.CHANGE_JOURNAL} WHERE path = ?", (kept_rel,)).fetchone()[0]
+    live.close()
+
+    def delete_page() -> None:
+        gone.unlink()
+        freshness.on_files_changed(tmp_path, changed=[], deleted=[gone])
+
+    if deleted == "before the build":
+        delete_page()  # The live catalogue keeps the page: no read has applied the deletion to it.
+    else:
+        real_fold = lexstore.LexicalStore._fold_to_single_file
+        state = {"deleted": False}
+
+        def fold_then_delete(conn: Any) -> bool:
+            if not state["deleted"]:
+                state["deleted"] = True
+                delete_page()
+            return real_fold(conn)
+
+        monkeypatch.setattr(store, "_fold_to_single_file", fold_then_delete)
+    published = store.rebuild_atomic()
+    monkeypatch.undo()
+
+    assert published is True
+    with sqlite3.connect(store.path) as live:
+        assert live.execute("SELECT count(*) FROM pages WHERE path = ?", (deleted_rel,)).fetchone() == (0,)
+        assert live.execute(
+            "SELECT count(*) FROM unit_revisions WHERE parent_path = ?", (deleted_rel,)
+        ).fetchone() == (0,)
+        assert live.execute(
+            f"SELECT count(*) FROM {lexstore.CHANGE_JOURNAL} WHERE path = ?", (kept_rel,)
+        ).fetchone() == (0,)
+    live.close()
+
+
 def test_live_blessed_inside_the_replayed_span_does_not_veto_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2890,8 +2978,9 @@ def test_a_catalogue_from_another_release_is_rebuilt_whole(
 
 
 @pytest.mark.skipif(not lexstore.fts5_available(), reason="searches the FTS5 lane")
+@pytest.mark.parametrize("table", ["fts", "title_fts"])
 def test_a_catalogue_missing_a_full_text_row_is_rebuilt_whole(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, table: str,
 ) -> None:
     _kb_file(tmp_path, "lost.md", "- [config] lostword ^u1")
     _kb_file(tmp_path, "other.md", "- [config] steadyword ^u1")
@@ -2902,11 +2991,12 @@ def test_a_catalogue_missing_a_full_text_row_is_rebuilt_whole(
     conn = sqlite3.connect(store.path)
     with conn:
         conn.execute(
-            "DELETE FROM fts WHERE rowid = (SELECT rowid FROM pages WHERE path = ?)",
+            f"DELETE FROM {table} WHERE rowid = (SELECT rowid FROM pages WHERE path = ?)",
             ("Knowledge Base/lost.md",),
         )
     conn.close()
-    assert lexstore.search_bm25(tmp_path, "lostword", k=5, scope="kb") == []
+    if table == "fts":
+        assert lexstore.search_bm25(tmp_path, "lostword", k=5, scope="kb") == []
     parsed = _record_parsed_pages(store, tmp_path, monkeypatch)
     assert store.rebuild_atomic() is True
 
@@ -2948,3 +3038,57 @@ def test_a_census_refuses_when_the_registry_holds_two_spellings_of_one_page(
         lexstore.LexicalStore._census_agrees_outside_replay(start, replayed, after_walk, view)
         is None
     )
+
+
+def test_a_shared_read_opens_the_replaced_sidecar_and_never_answers_from_the_one_it_replaced(
+    tmp_path: Path,
+) -> None:
+    """A plan loop shares one connection for many lookups. A sidecar that a rebuild replaces in the middle of
+    the loop leaves that connection on the unlinked file, so every later lookup would answer from the old one."""
+    page = _kb_file(tmp_path, "a.md", "- [config] before ^u1")
+    _seed(tmp_path, [page])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    rel = "Knowledge Base/a.md"
+    # The replacement is a copy of the live sidecar that stores another hash for the page, as a rebuild's would.
+    replacement = store.path.with_name("replacement.sqlite")
+    live, copy = sqlite3.connect(store.path), sqlite3.connect(replacement)
+    try:
+        live.backup(copy)
+        copy.execute("UPDATE pages SET content_hash = 'replaced' WHERE path = ?", (rel,))
+        copy.commit()
+    finally:
+        copy.close()
+        live.close()
+
+    with lexstore.shared_reads(tmp_path):
+        before = store.page_content_hashes([rel])[rel]
+        for sibling in (store.path.with_name(store.path.name + suffix) for suffix in ("-wal", "-shm")):
+            sibling.unlink(missing_ok=True)  # a published sidecar is one folded file
+        os.replace(replacement, store.path)
+        after = store.page_content_hashes([rel])[rel]
+
+    assert before not in (None, "replaced") and after == "replaced"
+
+
+def test_a_shared_read_lets_a_whole_catalogue_rebuild_publish_instead_of_declining_it(tmp_path: Path) -> None:
+    """A rebuild folds the live sidecar out of WAL mode only when no other connection is open. A plan loop's
+    held connection would make every publication decline, and a declined pass queues the whole build again."""
+    page = _kb_file(tmp_path, "a.md", "searchable committed payload")
+    _seed(tmp_path, [page])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    rel = "Knowledge Base/a.md"
+    key = tmp_path.resolve()
+
+    with lexstore.shared_reads(tmp_path):
+        assert store.page_content_hashes([rel])[rel]  # the loop holds its connection
+        lexstore._FULL_REBUILDS_IN_FLIGHT.add(key)  # the repair worker marks a whole pass this way
+        try:
+            assert store.page_content_hashes([rel])[rel]  # the loop's next read yields the connection
+            published = store.rebuild_atomic()
+        finally:
+            lexstore._FULL_REBUILDS_IN_FLIGHT.discard(key)
+        assert store.page_content_hashes([rel])[rel]  # the loop reads on from the published sidecar
+
+    assert published, "the held connection made the rebuild decline its publication"

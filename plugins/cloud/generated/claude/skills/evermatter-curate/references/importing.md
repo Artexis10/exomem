@@ -20,7 +20,7 @@ instructions for the current platform when either is missing.
 
 An unversioned `uvx` command can reuse a cached CLI, and a connector refresh does not update it.
 After a CLI fix ships, retry the returned command with its prefix pinned to the fixed release. This
-package's release is `uvx evermatter@0.204.0`. Keep the endpoints, the other arguments and
+package's release is `uvx evermatter@0.207.0`. Keep the endpoints, the other arguments and
 the existing checkpoint. [uv's tool-version guidance](https://docs.astral.sh/uv/concepts/tools/#tool-versions)
 explains pinned versions.
 
@@ -42,14 +42,28 @@ progress first and agree with the person whether to resume or cancel it.
    - Evermatter Cloud with a shell: start the returned CLI command in the background, never in the
      foreground. It can run for hours. A folder larger than the cell's room goes as several windows,
      each an ordinary import with its own ID. The folder is encrypted before it leaves the machine.
-     The command files each window once it lands, and never discards. Read its output for window
+     The command files each window once it lands, and never discards. It also asks the cell to
+     finish filing each window, so a stop or an exit of the command leaves no landed window unfiled.
+     `--label` names where the files came from, and the Sources record it. Read its output for window
      IDs and filing stops. With `--no-file`, it only uploads, and you file each window in step 3.
+     With `--no-wait`, it uploads and asks the cell to file, and makes no `file` call itself.
      Until the command finishes, the members it has not sent exist only at the source.
    - Evermatter Cloud without a shell: give the person the returned CLI command or the Home link. For
      a folder larger than the room, give only the command. Never upload the files yourself.
 2. Wait until the import, or its first window, reads `done`. On Cloud, poll `observe_transfer`.
    `inspect_memory(operation="imports.status")` lists each landed window's ID.
-3. File it with `manage_memory(operation="imports.file", arguments={"path": "<stage path>"})`, or
+3. File it. A cell that was asked to file, or that has seen any `imports.file` call on the stage,
+   finishes it by itself. Read `inspect_memory(operation="imports.status", arguments={"path": "<stage path>",
+   "view": "filing"})` until `state` is `done`.
+   - `state` is `working`, `parked` (with the `stop` code and `needs`), `done` or `discarded`.
+     `unknown` means the cell has no record of the stage, never zero files. A parked stage resumes
+     on a later `imports.file` call or a restart. A `done` view lists in `left_out` the members
+     that were not filed, by reason; tell the person.
+   - `manage_memory(operation="imports.file", arguments={"path": "<stage path>", "wait": false})`
+     registers the stage under your login, which resumes one whose login ended, and files nothing
+     in the call.
+
+   To file at once, call `manage_memory(operation="imports.file", arguments={"path": "<stage path>"})`, or
    with an uploaded archive `arguments={"upload": "<token>"}`. Never pass both. Add `collection` when
    the person names one. While the reply says `filing: "working"`, call again with the same `path`
    and the reply's `continuation`. Stop at `done` or `stopped`. The server plans, applies and
@@ -106,7 +120,8 @@ state. A connector refresh does not repair the server.
    summary with counts, the plan, a `revision` and the interruption state.
 2. For details, read `view="outcomes"` with `limit` and that `revision`, carrying `next_offset` as
    `offset`. Other views are `inventory`, `selection`, `plan` and `stale`. An omitted oversized row
-   is uninspected, not an empty or successful item.
+   is uninspected, not an empty or successful item. `view="filing"` is not a run view: it takes the
+   stage `path` and no `run_id` (step 3 of the flow).
 3. If the status changed while you paged, read the summary again and restart the detail pages.
 4. Repeat the interrupted call exactly once, with its account, client, arguments, original
    `continuation` and idempotency key. Expect `filing: "working"` with a fresh `continuation`.

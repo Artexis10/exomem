@@ -72,7 +72,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # refuses them without, added 77 B on 2026-11-25 (compact-add-metadata-refusal). Its `links` now says that a compact
 # observation keeps only a source citation, such as a `derived_from` link to a saved Source or Evidence page, and every
 # other relation needs a rich kind, which added 160 B the same day.
-TOTAL_BUDGET = 31_650
+# The door operation `maintenance.path_variants`, the owner's preview and merge of folder splits that block an
+# export, added 43 B to the two door enums on 2026-11-25 (merge-vault-folder-splits).
+# The door operations `media.attach_speech` and `media.rename_speakers`, an owner's agent attaching a speech result it
+# computed and naming the speakers after the fact, added 41 B to the write door's enum on 2026-11-25
+# (keep-speech-results-in-cloud).
+TOTAL_BUDGET = 31_750
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
@@ -89,11 +94,13 @@ TOOL_CEILINGS: dict[str, int] = {
     "edit_plan_item": 750,
     "edit_record": 850,
     # inspect_name_drift joined the read door on 2026-11-23 (align-names-with-titles).
-    "inspect_memory": 2230,
+    "inspect_memory": 2250,
     "list_review_items": 750,
-    "manage_memory": 2570,
+    "manage_memory": 2650,
     "query_plan_items": 1050,
-    "query_records": 1100,
+    # `options` names `query`, the typed version-1 query that a derived collection also answers, added 32 B on
+    # 2026-11-25 (legacy arguments on a derived collection).
+    "query_records": 1150,
     "read_instructions": 750,
     "read_page": 700,
     "recall_context": 2800,
@@ -110,10 +117,11 @@ TOOL_CEILINGS: dict[str, int] = {
 #: A Cloud cell serves the local surface minus the tools it withholds plus the Cloud-only
 #: control-plane tools, so its budget is the local one re-based on exactly those differences.
 #: The only new numbers are the ceilings of the two tools that no other surface lists.
-# observe_transfer step 3 names the `file` call and the older-server fallback, so it measures 1,959 B and its
-# ceiling rounds to 2,000 B.
+# observe_transfer step 3 names the `file` call and the older-server fallback, so it measured 1,959 B. It adds the
+# filing view that reports a stage the cell files by itself (file-imports-on-the-cell), 138 B, and the `wait` false
+# call that registers a stage, 48 B, so it measures 2,145 B and its ceiling rounds to 2,150 B.
 CLOUD_ONLY_CEILINGS: dict[str, int] = {
-    "observe_transfer": 2000,
+    "observe_transfer": 2150,
     "transfer_memory": 1650,
 }
 

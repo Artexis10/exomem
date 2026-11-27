@@ -15,7 +15,7 @@ from pathlib import Path
 import httpx2
 import pytest
 
-from exomem import cloud_export_client, cloud_import_client, cloud_import_windows
+from exomem import cloud_export_client, cloud_import_client, cloud_import_windows, extraction_parts
 from exomem.cli_progress import Progress
 from exomem.cloud_import import DEFAULT_RESERVE_BYTES
 from exomem.cloud_import_client import (
@@ -200,6 +200,27 @@ def test_folder_import_skips_links_hidden_and_ignored_files_and_reports_them(tmp
     assert hint.lstrip().startswith("hidden:")
     # The encrypted copy is named as duplicate storage while it exists, and as removed at the end.
     assert "duplicates your data" in report and "Removed the encrypted copy" in report
+
+
+@needs_age
+def test_a_long_transcript_goes_with_its_hidden_part_folder_without_the_hidden_flag(tmp_path):
+    parts = extraction_parts.folder_for(Path("talk.md")).as_posix()
+    folder = tmp_path / "notes"
+    (folder / parts).mkdir(parents=True)
+    (folder / ".other").mkdir()
+    (folder / "talk.md").write_text("first part")
+    (folder / parts / "part-02.md").write_text("second part")
+    (folder / ".other" / "x.txt").write_text("hidden")
+    identity, recipient = _age_keys(tmp_path)
+    cloud = FakeCloud(recipient)
+    lines: list[str] = []
+
+    asyncio.run(cloud.run(folder, tmp_path / "checkpoint", progress=Progress(lines.append)))
+
+    sent = _members(identity, cloud.ciphertext)
+    assert {name: data for name, data in sent.items() if data is not None} == {
+        "talk.md": b"first part", f"{parts}/part-02.md": b"second part"}
+    assert "1 hidden part folder" in "\n".join(lines)
 
 
 def test_a_folder_with_nothing_left_to_import_is_refused_before_anything_is_sent(tmp_path):
@@ -466,6 +487,91 @@ def _endpoints_used(monkeypatch, tmp_path, *arguments) -> CloudImportClientConfi
     monkeypatch.setattr(cloud_import_windows, "import_folder", capture)
     assert cloud_import_client.main(["import", str(tmp_path), "--checkpoint", str(tmp_path / "cp"), *arguments]) == 0
     return seen[0]
+
+
+def test_no_wait_asks_the_cell_to_file_while_no_file_does_not_and_the_two_cannot_go_together(tmp_path, monkeypatch, capsys):
+    """Catches `--no-wait` that still files from this command, or `--no-file` that asks the cell to file."""
+    sent = []
+
+    async def capture(source, config, checkpoint, **kwargs):
+        sent.append((kwargs["file"], kwargs["ask_cell"]))
+        return {"import_id": "e91b0d91-79ab-4c9c-950b-a85e80c3a7ef", "windows": 1}
+
+    class NoCell:
+        def __init__(self, config, oauth):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *error):
+            return None
+
+    monkeypatch.setattr(cloud_import_windows, "McpCell", NoCell)
+    monkeypatch.setattr(cloud_import_windows, "import_folder", capture)
+    base = ["import", str(tmp_path), "--checkpoint", str(tmp_path / "cp")]
+
+    for arguments in ([], ["--no-wait"], ["--no-file"]):
+        assert cloud_import_client.main([*base, *arguments]) == 0
+    with pytest.raises(SystemExit):
+        cloud_import_client.main([*base, "--no-wait", "--no-file"])
+
+    assert sent == [(True, True), (False, True), (False, False)]
+    assert "--no-wait" in capsys.readouterr().err
+
+
+def test_a_label_reaches_the_import_and_one_the_cell_would_drop_is_refused_before_any_upload(tmp_path, monkeypatch, capsys):
+    """Catches a label that the cell leaves out unseen: an overlong one would never reach its Sources."""
+    sent = []
+
+    async def capture(source, config, checkpoint, **kwargs):
+        sent.append(kwargs["origin_label"])
+        return {"import_id": "e91b0d91-79ab-4c9c-950b-a85e80c3a7ef", "windows": 1}
+
+    class NoCell:
+        def __init__(self, config, oauth):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *error):
+            return None
+
+    monkeypatch.setattr(cloud_import_windows, "McpCell", NoCell)
+    monkeypatch.setattr(cloud_import_windows, "import_folder", capture)
+    base = ["import", str(tmp_path), "--checkpoint", str(tmp_path / "cp")]
+
+    assert cloud_import_client.main([*base, "--label", "Phone photos"]) == 0
+    with pytest.raises(SystemExit):
+        cloud_import_client.main([*base, "--label", "x" * 201])
+
+    assert sent == ["Phone photos"]
+    assert "--label" in capsys.readouterr().err
+
+
+def test_a_lone_import_prints_whether_the_cell_was_asked_to_file_it(tmp_path, monkeypatch, capsys):
+    """Catches a result line that says only `done` after `--no-wait`, so a person or script cannot tell the cell was never asked."""
+    async def lone_import(source, config, checkpoint, **kwargs):
+        return {"import_id": "e91b0d91-79ab-4c9c-950b-a85e80c3a7ef", "observed_state": "done", "cell_filing": "asked"}
+
+    class NoCell:
+        def __init__(self, config, oauth):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *error):
+            return None
+
+    monkeypatch.setattr(cloud_import_windows, "McpCell", NoCell)
+    monkeypatch.setattr(cloud_import_windows, "import_folder", lone_import)
+
+    assert cloud_import_client.main(["import", str(tmp_path), "--checkpoint", str(tmp_path / "cp"), "--no-wait"]) == 0
+
+    assert json.loads(capsys.readouterr().out.splitlines()[-1]) == {
+        "ok": True, "import_id": "e91b0d91-79ab-4c9c-950b-a85e80c3a7ef", "state": "done", "cell_filing": "asked"}
 
 
 def test_a_folder_resume_connects_mcp_only_when_it_calls_a_cell_tool(tmp_path, monkeypatch):

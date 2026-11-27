@@ -57,7 +57,7 @@ on Evermatter Cloud.
 4. Save the reply as JSON, for example `handoff.json`. Its token is a secret: never print it or put it
    in a message. Send within fifteen minutes; the token works once.
 5. Send the bytes. With the CLI, run `exomem attach <file> --handoff-file handoff.json --root <dir>`
-   (CLI only). A sandbox can install it with `pip install evermatter==0.204.0`. Otherwise, run the `shell` line of the reply's `next` send step, with `<token>` read
+   (CLI only). A sandbox can install it with `pip install evermatter==0.207.0`. Otherwise, run the `shell` line of the reply's `next` send step, with `<token>` read
    from the file into a shell variable, such as
    `TOKEN=$(python3 -c 'import json; print(json.load(open("handoff.json"))["token"])')`.
    Add no other field: the service refuses it, and a refused send uses up the token.

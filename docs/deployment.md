@@ -480,6 +480,8 @@ service name, so it keeps working across the rename. Verify with
 
 ## 7. Add to claude.ai
 
+To install everything in one upload, open `https://kb.example.com/claude-plugin.zip`, upload the file as a plugin in Claude, then connect Evermatter from the plugin's **Connectors** tab. The plugin carries the connection, every skill and the hooks. To add only the connection:
+
 1. claude.ai → Settings → Connectors → **Add custom connector**
 2. **Name**: `Knowledge Base` (or whatever)
 3. **Server URL**: `https://kb.example.com/mcp` (this host's public hostname)
@@ -1595,8 +1597,8 @@ the new one. A restricted caller never gets the owner's map: its packet is built
 
 The `budget` block has two sizes. `used_chars` is the prose the packet charges against `max_chars`.
 `serialized_chars` is the length of the packet as the cell builds it, in compact JSON, without the
-`serialized_chars` field itself. A Cloud cell adds its `service_notice` field to the reply after that
-count, so the count excludes it. A map item omits `topics` when it has none, and omits
+`serialized_chars` field itself. A Cloud cell adds its `service_notice` and `update_notice` fields to
+the reply after that count, so the count excludes both. A map item omits `topics` when it has none, and omits
 `lifecycle_class` and `state` when they are unset.
 
 A client that holds the current map can send its `continuity` token back. When the map that the
@@ -1758,7 +1760,13 @@ to CPU on Apple Silicon for cross-machine voiceprint parity), with a
 `EXOMEM_VOICE_DEVICE=cuda`/`mps`/`cpu` override. Enroll voices with
 `exomem enroll-speaker --name <name> [--self] <sample.wav>` (profiles live in a local
 `.voice_profiles.json` beside the embedding sidecar; `list-speakers` / `remove-speaker`
-manage them). With ≥1 profile enrolled and `EXOMEM_DIARIZE` set, matched clusters render
+manage them). To keep a voice from a recording that is already a Source, run
+`exomem enroll-speaker --name <name> --recording <vault path> --label "Speaker A"`: it shows
+the label's lines, asks, and only then reads the audio; `--cloud --page-file <page>` reads the
+original through the signed-in Cloud download and deletes the copy, and reads the part pages of a
+long transcript from beside the saved page. The terminal Home does the
+same from its `v` key. An extraction of merged turns has no times: process the recording again
+with speaker labels first. With ≥1 profile enrolled and `EXOMEM_DIARIZE` set, matched clusters render
 as `[<name>]: …`; unknown voices stay anonymous. The ECAPA checkpoint
 (`speechbrain/spkrec-ecapa-voxceleb`, override `EXOMEM_VOICE_EMBED_MODEL`) is gated like
 pyannote's — set `HUGGINGFACE_TOKEN`. Attribution thresholds are tunable via
@@ -1853,6 +1861,31 @@ A request with a local token acts as the owner and is recorded as
 `principal_kind: owner-local`; access log lines carry `ingress=local` and the
 client label, never the token. Tokens give attribution and revocation, not
 isolation: any process running as your user that can read the file can use it.
+A token that nobody revokes stays valid until someone does. The command does
+not check who runs it: any process that runs as your user and can read the
+service configuration can issue, list and revoke local tokens.
+
+An agent that needs a token, for `exomem attach` or to redeem a held upload,
+needs the same command. Issuing needs `EXOMEM_JWT_SIGNING_KEY`, which can
+forge any owner session, so give the agent a wrapper instead of the key. The
+wrapper:
+
+- keeps the signing key out of the agent's environment, so it never reaches the agent's context, transcript or child processes; the agent can still read the service configuration;
+- passes a neutral task id as the client label, never a description that
+  could name a person or client, because the label reaches every access log
+  line;
+- logs each session id;
+- revokes the token with `exomem auth revoke -- SESSION_ID` when the task
+  ends.
+
+A refusal that a wrapper makes, such as for a caller of another tenant or for
+an output path inside a git work tree, guards against mistakes. It is not a
+security boundary, because any process of your user can read the service
+configuration and run the command directly. To keep an excluded tenant away
+from this owner's memory, use a separate OS user or machine.
+`exomem auth revoke` does not check who issued a session. `--all` ends every
+session, remote ones included. Nothing enforces who runs it, so a wrapper for
+agents should never offer `--all`; leave it to the operator.
 
 A client then points at `http://127.0.0.1:8764/mcp` with
 `Authorization: Bearer <token file contents>`. Two helpers use the token file:

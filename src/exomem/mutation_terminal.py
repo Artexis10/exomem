@@ -21,6 +21,7 @@ from . import (
 from . import curation as curation_module
 from .kbdir import managed_join, managed_split
 from .operation_entries import OutcomeVerb
+from .speech_attach_schema import SPEECH_OPERATIONS
 
 log = logging.getLogger(__name__)
 
@@ -161,6 +162,13 @@ _MAX_DERIVED_DIAGNOSTICS = 9
 #: Each media operation and the outcome its result reports.
 # nosemgrep: ep-word-set -- the media tool's closed operations, each implemented by the media command.
 MEDIA_OUTCOMES = {"process": "processed", "retry": "retried", "reprocess": "reprocessed"}
+#: The speech-result fields of an attach or rename reply, which the agent reads as built.
+#: `speech_attach.reply` and `speaker_rename` bound each: the lists hold at most `MAX_NAMES` entries.
+_SPEECH_REPLY_FIELDS = (
+    "operation", "outcome", "media_type", "state", "sidecar_path", "extracted_by", "attached_digest",
+    "speakers", "speaker_verification", "names_not_carried", "prior_extraction", "speech_job", "renamed",
+    "next_action",
+)
 #: The media operations whose result reports how many jobs they requeued.
 MEDIA_REQUEUE_OPERATIONS = frozenset({"retry", "reprocess"})
 
@@ -493,7 +501,7 @@ def _adoption_control_projection(leaf: Mapping[str, Any]) -> dict[str, Any]:
     Without them the reply that must stop (`apply_stop`), that has a next page (`next_after`),
     that yielded the boundary to a waiting write (`stop_reason`) or that leaves staged files with
     the person (`finish.residual`) has the shape of ordinary progress. Each field is built by
-    `adoption_run` and is small: `stop_reason` is one token, `apply_stop` has five keys,
+    `adoption_run` and is small: `stop_reason` is one token, `apply_stop` has at most five keys,
     `next_actions` holds at most five entries of three strings, and `residual` counts files by a
     closed set of reasons. The inventory and the plan items are not copied. `residual` stays under
     `finish` because the next actions name it as `finish.residual`.
@@ -2245,16 +2253,18 @@ def with_leaf_index_observed(
     return source_result_attribution.carry(terminal, changed)
 
 
-def as_replay(terminal: Any) -> Any:
-    """Mark a stored terminal that answers a retry, so the reply says it is the earlier commit's.
+def as_replay(stored: Any) -> Any:
+    """Mark a stored reply that answers a retry, so the reply says it is the earlier call's.
 
     `mutated`, `request_id` and `receipt_id` stay those of the commit it replays: the egress
-    filter binds a unit write's parent on `mutated`, so a replay must not change it. Anything that
-    is not a terminal passes through.
+    filter binds a unit write's parent on `mutated`, so a replay must not change it. A leaf reply
+    that no commit wrapped (a paused preparation) carries the same marker. A value that is not a
+    mapping passes through, and so does a reply that defines its own `replayed` field (the
+    episode resume reply lists the leaves it replayed): the marker never overwrites it.
     """
-    if not isinstance(terminal, Mapping) or terminal.get("_terminal") != _TERMINAL_MARKER:
-        return terminal
-    return source_result_attribution.carry(terminal, {**terminal, "replayed": True})
+    if not isinstance(stored, Mapping) or "replayed" in stored:
+        return stored
+    return source_result_attribution.carry(stored, {**stored, "replayed": True})
 
 
 def replayed_terminal(
@@ -2760,6 +2770,8 @@ def project_terminal(
         compact.update({key: value for key, value in leaf.items() if key != "outcome"})
         if user_summary is None:
             compact["outcome"] = stated_outcome
+    elif isinstance(leaf, Mapping) and leaf.get("operation") in SPEECH_OPERATIONS:
+        compact.update({key: leaf[key] for key in _SPEECH_REPLY_FIELDS if key in leaf})
     elif isinstance(leaf, Mapping) and leaf.get("operation") == "configure_memory":
         # The configuration contract is metadata-only and bounded by the
         # canonical prominence vocabulary. Keep the newly effective contract

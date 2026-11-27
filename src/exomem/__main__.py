@@ -15,7 +15,7 @@ Subcommands:
 - `tui` — launch the interactive terminal UI over the same product commands
   (requires the optional `tui` extra; needs an interactive terminal)
 - `doctor` — read-only local install/setup preflight
-- `auth sessions|revoke` — operator-only durable MCP session administration
+- `auth sessions|revoke` — durable MCP session administration
 - `governance-schema status|plan-migration|stage-migration|commit-migration|restore-migration-backup|downmigrate` — offline schema control
 - `cell-init` — idempotent Evermatter Cloud cell init-container entrypoint: vault
   init when absent, then offline state migration; no governance schema
@@ -24,6 +24,8 @@ Subcommands:
   cell, uploaded to controller-presigned parts; reports sizes and digests only
 - `cell-media-census` — Evermatter Cloud backup Job: the cell's last census of its
   evicted originals from its drain record, or `unknown unknown` when it cannot say
+- `cell-media-storage` — Evermatter Cloud backup Job: the cell's last reading of its
+  vault and media storage figures from its storage record, or nothing when it cannot say
 - `cell-media-manifest` — Evermatter Cloud backup Job: the media manifest that each
   snapshot carries, or an unknown manifest when the census cannot say
 - `cell-media-collect` — Evermatter Cloud backup Job: condemn the released media
@@ -54,7 +56,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
-from . import semantic_authoring
+from . import env_compat, semantic_authoring
 from .kbdir import managed_join, managed_root_rel
 
 
@@ -109,13 +111,22 @@ def _is_cli_only_invocation(raw: list[str]) -> bool:
 # runtime: each bounds itself in seconds on one CPU.
 # nosemgrep: ep-word-set -- This CLI's own parser registers these subcommand names.
 _LEAN_COMMANDS: frozenset[str] = frozenset(
-    {"cell-media-census", "cell-media-manifest", "cell-media-collect"}
+    {"cell-media-census", "cell-media-storage", "cell-media-manifest", "cell-media-collect"}
 )
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except env_compat.SettingsConflict as conflict:
+        print(f"exomem: not run. {conflict}", file=sys.stderr)
+        return 2
+
+
+def _main(argv: list[str] | None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     if raw[:1] and raw[0] in _LEAN_COMMANDS:
+        env_compat.refuse_process_conflicts()
         return _run_command(raw[0], raw[1:])
     from .runtime_resources import bootstrap, preload_local_dotenv_policy
 
@@ -123,9 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     bootstrap()
     # Named commands and identification/help keep their completion wait. A
     # serving route skips it only when its managed lifecycle already joined.
-    serving = (not raw or raw[0].startswith("-")) and not any(
-        item in {"--version", "--help", "-h"} for item in raw
-    )
+    serving = (not raw or raw[0].startswith("-")) and not env_compat.asks_only_to_identify(raw)
     try:
         return _run_cli(argv)
     finally:
@@ -153,6 +162,8 @@ def _run_cli(argv: list[str] | None = None) -> int:
         from .install_info import print_version
 
         return print_version(as_json="--json" in raw)
+    if not env_compat.asks_only_to_identify(raw):  # help acts on no setting
+        env_compat.refuse_process_conflicts()
     if raw and raw[0] == "find":
         # `find` was the original friendly retrieval command.  Keep existing
         # scripts useful while the current product language calls it `ask`.
@@ -237,6 +248,7 @@ class _DotenvConflict(Exception):
 def _dotenv_conflict_message(command: str, conflict: _DotenvConflict) -> str:
     return (
         f"{command}: not run. The working-directory .env sets {', '.join(conflict.keys)} "
+        f"(under that name or an alias: {', '.join(p + '*' for p in env_compat.ALIAS_PREFIXES)}) "
         "to a different value than this process's environment, so it is unclear which "
         "deployment to act on. Unset those variables, remove them from the .env, or run "
         "from a directory without that .env."
@@ -255,11 +267,17 @@ def _load_cwd_dotenv(*, refuse_conflicts: bool = False) -> None:
 
     The `.env` still wins over exported values. A command that writes
     credentials or sessions passes `refuse_conflicts`: when the `.env` would
-    replace an exported value with a different one, it stops instead of
-    acting on a store the operator did not name. Other commands warn.
+    replace an exported value with a different one, or either source sets an
+    `EVERMATTER_X` and `EXOMEM_X` to different values, it stops instead of
+    acting on a store the operator did not name. Other commands warn, except
+    that a placement setting in conflict always stops the command. The
+    comparison uses the `.env`'s names renamed to `EXOMEM_*`, so an
+    `EVERMATTER_X` line conflicts with an exported `EXOMEM_X`.
     """
     from . import cloud_cell
 
+    if refuse_conflicts:
+        env_compat.refuse_process_conflicts(every_setting=True)
     if cloud_cell.cloud_mode_enabled():
         return
     from .dotenv_guard import working_directory_dotenv
@@ -267,13 +285,13 @@ def _load_cwd_dotenv(*, refuse_conflicts: bool = False) -> None:
     dotenv_path = working_directory_dotenv()
     if dotenv_path is None:
         return
-    from dotenv import dotenv_values, load_dotenv
-
+    settings, conflicts = env_compat.dotenv_settings(dotenv_path)
+    env_compat.settle_conflicts(
+        conflicts, source="the working-directory .env", refuse_all=refuse_conflicts
+    )
     # Names only: the values may be secrets.
     replaced = sorted(
-        key
-        for key, value in dotenv_values(dotenv_path).items()
-        if value is not None and key in os.environ and os.environ[key] != value
+        key for key, value in settings.items() if key in os.environ and os.environ[key] != value
     )
     if replaced and refuse_conflicts:
         raise _DotenvConflict(replaced)
@@ -282,7 +300,7 @@ def _load_cwd_dotenv(*, refuse_conflicts: bool = False) -> None:
             f"warning: the working-directory .env replaces exported {', '.join(replaced)}",
             file=sys.stderr,
         )
-    load_dotenv(dotenv_path=dotenv_path, override=True)
+    env_compat.apply_settings(settings, override=True)
 
 
 def _build_auth_session_authority():
@@ -450,7 +468,7 @@ def _issue_local_main(args: argparse.Namespace) -> int:
 def _auth_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem auth",
-        description="Inspect and revoke durable MCP sessions (operator-only).",
+        description="Inspect and revoke durable MCP sessions.",
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
     sessions = subcommands.add_parser("sessions", help="list non-secret session metadata")
@@ -2141,15 +2159,26 @@ def _enroll_speaker_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem enroll-speaker",
         description=(
-            "Enroll (or extend) a named voice profile from an audio sample for opt-in "
-            "diarization. The sample is embedded into a 192-dim ECAPA voiceprint and stored in "
-            "the per-machine profile store beside the embedding sidecar — desk-side admin, never "
-            "an MCP tool. Re-enrolling the same name running-averages the centroid over samples. "
-            "Example: exomem enroll-speaker --name Alice --self alice-sample.wav"
+            "Enroll (or extend) a named voice profile for opt-in diarization. The voiceprint is a "
+            "192-dim ECAPA embedding stored in the per-machine profile store beside the embedding "
+            "sidecar — desk-side admin, never an MCP tool. Re-enrolling the same name running-averages "
+            "the centroid over samples. From an audio sample: exomem enroll-speaker --name Alice --self "
+            "alice-sample.wav. From a recording's Source: exomem enroll-speaker --name Alice "
+            "--recording 'Knowledge Base/Evidence/Audio/talk.m4a' --label 'Speaker A' shows the "
+            "label's lines and asks before it reads the audio."
         ),
     )
-    parser.add_argument("audio", help="path to an audio sample of the speaker's voice")
+    parser.add_argument("audio", nargs="?", help="path to an audio sample of the speaker's voice")
     parser.add_argument("--name", required=True, help="speaker name to attach to matched clusters")
+    parser.add_argument("--recording", help="vault path of a recording whose Source page labels the speaker")
+    parser.add_argument("--label", help="the speaker label as the recording's page shows it (with --recording)")
+    parser.add_argument("--yes", action="store_true", help="confirm without asking, after the lines are shown")
+    parser.add_argument(
+        "--cloud", action="store_true",
+        help="the recording is in your Cloud: read the original through your signed-in Cloud download "
+             "and delete the copy afterwards. Needs --page-file.",
+    )
+    parser.add_argument("--page-file", type=Path, help="with --cloud: the Source page as saved from your Cloud")
     parser.add_argument(
         "--self",
         dest="is_self",
@@ -2167,27 +2196,70 @@ def _enroll_speaker_main(argv: list[str]) -> int:
         default=os.environ.get("EXOMEM_VAULT_PATH"),
         help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
+    from .cloud_import_client import add_endpoint_arguments
+
+    add_endpoint_arguments(parser)
     args = parser.parse_args(argv)
+    if (args.audio is None) == (args.recording is None):
+        parser.error("give either an audio sample or --recording with --label")
+    if args.recording is not None and args.label is None:
+        parser.error("--recording needs --label")
+    if args.cloud and (args.recording is None or args.page_file is None):
+        parser.error("--cloud needs --recording and --page-file")
 
     from . import enroll_speaker as enroll_module
     from .voice_profiles import DEFAULT_THRESHOLD
 
+    threshold = args.threshold if args.threshold is not None else DEFAULT_THRESHOLD
     try:
-        rec = enroll_module.enroll_speaker(
-            args.audio,
-            args.name,
-            is_self=args.is_self,
-            threshold=args.threshold if args.threshold is not None else DEFAULT_THRESHOLD,
-            vault_root=_speaker_vault(args),
-        )
+        if args.recording is None:
+            rec = enroll_module.enroll_speaker(
+                args.audio, args.name, is_self=args.is_self, threshold=threshold, vault_root=_speaker_vault(args),
+            )
+        else:
+            rec = _enroll_from_recording(args, enroll_module, threshold)
+            if rec is None:
+                print("Not enrolled: nothing was confirmed, and no audio was read.")
+                return 1
     except (enroll_module.EnrollmentError, RuntimeError) as e:
-        print(f"exomem enroll-speaker: {e}", file=sys.stderr)
+        print(f"exomem enroll-speaker: {getattr(e, 'code', 'ENROLLMENT_FAILED')}: {e}", file=sys.stderr)
         return 1
     print(
         f"Enrolled {args.name!r} ({rec['samples']} sample(s), "
         f"threshold {rec['threshold']}, is_self={rec['is_self']})."
     )
     return 0
+
+
+def _enroll_from_recording(args, enroll_module, threshold: float):
+    """The recording form of `enroll-speaker`: show the label's lines, confirm, then embed its spans."""
+    root = _speaker_vault(args)
+    if args.cloud:
+        from .cloud_import_client import CloudImportClientConfig
+
+        text, recorded = enroll_module.saved_page(args.page_file)
+        config = CloudImportClientConfig(args.mcp_url, args.api_base_url, args.oauth_client_id)
+        original = enroll_module.cloud_original(config, args.recording)
+    else:
+        text, recorded = enroll_module.local_page(root, args.recording)
+        original = enroll_module.local_original(root, args.recording)
+
+    def confirm(sample) -> bool:
+        print(f"{sample.label!r} speaks in {len(sample.spans)} span(s) of {args.recording}. Sample lines:")
+        for line in sample.lines:
+            print(f"  {line}")
+        if args.yes:
+            return True
+        try:
+            # nosemgrep: ep-word-set -- the answers of the prompt's own [y/N]: a closed set the prompt states, not a reading of free text.
+            return input(f"Keep this voice as {args.name!r}? [y/N] ").strip().lower() in {"y", "yes"}
+        except EOFError:
+            return False
+
+    return enroll_module.enroll_from_recording(
+        text, recorded, args.label, args.name,
+        original=original, confirm=confirm, is_self=args.is_self, threshold=threshold, vault_root=root,
+    )
 
 
 def _list_speakers_main(argv: list[str]) -> int:
@@ -5453,6 +5525,13 @@ def _cell_media_census_main(argv: list[str]) -> int:
     return census_main(argv)
 
 
+def _cell_media_storage_main(argv: list[str]) -> int:
+    # It reads one file, so it loads no CLI, server framework or native runtime.
+    from .cell_media_storage import main as storage_main
+
+    return storage_main(argv)
+
+
 def _cell_media_manifest_main(argv: list[str]) -> int:
     # It runs on a read-only clone: it reads the vault and the media ledger, nothing more.
     from .media_manifest import main as manifest_main
@@ -5510,6 +5589,7 @@ _COMMANDS: dict[str, Callable[[list[str]], int]] = {
     "cell-init": _cell_init_main,
     "media-replicas": _media_replicas_main,
     "cell-media-census": _cell_media_census_main,
+    "cell-media-storage": _cell_media_storage_main,
     "cell-media-manifest": _cell_media_manifest_main,
     "cell-media-collect": _cell_media_collect_main,
     # A thin alias over the registry command, so there is exactly one leaf; the long form
@@ -5527,6 +5607,7 @@ _WITHOUT_CLI_LOG: frozenset[str] = frozenset(
         "cell-export",
         "cell-init",
         "cell-media-census",
+        "cell-media-storage",
         "cell-media-manifest",
         "cell-media-collect",
         "activate",

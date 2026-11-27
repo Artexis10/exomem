@@ -19,7 +19,6 @@ from copy import copy
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
 from fastmcp import FastMCP
 from fastmcp.server.middleware.middleware import Middleware, MiddlewareContext
 from fastmcp.server.transforms import Transform
@@ -39,8 +38,10 @@ from . import commands as commands_module
 from .access_log import AccessLogMiddleware, WorkerRequestTimingMiddleware
 from .command_surface import DEFAULT_TOOL_SHAPE
 from .edge_ingress import EdgeIngressMiddleware
+from .env_compat import load_dotenv
 from .server_assets import (
     register_asset_routes,
+    register_claude_plugin_route,
     register_health_routes,
     register_oauth_metadata_route,
     server_icons,
@@ -1043,6 +1044,7 @@ def build_server(
         register_oauth_metadata_route(
             mcp, base_url=runtime.base_url, auth_enabled=auth is not None
         )
+        register_claude_plugin_route(mcp, base_url=runtime.base_url)
         transfer_config = register_transfer_routes(
             mcp, vault_root=runtime.vault_root, media_worker=runtime.media_worker
         )
@@ -1446,6 +1448,10 @@ def run(
     # this process serves requests. The service manager hides the devices of the workers it starts; this
     # covers a foreground or stdio serve too. The media child gets the deployment's list back.
     cuda_containment.hide_in_process()
+    from . import thread_dump
+
+    # Before the threads start, so per-thread CPU in /proc names each one.
+    thread_dump.name_os_threads()
     from .collection_store import connection
 
     # Serving threads import store modules lazily; load their libraries before any thread starts.

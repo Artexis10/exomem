@@ -353,6 +353,7 @@ def test_a_stop_inside_the_batch_after_its_commit_settles_as_already_applied_and
     assert _page_of(vault, artifact).is_file() and not _staged(vault, import_id).exists()
     if not run_record_kept:  # the stop came before the run saved the commit: replay resolves the item from its Source
         run_file.write_bytes(planned_only)
+        run_file.with_name("journal.json").unlink(missing_ok=True)
 
     with _counting_bytes_read() as read:
         reply = consume._apply(vault, run_id, plan_id)

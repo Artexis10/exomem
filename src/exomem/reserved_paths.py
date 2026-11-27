@@ -63,6 +63,10 @@ _DUE_TEMP_RE = re.compile(
 )
 #: The atomic-replace temp name of the rotation file: a closed file-name format.
 _OWNERSHIP_TEMP_RE = re.compile(r"^\.\.ownership-rotation\.json\.[a-z0-9_]{8}\.tmp$", re.ASCII)
+#: The atomic-replace temp name of the per-app update-notice file: a closed file-name format.
+_APP_UPDATE_NOTICES_TEMP_RE = re.compile(
+    r"^\.\.app-update-notices\.json\.[a-z0-9_]{8}\.tmp$", re.ASCII
+)
 _LEXICAL_REBUILD_RE = re.compile(
     r"^\.lexical\.sqlite\.rebuild-[0-9a-f]{32}\.tmp(?:-(?:wal|shm|journal))?$",
     re.ASCII,
@@ -733,6 +737,17 @@ _REGISTRY = (
         exact=(".ownership-asked.jsonl", ".ownership-rotation.json"),
         patterns=(_OWNERSHIP_TEMP_RE,),
         rebuildable=False,
+    ),
+    # Born in the external state root, so it has nothing to migrate from the vault. The version each
+    # connected app was last told about. Rebuilt by recomputation: without the file every app is new on its
+    # next call, which records the running version and tells nothing, so a lost file costs one missed notice.
+    InternalStateDescriptor(
+        "app-update-notices",
+        "release_notes",
+        StatePlacement.EXTERNAL_STATE,
+        exact=(".app-update-notices.json", "..app-update-notices.json.lock"),
+        rebuildable=True,
+        patterns=(_APP_UPDATE_NOTICES_TEMP_RE,),
     ),
     InternalStateDescriptor(
         "lexical-rebuild",

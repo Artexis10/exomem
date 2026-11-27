@@ -342,6 +342,33 @@ def test_initialize_runtime_disables_usage_boost_and_relevance_check_in_cloud_mo
     assert os.environ["EXOMEM_DISABLE_RELEVANCE_CHECK"] == "1"
 
 
+def test_a_cloud_cell_keeps_a_forced_setting_against_an_evermatter_value(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cell forces EXOMEM_DISABLE_RELEVANCE_CHECK; an EVERMATTER_ value in the
+    pod environment must not undo it."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    initialize_vault_state_offline(vault, source="server runtime evermatter prefix fixture")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.delenv("EXOMEM_DISABLE_RELEVANCE_CHECK", raising=False)
+    monkeypatch.setenv("EVERMATTER_DISABLE_RELEVANCE_CHECK", "")
+    monkeypatch.setattr(server_runtime, "resolve_vault", lambda: vault)
+    monkeypatch.setattr(
+        server_runtime.schema,
+        "load_source_schema",
+        lambda _vault: SimpleNamespace(source_types=("session",)),
+    )
+    monkeypatch.setattr(server_runtime.project_keys, "keys_hint", lambda _vault: "")
+    monkeypatch.setattr(server_runtime, "_start_compute_runtime", lambda _vault, **_kwargs: None)
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _vault: None)
+    monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _vault: None)
+
+    server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
+
+    assert os.environ["EXOMEM_DISABLE_RELEVANCE_CHECK"] == "1"
+
+
 def test_initialize_runtime_does_not_start_workers_before_transport(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1559,6 +1586,30 @@ def test_a_save_during_a_long_startup_wait_finds_the_write_intake_running(
         activation._thread.join(10)
         activation._stop_background_workers()
         readiness.reset()
+
+
+@pytest.mark.parametrize(("serves_upload_sessions", "runs"), [(True, True), (False, False)])
+def test_the_import_filer_runs_in_the_http_serving_runtime_only_and_stops_with_it(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, serves_upload_sessions: bool, runs: bool
+) -> None:
+    """Defect: a stdio session also filing a stage its agent drives, or a filer left running after shutdown."""
+    from exomem import import_filing
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _quiet_starters(monkeypatch, [])
+    activation = server_runtime.LocalRuntimeActivation(vault)
+    activation.serves_upload_sessions = serves_upload_sessions
+    try:
+        activation.start()
+        activation._thread.join(10)
+        assert (import_filing.filer_for(vault) is not None) is runs
+        assert (activation.import_filer is not None) is runs
+    finally:
+        activation._stop_background_workers()
+        readiness.reset()
+    assert import_filing.filer_for(vault) is None
+    assert activation.import_filer is None or activation.import_filer.alive is False
 
 
 def test_original_fixity_runs_its_own_pass_where_media_extraction_is_off(

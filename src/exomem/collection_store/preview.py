@@ -7,6 +7,7 @@ Nothing else, and no environment flag, changes file-mode routing.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext, suppress
 from contextvars import ContextVar
@@ -106,7 +107,12 @@ class _PreviewPhase:
             raise CollectionStoreError("COLLECTION_STORE_BOUNDARY_REQUIRED", "Source metadata requires the actual writer boundary")
         handle = self.depart()
         try:
-            with manager._lock:
+            # Reads beside the store thread borrow the store for one short snapshot read and take no
+            # boundary, so wait for them to return, up to the mutation timeout, before refusing.
+            deadline = time.monotonic() + manager._mutation_timeout_seconds
+            with manager._store_condition:
+                while manager._store_borrowers and (remaining := deadline - time.monotonic()) > 0:
+                    manager._store_condition.wait(min(0.05, remaining))
                 if manager._store_borrowers:
                     raise CollectionStoreError("COLLECTION_STORE_BUSY", "another checkout still borrows the store")
             handle.require_write_authority()
@@ -403,6 +409,10 @@ def note_checked_hash(path, digest):
         checked[path] = digest
 
 
+class _DeadlinePassed(Exception):
+    """The request's store read reached its completion deadline before it decided every page."""
+
+
 class _Decide:
     """The work of one store request: each page asked, answered as its own call would be."""
 
@@ -410,6 +420,8 @@ class _Decide:
         self.read, self.vault_root, self.calls = read, vault_root, calls
         #: The pages this request decides, for the observability span (`StoreServer.call`).
         self.pages = len(calls)
+        #: When a request's read must stop deciding pages: its budget's deadline; None outside a request.
+        self.deadline = None
 
     def __call__(self):
         from ..cli_ops import OpError
@@ -419,6 +431,8 @@ class _Decide:
         try:
             for path, (args, kwargs) in self.calls.items():
                 request_budget.checkpoint()
+                if self.deadline is not None and time.monotonic() >= self.deadline:
+                    raise _DeadlinePassed()
                 try:
                     kind, payload = "value", self.read(self.vault_root, *args, **kwargs)
                 except (CollectionStoreError, OpError) as error:
@@ -433,11 +447,25 @@ class _Decide:
 
 
 def _request(server, decisions, work):
-    """One request to the store thread. A request refused whole is held against the store for the command."""
+    """One read-only request to the store. A request refused whole is held against the store for the command.
+
+    The decisions read the store's last commit beside the store thread (``StoreServer.read_beside``),
+    so a write or view pass that holds the thread does not make them wait out the mutation timeout.
+    The snapshot writer refuses every write, and the work reads no import progress. Where this
+    process holds no admitted writer, the request queues on the store thread as before.
+    """
     from ..cli_ops import OpError
 
+    if (budget := request_budget.current()) is not None:
+        # A read beside the store thread runs on the request's own thread, so it stops deciding pages at the
+        # deadline of the stage it serves, and the pages it has not decided are withheld together. A bound
+        # read checkpoint already stops it at each page (`request_budget.checkpoint`).
+        work.deadline = budget.deadline
     try:
-        return server.call(work, read_only=True, wake_maintenance=False)
+        try:
+            return server.read_beside(work, initial=None, progress=False)
+        except _DeadlinePassed:
+            raise server.missed_read() from None
     except (CollectionStoreError, OpError) as error:
         if decisions is not None:
             decisions.refusals.setdefault(server, error)
@@ -517,6 +545,7 @@ def canonical_read(function=None, *, projection=False, unavailable=None,
             if not projection:
                 return function(vault_root, *args, **kwargs)
             from ..cli_ops import OpError
+            from ..structured_collections import CollectionError
             from .runtime import projection_route
 
             # These consumers take a canonical path or page as their first argument; bulk callers decide each path below.
@@ -525,7 +554,9 @@ def canonical_read(function=None, *, projection=False, unavailable=None,
             try:
                 if isinstance(path, str) and (server := projection_route(vault_root, path)) is not None:
                     return _decide_through_store(server, read, batch, vault_root, path, args, kwargs)
-            except (CollectionStoreError, OpError):
+            # CollectionError is the store's content-free refusal of one page (its freshness signals raise it), so it
+            # withholds that page like a store outage does, instead of failing the whole response.
+            except (CollectionStoreError, OpError, CollectionError):
                 if unavailable is None:
                     raise
                 # Discovery withholds this C candidate instead of making unrelated A/B unavailable.
@@ -804,30 +835,39 @@ def dispatch(
         # A query that names one row answers that row and its body; Records names the key item_key, Planning plan_id.
         key = args.pop("item_key", args.pop("plan_id", None))
         with writer.read_collection(collection, facade_profile=profile) as manifest:
-            if key is not None:
-                column = collection_profiles.profile_for(manifest.semantic_profile).item_id_property
-                args["filters"] = [{"column": column, "op": "eq", "value": key}]
-                args["limit"] = 1
-            if profile == "planning":
-                # One named row is found whatever its lifecycle.
-                projected = planning.query(vault_root, manifest, **args, **({"lifecycle": "all"} if key is not None else {}))
+            if manifest.derived:
+                # The store holds none of a derived collection's rows, so the legacy arguments read them as a typed query.
+                from . import derived_query
+
+                typed = derived_query.typed_query(manifest, key, args)
             else:
-                include_history = args.pop("include_agent_history", False)
-                from .history import agent_history
+                if key is not None:
+                    column = collection_profiles.profile_for(manifest.semantic_profile).item_id_property
+                    args["filters"] = [{"column": column, "op": "eq", "value": key}]
+                    args["limit"] = 1
+                if profile == "planning":
+                    # One named row is found whatever its lifecycle.
+                    projected = planning.query(vault_root, manifest, **args, **({"lifecycle": "all"} if key is not None else {}))
+                else:
+                    include_history = args.pop("include_agent_history", False)
+                    from .history import agent_history
 
-                result = record_governance.query_collection(vault_root, manifest, **args)
-                projected = record_governance.project_query_result(
-                    result, manifest, output_format=args.get("output_format", "json"),
-                    agent_history=agent_history(writer, manifest) if include_history else None,
-                )
-                # The ids go on before the projection is sealed: a sealed payload that changes is refused.
-                from .. import collection_refs
+                    result = record_governance.query_collection(vault_root, manifest, **args)
+                    projected = record_governance.project_query_result(
+                        result, manifest, output_format=args.get("output_format", "json"),
+                        agent_history=agent_history(writer, manifest) if include_history else None,
+                    )
+                    # The ids go on before the projection is sealed: a sealed payload that changes is refused.
+                    from .. import collection_refs
 
-                projected = collection_refs.mark_rows(projected, profile="records")
-                projected = writer._operation.query_metadata_evidence(projected, writer, manifest, result)
-            if key is not None and projected.get("rows"):
-                projected = {**projected, **writer.row_body(manifest.collection_id, key)}
-            return True, projected
+                    projected = collection_refs.mark_rows(projected, profile="records")
+                    projected = writer._operation.query_metadata_evidence(projected, writer, manifest, result)
+                if key is not None and projected.get("rows"):
+                    projected = {**projected, **writer.row_body(manifest.collection_id, key)}
+                return True, projected
+        from ..query_engine import route
+
+        return True, route.run(writer, collection, typed, facade_profile=profile)
     if action == "create":
         return True, _mutate(vault_root, writer.create_collection, **args)
     if action == "import" and profile == "records":

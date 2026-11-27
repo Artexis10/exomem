@@ -35,7 +35,7 @@ import re
 import stat
 import tempfile
 import unicodedata
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO
@@ -80,6 +80,7 @@ from .vault import (
     relative_posix,
     respell_new_path,
     with_newline,
+    yaml_flow_list,
     yaml_scalar,
 )
 
@@ -1804,6 +1805,46 @@ def extracted_text(content: str) -> str:
     return content[start : end if section is None else section].strip()
 
 
+def map_extracted_text(content: str, rewrite: Callable[[str], str]) -> str:
+    """`content` with `rewrite` applied to the raw extraction text, and every other byte unchanged.
+
+    `extracted_text` strips its result; this keeps the exact span between the heading and the
+    section that follows it, so a caller that edits within lines changes nothing else.
+    """
+    newline = document_newline(content)
+    text = with_newline(content, "\n")
+    heading = text.find(_EXTRACTED_HEADING)
+    if heading == -1:
+        return content
+    start = heading + len(_EXTRACTED_HEADING)
+    end = _extraction_end(text, start)[0]
+    section = _low_confidence_start(text, start, end)
+    stop = end if section is None else section
+    updated = text[:start] + rewrite(text[start:stop]) + text[stop:]
+    return content if updated == text else with_newline(updated, newline)
+
+
+def render_sidecar_renamed(
+    before: str,
+    *,
+    rewrite: Callable[[str], str],
+    speakers: list[str],
+    speaker_names: list[dict[str, str]],
+    speaker_verification: str | None,
+) -> str:
+    """A sidecar after a person named speakers: `rewrite` applied to the raw extraction text, three fields set.
+
+    The labelled lines are the only stored turns, so `rewrite` changes their label spans and nothing
+    else. Every other byte of the page stays as it was.
+    """
+    content = map_extracted_text(before, rewrite)
+    content = _set_frontmatter_field(content, "speakers", yaml_flow_list(speakers))
+    content = _set_frontmatter_field(content, "speaker_names", json.dumps(speaker_names, ensure_ascii=False))
+    if speaker_verification is not None:
+        content = _set_frontmatter_field(content, "speaker_verification", speaker_verification)
+    return content
+
+
 def low_confidence_text(content: str) -> str:
     """The words under `## Low-confidence OCR`, or an empty string when the sidecar has none."""
     content = with_newline(content, "\n")
@@ -1976,13 +2017,15 @@ def _part_field_lines(parts: Layout | None) -> list[str]:
 
 #: Frontmatter that describes one extraction rather than the recording. A reprocess moves these
 #: with the old text. They are the sidecar schema's own field names, a closed set.
-_SPEAKER_FIELDS = ("speakers", "speaker_verification")
+_SPEAKER_FIELDS = ("speakers", "speaker_verification", "speaker_names", "speaker_names_not_carried")
+#: Where an extraction came from when the cell did not run its engine, and the digest that identifies it.
+_ORIGIN_FIELDS = ("extraction_origin", "attached_digest")
 _ASR_FIELD_PREFIX = "asr_"
 _DIARIZE_REQUESTED_FIELD = "diarize_requested"
 _EXTRACTION_FIELDS = frozenset({
     "extracted_by", "processing_state", "processing_attempts", "processing_error",
     "processing_retryable", "processing_next_action", OCR_CONFIDENCE_FIELD,
-    _DIARIZE_REQUESTED_FIELD, *_SPEAKER_FIELDS,
+    _DIARIZE_REQUESTED_FIELD, *_SPEAKER_FIELDS, *_ORIGIN_FIELDS,
 })
 
 
@@ -2029,6 +2072,9 @@ def render_sidecar_extraction(
     parts: Layout | None = None,
     binary_hints: tuple[int, int] | None = None,
     identity_check: dict | None = None,
+    speaker_names: list[dict[str, str]] | None = None,
+    names_not_carried: list[str] | None = None,
+    attached_digest: str | None = None,
 ) -> str:
     """Render an extraction sidecar without touching canonical or derived state.
 
@@ -2045,6 +2091,10 @@ def render_sidecar_extraction(
     do not describe the new one. `binary_hints` are the mtime and ctime of the original, as the
     caller verified them; a page stored with its original still holds them as null
     (`media_processing.render_pending_page`) and records them here.
+    `speaker_names` records each name with the label it replaced and its basis, and
+    `names_not_carried` the names of the replaced extraction that no new label took.
+    `attached_digest` marks an extraction attached from the owner's machine: the cell did not run
+    its engine, so the page says where it came from and never claims the engine was checked.
     """
     newline = document_newline(before)
     before = with_newline(before, "\n")
@@ -2057,6 +2107,8 @@ def render_sidecar_extraction(
     content = before
     if reset_speakers:
         content = _remove_frontmatter_fields(content, lambda key: key in _SPEAKER_FIELDS)
+    # An extraction states its own origin; a replaced one's origin never carries over.
+    content = _remove_frontmatter_fields(content, lambda key: key in _ORIGIN_FIELDS)
     content = set_diarize_pin(content, diarize)
     if diarize is False or (diarize is None and diarize_pin(before) is False):
         speaker_verification = "not-requested"
@@ -2081,7 +2133,16 @@ def render_sidecar_extraction(
             if label and label not in labels:
                 labels.append(label)
         if labels:
-            content = _set_frontmatter_field(content, "speakers", f"[{', '.join(labels)}]")
+            content = _set_frontmatter_field(content, "speakers", yaml_flow_list(labels))
+    if speaker_names:
+        content = _set_frontmatter_field(
+            content, "speaker_names", json.dumps(speaker_names, ensure_ascii=False)
+        )
+    if names_not_carried:
+        content = _set_frontmatter_field(content, "speaker_names_not_carried", yaml_flow_list(names_not_carried))
+    if attached_digest is not None:
+        content = _set_frontmatter_field(content, "extraction_origin", "attached")
+        content = _set_frontmatter_field(content, "attached_digest", attached_digest)
     content = _set_asr_facts(content, asr)
     content = _set_ocr_confidence(content, ocr)
     if capture is not None:
@@ -2093,9 +2154,7 @@ def render_sidecar_extraction(
         content = _media_processing_module().record_read_hints(
             content, mtime_ns=binary_hints[0], ctime_ns=binary_hints[1]
         )
-    if prior_extractions:
-        links = ", ".join(json.dumps(f"[[{link}]]", ensure_ascii=False) for link in prior_extractions)
-        content = _set_frontmatter_field(content, "prior_extractions", f"[{links}]")
+    content = set_prior_extractions(content, prior_extractions)
     content = _remove_frontmatter_fields(content, lambda key: key in _parts_module().SOURCE_FIELDS)
     for field, value in _part_fields(parts):
         content = _set_frontmatter_field(content, field, value)
@@ -2103,6 +2162,66 @@ def render_sidecar_extraction(
         content, text, _cap_low_confidence_text(ocr.low_confidence_text) if ocr is not None else ""
     )
     return with_newline(content, newline)
+
+
+def set_prior_extractions(content: str, links: Sequence[str]) -> str:
+    """`content` listing `links`, in order, as the pages that hold the extractions it replaced or declined.
+
+    Each link is a vault-relative path with no extension. An empty list leaves the field as it is.
+    """
+    if not links:
+        return content
+    listed = ", ".join(json.dumps(f"[[{link}]]", ensure_ascii=False) for link in links)
+    return _set_frontmatter_field(content, "prior_extractions", f"[{listed}]")
+
+
+def extraction_field_lines(content: str) -> list[str]:
+    """The one-line `key: value` forms of the extraction fields (`is_extraction_field`) in `content`'s frontmatter.
+
+    The frontmatter is parsed, and each field is written as the extraction writers above write it (a list of strings
+    in flow style, other structure as JSON). A list that an editor's property panel wrote as a block is not lost to its style.
+    """
+    fields = parse_frontmatter(with_newline(content, "\n"))[0]
+    return [f"{key}: {_one_line(value)}".rstrip() for key, value in fields.items() if is_extraction_field(str(key))]
+
+
+def _one_line(value: object) -> str:
+    """A parsed frontmatter value as one line, as the extraction writers above write it."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return ""
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return yaml_flow_list(value)
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, default=str)
+    return yaml_scalar(value)
+
+
+def render_kept_extraction(
+    before: str, *, field_lines: Sequence[str], text: str, parts: Layout | None,
+    prior_extractions: Sequence[str] = (),
+) -> str:
+    """`before` with another page's finished extraction in place of its own: the fields, the first part and the part layout.
+
+    `field_lines` are the lines that `extraction_field_lines` gives for the page that holds the extraction. Every
+    extraction field of `before` goes first, so none of a pending or earlier extraction survives next to the new one.
+    The recording's own fields (its identity and provenance) stay as `before` has them. `text` is the part that stays
+    on the page and `parts` the layout of the part pages that hold the rest, as `extraction_parts.layout` gives it.
+    """
+    newline = document_newline(before)
+    content = with_newline(before, "\n")
+    content = _remove_frontmatter_fields(content, is_extraction_field)
+    for line in field_lines:
+        key, _colon, value = line.partition(":")
+        content = _set_frontmatter_field(content, key, value.strip())
+    content = set_prior_extractions(content, prior_extractions)
+    content = _remove_frontmatter_fields(content, lambda key: key in _parts_module().SOURCE_FIELDS)
+    for field, value in _part_fields(parts):
+        content = _set_frontmatter_field(content, field, value)
+    return with_newline(_set_extracted_text(content, text), newline)
 
 
 def set_capture_fields(content: str, capture: CaptureFacts) -> str:

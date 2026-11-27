@@ -128,8 +128,9 @@ route. Never record a new hash for changed bytes.
 
 ## Path variants
 
-`path_variants` (opt-in: `categories=["path_variants"]`) lists sibling names that one portable filesystem would
-hold as a single entry. Names equal after Unicode NFC normalisation and casefolding are defects (`error`): the
-vault cannot be exported or opened on Windows or default macOS. Names equal only after NFKC folding and dropping
-separators are candidates (`info`) for a human call. Nothing merges automatically. Join the folders by hand with
-`files.move` and keep the spelling that already holds most pages.
+`path_variants` (run by default) lists sibling names that one portable filesystem would hold as a single
+entry. It reads the files an export keeps. Names equal after Unicode NFC normalisation and casefolding are
+defects (`error`): the vault cannot be exported or opened on Windows or default macOS. For a group of
+folders, preview the merge with `maintenance.path_variants` ([vault care](vault-care.md#maintenancepath_variants));
+a group with a file in it is renamed by hand. Names equal only after NFKC folding and dropping separators
+are candidates (`info`) for a human call; nothing merges them.

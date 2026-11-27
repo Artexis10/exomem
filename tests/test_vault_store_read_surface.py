@@ -222,6 +222,7 @@ SAMPLES = {
     "maintain_memory:maintenance-job": {"mode": "maintenance-job"},
     "maintain_memory:structured-files": {"mode": "structured-files", "collection": DATASET},
     "maintain_memory:tag-variants": {"mode": "tag-variants"},
+    "maintain_memory:path-variants": {"mode": "path-variants"},
     "maintain_memory:collections-store": {"mode": "collections-store"},
     "maintain_memory:collections-store-adopt-local": {"mode": "collections-store-adopt-local"},
     "maintain_memory:collections-store-export": {"mode": "collections-store-export"},
@@ -409,9 +410,13 @@ class _RecordedArguments(dict):
 ADAPTER_ARGUMENTS = frozenset({"validate_only", "save", "dry_run", "apply", "path", "query", "family"})
 
 
-def test_the_inventory_knows_each_registry_that_the_classifier_reads():
+def test_the_inventory_knows_each_registry_that_the_classifier_reads(monkeypatch):
     """A selector value whose classification reads a further argument splits by a registry that
-    the inventory must list, or it samples one of that registry's values and skips the rest."""
+    the inventory must list, or it samples one of that registry's values and skips the rest. An argument
+    that only `invocation_writes_outside_writer` reads selects a write that skips the lease, not a read."""
+    # A write that skips the writer lease is still a write: it is outside the read surface. Patching its
+    # check out records only the reads that the read-only classification itself makes.
+    monkeypatch.setattr(commands, "invocation_writes_outside_writer", lambda command, kwargs: False)
     selectors = egress.selector_registry()
     for command in (*commands.COMMANDS, *commands.PRODUCT_COMMANDS):
         selector = egress.selector_for_command(command.name)
@@ -639,10 +644,13 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
         clear_reader_caches(vault)
         # Cache eviction also clears the watcher registry. Restore service readiness before
         # comparing bounded graph reads and complete link answers with the store's current rows.
-        if sample_arguments.get("links") or name == "viewer_map":
+        if sample_arguments.get("links") or name in {"viewer_map", "review_memory"}:
             freshness.seed(vault, "vault", (
                 (str(path), freshness.stat_signature(path)) for path in vaults.walk_vault_md(vault)
             ))
+            if name == "review_memory":
+                # Compare full annotations with the store's current structures, not a stale file catalogue.
+                assert lexstore.ensure_fresh(vault)
             assert epistemic_graph.EpistemicGraphIndex(vault).available()
         if sample_arguments.get("links"):
             assert vaults.prime_inbound_index(vault, eager=True)

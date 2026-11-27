@@ -279,7 +279,7 @@ def test_idempotency_claim_is_visible_without_repeating_the_write(tmp_path, toke
     assert store.run("capture", "digest", lambda: result) == result
     assert store.run(
         "capture", "digest", lambda: pytest.fail("a replay repeated the write")
-    ) == result
+    ) == {**result, "replayed": True}
 
     stages = {item["name"]: item for item in call_spans.pop_call_spans(token)}
     claim = stages["mutation.idempotency_claim"]
@@ -484,6 +484,7 @@ _DOCUMENTED_SPAN_NAMES = frozenset(
         "lexical.proof",
         "lexical.query",
         "lexical.resolver_entries",
+        "lexical.catalogue_rows",
         "recall.projection.checkpoint",
         "recall.projection.snapshot",
         "recall.projection.scope_snapshot",
@@ -493,6 +494,7 @@ _DOCUMENTED_SPAN_NAMES = frozenset(
         "embeddings.matrix_load",
         "embeddings.matrix_catch_up",
         "embeddings.unit_matrix_load",
+        "embeddings.unit_matrix_catch_up",
         "delivery.vocabulary_after_commit",
         "derived.fanout",
         "commit_tail.mutation_committed",
@@ -551,6 +553,8 @@ _DOCUMENTED_SPAN_NAMES = frozenset(
         "post_commit.capture_sweep",
         "post_commit.entity_candidate",
         "post_commit.undeclared_referents",
+        "post_commit.promotions",
+        "terminal_persist.graph_sync_progress",
         "advisory.default_sweep",
         "command.body",
         "command.terminal_filter",

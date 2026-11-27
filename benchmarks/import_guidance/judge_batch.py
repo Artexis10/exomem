@@ -81,19 +81,27 @@ def run_id(run: dict) -> str:
 
 def prepare(stage_b: Sequence[Path], stage_c: Sequence[Path], scenarios: Sequence[Scenario], *, out: Path) -> int:
     """Write `judge-views.jsonl` and `private/judge-map.json` under `out`; returns the item count."""
-    entries = blind_items(stage_b, stage_c, scenarios)
-    rng = random.Random(BATCH_SEED)
+    return prepare_entries(blind_items(stage_b, stage_c, scenarios), out=out)
+
+
+def prepare_entries(
+    entries: Sequence[tuple[dict, tuple[dict, ...], str]], *, out: Path,
+    seed: int = BATCH_SEED, answer_schema: dict | None = None,
+) -> int:
+    """Blind supplied workflow views without selecting replies or omitting unavailable outcomes."""
+    rng = random.Random(seed)
     doubled = set(rng.sample(range(len(entries)), math.ceil(len(entries) * REJUDGE_FRACTION)))
     items, mapping = [], {}
     for position, (run, criteria, prompt) in enumerate(entries):
         first = uuid.uuid4().hex
         for item_id, twin_of in [(first, None), *([(uuid.uuid4().hex, first)] if position in doubled else [])]:
-            items.append({"id": item_id, "prompt": prompt, "answer_schema": judge.answer_schema(criteria)})
+            schema = judge.answer_schema(criteria) if answer_schema is None else answer_schema
+            items.append({"id": item_id, "prompt": prompt, "answer_schema": schema})
             mapping[item_id] = {"run": run, "criteria": list(criteria), "twin_of": twin_of, "prompt_sha256": prompt_sha256(prompt)}
     rng.shuffle(items)
     (out / "private").mkdir(parents=True, exist_ok=True)
     (out / VIEWS_FILE).write_text("".join(json.dumps(item) + "\n" for item in items), encoding="utf-8")
-    (out / "private" / "judge-map.json").write_text(json.dumps({"seed": BATCH_SEED, "items": mapping}, indent=1) + "\n", encoding="utf-8")
+    (out / "private" / "judge-map.json").write_text(json.dumps({"seed": seed, "items": mapping}, indent=1) + "\n", encoding="utf-8")
     return len(items)
 
 

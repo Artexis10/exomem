@@ -330,6 +330,8 @@ def reply(
     if retry is not None or fix.casefold() in message.casefold():
         # A structured retry is the fix; a remediation that the message already carries is not said twice.
         fix = ""
+    if fate and fate.rstrip(".").casefold() in message.casefold():
+        fate = None  # a message that already says what happened to the data is not said twice
     sentences = (message, _at_fault(message, refusal), fix, fate)
     body: dict[str, Any] = {"code": code, "message": " ".join(filter(None, sentences))}
     if code == _BUSY_CODE and (diagnostics := _busy_diagnostics(refusal)):

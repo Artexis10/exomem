@@ -9,11 +9,16 @@ from __future__ import annotations
 import asyncio
 import base64
 import gzip
+import json
+import os
+import subprocess
+import sys
 import time
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
+from cellctl.imports import JOB_FAILED_LOG_PHRASE
 
 from cloud_rehearsal import large_import, platform
 from cloud_rehearsal.mcp_client import ToolResult
@@ -85,6 +90,36 @@ def test_a_peak_over_ticks_that_could_not_read_the_cell_is_unknown_not_zero():
     reading = large_import.peaks(seen)
     assert reading["peak_volume_used_bytes"] == 70
     assert reading["ticks"] == 3 and reading["ticks_with_cell_reading"] == 1
+
+
+def test_thread_cpu_charges_a_phase_only_what_each_thread_used_during_it():
+    """Catches a phase charged with the CPU its threads used before it, and an unread phase shown as idle."""
+    rows = [{"label": "start", "threads": {"7": ["drain", 5_000_000]}},
+            {"label": "paging", "threads": {"7": ["drain", 7_000_000], "9": ["filing", 1_000_000]}},
+            {"label": "paging", "cell_error": "CommandFailed"},
+            {"label": "paging", "threads": {"7": ["drain", 8_000_000], "9": ["filing", 4_000_000]}},
+            {"label": "blind"}]
+
+    assert large_import.thread_cpu(rows, "paging") == {"filing": 4.0, "drain": 3.0}
+    assert large_import.thread_cpu(rows, "blind") is None
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/task"), reason="reads /proc")
+def test_the_sample_script_reads_each_thread_of_the_other_processes():
+    """Catches a sample script that fails on the /proc it reads, which would leave every tick without threads."""
+    sleeper = subprocess.Popen([sys.executable, "-c", "import threading, time\n"
+                                "threading.Thread(target=time.sleep, args=(30,), daemon=True).start()\ntime.sleep(30)"])
+    try:
+        time.sleep(0.5)
+        sample = json.loads(subprocess.run([sys.executable, "-c", large_import.SAMPLE_SCRIPT], capture_output=True,
+                                           text=True, check=True, timeout=60).stdout)
+        tids = os.listdir(f"/proc/{sleeper.pid}/task")
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+
+    assert len(tids) == 2
+    assert all(isinstance(sample["threads"][tid][1], int) for tid in tids)
 
 
 # --- filing ---------------------------------------------------------------------------------
@@ -237,6 +272,27 @@ def test_each_file_call_keeps_its_counts_and_the_page_shows_files_per_call_and_p
     assert page["files_per_second"] == 100.0  # 100 files over two calls of 0.5 s
 
 
+def test_a_deadline_that_stops_filing_still_reports_the_calls_made():
+    """Catches the report that lost every page because the deadline check came before the pages were recorded."""
+    agent = Scripted({"file": [_working("r1", filed=40, token="a"), _working("r1", filed=90, token="b")]})
+    folder = _folder(name="media")
+    plan = _plan()
+    checks = []
+
+    def require_time(what, *, seconds=0):
+        checks.append(what)
+        if len(checks) == 3:
+            raise large_import.OutOfTime(f"the scenario's deadline came before {what}")
+
+    plan.require_time = require_time
+
+    with pytest.raises(large_import.OutOfTime):
+        asyncio.run(large_import.file_pages(agent, plan, folder))
+
+    (page,) = folder.report["pages"]
+    assert [step["files"] for step in page["file_steps"]] == [40, 50]
+
+
 def test_a_reply_without_counts_leaves_its_files_and_the_rate_unknown_not_zero():
     steps = [large_import.file_step({"progress": {"filed": 10}}, 2.0, before=0),
              large_import.file_step({}, 2.0, before=10)]
@@ -351,6 +407,39 @@ def test_each_folders_app_log_is_kept_under_its_own_name(monkeypatch, tmp_path):
 
     kept = {path.name: path.read_bytes() for path in (tmp_path / "diagnostics").iterdir()}
     assert kept == {"cell-app-notes-exomem.log": b"first pod", "cell-app-media-exomem.log": b"second pod"}
+
+
+def _failure_ctx(tmp_path, *, log_returncode: int, log: str):
+    return SimpleNamespace(stack=SimpleNamespace(workdir=tmp_path),
+                           kubectl=lambda *_args, **_kwargs: SimpleNamespace(returncode=log_returncode, stdout=log, stderr=""))
+
+
+def test_a_failed_upload_keeps_the_runners_kernel_log_and_the_failed_jobs_reason(monkeypatch, tmp_path):
+    """Defect: the Job and its pod are gone by the time anyone looks, so an out-of-memory kill is only provable
+    from the kernel log and the line cellctl logged first."""
+    failed = f"cellctl: import 1 import{JOB_FAILED_LOG_PHRASE}{{\"exit_code\": 137, \"reason\": \"OOMKilled\"}}"
+    monkeypatch.setattr(large_import, "run", lambda *_args, **_kwargs: SimpleNamespace(
+        returncode=0, stdout="[Wed] Memory cgroup out of memory: Killed process 7 (python)\n", stderr=""))
+    ctx = _failure_ctx(tmp_path, log_returncode=0, log=f"reconciled\n{failed}\n")
+
+    kept = large_import.save_import_failure_evidence(ctx)
+
+    diagnostics = tmp_path / "diagnostics"
+    assert "Killed process 7" in (diagnostics / "runner-dmesg.txt").read_text()
+    assert failed in (diagnostics / "cellctl-at-failure.log").read_text()
+    assert kept["import_job_failures"] == [failed] and kept["import_job_failures_total"] == 1
+    assert kept["runner_dmesg"]["returncode"] == 0 and kept["cellctl_log"]["returncode"] == 0
+
+
+def test_a_cellctl_log_that_could_not_be_read_is_null_not_an_empty_list(monkeypatch, tmp_path):
+    """Defect: a failed log read reported no failed import Jobs, so the evidence read as complete and clean."""
+    monkeypatch.setattr(large_import, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""))
+    ctx = _failure_ctx(tmp_path, log_returncode=1, log="")
+
+    kept = large_import.save_import_failure_evidence(ctx)
+
+    assert kept["cellctl_log"]["returncode"] == 1
+    assert kept["import_job_failures"] is None and kept["import_job_failures_total"] is None
 
 
 def test_an_app_log_that_cannot_be_read_is_reported_and_does_not_fail_the_run(monkeypatch, tmp_path):

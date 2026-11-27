@@ -895,6 +895,48 @@ def test_the_projection_resolves_twins_exactly_as_the_scan_does(
     }
 
 
+def test_a_write_resolves_its_memory_ref_from_the_projection_as_the_scan_does(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write addressed by memory ref once walked the whole vault to find its page.
+
+    On a large vault on a starved host that walk alone held a write for minutes. A current
+    identity projection now answers, with the scan's page and the scan's errors.
+    """
+    single, twin, missing = (memory_refs.new_id() for _ in range(3))
+    _write_page(tmp_path, "Knowledge Base/Notes/Open/single.md", _page(single))
+    _write_page(tmp_path, "Knowledge Base/Notes/Open/first.md", _page(twin))
+    _write_page(tmp_path, "Knowledge Base/Notes/Open/second.md", _page(twin))
+
+    def resolve(identity: str) -> str | dict[str, str]:
+        try:
+            return memory_refs.resolve_identifier_read_only(
+                tmp_path, memory_refs.memory_ref(identity)
+            )
+        except memory_refs.ReferenceError as error:
+            return error.as_dict()
+
+    # No projection is current yet, so these read through the scan.
+    through_scan = {identity: resolve(identity) for identity in (single, twin, missing)}
+
+    freshness.rebaseline(tmp_path)
+    semantic_contract.build_corpus_context(tmp_path)
+
+    def no_scan(*_args: object) -> list:
+        raise AssertionError("a current projection must answer without a scan")
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", no_scan)
+    monkeypatch.setattr(memory_refs.ReferenceIndex, "_scan_paths_for_id", no_scan)
+    through_projection = {identity: resolve(identity) for identity in (single, twin, missing)}
+
+    assert through_projection == through_scan
+    assert through_projection == {
+        single: "Knowledge Base/Notes/Open/single.md",
+        twin: {"code": "AMBIGUOUS_REFERENCE", "reason": f"memory id {twin} appears in 2 pages"},
+        missing: {"code": "REFERENCE_NOT_FOUND", "reason": f"memory id not found: {missing}"},
+    }
+
+
 def test_artifact_redaction_borrows_the_current_identity_projection(
     tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

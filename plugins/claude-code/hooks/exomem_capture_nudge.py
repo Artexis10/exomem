@@ -115,6 +115,7 @@ import shlex
 import sys
 import threading
 import time
+from collections.abc import MutableMapping
 from functools import lru_cache
 from pathlib import Path, PureWindowsPath
 
@@ -209,11 +210,52 @@ _ENV_ALIASES = (
 )
 
 
-def _normalize_env_aliases() -> None:
-    """Map any legacy KB_* tunable onto its EXOMEM_* name (new wins if both set)."""
+# The settings that choose where data lives, which a hook never guesses between: the package's
+# placement settings (`exomem.env_compat.PLACEMENT_SETTINGS`) and the hook's own home.
+# nosemgrep: ep-word-set -- closed set that this code defines, not a customer's vocabulary
+_PLACEMENT_SETTINGS = frozenset({"VAULT_PATH", "STATE_ROOT", "HOSTED_STATE_ROOT", "HOOK_HOME"})
+
+
+def _is_placement(alias: str) -> bool:
+    """Whether the conflicting EVERMATTER_ name sets a placement setting, which skips the turn."""
+    return alias[len("EVERMATTER_") :] in _PLACEMENT_SETTINGS
+
+
+def _conflict_pairs(names: list[str]) -> str:
+    """The variables in conflict, each EVERMATTER_ name with its EXOMEM_ name; never their values."""
+    return "; ".join(f"{name} and EXOMEM_{name[len('EVERMATTER_'):]}" for name in names)
+
+
+def _rename_aliases(environ: MutableMapping[str, str]) -> list[str]:
+    """Rename each alias name in `environ` into its EXOMEM_ name and remove the alias names.
+
+    Copy of `exomem.env_compat.rename_settings` for a hook, which cannot import the
+    package; `tests/test_setting_names_in_step.py` keeps the copy in step. EVERMATTER_X then
+    KB_MCP_X fills EXOMEM_X only when it is unset. Returns the EVERMATTER_ names whose
+    value differs from a set EXOMEM_ name: a placement setting skips the turn, any other lets EXOMEM_X win.
+    """
+    conflicts: list[str] = []
+    for prefix in ("EVERMATTER_", "KB_MCP_"):  # the product's closed naming history
+        for name in [name for name in environ if name.startswith(prefix)]:
+            value = environ.pop(name)
+            canonical = "EXOMEM_" + name[len(prefix) :]
+            if canonical not in environ:
+                environ[canonical] = value
+            elif prefix == "EVERMATTER_" and environ[canonical] != value:
+                conflicts.append(name)
+    return conflicts
+
+
+def _normalize_env_aliases() -> list[str]:
+    """Rename EVERMATTER_* and KB_MCP_* names, and map any legacy KB_* tunable, onto EXOMEM_* (EXOMEM_* wins if set).
+
+    Returns the names in conflict (see `_rename_aliases`).
+    """
+    conflicts = _rename_aliases(os.environ)
     for new, old in _ENV_ALIASES:
         if new not in os.environ and old in os.environ:
             os.environ[new] = os.environ[old]
+    return conflicts
 
 
 def _env_int(name: str, default: int) -> int:
@@ -1277,6 +1319,17 @@ def _log(text: str, outcome: str = "fired") -> None:
         pass
 
 
+def _log_conflict(names: list[str], *, skipped: bool) -> None:
+    """One row naming both variables of each conflict (never their values), and whether the turn was skipped."""
+    try:
+        logp = _hook_home() / "exomem-capture-nudge.log"
+        outcome = "nudge skipped" if skipped else "nudge ran with the EXOMEM_ names"
+        row = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {outcome} | settings conflict: {_conflict_pairs(names)}\n"
+        _state_core().write_nudge_file(logp, row.encode("utf-8"), append=True)
+    except Exception:  # noqa: BLE001 — logging must never break a stop hook
+        pass
+
+
 def _capture_reason(reason: str) -> str:
     if os.environ.get("EXOMEM_RETRIEVE_INJECT", "").strip().lower() == "mcp":
         return "If Evermatter is not connected or cannot capture, tell the user nothing is saved and to reconnect it in the app's MCP/connector settings. Run read_instructions first if no contract.\n" + reason
@@ -1304,6 +1357,8 @@ def main(argv: list[str] | None = None) -> int:
         args = parser.parse_args(argv or [])
     except SystemExit:
         return 0
+    # Inherited names are renamed first, so a flag below wins over every name for its setting.
+    conflicts = _normalize_env_aliases()
     if args.hook_home_env is not None:
         args.hook_home = os.environ.get(args.hook_home_env)
         if not args.hook_home or not args.hook_home.strip():
@@ -1315,7 +1370,11 @@ def main(argv: list[str] | None = None) -> int:
     ):
         if value is not None:
             os.environ[name] = value
-    _normalize_env_aliases()
+    if conflicts:
+        placement = any(_is_placement(name) for name in conflicts)
+        _log_conflict(conflicts, skipped=placement)
+        if placement:  # never guess where data lives: skip this turn's nudge
+            return 0
     if os.environ.get("EXOMEM_CAPTURE_NUDGE_DISABLE"):
         return 0
     level = _prominence()

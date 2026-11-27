@@ -15,10 +15,12 @@ from typing import Any
 
 import pytest
 import yaml
+from membench.clock import week_of
 from membench.generate import BANNED_VOCABULARY, _lint_vocabulary
 
 from benchmarks.membench.world import core, names
 from benchmarks.membench.world.core import Vocabulary
+from benchmarks.membench.world.keys import key_spec
 from benchmarks.membench.world.loader import CATALOGUE_DIR, load_catalogue
 from benchmarks.membench.world.manifest import catalogue_digest
 from benchmarks.membench.world.pack import PACKS_DIR, PackRefused, check_pack, load_pack
@@ -62,6 +64,18 @@ def banned_words(*paths: Path) -> list[str]:
 
 
 # -- the workflow ---------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("twins", [0, 1])
+def test_weekly_probes_do_not_receive_future_files_from_their_session(twins: int) -> None:
+    """Every arm ingests the complete weekly session before it answers that week's probes."""
+    planned = plan(twins=twins)
+    world = planned.world()
+    for thread in planned.threads:
+        for form in CATALOGUE.entries[thread.entry].probes:
+            at = thread.slots[key_spec(CATALOGUE, thread, form)["at"]]
+            ingested = [a for a in world.artefacts.values() if week_of(a.at) <= week_of(at)]
+            assert all(a.at <= at for a in ingested), (thread.id, form, at)
 
 
 def test_a_world_is_planned_from_a_seed_and_written_the_same_way_twice(tmp_path: Path) -> None:

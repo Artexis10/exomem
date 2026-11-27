@@ -1592,7 +1592,9 @@ def _document_digest(value: Any) -> str:
 
 
 def _verify_pinned_base(tag: str, commit: str) -> None:
-    if _git_bytes("rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}").decode().strip() != commit:
+    # A release base is labelled by its tag; a branch's merge base has no tag and is labelled by its own commit.
+    reference = commit if tag == commit else f"refs/tags/{tag}"
+    if _git_bytes("rev-parse", "--verify", f"{reference}^{{commit}}").decode().strip() != commit:
         raise MeasurementRefused("pinned-release-tag-mismatch")
 
 
@@ -1980,8 +1982,8 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument("--aggregate-paired", type=Path, help="compare one complete series from raw shard artifacts")
     parser.add_argument("--producer-outcome", help="current Actions sampler matrix result, required for aggregation")
     parser.add_argument("--series", help="limit --paired to one series of the case file")
-    parser.add_argument("--base-tag", help="release label resolved once before sampling")
-    parser.add_argument("--base-commit", help="peeled release commit resolved before sampling")
+    parser.add_argument("--base-tag", help="release tag resolved once before sampling, or the base commit itself")
+    parser.add_argument("--base-commit", help="peeled base commit resolved before sampling")
     parser.add_argument("--shard", type=int, help="one contiguous case shard; emits raw samples only")
     parser.add_argument("--shards", type=int, help="number of case shards")
     source.add_argument("--worker-source", type=Path, help=argparse.SUPPRESS)

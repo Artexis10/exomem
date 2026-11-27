@@ -535,17 +535,37 @@ def _enrol_store_collections(root: Path, count: int) -> list[str]:
 
 @pytest.fixture
 def store_requests(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
-    """The arguments of every request that reaches the collection-store thread."""
+    """The arguments of every request a command makes of the collection store, at either door.
+
+    The store thread's queue (`call`) and the read beside it (`read_beside`) each count once; a read
+    beside that falls back onto the queue counts once, and a background read that never queues is
+    not counted.
+    """
+    import threading
+
     from exomem.collection_store import runtime
 
     requests: list[dict] = []
-    real = runtime.StoreServer.call
+    real_call, real_beside = runtime.StoreServer.call, runtime.StoreServer.read_beside
+    beside = threading.local()
 
     def counting(self, work, **kwargs):
-        requests.append(kwargs)
-        return real(self, work, **kwargs)
+        if not getattr(beside, "active", False):
+            requests.append(kwargs)
+        return real_call(self, work, **kwargs)
+
+    def counting_beside(self, work, **kwargs):
+        if not kwargs.get("queue", True):
+            return real_beside(self, work, **kwargs)
+        requests.append({"beside": True})
+        beside.active = True
+        try:
+            return real_beside(self, work, **kwargs)
+        finally:
+            beside.active = False
 
     monkeypatch.setattr(runtime.StoreServer, "call", counting)
+    monkeypatch.setattr(runtime.StoreServer, "read_beside", counting_beside)
     return requests
 
 
@@ -601,10 +621,12 @@ def test_a_caller_that_expects_other_bytes_than_the_page_has_is_refused_as_on_it
     assert len(store_requests) <= 2, "the stale page is decided again on its own, the rest together"
 
 
+@pytest.mark.parametrize("refusal", ["store unavailable", "collection not found"])
 def test_a_page_the_store_refuses_stays_withheld_while_the_others_are_answered(
-    service, store_requests: list[dict], monkeypatch: pytest.MonkeyPatch  # noqa: F811
+    service, store_requests: list[dict], monkeypatch: pytest.MonkeyPatch, refusal: str  # noqa: F811
 ) -> None:
     from exomem.cli_ops import OpError
+    from exomem.structured_collections import CollectionError
 
     root = service.root
     pages = _enrol_store_collections(root, 2)
@@ -616,7 +638,10 @@ def test_a_page_the_store_refuses_stays_withheld_while_the_others_are_answered(
 
     def refusing(vault_root, rel_path, *args, **kwargs):
         if rel_path == refused:
-            raise OpError("COLLECTION_STORE_UNAVAILABLE", "the store cannot place this page")
+            # The store's two refusals of one page: an outage, and its content-free freshness refusal.
+            if refusal == "store unavailable":
+                raise OpError("COLLECTION_STORE_UNAVAILABLE", "the store cannot place this page")
+            raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
         return real(vault_root, rel_path, *args, **kwargs)
 
     monkeypatch.setattr(egress, "projection_decision", refusing)
@@ -655,10 +680,12 @@ def test_a_batched_answer_is_never_given_to_another_caller(service) -> None:  # 
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("refusal", ["store unavailable", "collection not found"])
 def test_a_page_the_store_refuses_stays_withheld_from_the_owner_while_the_others_are_answered(
-    service, store_requests: list[dict], monkeypatch: pytest.MonkeyPatch  # noqa: F811
+    service, store_requests: list[dict], monkeypatch: pytest.MonkeyPatch, refusal: str  # noqa: F811
 ) -> None:
     from exomem.cli_ops import OpError
+    from exomem.structured_collections import CollectionError
 
     root = service.root
     pages = _enrol_store_collections(root, 2)
@@ -668,7 +695,10 @@ def test_a_page_the_store_refuses_stays_withheld_from_the_owner_while_the_others
 
     def refusing(vault_root, rel_path, *args, **kwargs):
         if rel_path == refused:
-            raise OpError("COLLECTION_STORE_UNAVAILABLE", "the store cannot place this page")
+            # The store's two refusals of one page: an outage, and its content-free freshness refusal.
+            if refusal == "store unavailable":
+                raise OpError("COLLECTION_STORE_UNAVAILABLE", "the store cannot place this page")
+            raise CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
         return real(vault_root, rel_path, *args, **kwargs)
 
     monkeypatch.setattr(egress, "projection_decision", refusing)

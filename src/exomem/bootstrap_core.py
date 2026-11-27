@@ -109,7 +109,8 @@ _PASSTHROUGH = ("due_state", "latency")
 #: Sections answered from live state rather than projected from the reference
 #: payload, so the index (a map of reference bytes) does not list them.
 ACTIVITY_SECTION = "activity"
-LIVE_SECTIONS = (ACTIVITY_SECTION,)
+WHATS_NEW_SECTION = "whats_new"
+LIVE_SECTIONS = (ACTIVITY_SECTION, WHATS_NEW_SECTION)
 
 
 def accepted_sections() -> tuple[str, ...]:

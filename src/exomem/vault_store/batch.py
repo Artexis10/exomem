@@ -13,6 +13,7 @@ note, the semantic drain's wake and the heat projection.
 
 from __future__ import annotations
 
+import enum
 import hashlib
 import logging
 import os
@@ -79,6 +80,39 @@ class Lifecycle:
     vacated_folders: tuple[str, ...] = ()
 
 
+class NoStoreChange(ValueError):
+    """A batch names only files that the store neither holds nor derives rows for.
+
+    A curation run's JSON file is one: the store has nothing to commit for it, and refuses an
+    empty change. ``commit_batch`` raises this before it does anything, and
+    ``vault.batch_atomic_write`` commits such a batch through the native locked writer, as in a
+    file-mode vault. It is a ``ValueError`` as the store's own refusal of an empty change is.
+    """
+
+
+class _Holder(enum.Enum):
+    """Who holds a batch file: the store (a page, a binary), its row refresh (Markdown) or no one."""
+
+    PAGE = enum.auto()
+    BINARY = enum.auto()
+    REFRESH = enum.auto()
+    FILE = enum.auto()
+
+
+def _holder_of(rel: str | None) -> _Holder:
+    """The holder of a vault-relative path (None: outside the vault). The one rule for what gives
+    the store a change: ``commit_batch`` and its plan both read it."""
+    if rel is None:
+        return _Holder.FILE
+    kind = ownership.classify(rel)
+    if kind is ownership.Ownership.PAGE:
+        return _Holder.PAGE
+    if kind is ownership.Ownership.BINARY:
+        return _Holder.BINARY
+    # A Markdown suffix names the format, so it fixes which files carry rows.
+    return _Holder.REFRESH if ownership.is_markdown(rel) else _Holder.FILE
+
+
 def commit_batch(
     writer: CollectionWriter,
     writes: Iterable[vault.PlannedWrite],
@@ -110,6 +144,13 @@ def commit_batch(
     to its own error, since file mode has no such guard to name.
     """
     root = Path(vault_root)
+    caller_writes = list(writes)
+    if (
+        lifecycle is None
+        and caller_writes
+        and all(_holder_of(_relative(root, write.path)) is _Holder.FILE for write in caller_writes)
+    ):
+        raise NoStoreChange("a batch of files that the store does not hold has no store change")
     if defer_graph_completion:
         # The handoff completes a graph checkpoint in the external state root, which a store commit
         # never writes: its graph rows are complete at the commit, so there is nothing to defer.
@@ -122,7 +163,6 @@ def commit_batch(
     from .. import curation_witness, semantic_drain, vocabulary_gate, working_set_heat
     from ..governance import artifact_census
 
-    caller_writes = list(writes)
     if prepare is not None:
         with vocabulary_gate.preparation_context(root):
             _stop_at_preparation(
@@ -224,15 +264,14 @@ class _Plan:
         self.refresh: list[str] = []
         for write in writes:
             rel = _relative(root, write.path)
-            kind = None if rel is None else ownership.classify(rel)
-            if rel is not None and kind is ownership.Ownership.PAGE:
+            holder = _holder_of(rel)
+            if holder is _Holder.PAGE:
                 self.pages.append((rel, write))
                 continue
             self.files.append(write)
-            if rel is not None and kind is ownership.Ownership.BINARY:
+            if holder is _Holder.BINARY:
                 self.binaries.append((rel, write))
-            # A Markdown suffix names the format, so it fixes which files carry rows.
-            elif rel is not None and rel.lower().endswith(".md"):
+            elif holder is _Holder.REFRESH:
                 self.refresh.append(rel)
         self.disk_guards: list[vault.PathGuard] = []
         self.disk_censuses: list[vault.DirectoryCensusGuard] = []

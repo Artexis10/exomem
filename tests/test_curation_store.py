@@ -50,6 +50,26 @@ def test_forward_plan_is_create_only_and_collision_refuses(vault: Path) -> None:
         store._create_plan_at(store.plan_path(stored["run_id"]), changed)
 
 
+def test_a_seal_that_fails_for_another_reason_is_not_reported_as_a_collision(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused write reported as a collision hides its cause, so the agent retries for nothing."""
+    from exomem import curation
+
+    def refused(*_args: object, **_kwargs: object) -> None:
+        raise ValueError("a store change names no file")
+
+    monkeypatch.setattr(curation, "batch_atomic_write", refused)
+
+    with pytest.raises(curation.CurationError) as refusal:
+        curation.CurationStore(vault).create_forward(
+            _stored_plan(), binding_manifest=[], registry_ids={}
+        )
+
+    assert refusal.value.code == "CURATION_STORE_WRITE_FAILED"
+    assert "a store change names no file" in refusal.value.reason
+
+
 def test_store_refuses_symlinked_run_ancestors(vault: Path, tmp_path: Path) -> None:
     from exomem import curation
 

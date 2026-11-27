@@ -1,6 +1,6 @@
 [project]
 name = "evermatter"
-version = "0.204.0" # x-release-please-version
+version = "0.207.0" # x-release-please-version
 description = "Local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI with multimodal OCR/ASR/CLIP search"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -262,6 +262,9 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build]
+# The release build writes this gitignored file into the Cloud cell image's source tree
+# (scripts/user_notes.py generate). Naming it keeps a build that honours .gitignore from dropping it.
+artifacts = ["/src/exomem/user_release_notes.json"]
 # The bundled sample vault ships authored Markdown and schema content, never
 # rebuildable indexes, local worker locks, coordination state, or voice profiles
 # that happen to exist in a dirty source tree.

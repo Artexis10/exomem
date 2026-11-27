@@ -71,6 +71,8 @@ class CloudImportError(Exception):
         self.resume = resume
         # True when Cloud reported that the import itself ended (failed, expired or discarded).
         self.ended = False
+        # For an ended import: False when a rerun would meet the same stop, so the folder run says nothing to rerun.
+        self.rerun_helps = True
         # Set when the client abandoned a checkpoint it could not resume; Cloud's import may still be open.
         self.why: str | None = None
 
@@ -83,6 +85,23 @@ _STOP_ON_CLOUD = (f"press Cancel in {_HOME_IMPORT_STATUS}, or ask your assistant
 
 class _SourceChanged(Exception):
     """A file or folder changed while it was archived, so the archive would mix two versions."""
+
+
+# The cell's controller fixes these two codes for an import step that left no report of its own: what each means for
+# the person, and whether running the command again can help. A new run after an out-of-memory stop meets the same
+# archive under the same limit, and a large vault takes hours to upload, so that message asks for a report first.
+_ENDED_WITHOUT_REPORT = {
+    "IMPORT_OUT_OF_MEMORY": ("the cell ran out of memory while it imported, and the checkpoint is removed. "
+                             "Report the import id; a new run on the same archive will likely stop the same way", False),
+    "IMPORT_KILLED": ("the import was stopped on your cell before it could say why, and the checkpoint is removed. "
+                      "Run the command again to start a new import; if it stops the same way, report the import id", True),
+}
+
+
+def _ended_without_finishing(code: str) -> tuple[str, bool]:
+    """What happened to an import that Cloud ended, with what the person can do, and whether a rerun can help."""
+    return _ENDED_WITHOUT_REPORT.get(
+        code, ("the Cloud import ended without finishing, and the checkpoint is removed; a new run starts a new import", True))
 
 
 def safe_code(value: object) -> str | None:
@@ -139,6 +158,58 @@ class Window:
     series_file: bytes
     # The import ID that the series records before the send, so a rerun finds the window's receipt by it.
     import_id: str | None = None
+
+
+# What a lone import's series file depends on, by the flag that a person gives. This CLI's own arguments fix the set.
+CHOICE_FLAGS = {"filing": "--no-file", "label": "--label", "collection": "--collection"}
+
+
+@dataclass(frozen=True)
+class Choices:
+    """What a lone import's series file carries, and the claim its result makes, as the checkpoint keeps them.
+
+    The archive of the first run holds the series file, so a rerun cannot change it. A rerun whose flags differ is
+    refused, and one that matches carries and claims what the checkpoint recorded, whatever the cell offers now.
+    """
+
+    filing: bool = False  # the series file asks the cell to file
+    label: str | None = None
+    collection: str | None = None
+    carried: bool = False  # the archive holds a series file at all; the caller sets it together with `window`
+    cell_filing: str | None = None  # the result's claim, decided when the import is declared
+
+
+def _resumed_choices(now: Choices, state: dict) -> Choices:
+    """The choices that the checkpoint recorded, once this run's flags are shown to match them."""
+    recorded = Choices(**state["choices"]) if "choices" in state else None
+    plain = recorded or Choices()  # a checkpoint from before the record was a plain import: no series file, no claim
+    differs = [flag for key, flag in CHOICE_FLAGS.items() if getattr(plain, key) != getattr(now, key)]
+    if differs and recorded is None:
+        raise CloudImportError(PREFLIGHT, "CHECKPOINT_OPTIONS_CHANGED",
+                               "this import was started as an upload only, with no request to file and no label or collection. "
+                               "Run the command with --no-file and without --label and --collection to finish it, "
+                               "then ask your assistant to file it")
+    if differs:
+        raise CloudImportError(PREFLIGHT, "CHECKPOINT_OPTIONS_CHANGED",
+                               f"this run differs from the checkpoint made for this import in {', '.join(differs)}; "
+                               "run the command as it was first run")
+    return plain
+
+
+def resumed_choices(checkpoint: Path, now: Choices, source: Path) -> Choices | None:
+    """The choices of the import that `checkpoint` holds, once this run's flags match them; None for a new import.
+
+    A caller asks before it probes the cell, so a rerun builds the archive the first run chose. A record that
+    cannot be read, or that belongs to another source, gives None here, and the import reads it again and
+    stops on it as it always did.
+    """
+    try:
+        state = json.loads((checkpoint / CHECKPOINT_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if state.get("source") != str(source):
+        return None
+    return _resumed_choices(now, state)
 
 
 @dataclass(frozen=True)
@@ -396,10 +467,12 @@ async def import_source(source: Path, config: CloudImportClientConfig, checkpoin
                         api=None, uploads=None, poll_seconds: float = 2,
                         progress: Progress | None = None,
                         free_bytes: Callable[[Path], int] = _free_bytes,
-                        window: Window | None = None) -> dict:
+                        window: Window | None = None, choices: Choices | None = None) -> dict:
     """Reauthorize on restart and reuse the same private ciphertext and part receipts.
 
-    A `window` sends only its members, with the series file; the source's other files stay behind.
+    A `window` sends only its members, with the series file; the source's other files stay behind. A lone import
+    gives its `choices`, which the checkpoint records when it declares the import, and the result's `cell_filing`
+    comes from them.
 
     Every failure leaves as a `CloudImportError` that names its phase, a content-free code and the import id.
     """
@@ -408,7 +481,7 @@ async def import_source(source: Path, config: CloudImportClientConfig, checkpoin
         return await _import(source, config, checkpoint, where, scope=scope, category=category,
                              include_hidden=include_hidden, use_gitignore=use_gitignore, api=api,
                              uploads=uploads, poll_seconds=poll_seconds, progress=progress or Progress(),
-                             free_bytes=free_bytes, window=window)
+                             free_bytes=free_bytes, window=window, choices=choices)
     except CloudImportError as error:
         error.import_id = error.import_id or where.import_id
         raise
@@ -418,7 +491,7 @@ async def import_source(source: Path, config: CloudImportClientConfig, checkpoin
 
 async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Path, where: _Where, *,
                   scope, category, include_hidden, use_gitignore, api, uploads, poll_seconds,
-                  progress: Progress, free_bytes, window: Window | None = None) -> dict:
+                  progress: Progress, free_bytes, window: Window | None = None, choices: Choices | None = None) -> dict:
     source = source.resolve()
     checkpoint = checkpoint.resolve()
     if source.is_dir() and checkpoint.is_relative_to(source):
@@ -456,6 +529,8 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
             if state.get("selection", options) != options:
                 raise CloudImportError(PREFLIGHT, "CHECKPOINT_OPTIONS_CHANGED",
                                        "the checkpoint was made with other --include-hidden or --no-gitignore options")
+            if choices is not None:
+                choices = _resumed_choices(choices, state)
             where.import_id = state["import_id"]
             progress.say(f"Resuming import {state['import_id']} from {checkpoint}.")
         else:
@@ -474,6 +549,8 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
             state = {"source": str(source), "config": asdict(config), "import_id": (window.import_id if window else None) or str(uuid.uuid4()),
                      "kind": plan.kind, "declared_files": plan.files, "declared_bytes": plan.bytes, "parts": {},
                      "envelope": envelope.model_dump() if envelope else None, "selection": options}
+            if choices is not None:
+                state["choices"] = asdict(choices)
             where.import_id = state["import_id"]
             _private_json(record, state)
         endpoint = base + "/" + state["import_id"]
@@ -503,10 +580,10 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
             if item["observed_state"] in ("failed", "expired", "discarded"):
                 ciphertext.unlink(missing_ok=True)
                 record.unlink(missing_ok=True)
-                ended = CloudImportError(where.phase, safe_code(item.get("error_code")) or "IMPORT_ENDED",
-                                         "the Cloud import ended without finishing, and the checkpoint is removed; "
-                                         "a new run starts a new import", state["import_id"], resume=False)
-                ended.ended = True
+                code = safe_code(item.get("error_code")) or "IMPORT_ENDED"
+                message, rerun_helps = _ended_without_finishing(code)
+                ended = CloudImportError(where.phase, code, message, state["import_id"], resume=False)
+                ended.ended, ended.rerun_helps = True, rerun_helps
                 raise ended
             if predicate(item):
                 return item
@@ -519,7 +596,7 @@ async def _import(source: Path, config: CloudImportClientConfig, checkpoint: Pat
             progress.say(f"Removed the encrypted copy ({human_bytes(state['ciphertext_bytes'])}) from {checkpoint}.")
         ciphertext.unlink(missing_ok=True)
         record.unlink(missing_ok=True)
-        return result
+        return {**result, "cell_filing": choices.cell_filing} if choices is not None and choices.cell_filing else result
 
     try:
         # A client-supplied UUID makes a dropped initial response safe to replay.
@@ -651,7 +728,8 @@ async def _run(args, config: CloudImportClientConfig, checkpoint: Path, progress
             return await import_folder(
                 args.source, config, checkpoint, cell=cell, api=api, uploads=uploads, include_hidden=args.include_hidden,
                 use_gitignore=not args.no_gitignore, progress=progress, resend_residual=args.resend_residual,
-                file=not args.no_file, collection=args.collection)
+                file=not (args.no_file or args.no_wait), collection=args.collection, origin_label=args.label,
+                ask_cell=not args.no_file)
     finally:
         await api.aclose()
         await uploads.aclose()
@@ -671,11 +749,19 @@ def main(argv=None) -> int:
     command.add_argument("--resend-residual", action="store_true",
                          help="send the members that discarded windows did not file, as a new series")
     command.add_argument("--collection", help="the collection name that the cell files the folder under")
+    command.add_argument("--label", help="where these files came from, such as a device or a drive; each filed page records it")
     command.add_argument("--no-file", action="store_true",
                          help="only upload: leave each landed window staged for your assistant to file")
+    command.add_argument("--no-wait", action="store_true",
+                         help="upload, and ask the cell to file the folder itself: this command files nothing and does not wait for it")
     args = parser.parse_args(argv)
     if args.no_file and args.collection:
         parser.error("--collection names the filing, so it cannot go with --no-file")
+    if args.no_wait and (args.no_file or args.collection):
+        parser.error("--no-wait asks the cell to file the folder as it is, so it cannot go with --no-file or --collection")
+    if args.label is not None and import_stage.ORIGIN_LABEL not in import_stage.origin_values({import_stage.ORIGIN_LABEL: args.label}):
+        # The cell leaves out a label of another shape, so a refusal here keeps the person from losing it unseen.
+        parser.error("--label must be printable text of 1 to 200 characters")
     progress = Progress()
     checkpoint = args.checkpoint
     try:
@@ -701,5 +787,5 @@ def main(argv=None) -> int:
         print(json.dumps({"ok": True, **result}))
         return 0
     print(json.dumps({"ok": True, "import_id": result["import_id"], "state": result["observed_state"],
-                      **{key: result[key] for key in ("staged_files", "staged_bytes") if result.get(key) is not None}}))
+                      **{key: result[key] for key in ("staged_files", "staged_bytes", "cell_filing") if result.get(key) is not None}}))
     return 0

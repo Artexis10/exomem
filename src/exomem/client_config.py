@@ -52,7 +52,7 @@ TOOL_PREFIX_RENAMES = {
 #: step too; it cannot import this module, and a test fails when the two differ.
 SIGN_IN_STEPS = {
     "claude": f"run /mcp in Claude Code and choose {SERVER_NAME}",
-    "codex": f"codex mcp login {SERVER_NAME}",
+    "codex": f"run codex mcp login {SERVER_NAME}",
 }
 #: The suffix that `_write_user_file` and `evermatter setup --migrate` give a file's backup copy.
 BACKUP_SUFFIX = ".exomem-bak"

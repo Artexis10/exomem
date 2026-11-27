@@ -8,10 +8,14 @@ Substrate answers, and reads what the public Actions log would show.
 from __future__ import annotations
 
 import copy
+import http.client
 import importlib.util
 import json
 import re
 import sys
+import types
+import urllib.error
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -47,15 +51,17 @@ LAG_RESOLVED = [(cloud_deploy.RELEASE_BEHIND_ALERT, False), (cloud_deploy.CELL_P
 FAILING_RESOLVED = (cloud_deploy.FAILING_ALERT, False)
 # Only the chart and controller's test and Markdown files changed since the platform's release.
 TESTS_AND_DOCS = ["infra/cellctl/tests/test_reconcile.py", "infra/helm/platform/OWNERSHIP.md", "src/exomem/server.py"]
+CHART_CHANGE = ["infra/helm/platform/templates/cellctl.yaml"]
 
 
 class Recorded:
     """Serves recorded answers by method and path, in order; the last answer repeats."""
 
     def __init__(self, rollout: list[str], put: str = "substrate_put_ok", deployments: list | None = None,
-                 releases: str = "github_releases") -> None:
+                 releases: str = "github_releases", github_reachable: bool = True) -> None:
         self.rollout = [copy.deepcopy(ANSWERS[name]) for name in rollout]
-        self.releases = None if releases == "unavailable" else copy.deepcopy(ANSWERS[releases])
+        self.releases = releases if releases in ("unavailable", "garbled", "unreachable") else copy.deepcopy(ANSWERS[releases])
+        self.github_reachable = github_reachable
         self.put = ANSWERS[put]
         self.deployments = ANSWERS["github_platform_deployments"] if deployments is None else deployments
         self.calls: list[tuple[str, str, bytes | None]] = []
@@ -63,10 +69,18 @@ class Recorded:
     def __call__(self, method: str, url: str, headers: dict, body: bytes | None) -> tuple[int, bytes]:
         self.calls.append((method, url, body))
         path = url.split(".test", 1)[1]
+        if "/repos/" in path and not self.github_reachable:
+            raise OSError("connection reset")
         if path == "/repos/example-owner/example-repo/releases/latest":
             return 200, json.dumps(ANSWERS["github_release_latest"]).encode()
         if path == f"/repos/example-owner/example-repo/releases?per_page={cloud_deploy.RELEASE_SCAN_LIMIT}":
-            return (502, b"{}") if self.releases is None else (200, json.dumps(self.releases).encode())
+            if self.releases == "unavailable":
+                return 502, b"{}"
+            if self.releases == "unreachable":
+                raise OSError("connection reset")
+            if self.releases == "garbled":
+                return 200, b"<html>busy</html>"
+            return 200, json.dumps(self.releases).encode()
         if path.startswith("/repos/example-owner/example-repo/deployments?"):
             return 200, json.dumps(self.deployments).encode()
         if path.startswith("/repos/example-owner/example-repo/deployments/") and "/statuses?" in path:
@@ -89,15 +103,27 @@ class Recorded:
                 if method == "POST"]
 
 
+def _changed_paths(tag: str, changed: list[str] | None, changed_by_tag: dict[str, list[str] | None] | None) -> list[str]:
+    """The paths a tag changes: one answer for every tag, or `changed_by_tag`'s, where None is a tag that git cannot diff."""
+
+    if changed_by_tag is None:
+        return TESTS_AND_DOCS if changed is None else changed
+    if changed_by_tag[tag] is None:
+        raise cloud_deploy.Stop("PLATFORM_DIFF_FAILED", ok=False)
+    return changed_by_tag[tag]
+
+
 def _run(recorded: Recorded, capsys, *, attested: bool = True, changed: list[str] | None = None,
-         env: dict | None = None) -> tuple[int, str, list[float]]:
+         env: dict | None = None, changed_by_tag: dict[str, list[str] | None] | None = None,
+         images: dict[str, str | None] | None = None, unattested: tuple[str, ...] = (),
+         image_lookup: Callable[[str], str | None] | None = None) -> tuple[int, str, list[float]]:
     slept: list[float] = []
     clock = iter(range(0, 10_000, 15))
     tools = cloud_deploy.Tools(
         transport=recorded,
-        image=lambda tag: IMAGE,
-        attest=lambda image, tag: attested,
-        changed_paths=lambda base, head: TESTS_AND_DOCS if changed is None else changed,
+        image=image_lookup or (lambda tag: IMAGE if images is None else images[tag]),
+        attest=lambda image, tag: attested and tag not in unattested,
+        changed_paths=lambda base, head: _changed_paths(head, changed, changed_by_tag),
         sleep=slept.append,
         monotonic=lambda: next(clock),
         now=lambda: NOW,
@@ -113,9 +139,9 @@ def _run(recorded: Recorded, capsys, *, attested: bool = True, changed: list[str
     return code, log, slept
 
 
-def _barrier_file(tmp_path: Path, scope: str) -> Path:
+def _barrier_file(tmp_path: Path, scope: str, version: str = "0.171.0") -> Path:
     document = json.loads(cloud_deploy.BARRIER_FILE.read_text(encoding="utf-8"))
-    document["barriers"].append({"id": "new-step", "version": "0.171.0", "scope": scope, "kind": "operator-step",
+    document["barriers"].append({"id": "new-step", "version": version, "scope": scope, "kind": "operator-step",
                                  "runbook": "docs/runbooks/cloud-platform-deploy.md#apply-the-active-secrets",
                                  "summary": "A step for this release."})
     path = tmp_path / "barriers.json"
@@ -147,6 +173,17 @@ def test_an_unattested_digest_sets_nothing(capsys) -> None:
 
     assert (code, recorded.puts()) == (1, [])
     assert "ATTESTATION_UNVERIFIED" in log
+
+
+def test_a_github_that_cannot_be_reached_ends_the_run_on_a_failing_stop_that_alerts(capsys) -> None:
+    # Catches a network error that crashes the run with a traceback, so no alert says it failed.
+    recorded = Recorded(["substrate_rollout_behind"], github_reachable=False)
+
+    code, log, _ = _run(recorded, capsys)
+
+    assert (code, recorded.puts()) == (1, [])
+    assert log.splitlines()[-1] == "cloud-deploy: GITHUB_API_FAILED unreachable"
+    assert (cloud_deploy.FAILING_ALERT, True) in recorded.alerts()
 
 
 def test_an_image_is_verified_against_the_repository_that_built_it_and_no_other(monkeypatch) -> None:
@@ -560,9 +597,10 @@ def test_a_changed_chart_template_with_a_non_ascii_name_still_reaches_the_platfo
     assert cloud_deploy.platform_inputs(paths, ["infra/helm/platform/**"], [])
 
 
-def test_a_release_list_that_cannot_be_read_still_lets_the_rollout_go_on(capsys) -> None:
-    # Catches a read that only feeds the lag alert stopping a deploy for a day.
-    recorded = Recorded(["substrate_rollout_behind", "substrate_rollout_canary_on_target"], releases="unavailable")
+@pytest.mark.parametrize("releases", ["unavailable", "garbled", "unreachable"])
+def test_a_release_list_that_cannot_be_read_still_lets_the_rollout_go_on(capsys, releases) -> None:
+    # Catches a read that only feeds the lag alert stopping a deploy for a day, whether it fails or answers 200 with no JSON.
+    recorded = Recorded(["substrate_rollout_behind", "substrate_rollout_canary_on_target"], releases=releases)
 
     code, log, _ = _run(recorded, capsys)
 
@@ -591,3 +629,202 @@ def test_a_paused_rollout_leaves_the_failing_alert_to_cellctls_pause_alert(capsy
     _run(recorded, capsys)
 
     assert recorded.alerts()[-1] == (cloud_deploy.FAILING_ALERT, False)
+
+
+# The covered-release cases: the fleet runs v0.170.0, the platform was deployed at v0.170.0 (deployment 9002),
+# and the release list holds v0.171.0 (the newest) and v0.170.3, v0.170.2, v0.170.1 (the ones the fleet lacks).
+SEVERAL_BEHIND = "github_releases_fleet_several_behind"
+ROLLOUT_THEN_CANARY = ["substrate_rollout_behind", "substrate_rollout_canary_on_target"]
+# One digest per release, so a run that sets another release's image is seen.
+RELEASE_IMAGES = {
+    "v0.171.0": "ghcr.io/substrate-systems/evermatter@sha256:" + "a" * 64,
+    "v0.170.3": "ghcr.io/substrate-systems/evermatter@sha256:" + "b" * 64,
+    "v0.170.2": "ghcr.io/substrate-systems/evermatter@sha256:" + "c" * 64,
+    "v0.170.1": "ghcr.io/substrate-systems/evermatter@sha256:" + "d" * 64,
+}
+PLATFORM_BLOCK_LINE = "cloud-deploy: cloud-release-platform-needed 1 platform input(s) changed"
+
+
+def test_a_newest_release_that_needs_a_platform_upgrade_rolls_out_the_newest_release_the_platform_carries(
+        capsys) -> None:
+    # Catches a fleet that stays on an old release for days because every newer release changed the
+    # chart, while an older release newer than the fleet's matches the deployed platform.
+    recorded = Recorded(ROLLOUT_THEN_CANARY, releases=SEVERAL_BEHIND)
+    changed_by_tag = {"v0.171.0": CHART_CHANGE, "v0.170.3": CHART_CHANGE, "v0.170.2": TESTS_AND_DOCS,
+                      "v0.170.1": TESTS_AND_DOCS}
+
+    code, log, slept = _run(recorded, capsys, changed_by_tag=changed_by_tag, images=RELEASE_IMAGES)
+
+    assert (code, slept) == (0, [])
+    assert recorded.puts() == [{"cellImage": RELEASE_IMAGES["v0.170.2"], "release": "v0.170.2"}]
+    assert log.splitlines()[-4:] == [PLATFORM_BLOCK_LINE, "cloud-deploy: COVERED_RELEASE v0.170.2",
+                                     "cloud-deploy: CELL_IMAGE_SET", "cloud-deploy: CANARY_ON_TARGET"]
+    # The fleet still lacks the newest release: the platform alert and the lag alert stay active.
+    assert recorded.alerts() == [(cloud_deploy.RELEASE_BEHIND_ALERT, True), (cloud_deploy.CELL_PINNED_ALERT, False),
+                                 (cloud_deploy.PLATFORM_NEEDED_ALERT, True), FAILING_RESOLVED]
+    # One bounded list read serves the lag alert and the fallback.
+    assert [url for _, url, _ in recorded.calls if "/releases?" in url] == [
+        f"https://api.github.test/repos/example-owner/example-repo/releases?per_page={cloud_deploy.RELEASE_SCAN_LIMIT}"]
+
+
+def test_no_release_between_the_fleet_and_the_newest_that_the_platform_carries_leaves_the_platform_stop(capsys) -> None:
+    # Catches a fallback that sets a release the platform lacks the chart for.
+    recorded = Recorded(["substrate_rollout_behind"], releases=SEVERAL_BEHIND)
+    changed_by_tag = {tag: CHART_CHANGE for tag in RELEASE_IMAGES}
+
+    code, log, _ = _run(recorded, capsys, changed_by_tag=changed_by_tag, images=RELEASE_IMAGES)
+
+    assert (code, recorded.puts()) == (1, [])
+    assert log.splitlines()[-1] == PLATFORM_BLOCK_LINE
+    assert recorded.alerts()[-2:] == [(cloud_deploy.PLATFORM_NEEDED_ALERT, True), FAILING_RESOLVED]
+
+
+@pytest.mark.parametrize(("barrier_version", "rolled_out", "last_line"), [
+    pytest.param("0.170.3", "v0.170.2", "cloud-deploy: CANARY_ON_TARGET", id="the next older release qualifies"),
+    pytest.param("0.170.1", None, "cloud-deploy: cloud-release-barrier new-step", id="no release qualifies"),
+])
+def test_a_covered_release_with_an_uncrossed_barrier_is_skipped(
+        capsys, monkeypatch, tmp_path: Path, barrier_version: str, rolled_out: str | None, last_line: str) -> None:
+    # Catches a fallback that sets a release past a one-way change the paths do not show. Every release
+    # changes no build input here, so the barrier alone decides: the newest release is blocked by it too.
+    recorded = Recorded(ROLLOUT_THEN_CANARY, releases=SEVERAL_BEHIND)
+    monkeypatch.setattr(cloud_deploy, "BARRIER_FILE", _barrier_file(tmp_path, "platform", barrier_version))
+    changed_by_tag = {tag: TESTS_AND_DOCS for tag in RELEASE_IMAGES}
+
+    _, log, _ = _run(recorded, capsys, changed_by_tag=changed_by_tag, images=RELEASE_IMAGES)
+
+    assert recorded.puts() == ([{"cellImage": RELEASE_IMAGES[rolled_out], "release": rolled_out}] if rolled_out else [])
+    assert log.splitlines()[-1] == last_line
+    # The log names the barrier that stopped the newest release, as the runbook says.
+    assert "cloud-deploy: cloud-release-barrier new-step" in log
+    assert (cloud_deploy.BARRIER_ALERT, True) in recorded.alerts()
+
+
+def test_an_unknown_fleet_release_leaves_the_platform_stop_and_sets_nothing(capsys) -> None:
+    # Catches a fallback that guesses which releases the fleet lacks, when Substrate reports no release.
+    recorded = Recorded(["substrate_rollout_behind"], releases=SEVERAL_BEHIND)
+    recorded.rollout[0]["view"]["release"] = None
+    changed_by_tag = {"v0.171.0": CHART_CHANGE, "v0.170.2": TESTS_AND_DOCS}
+
+    code, log, _ = _run(recorded, capsys, changed_by_tag=changed_by_tag, images=RELEASE_IMAGES)
+
+    assert (code, recorded.puts()) == (1, [])
+    assert log.splitlines()[-1] == PLATFORM_BLOCK_LINE
+
+
+def test_a_covered_release_whose_attestation_fails_sets_nothing_and_no_older_release_is_tried(capsys) -> None:
+    # Catches a fallback that skips a failed attestation and sets an unverified image for an older release.
+    recorded = Recorded(["substrate_rollout_behind"], releases=SEVERAL_BEHIND)
+    changed_by_tag = {"v0.171.0": CHART_CHANGE, "v0.170.3": TESTS_AND_DOCS, "v0.170.2": TESTS_AND_DOCS,
+                      "v0.170.1": TESTS_AND_DOCS}
+
+    code, log, _ = _run(recorded, capsys, changed_by_tag=changed_by_tag, images=RELEASE_IMAGES,
+                        unattested=("v0.170.3",))
+
+    assert (code, recorded.puts()) == (1, [])
+    assert log.splitlines()[-1] == "cloud-deploy: ATTESTATION_UNVERIFIED"
+    assert recorded.alerts()[-1] == (cloud_deploy.FAILING_ALERT, True)
+
+
+def test_a_covered_release_with_no_published_image_is_skipped_for_the_next_older_one(capsys) -> None:
+    # Catches a fallback that stops on a release whose image was never published, while an older one qualifies.
+    recorded = Recorded(ROLLOUT_THEN_CANARY, releases=SEVERAL_BEHIND)
+    changed_by_tag = {"v0.171.0": CHART_CHANGE, "v0.170.3": TESTS_AND_DOCS, "v0.170.2": TESTS_AND_DOCS,
+                      "v0.170.1": TESTS_AND_DOCS}
+
+    code, log, _ = _run(recorded, capsys, changed_by_tag=changed_by_tag,
+                        images={**RELEASE_IMAGES, "v0.170.3": None})
+
+    assert code == 0
+    assert recorded.puts() == [{"cellImage": RELEASE_IMAGES["v0.170.2"], "release": "v0.170.2"}]
+    assert "cloud-deploy: CELL_IMAGE_NOT_PUBLISHED v0.170.3" in log
+
+
+def test_a_fleet_already_on_the_covered_releases_image_leaves_the_platform_stop(capsys) -> None:
+    # Catches a fallback that sets, and then waits on, an image the fleet already runs.
+    recorded = Recorded(["substrate_rollout_behind"], releases=SEVERAL_BEHIND)
+    recorded.rollout[0]["view"]["cell_image"] = RELEASE_IMAGES["v0.170.2"]
+    changed_by_tag = {"v0.171.0": CHART_CHANGE, "v0.170.3": CHART_CHANGE, "v0.170.2": TESTS_AND_DOCS,
+                      "v0.170.1": TESTS_AND_DOCS}
+
+    code, log, _ = _run(recorded, capsys, changed_by_tag=changed_by_tag, images=RELEASE_IMAGES)
+
+    assert (code, recorded.puts()) == (1, [])
+    assert log.splitlines()[-1] == PLATFORM_BLOCK_LINE
+
+
+def test_a_covered_release_that_substrate_says_the_fleet_has_passed_ends_the_run_ok_with_the_platform_alert_active(
+        capsys) -> None:
+    # Catches a red run after a withdrawal, and a platform alert that resolves while the newest release still needs the upgrade.
+    recorded = Recorded(["substrate_rollout_behind"], put="substrate_error_release_older", releases=SEVERAL_BEHIND)
+    changed_by_tag = {"v0.171.0": CHART_CHANGE, "v0.170.3": CHART_CHANGE, "v0.170.2": TESTS_AND_DOCS,
+                      "v0.170.1": TESTS_AND_DOCS}
+
+    code, log, _ = _run(recorded, capsys, changed_by_tag=changed_by_tag, images=RELEASE_IMAGES)
+
+    assert code == 0
+    assert log.splitlines()[-1] == "cloud-deploy: CELL_RELEASE_OLDER"
+    assert (cloud_deploy.PLATFORM_NEEDED_ALERT, True) in recorded.alerts()
+    assert (cloud_deploy.PLATFORM_NEEDED_ALERT, False) not in recorded.alerts()
+
+
+def test_a_covered_release_that_git_cannot_diff_fails_the_run_loudly_and_the_log_names_the_barrier(
+        capsys, monkeypatch, tmp_path: Path) -> None:
+    # Catches a candidate skipped in silence when its tag is missing from the checkout, which would hide a
+    # broken fallback, and a log that fails without saying which barrier stopped the newest release.
+    recorded = Recorded(["substrate_rollout_behind"], releases=SEVERAL_BEHIND)
+    monkeypatch.setattr(cloud_deploy, "BARRIER_FILE", _barrier_file(tmp_path, "platform", "0.170.3"))
+    changed_by_tag = {"v0.171.0": TESTS_AND_DOCS, "v0.170.3": None, "v0.170.2": TESTS_AND_DOCS,
+                      "v0.170.1": TESTS_AND_DOCS}
+
+    code, log, _ = _run(recorded, capsys, changed_by_tag=changed_by_tag, images=RELEASE_IMAGES)
+
+    assert (code, recorded.puts()) == (1, [])
+    assert log.splitlines() == ["cloud-deploy: RELEASE_BEHIND hours=49", "cloud-deploy: cloud-release-barrier new-step",
+                                "cloud-deploy: PLATFORM_DIFF_FAILED"]
+    assert recorded.alerts()[-1] == (cloud_deploy.FAILING_ALERT, True)
+
+
+@pytest.mark.parametrize("releases", ["unavailable", "garbled"])
+def test_a_release_list_that_cannot_be_read_leaves_the_platform_stop(capsys, releases: str) -> None:
+    # Catches a failed list read that ends the blocked run on a GitHub error instead of the platform stop.
+    recorded = Recorded(["substrate_rollout_behind"], releases=releases)
+
+    code, log, _ = _run(recorded, capsys, changed=CHART_CHANGE)
+
+    assert (code, recorded.puts()) == (1, [])
+    assert log.splitlines()[-1] == PLATFORM_BLOCK_LINE
+
+
+@pytest.mark.parametrize("failure", [
+    pytest.param(urllib.error.HTTPError("https://ghcr.io/v2/secret-path", 503, "unavailable", {}, None), id="http status"),
+    pytest.param(urllib.error.URLError("https://ghcr.io/token?scope=secret"), id="unreachable"),
+    pytest.param(http.client.IncompleteRead(b""), id="truncated answer"),
+    pytest.param(ValueError("registry manifest digest must be a sha256 digest"), id="no digest"),
+])
+def test_a_registry_that_fails_ends_the_run_on_a_failing_stop_that_alerts_and_prints_no_url(
+        capsys, monkeypatch, failure: Exception) -> None:
+    # Catches a registry outage that crashes the run with a traceback, so that no alert says it failed,
+    # and a log that carries the registry's URL.
+    def lookup(reference: str) -> str | None:
+        raise failure
+
+    monkeypatch.setitem(sys.modules, "release_recovery", types.SimpleNamespace(image_digest=lookup))
+    recorded = Recorded(["substrate_rollout_behind"])
+
+    code, log, _ = _run(recorded, capsys, image_lookup=cloud_deploy.registry_image)
+
+    assert (code, recorded.puts()) == (1, [])
+    assert log.splitlines()[-1] == f"cloud-deploy: REGISTRY_LOOKUP_FAILED v0.171.0 {type(failure).__name__}"
+    assert "ghcr.io" not in log
+    assert recorded.alerts()[-1] == (cloud_deploy.FAILING_ALERT, True)
+
+
+def test_a_registry_that_has_no_manifest_for_a_release_means_not_published(capsys, monkeypatch) -> None:
+    # Catches a 404 read as a failed lookup, which would turn a release with no image into a registry alert.
+    monkeypatch.setitem(sys.modules, "release_recovery", types.SimpleNamespace(image_digest=lambda reference: None))
+
+    code, log, _ = _run(Recorded(["substrate_rollout_behind"]), capsys, image_lookup=cloud_deploy.registry_image)
+
+    assert code == 1
+    assert log.splitlines()[-1] == "cloud-deploy: CELL_IMAGE_NOT_PUBLISHED"

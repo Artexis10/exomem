@@ -27,7 +27,7 @@ def operator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """The service configuration an operator shell carries."""
     from fastmcp import settings
 
-    monkeypatch.setattr("dotenv.load_dotenv", lambda **_kwargs: None)
+    monkeypatch.chdir(tmp_path)  # the CLI loads the working directory's `.env`: this one has none
     monkeypatch.setattr(settings, "home", tmp_path / "fastmcp-home")
     for name in ("EXOMEM_OAUTH_STORAGE_URL", "EXOMEM_WRITER_LEASE_URL"):
         monkeypatch.delenv(name, raising=False)

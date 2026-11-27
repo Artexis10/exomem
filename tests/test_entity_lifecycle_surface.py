@@ -7,8 +7,17 @@ from pathlib import Path
 
 import pytest
 
-from exomem import attention, commands, curation, find
+from exomem import (
+    attention,
+    commands,
+    curation,
+    entity_evidence,
+    entity_recurrence,
+    find,
+    request_budget,
+)
 from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
+from exomem.cli_ops import OpError
 from exomem.vault import content_hash
 
 pytestmark = pytest.mark.reads_repository_docs
@@ -186,6 +195,33 @@ def test_entity_candidate_review_ref_round_trips_through_item_lookup(tmp_path: P
     assert resolved.fingerprint == candidate.fingerprint
     assert resolved.categories == ["entity_recurrence"]
     assert resolved.reasons[0]["meta"]["candidate_state"] == "promotion"
+
+
+def test_an_entity_candidate_lookup_the_deadline_cut_asks_for_a_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cold evidence store and no held pass: a lookup whose sweep the deadline cut must not call
+    a live candidate missing or closed, so an agent never stops work on it."""
+    _promotion(tmp_path)
+    candidate = _candidate(tmp_path)
+    entity_evidence.reset(tmp_path)
+    page_evidence = entity_recurrence.page_evidence
+
+    def cut_the_sweep(page, **kwargs):
+        request_budget.current().deadline = 0.0
+        return page_evidence(page, **kwargs)
+
+    monkeypatch.setattr(entity_recurrence, "page_evidence", cut_the_sweep)
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=50))
+    try:
+        with pytest.raises(OpError) as refused:
+            attention.entity_candidate_by_ref(
+                tmp_path, candidate.ref or "", expected_fingerprint=candidate.fingerprint
+            )
+    finally:
+        request_budget.reset_current(token)
+
+    assert refused.value.code == "REVIEW_QUEUES_WARMING"
 
 
 def test_curation_work_item_binds_the_exact_entity_candidate(tmp_path: Path) -> None:
@@ -874,7 +910,7 @@ def test_hookless_custom_instruction_blocks_name_the_ordinary_entity_boundary() 
         # so it defers the decision order to the bootstrap payload it already
         # instructs the agent to follow. That deferral is only honest if the
         # instruction to follow bootstrap is actually present.
-        assert 'bootstrap(profile="compact")' in block
+        assert 'read_instructions()' in block
         assert "follow it" in folded
         for restated in ("stop ambiguity", "hydrate before create", "resolve first"):
             assert restated not in folded, restated

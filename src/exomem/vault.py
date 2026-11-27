@@ -6080,10 +6080,10 @@ def folder_split_warnings(vault_root: Path, directory: Path) -> list[str]:
     for part in relative.parts:
         variants = sibling_name_variants(current, part)
         if variants and (current / part).is_dir():
-            audit_call = active_call_text("maintain_memory", {"mode": "audit", "categories": ["path_variants"]})
+            preview_call = active_call_text("maintain_memory", {"mode": "path-variants"})
             warnings.append(
                 f"folder '{part}' also exists as {', '.join(repr(v) for v in variants)}; "
-                f"run {audit_call} to see the split"
+                f"preview a merge with {preview_call}"
             )
         current = current / part
     return warnings
@@ -6388,21 +6388,27 @@ def batch_atomic_write(
         from .vault_store import availability
         from .vault_store import batch as store_batch
 
+        # The native writer below reads the batch again when the store hands it back.
+        writes = list(writes)
         writer = availability.page_writer(Path(vault_root))
         if writer is not None:
             if _payload_custody is not None:
                 # A file-owner contract cannot silently lose its custody in another persistence owner.
                 raise ValueError("file payload custody requires its native writer")
-            return store_batch.commit_batch(
-                writer, writes, vault_root=Path(vault_root), required_guards=required_guards,
-                completion_guards=completion_guards, index_reports=index_reports,
-                post_commit_fanout=post_commit_fanout, commit_point=commit_point,
-                defer_graph_completion=defer_graph_completion,
-                vocabulary_auxiliaries=_vocabulary_auxiliaries,
-                validate_prepared_bindings=_validate_prepared_bindings, prepare=_prepare,
-                publish_originals=_publish_originals, retained_original=_retained_original,
-                file_commit_witness=_file_commit_witness,
-            )
+            try:
+                return store_batch.commit_batch(
+                    writer, writes, vault_root=Path(vault_root), required_guards=required_guards,
+                    completion_guards=completion_guards, index_reports=index_reports,
+                    post_commit_fanout=post_commit_fanout, commit_point=commit_point,
+                    defer_graph_completion=defer_graph_completion,
+                    vocabulary_auxiliaries=_vocabulary_auxiliaries,
+                    validate_prepared_bindings=_validate_prepared_bindings, prepare=_prepare,
+                    publish_originals=_publish_originals, retained_original=_retained_original,
+                    file_commit_witness=_file_commit_witness,
+                )
+            except store_batch.NoStoreChange:
+                # Only files that the store does not hold (a curation run's JSON): file-mode's.
+                pass
     if _retained_original is not None:
         raise ValueError("retained import original requires its canonical store writer")
     with _BATCH_COMMIT_LOCK, ExitStack() as custody_stack:
@@ -7773,23 +7779,27 @@ def respell_new_path(vault_root: Path, rel: str, *, replacing: str | None = None
 
     A component that does not exist as spelled, but matches an existing sibling
     by `vault_name_key`, takes that sibling's spelling: `Notes/garden/x.md`
-    lands in an existing `Notes/Garden/`. An exact component always wins, and
-    the first component that matches nothing ends the walk, because the rest is
-    new. Only destinations come here. A recorded identity (a read, a delete, an
-    index key) keeps the host's spelling, so a split that already exists on a
+    lands in an existing `Notes/Garden/`. A folder on the way that already has
+    a variant sibling (a split) takes the split's canonical spelling
+    (`canonical_variant`), whichever spelling the caller named, unless the
+    destination is a file that already exists under the requested one. The first component
+    that matches nothing ends the walk, because the rest is new. Only
+    destinations come here. A recorded identity (a read, a delete, an index
+    key) keeps the host's spelling, so a split that already exists on a
     case-sensitive volume keeps two identities.
 
     `replacing` is the path that a move vacates. It is not a sibling to land
     on, so a move that changes only the case or Unicode form of a name still
-    renames it. Each component costs one `lstat`; a folder is listed only when
-    the component is missing. Fails open to `rel` when a component cannot be
-    read.
+    renames it. Each component costs one `lstat`, and each folder on the way
+    one listing; the destination's own folder is not listed when the leaf is an
+    existing file. Fails open to `rel` when a component cannot be read.
     """
     parts = [part for part in str(rel).replace("\\", "/").split("/") if part]
     stored = _respell_in_store(Path(vault_root), parts, replacing)
     if stored is not None:
         return stored
-    current = Path(vault_root)
+    root = Path(vault_root)
+    current = root
     spelled: list[str] = []
     for index, part in enumerate(parts):
         try:
@@ -7799,20 +7809,115 @@ def respell_new_path(vault_root: Path, rel: str, *, replacing: str | None = None
         except OSError:
             return rel
         else:
+            rest = parts[index + 1 :]
+            # A leaf that is a file keeps its spelling, so its folder needs no listing.
+            if rest or not _existing_file(current / part):
+                part = _split_spelling(
+                    root, _listed(current), part, "/".join(spelled), replacing,
+                    exists=lambda name, base=current, rest=rest: _existing_file(base.joinpath(name, *rest)),
+                    entries=lambda name, base=current: _disk_entries(base / name),
+                )
             spelled.append(part)
             current = current / part
             continue
-        try:
-            names = os.listdir(current)
-        except OSError:
-            names = []
-        variant = _sibling_spelling(names, part, "/".join(spelled), replacing)
+        variant = _sibling_spelling(_listed(current), part, "/".join(spelled), replacing)
         if variant is None:
             spelled.extend(parts[index:])
             break
         spelled.append(variant)
         current = current / variant
     return "/".join(spelled)
+
+
+def _listed(directory: Path) -> list[str]:
+    try:
+        return os.listdir(directory)
+    except OSError:
+        return []
+
+
+def _existing_file(path: Path) -> bool:
+    return os.path.lexists(path) and not path.is_dir()
+
+
+def _disk_entries(directory: Path) -> set[str] | None:
+    """The names in a folder, or None when it is not a folder."""
+    if not directory.is_dir() or directory.is_symlink():
+        return None
+    return set(_listed(directory))
+
+
+def canonical_variant(
+    vault_root: Path,
+    parent: str,
+    spellings: Iterable[str],
+    entries: Callable[[str], set[str] | None],
+) -> str | None:
+    """The spelling of a folder split under `parent` that writes and merges converge on.
+
+    None when no spelling is a folder. `entries` gives a spelling's folder entries, or None for a
+    spelling that is not a folder. The spelling in NFC wins first, because an export refuses any
+    other form. Next comes a spelling that the layout declares (`layout.declared_folders`) or that
+    the project registry names, because code reads those folders by their exact spelling. Then the
+    folder with the most entries, which a merge into it only grows, and last code-point order.
+
+    At the top of the vault or of the managed root, code reads folders that no registry declares
+    (such as the Evidence tree), so a split there with no declared spelling has no canonical one:
+    a count could send a whole tree into a spelling that code never reads.
+    """
+    counts = {name: len(found) for name in spellings if (found := entries(name)) is not None}
+    if not counts:
+        return None
+    from . import layout, project_keys
+
+    declared = layout.declared_folders(vault_root)
+    registered = set(project_keys.load_project_registry(vault_root).project_to_folder.values())
+    if parent in {"", managed_root_rel()} and not any(
+        (f"{parent}/{name}" if parent else name) in declared for name in counts
+    ):
+        return None
+
+    def rank(name: str) -> tuple[bool, bool, int, str]:
+        path = f"{parent}/{name}" if parent else name
+        return (
+            unicodedata.normalize("NFC", name) != name,
+            path not in declared and name not in registered,
+            -counts[name],
+            name,
+        )
+
+    return min(counts, key=rank)
+
+
+def _split_spelling(
+    vault_root: Path,
+    names: Iterable[str],
+    part: str,
+    prefix: str,
+    replacing: str | None,
+    *,
+    exists: Callable[[str], bool],
+    entries: Callable[[str], set[str] | None],
+) -> str:
+    """The spelling an existing folder `part` on a destination's way takes.
+
+    Without a listed variant sibling it is `part`. With one it is the split's canonical spelling,
+    unless the destination is a file that already exists under `part` (`exists`): a write to it
+    must not fork it into the other spelling. A destination folder that exists is steered, so a
+    caller that respells only a folder lands in the canonical one.
+    """
+    listed = set(names)
+    if part not in listed:
+        # A folding volume answered for a spelling it does not list: no split here.
+        return part
+    variants = [
+        name
+        for name in held_fs.name_variants(listed, part)
+        if (f"{prefix}/{name}" if prefix else name) != replacing
+    ]
+    if not variants or exists(part):
+        return part
+    return canonical_variant(vault_root, prefix, [part, *variants], entries) or part
 
 
 def _sibling_spelling(
@@ -7843,14 +7948,26 @@ def _respell_in_store(vault_root: Path, parts: list[str], replacing: str | None)
         return None
     spelled: list[str] = []
     with read.snapshot(vault_root) as view:
+
+        def names_in(prefix: str) -> set[str]:
+            names = {child.name for child in view.children(prefix)}
+            names.update(_listed(vault_root / prefix if prefix else vault_root))
+            return names
+
         for index, part in enumerate(parts):
             prefix = "/".join(spelled)
-            names = {child.name for child in view.children(prefix)}
-            try:
-                names.update(os.listdir(vault_root / prefix if prefix else vault_root))
-            except OSError:
-                pass  # a folder that only the store knows has no directory yet
+            names = names_in(prefix)
             if part in names:
+                rest = parts[index + 1 :]
+                part = _split_spelling(
+                    vault_root, names, part, prefix, replacing,
+                    exists=lambda name, prefix=prefix, rest=rest: _stored_or_on_disk(
+                        vault_root, view, "/".join(filter(None, (prefix, name, *rest)))
+                    ),
+                    entries=lambda name, prefix=prefix: folder_entries(
+                        vault_root, view, f"{prefix}/{name}" if prefix else name
+                    ),
+                )
                 spelled.append(part)
                 continue
             variant = _sibling_spelling(names, part, prefix, replacing)
@@ -7859,6 +7976,23 @@ def _respell_in_store(vault_root: Path, parts: list[str], replacing: str | None)
                 break
             spelled.append(variant)
     return "/".join(spelled)
+
+
+def folder_entries(vault_root: Path, view: Any, rel: str) -> set[str] | None:
+    """The names in folder `rel`, from the store view (or None in file mode) and the disk.
+
+    None when neither holds a folder there.
+    """
+    stored = {child.name for child in view.children(rel)} if view is not None else set()
+    on_disk = _disk_entries(vault_root / rel)
+    if on_disk is None and not stored:
+        return None
+    return stored | (on_disk or set())
+
+
+def _stored_or_on_disk(vault_root: Path, view: Any, rel: str) -> bool:
+    """Whether `rel` is a page the store holds or a file on disk."""
+    return bool(view.held_pages((rel,))) or _existing_file(vault_root / rel)
 
 
 # Probing the filesystem costs a couple of syscalls; the answer is a property
@@ -9368,7 +9502,9 @@ def store_inbound_wikilinks(
     its stored bytes gives its links from those bytes (``_underived_inbound``). The links come in
     path order, then scan order, which is deterministic across runs. A store that an older build
     set up raises ``VAULT_STORE_DERIVED_BEHIND`` until its pass has derived every page's rows: a
-    partial or empty answer would say that fewer pages, or none, link to the page.
+    partial or empty answer would say that fewer pages, or none, link to the page. So does more than
+    ``UNDERIVED_CAP`` pages whose rows wait: any of them could add a link, and the check reads them
+    all, so it refuses before it reads one.
     """
     from .vault_store import read as store_read
 
@@ -9451,7 +9587,8 @@ def store_inbound_sources(conn, rels: Iterable[str]) -> frozenset[str]:
     from .vault_store import read as store_read
 
     wanted = list(dict.fromkeys(rels))
-    underived = _underived_inbound(conn)
+    # Only the pending state of ``wanted`` decides the answer, so the read is keyed to ``wanted``.
+    underived = _underived_inbound(conn, wanted)
     found: set[str] = set()
     for start in range(0, len(wanted), store_read.KEYS_PER_QUERY):
         chunk = wanted[start : start + store_read.KEYS_PER_QUERY]
@@ -9459,31 +9596,38 @@ def store_inbound_sources(conn, rels: Iterable[str]) -> frozenset[str]:
             f"SELECT path FROM inbound_sources WHERE path IN ({', '.join('?' * len(chunk))})",
             chunk,
         ) if path not in underived)
-    found.update(path for path, given in underived.items() if given is not None and path in wanted)
+    found.update(path for path, given in underived.items() if given is not None)
     return frozenset(found)
 
 
-def _underived_inbound(conn) -> dict[str, tuple[str, list[tuple[int, str, str, str]]] | None]:
+def _underived_inbound(
+    conn, paths: Iterable[str] | None = None
+) -> dict[str, tuple[str, tuple[tuple[int, str, str, str], ...]] | None]:
     """The rows that each page whose derivation trails its stored bytes will hold, from those bytes.
 
     A failed or waiting derivation leaves a page's inbound rows describing bytes that the store no
     longer holds, so every read of the rows takes these in their place: ``inbound_rows`` of the
     bytes, or None for a page that gives no rows (the store holds none there, the walk does not
     reach it, or its bytes are not UTF-8), as the drain writes them once it succeeds. No link guard
-    or link rewrite then trusts a row that its page no longer gives. The work follows the queue's
-    lag, which is empty once the drain keeps up.
+    or link rewrite then trusts a row that its page no longer gives. With ``paths`` the read covers
+    those pages alone; without, it covers every pending page, which any of them could change a link
+    for, and ``derivation.underived_parsed`` refuses it when the backlog passes ``UNDERIVED_CAP``.
     """
     from .vault_store import derivation
     from .vault_store import read as store_read
 
-    given: dict[str, tuple[str, list[tuple[int, str, str, str]]] | None] = {}
-    for rel, raw in derivation.underived(conn).items():
+    def rows(rel: str, raw: bytes) -> tuple[str, tuple[tuple[int, str, str, str], ...]] | None:
         try:
-            given[rel] = (None if raw is None or not store_read.walk_member(rel)
-                          else inbound_rows(rel, raw.decode("utf-8")))
+            if not store_read.walk_member(rel):
+                return None
+            stem, links = inbound_rows(rel, raw.decode("utf-8"))
         except UnicodeDecodeError:
-            given[rel] = None
-    return given
+            return None
+        return stem, tuple(links)  # every check that reads this page shares the result
+
+    # A failed page stays pending for as long as it fails: each page is parsed once while its bytes
+    # stay the same, not on every check (``derivation.underived_parsed``).
+    return derivation.underived_parsed(conn, paths, "inbound", rows)
 
 
 def _store_inbound(
@@ -9998,7 +10142,75 @@ class WikilinkCandidate:
 
 def _wikilink_path_key(path: str) -> str:
     """Keep the legacy canonical key separate from the indexed physical path."""
-    return path.removesuffix(".md")
+    return wikilink_keys(path, None)[0]
+
+
+def wikilink_keys(path: str, title: str | None) -> tuple[str, str, str | None]:
+    """One physical page's resolver keys, shared by the full resolver and indexed projection."""
+    path_key = path.removesuffix(".md")
+    return path_key, path_key.rsplit("/", 1)[-1], _keyed_title(title)[0]
+
+
+@dataclass(frozen=True, slots=True)
+class WikilinkMatches:
+    """Admitted physical witnesses; exhaustion proves zero/one, two witnesses prove ambiguity."""
+
+    candidates: tuple[WikilinkCandidate, ...]
+    complete: bool
+
+
+@dataclass(frozen=True, slots=True)
+class WikilinkResolution:
+    """A pure selector's outcome, including the next lookup needed by an incomplete selection."""
+
+    status: Literal["resolved", "ambiguous", "missing", "incomplete"]
+    canonical: str = ""
+    matches: WikilinkMatches | None = None
+    axis: str = ""
+    key: str = ""
+
+    @property
+    def candidate(self) -> WikilinkCandidate | None:
+        return self.matches.candidates[0] if self.status == "resolved" and self.matches else None
+
+    @property
+    def diagnostics(self) -> dict[str, Any]:
+        witnesses = self.matches.candidates if self.matches else ()
+        count = "match_count" if self.matches is not None and self.matches.complete else "match_count_lower_bound"
+        return {"status": self.status, count: len(witnesses), "witnesses": [item.path for item in witnesses]}
+
+
+def wikilink_lookup_stages(target: str) -> list[tuple[str, str]]:
+    """The `(axis, key)` lookups that resolve `target`, in precedence order; none for a blank one."""
+    cleaned = wikilink_page_key(split_wikilink_target(target)[0])
+    if not cleaned:
+        return []
+    stages = [("path", cleaned), ("path", managed_join(cleaned))]
+    if "/" not in cleaned:
+        stages.extend((("stem", cleaned), ("title", title_key(cleaned))))
+    return stages
+
+
+def select_wikilink(
+    target: str, lookup: Callable[[str, str], WikilinkMatches | None],
+) -> WikilinkResolution:
+    """Apply normalizer precedence to prepared proofs without I/O or legacy fallbacks."""
+    anchor = split_wikilink_target(target)[1]
+    stages = wikilink_lookup_stages(target)
+    if not stages:
+        return WikilinkResolution("missing")
+    for axis, key in stages:
+        matches = lookup(axis, key)
+        if matches is None:
+            return WikilinkResolution("incomplete", axis=axis, key=key)
+        if len(matches.candidates) >= 2:
+            return WikilinkResolution("ambiguous", matches=matches, axis=axis, key=key)
+        if not matches.complete:
+            return WikilinkResolution("incomplete", matches=matches, axis=axis, key=key)
+        if matches.candidates:
+            return WikilinkResolution("resolved", _wikilink_path_key(matches.candidates[0].path) + anchor,
+                                      matches, axis, key)
+    return WikilinkResolution("missing")
 
 
 def wikilink_candidates(
@@ -10217,7 +10429,7 @@ class WikilinkResolver:
         )
         self.full_paths.add(no_ext)
         self.kb_stripped.add(managed_relative(no_ext))
-        _insert_into_bucket(self.stems, no_ext.rsplit("/", 1)[-1], no_ext)
+        _insert_into_bucket(self.stems, wikilink_keys(rel_path, None)[1], no_ext)
         if title_lower:
             _insert_into_bucket(self.titles, title_lower, no_ext)
 
@@ -10688,11 +10900,6 @@ def _normalize_wikilink(
         resolver = resolver_factory() if resolver_factory is not None else WikilinkResolver(vault_root)
     contains = targeted_namespace_contains if targeted else resolver.full_paths.__contains__
 
-    def _matches(keys: Iterable[str], *, title_key: str | None = None) -> list[WikilinkCandidate]:
-        return wikilink_candidates(
-            resolver.candidates_by_key, keys, title_key=title_key, visible=visible
-        )
-
     def _selected(
         matches: list[WikilinkCandidate], kind: str,
     ) -> tuple[str, str | None, WikilinkCandidate | None]:
@@ -10710,7 +10917,9 @@ def _normalize_wikilink(
             f"by {kind}; left unchanged. Files: {paths}"
         ), None
 
-    # Full paths take precedence over Knowledge-Base-relative paths.
+    # Full paths take precedence over Knowledge-Base-relative paths. A path that a page left
+    # and a visible live page claims names the claimant, so that check runs before the live
+    # path, stem and title selection below.
     for key in (cleaned, managed_join(cleaned)):
         if contains(key):
             # The resolver's kept claims answer the common case, a path that no page left,
@@ -10723,9 +10932,29 @@ def _normalize_wikilink(
                     return _selected(claimed, "prior path")
             if targeted:
                 return key + anchor, None, None
-            matches = _matches((key,))
-            if matches:
-                return _selected(matches, "path")
+            # A live page at this key wins over a squatted later key, as it does for
+            # main's per-key order; select_wikilink then resolves this key's path axis.
+            if wikilink_candidates(resolver.candidates_by_key, (key,), visible=visible):
+                break
+
+    if not targeted:
+        def prepared(axis: str, key: str) -> WikilinkMatches:
+            if axis == "path":
+                keys = (key,) if contains(key) else ()
+            elif axis == "stem":
+                keys = resolver.stems.get(key, ())
+            else:
+                keys = resolver.titles.get(key, ())
+            return WikilinkMatches(tuple(wikilink_candidates(
+                resolver.candidates_by_key, keys,
+                title_key=key if axis == "title" else None, visible=visible,
+            )), True)
+
+        selected = select_wikilink(target, prepared)
+        if selected.status == "resolved":
+            return selected.canonical, None, selected.candidate
+        if selected.status == "ambiguous":
+            return _selected(list(selected.matches.candidates), selected.axis)
 
     # A path that a moved page left names that page while exactly one visible live page claims it.
     if "/" in cleaned:

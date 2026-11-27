@@ -61,8 +61,9 @@ Retry only the failed items, in a new request.
 
 ## Retries and identity
 
-Every write has an identity. The same identity with the same payload replays the first reply and
-never writes twice. A new identity is a new write.
+Every write has an identity. The same identity with the same payload replays the first reply with a
+top-level `replayed: true`, and never writes twice. A reply that defines its own `replayed` field keeps
+that field as it was. A new identity is a new write.
 
 1. When a call-level warming or busy error says nothing committed, wait for its `retry` hint. Then
    retry with the same identity and the same payload.

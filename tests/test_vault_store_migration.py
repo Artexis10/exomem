@@ -50,7 +50,7 @@ from exomem import vault as pages
 from exomem.collection_store import capability, connection, custody, replica, schema
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import library_scope
-from exomem.vault_store import migrate, mode, ownership, write
+from exomem.vault_store import derivation, migrate, mode, ownership, write
 
 ALPHA = "Knowledge Base/Notes/Alpha.md"
 BETA = "Knowledge Base/Notes/Beta.md"
@@ -206,7 +206,7 @@ def test_a_migration_stores_every_file_and_the_rows_equal_the_sidecars_and_no_va
             ("migrate", "drill")
         ]
         with sidecar(lexstore.lexical_path(vault)) as lexical:
-            for table in ("pages", "fts", "semantic_units", "unit_fts"):
+            for table in ("pages", "fts", "title_fts", "wikilink_keys", "semantic_units", "unit_row_keys", "unit_fts"):
                 assert table_rows(store, table) == table_rows(lexical, table)
             assert table_rows(lexical, "pages"), (
                 "the lexical catalogue must hold pages for this check to mean anything"
@@ -877,3 +877,80 @@ def test_queued_graph_work_that_cannot_drain_refuses_before_any_staging(
     assert staged == []
     assert store_objects(vault) == objects
     assert not mode.store_mode_active(vault)
+
+
+def test_a_store_migrated_before_the_change_journal_gets_it_at_its_next_derivation(vault, tmp_path):
+    """A store that an older build migrated has no change journal, and until it has one every recall after
+    a write reads the whole catalogue again. Its next derivation must create the journal with no owner pass,
+    journal that derivation's own page, and record the journal so that a rollback leaves none of it behind.
+    """
+    journal = "SELECT name FROM sqlite_master WHERE name LIKE 'catalogue\\_change%' ESCAPE '\\'"
+    assert migrate_apply(vault) == 0
+    path = connection.store_path(vault)
+    with connection.open_writer(path, lease_check=lambda: True) as handle:
+        with handle.transaction() as tx:
+            # What an older build left: no journal objects, and none in the rollback record.
+            names = {name: kind for name, kind in tx.execute(
+                "SELECT name, type FROM sqlite_master WHERE name LIKE 'catalogue\\_change%' ESCAPE '\\'"
+            )}
+            for name in [name for name, kind in names.items() if kind == "trigger"] + [
+                name for name, kind in names.items() if kind == "table"
+            ]:
+                tx.execute(f"DROP {names[name].upper()} {name}")
+            tx.execute("DELETE FROM store_mode_objects WHERE name LIKE 'catalogue\\_change%' ESCAPE '\\'")
+        assert len(names) > 2, "the migrated store must have held the journal for this check to mean anything"
+        assert mode.status(vault)["owner_schema"] == "current"
+
+        writer = CollectionWriter(vault, handle)
+        write.commit(writer, write.StoreChange(
+            write.Origin.GOVERNED, "test", puts=(write.PagePut(ALPHA, b"# Alpha\n\nThe tide gauge reads high.\n"),),
+        ))
+        derivation.drain(vault.resolve(), writer)
+
+    assert mode.status(vault)["owner_schema"] == "current"
+    with closing(connection.open_reader(path)) as reader:
+        assert {name for (name,) in reader.execute(journal)} == set(names)
+        assert lexstore.change_journal_complete(reader)
+        assert (ALPHA,) in reader.execute("SELECT DISTINCT path FROM catalogue_changes").fetchall()
+        recorded = {name for (name,) in reader.execute(
+            "SELECT name FROM store_mode_objects WHERE name LIKE 'catalogue\\_change%' ESCAPE '\\'"
+        )}
+    assert recorded == set(names)
+
+    assert rollback_apply(vault, tmp_path / "export") == 0
+    with closing(connection.open_reader(path)) as reader:
+        assert reader.execute(journal).fetchall() == []
+
+
+def test_a_change_journal_that_cannot_be_created_leaves_the_derivation_going(vault, monkeypatch):
+    """A missing journal only makes recall read every row, but a drain that failed with it would leave every
+    later write underived. A creation that fails partway leaves no journal object and the page derived.
+    """
+    journal = "SELECT name FROM sqlite_master WHERE name LIKE 'catalogue\\_change%' ESCAPE '\\'"
+    assert migrate_apply(vault) == 0
+    path = connection.store_path(vault)
+    with connection.open_writer(path, lease_check=lambda: True) as handle:
+        with handle.transaction() as tx:
+            names = dict(tx.execute(journal.replace("SELECT name", "SELECT name, type")))
+            for name in [name for name, kind in names.items() if kind == "trigger"] + [
+                name for name, kind in names.items() if kind == "table"
+            ]:
+                tx.execute(f"DROP {names[name].upper()} {name}")
+            tx.execute("DELETE FROM store_mode_objects WHERE name LIKE 'catalogue\\_change%' ESCAPE '\\'")
+
+        def fails_partway(conn):
+            conn.execute(f"CREATE TABLE {lexstore.CHANGE_JOURNAL}(seq INTEGER PRIMARY KEY, path TEXT, stamp BLOB)")
+            raise sqlite3.OperationalError("database or disk is full")
+
+        monkeypatch.setattr(lexstore, "create_change_journal", fails_partway)
+        writer = CollectionWriter(vault, handle)
+        write.commit(writer, write.StoreChange(
+            write.Origin.GOVERNED, "test", puts=(write.PagePut(ALPHA, b"# Alpha\n\nThe tide gauge reads high.\n"),),
+        ))
+        derivation.drain(vault.resolve(), writer)
+
+    assert mode.status(vault)["owner_schema"] == "current"
+    with closing(connection.open_reader(path)) as reader:
+        assert reader.execute(journal).fetchall() == []
+        # The drain derived the page: a failed batch would leave its intent queued for a retry.
+        assert reader.execute("SELECT count(*) FROM store_derivation_queue WHERE path = ?", (ALPHA,)).fetchone() == (0,)

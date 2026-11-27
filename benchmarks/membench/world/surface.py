@@ -12,7 +12,8 @@ A form lists what it ``serves``, and each entry names a family and an item of a 
 * ``operation.<name>``: the document that announces an operation that the pack gives a document;
 * ``qualifier.scope``, ``qualifier.hedge.<word>``, ``qualifier.basis.<value>``: a wrapper that takes
   the sentence as ``{text}``;
-* ``probe.<form>``: the task of a probe form;
+* ``probe.<form>.<mechanism>.<reading>``: the task of a declared reading;
+  ``probe.<form>`` serves a role-backed key that names no reading;
 * ``relation.<form>``: a source snapshot of a canonical context parent, support or defeat edge.
 
 A form fits an item when every slot of the form is one that the item can fill, and the form holds
@@ -41,7 +42,7 @@ LEVELS = ("stated", "paraphrased", "unmarked")
 STATED, PARAPHRASED = LEVELS[:2]
 # The slots that a text may hold. A document frame takes `by` and `date`.
 SLOTS = frozenset(
-    "by subject about value quoting as scope old name former holder absorbed audience until text where source target child parent".split()
+    "by subject about value quoting as scope old name former holder absorbed audience until text where who when for source target child parent".split()
 )
 FRAME_SLOTS = frozenset({"by", "date"})
 # Closed families of surface-form keys, each with the registry that its item is read from.
@@ -257,6 +258,11 @@ class _Checker:
 
     def serves(self, item: str, key: str, slots: frozenset[str]) -> None:
         family, _, name = str(key).partition(".")
+        if family == "probe":
+            # Probe forms and readings are closed attributes implemented by the oracle.
+            name, separator, reading = name.partition(".")
+            if separator and reading not in self.vocabulary.readings:
+                self.refuse("unknown-reference", item, f"`{reading}` is no declared reading")
         registry = {
             "statement": self.vocabulary.commitments,
             "rule": self.vocabulary.rule_shapes,

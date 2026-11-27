@@ -4,6 +4,8 @@ Home has no route of its own: it calls the same stateless MCP endpoint as every
 assistant, with the bearer the gateway derives. These cases send requests the
 way the gateway forwards them: no `initialize` first, the gateway's own
 `User-Agent`, and the header that names the authenticated OAuth client.
+Home's own calls are written exactly as Home sends them, by public tool name:
+the cell refuses a command name such as `configure_memory` or `bootstrap`.
 """
 
 from __future__ import annotations
@@ -31,7 +33,8 @@ def cell(vault, monkeypatch, tmp_path):
         monkeypatch.delenv(key, raising=False)
     call_ledger.reset_chain_cache()  # an earlier test's failed append is not this cell's
     mcp, _ = _build_cloud_server(monkeypatch)
-    app = mcp.http_app(stateless_http=True, json_response=True)
+    # The transport a cloud cell serves (server.py): stateless, answering as an event stream.
+    app = mcp.http_app(stateless_http=True)
 
     def run(scenario):
         async def wrapped():
@@ -47,10 +50,15 @@ def cell(vault, monkeypatch, tmp_path):
     _teardown_activation(mcp)
 
 
+#: Home's activity read, exactly as Home sends it.
+HOME_ACTIVITY = {"profile": "compact", "section": "activity"}
+
+
 async def _call(client, name, arguments, *, oauth_client=None, client_context=None, app_id=None):
-    """One tools/call exactly as the gateway forwards it."""
+    """One tools/call exactly as the gateway forwards it, read the way Home reads the answer."""
     name, arguments = public_call(name, arguments)
     headers = {
+        # Home's Accept header; the cell refuses a POST that does not accept both formats.
         "accept": "application/json, text/event-stream",
         "content-type": "application/json",
         "authorization": f"Bearer {TOKEN}",
@@ -70,9 +78,17 @@ async def _call(client, name, arguments, *, oauth_client=None, client_context=No
               "params": {"name": name, "arguments": arguments}},
     )
     assert response.status_code == 200, response.text
-    result = response.json()["result"]
+    result = _answer(response, 2)["result"]
     assert result["isError"] is False, result
     return result["structuredContent"]
+
+
+def _answer(response, request_id) -> dict:
+    """The JSON-RPC message that answers `request_id`, from a JSON body or an event stream."""
+    if not response.headers["content-type"].startswith("text/event-stream"):
+        return response.json()
+    messages = [json.loads(line[len("data:"):]) for line in response.text.splitlines() if line.startswith("data:")]
+    return next(message for message in messages if message.get("id") == request_id)
 
 
 def test_home_sets_the_chat_apps_level_that_a_chat_app_then_gets(cell):
@@ -81,22 +97,20 @@ def test_home_sets_the_chat_apps_level_that_a_chat_app_then_gets(cell):
 
     async def scenario(client):
         shown = await _call(client, "inspect_memory", {"operation": "settings.inspect", "arguments": {}})
-        set_ = await _call(client, "configure_memory", {
-            "action": "set", "context": "conversation", "prominence": "light",
-            "expected_revision": shown["revision"],
-        })
+        set_ = await _call(client, "manage_memory", {"operation": "settings.set", "arguments": {
+            "context": "conversation", "prominence": "light", "expected_revision": shown["revision"],
+        }})
         # A name that client detection does not know: the registry's context decides.
         chat_app = await _call(
             client, "inspect_memory", {"operation": "settings.inspect", "arguments": {}},
             oauth_client="Acme Chat", client_context="conversation",
         )
-        stale = await _call(client, "configure_memory", {
-            "action": "set", "context": "conversation", "prominence": "off",
-            "expected_revision": shown["revision"],
-        })
-        cleared = await _call(client, "configure_memory", {
-            "action": "clear", "context": "conversation", "expected_revision": set_["revision"],
-        })
+        stale = await _call(client, "manage_memory", {"operation": "settings.set", "arguments": {
+            "context": "conversation", "prominence": "off", "expected_revision": shown["revision"],
+        }})
+        cleared = await _call(client, "manage_memory", {"operation": "settings.clear", "arguments": {
+            "context": "conversation", "expected_revision": set_["revision"],
+        }})
         return shown, set_, chat_app, stale, cleared
 
     shown, set_, chat_app, stale, cleared = cell(scenario)
@@ -121,13 +135,13 @@ def test_home_sees_a_recall_with_the_notes_it_released_and_the_note_count_move(c
     save must move the note count even though Home polls a cached count."""
 
     async def scenario(client):
-        before = await _call(client, "bootstrap", {"section": "activity"})
+        before = await _call(client, "read_instructions", HOME_ACTIVITY)
         recall = await _call(client, "ask_memory", {"query": "project"}, oauth_client="claude.ai")
         await _call(client, "remember", {
             "content": "The second build fixed the flaky upload.",
             "title": "Flaky upload fixed", "status": "draft",
         }, oauth_client="ChatGPT")
-        after = await _call(client, "bootstrap", {"section": "activity"})
+        after = await _call(client, "read_instructions", HOME_ACTIVITY)
         return before, recall, after
 
     before, recall, after = cell(scenario)
@@ -163,9 +177,9 @@ def test_a_save_whose_path_the_server_chose_still_reports_its_note(cell, tool, a
     more note in Home's count."""
 
     async def scenario(client):
-        before = await _call(client, "bootstrap", {"section": "activity"})
+        before = await _call(client, "read_instructions", HOME_ACTIVITY)
         await _call(client, tool, arguments, oauth_client="ChatGPT", client_context="conversation")
-        return before, await _call(client, "bootstrap", {"section": "activity"})
+        return before, await _call(client, "read_instructions", HOME_ACTIVITY)
 
     before, after = cell(scenario)
 
@@ -191,7 +205,7 @@ def test_an_edit_that_names_its_page_by_reference_counts_that_page_once(cell, va
             "operation": {"kind": "replace_string", "old_string": "second build",
                           "new_string": "second build (1.4.2)"},
         }, oauth_client="claude.ai")
-        return await _call(client, "bootstrap", {"section": "activity"})
+        return await _call(client, "read_instructions", HOME_ACTIVITY)
 
     activity = cell(scenario)
 
@@ -214,7 +228,7 @@ def test_a_recall_the_ledger_could_not_record_is_never_inside_an_idle_interval(
     ledger_dir = tmp_path / "ledger"
 
     async def scenario(client):
-        await _call(client, "bootstrap", {"section": "activity"})
+        await _call(client, "read_instructions", HOME_ACTIVITY)
         locked = [ledger_dir / "ledger.jsonl", ledger_dir]
         modes = [path.stat().st_mode for path in locked]
         locked[0].chmod(0o400)
@@ -227,12 +241,12 @@ def test_a_recall_the_ledger_could_not_record_is_never_inside_an_idle_interval(
         recalled_by = dt.datetime.now(dt.UTC)
         assert recall["result"], "sanity: the recall returned notes"
         assert not call_ledger.gap_marker_path().exists(), "sanity: no marker was written"
-        first = await _call(client, "bootstrap", {"section": "activity"})
-        second = await _call(client, "bootstrap", {"section": "activity"})
+        first = await _call(client, "read_instructions", HOME_ACTIVITY)
+        second = await _call(client, "read_instructions", HOME_ACTIVITY)
         # A container restart: a new process, with nothing in memory, on the same ledger.
         monkeypatch.setattr(call_ledger, "WRITER_STARTED_AT", dt.datetime.now(dt.UTC))
         call_ledger.reset_chain_cache()
-        restarted = await _call(client, "bootstrap", {"section": "activity"})
+        restarted = await _call(client, "read_instructions", HOME_ACTIVITY)
         return recalled_by, first, second, restarted
 
     recalled_by, first, second, restarted = cell(scenario)
@@ -353,7 +367,7 @@ def test_home_keeps_two_grants_of_one_client_family_separate(cell):
             await _call(client, "remember", {
                 "content": "The upload completed.", "title": title, "status": "draft",
             }, oauth_client="ChatGPT", app_id=app_id)
-        return await _call(client, "bootstrap", {"section": "activity"})
+        return await _call(client, "read_instructions", HOME_ACTIVITY)
 
     after = cell(scenario)
 

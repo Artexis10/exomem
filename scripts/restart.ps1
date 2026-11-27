@@ -70,18 +70,7 @@ $PyvenvCfg = Join-Path (Split-Path -Parent (Split-Path -Parent $VenvPy)) "pyvenv
 
 function Get-DotenvValue {
     param([string]$Name)
-    $envPath = Join-Path $RepoRoot ".env"
-    if (-not (Test-Path $envPath)) { return $null }
-    foreach ($line in Get-Content $envPath) {
-        if ($line -match "^\s*$([Regex]::Escape($Name))\s*=\s*(.*)\s*$") {
-            $value = $Matches[1].Trim()
-            if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
-                $value = $value.Substring(1, $value.Length - 2)
-            }
-            return $value
-        }
-    }
-    return $null
+    return Get-ExomemDotenvValue -RepoRoot $RepoRoot -Name $Name
 }
 
 function Invoke-DoctorGate {

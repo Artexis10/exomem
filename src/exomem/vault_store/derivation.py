@@ -4,12 +4,16 @@ A governed write commits page bytes, audit rows, projection intents and one deri
 in one short transaction under the vault mutation boundary (``write.commit``). The lexical, identity,
 prior-path, page-fact, inbound and graph rows follow here, on the store thread, in transactions of
 their own that never take that boundary: the store thread is the store's only writer, and it runs this
-drain before any other work, so every later write and check sees the rows of every earlier commit.
+drain before it takes a request, a slice of at most ``SLICE_SECONDS`` a turn. A slice that its deadline
+cut, with intents still due, yields the thread to the requests then queued
+(``StoreServer._derive_owed``). A check that meets a page whose rows still wait reads that page from its
+stored bytes (``underived_parsed``).
 
 A batch takes whole revisions of intents in ``(revision, path)`` order, derives them with the code that
 file mode uses, re-derives the pages whose links they move, deletes the intents and advances the store
-revision. A failed intent keeps its row and its reason code and retries alone, with a growing backoff, so
-it holds back neither the other intents nor any reader; after ``ATTEMPTS`` status counts it as failed.
+revision. A batch that fails marks each of its intents, so that each is taken alone from then on.
+A failed intent keeps its row and its reason code and retries alone, with a growing backoff, so it
+holds back neither the other intents nor any reader; after ``ATTEMPTS`` status counts it as failed.
 """
 
 from __future__ import annotations
@@ -17,24 +21,26 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from sqlite3 import Connection, OperationalError
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 from .. import find, foreground_priority, media_capacity, writer_lease
 from ..cli_ops import OpError
 from ..collection_store import connection
-from . import derive, mode, read, resident_catalogue
+from . import derive, mode, read, rederive, resident_catalogue
 
 if TYPE_CHECKING:
     from ..collection_store.writer import CollectionWriter
 
 log = logging.getLogger(__name__)
+
+_Parsed = TypeVar("_Parsed")
 
 #: The queue's operations, a closed set that collection schema 20 fixes: derive the rows of a path
 #: from its stored page (or drop them when the store holds no page there), or refresh a file that the
@@ -51,10 +57,18 @@ BATCH_PAGES = 32
 RETRY_SECONDS = 1.0
 MAX_RETRY_SECONDS = 300.0
 
-#: The seconds that a writing request that derives its own intents (``committed``) spends on them
-#: before it acknowledges with its derived state pending; the store thread derives the rest before
-#: its next request.
-OWN_DERIVATION_SECONDS = 30.0
+#: The most pending pages that a check which reads every one of them takes (``underived_parsed``):
+#: 256 pages parse in about 0.15 s, at the 0.6 ms a page measured on the store thread, so a check
+#: stays well inside a request's budget, and a backlog past it refuses the check until the drain
+#: shrinks it.
+UNDERIVED_CAP = 256
+#: The longest that one stretch of derivation holds the store thread, whether the thread derives what
+#: is owed (``StoreServer._derive_owed``) or a request derives its own intents (``committed``). It
+#: stays well below the mutation timeout (5 s by default), so a queued request is taken in time; a
+#: batch transaction runs whole, so a stretch ends at the first batch boundary after it, and the
+#: first page of a failed batch always runs alone. A request acknowledges with its derived state
+#: pending past it, and the store thread derives the rest in later stretches, between its requests.
+SLICE_SECONDS = 1.0
 #: The longest that a read waits for the derivation of the writes acknowledged before it began
 #: (``caught_up``); its request budget may cut the wait shorter.
 READ_WAIT_SECONDS = 1.0
@@ -66,9 +80,9 @@ _LOOK_FIRST_SECONDS, _LOOK_MOST_SECONDS = 0.01, 0.1
 
 #: The vault whose derived rows this context writes without the vault mutation boundary.
 _SCOPE: ContextVar[Path | None] = ContextVar("vault_store_derivation_scope", default=None)
-#: Whether the commits of this context derive their rows before their request acknowledges
-#: (``own_rows``).
-_OWN_ROWS: ContextVar[bool] = ContextVar("vault_store_derivation_own_rows", default=False)
+#: The ``own_rows`` block of this context, if one is open: its commits derive their rows before their
+#: request acknowledges.
+_OWN_ROWS: ContextVar[_Own | None] = ContextVar("vault_store_derivation_own_rows", default=None)
 #: Signalled after each drain batch commits and after each failure is recorded, so a reader waiting
 #: in this process (``caught_up``) looks again at once. ``_TURNS`` counts the signals, so a reader
 #: that looked just before one does not sleep through it.
@@ -133,14 +147,24 @@ def enqueue(
     )
 
 
+@dataclass(slots=True)
+class _Own:
+    """An ``own_rows`` block: the revision of its first commit, where its request's rows begin."""
+
+    revision: int | None = None
+
+
 @contextmanager
 def own_rows() -> Iterator[None]:
     """Derive the rows of the commits in this block before their request acknowledges.
 
     For a governed trash or recovery, which settles its receipt from those rows after the release
-    (``governed.settle``): its reply then reports the rows that its receipt was settled from.
+    (``governed.settle``): its reply then reports the rows that its receipt was settled from. The
+    request derives its own rows ahead of any older backlog (``drain``'s ``from_revision``): the
+    store thread cannot wait for the rows that it derives itself, and a queue of older intents would
+    otherwise take the whole slice and leave the receipt unsettled.
     """
-    token = _OWN_ROWS.set(True)
+    token = _OWN_ROWS.set(_Own())
     try:
         yield
     finally:
@@ -152,22 +176,31 @@ def committed(writer: CollectionWriter, before: tuple, after: tuple, paths: tupl
 
     The resident catalogue moves to the commit's triple at once, since the commit wrote no catalogue
     row. A request on the store thread acknowledges at the commit: the thread derives the intents,
-    and moves the resolver and corpus contexts, before it takes other work, and a reader waits for
-    them (``caught_up``). Any other request derives them once it has released the vault mutation
-    boundary and before it acknowledges, as do a governed transition (``own_rows``) and an upload,
-    whose rows draw on the room that its session reserved. A caller with no boundary and no request
-    (a test, an offline route) derives them here.
+    and moves the resolver and corpus contexts, before it takes a request unless its last slice was
+    cut (``StoreServer._derive_owed``), and a reader waits for them (``caught_up``). Any other
+    request derives them once it has released the vault mutation boundary and before it
+    acknowledges, for one slice (``SLICE_SECONDS``); so does an upload, whose rows draw on the room
+    that its session reserved. A governed transition (``own_rows``) derives its own rows the same
+    way, on the store thread, and an upload derives its own too: both ahead of the older intents. A
+    caller with no boundary and no request (a test, an offline route) derives them here.
     """
     root = Path(writer.root)
+    # An upload's derived rows draw on the room that its session reserved, as its page did.
+    credit = media_capacity.held_commit_credit()
+    own = _OWN_ROWS.get()
+    if own is None and credit is not None:
+        # The reservation ends with the commit's request, so its rows derive ahead of any older
+        # backlog, as a governed transition's do: they begin at this commit's revision.
+        own = _Own()
+    if own is not None and own.revision is None:
+        own.revision = after[1]
     # First, so that nothing below can strand the intents: should the request end before its follow
     # runs, the store thread drains before its next work.
     owe(root)
     resident_catalogue.advance(root, before, after)
     with _UNADVANCED_LOCK:
         _UNADVANCED.setdefault(root, []).append((before, after, tuple(paths)))
-    # An upload's derived rows draw on the room that its session reserved, as its page did.
-    credit = media_capacity.held_commit_credit()
-    if credit is None and not _OWN_ROWS.get() and writer_lease.terminal_follows():
+    if credit is None and own is None and writer_lease.terminal_follows():
         from ..collection_store import runtime
 
         if runtime.on_store_thread(root):
@@ -176,7 +209,10 @@ def committed(writer: CollectionWriter, before: tuple, after: tuple, paths: tupl
     def follow() -> list[object]:
         try:
             with media_capacity.commit_credit(credit) if credit is not None else nullcontext():
-                drain(root, writer, deadline=time.monotonic() + OWN_DERIVATION_SECONDS)
+                drain(
+                    root, writer, deadline=time.monotonic() + SLICE_SECONDS,
+                    from_revision=0 if own is None or own.revision is None else own.revision,
+                )
         except Exception:  # noqa: BLE001 - the page is durable; the store thread drains it again
             log.warning("the intents of a commit to %s could not be derived yet", root, exc_info=True)
             owe(root, time.monotonic() + RETRY_SECONDS)
@@ -389,28 +425,139 @@ def caught_up(still_held_back: Callable[[], bool], seconds: float) -> bool:
             pause = min(pause * 2, _LOOK_MOST_SECONDS)
 
 
-def underived(conn: Connection) -> dict[str, bytes | None]:
-    """The pages whose derived rows trail their stored bytes at ``conn``'s snapshot, with those bytes.
+def _pending_paths(conn: Connection, paths: Iterable[str] | None) -> dict[str, int]:
+    """The ``derive`` intents that ``underived_parsed`` reads, each path with its ``attempts``, or
+    the refusal that it makes."""
+    wanted = None if paths is None else list(dict.fromkeys(paths))
+    if wanted is None or len(wanted) > UNDERIVED_CAP:
+        waiting = _queue_rows(
+            conn,
+            "SELECT path FROM store_derivation_queue WHERE operation = ? AND attempts < ? LIMIT ?",
+            (DERIVE, ATTEMPTS, UNDERIVED_CAP + 1),
+        )
+        if waiting is not None and len(waiting) > UNDERIVED_CAP:
+            raise read.backlog_too_large()
+        rows = _queue_rows(
+            conn, "SELECT path, attempts FROM store_derivation_queue WHERE operation = ?", (DERIVE,)
+        )
+        pending = dict(rows or ())
+        if wanted is not None:
+            keep = set(wanted)
+            pending = {path: attempts for path, attempts in pending.items() if path in keep}
+        return pending
+    pending = {}
+    for start in range(0, len(wanted), read.KEYS_PER_QUERY):
+        batch = wanted[start : start + read.KEYS_PER_QUERY]
+        rows = _queue_rows(
+            conn,
+            "SELECT path, attempts FROM store_derivation_queue WHERE operation = ? "
+            f"AND path IN ({', '.join('?' * len(batch))})",
+            (DERIVE, *batch),
+        )
+        pending.update(rows or ())
+    return pending
+
+
+def _bodies(conn: Connection, paths: list[str]) -> Iterator[tuple[str, bytes]]:
+    """The stored bytes of each of ``paths`` that the store holds a page at, in keyed reads."""
+    for start in range(0, len(paths), read.KEYS_PER_QUERY):
+        batch = paths[start : start + read.KEYS_PER_QUERY]
+        yield from ((path, bytes(body)) for path, body in conn.execute(
+            f"SELECT path, body FROM store_pages WHERE path IN ({', '.join('?' * len(batch))})", batch,
+        ))
+
+
+#: The parse of each failed page that a check reads (``underived_parsed``), by the check's kind and
+#: the page's path: the ``sha256`` of the bytes that were parsed, and the result. A failed page
+#: stays queued for as long as it fails, and every such check would parse it again, so a result is
+#: kept while the page's bytes stay the same. A page that has not failed drains within moments, so
+#: its parse is not kept: the memory follows the failed pages, never a backlog or a large page that
+#: a reader that never drains would hold. Process memory is right for it: a result is a pure
+#: function of the path and the bytes, and a lost entry costs one parse.
+_PARSED: dict[str, dict[str, tuple[str, object]]] = {}
+_PARSED_LOCK = threading.Lock()
+#: The most results kept per kind. A failed page is rare and its result small, so this holds a
+#: failed set far past any that a vault has met; a set past it reparses each check, as before the
+#: cache.
+PARSED_CAP = 2048
+
+
+def underived_parsed(
+    conn: Connection,
+    paths: Iterable[str] | None,
+    kind: str,
+    parse: Callable[[str, bytes], _Parsed],
+) -> dict[str, _Parsed | None]:
+    """The pages whose derived rows trail their stored bytes at ``conn``'s snapshot, each with what
+    ``parse(path, bytes)`` makes of its stored bytes.
 
     Each ``derive`` intent, pending or failed, maps its path to the page that the store holds there,
     or to None when it holds none (a delete, or the source of a move). A check that reads link or
-    identity rows derives these pages' rows from these bytes in their place, by the rule that the
+    identity rows derives these pages' rows from their bytes in their place, by the rule that the
     drain applies, so a derivation that failed or waits for room never lets a write trust rows that
     its page no longer gives. A ``refresh`` intent stays out: it names a file that the store does not
     own, whose rows trail the file until its drain succeeds, as an outside edit's rows trail it until
-    a commit sees the edit. The cost follows the lag.
+    a commit sees the edit.
+
+    With ``paths``, only those pages count, each in a keyed read: the cost follows the caller's own
+    paths, whatever the backlog. A check that asks about those pages alone, or that asks whether the
+    rows it found belong to a pending page, takes this form. Without ``paths``, every page counts,
+    for a check that any pending page could change (a new link, a claimed id): its cost follows the
+    backlog, so more than ``UNDERIVED_CAP`` pending pages refuse it with ``read.backlog_too_large()``
+    before it reads one. The store thread derives the backlog between requests, so the retry finds it
+    smaller. Only an intent that still has attempts left counts toward the cap: one that used up its
+    ``ATTEMPTS`` keeps retrying on a growing backoff and never leaves the queue while it fails, so it
+    would refuse every such check for good. Its bytes are read all the same, and status reports it as failed. An
+    intent that failed fewer times is a backlog still, because a retry that lands removes it.
+
+    Keyed paths that outnumber ``UNDERIVED_CAP`` could name every waiting page, so that call takes
+    this form too.
+
+    ``kind`` names what ``parse`` makes, one name per parse. A page that failed (its intent has
+    attempts) stays here for as long as it fails, so it is parsed once while its bytes stay the
+    same, whatever the number of checks that read it: the result is kept by the page's ``sha256``,
+    so a page that changed is parsed anew, and it is dropped when the intent leaves the queue
+    (``_forget``). That saves the parse and the copy of its bytes, not the read of its row: SQLite
+    still reads the overflow pages of ``body``, which comes before ``sha256`` in the row. A page
+    that has not failed is parsed on every check, as it drains soon.
     """
-    rows = _queue_rows(conn, "SELECT path FROM store_derivation_queue WHERE operation = ?", (DERIVE,))
-    if not rows:
-        return {}
-    paths = [path for path, in rows]
-    found: dict[str, bytes | None] = dict.fromkeys(paths)
-    for start in range(0, len(paths), read.KEYS_PER_QUERY):
-        batch = paths[start : start + read.KEYS_PER_QUERY]
-        found.update((path, bytes(body)) for path, body in conn.execute(
-            f"SELECT path, body FROM store_pages WHERE path IN ({', '.join('?' * len(batch))})", batch,
-        ))
+    pending = _pending_paths(conn, paths)
+    found: dict[str, _Parsed | None] = dict.fromkeys(pending)
+    failed = [path for path, attempts in pending.items() if attempts]
+    hashes: dict[str, str] = {}
+    for start in range(0, len(failed), read.KEYS_PER_QUERY):
+        batch = failed[start : start + read.KEYS_PER_QUERY]
+        marks = ", ".join("?" * len(batch))
+        hashes.update(
+            conn.execute(f"SELECT path, sha256 FROM store_pages WHERE path IN ({marks})", batch)
+        )
+    to_parse = [path for path, attempts in pending.items() if not attempts]
+    with _PARSED_LOCK:
+        kept = _PARSED.get(kind, {})
+        for path, digest in hashes.items():
+            held = kept.get(path)
+            if held is not None and held[0] == digest:
+                found[path] = held[1]  # type: ignore[assignment]  # this kind's own parse made it
+            else:
+                to_parse.append(path)
+    for path, body in _bodies(conn, to_parse):
+        found[path] = parsed = parse(path, body)
+        if path in hashes:
+            with _PARSED_LOCK:
+                results = _PARSED.setdefault(kind, {})
+                results.pop(path, None)  # a re-parsed page goes last, so the oldest goes first
+                results[path] = (hashes[path], parsed)
+                if len(results) > PARSED_CAP:
+                    del results[next(iter(results))]
     return found
+
+
+def _forget(paths: list[str]) -> None:
+    """Drop the parsed results of ``paths``, whose intents left the queue."""
+    with _PARSED_LOCK:
+        for results in _PARSED.values():
+            for path in paths:
+                results.pop(path, None)
 
 
 def figures(conn: Connection) -> dict:
@@ -437,19 +584,29 @@ def figures(conn: Connection) -> dict:
 @dataclass(slots=True)
 class Drained:
     """What one drain call did: the batches it committed, the intents that reached ``ATTEMPTS`` in it,
-    and whether it stopped with intents still due (a refusal, or a failure it could not record)."""
+    whether it stopped with intents still due (a refusal, or a failure it could not record), and
+    whether its deadline ended it while intents were still due (``cut``)."""
 
     batches: int = 0
     failed: int = 0
     stopped: bool = False
+    cut: bool = False
 
 
-def drain(root: Path, writer: CollectionWriter, *, deadline: float | None = None) -> Drained:
+def drain(
+    root: Path, writer: CollectionWriter, *, deadline: float | None = None, from_revision: int = 0
+) -> Drained:
     """Derive every due intent, a batch per transaction, until none is due or ``deadline`` passes.
 
+    ``from_revision`` leaves the intents of older revisions to the store thread: a request derives
+    only the intents that it queued itself (``own_rows``).
+
     A refusal to start a transaction (lease lost, store handed off) stops the drain and leaves every
-    intent as it was. A batch that raises is rolled back and its paths run one by one, so a single bad
-    page only delays itself.
+    intent as it was. A batch that raises is rolled back and each of its intents is marked
+    (``_record_failure``), so that none is taken in a batch again; its paths then run one by one, so
+    a single bad page only delays itself. The first of them runs whatever the deadline, so that a
+    batch that fails after the deadline still settles an intent; the next drain takes the others
+    alone.
     """
     root = Path(root)
     result = Drained()
@@ -459,30 +616,32 @@ def drain(root: Path, writer: CollectionWriter, *, deadline: float | None = None
         _advance(root, writer)
         while not result.stopped and (deadline is None or time.monotonic() < deadline):
             try:
-                batch = _next_batch(writer)
+                batch = _next_batch(writer, from_revision)
                 if not batch:
                     break
                 if _derive(root, writer, batch, result) or len(batch) == 1:
                     continue
-                for intent in batch:
-                    if result.stopped or (deadline is not None and time.monotonic() >= deadline):
+                for position, intent in enumerate(batch):
+                    if result.stopped or (position and deadline is not None and time.monotonic() >= deadline):
                         break
                     _derive(root, writer, [intent], result)
             except connection.CollectionStoreError:
                 result.stopped = True
-    _owe_remaining(root, writer, stopped=result.stopped)
+    due_now = _owe_remaining(root, writer, stopped=result.stopped)
+    result.cut = due_now and deadline is not None and time.monotonic() >= deadline
     return result
 
 
-def _owe_remaining(root: Path, writer: CollectionWriter, *, stopped: bool) -> None:
-    """Owe the next drain: now when an intent is due, else when the first retry falls due.
+def _owe_remaining(root: Path, writer: CollectionWriter, *, stopped: bool) -> bool:
+    """Owe the next drain: now when an intent is due, else when the first retry falls due. Whether
+    an intent is due now.
 
     A drain that a refusal stopped (a handoff, a lost lease) is owed after ``RETRY_SECONDS``, so the
     store thread does not spin on the refusal.
     """
     if stopped:
         owe(root, time.monotonic() + RETRY_SECONDS)
-        return
+        return False
     try:
         due_now, first_retry = writer.connection.execute(
             f"SELECT EXISTS(SELECT 1 FROM store_derivation_queue WHERE {_DUE}), "
@@ -491,12 +650,13 @@ def _owe_remaining(root: Path, writer: CollectionWriter, *, stopped: bool) -> No
         ).fetchone()
     except Exception:  # noqa: BLE001 - a store that cannot be read is retried from its next start
         log.debug("the derivation queue could not be read after a drain", exc_info=True)
-        return
+        return False
     if due_now:
         owe(root)
     elif first_retry is not None:
         wait = datetime.strptime(first_retry, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC) - _now()
         owe(root, time.monotonic() + max(0.0, wait.total_seconds()))
+    return bool(due_now)
 
 
 @dataclass(frozen=True, slots=True)
@@ -506,24 +666,30 @@ class _Intent:
     operation: str
     attempts: int
     metered: int
+    failed_code: str | None
 
 
-def _next_batch(writer: CollectionWriter) -> list[_Intent]:
-    """The next due intents: one that failed before runs alone, so that it never splits a batch of new
-    intents; new ones run in whole revisions of up to ``BATCH_PAGES`` pages."""
+#: The columns that make an ``_Intent``, in the order of its fields.
+_INTENT_COLUMNS = "path, revision, operation, attempts, metered, failed_code"
+
+
+def _next_batch(writer: CollectionWriter, from_revision: int = 0) -> list[_Intent]:
+    """The next due intents at ``from_revision`` or later: one that failed before runs alone, so that
+    it never splits a batch of new intents; new ones run in whole revisions of up to ``BATCH_PAGES``
+    pages."""
     first = writer.connection.execute(
-        f"SELECT path, revision, operation, attempts, metered FROM store_derivation_queue WHERE {_DUE} "
-        "ORDER BY revision, path LIMIT 1",
-        (_stamp(_now()),),
+        f"SELECT {_INTENT_COLUMNS} FROM store_derivation_queue WHERE {_DUE} "
+        "AND revision >= ? ORDER BY revision, path LIMIT 1",
+        (_stamp(_now()), from_revision),
     ).fetchone()
     if first is None:
         return []
     if first[3] > 0:
         return [_Intent(*first)]
     rows = writer.connection.execute(
-        f"SELECT path, revision, operation, attempts, metered FROM store_derivation_queue WHERE {_DUE} "
-        "AND attempts = 0 ORDER BY revision, path LIMIT ?",
-        (_stamp(_now()), BATCH_PAGES + 1),
+        f"SELECT {_INTENT_COLUMNS} FROM store_derivation_queue WHERE {_DUE} "
+        "AND revision >= ? AND attempts = 0 ORDER BY revision, path LIMIT ?",
+        (_stamp(_now()), from_revision, BATCH_PAGES + 1),
     ).fetchall()
     intents = [_Intent(*row) for row in rows]
     if len(intents) <= BATCH_PAGES:
@@ -535,7 +701,7 @@ def _next_batch(writer: CollectionWriter) -> list[_Intent]:
     if whole:
         return whole
     rows = writer.connection.execute(
-        f"SELECT path, revision, operation, attempts, metered FROM store_derivation_queue WHERE {_DUE} "
+        f"SELECT {_INTENT_COLUMNS} FROM store_derivation_queue WHERE {_DUE} "
         "AND attempts = 0 AND revision = ? ORDER BY path",
         (_stamp(_now()), last),
     ).fetchall()
@@ -557,6 +723,7 @@ def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: 
                 # A rollback empties the queue; until it commits, nothing here is derived.
                 result.stopped = True
                 return True
+            rederive.adopt_change_journal(tx)
             stored = _stored(tx, [intent.path for intent in batch if intent.operation == DERIVE])
             written = [intent.path for intent in batch if intent.path in stored]
             removed = [intent.path for intent in batch
@@ -586,6 +753,7 @@ def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: 
         _record_failure(writer, batch, error, result)
         return False
     result.batches += 1
+    _forget([intent.path for intent in batch])
     # After the transaction: a reader that meets the advanced catalogue must see this revision.
     resident_catalogue.remember(root, after, delta.catalogue)
     find.on_store_commit(root, before, after, delta.entries, delta.deleted, ())
@@ -611,13 +779,33 @@ def _stored(tx: Connection, paths: list[str]) -> set[str]:
 
 
 def _record_failure(writer: CollectionWriter, batch: list[_Intent], error: Exception, result: Drained) -> None:
-    """Count one attempt against each intent of a failed single-path batch; a larger batch is split first."""
+    """Record a failure against each intent of a failed batch, or against the one that failed.
+
+    A batch of several intents cannot say which of them failed: each is marked (attempts 1, no
+    reason code and no retry time), and so stays due and still holds a reader back, but
+    ``_next_batch`` takes an intent that has attempts alone from then on. The drain runs them one by
+    one at once, and a later turn takes the rest the same way, so one bad page never fails the batch
+    of the others again. The mark counts no attempt: a page's own failures are the ones that make it
+    failed, as before a batch was marked. The mark survives a restart, as the queue does.
+    """
     if len(batch) > 1:
         log.info("a derivation batch failed (%s); deriving its paths one by one", type(error).__name__)
+        try:
+            with writer.handle.transaction() as tx:
+                # Only the intents that failed: a newer write to a path reset its row meanwhile.
+                tx.executemany(
+                    "UPDATE store_derivation_queue SET attempts = 1 "
+                    "WHERE path = ? AND revision = ? AND attempts = 0",
+                    [(intent.path, intent.revision) for intent in batch],
+                )
+        except Exception:  # noqa: BLE001 - the batch then fails again, as it did before the count
+            log.warning("a failed derivation batch could not be recorded", exc_info=True)
         return
     [intent] = batch
     code = NO_ROOM if isinstance(error, OpError) and error.code == media_capacity.UPLOAD_SPACE_BUSY else FAILED
-    attempts = intent.attempts + 1
+    # A batch's mark (attempts 1, no code) counted nothing that left a reason, so the first failure
+    # on its own is the page's first.
+    attempts = intent.attempts + 1 if intent.failed_code else 1
     log.warning("a store page's derivation failed (%s, attempt %d)", type(error).__name__, attempts,
                 exc_info=not isinstance(error, OpError))
     wait = min(RETRY_SECONDS * 2 ** (attempts - 1), MAX_RETRY_SECONDS)

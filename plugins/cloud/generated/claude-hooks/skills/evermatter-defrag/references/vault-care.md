@@ -136,6 +136,31 @@ readable bodies, including the governed inbound-link rewrites. The preview is re
 exact `plan_id`, the `source_snapshot` and a `why`, and it commits atomically. Durable identity and mutable
 state stay in frontmatter, never in filenames.
 
+### `maintenance.path_variants`
+
+This operation lists folder splits: sibling folders whose names differ only by letter case or Unicode form, such
+as `Garden/` and `garden/`. A split blocks a whole-vault export with `CASE_COLLISION`. New writes already land in
+the split's canonical spelling: the spelling in NFC form, then a folder that the vault's layout or project
+registry names, then the folder with the most entries.
+
+1. Preview with `inspect_memory(operation="maintenance.path_variants", arguments={"dry_run": true})`. The preview
+   is read-only and owner-only. For each split it names the canonical spelling, counts the files under each other
+   spelling, lists the moves, the files it can already tell will not move with their reasons, and the spellings
+   that the merge removes once they are empty. A split outside the knowledge base, or at its top level with no
+   spelling the layout declares, is listed for the owner to rename by hand and is never merged. A long list shows
+   its first rows and its count. A remote preview runs as a maintenance job, whose receipt lists every row. The
+   preview does not list the pages whose links each move rewrites.
+2. Show the owner the preview before the merge: it moves their files.
+3. Merge every split with `manage_memory(operation="maintenance.path_variants", arguments={"dry_run": false,
+   "plan_id": ..., "why": ...})`. Each file moves through the ordinary move, which rewrites the links to it. A
+   remote merge runs as a maintenance job (above).
+4. Read the result. A move that the ordinary move refuses is skipped and listed with its reason; the preview
+   cannot foresee such a refusal. The merge then removes each other spelling that is left empty and logs the
+   removal. Preview again to see what is left.
+
+The merge is one-way: bytes are kept, links are rewritten and each moved page's lineage names its old path, but
+nothing moves the files back.
+
 ### `maintenance.tag_variants`
 
 This operation lists tags that differ only by case, separator or plural. It groups them with visible page counts

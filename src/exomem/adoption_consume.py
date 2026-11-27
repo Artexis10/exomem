@@ -34,6 +34,7 @@ STAYS: Mapping[str, tuple[bool, str]] = MappingProxyType({  # nosemgrep: ep-word
     "unchecked": (False, "{n} not yet verified against their Source page"),
     "text": (True, "{n} text"),
     "kept": (True, "{n} artifact"),
+    "kept_speech": (True, "{n} transcript kept with its recording"),
 })
 
 
@@ -86,9 +87,14 @@ def _member_path(stage: import_stage.Stage, original_path: str) -> str | None:
 
 
 def entry_of(stage: import_stage.Stage, original_path: str) -> tuple[int, str] | None:
-    """The manifest's (size, SHA-256) for a staged file given by its vault-relative path, or None if unlisted."""
+    """The (size, SHA-256) that the manifest, or the cell's own record of a file it derived, gives a staged file by its vault-relative path; None if neither lists it."""
     member_path = _member_path(stage, original_path)
-    return None if member_path is None else stage.members.get(member_path)
+    if member_path is None:
+        return None
+    if (entry := stage.members.get(member_path)) is not None:
+        return entry
+    derived = stage.derived.get(member_path)
+    return None if derived is None else (derived.size, derived.sha256)
 
 
 def identity_of(stage: import_stage.Stage, original_path: str) -> import_stage.Identity | None:
@@ -166,15 +172,27 @@ def _page_classifier(page: dict, filed_statuses: tuple[str, ...]):
     selected = set((page.get("selection") or {}).get("paths") or [])
     outcomes = page.get("outcomes") or {}
     removes_copies = page.get("consume", True)  # a run that opted out never checks or removes a copy
+    # The part pages of a kept transcript are no plan items: they follow their page.
+    kept_with = {
+        member: item for item in items.values()
+        for member in (item.get("kept") or {}).get("members") or () if member != item["original_path"]
+    }
 
     def classify(path: str) -> str | None:
-        item = items.get(path)
+        item = items.get(path) or kept_with.get(path)
         if item is not None:
-            outcome = outcomes.get(path) or {}
+            outcome = outcomes.get(item["original_path"]) or {}
             status = outcome.get("status")
             if status == "failed":
                 return "over_ceiling" if outcome.get("code") == adoption_plan.OVER_CEILING else "failed"
             if status in filed_statuses:
+                settled = outcome.get("kept_speech")  # the page's result went to its recording's Source
+                if path != item["original_path"]:  # a part page of a transcript
+                    if settled is None:
+                        return "ineligible"  # its page filed as a text Source, so no part is kept
+                    return "failed" if settled.get("outcome") == "failed" else "kept_speech"
+                if settled is not None:
+                    return "kept_speech"
                 if outcome.get("stays"):
                     return outcome["stays"]  # `finish` recorded why it kept this copy: a result key of `STAYS`
                 if item["form"] == "text" and removes_copies and not outcome.get("consumed"):

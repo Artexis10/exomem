@@ -66,6 +66,7 @@ from .substrate import PUBLIC_BASE_URL, Substrate
 
 if TYPE_CHECKING:
     from .catalogue_prewarm import CataloguePlan
+    from .home_import import HomeImportPlan
     from .large_import import LargeImportPlan
     from .original_fixity import FixityPlan
     from .raw_import import RawImportPlan
@@ -158,6 +159,8 @@ class Context:
     large_import: LargeImportPlan | None = None
     # The raw-data import mode (raw_import.py): what to run after provisioning.
     raw_import: RawImportPlan | None = None
+    # The Home-import mode (home_import.py): what to run after provisioning.
+    home_import: HomeImportPlan | None = None
     # The original-fixity mode (original_fixity.py): what to seed after provisioning.
     original_fixity: FixityPlan | None = None
     # The catalogue-prewarm mode (catalogue_prewarm.py): the scenarios to run after provisioning.
@@ -1378,6 +1381,13 @@ async def run_steps(ctx: Context, *, only: set[int] | None = None) -> None:
                 if record.status != PASSED:
                     raise StepFailure("the raw-data import needs the provisioned cell, and step 2 did not pass")
                 await run_raw_import(ctx, ctx.raw_import)
+        if number == 2 and ctx.home_import is not None:
+            from .home_import import run_home_import
+
+            with stage(ctx.report, "home_import"):
+                if record.status != PASSED:
+                    raise StepFailure("the Home import needs the provisioned cell, and step 2 did not pass")
+                await run_home_import(ctx, ctx.home_import)
         if number == 2 and ctx.original_fixity is not None:
             from .original_fixity import run_original_fixity
 
@@ -1413,6 +1423,9 @@ async def run_steps(ctx: Context, *, only: set[int] | None = None) -> None:
     if ctx.raw_import is not None and "raw_import" not in ctx.report.stages:
         with stage(ctx.report, "raw_import"):
             raise StepFailure("the requested raw-data import stage requires provisioning at step 2")
+    if ctx.home_import is not None and "home_import" not in ctx.report.stages:
+        with stage(ctx.report, "home_import"):
+            raise StepFailure("the requested Home import stage requires provisioning at step 2")
     if ctx.original_fixity is not None and "original_fixity" not in ctx.report.stages:
         with stage(ctx.report, "original_fixity"):
             raise StepFailure("the requested original-fixity stage requires provisioning at step 2")

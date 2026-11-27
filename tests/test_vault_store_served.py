@@ -36,7 +36,7 @@ from test_vault_store_derivation_queue import HOLD_GROWTH_LIMIT_MS, SLOW_DERIVAT
 from test_vault_store_governed_writers import tombstones
 from test_vault_store_media import PICTURE, PICTURE_BYTES
 from test_vault_store_migration import ALPHA, BETA, DIAGRAM, DIAGRAM_BYTES, vault  # noqa: F401
-from test_vault_store_write_path import store_rows
+from test_vault_store_write_path import bm25_paths, store_rows
 
 from exomem import (
     commands,
@@ -60,6 +60,7 @@ from exomem import (
     warmup,
     writer_lease,
 )
+from exomem.cli_ops import OpError
 from exomem.collection_store import connection, runtime
 from exomem.governance import lifecycle
 from exomem.governance.principal import owner_principal, request_scope
@@ -398,6 +399,78 @@ def test_a_search_that_outwaits_its_bound_says_the_rows_lag_and_a_lookup_refuses
     assert read.page_exists(stored, archived)
 
 
+@contextmanager
+def backlog_past_the_cap(root):
+    """More pages wait to derive than one check reads, and the store thread derives none of them
+    until the block ends, when it derives them all."""
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: derivation.Drained())
+        commit(root, puts=tuple(
+            write.PagePut(f"{NOTES}/Backlog {number}.md", f"# Backlog {number}\n".encode())
+            for number in range(derivation.UNDERIVED_CAP + 1)
+        ))
+        yield
+    derivation.owe(root.resolve())
+    derived(root)
+
+
+def test_a_delete_served_beside_a_backlog_past_the_cap_refuses_retryably_and_commits_nothing(
+    stored, service
+):
+    """A person's note, deleted through the served door while more pages wait to derive than one
+    link check reads. The check runs on the store thread, which cannot wait for the drain, so the
+    delete refuses with the retryable derived-behind error and the note stays. Once the store
+    thread has derived the backlog, the same delete runs."""
+    saved = call(stored, "remember", **QUOKKA)
+    derived(stored)
+    with backlog_past_the_cap(stored):
+        revision = store_rows(stored, "SELECT revision FROM store_mode")
+        with pytest.raises(OpError) as refused:
+            call(stored, "manage_memory_file", operation="delete", path=saved["path"], confirm=True)
+        unchanged = store_rows(stored, "SELECT revision FROM store_mode")
+    deleted = call(stored, "manage_memory_file", operation="delete", path=saved["path"], confirm=True)
+
+    assert refused.value.code == read.DERIVED_BEHIND
+    assert "still being indexed" in str(refused.value) and "Nothing was saved" in str(refused.value)
+    assert unchanged == revision
+    assert deleted["path"] == saved["path"]
+    assert not read.page_exists(stored, saved["path"])
+
+
+def test_a_read_by_reference_beside_a_backlog_past_the_cap_refuses_retryably(stored, service):
+    """A page read by its reference while more pages wait to derive than one check reads: the owner
+    of the id could be any waiting page, so the read refuses, retryably, instead of parsing them all.
+    Once the backlog is derived the same read returns the page."""
+    saved = call(stored, "remember", **QUOKKA, response_detail="full")["diagnostics"]["leaf_result"]
+    derived(stored)
+    with backlog_past_the_cap(stored):
+        with pytest.raises(OpError) as refused:
+            call(stored, "read_memory", path=saved["ref"])
+    page = call(stored, "read_memory", path=saved["ref"])
+
+    assert refused.value.code == read.DERIVED_BEHIND
+    assert "Retry in a few seconds" in refused.value.remediation
+    assert page["path"] == saved["path"]
+
+
+def test_a_read_with_links_beside_a_backlog_past_the_cap_returns_the_page_without_inbound_links(
+    stored, service
+):
+    """A page read by its path with its links while more pages wait to derive than one link check
+    reads: the inbound links are unknown, so they come back null, as for a cold index, and the page
+    that was found is not withheld for them. The same read after the drain lists the links."""
+    saved = call(stored, "remember", **QUOKKA)
+    derived(stored)
+    with backlog_past_the_cap(stored):
+        page = call(stored, "read_memory", path=saved["path"], links=True)
+    drained = call(stored, "read_memory", path=saved["path"], links=True)
+
+    assert page["path"] == saved["path"] and "quokka population" in page["body"]
+    assert page["links"]["inbound"] is None
+    assert page["links"]["outbound"] == [ALPHA.removesuffix(".md")]
+    assert drained["links"]["inbound"] is not None
+
+
 def test_a_recall_that_outwaits_its_bound_says_the_rows_lag(stored, service, monkeypatch):
     """A save whose rows the store thread derives only after the next recall's wait ran out. The
     recall cannot rank the page yet, and without the notice that a search carries it missed the
@@ -544,6 +617,231 @@ def test_a_save_replies_before_the_store_thread_derives_its_rows(stored, service
         f"the save replied in {slow:.2f} s with a {SLOW_DERIVATION_SECONDS:.0f} s derivation, "
         f"against {quick:.2f} s with an instant one"
     )
+
+
+#: One derivation batch this slow, one page per batch, makes a dozen pages cost several slices.
+BATCH_SECONDS = 0.5
+BACKLOG_PAGES = 12
+
+
+@contextmanager
+def slow_batches(monkeypatch):
+    """Each derivation batch takes ``BATCH_SECONDS`` and holds one page; the yielded list's first
+    item sets the seconds, so a test ends its backlog fast by setting it to zero."""
+    seconds = [BATCH_SECONDS]
+    real = derive.derive_paths
+
+    def derive_paths(*arguments, **keywords):
+        time.sleep(seconds[0])
+        return real(*arguments, **keywords)
+
+    monkeypatch.setattr(derivation, "BATCH_PAGES", 1)
+    monkeypatch.setattr(derive, "derive_paths", derive_paths)
+    yield seconds
+
+
+def backlog_page(number):
+    return f"{NOTES}/Backlog {number}.md", f"# Backlog {number}\n\nThe ferry calls at dusk.\n".encode()
+
+
+def commit_backlog(root, monkeypatch, pages, first=0):
+    """``pages`` one-page commits that nothing derives, as a crash leaves them."""
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: derivation.Drained())
+        patch.setattr(derivation, "owe", lambda *_arguments, **_keywords: None)
+        for number in range(first, first + pages):
+            rel, body = backlog_page(number)
+            commit(root, puts=(write.PagePut(rel, body),))
+
+
+def test_requests_queued_together_behind_a_derivation_backlog_are_all_served_before_the_backlog_drains(
+    stored, monkeypatch
+):
+    """A start that finds forty intents due, each batch slow, and eight requests that reach the store
+    thread together while it derives them. Derived whole before the thread took anything else, the
+    backlog outlasted the mutation timeout and every request was refused as busy; with one request
+    served per slice, the sixth and later waited out the timeout."""
+    with store_thread(stored):
+        server = runtime._server(stored.resolve())
+        derived(stored)
+        commit_backlog(stored, monkeypatch, 40)
+        with slow_batches(monkeypatch) as seconds:
+            derivation.owe(stored.resolve())
+            server.call(lambda: None)  # wakes the idle thread, which then derives what is owed
+            time.sleep(BATCH_SECONDS / 2)  # the thread is inside its first batch
+            waits = {}
+
+            def send(number):
+                began = time.monotonic()
+                try:
+                    server.call(lambda: None, read_only=True)
+                    waits[number] = ("served", time.monotonic() - began)
+                except OpError as refusal:
+                    waits[number] = (refusal.code, time.monotonic() - began)
+
+            senders = [threading.Thread(target=send, args=(number,)) for number in range(8)]
+            for sender in senders:
+                sender.start()
+            for sender in senders:
+                sender.join()
+            left = len(store_rows(stored, "SELECT path FROM store_derivation_queue"))
+            seconds[0] = 0.0
+            derived(stored)
+        undrained = store_rows(stored, "SELECT path FROM store_derivation_queue")
+
+    print(json.dumps({"outcomes": sorted((round(wait, 2), outcome) for outcome, wait in waits.values()),
+                      "intents_left_when_all_served": left}))
+    assert {outcome for outcome, _wait in waits.values()} == {"served"}, waits
+    assert max(wait for _outcome, wait in waits.values()) < server.manager._mutation_timeout_seconds / 2
+    assert left > 0, "the requests must be served while the backlog stands for this check to mean anything"
+    assert undrained == [], "the thread derived the whole backlog after the requests"
+
+
+def test_derivation_finishes_beneath_a_steady_stream_of_requests(stored, monkeypatch):
+    """Four clients that each send the next request as the last one returns, so a request is always
+    waiting, over a backlog of eight slow batches. Serving every queued request before any slice
+    would never derive; the thread must still finish the backlog, and serve every request."""
+    with store_thread(stored):
+        server = runtime._server(stored.resolve())
+        derived(stored)
+        commit_backlog(stored, monkeypatch, 8)
+        stop, refusals = threading.Event(), []
+
+        def stream():
+            while not stop.is_set():
+                try:
+                    server.call(lambda: time.sleep(0.05), read_only=True)
+                except OpError as refusal:
+                    refusals.append(refusal.code)
+
+        clients = [threading.Thread(target=stream, daemon=True) for _ in range(4)]
+        with slow_batches(monkeypatch):
+            began = time.monotonic()
+            derivation.owe(stored.resolve())
+            for client in clients:
+                client.start()
+            try:
+                while store_rows(stored, "SELECT path FROM store_derivation_queue"):
+                    assert time.monotonic() - began < 60, "the backlog finished beneath the stream"
+                    time.sleep(0.05)
+                drained_after = time.monotonic() - began
+            finally:
+                stop.set()
+                for client in clients:
+                    client.join(30)
+
+    print(json.dumps({"backlog_s_of_work": 8 * BATCH_SECONDS, "drained_after_s": round(drained_after, 2)}))
+    assert refusals == []
+
+
+def test_a_request_that_commits_many_pages_acknowledges_after_one_slice_of_their_rows(
+    stored, service, monkeypatch
+):
+    """A request that commits a dozen pages and derives its own rows, each batch slow. It spent its
+    whole own-derivation budget on them before it acknowledged; it now acknowledges after one slice
+    with the rest pending, and the store thread derives that rest."""
+    derived(stored)
+    pages = [backlog_page(number) for number in range(BACKLOG_PAGES)]
+
+    def commit_pages(writer):
+        with derivation.own_rows():
+            for rel, body in pages:
+                write.commit(
+                    writer, write.StoreChange(write.Origin.GOVERNED, "served test", puts=(write.PagePut(rel, body),))
+                )
+
+    with slow_batches(monkeypatch) as seconds:
+        began = time.monotonic()
+        projector.store_thread_runner(stored)(commit_pages)
+        acknowledged = time.monotonic() - began
+        pending = len(store_rows(stored, "SELECT path FROM store_derivation_queue"))
+        seconds[0] = 0.0
+        derived(stored)
+
+    print(json.dumps({"acknowledged_after_s": round(acknowledged, 3), "pages_pending_at_ack": pending}))
+    assert acknowledged < derivation.SLICE_SECONDS + 2 * BATCH_SECONDS + 1.0, acknowledged
+    assert 0 < pending < BACKLOG_PAGES, "the request must leave some rows pending, and derive some"
+    assert {rel for rel, _body in pages} <= set(bm25_paths(stored, "ferry")), "the thread derived the rest"
+
+
+def test_a_save_is_derived_before_the_next_queued_request_when_its_slice_was_small(stored, service):
+    """Two clients whose slow requests queue behind a save, one slice of nothing having just ended.
+    The thread served both before it derived the save, whatever its slice had cost, so a read that
+    began after the save waited out its whole bound for rows that a few milliseconds of work give."""
+    server = runtime._server(stored.resolve())
+    running, release = threading.Event(), threading.Event()
+
+    def occupy():
+        derivation.owe(stored.resolve())  # a turn of derivation, empty, runs as the thread is freed
+        running.set()
+        release.wait(30)
+
+    def queued():
+        return len(server._requests)
+
+    threads = [threading.Thread(target=server.call, args=(occupy,))]
+    threads[0].start()
+    assert running.wait(30)
+    threads.append(threading.Thread(
+        target=call, args=(stored, "remember"), kwargs={**QUOKKA, "title": "Late census"}
+    ))
+    threads[1].start()
+    while queued() < 1:
+        time.sleep(0.01)
+    for _client in range(2):
+        threads.append(threading.Thread(target=server.call, args=(lambda: time.sleep(0.6),),
+                                        kwargs={"read_only": True}))
+        threads[-1].start()
+    while queued() < 3:
+        time.sleep(0.01)
+    release.set()
+    threads[1].join(30)
+
+    began = time.monotonic()
+    with read.request_snapshot(stored, catch_up=True):
+        held_back = read._REQUEST.get().held_back
+    waited = time.monotonic() - began
+    for thread in threads:
+        thread.join(30)
+
+    print(json.dumps({"read_waited_s": round(waited, 3), "held_back": held_back}))
+    assert not held_back
+    assert waited < derivation.READ_WAIT_SECONDS / 2, waited
+
+
+def test_a_governed_trash_and_its_recovery_settle_exactly_behind_a_derivation_backlog(
+    stored, service, monkeypatch
+):
+    """A governed page trashed through the served door, then recovered, each time with three seconds
+    of earlier derivation due ahead of its own rows. The request derived the due rows in order for
+    one slice, never reached its own, and settled not exact for good: the trash left its tombstone
+    pending and the recovery left the page hidden, until a reconcile."""
+    govern(stored, BETA)
+    derived(stored)
+    with slow_batches(monkeypatch) as seconds:
+        commit_backlog(stored, monkeypatch, 6)
+        trash = call(stored, "manage_memory_file", operation="delete", path=BETA, confirm=True,
+                     force_orphan=True)
+        trash_left = len(store_rows(stored, "SELECT path FROM store_derivation_queue"))
+        trash_states = [marker["state"] for marker in tombstones(stored)]
+        [trashed] = tombstones(stored)[0]["manifest"]
+        seconds[0] = 0.0
+        derived(stored)
+        seconds[0] = BATCH_SECONDS
+        commit_backlog(stored, monkeypatch, 6, first=100)
+        recovery = call(stored, "manage_memory_file", operation="recover",
+                        trash_path=trashed["trash_path"])
+        recovery_left = len(store_rows(stored, "SELECT path FROM store_derivation_queue"))
+        seconds[0] = 0.0
+        derived(stored)
+
+    print(json.dumps({"backlog_left_after_trash": trash_left, "backlog_left_after_recovery": recovery_left}))
+    assert trash_left > 0 and recovery_left > 0, "each must settle while its backlog stands"
+    assert lifecycle.TRASH_NOT_EXACT not in trash.get("warnings", ())
+    assert lifecycle.RECOVERY_NOT_EXACT not in recovery.get("warnings", ())
+    assert trash_states == ["committed"]
+    assert "pending" not in [marker["state"] for marker in tombstones(stored)]
+    assert call(stored, "read_memory", path=BETA)["path"] == BETA
 
 
 def test_a_drain_that_keeps_failing_is_retried_no_sooner_than_its_retry_delay(

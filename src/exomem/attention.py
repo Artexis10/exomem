@@ -29,10 +29,11 @@ from pathlib import Path
 
 from . import activation as activation_module
 from . import audit as audit_module
-from . import call_spans, fusion, review_pass
+from . import call_spans, fusion, request_budget, review_pass
 from . import contradiction_stance as contradiction_stance_module
 from . import review_state as review_state_module
 from .audit import AuditFinding
+from .cli_ops import OpError
 
 log = logging.getLogger(__name__)
 
@@ -483,13 +484,25 @@ def attention(
         audited, stored = _stored_rows(vault_root, resolved)
         found, coverage = list(stored), None
         if audited:
+            # With no held pass the request audits the vault itself: it stops at its own deadline,
+            # and a check it could not finish reads as coverage "unknown", never as no findings.
             report = audit_module.audit(
-                vault_root, categories=sorted(audited), today=today, now=effective_now
+                vault_root,
+                categories=sorted(audited),
+                today=today,
+                now=effective_now,
+                budget=request_budget.current(),
             )
-            found, coverage = [*report.findings, *stored], (report.metadata or {}).get("coverage")
+            # Keyed by queue, as the held pass's is, so a budget that was not hit changes nothing.
+            raw = (report.metadata or {}).get("coverage") or {}
+            found = [*report.findings, *stored]
+            coverage = {k: v for k, v in raw.items() if k in resolved} or None
     else:
-        # The held pass ran every triageable queue; its coverage is keyed by queue.
-        found = held.findings
+        # The held pass ran every triageable queue; its coverage is keyed by queue. Its worker
+        # spells each finding's call with no serving surface bound, so a family that a stored row
+        # serves is built here instead, spelled for this caller's surface.
+        audited, stored = _stored_rows(vault_root, resolved)
+        found = [*(finding for finding in held.findings if finding.category in audited), *stored]
         coverage = {k: v for k, v in (held.coverage or {}).items() if k in resolved} or None
     # BEFORE fusion, deliberately. Dropping an excluded family's reasons at the
     # report edge would leave its RRF votes in the scores, so an item flagged
@@ -837,6 +850,13 @@ def entity_candidate_by_ref(
     state/fingerprint machinery.
     """
     wanted = review_state_module.parse_review_ref(reference)
+    with _whole_lookup():
+        return _entity_candidate(vault_root, wanted, reference, expected_fingerprint, today)
+
+
+def _entity_candidate(
+    vault_root: Path, wanted: str, reference: str, expected_fingerprint: str | None, today
+) -> AttentionItem:
     report = attention(
         vault_root,
         categories=["entity_recurrence"],
@@ -894,7 +914,63 @@ def record_refused(vault_root: Path, reference: str, refused: Sequence[Mapping[s
             return
 
 
+#: How long a caller waits before it asks again for an item the request could not finish looking up.
+_QUEUES_WARMING_RETRY_MS = 5000
+
+
 def item_by_ref(
+    vault_root: Path,
+    reference: str,
+    *,
+    expected_fingerprint: str | None = None,
+    today=None,
+) -> AttentionItem:
+    """Resolve one current review item by its stable review reference, within the request budget."""
+    with _whole_lookup():
+        return _resolve_item_by_ref(
+            vault_root, reference, expected_fingerprint=expected_fingerprint, today=today
+        )
+
+
+@contextmanager
+def _whole_lookup() -> Iterator[None]:
+    """Run a lookup of one item over the review queues inside the request budget, or refuse it.
+
+    With no held review pass a lookup reads every queue itself. A lookup whose read the deadline
+    stopped, or whose audit could not finish a check, has not seen every item. Whatever it then
+    found, missed or refused, it refuses with the retryable REVIEW_QUEUES_WARMING instead, so it
+    never calls a present item missing or decides on one it saw in part. The lookup runs under its
+    own child budget, ending a delivery reserve before the call's, so only its own stops count.
+    """
+    if request_budget.current() is None:
+        yield
+        return
+    with request_budget.leaving(request_budget.DELIVERY_RESERVE_SECONDS):
+        lookup = request_budget.current()
+        assert lookup is not None
+        try:
+            with request_budget.checking(request_budget.ReadCheckpoint(lookup)):
+                yield
+        except request_budget.ReadBudgetExhausted:
+            raise _queues_warming() from None
+        except ValueError:
+            if lookup.yielded():
+                raise _queues_warming() from None
+            raise
+        if lookup.yielded():
+            raise _queues_warming()
+
+
+def _queues_warming() -> OpError:
+    return OpError(
+        "REVIEW_QUEUES_WARMING",
+        "This call could not read every review queue in its time, so it decided nothing.",
+        "Retry the same call shortly with the same arguments.",
+        details={"retry_after_ms": _QUEUES_WARMING_RETRY_MS},
+    )
+
+
+def _resolve_item_by_ref(
     vault_root: Path,
     reference: str,
     *,

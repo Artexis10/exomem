@@ -56,7 +56,7 @@ The actual project knowledge belongs in Evermatter, not in that native-memory en
 
 An MCP connection exposes tools. It does not guarantee the agent knows when to
 use them. Claude Code can load the Evermatter skill. Other clients should call
-`bootstrap(profile="compact")` once per session and follow the returned contract.
+`read_instructions()` once per session and follow the returned contract.
 
 The practical behavior is:
 

@@ -11,12 +11,13 @@ import hashlib
 import io
 import os
 import sqlite3
+import sys
 from contextlib import closing
 
 import pytest
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_media_store import selected_store as selected_store
-from test_vault_store_migration import ALPHA, DIAGRAM, DIAGRAM_BYTES, vault  # noqa: F401
+from test_vault_store_migration import ALPHA, BETA, DIAGRAM, DIAGRAM_BYTES, vault  # noqa: F401
 from test_vault_store_read_write import stored, writer  # noqa: F401
 from test_workflow_contracts import _proposal as workflow_contract_proposal
 
@@ -302,6 +303,51 @@ def test_a_new_page_resolves_the_links_that_wait_for_its_title_and_a_delete_unre
     )
     assert edge_targets(served, ALPHA) == waiting
     assert not store_rows(served, "SELECT 1 FROM pages WHERE path = ?", GAMMA)
+
+
+def test_store_page_writes_replace_and_delete_the_authored_row_key_projection(served, writer):  # noqa: F811
+    """Store commits must maintain the same row-key facts as a file-built catalogue."""
+    text = (
+        "---\ntype: note\n---\n# Gamma\n\n## Claim\n- asserted_by: Survey team\n"
+        "- modality: must\n\nThe beacon must remain lit.\n"
+    )
+    vault_module.batch_atomic_write(
+        [planned(served, GAMMA, text, create_only=True)], vault_root=served, post_commit_fanout=False,
+    )
+    query = "SELECT row_key FROM unit_row_keys WHERE parent_path = ? ORDER BY row_key"
+    assert store_rows(served, query, GAMMA) == [("asserted_by",), ("modality",)]
+    revision_query = "SELECT revision FROM unit_revisions WHERE parent_path = ?"
+    old_revision = store_rows(served, revision_query, GAMMA)
+    # Warm the public unit statistics before deletion, so recreation must discard the old contribution.
+    def units():
+        hits = commands.op_ask_memory(
+            served, query="", mode="keyword", scope="kb-only", result_level="unit",
+            filters={"unit.kind": {"$eq": "claim"}}, limit=50, graph=False,
+        )["hits"]
+        return [hit for hit in hits if hit["parent_path"] == GAMMA]
+
+    assert len(units()) == 1
+
+    vault_module.batch_atomic_write(
+        [planned(served, GAMMA, text.replace("- modality: must\n", ""))],
+        vault_root=served, post_commit_fanout=False,
+    )
+    assert store_rows(served, query, GAMMA) == [("asserted_by",)]
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "test", deletes=(write.PageDelete(GAMMA),),
+    ))
+    assert store_rows(served, query, GAMMA) == []
+    assert store_rows(served, revision_query, GAMMA) == []
+    assert units() == []
+    replacement = text.replace("The beacon must remain lit.", "The harbour lamp stays dark.")
+    replacement += "\n## Claim\n\nThe tide keeps rising.\n"
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "test", puts=(write.PagePut(GAMMA, replacement.encode()),),
+    ))
+    assert store_rows(served, revision_query, GAMMA) != old_revision
+    recreated = units()
+    assert len(recreated) == 2
+    assert all("The beacon must remain lit." not in hit["excerpt"] for hit in recreated)
 
 
 def test_a_batch_commits_its_pages_at_one_revision(served):
@@ -606,6 +652,84 @@ def test_a_batch_that_mixes_a_page_a_binary_and_a_file_the_store_does_not_own(se
     assert bm25_paths(served, "harbour") == [GAMMA]
 
 
+def test_a_batch_of_files_the_store_does_not_hold_commits_through_the_file_writer(served):
+    """A curation run's JSON file is no page, binary or Markdown file, so the store has no change
+    for it and refuses an empty one: every curation run failed to seal in a store-mode vault."""
+    run_file = "Knowledge Base/_Governance/curation/runs/run-1/plan.json"
+    vault_module.batch_atomic_write(
+        [planned(served, run_file, '{"version": 1}\n', create_only=True)],
+        vault_root=served,
+        post_commit_fanout=False,
+    )
+    assert (served / run_file).read_text() == '{"version": 1}\n'
+    assert not store_rows(served, "SELECT 1 FROM store_pages WHERE path = ?", run_file)
+
+
+def apply_curation_run(root, proposed):
+    """Approve a sealed run and call again until it is no longer executing."""
+    result = commands.op_maintain_memory(
+        root,
+        mode="curation",
+        curation_action="apply",
+        run_id=proposed["run_id"],
+        plan_id=proposed["plan_id"],
+        expected_plan_fingerprint=proposed["plan_fingerprint"],
+        why="Approved in the test.",
+    )
+    while result["phase"] == "executing":
+        result = commands.op_maintain_memory(
+            root,
+            mode="curation",
+            curation_action="resume",
+            run_id=proposed["run_id"],
+            plan_id=proposed["plan_id"],
+        )
+    return result
+
+
+def test_a_curation_plan_seals_and_completes_in_a_store_mode_vault(served):
+    """Every sealing write of a run failed in store mode, so no plan could be proposed."""
+    plan = {
+        "version": 1,
+        "title": "A plain note",
+        "steps": [
+            {
+                "step_id": "note",
+                "kind": "create-note",
+                "args": {
+                    "title": "Plain note",
+                    "slug": "plain-note",
+                    "content": "## Observations\n\n- [finding] A plain note. ^plain\n",
+                    "relation_disposition": "reviewed_none",
+                    "relation_review_reason": "No honest relation exists for this fixture.",
+                },
+            }
+        ],
+    }
+    proposed = commands.op_maintain_memory(
+        served, mode="curation", curation_action="propose", plan=plan
+    )
+    done = apply_curation_run(served, proposed)
+    assert done["phase"] == "completed"
+    with read.snapshot(served) as view:
+        assert view.page(done["step"]["path"]) is not None
+
+
+def test_a_relocation_of_two_pages_seals_and_completes_in_a_store_mode_vault(served):
+    proposed = commands.op_maintain_memory(
+        served,
+        mode="curation",
+        curation_action="relocate",
+        pages=[ALPHA, BETA],
+        to_project="meadow",
+    )
+    assert proposed["sealed"] is True
+    assert apply_curation_run(served, proposed)["phase"] == "completed"
+    with read.snapshot(served) as view:
+        for rel in (ALPHA, BETA):
+            assert "project: meadow" in view.page(rel).body.decode()
+
+
 def test_a_binary_delete_that_the_disk_already_made_queues_no_removal(stored, writer):  # noqa: F811
     """A delete of a binary's record that also queues the removal of a file that is already gone,
     so that a file restored before the projector runs is taken away."""
@@ -673,6 +797,53 @@ def test_a_folder_and_a_name_that_only_the_store_holds_are_taken_not_new(served)
         vault_module.respell_new_path(served, "Knowledge Base/stored only/Delta.md")
         == "Knowledge Base/Stored Only/Delta.md"
     )
+
+
+@pytest.mark.skipif(sys.platform in {"win32", "darwin"}, reason="needs a case-sensitive volume")
+def test_a_page_written_into_a_split_lands_in_the_fuller_stored_spelling(served):
+    """Defect: the store walk accepts an exact folder and keeps filling the smaller side of a split."""
+    for stem in ("Gamma", "Delta"):
+        vault_module.batch_atomic_write(
+            [planned(served, f"Knowledge Base/Notes/Stored Only/{stem}.md", GAMMA_TEXT, create_only=True)],
+            vault_root=served,
+            post_commit_fanout=False,
+        )
+    loose = served / "Knowledge Base/Notes/stored only"
+    loose.mkdir(parents=True)
+    (loose / "chart.png").write_bytes(b"png")
+
+    assert (
+        vault_module.respell_new_path(served, "Knowledge Base/Notes/stored only/notes/Epsilon.md")
+        == "Knowledge Base/Notes/Stored Only/notes/Epsilon.md"
+    )
+
+
+@pytest.mark.skipif(sys.platform in {"win32", "darwin"}, reason="needs a case-sensitive volume")
+def test_a_stored_split_is_merged_into_its_canonical_spelling(served):
+    """Defect: the merge reads only the disk and misses pages that only the store holds."""
+    from exomem import path_variants
+
+    for stem in ("Gamma", "Delta"):
+        vault_module.batch_atomic_write(
+            [planned(served, f"Knowledge Base/Notes/Stored Only/{stem}.md", GAMMA_TEXT, create_only=True)],
+            vault_root=served,
+            post_commit_fanout=False,
+        )
+    vault_module.batch_atomic_write(
+        [planned(served, "Knowledge Base/Notes/stored only/Epsilon.md", GAMMA_TEXT, create_only=True)],
+        vault_root=served,
+        post_commit_fanout=False,
+    )
+
+    preview = path_variants.preview(served)
+    assert [unit["from"] for unit in preview["moves"]] == ["Knowledge Base/Notes/stored only/Epsilon.md"]
+    result = path_variants.apply(served, plan_id=preview["plan_id"], why="merge the stored split")
+
+    assert result["moved"] == [
+        {"from": "Knowledge Base/Notes/stored only/Epsilon.md", "to": "Knowledge Base/Notes/Stored Only/Epsilon.md"}
+    ]
+    rows = store_rows(served, "SELECT path FROM store_pages WHERE path LIKE ?", "Knowledge Base/Notes/%Epsilon.md")
+    assert rows == [("Knowledge Base/Notes/Stored Only/Epsilon.md",)]
 
 
 def test_the_rows_that_governed_commands_commit_equal_a_cold_derivation_from_the_files(

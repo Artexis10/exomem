@@ -574,7 +574,9 @@ class _Renderer:
         names = []
         for ref in refs if isinstance(refs, list) else [refs]:
             statement = self.world.statements.get(ref)
-            ref = statement.about if statement is not None and statement.about else ref
+            if statement is not None:
+                names.append((source_ref(ref), None))
+                continue
             try:
                 names.append(self.reader.where(ref, at))
             except _Unrenderable:
@@ -583,11 +585,15 @@ class _Renderer:
             return names[0]
         return " and ".join(n for n, _ in names), None
 
-    def context(self, thread: Thread, spec: Mapping[str, Any], at: date) -> dict[str, str]:
-        """The context that a probe's key reads, as the `where` slot that a form may fill: the name that
-        the documents use for it. A key that reads no context has no such slot."""
-        ref = spec["value"].get("where")
-        return {} if ref is None else {"where": self.reader.text(thread.resolve(ref), at)}
+    def arguments(self, thread: Thread, spec: Mapping[str, Any], at: date) -> dict[str, str]:
+        """Preserve the reading's closed qualifier arguments in the task's named slots."""
+        return {
+            name: thread.slots[ref].isoformat()
+            if name == "when"
+            else self.reader.text(thread.resolve(ref), at)
+            for name, ref in spec["value"].items()
+            if name not in ("read", "of", "role")
+        }
 
     def probes(self, documents: Mapping[str, Document]) -> list[Probe]:
         used: dict[str, set[str]] = {}
@@ -603,18 +609,20 @@ class _Renderer:
                 fills = (
                     {"subject": subject}
                     | ({} if schema is None else {"about": schema.label})
-                    | self.context(thread, spec, at)
+                    | self.arguments(thread, spec, at)
                 )
                 item = f"probe {thread.id} {form}"
-                pool = self.bank.eligible(f"probe.{form}", None, fills, {"about", "where"})
+                reading = spec["value"].get("read")
+                key = f"probe.{form}" + (f".{reading}" if reading else "")
+                pool = self.bank.eligible(key, None, fills, {"about", "where", "who", "when", "for"})
                 free = [f for f in pool if f.id not in used.get(thread.id, set())]
                 if not free:
                     self.refuse(
                         "shared-form" if pool else "no-form",
                         item,
-                        f"every form for `probe.{form}` is one that an artefact of the thread uses: {sorted(f.id for f in pool)}"
+                        f"every form for `{key}` is one that an artefact of the thread uses: {sorted(f.id for f in pool)}"
                         if pool
-                        else f"no form serves `probe.{form}` with {sorted(fills)}",
+                        else f"no form serves `{key}` with {sorted(fills)}",
                     )
                     continue
                 chosen = self.pick(free, f"probe:{thread.id}:{form}")

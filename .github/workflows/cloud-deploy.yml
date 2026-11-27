@@ -2,8 +2,11 @@ name: cloud-deploy
 
 # automate-cloud-releases D1: after a release, set its attested cell image as
 # Substrate's cell_image, when the platform carries the release and no upgrade
-# barrier stops it, then wait until the canary runs it. The logic and its tests
-# are in infra/scripts/cloud_deploy.py and tests/test_cloud_deploy.py.
+# barrier stops it, then wait until the canary runs it. When either check stops
+# the newest release, it sets the newest older release that the fleet lacks and the
+# platform carries (deploy-newest-covered-release), and the newest release's alert
+# stays active. The logic and its tests are in infra/scripts/cloud_deploy.py and
+# tests/test_cloud_deploy.py.
 #
 # - It runs on a dispatch on main. The release workflow's tag run ends with that
 #   dispatch, and so does the platform upgrade. A workflow_run trigger never

@@ -1486,13 +1486,15 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def retire_ocr(self, binary_path: Path, media_type: str) -> int:
+    def retire_ocr(self, binary_path: Path, media_type: str, *, superseded: bool = False) -> int:
         """Retire the OCR stage of an artifact already completed in Markdown.
 
         A queued CLIP or re-embed stage stays queued. A running claim, or a row
         whose result waits for the parent, is left to that result. A reprocess
         request is no leftover: the transcript is complete because it is the one
-        to replace, so only its own run ends it.
+        to replace, so only its own run ends it. `superseded` says a speech result
+        from elsewhere just replaced that transcript, so a queued reprocess has
+        nothing left to replace and goes with the rest of the stage.
         """
         key = self._key(self._relative(binary_path), media_type)
         conn = self._connect()
@@ -1500,9 +1502,9 @@ class MediaJobStore:
             with conn:
                 return _drop_ocr_stage(
                     conn,
-                    "do_ocr = 1 AND reprocess = 0 AND job_key = ? AND state != 'running' "
+                    "do_ocr = 1 AND (reprocess = 0 OR ?) AND job_key = ? AND state != 'running' "
                     "AND NOT EXISTS (SELECT 1 FROM media_job_results WHERE job_id = jobs.id)",
-                    (key,),
+                    (int(superseded), key),
                 )
         finally:
             conn.close()

@@ -279,6 +279,14 @@ class FakeBackend:
         self.selected_packs = list(pack_ids)
         return {"selected_pack_ids": list(pack_ids)}
 
+    def voice_sample(self, recording: str, label: str) -> dict:
+        self._gate("voice_sample", recording=recording, label=label)
+        return {"label": label, "spans": 2, "lines": [f"[0:00] [{label}]: Welcome back to the show."]}
+
+    def voice_enroll(self, recording: str, label: str, name: str) -> dict:
+        self._gate("voice_enroll", recording=recording, label=label, name=name)
+        return {"name": name, "samples": 1}
+
     def doctor_report(self) -> dict:
         self._gate("doctor_report")
         return {
