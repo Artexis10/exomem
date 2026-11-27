@@ -89,11 +89,32 @@ The session-close engine serves no instructions by patching a module global in a
 
 ## Cost and selection
 
-A change replays only the cases it can reach, under the eval-loop's selection: the cases whose checks name a tool, a skill or a guidance text that the change alters, failures first. It runs one to three repeats on two arms. Admitting a new positive case needs three repeats on the arm without the fix, for that case only.
+A change replays the cases it can reach, under the eval-loop's selection, failures first:
 
-The release run plays the whole set once, on the release candidate alone: 54 sessions. A failing case is rerun with more repeats before the release. A full run on two arms with three repeats is never the normal path.
+| What the change alters | Cases it reaches | Arms and repeats |
+|---|---|---|
+| Skill, guidance, server-instruction or prompt text | Every case on a client class that loads that text | Two arms, one repeat |
+| A tool or door operation | The cases that call it or check its effect | Two arms, one repeat |
+| The model, the judge or the code that reads the answer | Every case | Two arms, one repeat |
+| A fix for a production failure | Its targeted cases, in addition | Two arms, three repeats |
 
-On 2026-11-27, 107 replay sessions of this kind cost a median of $0.18 of notional subscription usage each, with a maximum of $0.32. Nothing was billed. So a fix that reaches three cases costs about 12 to 18 sessions, about $2 to $3 notional, and a release run about $10 notional. Runs with the `openai` actor are metered and need agreement before they run.
+The targeted cases need three repeats on both arms, because the admission line shows at least two of three failing without the fix and at least two of three passing with it. A case that differs between the arms on one repeat is rerun with more repeats before the merge. The release run plays the whole set once on the release candidate, and reruns its failures.
+
+Session cost comes from two samples:
+
+- The session-close engine, which played the external cases: 88 sessions on 2026-11-27 cost a median of $0.18 of notional subscription usage each, with a maximum of $0.32 (`cost_usd` in `/var/tmp/exomem-skills-proof/**/runs.jsonl`).
+- The incident runner, which plays the 35 existing cases: 209 sessions cost a median of $0.075, with a maximum of $0.37 (`notional_usd` in `/var/tmp/exomem-outcome-evals/runs/incidents-*/results.jsonl`).
+
+Nothing was billed in either sample. At the higher median, these are the typical costs:
+
+| Run | Sessions | Notional cost |
+|---|---|---|
+| A fix with three targeted cases and no text change | 18 | about $3 |
+| A skill or guidance change reaching 25 cases, plus three targeted cases | about 68 | about $12 |
+| A model or judge change, every case on two arms | 108 | about $20 |
+| The release run | 54 | about $10 |
+
+Runs with the `openai` actor are metered and need agreement before they run.
 
 ## Risks
 

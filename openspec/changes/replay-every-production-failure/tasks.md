@@ -14,7 +14,7 @@
 
 - [ ] 2.1 Add the admission record and refuse a case whose digest has no line. Print the line at the end of a run.
 - [ ] 2.2 Add legacy lines for the 35 existing cases, each naming the commit that added it.
-- [ ] 2.3 Rewrite the README's "add a case" steps: fresh rewrite from the mechanism, positive and guard admission, the admission line in the fix PR.
+- [ ] 2.3 Rewrite the README's steps and cost line: fresh rewrite from the mechanism, positive and guard admission, the admission line in the fix PR, selection by what a change reaches, the release run, and the measured session cost.
 
 ## 3. Port
 
