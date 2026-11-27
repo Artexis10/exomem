@@ -26,7 +26,7 @@ A `source-formats` entry `google-photos-sidecar` has:
 - `parser: photo-sidecar`;
 - `file_glob: "*.json"`;
 - `item_keys: [title, photoTakenTime]`;
-- the vendor's naming facts: the suffix word (`supplemental-metadata`), the media-name limit (47), and the characters that become `_` (`&`, `?`).
+- the vendor's naming facts: the suffix word (`supplemental-metadata`), the sidecar-name limit (46 characters before `.json`), the media-name limit (47), and the characters that become `_` (`&`, `?`).
 
 These are vendor facts that change as Google changes, so they live in the registry. Like every recognition fact, they are fixed in the shipped pack.
 
@@ -34,7 +34,7 @@ The container is one JSON object of at most 1 MiB, read whole. A larger file is 
 
 The parser derives no files. At the start of `file`, it runs one pass over the stage's recognised sidecars. The pass has one state entry, uses the expansion slice budget and resumes from its last row. It appends one row per sidecar, holding the sidecar's path, its name key (Decision 2, steps 1 and 3), and the time and the caption it carries. A row never holds a position.
 
-**Photos wait for the pass.** While the pass runs, the stage's images and videos stay out of selection, the same way an export that is still being read stays out today. When the pass ends, it decides every pair in the stage in one step from its rows (Decision 2, step 4) and records the pairs. Only then do the photos file, each carrying its pair's time and caption on its planned item. The cost is a delay: photos start filing after the pass, which reads about a kilobyte per sidecar.
+**Photos wait for the pass.** While the pass runs, the stage's images and videos stay out of selection by their media type, not as a list of paths, the same way an export that is still being read stays out today. The hold lifts when the pass ends in any state, done or partial, so a read fault never holds photos back. When the pass ends, it decides every pair in the stage in one step from its rows (Decision 2, step 4) and records the pairs. Only then do the photos file, each carrying its pair's time and caption on its planned item. The cost is a delay: photos start filing after the pass, which reads about a kilobyte per sidecar.
 
 A sidecar row is not a derived file and adds nothing to the stage total. Each sidecar counts once, as a staged member that is left out. Its reason is worked out when filing reaches done, from its photo's filing result (Decision 5).
 
@@ -43,7 +43,7 @@ A sidecar row is not a derived file and adds nothing to the stage total. Each si
 Names are compared exactly after NFC normalisation, without their copy numbers, which are compared separately. Candidates are the images and videos in the sidecar's own staged folder.
 
 1. **From the sidecar's name.** Strip `.json`, a copy number `(n)` before it, and the suffix word or any cut form of it. What remains is the base. The base may carry its own copy number before its extension.
-2. **By name.** A media file fits when its stem equals the base's stem, or the base's stem is the media stem cut where the sidecar name reached its limit, and both extensions name the same media type. A copy number must agree too: when the sidecar has one, in either place, the media name has the same one, and when the sidecar has none, the media name has none. A `(n)` that is part of the name itself (`photo (1).jpg`) is read both ways, and the reading that the title confirms is used.
+2. **By name.** A media file fits when its stem equals the base's stem and both extensions name the same media type, or, when the sidecar name is at the registry's sidecar-name limit, when the base is a prefix of the media name. Step 3 confirms a prefix fit. A copy number must agree too: when the sidecar has one, in either place, the media name has the same one, and when the sidecar has none, the media name has none. A `(n)` that is part of the name itself (`photo (1).jpg`) is read both ways, and the reading that the title confirms is used.
 3. **By title.** The media name without its copy number must agree with `title`. Apply the replaced characters and the media-name limit to the title first, compare the stems, and require that both extensions name the same media type.
 4. **One to one.** When the pass ends, a sidecar pairs only when exactly one file fits it and that file fits no other sidecar in the stage. In every other case, each sidecar involved stays unpaired with a reason: `no-photo` or `ambiguous`.
 

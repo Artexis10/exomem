@@ -6,7 +6,7 @@ Google Takeout exports Google Photos as the media files plus one JSON sidecar pe
 
 ## What changes
 
-- **Sidecars are read, never filed.** The cell pairs a recognised Takeout sidecar with the one photo or video in its folder that it describes, and only on a one-to-one match. No recognised sidecar files as a Source, paired or not. The filing view counts each sidecar by its outcome: applied, nothing to apply, photo not filed, or unpaired.
+- **Sidecars are read, never filed.** The cell reads every recognised sidecar in a stage before any photo in it files, then pairs a recognised Takeout sidecar with the one photo or video in its folder that it describes, and only on a one-to-one match. No recognised sidecar files as a Source, paired or not. The filing view counts each sidecar by its outcome: applied, nothing to apply, photo not filed, or unpaired.
 - **A photo that states no time gets the sidecar's time.** The time is recorded with a new source `export-sidecar` in the `capture-date-sources` vocabulary. That source ranks below every source that reads the photo itself or a matching original. The capture record names the sidecar it came from, and the date survives later re-reads and owner maintenance runs.
 - **The owner's caption is kept.** A non-empty sidecar description goes into the photo Source's description section, through the same redaction as an upload's description, so search finds it.
 
@@ -15,7 +15,8 @@ Google Takeout exports Google Photos as the media files plus one JSON sidecar pe
 ### Modified Capabilities
 
 - `media-capture-metadata`: a new evidence source, its rank, and survival of dates that no re-read can reproduce.
-- `app-export-import`: a JSON-object container, sidecar pairing, outcome counts, and a sidecar that files nothing.
+- `app-export-import`: a JSON-object container, sidecar pairing, photos that wait for their sidecars, outcome counts, and a sidecar that files nothing.
+- `structured-retrieval-filters`: the evidence-only filter example includes `export-sidecar`.
 
 ## Impact
 
