@@ -411,7 +411,7 @@ def read(fmt: SourceFormat, stream: BinaryIO, *, start: int = 0, workdir: Path |
                 fault = type(error).__name__
             quiet = 0 if target.events != events else quiet + len(chunk)
             if fault is None and quiet > _MAX_QUIET_BYTES:
-                fault = "a single comment, instruction or attribute value is longer than 64 MiB"
+                fault = "a single comment, instruction, attribute value or start tag is longer than 4 MiB"
             yield from target.drain()
             if fault is not None or not chunk:
                 break
