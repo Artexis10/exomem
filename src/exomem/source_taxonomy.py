@@ -188,8 +188,8 @@ class Definition:
     builtin: bool = False
     requires_url: bool = False
     #: Sensitivity class keys (kinds only) that a Source or Evidence capture of this kind takes when
-    #: it declares none. A vault declares them; the shipped kinds declare none. A capture applies only
-    #: the keys that the `sensitivity-classes` registry holds, and skips the rest.
+    #: it declares none. A vault declares them; the shipped kinds declare none. A capture applies
+    #: only the keys that the `sensitivity-classes` registry holds, and skips the rest.
     sensitivity: tuple[str, ...] = ()
     #: The domain this one sits under (domains only): its profile is served after this domain's own.
     parent: str | None = None
@@ -754,7 +754,8 @@ def _definition_from_entry(
         requires_url = bool(existing.requires_url) if existing else False
     sensitivity = existing.sensitivity if existing else ()
     if axis == "source_kind" and "sensitivity" in entry:
-        sensitivity = tuple(dict.fromkeys(item.strip() for item in _string_list(entry["sensitivity"])))
+        declared = _string_list(entry["sensitivity"])
+        sensitivity = tuple(dict.fromkeys(item.strip() for item in declared))
     parent = existing.parent if existing else None
     if axis == "domain" and entry.get("parent"):
         try:

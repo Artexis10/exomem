@@ -1932,6 +1932,7 @@ def update_record(
                 "INVALID_RECORD_PRESENTATION", "collection has no presentation recipe"
             )
         record_governance.require_mutation_visibility(root, manifest)
+        changes = _registered_classes(root, manifest, changes)
         adapter = record_formats.load_adapter(root, manifest)
         if not adapter.mutable:
             adapter.refuse_mutation("update")
