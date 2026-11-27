@@ -8,7 +8,7 @@ A save that the caller sent is never lost because the vault was busy. When the m
 
 ### Requirement: A busy save is accepted durably instead of refused
 
-The serving HTTP process SHALL accept a save durably when the vault mutation boundary stays busy, instead of returning `MUTATION_BUSY`. Acceptance SHALL persist the save to a machine-local store that survives a process kill and a power loss before the receipt is returned. An eligible save SHALL wait for the boundary for at most the intake wait (15 s by default) before it is accepted.
+The serving HTTP process SHALL accept a save durably when the vault mutation boundary stays busy, instead of returning `MUTATION_BUSY`. Acceptance SHALL persist the save to a machine-local store that survives a process kill and a power loss before the receipt is returned. An eligible save SHALL wait for the boundary for at most the intake wait (2 s by default) before it is accepted.
 
 #### Scenario: A save during a long hold comes back queued
 
@@ -75,7 +75,7 @@ A save that meets no contention SHALL NOT read the intake store, and a fault in 
 
 ### Requirement: Queued saves land once, in arrival order
 
-One drainer in the serving process SHALL apply queued saves in acceptance order, through the ordinary dispatcher, as the principal that sent each save. A contention refusal during application SHALL leave the save queued and retried, without a limit on attempts. A new eligible save that arrives while saves are queued SHALL wait behind them and SHALL be queued behind them if the queue does not empty within the intake wait.
+One drainer in the serving process SHALL apply queued saves in acceptance order, through the ordinary dispatcher, as the principal that sent each save. A contention refusal during application SHALL leave the save queued and retried, without a limit on attempts. A new eligible save that arrives while saves are queued SHALL be queued behind them at once, without waiting for the queue to empty.
 
 #### Scenario: Two clients' saves land after the hold ends
 
@@ -88,6 +88,13 @@ One drainer in the serving process SHALL apply queued saves in acceptance order,
 - **WHEN** a `remember` save is queued
 - **AND** an `edit_memory` of that page arrives while the create is still queued
 - **THEN** the edit is applied after the create
+
+#### Scenario: A save behind queued saves gets its receipt at once
+
+- **WHEN** saves are queued and not yet applied
+- **AND** the owner sends another eligible save
+- **THEN** the call returns its queued receipt without waiting the intake wait
+- **AND** the save is applied after the earlier ones
 
 ### Requirement: A replay commits at most once
 
@@ -195,3 +202,20 @@ Only a caller whose saves may be queued SHALL read queued saves or the intake co
 
 - **WHEN** a caller with a delegated authorization session of the owner reads `review_memory(mode="queued-write")`
 - **THEN** it receives `QUEUED_WRITE_OWNER_ONLY`
+
+### Requirement: A save its arguments condemn is refused, not queued
+
+Before the intake accepts a save, the serving process SHALL apply the argument-only checks that exist for it: compact observation metadata, an episode recap's own validation, and the argument rules of `record_memory` and `plan_memory`. A save that one of them refuses SHALL get that refusal at once and SHALL NOT be queued. A refusal that reads vault state SHALL stay at the replay.
+
+#### Scenario: An oversized recap behind the queue is refused at once
+
+- **WHEN** an owner sends an `episode_memory` record whose decided item exceeds its size cap
+- **AND** earlier saves are still queued
+- **THEN** the call returns `EPISODE_TOO_LARGE`
+- **AND** the intake holds only the earlier saves
+
+#### Scenario: An edit of a page that a queued save creates still queues
+
+- **WHEN** an owner sends an edit of a page that a queued save will create
+- **AND** that queued save has not been applied yet
+- **THEN** the edit is queued behind it, not refused for the missing page

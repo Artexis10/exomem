@@ -86,7 +86,9 @@ MAX_ARGUMENT_BYTES = 4 * 1024 * 1024
 APPLIED_RETENTION_SECONDS = 7 * 24 * 60 * 60.0
 FIRST_BACKOFF_SECONDS = 1.0
 MAX_BACKOFF_SECONDS = 30.0
-_DEFAULT_INTAKE_WAIT_SECONDS = 15.0
+#: Long enough for an ordinary boundary wait (99% of direct commits waited under 1.6 s on a busy
+#: personal service), short enough that a busy caller gets its receipt at once.
+_DEFAULT_INTAKE_WAIT_SECONDS = 2.0
 _MAX_INTAKE_WAIT_SECONDS = 600.0
 #: How often a drainer looks again at a row that another live process is applying.
 _OTHER_OWNER_POLL_SECONDS = 5.0
@@ -620,16 +622,6 @@ class Drainer:
         with self._condition:
             return self._backlog_unsettled()
 
-    def wait_for_empty_queue(self, deadline: float) -> bool:
-        """Wait until no save is open or `deadline` (monotonic) passes; return whether it emptied."""
-        with self._condition:
-            while self._backlog_unsettled():
-                remaining = deadline - time.monotonic()
-                if remaining <= 0 or self._stop.is_set():
-                    return False
-                self._condition.wait(min(remaining, 1.0))
-            return True
-
     def enter(self, origin: str) -> tuple[str, str] | None:
         """Admit one send of the save with this origin, atomically.
 
@@ -1155,13 +1147,15 @@ class Admission:
 
     def _run_in_flight(self, call: Callable[[], Any], started: float, deadline: float) -> Any:
         try:
-            behind = self.drainer.has_backlog() and not self.drainer.wait_for_empty_queue(deadline)
+            backlog = self.drainer.has_backlog()
         except Exception:  # noqa: BLE001 - an intake fault must not stop an ordinary save
-            log.warning("write intake could not wait behind its queue", exc_info=True)
-            behind = False
-        if behind:
-            if self.refusal is not None:
-                raise self.refusal
+            log.warning("write intake could not read its queue", exc_info=True)
+            backlog = False
+        if backlog and self.refusal is not None:
+            # Refused whether it runs after the queue or never: waiting would only delay the answer.
+            raise self.refusal
+        if backlog:
+            # A queue rarely empties within a caller's wait, so waiting for it only delays the receipt.
             try:
                 # Behind earlier queued saves: run after them, never before.
                 return self._accept(reason="queue_not_empty", started=started)

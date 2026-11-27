@@ -3086,6 +3086,7 @@ def op_find(
     degraded: list[str] = []
     failed: list[str] = []
     dimension_check: dict[str, int] = {}
+    partial_coverage: list[str] = []
     dimension_groups: list[dimension_display_module.GroupRequest] = []
     group_blocks: list[dict[str, Any]] | None = None
     projected_continuation: str | None = None
@@ -3176,6 +3177,7 @@ def op_find(
                 admit_path=admit_path,
                 dimension_check_out=dimension_check,
                 dimension_groups_out=dimension_groups,
+                partial_coverage_out=partial_coverage,
             )
         # Values of small datasets are a separate lane that `find` does not run. It answers an
         # unfiltered text query, and `annotate_hits` below releases its hits only at full level.
@@ -3216,6 +3218,8 @@ def op_find(
         with find_module._span(timings, "release_gate"):
             release = egress_module.annotate_hits(vault_root, hits, limit=limit, purpose=purpose)
             hits = release.hits
+        # A stopped keyword scan shortens the result only when release kept fewer hits than the limit.
+        find_module.settle_partial_coverage(partial_coverage, hits, limit=limit)
         if dimension_groups:
             # Grouping orders and marks the released hits; the limit has already cut them.
             with find_module._span(timings, "dimension_groups"):
@@ -3417,6 +3421,8 @@ def op_find(
         and dimension_check["checked"] >= retrieval_limit
         else None
     )
+    # An exact dimension scan stopped at its designed bound: no lane failed, and more matches may exist.
+    partial_coverage_marker = sorted(set(partial_coverage)) or None
     if (
         timings_dict is None
         and timings_suppressed is None
@@ -3426,6 +3432,7 @@ def op_find(
         and projected_continuation is None
         and budget_block is None
         and dimension_block is None
+        and partial_coverage_marker is None
         and group_blocks is None
         and registry_lag is None
     ):
@@ -3458,6 +3465,8 @@ def op_find(
         out["budget"] = budget_block
     if dimension_block is not None:
         out["dimension_check"] = dimension_block
+    if partial_coverage_marker is not None:
+        out["partial_coverage"] = partial_coverage_marker
     if group_blocks is not None:
         out["dimension_groups"] = group_blocks
     if registry_lag is not None:
@@ -7164,7 +7173,7 @@ def _search_notice(envelope: Mapping[str, Any]) -> str | None:
         return _SEARCH_NOTICE_DEGRADED
     if envelope.get("budget"):
         return _SEARCH_NOTICE_BUDGET
-    if envelope.get("dimension_check"):
+    if envelope.get("dimension_check") or envelope.get("partial_coverage"):
         return _SEARCH_NOTICE_DIMENSION
     return None
 
@@ -7219,8 +7228,8 @@ def _cite_search_hits(vault_root: Path, hits: list) -> None:
 def _agent_search_reply(result: list | dict, *, internals: bool) -> dict:
     """Shape a search result for the agent: a summary, the hits, and one notice when partial.
 
-    Index, warming, budget and dimension-check state become a `notice` sentence; a dimension check
-    that dropped hits after the limit also leads the summary with its count. A caller that asked
+    Index, warming, budget, dimension-check and partial-coverage state become a `notice` sentence; a
+    dimension check that dropped hits after the limit also leads the summary with its count. A caller that asked
     for timings or an explanation asked to see retrieval internals, so those raw blocks stay
     beside them.
     """
@@ -7236,7 +7245,7 @@ def _agent_search_reply(result: list | dict, *, internals: bool) -> dict:
         sentence for sentence in (_search_notice(envelope), envelope.pop("notice", None)) if sentence
     ) or None
     dimension_check = envelope.get("dimension_check")
-    for internal in ("warming", "degraded", "budget", "dimension_check", "lag"):
+    for internal in ("warming", "degraded", "budget", "dimension_check", "partial_coverage", "lag"):
         if internals:
             continue
         envelope.pop(internal, None)
@@ -15900,16 +15909,32 @@ def busy_intake_applies(command: Command, arguments: Mapping[str, Any]) -> bool:
     return operations.queues_when_busy(action, arguments)
 
 
-def refusal_before_queueing(command: Command, arguments: Mapping[str, Any]) -> ValueError | None:
+def refusal_before_queueing(command: Command, arguments: Mapping[str, Any]) -> Exception | None:
     """The refusal that a save's arguments alone are certain to get, or None.
 
     A queued receipt promises a save, and a replay that the arguments already condemn would
-    fail only later. The check reads no page; `observe_memory` is the one command that has it.
+    fail only later. Each check reads no page, so a save that depends on an earlier queued
+    save is never refused for what that save has not written yet.
     """
-    if command.name != "observe_memory":
+    if command.name == "observe_memory":
+        error = observe_memory_module.argument_refusal(arguments)
+        return None if error is None else error.leaf_error()
+    if command.name == "episode_memory":
+        return episode_memory_module.argument_refusal(dict(arguments))
+    rules = _ARGUMENT_RULES.get(command.name)
+    operations = None if rules is None else operation_entries.register_operations(command.name)
+    if rules is None or operations is None or operations.selector is None:
         return None
-    error = observe_memory_module.argument_refusal(arguments)
-    return None if error is None else error.leaf_error()
+    # These rules take the caller's own selector value and refuse an unknown one themselves; the
+    # tool-level arguments its renderings declare are not operation fields.
+    skipped = {operations.selector, *(name for rendering in _renderings_for(command.name)
+                                      for name in rendering.tool_arguments)}
+    fields = {key: value for key, value in arguments.items() if key not in skipped}
+    try:
+        rules.validate(arguments.get(operations.selector), fields)
+    except Exception as error:  # noqa: BLE001 - the command's own refusal, whatever its type
+        return error
+    return None
 
 
 _MCRC = frozenset({"mcp", "rest", "cli"})
