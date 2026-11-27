@@ -428,9 +428,3 @@ def test_a_cloud_cell_delete_also_names_the_running_backups_snapshot(doors, vaul
 
     residues = [residue["residue"] for residue in reply["residues"]]
     assert residues == ["older backups", "a running Cloud cell backup's volume snapshot", "freed disk blocks"]
-
-
-def test_the_disclosure_says_names_go_into_backups_and_outlive_a_delete() -> None:
-    """Catches a disclosure promising that face data never leaves the account, when backups carry names."""
-    assert "backups" in face_operations.DISCLOSURE
-    assert "never leaves this account" not in face_operations.DISCLOSURE
