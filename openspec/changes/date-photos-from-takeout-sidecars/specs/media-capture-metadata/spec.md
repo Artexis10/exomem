@@ -51,6 +51,16 @@ One owner operation SHALL add capture metadata to existing image and video sidec
 
 ## ADDED Requirements
 
+### Requirement: A file-name date reads the name its owner gave
+
+The capture date that a file name states SHALL be read from the name recorded as the page's `original_filename`, falling back to the stored name when none is recorded, for every filed photo or video, in the media worker and in the owner backfill. The cell's filer stores an original under a name of its own, so the stored name SHALL NOT be the only one read.
+
+#### Scenario: A photo filed under a name of its own
+
+- **WHEN** a photo whose original name is `20200314_101112.jpg`, with no capture time in its bytes, is filed under a stored name that states no time
+- **THEN** the media worker records `2020-03-14T10:11:12` with source `file-name`
+- **AND** the owner backfill records the same for such a photo that the media worker has not read
+
 ### Requirement: The owner operation skips what it cannot read safely
 
 The capture-metadata operation SHALL skip and count a sidecar that the boundary guard cannot classify, and an original whose bytes are not on the volume, which it SHALL never fetch. A file that states no capture metadata, whose name states no time and that matches no original SHALL leave its sidecar unchanged. A recorded date SHALL NOT be replaced by a date of lower precedence.
@@ -62,12 +72,22 @@ The capture-metadata operation SHALL skip and count a sidecar that the boundary 
 
 ### Requirement: A Takeout sidecar dates a photo that states no time
 
-When a paired photo or video states no capture time and its name states none, its capture date SHALL come from the paired Takeout sidecar's `photoTakenTime`, with `capture_date_source: export-sidecar` and `capture_date_basis: utc`. A sidecar whose `photoTakenTime` equals its `creationTime` to the second SHALL give no time.
+When a paired photo or video states no capture time and its name states none, its capture date SHALL come from the paired Takeout sidecar's `photoTakenTime`, with `capture_date_source: export-sidecar` and `capture_date_basis: utc`, and the capture date SHALL be the UTC day of that time. A sidecar whose `photoTakenTime` equals its `creationTime` to the second, or is at or before 1970-01-01, SHALL give no time.
 
 #### Scenario: A received photo
 
 - **WHEN** a JPEG with no EXIF capture time and an undated name files with a paired sidecar whose `photoTakenTime` is 2019-05-04 10:00:00 UTC and whose `creationTime` is a later day
-- **THEN** the photo's capture date is 2019-05-04 with source `export-sidecar`
+- **THEN** the photo's capture date is 2019-05-04 with source `export-sidecar` and basis `utc`
+
+#### Scenario: An evening west of UTC
+
+- **WHEN** a paired sidecar's `photoTakenTime` is 2019-05-05 02:00:00 UTC, which is the evening of 2019-05-04 at UTC-5, and the photo states no time
+- **THEN** the photo's capture date is 2019-05-05 with basis `utc`, as a video's UTC container time gives it
+
+#### Scenario: A time at or before 1970
+
+- **WHEN** a paired sidecar's `photoTakenTime` is `0` or negative, and the photo states no time
+- **THEN** the photo has no evidence capture date
 
 #### Scenario: Google copied the upload time
 
