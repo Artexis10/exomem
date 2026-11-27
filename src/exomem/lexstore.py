@@ -5164,12 +5164,14 @@ def search_semantic_units_result(
     rank_query: bool = False,
     scan_limit: int | None = None,
     scan_stopped: list[bool] | None = None,
+    scan_whole_pages: bool = False,
 ) -> CatalogQueryResult[list[SemanticUnitLexicalHit]]:
     """Typed exact-category unit query preserving every catalog outcome.
 
     `rank_query` ranks the eligible rows by the query's BM25 match and keeps the best `k`; an
     unavailable FTS5 answers `unsupported`. `scan_limit` bounds the proposed rows that fail the
     exact check; `scan_stopped` receives True when the scan stops there with rows left unchecked.
+    `scan_whole_pages` lets an unranked scan finish the page it is in before it stops there.
     `validated` keeps each row stamp's currency check
     for the caller's request, so several queries over the same parents read each one once. A request
     shares it across its activation lanes, so a parent whose file changes
@@ -5222,6 +5224,7 @@ def search_semantic_units_result(
         filter_plan=filter_plan,
         scan_limit=scan_limit,
         scan_stopped=scan_stopped,
+        scan_whole_pages=scan_whole_pages,
     )
     if not result.readiness.complete or not _validate_current:
         return result
@@ -5288,6 +5291,7 @@ def search_semantic_units_result(
                 rank_query=rank_query,
                 scan_limit=scan_limit,
                 scan_stopped=scan_stopped,
+                scan_whole_pages=scan_whole_pages,
             )
     _schedule_repair(vault_root)
     return CatalogQueryResult(
@@ -14370,6 +14374,7 @@ class LexicalStore:
         parents_first: bool = False,
         scan_limit: int | None = None,
         scan_stopped: list[bool] | None = None,
+        scan_whole_pages: bool = False,
     ) -> CatalogQueryResult[list[SemanticUnitLexicalHit]]:
         """Ready-catalogue unit query, optionally ranking bounded material terms.
 
@@ -14423,6 +14428,7 @@ class LexicalStore:
                 registry_scope=registry_scope,
                 selected_units=view, statistics=statistics, parents_first=parents_first,
                 filter_plan=filter_plan, scan_limit=scan_limit, scan_stopped=scan_stopped,
+                scan_whole_pages=scan_whole_pages,
             )
 
         return self._serve_from_ready_catalog_result(
@@ -14457,6 +14463,7 @@ class LexicalStore:
         parents_first: bool = False,
         scan_limit: int | None = None,
         scan_stopped: list[bool] | None = None,
+        scan_whole_pages: bool = False,
     ) -> list[SemanticUnitLexicalHit]:
         """Units whose own selected meaning matches, ranked, then limited to `k`.
 
@@ -14622,9 +14629,15 @@ class LexicalStore:
                     f"WHERE {where} ORDER BY u.updated DESC, u.parent_path DESC, u.source_order",
                     params,
                 )
+            # The unranked order keeps each page's units together, so a whole-page scan stops where one starts.
+            whole_pages = scan_whole_pages and not ranked
+            page = None
             for row, unit in view.candidates(rows):
-                if len(hits) >= k or stop_scan():
+                if len(hits) >= k:
                     break
+                if not (whole_pages and str(row[1]) == page) and stop_scan():
+                    break
+                page = str(row[1])
                 if wanted(row, unit):
                     hits.append(_unit_hit(row, unit, row[18]))
                 else:

@@ -133,6 +133,10 @@ _STORE_UNAVAILABLE_COMPONENT = "collection_store"
 # result covers the best-ranked rows only. No lane failed: the result is cacheable and is not a
 # degradation, and the caller says more matches may exist (`partial_coverage_out`).
 PARTIAL_DIMENSION_SCAN = "dimension_scan_bound"
+# A keyword scan's stop, which the caller decides after release. Recency orders both the scan and the
+# result, so a match past the stop ranks after every active hit: it matters only when the released
+# result holds fewer active units than the caller's limit (`settle_partial_coverage`).
+KEYWORD_SCAN_BOUND = "keyword_scan_bound"
 
 
 def _record_degradation(lane: str) -> None:
@@ -1614,6 +1618,20 @@ def caller_admission(vault_root: Path) -> Callable[[str], bool] | None:
     return egress.content_admission(vault_root, who)
 
 
+def settle_partial_coverage(partial_coverage: list[str], released: list[Any], *, limit: int) -> None:
+    """Decide a stopped keyword scan (`KEYWORD_SCAN_BOUND`) on the hits that release kept, in place.
+
+    The released hits are in their final order and cut to the caller's `limit`.
+    """
+    if KEYWORD_SCAN_BOUND not in partial_coverage:
+        return
+    partial_coverage[:] = [marker for marker in partial_coverage if marker != KEYWORD_SCAN_BOUND]
+    # An active match past the stop would rank above a demoted unit, so a demoted unit fills no place.
+    settled = sum(not (isinstance(hit, SemanticUnitHit) and hit.demoted) for hit in released[:limit])
+    if settled < limit and PARTIAL_DIMENSION_SCAN not in partial_coverage:
+        partial_coverage.append(PARTIAL_DIMENSION_SCAN)
+
+
 @governance_policy.request_policy_snapshot()
 @_with_catalog_scope
 def find(
@@ -1696,7 +1714,9 @@ def find(
     `partial_coverage_out`: optional caller-owned list. A designed bound that
     stopped an exact dimension scan, where the result may lack matches past it,
     appends `PARTIAL_DIMENSION_SCAN` here. No lane failed, so the result is
-    cached with the marker and a cache hit reports it again.
+    cached with the marker and a cache hit reports it again. A stopped keyword
+    scan appends `KEYWORD_SCAN_BOUND` instead, which the caller settles on its
+    released hits with `settle_partial_coverage`.
 
     `dimension_groups_out`: optional caller-owned list. When the filter asks for
     dimension groups (`structured_filters.requested_groups`) and the search
@@ -2489,7 +2509,7 @@ def find(
             )
         cache_key = (request_key, fresh)
         prior_key: tuple | None = None
-        prior_hits: tuple[list[Hit], tuple[str, str]] | None = None
+        prior_hits: tuple[list[Hit], tuple[str, str], tuple[str, ...]] | None = None
         prior_checkpoints: tuple[
             tuple[str, freshness.RecallFreshnessCheckpoint], ...
         ] | None = None
@@ -3317,6 +3337,7 @@ class _UnitCandidate:
     vector_score: float | None = None
     relation_match: Any = None
     mixed_units_truncated: int = 0
+    demoted: bool = False
 
     def __getattr__(self, name: str) -> Any:
         # A unit's governed rows are read from its selected interpretation, as `as_of` is.
@@ -3606,6 +3627,7 @@ def _finish_unit_candidates(
             )
             verified.relation_match = candidate.relation_match
             verified.mixed_units_truncated = candidate.mixed_units_truncated
+            verified.demoted = candidate.demoted
             out.append(verified)
         except (OSError, UnicodeError, ValueError, KeyError, TypeError):
             if catalog is not None:
@@ -4098,9 +4120,10 @@ def _find_semantic_units(
         )
 
     def finish(hits):
-        if partial and partial_coverage_out is not None and PARTIAL_DIMENSION_SCAN not in partial_coverage_out:
-            # An exact scan stopped at its bound: no lane failed, but the result may lack matches past it.
-            partial_coverage_out.append(PARTIAL_DIMENSION_SCAN)
+        # An exact scan stopped at its bound: no lane failed, but the result may lack matches past it.
+        marker = PARTIAL_DIMENSION_SCAN if partial else KEYWORD_SCAN_BOUND if keyword_stopped else None
+        if marker is not None and partial_coverage_out is not None and marker not in partial_coverage_out:
+            partial_coverage_out.append(marker)
         if _candidate_window is not None:
             _candidate_window.exhausted = candidate_window_exhausted
         return hits if _defer_hydration else _finish_unit_candidates(
@@ -4113,9 +4136,11 @@ def _find_semantic_units(
             stale_out=stale_out, parent_reads=parent_reads, recall_checkpoint=recall_checkpoint,
         )
 
-    def dimension_rows(text: str, *, k: int, rank_query: bool = False, literal_all: bool = False):
+    def dimension_rows(
+        text: str, *, k: int, rank_query: bool = False, literal_all: bool = False, whole_pages: bool = False,
+    ):
         # Rows the store checked exactly against the dimension filter, and whether it stopped after
-        # `bound` rejected rows.
+        # `bound` rejected rows (with `whole_pages`, at the first page boundary after them).
         stopped: list[bool] = []
         result = lexstore.search_semantic_units_result(
             vault_root,
@@ -4137,6 +4162,7 @@ def _find_semantic_units(
             _validate_current=False,
             scan_limit=bound,
             scan_stopped=stopped,
+            scan_whole_pages=whole_pages,
         )
         _set_catalog_timing_profile(timings, result.readiness)
         if not result.readiness.complete:
@@ -4144,8 +4170,9 @@ def _find_semantic_units(
         return list(result.value or []), bool(stopped)
 
     def newest_members_read():
-        # The newest members within the bound, and whether more may exist past it.
-        members, stopped = dimension_rows("", k=bound + 1)
+        # The newest members within the bound, and whether more may exist past it. The read finishes the
+        # page it is in, so one long page of nonmembers cannot hide its own members from the vector lane.
+        members, stopped = dimension_rows("", k=bound + 1, whole_pages=True)
         return members, stopped or len(members) > bound
 
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
@@ -4159,6 +4186,8 @@ def _find_semantic_units(
     candidate_window_exhausted = False
     # Set when an exact dimension scan stopped at its bound and the result may lack members past it.
     partial = False
+    # Set when a keyword scan stopped at its bound, for the caller to decide after release.
+    keyword_stopped = False
     lexical_capped = False
     # The unit lane consumes the same branch-preserving DNF the page lane uses:
     # an exact category/kind plan seeds candidates through `algebra.clauses`
@@ -4380,10 +4409,14 @@ def _find_semantic_units(
         return finish(ordered_hits)
 
     if mode == "keyword":
+        # Only the caller knows how many hits release keeps; a request without a limit has no final cut.
+        if limit is None:
+            partial = lexical_capped
+        else:
+            keyword_stopped = lexical_capped
         if not records:
             if candidate_window_exhausted and pushed_dimensions and limit is not None:
                 return widen()
-            partial = lexical_capped
             return finish([])
         tokens = query.lower().split()
         ordered = sorted(
@@ -4413,12 +4446,12 @@ def _find_semantic_units(
         if candidate_window_exhausted and pushed_dimensions and limit is not None and short:
             # Recency is the final order, so only a short or superseded prefix needs more rows.
             return widen()
-        partial = lexical_capped and short
         selected = ordered if limit is None else ordered[:limit]
-        hits = [
-            _semantic_unit_hit(page, unit, bm25_rank=None, bm25_score=None)
-            for page, unit, _source_order in selected
-        ]
+        hits = []
+        for record in selected:
+            hit = _semantic_unit_hit(record[0], record[1], bm25_rank=None, bm25_score=None)
+            hit.demoted = superseded[id(record)]
+            hits.append(hit)
         if retrieval_trace is not None:
             retrieval_trace.record_unit_keyword(
                 selected, status_basis=status_basis, prefer_active=prefer_active
@@ -4539,6 +4572,9 @@ def _find_semantic_units(
             _record_degradation("vector")
             if failed_out is not None and "vector" not in failed_out:
                 failed_out.append("vector")
+        if member_refs is not None and vector_hits:
+            # The vector lane ranked every member, so the lexical scan's stop left none out.
+            partial = False
 
     # Pure vector mode keeps lexical rows cold unless the vector lane could not
     # produce a trustworthy ranking. This avoids reparsing the same candidate

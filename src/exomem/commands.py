@@ -3218,6 +3218,8 @@ def op_find(
         with find_module._span(timings, "release_gate"):
             release = egress_module.annotate_hits(vault_root, hits, limit=limit, purpose=purpose)
             hits = release.hits
+        # A stopped keyword scan shortens the result only when release kept fewer hits than the limit.
+        find_module.settle_partial_coverage(partial_coverage, hits, limit=limit)
         if dimension_groups:
             # Grouping orders and marks the released hits; the limit has already cut them.
             with find_module._span(timings, "dimension_groups"):

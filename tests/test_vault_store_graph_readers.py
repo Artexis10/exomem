@@ -1022,10 +1022,9 @@ def test_a_family_dimension_finds_members_the_vector_ranks_last_in_one_read(
     """Catches vector reads that grow with the other units of a member's page, and a filtered search
     that stops short of members that both lanes rank last."""
     body = "# Family source\n\n" + "\n".join(
-        f"## Claim\n- id: noise-{index}\n\nSignal number {index}.\n" for index in range(100)
+        f"## Claim\n- id: noise-{index}\n\nSignal number {index}.\n" for index in range(300)
     )
-    # The members carry no query word: both lanes rank all 100 nonmembers above them, which stay
-    # within the rows that an exact scan may reject before it stops.
+    # The members carry no query word: both lanes rank all 300 nonmembers above them.
     body += "\n".join(
         f"## Claim\n- id: member-{index}\n- relations: derived_from: [[Family target]]\n\n"
         f"Qualifying source material for outcome {index}.\n"
@@ -1124,6 +1123,50 @@ def test_a_sparse_family_dimension_checks_no_more_rows_as_the_corpus_grows(
     # The cache serves the repeat with its notice; a restricted caller's search is never cached.
     assert first_checks > 0
     assert repeat_checks == (first_checks if restricted else 0)
+
+
+@pytest.mark.parametrize(
+    ("limit", "superseded", "notice"), [(5, 0, False), (10, 0, False), (5, 2, True)],
+    ids=["limit-5", "limit-10", "newest-pages-superseded"],
+)
+def test_a_stopped_keyword_scan_says_more_matches_may_exist_only_when_release_keeps_too_few(
+    stored, writer, limit, superseded, notice,  # noqa: F811
+):
+    """Catches a keyword notice decided on the over-fetch pool, which a policy makes larger than the
+    caller's limit: a scan that stops after the limit is full still said more matches may exist.
+    A unit of a superseded page ranks after every active match, including those past the stop."""
+    def source(page):
+        status = "status: superseded\n" if page >= 10 - superseded else ""
+        body = "\n".join(f"## Claim\n- id: noise-{unit}\n\nSignal note {unit}.\n" for unit in range(18))
+        body += "".join(
+            f"\n## Claim\n- id: member-{member}\n- relations: derived_from: [[Family target]]\n\n"
+            f"Signal from member {page}{member}.\n"
+            for member in "ab"
+        )
+        return write.PagePut(
+            f"Knowledge Base/Notes/Source {page}.md",
+            f"---\nupdated: 2026-01-{10 + page}\n{status}---\n# Source {page}\n\n{body}".encode(),
+        )
+
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=(
+        *(source(page) for page in range(10)),
+        write.PagePut("Knowledge Base/Notes/Family target.md", b"# Family target\n\nSurvey material.\n"),
+    )))
+    # Any policy makes release over-fetch, so the search asks for about twice the caller's limit.
+    restrict_external(stored, 'tags: ["secret"]')
+
+    result = commands.op_ask_memory(
+        stored, query="signal", scope="kb-only", mode="keyword", result_level="unit",
+        filters={"unit.dimension": {"$eq": "provenance"}}, limit=limit, graph=False,
+    )
+
+    excerpts = [hit["excerpt"] for hit in result["hits"]]
+    assert len(excerpts) == limit
+    if not superseded:
+        # The newest members in recency order, as a scan without a bound returns them.
+        newest = [f"Signal from member {page}{member}." for page in range(9, -1, -1) for member in "ab"]
+        assert excerpts == newest[:limit]
+    assert (result.get("notice") == commands._SEARCH_NOTICE_DIMENSION) is notice
 
 
 def test_a_family_dimension_does_no_graph_work_for_unrelated_pages(stored, writer, monkeypatch):  # noqa: F811
