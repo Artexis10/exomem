@@ -464,7 +464,7 @@ prediction stays active and ranked, for the same reason a refuted experiment sta
 ### Recording a tried approach
 
 When you ran a test, trial or comparison that tried a change, write or update its `experiment` note in that
-turn. The note's `outcome:` is its one verdict, so the body carries no second verdict row. Use `refuted` when
+turn. The note's `outcome:` is the experiment's verdict; a `## Prediction` unit keeps its own `verdict:`. Use `refuted` when
 the result rules out the hoped-for gain, including a change that made the result worse: say the direction and
 size in the body. Use `inconclusive` when the interval includes no change or is too wide to say. The body holds:
 

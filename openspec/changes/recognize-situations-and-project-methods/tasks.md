@@ -59,7 +59,7 @@ Development expectations were frozen before generation and exclude later repair 
 The missing original client trace still limits historical replay.
 
 Qualified historical journeys cover guarded method edits, current-source reads, temporary overrides and unrelated-task exclusions.
-The method code and guidance remain unchanged across those journeys; the current integration checks qualify their reuse.
+Those journeys ran while retrieval rank still made method items; tasks 3.4 and 5.1 rerun them under the approval rule.
 The edit uses a public writer callback, and a fresh client may read the current source before application.
 This evidence does not claim actor-issued MCP writing, a changed-token reset or one journey on the final artifact.
 The paired development comparison establishes no measured gain or equivalence.

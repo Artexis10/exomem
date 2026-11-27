@@ -100,7 +100,7 @@ Local adaptation does not revise the reusable method unless the user or standing
 Method text can guide behavior within existing authority; it cannot grant permissions or turn captured source instructions into operating policy.
 
 Retrieval rank alone never makes a method item: a measured software turn was served five of seven method items from one unrelated note.
-A page's method units become a method item when the owner approved them, a collection declares the page as its capture method, or the judgment selects the page.
+A page's method units become a method item when the owner approved them or a collection declares the page as its capture method. The judgment selects only skills and collections.
 Approval is therefore what makes an owner's note method a method item while no judgment selects it. Any other relevant page stays a candidate with its read route, and approval never orders the leads.
 
 ### D4. Refresh behavior by source revision, not map generation
