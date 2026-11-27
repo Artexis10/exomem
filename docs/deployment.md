@@ -1884,7 +1884,8 @@ security boundary, because any process of your user can read the service
 configuration and run the command directly. To keep an excluded tenant away
 from this owner's memory, use a separate OS user or machine.
 `exomem auth revoke` does not check who issued a session. `--all` ends every
-session, remote ones included, and stays an operator action.
+session, remote ones included. Nothing enforces who runs it, so a wrapper for
+agents should never offer `--all`; leave it to the operator.
 
 A client then points at `http://127.0.0.1:8764/mcp` with
 `Authorization: Bearer <token file contents>`. Two helpers use the token file:
