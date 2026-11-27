@@ -476,7 +476,7 @@ def platform_support() -> PlatformSupport:
         return PlatformSupport(True)
     return PlatformSupport(
         False,
-        f"exomem has no held-filesystem backend for {sys.platform!r}; "
+        f"Evermatter has no held-filesystem backend for {sys.platform!r}; "
         "Linux and Windows are the platforms it can serve today",
     )
 

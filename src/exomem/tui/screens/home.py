@@ -143,7 +143,7 @@ def health_lines(sections: dict[str, Any], skin: Skin, budget: int) -> list[Text
             lines.append(
                 receipt(skin, "warn", "hooks", "not wired for your agents yet", budget=budget, label_width=NOW_FIELD)
             )
-            lines.append(continuation(skin, "run: exomem install-hook", indent=2))
+            lines.append(continuation(skin, "run: evermatter install-hook", indent=2))
 
     return lines
 

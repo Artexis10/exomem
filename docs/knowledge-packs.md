@@ -109,7 +109,7 @@ or ask a model to classify the vault.
 
 The safe loop is:
 
-1. Run `exomem setup` or `adopt_vault(mode="scan-only")`.
+1. Run `evermatter setup` or `adopt_vault(mode="scan-only")`.
 2. Review suggested packs or choose explicit packs for a fresh vault.
 3. Persist selected packs under `Knowledge Base/_Packs/`.
 4. Optionally save an adoption manifest under `Knowledge Base/_Adoption/`.
@@ -128,7 +128,7 @@ Packs do not bypass governance. They help agents choose product commands:
 | `review` | `list_review_items` |
 | `connect` | `inspect_memory` with the `connections` operations |
 | `adopt` | `adopt_vault(mode="scan-only")` before copy/compile modes |
-| `maintain` | `inspect_memory` with `maintenance.audit` for audit and dry-run; a remote `fix`, `backfill-ids` or `reconcile` write starts as a maintenance job from a dry run's `plan_id` and a `why`; the local CLI is `exomem maintain --fix` / `--reconcile` |
+| `maintain` | `inspect_memory` with `maintenance.audit` for audit and dry-run; a remote `fix`, `backfill-ids` or `reconcile` write starts as a maintenance job from a dry run's `plan_id` and a `why`; the local CLI is `evermatter maintain --fix` / `--reconcile` |
 | `record` observed state | `query_records`, `add_record` or `edit_record`; `records.create` on `manage_memory` |
 
 Agents should speak in product language. The user can say "save this warranty

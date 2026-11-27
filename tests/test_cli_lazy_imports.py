@@ -85,9 +85,9 @@ def test_help_discovers_product_commands_without_importing_heavy_stacks(tmp_path
 
     assert result.returncode == 0, result.stderr
     assert "MCP transport to serve" in result.stdout
-    assert "exomem bootstrap --help" in result.stdout
-    assert "exomem bootstrap --profile compact --json" in result.stdout
-    assert "exomem <command> --help" in result.stdout
+    assert "evermatter bootstrap --help" in result.stdout
+    assert "evermatter bootstrap --profile compact --json" in result.stdout
+    assert "evermatter <command> --help" in result.stdout
     _assert_no_heavy_modules(modules)
 
 

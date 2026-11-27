@@ -737,7 +737,7 @@ async def _run(args, config: CloudImportClientConfig, checkpoint: Path, progress
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem cloud", epilog="To download an owner export, run: exomem cloud export --help")
+        prog="evermatter cloud", epilog="To download an owner export, run: evermatter cloud export --help")
     commands = parser.add_subparsers(dest="command", required=True)
     command = commands.add_parser("import")
     command.add_argument("source", type=Path)

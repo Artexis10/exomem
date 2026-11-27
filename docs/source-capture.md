@@ -52,7 +52,7 @@ The initial atomic Source write stores identity and `capture_input_digest`; late
 
 Conflicting original inputs return `SOURCE_IDENTITY_CONFLICT` without a capture write.
 Files or adoption with source identity return `SOURCE_IDENTITY_TEXT_ONLY` before retrieval.
-The local `exomem attach` command supports `--lane source` for file capture without text identity.
+The local `evermatter attach` command supports `--lane source` for file capture without text identity.
 An unreadable or malformed canonical Source candidate returns `SOURCE_IDENTITY_UNAVAILABLE`; indexes cannot prove capture absence.
 The scan checks canonical pages in Sources and Evidence. Verified companion bindings distinguish Markdown originals from canonical pages.
 An original's frontmatter cannot supply a capture receipt or classify another page.

@@ -402,7 +402,7 @@ def test_context_pane_wraps_its_prose_instead_of_cutting_it():
     rendered = context_lines(item, {"target": {"path": item["path"]}}, SKIN, 54).plain
     flowed = " ".join(rendered.split())
     assert "bound to the fingerprint" in flowed, "the binding must survive the column"
-    assert "exomem serve http, then /studio/" in flowed
+    assert "evermatter serve http, then /studio/" in flowed
     assert "fingerp\u2026" not in rendered, "prose must wrap rather than lose its tail"
     assert all(len(line) <= 56 for line in rendered.splitlines())
 

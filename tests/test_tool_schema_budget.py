@@ -301,7 +301,7 @@ def test_cli_help_and_rest_point_to_the_contract_but_the_mcp_wire_does_not(
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "synthetic-test-key")
     server = _build_server(monkeypatch, tmp_path)
     pointer = semantic_authoring.CLI_REST_POINTER
-    assert 'bootstrap(profile="full")' in pointer and "exomem bootstrap --profile full" in pointer
+    assert 'bootstrap(profile="full")' in pointer and "evermatter bootstrap --profile full" in pointer
     assert all(pointer not in str(wire) for wire in _wires(server))
 
     openapi = (

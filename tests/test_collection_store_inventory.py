@@ -143,4 +143,4 @@ def test_an_inventory_from_a_process_without_the_store_says_why_it_lists_no_stor
     # The migration moved four collections into the store; the dataset stays in files.
     assert report["inventory"]["total"] == 5 and [row["path"] for row in listed] == [DATASET]
     assert "4 store collection" in report["outcome"], report.get("outcome")
-    assert "exomem collections migrate --dry-run" in report["outcome"]
+    assert "evermatter collections migrate --dry-run" in report["outcome"]

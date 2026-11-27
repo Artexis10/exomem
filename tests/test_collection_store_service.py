@@ -1408,7 +1408,7 @@ def test_a_coordinator_that_never_enrolled_the_store_names_adopt_local_which_ser
         finally:
             replaced.stop()
         assert refusal.value.code == "COLLECTION_STORE_ADOPTION_REQUIRED"
-        assert "exomem collections adopt-local" in refusal.value.message
+        assert "evermatter collections adopt-local" in refusal.value.message
         assert refusal.value.code not in refusal.value.message
         with pytest.MonkeyPatch.context() as shell:  # the owner's offline step, in this same process
             shell.setenv(OPERATOR, "operator")

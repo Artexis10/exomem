@@ -16,7 +16,7 @@ per-platform location for a packaged (wheel) install with no override:
 `%ProgramData%\exomem\logs` on Windows (machine-wide, since the service
 commonly runs as `LocalSystem` while the `exomem` CLI runs as the logged-in
 user), `~/Library/Logs/Exomem` on macOS, `$XDG_STATE_HOME/exomem/logs`
-(falling back to `~/.local/state/exomem/logs`) on Linux. `exomem doctor`
+(falling back to `~/.local/state/exomem/logs`) on Linux. `evermatter doctor`
 reports the resolved path under the `observability` check's `log_dir` detail
 (`--json`), so a misresolved directory is never silent. Every file below
 resolves through this SAME function — none of them may compute their own
@@ -38,7 +38,7 @@ directory independently.
 
 Each JSONL file rotates at a size cap (`EVERMATTER_JSONL_MAX_MB`, default 64MB),
 keeping exactly one prior generation (`<file>.1`). `usage.py` and `exomem
-trace`/`exomem logs` read both the live file and that generation. `ledger.jsonl`
+trace`/`evermatter logs` read both the live file and that generation. `ledger.jsonl`
 rotates differently — see below.
 `exomem.log`/`exomem-cli.log`/`exomem-media.log` use Python's standard
 `RotatingFileHandler` (`EVERMATTER_LOG_MAX_MB` default 5MB, `EVERMATTER_LOG_BACKUPS`
@@ -208,8 +208,8 @@ refusal or error. It is the only source that covers every call: `queries.jsonl`,
 tool that is none of those leaves no structured trace anywhere else. And it is
 the only one that records **which client called**.
 
-Read it with `exomem logs --file ledger`, join it with `exomem trace`, and check
-it with `exomem logs verify`.
+Read it with `evermatter logs --file ledger`, join it with `evermatter trace`, and check
+it with `evermatter logs verify`.
 
 ### What a row carries
 
@@ -282,7 +282,7 @@ it with `exomem logs verify`.
   ids that the installed MCP packages name and records the number of the rest as
   `client_extensions_other`. It also keeps `protocol_version` only when it has
   the shape of a date. Capability names are fields of the SDK's own model, so it
-  keeps them. `exomem doctor` reads the last 24 hours of these rows, from the
+  keeps them. `evermatter doctor` reads the last 24 hours of these rows, from the
   live ledger and its archive, and prints one line that names each client and
   revision with its capabilities and extensions, counted per tool call. It says
   "partial" and from when it counts when the history is shorter than a day, the
@@ -312,7 +312,7 @@ it with `exomem logs verify`.
   for any other outcome and for a write that names no page. Null means
   unknown, never zero. Both fields carry no content, so a cloud cell keeps
   them. A version 1 row lacks both; readers treat them as unknown, and
-  `exomem logs verify` accepts a chain that runs from version 1 into version 2.
+  `evermatter logs verify` accepts a chain that runs from version 1 into version 2.
 
 ### Where a write's time went (`spans`)
 
@@ -549,7 +549,7 @@ silent. A process restart resumes the chain from the live file's last row —
 `sequence` never resets.
 
 ```
-exomem logs verify
+evermatter logs verify
 ```
 
 Walks the archive and the live file as one chain, **anchored** to the genesis
@@ -641,8 +641,8 @@ returns 404; counters stop accumulating).
 ## Tracing a request
 
 ```
-exomem trace <request-id>
-exomem trace <request-id> --json
+evermatter trace <request-id>
+evermatter trace <request-id> --json
 ```
 
 Joins `exomem.log`, `ledger.jsonl`, `queries.jsonl`, `writes.jsonl`,
@@ -650,10 +650,10 @@ Joins `exomem.log`, `ledger.jsonl`, `queries.jsonl`, `writes.jsonl`,
 report. Best-effort: a missing or unparseable source is skipped, never raised.
 
 ```
-exomem logs tail --file server -n 50 [-f]
-exomem logs grep --file mutations 'MUTATION_BUSY'
-exomem logs grep --file ledger '"outcome":"refused"'
-exomem logs verify
+evermatter logs tail --file server -n 50 [-f]
+evermatter logs grep --file mutations 'MUTATION_BUSY'
+evermatter logs grep --file ledger '"outcome":"refused"'
+evermatter logs verify
 ```
 
 `--file` accepts
@@ -744,7 +744,7 @@ diagnostic metadata does not change the failed result.
 The `observability` check covers log-directory writes, rotation sizes, and
 metrics-snapshot freshness. It reports those conditions separately from latency.
 
-`exomem doctor` reports observation coverage beside each measured percentile.
+`evermatter doctor` reports observation coverage beside each measured percentile.
 It reports unavailable or partial sources independently and preserves healthy
 request results when observation fails. Consult `sources` and each row's
 `coverage` before using a percentile. The latency check does not contact a

@@ -156,7 +156,7 @@ def _uuid_text(value: str) -> str:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem cloud export",
+        prog="evermatter cloud export",
         description="Download your Cloud export to a folder, verified against its recorded digest.")
     parser.add_argument("--out", type=Path, required=True, help="Folder that receives the archive.")
     parser.add_argument("--export-id", type=_uuid_text, help="Only download this export.")

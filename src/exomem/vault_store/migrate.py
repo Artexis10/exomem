@@ -337,7 +337,7 @@ def preflight(vault_root: Path) -> dict:
         raise OpError(
             "VAULT_STORE_NEEDS_COLLECTION_STORE",
             "this vault has no collection store, and store mode never creates one",
-            "Run `exomem collections migrate` or create a summary collection first.",
+            "Run `evermatter collections migrate` or create a summary collection first.",
         )
     if mode.store_mode_active(vault_root):
         raise OpError("VAULT_STORE_ALREADY_ACTIVE", "this vault is already in store mode")
@@ -580,7 +580,7 @@ def _cutover(root: Path, session, token, writer, *, why: str) -> dict:
                 ),
                 (
                     "The search or reference index is behind the files, as a service that "
-                    "stopped early leaves it. Run `exomem maintain --reconcile` to bring them up "
+                    "stopped early leaves it. Run `evermatter maintain --reconcile` to bring them up "
                     "to date, then run this command again."
                     if comparison.differences
                     else "The store cannot reproduce the named pages' bytes, so keep this vault "

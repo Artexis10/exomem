@@ -85,7 +85,7 @@ class GotoCommands(Provider):
 
 
 class ExomemTuiApp(App):
-    TITLE = "exomem"
+    TITLE = "evermatter"
     CSS = theme_module.APP_CSS
     COMMANDS = App.COMMANDS | {GotoCommands}
     BINDINGS = [
@@ -314,7 +314,7 @@ class ExomemTuiApp(App):
     def action_help(self) -> None:
         screen = self.screen
         rows: list[tuple[str, str]] = []
-        title = "exomem"
+        title = "evermatter"
         if isinstance(screen, ExomemScreen):
             title = screen.SCREEN_TITLE or title
             rows.extend(screen.help_rows())

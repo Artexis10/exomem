@@ -37,7 +37,7 @@ uv sync
 uv run python -m pytest -q
 uvx ruff check .
 source infra/tool-versions.env && node scripts/openspec_strict_gate.mjs -- npm exec --yes @fission-ai/openspec@$OPENSPEC_VERSION --
-uv run exomem demo --json
+uv run evermatter demo --json
 uv run python scripts/generate-capabilities.py --check
 uv build
 ```

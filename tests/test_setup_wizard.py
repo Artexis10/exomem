@@ -96,7 +96,7 @@ def test_fresh_vault_happy_path(tmp_path: Path) -> None:
     assert "2 files" in out
     assert "Likely packs:" in out
     assert "Selected packs: Personal records" in out
-    assert "Adoption: run `exomem adopt`" in out
+    assert "Adoption: run `evermatter adopt`" in out
     assert "compile planning" in out
     assert "writes only under 'Knowledge Base/'" in out
     # registration argv shape (Codex is registered too; pick the Claude call)

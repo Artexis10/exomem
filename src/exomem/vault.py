@@ -8385,7 +8385,7 @@ def resolve_under_vault(
             raise VaultPathError(
                 code="INVALID_PATH",
                 reason=(
-                    f"path is outside Knowledge Base/: {raw!r} — exomem only "
+                    f"path is outside Knowledge Base/: {raw!r} — Evermatter only "
                     "writes governed content under Knowledge Base/"
                 ),
             ) from None
