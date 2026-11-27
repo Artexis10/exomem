@@ -30,7 +30,9 @@ The engineering roster's pick-by-problem table has no row for backup verificatio
 
 Each reference entry is compared with the restore when its ctime is earlier than the cutoff. Such an entry must exist in the restore with the same digest; otherwise the drill fails. A reference entry with a later ctime is reported as changed since the backup. A restored entry that the reference lacks is reported as removed since the backup: a deletion leaves no time to judge by. An entry that matches the backup's exclude patterns is reported, never judged.
 
-ctime, not mtime: a write, a rename, a chmod or a new link all move ctime forward, and a program cannot set it back. An entry with an older ctime has not changed since that moment.
+ctime, not mtime: a write, a rename, a chmod or a new link all move ctime forward, and a program cannot set it back. An entry with an older ctime has not changed in content since that moment. Its path may have changed, because renaming a directory moves the directory's ctime, not its files'.
+
+So a would-be missing entry pairs with a removed entry that has the same digest and the same file name, each removed entry at most once, and the pair is reported as moved since the backup, not as missing. A lost file passes this way only when the cell deleted an identical, same-named file after the snapshot.
 
 Alternatives considered:
 
@@ -45,14 +47,14 @@ The drill reads the snapshot's time from restic's snapshot record, in the scratc
 
 ### D3: The drill says how much it judged
 
-Per root, the log prints `judged=N changed_since=N removed_since=N excluded=N`. When the reference vault holds entries and the rule judged none, the verdict is `inconclusive` with a non-zero rc. That happens when the snapshot is older than every entry, or when every ctime moved, for example after a recursive ownership change (the cell pod sets `fsGroupChangePolicy: OnRootMismatch`). A host root may legitimately judge nothing.
+Per root, the log prints `judged=N changed_since=N removed_since=N moved_since=N excluded=N missing=N differ=N`. When the reference vault holds entries and the rule judged none, the verdict is `inconclusive` with a non-zero rc. That happens when the snapshot is older than every entry, or when every ctime moved, for example after a recursive ownership change (the cell pod sets `fsGroupChangePolicy: OnRootMismatch`). A host root may legitimately judge nothing.
 
 ### D4: The verdict lives in `cloud_vault_digest.py judge`
 
 - `hash --ctime` adds each entry's ctime in nanoseconds to its line. Only the drill's reference capture uses it, so plain `hash` lines and `compare`, which the in-place restore uses during downtime, stay as they are.
 - For a regular file, `hash --ctime` takes the ctime from `fstat` on the open file after reading it. A file the cell rewrites during the read then shows its new ctime and is reported, not judged against old content.
 - `judge RESTORED REFERENCE CUTOFF_NS OUT_DIR --root ROOT --exclude PATTERN…` writes names to the private run directory and prints counts only. It exits 0 on pass, 3 on a judged mismatch, 4 on inconclusive, and 1 when it cannot run.
-- `cloud_restore_manifests.py exclude-patterns` prints `CATALOGUE_BACKUP_EXCLUDES`, as `backup-paths` prints `BACKUP_PATHS`, so the list keeps one definition. `judge` keeps the patterns under its `--root`, strips that root, and matches the rest with restic's meaning, in which `*` does not cross `/`.
+- `cloud_restore_manifests.py exclude-patterns` prints `CATALOGUE_BACKUP_EXCLUDES`, as `backup-paths` prints `BACKUP_PATHS`, so the list keeps one definition. `judge` keeps the patterns under its `--root`, strips that root, and matches the rest with restic's meaning, in which `*` does not cross `/`. A pattern that uses `**`, a `[` class or a backslash escape reads differently in restic, so `judge` exits 1 on it.
 - `cloud_restore.sh` maps each exit code to the verdict, and any code it does not know fails the drill. Tests drive `judge` on fixture trees, as they already drive `compare`.
 
 ## Risks / Trade-offs

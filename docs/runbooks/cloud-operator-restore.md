@@ -142,26 +142,28 @@ Each root prints a count line, then its verdict:
 
 ```
 == judge /data/vault
-judged=11709 changed_since=0 removed_since=0 excluded=0 missing=0 differ=0
+judged=11709 changed_since=0 removed_since=0 moved_since=0 excluded=0 missing=0 differ=0
 /data/vault verdict=pass judge_exit=0
 ```
 
 - `judged`: the reference entries that the rule compared with the restore.
 - `changed_since`: reference entries with a ctime at or after the snapshot's time, not judged.
 - `removed_since`: restored entries that the reference lacks, not judged.
+- `moved_since`: pairs of a reference entry and a restored entry with the same content and file name at different paths. A directory renamed after the snapshot gives one pair for each file, because a rename does not change its files' ctimes. Each pair counts in `judged` and does not fail the drill.
 - `excluded`: entries that match the backup's exclude patterns, not judged.
 - `missing` and `differ`: judged entries that the restore lacks or holds with other content. Any of them fails the drill.
 
 The verdict is `pass`, `fail` or `inconclusive`:
 
-- `fail`: a judged entry is missing or different, or the judge could not run. A judge that could not run logs `judge failed: <error class>`.
+- `fail`: a judged entry is missing or different, or the judge could not run. A judge that could not run logs `judge failed: <error class>`. A bad judge argument exits 2 with a usage message, and the verdict is still `fail`.
 - `inconclusive`: the vault root judged no entry, so the drill proved nothing. The run ends with `rc=1`.
   This happens when the snapshot is older than every entry, or after a recursive ownership change that moved every ctime.
   Run the drill again with a newer snapshot.
 - The host root may judge nothing and still pass.
 
 The log holds counts only. The names behind each count are in `/var/lib/exomem-restore/<run ID>/hashes/judge-<root>/`, one file per count.
-Before you treat a `fail` as a defective backup, check the times of one listed entry by hand.
+Before you treat a `fail` as a defective backup, check one listed entry by hand.
+Compare its ctime with the snapshot's time, and look for a same-named file under `removed_since.txt` that the cell may have renamed or deleted.
 A clock difference between the backup node and the cell node can misjudge an entry changed close to the snapshot's time.
 When the restore Job's log has no snapshot time, the drill logs `!! the restore Job's log has no snapshot time` and ends `verdict=fail`.
 A drill supports only cells whose backup reads the stopped cell's volume, which is every cell that this runbook covers.

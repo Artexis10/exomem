@@ -17,9 +17,10 @@ The in-place restore uses `hash` and `compare`.
 
 `judge` is the drill's verdict. It requires each reference entry that has not
 changed since the snapshot's time (CUTOFF_NS) to be in the restore with the
-same digest, and reports later changes and later removals without failing on
-them. It writes the names to OUT_DIR, prints counts only and exits 0 on a pass,
-3 on a judged mismatch, 4 when it judged no entry, and 1 when it cannot run.
+same digest, and reports later changes, later removals and directories renamed
+since without failing on them. It writes the names to OUT_DIR, prints counts
+only and exits 0 on a pass, 3 on a judged mismatch, 4 when it judged no entry,
+and 1 when it cannot run.
 
 `cutoff` reads a restic restore log on stdin and prints the snapshot's time,
 truncated to the second, in nanoseconds.
@@ -152,7 +153,7 @@ def compare(restored: dict[str, str], reference: dict[str, str], *, allow_empty:
     )
 
 
-def _write_names(path: str, names: list[str]) -> None:
+def _write_names(path: str, names: list) -> None:
     with open(path, "w", encoding="utf-8") as handle:
         handle.writelines(json.dumps(name) + "\n" for name in names)
 
@@ -166,9 +167,10 @@ def exclude_patterns_under(root: str, patterns: list[str]) -> list[list[str]]:
 
     prefix = root.rstrip("/") + "/"
     relative = [pattern[len(prefix):].split("/") for pattern in patterns if pattern.startswith(prefix)]
-    if any("**" in parts for parts in relative):
-        # restic's `**` crosses directories; fnmatch cannot say that, so a pattern that uses it cannot be judged.
-        raise ValueError("an exclude pattern uses **")
+    # fnmatch reads only `*` and `?` as restic does. restic's `**` crosses directories, and its `[...]` classes
+    # and `\` escapes differ from fnmatch's, so a pattern that uses any of them cannot be judged: fail closed.
+    if any("**" in parts or any("[" in part or "\\" in part for part in parts) for parts in relative):
+        raise ValueError("an exclude pattern uses **, [ or a backslash")
     return relative
 
 
@@ -189,6 +191,7 @@ class Judgement:
     differ: list[str]
     changed_since: list[str]
     removed_since: list[str]
+    moved_since: list[tuple[str, str]]
     excluded: list[str]
 
     @property
@@ -200,8 +203,8 @@ class Judgement:
     def summary(self) -> str:
         return (
             f"judged={self.judged} changed_since={len(self.changed_since)} "
-            f"removed_since={len(self.removed_since)} excluded={len(self.excluded)} "
-            f"missing={len(self.missing)} differ={len(self.differ)}"
+            f"removed_since={len(self.removed_since)} moved_since={len(self.moved_since)} "
+            f"excluded={len(self.excluded)} missing={len(self.missing)} differ={len(self.differ)}"
         )
 
 
@@ -213,6 +216,11 @@ def judge(
     A reference entry with an earlier ctime must be in the restore with the same digest.
     A later ctime, and a restored entry the reference lacks (a deletion leaves no time to
     judge by), are reported. An entry that matches an exclude pattern is reported, never judged.
+
+    A directory renamed after the snapshot leaves its files' ctimes alone, so each file shows twice:
+    absent from the restore at its new path, and restored at its old path. A would-be missing entry
+    pairs with a removed one that has the same digest and the same file name, each removed entry at
+    most once, and the pair is reported as moved, not as missing.
     """
 
     judged, missing, differ, changed_since, removed_since, excluded = 0, [], [], [], [], []
@@ -229,7 +237,19 @@ def judge(
                 missing.append(name)
             elif restored[name] != reference[name][0]:
                 differ.append(name)
-    return Judgement(judged, missing, differ, changed_since, removed_since, excluded)
+    twins: dict[tuple[str, str], list[str]] = {}
+    for name in removed_since:
+        twins.setdefault((restored[name], name.rsplit("/", 1)[-1]), []).append(name)
+    moved_since, lost = [], []
+    for name in missing:
+        twin = twins.get((reference[name][0], name.rsplit("/", 1)[-1]))
+        if twin:
+            moved_since.append((twin.pop(0), name))
+        else:
+            lost.append(name)
+    moved_from = {old for old, _ in moved_since}
+    removed_since = [name for name in removed_since if name not in moved_from]
+    return Judgement(judged, lost, differ, changed_since, removed_since, moved_since, excluded)
 
 
 def snapshot_cutoff_ns(log: str) -> int:
@@ -255,7 +275,7 @@ def _judge(argv: list[str]) -> int:
         load(args.restored), load_reference(args.reference), int(args.cutoff_ns),
         exclude_patterns_under(args.root, args.exclude),
     )
-    for label in ("missing", "differ", "changed_since", "removed_since", "excluded"):
+    for label in ("missing", "differ", "changed_since", "removed_since", "moved_since", "excluded"):
         _write_names(os.path.join(args.out_dir, label + ".txt"), getattr(result, label))
     print(result.summary())
     return result.exit_code

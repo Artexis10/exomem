@@ -534,7 +534,7 @@ def test_a_cell_that_moved_on_after_the_backup_still_passes(tmp_path: Path) -> N
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.strip() == "judged=1 changed_since=3 removed_since=1 excluded=0 missing=0 differ=0"
+    assert result.stdout.strip() == "judged=1 changed_since=3 removed_since=1 moved_since=0 excluded=0 missing=0 differ=0"
     assert "lock" not in result.stdout
     assert (out / "changed_since.txt").read_text(encoding="utf-8").count("lock") == 2
     assert (out / "removed_since.txt").read_text(encoding="utf-8").count("scratch.tmp") == 1
@@ -562,7 +562,7 @@ def test_an_unchanged_file_the_backup_lost_or_altered_fails(
     result, out = _judge(tmp_path, restored, reference, changed_since=("attachments/scan.pdf",))
 
     assert result.returncode == 3, result.stdout + result.stderr
-    assert result.stdout.strip() == f"judged=2 changed_since=1 removed_since=0 excluded=0 {counts}"
+    assert result.stdout.strip() == f"judged=2 changed_since=1 removed_since=0 moved_since=0 excluded=0 {counts}"
     assert "inbox" not in result.stdout
     assert (out / listed_in).read_text(encoding="utf-8").count("inbox.md") == 1
 
@@ -584,7 +584,7 @@ def test_a_file_the_backup_excludes_is_reported_and_never_judged(tmp_path: Path)
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.strip() == "judged=1 changed_since=0 removed_since=0 excluded=1 missing=0 differ=0"
+    assert result.stdout.strip() == "judged=1 changed_since=0 removed_since=0 moved_since=0 excluded=1 missing=0 differ=0"
     assert (out / "excluded.txt").read_text(encoding="utf-8").count("lexical-staged") == 1
 
 
@@ -626,7 +626,79 @@ def test_a_vault_whose_every_file_changed_after_the_backup_is_inconclusive(tmp_p
     )
 
     assert result.returncode == 4, result.stdout + result.stderr
-    assert result.stdout.strip() == "judged=0 changed_since=3 removed_since=0 excluded=0 missing=0 differ=0"
+    assert result.stdout.strip() == "judged=0 changed_since=3 removed_since=0 moved_since=0 excluded=0 missing=0 differ=0"
+
+
+@posix_trees
+def test_a_directory_renamed_after_the_backup_is_reported_as_moved_not_lost(tmp_path: Path) -> None:
+    # A rename moves the directory's ctime, not its files': each file keeps an old ctime at its new path.
+    restored = tmp_path / "restored"
+    (restored / "Projects" / "alpha").mkdir(parents=True)
+    (restored / "Projects" / "alpha" / "plan.md").write_text("# Plan\n", encoding="utf-8")
+    (restored / "Projects" / "alpha" / "notes.md").write_text("notes\n", encoding="utf-8")
+    (restored / "inbox.md").write_text("first\n", encoding="utf-8")
+    reference = tmp_path / "reference"
+    shutil.copytree(restored, reference)
+    (reference / "Projects" / "alpha").rename(reference / "Projects" / "beta")
+
+    result, out = _judge(tmp_path, restored, reference)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == "judged=3 changed_since=0 removed_since=0 moved_since=2 excluded=0 missing=0 differ=0"
+    moved = [json.loads(line) for line in (out / "moved_since.txt").read_text(encoding="utf-8").splitlines()]
+    assert moved == [
+        ["Projects/alpha/notes.md", "Projects/beta/notes.md"],
+        ["Projects/alpha/plan.md", "Projects/beta/plan.md"],
+    ]
+
+
+@posix_trees
+@pytest.mark.parametrize(
+    ("reference_files", "restored_files", "counts"),
+    [
+        # Same file name, other content: the restore does not hold the file the reference holds.
+        (
+            {"a/plan.md": "# Plan\n"}, {"c/plan.md": "# Another plan\n"},
+            "judged=1 changed_since=0 removed_since=1 moved_since=0 excluded=0 missing=1 differ=0",
+        ),
+        # One removed twin cannot stand in for two lost files of the same content and name.
+        (
+            {"a/.keep": "", "b/.keep": ""}, {"c/.keep": ""},
+            "judged=2 changed_since=0 removed_since=0 moved_since=1 excluded=0 missing=1 differ=0",
+        ),
+    ],
+)
+def test_a_lost_file_without_its_own_removed_twin_still_fails(
+    tmp_path: Path, reference_files: dict[str, str], restored_files: dict[str, str], counts: str
+) -> None:
+    for root, files in ((tmp_path / "reference", reference_files), (tmp_path / "restored", restored_files)):
+        for name, text in files.items():
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_text(text, encoding="utf-8")
+
+    result, _ = _judge(tmp_path, tmp_path / "restored", tmp_path / "reference")
+
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert result.stdout.strip() == counts
+
+
+@posix_trees
+@pytest.mark.parametrize("pattern", ["/data/host/state/*/**/x", "/data/host/state/[ab]/x", "/data/host/state/\\*/x"])
+def test_an_exclude_pattern_that_fnmatch_cannot_read_as_restic_does_ends_the_run_with_one(
+    tmp_path: Path, pattern: str
+) -> None:
+    # A class, an escape or `**` would be matched differently here than by restic, so the drill must not guess.
+    vault = _vault(tmp_path / "vault")
+    restored_list = _hash(vault, tmp_path / "r.list")
+    reference_list = _reference_list(vault, tmp_path / "f.list")
+
+    result = _digest(
+        "judge", restored_list, reference_list, SNAPSHOT_NS, tmp_path, "--root", "/data/host", "--exclude", pattern
+    )
+
+    assert result.returncode == 1
+    assert not result.stdout
+    assert result.stderr.strip() == "judge failed: ValueError"
 
 
 @posix_trees
@@ -768,10 +840,10 @@ def test_the_drill_logs_a_count_line_and_verdict_for_each_root_through_the_real_
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == [
         "== judge /data/vault",
-        "judged=3 changed_since=0 removed_since=0 excluded=0 missing=0 differ=0",
+        "judged=3 changed_since=0 removed_since=0 moved_since=0 excluded=0 missing=0 differ=0",
         "/data/vault verdict=pass judge_exit=0",
         "== judge /data/host",
-        "judged=1 changed_since=1 removed_since=0 excluded=0 missing=0 differ=0",
+        "judged=1 changed_since=1 removed_since=0 moved_since=0 excluded=0 missing=0 differ=0",
         "/data/host verdict=pass judge_exit=0",
         "pass",
     ]
