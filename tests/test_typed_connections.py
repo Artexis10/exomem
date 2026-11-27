@@ -14,8 +14,8 @@ from pathlib import Path
 import pytest
 import yaml
 from test_activate_context_maps import _activate
-from test_context_catalogue import INSIGHTS, _built, _page
 from test_approved_procedure_serving import _approve
+from test_context_catalogue import INSIGHTS, _built, _page
 from test_governance_egress import _external, write_rule, write_scope
 from test_task_context_links import _discover, _discover_packet, _lead, _linked
 
