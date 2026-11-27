@@ -1,8 +1,9 @@
-"""The unit row set reproduces the lexical unit rows and the graph's candidate nodes for the same bytes.
+"""The unit row set reproduces the lexical unit rows and the graph's candidate nodes.
 
-OpenSpec make-vault-store-canonical D10, task 5.1. `verify.derive_expected` derives a store's tables from
-a vault's files, so it is the one place where the new `unit_rows` table sits beside the two row sets that
-it merges. Each test reads the stored unit rows back and projects them again.
+OpenSpec make-vault-store-canonical D10, task 5.1. For the same bytes, `verify.derive_expected`
+derives a store's tables from a vault's files, so it is the one place where the new `unit_rows`
+table sits beside the two row sets that it merges. Each test reads the stored unit rows back and
+projects them again.
 """
 
 from __future__ import annotations
@@ -42,7 +43,8 @@ _TWINS_ID = "22222222-2222-4222-8222-222222222222"
 
 def _page(title: str, body: str, *, exomem_id: str | None = None) -> str:
     identity = f"exomem_id: {exomem_id}\n" if exomem_id else ""
-    return f"---\ntype: insight\ntitle: {title}\n{identity}updated: 2026-07-15\n---\n# {title}\n\n{body}"
+    head = f"---\ntype: insight\ntitle: {title}\n{identity}updated: 2026-07-15\n---\n"
+    return f"{head}# {title}\n\n{body}"
 
 
 PAGES: dict[str, bytes] = {
@@ -53,13 +55,16 @@ PAGES: dict[str, bytes] = {
     ).encode(),
     # Two identical unanchored compact units: identity binds occurrence 1 and 2.
     TWINS: _page(
-        "Gate latch", "## Observations\n- [config] The gate latch sticks\n- [config] The gate latch sticks\n",
+        "Gate latch",
+        "## Observations\n- [config] The gate latch sticks\n- [config] The gate latch sticks\n",
         exomem_id=_TWINS_ID,
     ).encode(),
-    # A unit whose text holds a reserved origin carrier, which the graph withholds and the lexical row keeps.
+    # A unit whose text holds a reserved origin carrier, which the graph withholds and the lexical
+    # row keeps.
     CARRIER: _page(
         "Dock visit",
-        '## Observations\n- [config] Visible text <!-- exomem-origin:v1 {"reason":"Neutral example."} --> after\n',
+        "## Observations\n- [config] Visible text "
+        '<!-- exomem-origin:v1 {"reason":"Neutral example."} --> after\n',
     ).encode(),
     # A rich unit with an id, a compact unit nested in it, and a rich unit without an id.
     RICH: _page(
@@ -71,11 +76,14 @@ PAGES: dict[str, bytes] = {
     GOVERNED: _page(
         "Pump station",
         "## Observations\n- [config] The pump trips at night #maintenance (north dock) ^pump\n\n"
-        "## Claim\n- id: pump-claim\n- check_by: 2026-12-31\n- tags: dock, pump\n- context: north dock\n\n"
-        "The pump trips at night.\n",
+        "## Claim\n- id: pump-claim\n- check_by: 2026-12-31\n- tags: dock, pump\n"
+        "- context: north dock\n\nThe pump trips at night.\n",
     ).encode(),
-    # A page whose structure is unavailable: its bytes are not UTF-8, so it has a page row and no unit.
-    UNREADABLE: b"---\ntitle: Broken bytes\n---\n# Broken bytes\n\xff\xfe\n- [config] Unread ^unread\n",
+    # A page whose structure is unavailable: its bytes are not UTF-8, so it has a page row and no
+    # unit.
+    UNREADABLE: (
+        b"---\ntitle: Broken bytes\n---\n# Broken bytes\n\xff\xfe\n- [config] Unread ^unread\n"
+    ),
     # A copy of a page outside the Knowledge Base: lexical rows only.
     OUTSIDE: _page(
         "Copy of harbour tide", "## Observations\n- [config] The tide table is read at dawn ^copy\n"
@@ -105,7 +113,9 @@ def _stored_rows(expected: Path, path: str | None = None) -> list[unit_rows.Unit
     with closing(sqlite3.connect(expected)) as conn:
         conn.row_factory = sqlite3.Row
         where, arguments = ("WHERE path = ? ", (path,)) if path else ("", ())
-        found = conn.execute(f"SELECT * FROM unit_rows {where}ORDER BY path, ordinal", arguments).fetchall()
+        found = conn.execute(
+            f"SELECT * FROM unit_rows {where}ORDER BY path, ordinal", arguments
+        ).fetchall()
     return [unit_rows.UnitRow.from_record(dict(row)) for row in found]
 
 
@@ -117,37 +127,58 @@ def _page_columns(expected: Path) -> dict[str, dict[str, object]]:
 
 def _differing(conn: sqlite3.Connection, one: str, other: str) -> int:
     return sum(
-        conn.execute(f"SELECT COUNT(*) FROM (SELECT * FROM {a} EXCEPT SELECT * FROM {b})").fetchone()[0]
+        conn.execute(
+            f"SELECT COUNT(*) FROM (SELECT * FROM {a} EXCEPT SELECT * FROM {b})"
+        ).fetchone()[0]
         for a, b in ((one, other), (other, one))
     )
 
 
-def test_the_lexical_projection_of_the_unit_rows_is_the_semantic_units_table(derived: Derived) -> None:
-    """A unit row that loses a field in the store would leave the lexical row and its projection apart."""
+def test_the_lexical_projection_of_the_unit_rows_is_the_semantic_units_table(
+    derived: Derived,
+) -> None:
+    """A unit row that loses a field in the store would leave the lexical row and its projection
+    apart."""
     pages = _page_columns(derived.expected)
     with closing(sqlite3.connect(":memory:")) as projected:
         lexstore.create_catalogue_schema(projected)
-        columns = [name for (name,) in projected.execute("SELECT name FROM pragma_table_info('semantic_units')")]
+        columns = [
+            name
+            for (name,) in projected.execute("SELECT name FROM pragma_table_info('semantic_units')")
+        ]
         for row in _stored_rows(derived.expected):
             values = unit_rows.lexical_columns(row, pages[row.path])
+            marks = ", ".join("?" * len(values))
             projected.execute(
-                f"INSERT INTO semantic_units({', '.join(values)}) VALUES ({', '.join('?' * len(values))})",
+                f"INSERT INTO semantic_units({', '.join(values)}) VALUES ({marks})",
                 tuple(values.values()),
             )
         projected.execute("ATTACH DATABASE ? AS derived", (str(derived.expected),))
         select = ", ".join(name for name in columns if name != "rowid")
         for name in ("main", "derived"):
-            projected.execute(f"CREATE TEMP VIEW units_{name} AS SELECT {select} FROM {name}.semantic_units")
+            projected.execute(
+                f"CREATE TEMP VIEW units_{name} AS SELECT {select} FROM {name}.semantic_units"
+            )
         stored = projected.execute("SELECT COUNT(*) FROM units_derived").fetchone()[0]
-        assert stored >= len(PAGES) - 1, "the fixture vault must hold units for this check to mean anything"
+        assert stored >= len(PAGES) - 1, "the fixture vault must hold units for this check"
         assert _differing(projected, "units_main", "units_derived") == 0
-        stored_keys = {(row.path, row.occurrence_key, key) for row in _stored_rows(derived.expected) for key in row.row_keys}
-        derived_keys = set(projected.execute("SELECT parent_path, occurrence_key, row_key FROM derived.unit_row_keys"))
+        stored_keys = {
+            (row.path, row.occurrence_key, key)
+            for row in _stored_rows(derived.expected)
+            for key in row.row_keys
+        }
+        derived_keys = set(
+            projected.execute(
+                "SELECT parent_path, occurrence_key, row_key FROM derived.unit_row_keys"
+            )
+        )
         assert stored_keys == derived_keys != set()
 
 
-def test_the_graph_projection_of_the_unit_rows_is_the_graph_candidate_nodes(derived: Derived) -> None:
-    """Knowledge Base pages project the stored unit rows to the graph; a copy outside it has no node."""
+def test_the_graph_projection_of_the_unit_rows_is_the_graph_candidate_nodes(
+    derived: Derived,
+) -> None:
+    """Knowledge Base pages project the stored unit rows to the graph; a copy outside has none."""
     root = derived.root
     resolver = vault.WikilinkResolver.from_entries(root, [(rel, rel) for rel in GRAPH_PAGES])
     type_basis = epistemic_graph.producer_type_basis(root)
@@ -159,42 +190,52 @@ def test_the_graph_projection_of_the_unit_rows_is_the_graph_candidate_nodes(deri
             state = semantic_index.current_parent_index_state(root, rel, source=raw.decode())
             graph = epistemic_graph.page_graph_rows(
                 root, rel, raw, page=page, state=state, resolver=resolver, type_basis=type_basis,
-                target_exists=lambda _rel: False, landing=lambda *_: pytest.fail("the fixture has no link"),
+                target_exists=lambda _rel: False,
+                landing=lambda *_: pytest.fail("the fixture has no link"),
                 prepared_unit_rows=_stored_rows(derived.expected, rel),
             )
-            epistemic_graph.write_page_graph_rows(projected, graph, epistemic_graph.graph_registry_stamps(root))
+            epistemic_graph.write_page_graph_rows(
+                projected, graph, epistemic_graph.graph_registry_stamps(root)
+            )
         projected.execute("ATTACH DATABASE ? AS derived", (str(derived.expected),))
         select = "SELECT {} FROM {}.graph_nodes WHERE kind = 'candidate'"
         columns = ", ".join(
-            name for (name,) in projected.execute("SELECT name FROM pragma_table_info('graph_nodes')")
+            name
+            for (name,) in projected.execute("SELECT name FROM pragma_table_info('graph_nodes')")
             if name not in ("rowid", "node_id")
         )
         for name in ("main", "derived"):
             projected.execute(f"CREATE TEMP VIEW nodes_{name} AS {select.format(columns, name)}")
-        assert projected.execute("SELECT COUNT(*) FROM nodes_derived").fetchone()[0] >= len(GRAPH_PAGES)
+        counted = projected.execute("SELECT COUNT(*) FROM nodes_derived").fetchone()[0]
+        assert counted >= len(GRAPH_PAGES)
         assert _differing(projected, "nodes_main", "nodes_derived") == 0
         outside = projected.execute(
             "SELECT COUNT(*) FROM derived.graph_nodes WHERE path = ?", (OUTSIDE,)
         ).fetchone()[0]
         assert outside == 0
-    assert _stored_rows(derived.expected, OUTSIDE), "the copy outside the Knowledge Base keeps its unit rows"
+    assert _stored_rows(derived.expected, OUTSIDE), "the copy outside the Knowledge Base keeps rows"
 
 
 def test_references_bound_from_the_stored_identity_facts_are_the_ones_the_page_summary_binds(
     derived: Derived,
 ) -> None:
-    """Binding at read time needs only the facts in the rows: an overlay change cannot leave a ref stale."""
+    """Binding at read time needs only the stored facts, so an overlay leaves no stale ref."""
     core = semantic_language_registry.core_registry()
     stored_by_page: dict[str, list[unit_rows.UnitRow]] = {}
     for row in _stored_rows(derived.expected):
         stored_by_page.setdefault(row.path, []).append(row)
     with closing(sqlite3.connect(derived.expected)) as conn:
-        summaries = dict(conn.execute("SELECT path, structure_json FROM pages WHERE structure_json IS NOT NULL"))
+        summaries = dict(
+            conn.execute("SELECT path, structure_json FROM pages WHERE structure_json IS NOT NULL")
+        )
     assert UNREADABLE not in summaries
 
-    def bind(summary: dict, parent_ref: str | None, rel: str) -> list[tuple[str, str | None, str | None]]:
+    def bind(
+        summary: dict, parent_ref: str | None, rel: str
+    ) -> list[tuple[str, str | None, str | None]]:
         selected = semantic_units.interpret_structural_summary(
-            summary, language_registry=core, relation_registry=core_relations(), parent_ref=parent_ref, path=rel,
+            summary, language_registry=core, relation_registry=core_relations(),
+            parent_ref=parent_ref, path=rel,
         )
         return [(unit.occurrence_key, unit.unit_ref, unit.fingerprint) for unit in selected.units]
 
@@ -205,11 +246,13 @@ def test_references_bound_from_the_stored_identity_facts_are_the_ones_the_page_s
         for item in (*summary["rich"], *summary["compact"]):
             row = rows.get(item["key"])
             item["identity"] = None if row is None else {
-                "signature": row.identity_signature, "fingerprints": list(row.identity_fingerprints),
+                "signature": row.identity_signature,
+                "fingerprints": list(row.identity_fingerprints),
             }
         original = json.loads(raw_summary)["structure"]
-        assert bind(summary, metadata["parent_ref"], rel) == bind(original, metadata["parent_ref"], rel)
-        assert bind(summary, metadata["parent_ref"], rel), f"{rel} binds no unit"
+        parent_ref = metadata["parent_ref"]
+        assert bind(summary, parent_ref, rel) == bind(original, parent_ref, rel)
+        assert bind(summary, parent_ref, rel), f"{rel} binds no unit"
     twins = bind(json.loads(summaries[TWINS])["structure"], _memory_ref(_TWINS_ID), TWINS)
     # The two identical unanchored units bind occurrence 1 and 2, so their references differ.
     assert len({unit_ref for _key, unit_ref, _fingerprint in twins}) == len(twins) == 2
@@ -219,36 +262,46 @@ def _memory_ref(identity: str) -> str:
     return f"exomem://memory/{identity}"
 
 
-def test_the_lexical_rows_and_graph_nodes_say_what_the_parser_emits_for_the_same_bytes(derived: Derived) -> None:
-    """The parser's own selected units are the oracle that no projection of the unit rows can share a defect with."""
+def test_the_lexical_rows_and_graph_nodes_say_what_the_parser_emits_for_the_same_bytes(
+    derived: Derived,
+) -> None:
+    """The parser's own units are the oracle that no projection of the unit rows can share a defect
+    with."""
     with closing(sqlite3.connect(derived.expected)) as conn:
         compared = 0
         for rel in (*GRAPH_PAGES, OUTSIDE):
             raw = PAGES[rel]
-            state = semantic_index.current_parent_index_state(derived.root, rel, source=raw.decode())
+            state = semantic_index.current_parent_index_state(
+                derived.root, rel, source=raw.decode()
+            )
             lexical = {
                 (form, line): rest for form, line, *rest in conn.execute(
-                    "SELECT form, line, end_line, anchor, content, tags_json, context FROM semantic_units "
-                    "WHERE parent_path = ?", (rel,),
+                    "SELECT form, line, end_line, anchor, content, tags_json, context "
+                    "FROM semantic_units WHERE parent_path = ?", (rel,),
                 )
             }
             nodes = {
-                (json.loads(metadata)["form"], line): rest for metadata, line, *rest in conn.execute(
+                (json.loads(metadata)["form"], line): rest
+                for metadata, line, *rest in conn.execute(
                     "SELECT metadata, line_start, line_end, anchor, text FROM graph_nodes "
                     "WHERE path = ? AND kind = 'candidate'", (rel,),
                 )
             }
             for unit in semantic_units.parse_semantic_units(state.body, path=rel).units:
                 tags = json.dumps(list(unit.tags), separators=(",", ":"))
-                assert lexical[(unit.form, unit.line)] == [unit.end_line, unit.anchor, unit.content, tags, unit.context]
+                assert lexical[(unit.form, unit.line)] == [
+                    unit.end_line, unit.anchor, unit.content, tags, unit.context
+                ]
                 if rel != OUTSIDE:
-                    assert nodes[(unit.form, unit.line)] == [unit.end_line, unit.anchor, unit.content]
+                    assert nodes[(unit.form, unit.line)] == [
+                        unit.end_line, unit.anchor, unit.content
+                    ]
                 compared += 1
     assert compared >= 7, "the fixture vault must emit units for this check to mean anything"
 
 
 def test_each_projection_keeps_the_rule_that_the_other_does_not_share(derived: Derived) -> None:
-    """The lexical row keeps the authored anchor and never a fingerprint; the graph names a fallback anchor."""
+    """The lexical row keeps the authored anchor and no fingerprint; the graph names a fallback."""
     with closing(sqlite3.connect(derived.expected)) as conn:
         lexical = {
             (path, form, line): (anchor, content, fingerprint)
@@ -273,7 +326,9 @@ def test_each_projection_keeps_the_rule_that_the_other_does_not_share(derived: D
     # No projection carries an origin payload, and the unit around it keeps its visible text.
     assert not [text for (_a, text, _f) in lexical.values() if "exomem-origin" in text]
     assert not [text for (_a, text) in graph.values() if "exomem-origin" in text]
-    assert any("Visible text" in text for (path, _line), (_a, text) in graph.items() if path == CARRIER)
+    assert any(
+        "Visible text" in text for (path, _line), (_a, text) in graph.items() if path == CARRIER
+    )
 
 
 def test_a_page_with_no_structure_has_a_page_row_and_no_unit_row(derived: Derived) -> None:

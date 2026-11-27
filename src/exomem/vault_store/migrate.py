@@ -71,14 +71,16 @@ class Staged:
     pages: int = 0
     binaries: int = 0
     skipped: list[ownership.Skipped] = field(default_factory=list)
-    #: Each object the lexical, the graph, the references, the inbound-link, then the unit row owner created: name -> type, in creation order.
+    #: Each object the lexical, the graph, the references, the inbound-link, then the unit row owner
+    #: created: name -> type, in creation order.
     objects: dict[str, str] = field(default_factory=dict)
     lexical_tables: list[str] = field(default_factory=list)
     graph_tables: list[str] = field(default_factory=list)
     refs_tables: list[str] = field(default_factory=list)
     #: The tables that no sidecar holds, so staging derives their rows from the files.
     link_tables: list[str] = field(default_factory=list)
-    #: The unit row table, which no sidecar holds either; staging copies it from the one derivation of the files.
+    #: The unit row table, which no sidecar holds either. Staging copies it from the one derivation
+    #: of the files.
     unit_tables: list[str] = field(default_factory=list)
     #: How the graph sidecar's rows differed from the files' derivation, which staging took instead.
     graph_sidecar: tuple[verify.Difference, ...] = ()
@@ -121,7 +123,10 @@ def schema_objects(conn: sqlite3.Connection) -> dict[str, str]:
 def create_owner_schema(
     conn: sqlite3.Connection,
 ) -> tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, str], dict[str, str]]:
-    """Create the lexical, graph, references, inbound-link, then unit row tables with their owners' DDL; return what each created."""
+    """Create the lexical, graph, references, inbound-link, then unit row tables.
+
+    Each owner's own DDL creates its tables. Return what each created.
+    """
     before = schema_objects(conn)
     lexstore.create_catalogue_schema(conn)
     lexstore.create_browse_index(conn)  # store-only: a sidecar shares the catalogue DDL above
@@ -151,8 +156,8 @@ def stage(
     """Load the exact bytes of every owned file into ``conn``, a staged store, and fill its tables.
 
     The one derivation of the files goes to a new database at ``expected``, which `verify_staged`
-    compares with next. The graph and unit row tables are that derivation's rows; the lexical and reference
-    tables are the sidecars' rows, which `verify_staged` proves against it.
+    compares with next. The graph and unit row tables are that derivation's rows; the lexical and
+    reference tables are the sidecars' rows, which `verify_staged` proves against it.
     """
     staged = Staged()
     started = time.perf_counter()

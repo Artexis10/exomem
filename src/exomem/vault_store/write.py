@@ -382,8 +382,8 @@ def _lexical_allocation_bytes(rows: lexstore.PageRows | None) -> int:
     )
     path = rows.columns["path"]
     records += 5 * (9 + _record_bytes((path, *vault.wikilink_keys(path, rows.columns["title"]))))
-    # A unit row sits once in `unit_rows` and once in its primary key's index. A store without the table
-    # is over-counted, which only reserves more room.
+    # A unit row sits once in `unit_rows` and once in its primary key's index. A store without the
+    # table is over-counted, which only reserves more room.
     records += sum(
         _record_bytes(unit_rows.record(unit, rows.columns).values())
         + 9 + _record_bytes((unit.path, unit.occurrence_key))
@@ -567,7 +567,8 @@ def _rowid_runs(rowids: list[int]) -> int:
 # The schema tables that the lexical and graph writers delete by source path, with that column.
 # The file's graph node stores its own copy of the structural summary.
 _LEXICAL_SOURCE_TABLES = (("pages", "path"), ("semantic_units", "parent_path"), ("unit_revisions", "parent_path"))
-# A store that an earlier owner version set up has no unit rows until its rederive pass creates the table.
+# A store that an earlier owner version set up has no unit rows until its rederive pass creates
+# the table.
 _UNIT_ROW_SOURCE_TABLE = (unit_rows.TABLE, "path")
 _GRAPH_SOURCE_TABLES = (
     ("graph_nodes", "path"), ("graph_parent_refs", "path"), ("graph_edges", "source_path"),
@@ -662,7 +663,9 @@ def _source_derived_pages(
     """Size the stored records that the writers delete for these source paths."""
     cells = _CellPages()
     if tables is None:
-        held = tx.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (unit_rows.TABLE,))
+        held = tx.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (unit_rows.TABLE,)
+        )
         unit = (_UNIT_ROW_SOURCE_TABLE,) if held.fetchone() else ()
         tables = _LEXICAL_SOURCE_TABLES + unit + _GRAPH_SOURCE_TABLES
     layouts = {} if layouts is None else layouts

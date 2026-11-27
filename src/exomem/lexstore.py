@@ -6450,7 +6450,8 @@ class PageRows:
     body_lower: str
     structure_json: str | None
     units: tuple[SemanticUnitRow, ...]
-    #: The unit rows that `units` project from; a store's `unit_rows` table and the graph's candidate nodes read them too.
+    #: The unit rows that `units` project from. A store's `unit_rows` table and the graph's
+    #: candidate nodes read them too.
     unit_rows: tuple[unit_rows_module.UnitRow, ...] = ()
 
 
@@ -6476,7 +6477,7 @@ def page_rows(
     destination file itself.
     """
     from . import bm25 as bm25_module
-    from . import recall_policy
+    from . import recall_policy, semantic_units
     from . import unit_rows as unit_rows_module
     from .semantic_index import structural_metadata
 
@@ -6530,8 +6531,11 @@ def page_rows(
     units: list[SemanticUnitRow] = []
     built: tuple[unit_rows_module.UnitRow, ...] = ()
     if page is not None and state is not None and state.candidates is not None:
-        structure_json = json.dumps(structural_metadata(state), sort_keys=True)
-        built = unit_rows_module.build(rel, state)
+        # One identity-facts pass serves the structural summary and the unit rows.
+        candidates = semantic_units.candidate_units(state.candidates)
+        facts = semantic_units.identity_facts(list(candidates))
+        structure_json = json.dumps(structural_metadata(state, facts), sort_keys=True)
+        built = unit_rows_module.build(rel, state, units=candidates, identity=facts)
         units = [
             SemanticUnitRow(
                 unit_rows_module.lexical_columns(row, columns),
@@ -6727,8 +6731,8 @@ def derive_catalogue_rows(
     """Fill the catalogue on ``conn`` from the vault's Markdown files, as a cold rebuild does.
 
     ``conn`` already holds the schema that ``create_catalogue_schema`` made. Store mode compares what this
-    derives with the rows it copied in. It owns no transaction and stamps no meta row. ``projections`` names
-    the tables that ``conn`` holds, as ``write_page_rows`` takes them.
+    derives with the rows it copied in. It owns no transaction and stamps no meta row.
+    ``projections`` names the tables that ``conn`` holds, as ``write_page_rows`` takes them.
     """
     store = LexicalStore(vault_root)
     members, signatures = store._walk_entries()
@@ -8774,11 +8778,18 @@ class LexicalStore:
             self._bless(conn, scope, target)
 
     def _insert_members(
-        self, conn: sqlite3.Connection, members, signatures, *, projections: frozenset[str] | None = None
+        self,
+        conn: sqlite3.Connection,
+        members,
+        signatures,
+        *,
+        projections: frozenset[str] | None = None,
     ) -> None:
         """Insert a page row, with its full-text and unit rows, for each walked file (caller owns the txn)."""
         for path, (in_kb, in_vault) in members.items():
-            self._insert_page(conn, path, signatures[path][0], in_kb, in_vault, projections=projections)
+            self._insert_page(
+                conn, path, signatures[path][0], in_kb, in_vault, projections=projections
+            )
 
     def _delta_source(self):
         """`(members, signatures)` for the heal's diff — from the live freshness

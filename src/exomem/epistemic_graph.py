@@ -2718,14 +2718,17 @@ def page_graph_rows(
     """
     if not _is_graph_page(rel) or not recall_policy.admits_markdown_content(vault_root, rel, raw):
         return None
+    facts = None
+    if prepared_unit_rows is None:
+        # One identity-facts pass serves the page's unit rows and its structural summary.
+        units = semantic_units.candidate_units(state.candidates)
+        facts = semantic_units.identity_facts(list(units))
+        prepared_unit_rows = unit_rows.build(rel, state, units=units, identity=facts)
     file_node = _file_node(
         vault_root, page, raw.decode("utf-8"), state=state, type_basis=type_basis,
-        prepared_structure=prepared_structure,
+        prepared_structure=prepared_structure, identity=facts,
     )
-    unit_nodes = [
-        _candidate_node(page, row)
-        for row in (unit_rows.build(rel, state) if prepared_unit_rows is None else prepared_unit_rows)
-    ]
+    unit_nodes = [_candidate_node(page, row) for row in prepared_unit_rows]
     edges = _structural_edges_for_page(
         vault_root,
         page,
@@ -14653,6 +14656,7 @@ def _file_node(
     state: semantic_index.SemanticParentIndexState,
     type_basis: note_types.Basis,
     prepared_structure: Mapping[str, Any] | None = None,
+    identity: dict[str, dict[str, Any]] | None = None,
 ) -> GraphNode:
     from . import activation
 
@@ -14661,7 +14665,7 @@ def _file_node(
     updated = frontmatter.get("updated")
     structure = prepared_structure
     if structure is None:
-        structure = semantic_index.structural_metadata(state)
+        structure = semantic_index.structural_metadata(state, identity)
     metadata: dict[str, Any] = {
         "page_type": page.page_type,
         "status": frontmatter.get("status") if isinstance(frontmatter.get("status"), str) else None,
@@ -14737,7 +14741,9 @@ def _unit_anchor(unit: semantic_units.SemanticUnit | unit_rows.UnitRow) -> str |
     return unit.anchor
 
 
-def _parent_stamps(state: semantic_index.SemanticParentIndexState | unit_rows.UnitRow) -> dict[str, Any]:
+def _parent_stamps(
+    state: semantic_index.SemanticParentIndexState | unit_rows.UnitRow,
+) -> dict[str, Any]:
     return {
         "parent_generation": state.parent_generation,
         "parent_source_hash": state.parent_source_hash,
@@ -14758,7 +14764,7 @@ def _candidate_metadata(unit: semantic_units.SemanticUnit | unit_rows.UnitRow) -
 
 
 def _candidate_node(page, row: unit_rows.UnitRow) -> GraphNode:
-    """The graph node of one stored unit row; the row holds every fact, and this holds the graph's rules."""
+    """The graph node of one unit row. The row holds each fact; this holds the graph's own rules."""
     return GraphNode(
         node_key=row.node_key,
         kind=CANDIDATE_KIND,
@@ -14766,7 +14772,9 @@ def _candidate_node(page, row: unit_rows.UnitRow) -> GraphNode:
         anchor=_unit_anchor(row),
         title=row.title,
         # A rich unit's body is its content; a rich unit with no body reads as its title.
-        text=_node_text(page, row.content if row.form == "compact" else row.content or row.title or ""),
+        text=_node_text(
+            page, row.content if row.form == "compact" else row.content or row.title or ""
+        ),
         source_hash=row.parent_source_hash,
         line_start=row.line,
         line_end=row.end_line,

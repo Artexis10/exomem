@@ -750,12 +750,16 @@ def test_an_owner_upgrade_restarts_an_older_pass_and_resumes_its_own_generation(
 def test_a_store_at_owner_version_five_gains_its_unit_rows_when_the_pass_settles(
     stored, writer, tmp_path  # noqa: F811
 ):
-    """A store that an earlier build set up has no unit row table: the pass creates it and derives every
-    page into it, past a cursor that would otherwise skip the pages."""
-    observation = b"---\ntitle: %s\ntype: note\n---\n# %s\n\n## Observations\n- [config] The tide ledger is kept ^ledger\n"
+    """A store that an earlier build set up has no unit row table: the pass creates it and derives
+    every page into it, past a cursor that would otherwise skip the pages."""
+    observation = (
+        b"---\ntitle: %s\ntype: note\n---\n# %s\n\n"
+        b"## Observations\n- [config] The tide ledger is kept ^ledger\n"
+    )
     for rel, title in ((GAMMA, b"Gamma"), (ALPHA, b"Alpha")):
+        page = observation % (title, title)
         write.commit(writer, write.StoreChange(
-            write.Origin.GOVERNED, "note", puts=(write.PagePut(rel, observation % (title, title)),),
+            write.Origin.GOVERNED, "note", puts=(write.PagePut(rel, page),),
         ))
     project(writer, stored)
     held = rows(stored, "SELECT path, COUNT(*) FROM unit_rows GROUP BY path ORDER BY path")
@@ -766,11 +770,15 @@ def test_a_store_at_owner_version_five_gains_its_unit_rows_when_the_pass_settles
         tx.execute("UPDATE store_meta SET value = ? WHERE key = ?", ("5", rederive.OWNER_SCHEMA))
         tx.execute(
             "INSERT OR REPLACE INTO store_meta(key, value) VALUES (?, ?)",
-            (rederive.PASS, json.dumps({"target": revision(stored), "after": "~", **rederive._generation()})),
+            (rederive.PASS, json.dumps(
+                {"target": revision(stored), "after": "~", **rederive._generation()}
+            )),
         )
-    # The store lacks the table, yet a write derives its page at once and keeps its other rows whole.
+    # The store lacks the table, yet a write derives its page at once and keeps its other rows
+    # whole.
     write.commit(writer, write.StoreChange(
-        write.Origin.GOVERNED, "note", puts=(write.PagePut(BETA, observation % (b"Beta", b"Beta")),),
+        write.Origin.GOVERNED, "note",
+        puts=(write.PagePut(BETA, observation % (b"Beta", b"Beta")),),
     ))
     project(writer, stored)
     assert "unit_rows" not in {name for (name,) in rows(stored, "SELECT name FROM sqlite_master")}
@@ -779,9 +787,8 @@ def test_a_store_at_owner_version_five_gains_its_unit_rows_when_the_pass_settles
     settle_to_the_end(stored, writer, limit=200)
 
     assert mode.status(stored)["owner_schema"] == "current"
-    assert rows(stored, "SELECT path, COUNT(*) FROM unit_rows GROUP BY path ORDER BY path") == sorted(
-        [*held, (BETA, held[0][1])]
-    )
+    after = rows(stored, "SELECT path, COUNT(*) FROM unit_rows GROUP BY path ORDER BY path")
+    assert after == sorted([*held, (BETA, held[0][1])])
     assert_cold_derivation(stored, tmp_path)
 
 

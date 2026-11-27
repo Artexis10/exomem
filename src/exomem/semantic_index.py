@@ -492,12 +492,17 @@ def structural_frontmatter(frontmatter: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in frontmatter.items() if key in inputs}
 
 
-def structural_metadata(state: SemanticParentIndexState) -> dict[str, Any]:
-    """Portable parser coverage and inputs for body-free selected interpretation."""
+def structural_metadata(
+    state: SemanticParentIndexState, identity: dict[str, dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    """Portable parser coverage and inputs for body-free selected interpretation.
+
+    ``identity`` is `semantic_units.identity_facts` of the state's units, when the caller has it.
+    """
     if state.candidates is None:
         raise ValueError("SEMANTIC_STRUCTURE_UNAVAILABLE")
     return {
-        "structure": semantic_units.structural_summary(state.candidates),
+        "structure": semantic_units.structural_summary(state.candidates, identity),
         "frontmatter_yaml": yaml.safe_dump(structural_frontmatter(state.frontmatter)),
         "parent_ref": state.parent_ref,
         "parent_generation": state.parent_generation,
