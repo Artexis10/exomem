@@ -465,23 +465,7 @@ async def _run(args: argparse.Namespace) -> int:
                 await ctx.admin_release({"cellImage": built.cell_v1, "release": RELEASE_V1})
             report.stages["release"]["principal"] = "deploy token" if args.release else "admin token"
             report.stages["release"]["published_cell_slots"] = await _published_cell_slots(ctx, timeout=120)
-        try:
-            await run_steps(ctx, only=only)
-        finally:
-            await close_clients(ctx)
-        report.stages["post_checks"] = post_checks(ctx)
-        mismatches = await ready_matches_pods(ctx)
-        report.stages["post_checks"]["ready_matches_pod"] = not mismatches
-        if mismatches:
-            report.defects.append(
-                {
-                    "step": "post_checks", "cross_lane": True, "owner": "Artexis10/exomem#1368",
-                    "component": "infra/cellctl reconcile._reconcile_row",
-                    "message": "a converged row's `ready` is not re-observed: a row that is not dirty gets only "
-                    "observed_at written, so a cell whose pod later turns NotReady keeps ready=true",
-                    "evidence": mismatches,
-                }
-            )
+        await _steps_then_checks(ctx, report, args.report, workdir, only)
         harness_errors = [step.number for step in report.steps if step.failure and "traceback" in step.failure]
         harness: dict[str, object] = {"steps_with_harness_errors": harness_errors}
         if args.harness_check:
@@ -543,6 +527,31 @@ async def _run(args: argparse.Namespace) -> int:
     return code
 
 
+async def _steps_then_checks(ctx: Context, report: Report, report_path: Path, workdir: Path, only: set[int] | None) -> None:
+    try:
+        await run_steps(ctx, only=only)
+    finally:
+        await close_clients(ctx)
+    # The report and the logs the steps kept leave before the checks that read the cluster: a cluster that stopped
+    # answering holds those checks, and the workflow's step timeout then ends the run with nothing uploaded. The report
+    # written at the end of the run replaces this one.
+    guarded(report, "report", lambda: report.write(report_path))
+    guarded(report, "kept diagnostics", lambda: _publish_kept_diagnostics(workdir))
+    report.stages["post_checks"] = post_checks(ctx)
+    mismatches = await ready_matches_pods(ctx)
+    report.stages["post_checks"]["ready_matches_pod"] = not mismatches
+    if mismatches:
+        report.defects.append(
+            {
+                "step": "post_checks", "cross_lane": True, "owner": "Artexis10/exomem#1368",
+                "component": "infra/cellctl reconcile._reconcile_row",
+                "message": "a converged row's `ready` is not re-observed: a row that is not dirty gets only "
+                "observed_at written, so a cell whose pod later turns NotReady keeps ready=true",
+                "evidence": mismatches,
+            }
+        )
+
+
 def _compare_with_known_findings(report: Report, path: Path, only: set[int] | None) -> dict[str, object]:
     """Harness check: every failing or blocked step must be a known, owned finding.
 
@@ -599,13 +608,18 @@ def _wait_json(resolver: Resolver, url: str, what: str) -> None:
 DIAGNOSTIC_READ_SECONDS = 60
 
 
+def _publish_kept_diagnostics(workdir: Path) -> None:
+    """Copy what the scenarios kept (cell logs, samples) to the folder that the workflow uploads."""
+    artifacts = os.environ.get("REHEARSAL_DIAGNOSTICS_DIR")
+    if artifacts and (workdir / "diagnostics").is_dir():
+        shutil.copytree(workdir / "diagnostics", Path(artifacts), dirs_exist_ok=True)
+
+
 def _collect_diagnostics(stack: infra.Stack, workdir: Path) -> None:
     out = workdir / "diagnostics"
     out.mkdir(exist_ok=True)
-    artifacts = os.environ.get("REHEARSAL_DIAGNOSTICS_DIR")
-    if artifacts:
-        # What the scenario kept (cell logs, samples) leaves first: the reads below can still run long.
-        shutil.copytree(out, Path(artifacts), dirs_exist_ok=True)
+    # What the scenario kept leaves first: the reads below can still run long.
+    _publish_kept_diagnostics(workdir)
     for name, command in {
         "pods": ["get", "pods", "--all-namespaces", "-o", "wide"],
         "events": ["get", "events", "--all-namespaces", "--sort-by=.lastTimestamp"],
@@ -623,8 +637,7 @@ def _collect_diagnostics(stack: infra.Stack, workdir: Path) -> None:
         # as a collection that failed, so the file says the command ran and printed nothing.
         text = result.stdout + result.stderr
         (out / f"{name}.txt").write_text(text or f"(kubectl {' '.join(command)} printed nothing)\n", encoding="utf-8")
-    if artifacts:
-        shutil.copytree(out, Path(artifacts), dirs_exist_ok=True)
+    _publish_kept_diagnostics(workdir)
 
 
 def _print_summary(report: Report, path: Path) -> None:

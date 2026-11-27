@@ -25,11 +25,13 @@ import secrets
 import shutil
 import socket
 import ssl
+import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import host_speed, images, tls
-from .shell import run, wait_for
+from .shell import CommandFailed, run, wait_for
 
 K3S_POD_CIDR = "10.42.0.0/16"
 K3S_SERVICE_CIDR = "10.43.0.0/16"
@@ -73,6 +75,18 @@ class ObjectStore:
         return f"http://127.0.0.1:{self.host_port}" if from_host else f"http://{self.ip}:{S3_PORT}"
 
 
+# A kubectl call with a limit runs under GNU `timeout` in the node's container: TERM at the limit, KILL after the grace.
+# `timeout` exits 124 when it ended the call and 137 when it had to KILL it; the docker client adds the slack on top.
+KILL_GRACE_SECONDS = 5
+CLIENT_SLACK_SECONDS = 30
+TIMED_OUT_STATUS = (124, 137)
+
+
+def _ended_by_limit(status: int, started: float, timeout: float) -> bool:
+    """`timeout`'s status after the whole limit had passed. An earlier 137 is the command's own (a kill by the kernel)."""
+    return status in TIMED_OUT_STATUS and time.monotonic() - started >= timeout
+
+
 @dataclass
 class K3s:
     container: str
@@ -83,14 +97,27 @@ class K3s:
     kubeconfig: Path | None = None
 
     def kubectl(self, *args: str, input_text: str | None = None, check: bool = True, timeout: float | None = None):
-        # `timeout` ends the docker client, which ends the exec; without it `run`'s own default applies.
-        limit = {} if timeout is None else {"timeout": timeout}
-        return run(
-            ["docker", "exec", "--interactive", self.container, "kubectl", *args],
-            input_text=input_text,
-            check=check,
-            **limit,
-        )
+        """One kubectl call in the node's container.
+
+        With `timeout`, GNU `timeout` inside the container ends kubectl itself (the docker client's death would leave it
+        running) and the call raises `subprocess.TimeoutExpired`. A `kubectl exec` that this ends leaves the script it
+        started in the pod running until the script ends on its own: only the client is bounded.
+        """
+        command = ["docker", "exec", "--interactive", self.container]
+        if timeout is None:
+            return run([*command, "kubectl", *args], input_text=input_text, check=check)
+        limited = [*command, "timeout", "-k", str(KILL_GRACE_SECONDS), f"{timeout:.3f}", "kubectl", *args]
+        started = time.monotonic()
+        try:
+            # The docker client's own limit only backstops a wedged client; `timeout` ends the call first.
+            result = run(limited, input_text=input_text, check=check, timeout=timeout + KILL_GRACE_SECONDS + CLIENT_SLACK_SECONDS)
+        except CommandFailed as error:
+            if _ended_by_limit(error.returncode, started, timeout):
+                raise subprocess.TimeoutExpired(["kubectl", *args[:1]], timeout) from None
+            raise
+        if _ended_by_limit(result.returncode, started, timeout):
+            raise subprocess.TimeoutExpired(["kubectl", *args[:1]], timeout)
+        return result
 
 
 @dataclass(frozen=True)

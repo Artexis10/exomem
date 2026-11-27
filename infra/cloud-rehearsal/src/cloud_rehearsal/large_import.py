@@ -39,7 +39,7 @@ from .mcp_client import TenantClient, ToolResult
 from .native_import import UPLOAD_ONLY, retain_cli_diagnostics, run_cli_import
 from .report import StepFailure, StepRecord, innermost, percentile
 from .scenarios import Context, first_session
-from .shell import CommandFailed, run
+from .shell import DEFAULT_TIMEOUT_SECONDS, CommandFailed, run
 
 SEED = "exomem-large-import-v1"
 # The loop-device disk is sparse and attached before K3s starts, so its size must not depend on the
@@ -54,15 +54,19 @@ APP_LOG_TAIL_BYTES = 20 << 20  # kept per file of the cell's app log; the pod's 
 TRANSIENT_ATTEMPTS = 8
 MUTATION_BUSY = "MUTATION_BUSY"  # a write that the vault's write boundary refused; the call may be repeated
 BUSY_RETRIES = 30  # refusals of one call before the run calls it a livelock and fails it
-# Every call into the cell ends at the scenario's deadline, so a hang still leaves a report. A kubectl call also ends at
-# KUBECTL_SECONDS (shell.run's own default) while the deadline is far. Once the scenario has ended only evidence is read,
-# each read for at most WRAP_UP_CALL_SECONDS and all of them for WRAP_UP_SECONDS, so a wedged cluster costs ten minutes
-# and not the report. The workflow's step ends at 140 minutes and the deadline default is 115: a call that hung until the
-# deadline, ten minutes of evidence and five of diagnostics (`__main__._collect_diagnostics`) leave about ten for teardown,
-# and `__main__` has written the report before the diagnostics start.
-KUBECTL_SECONDS = 900
+# What is bounded, against the workflow's 140-minute step and the deadline default of 115 minutes:
+# - While the stage runs, a tool call is cancelled at the deadline, and so is a kubectl call (`timeout` ends kubectl in the
+#   node's container, `infra.K3s.kubectl`). Far from the deadline a kubectl call ends at `shell.DEFAULT_TIMEOUT_SECONDS`.
+# - Once the stage has ended its work, its evidence reads each take at most WRAP_UP_READ_SECONDS and all of them
+#   WRAP_UP_SECONDS. The stage ends at minute 125 at the latest. These limits stop with the stage.
+# - `__main__` then writes the report and copies the logs the stage kept, before the post checks read the cluster.
+#   `scenarios.snapshot_logs` fails on its first read that takes over WRAP_UP_READ_SECONDS, and the diagnostics
+#   (`__main__._collect_diagnostics`) take five reads of one minute at most: about nine minutes are left for teardown.
+# Not bounded: `ready_matches_pods` reads with the usual limit, and so do the teardown's commands. They run after the
+# report is on disk, so the step's end costs the output of those reads and nothing else. A script that `kubectl exec`
+# started in the pod runs on until it ends, after its kubectl was ended.
 WRAP_UP_SECONDS = 600
-WRAP_UP_CALL_SECONDS = 60
+WRAP_UP_READ_SECONDS = 60
 CELL_COLLECTION = {"notes": "Imported notes", "media": "Imported media"}
 
 # Everything below runs inside the cell's pod, against its volume, with the cell's own interpreter.
@@ -300,6 +304,15 @@ class LargeImportPlan:
     seed: str = SEED
     node: drill_cluster.Agent | None = None
     wrap_up_started: float | None = None  # a time.monotonic() value, set once when the scenario has ended
+    active: bool = False  # the stage is running: only then do its call limits apply
+    read_seconds: float = WRAP_UP_READ_SECONDS  # the longest one read of the cluster's state may take as evidence
+
+    def begin_stage(self) -> None:
+        self.active, self.wrap_up_started = True, None
+
+    def end_stage(self) -> None:
+        """The stage's call limits end with it: a read after the stage (the post checks) keeps its usual limit."""
+        self.active, self.wrap_up_started = False, None
 
     @property
     def volume_gib(self) -> int:
@@ -317,14 +330,17 @@ class LargeImportPlan:
         if self.wrap_up_started is None:
             self.wrap_up_started = time.monotonic()
 
-    def call_limit(self, what: str) -> float:
-        """The seconds one kubectl call may run: until the deadline, or the wrap-up's own limit once the scenario ended."""
+    def call_limit(self, what: str) -> float | None:
+        """The seconds one kubectl call may run while the stage runs: until the deadline, or the wrap-up's own limit once
+        the stage has ended its work. None outside the stage, and the call keeps its usual limit."""
+        if not self.active:
+            return None
         if self.wrap_up_started is not None:
             left = self.wrap_up_started + WRAP_UP_SECONDS - time.monotonic()
-            return max(1.0, min(WRAP_UP_CALL_SECONDS, left))
+            return max(1.0, min(self.read_seconds, left))
         if self.remaining() <= 0:
             raise OutOfTime(f"the scenario's deadline had passed before {what}")
-        return min(KUBECTL_SECONDS, self.remaining())
+        return min(DEFAULT_TIMEOUT_SECONDS, self.remaining())
 
     def call_timed_out(self, what: str, seconds: float) -> StepFailure:
         """The failure for a call that its limit ended: the deadline's, or a hang with the deadline still far."""
@@ -1424,7 +1440,16 @@ def measurements(out: dict, sampler: Sampler, environment: Mapping[str, Any]) ->
 
 
 async def run_large_import(ctx: Context, plan: LargeImportPlan) -> None:
-    """The stage body: write into `report.stages["large_import"]` as it goes, so partial results survive."""
+    """The stage: its call limits apply while it runs, and stop with it."""
+    plan.begin_stage()
+    try:
+        await _stage_body(ctx, plan)
+    finally:
+        plan.end_stage()
+
+
+async def _stage_body(ctx: Context, plan: LargeImportPlan) -> None:
+    """Write into `report.stages["large_import"]` as it goes, so partial results survive."""
     out = ctx.report.stages["large_import"]
     out.update({
         "mode": "smoke" if plan.smoke else "full", "seed": plan.seed, "ceiling_bytes": plan.ceiling, "import_reserve_bytes": plan.reserve,
