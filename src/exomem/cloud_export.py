@@ -161,6 +161,11 @@ def run_export(vault: Path, staging: Path, *, export_id: str, cell_id: str,
             return sink.finish()
 
 
+# Each block is one ranged GET, so the block size sets how many round trips a
+# remote verification pays. Two cached blocks stay far inside the Job's memory limit.
+VERIFY_BLOCK_BYTES = 8 * 1024 * 1024
+
+
 def verify_remote_export(url: str, *, cell_id: str, archive_bytes: int, archive_sha256: str,
                          max_bytes: int) -> dict:
     """Verify a completed private object with the runtime's canonical reader and bounded HTTP cache."""
@@ -174,7 +179,7 @@ def verify_remote_export(url: str, *, cell_id: str, archive_bytes: int, archive_
     try:
         # cellctl passes the planned bound, at most 1000 parts of 1 GiB. The verifier must accept every
         # archive that the pack wrote, and an evicted recording above 2 GiB is one member of it.
-        with fs.open(url, "rb", size=archive_bytes, block_size=1024 * 1024,
+        with fs.open(url, "rb", size=archive_bytes, block_size=VERIFY_BLOCK_BYTES,
                      cache_type="blockcache", cache_options={"maxblocks": 2}) as stream:
             verified = vault_portability.verify_export_stream(stream, archive_bytes, expected_cell_id=cell_id,
                 expected_vault_id=cell_id, limits=vault_portability.PortabilityLimits(
