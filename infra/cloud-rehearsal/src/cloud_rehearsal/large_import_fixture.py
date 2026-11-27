@@ -62,8 +62,17 @@ MIN_NOTES = 3
 # Peak disk use of the first folder: its source, the client's ciphertext (x1.05), the object store
 # (x1.05) and the backup repository (x1.0), plus the cell volume and some headroom for images.
 PEAK_COPIES = 4.1
-VOLUME_FACTOR = 1.6  # volume = 1.6 x the first folder, which holds one copy and not two
 MIN_VOLUME_GIB = 4  # the platform chart's smallest cellStorage.maxCellGib
+# What a cell keeps beside the files that it imports, for each file filed. The catalogue figure is measured on this
+# fixture's own notes: 8,000 of them took 19,600 bytes a row after the first build and 26,400 after one round of edits;
+# 33,000 allows a second round. The other derived state (extracted text, graph, sidecars) is an estimate, not a
+# measurement: the report's `peak_volume_used` against `sizing.fullest_volume_bytes` shows how far off it is.
+CATALOGUE_BYTES_PER_FILE = 33_000
+OTHER_DERIVED_BYTES_PER_FILE = 10_000
+# The free space that a full catalogue rebuild keeps back for canonical writes (the cell's import reserve,
+# `cloud_import.DEFAULT_RESERVE_BYTES`; this harness cannot import the product).
+REBUILD_RESERVE_BYTES = 256 * MIB
+VOLUME_MARGIN = 1.15  # over the fullest the volume gets: the file system's own overhead (2.8% measured) and a chunk in flight
 HEADROOM_BYTES = 4 * GIB
 SHRINK = 0.9
 
@@ -112,6 +121,8 @@ class Sizing:
     scaled: bool
     proves_one_copy_only: bool
     note: str
+    fullest_volume_bytes: int  # the fullest the volume gets while filing removes each staged copy
+    with_staged_copy_bytes: int  # what it would need if the first folder's staged copies stayed
 
 
 def disposition_of(kind: str, *, hidden: str | None, include_hidden: bool) -> str:
@@ -335,8 +346,29 @@ def read_manifest(path: Path) -> list[Entry]:
 # --- sizing ---------------------------------------------------------------------------------
 
 
-def volume_gib_for(notes_bytes: int) -> int:
-    return max(MIN_VOLUME_GIB, math.ceil(VOLUME_FACTOR * notes_bytes / GIB))
+def derived_bytes(files: int) -> int:
+    """What the cell keeps beside `files` filed files: the lexical catalogue and every other derived store."""
+    return files * (CATALOGUE_BYTES_PER_FILE + OTHER_DERIVED_BYTES_PER_FILE)
+
+
+def rebuild_transient_bytes(files: int) -> int:
+    """The most that a full catalogue rebuild adds while it runs: one more copy of the catalogue, and the reserve."""
+    return files * CATALOGUE_BYTES_PER_FILE + REBUILD_RESERVE_BYTES
+
+
+def fullest_volume_bytes(content_bytes: int, files: int) -> int:
+    """The fullest the cell's volume gets when filing removes each staged copy: the filed files, what the cell
+    derives from them, and a catalogue rebuild at the end."""
+    return content_bytes + derived_bytes(files) + rebuild_transient_bytes(files)
+
+
+def with_staged_copy_bytes(notes_bytes: int, content_bytes: int, files: int) -> int:
+    """The same peak if the first folder's staged copies stayed after filing, as they did before filing removed them."""
+    return notes_bytes + fullest_volume_bytes(content_bytes, files)
+
+
+def volume_gib_for(content_bytes: int, files: int) -> int:
+    return max(MIN_VOLUME_GIB, math.ceil(VOLUME_MARGIN * fullest_volume_bytes(content_bytes, files) / GIB))
 
 
 def generation_need_bytes(folder_bytes: int) -> int:
@@ -345,9 +377,9 @@ def generation_need_bytes(folder_bytes: int) -> int:
     return math.ceil(PEAK_COPIES * folder_bytes) + HEADROOM_BYTES
 
 
-def peak_disk_bytes(notes_bytes: int) -> int:
+def peak_disk_bytes(notes_bytes: int, volume_gib: int) -> int:
     """The runner disk the first folder needs at its peak, whatever else is already on it."""
-    return generation_need_bytes(notes_bytes) + volume_gib_for(notes_bytes) * GIB
+    return generation_need_bytes(notes_bytes) + volume_gib * GIB
 
 
 def plan_sizes(*, free_bytes: int, ceiling: int, files: int, target_bytes: int,
@@ -355,7 +387,8 @@ def plan_sizes(*, free_bytes: int, ceiling: int, files: int, target_bytes: int,
     """Choose the bytes of each folder and the cell volume from the free disk.
 
     The file count never shrinks; the bytes do, by a tenth at a time, until the first folder's peak
-    fits. The volume is sized to hold one copy of the first folder and not two, and the result says
+    fits. The volume holds both folders once, what the cell derives from their files and one more copy of
+    the lexical catalogue while it rebuilds, and not a second copy of the first folder. The result says
     when scaling left the volume too large to prove that.
     """
     files_media = files // MEDIA_FILES_DIVISOR
@@ -366,22 +399,24 @@ def plan_sizes(*, free_bytes: int, ceiling: int, files: int, target_bytes: int,
     scaled = False
     while True:
         media = max(floor_media, int(notes * (1 - NOTES_SHARE) / NOTES_SHARE))
-        needed = peak_disk_bytes(max(notes, media))
+        volume = volume_gib_for(notes + media, files)
+        needed = peak_disk_bytes(max(notes, media), volume)
         if needed <= free_bytes:
             break
         if notes <= floor_notes:
             raise SizingError(f"{free_bytes / GIB:.1f} GiB free disk cannot hold even the smallest fixture, "
                               f"which needs {needed / GIB:.1f} GiB")
         notes, scaled = max(floor_notes, int(notes * SHRINK)), True
-    volume = volume_gib_for(notes)
-    proves = volume * GIB < 2 * notes
+    fullest = fullest_volume_bytes(notes + media, files)
+    staged = with_staged_copy_bytes(notes, notes + media, files)
+    proves = volume * GIB < staged
     note = (f"first folder {notes / GIB:.2f} GiB and second {media / GIB:.2f} GiB on a {volume} GiB volume"
             + (f"; scaled down from {target_bytes / GIB:.2f} GiB to fit {free_bytes / GIB:.1f} GiB free"
                if scaled else ""))
     if not proves:
-        note += (f"; the volume is not below two copies of the first folder ({2 * notes / GIB:.2f} GiB), "
+        note += (f"; the volume is not below what a staged copy of the first folder would need ({staged / GIB:.2f} GiB), "
                  "so the run cannot show that consuming is what makes it fit")
-    return Sizing(notes, media, volume, files_notes, files_media, scaled, proves, note)
+    return Sizing(notes, media, volume, files_notes, files_media, scaled, proves, note, fullest, staged)
 
 
 # --- the answer key -------------------------------------------------------------------------

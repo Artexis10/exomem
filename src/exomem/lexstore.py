@@ -68,6 +68,7 @@ import json
 import logging
 import operator
 import os
+import shutil
 import sqlite3
 import sys
 import threading
@@ -1226,6 +1227,8 @@ _PUBLISHED_HANDOFF_PENDING: set[Path] = set()
 #: request observed during it, the request stays pending for a later caller to
 #: restart after an idle boundary instead of chaining full scans forever.
 _MAX_FULL_REBUILDS_PER_FLIGHT = 1
+#: The repair result of a full pass that left the volume's last bytes to canonical writes (`_rebuild_space_wait`).
+_WAITING_FOR_SPACE = "waiting_for_space"
 #: Progress floor of a full repair's rebuild (`foreground_priority.PassBudget`).
 #: An import's apply holds the boundary for 97% of each call (rehearsals,
 #: 2026-10-31). In a local reproduction, the default half share let the repair
@@ -1376,6 +1379,7 @@ def _log_repair_finished(
     parked_s: float = 0.0,
     declined_for: DeclineCause | CatchUpDecline | None = None,
     promoted: bool | None = None,
+    space_wait: tuple[int, int] | None = None,
 ) -> None:
     """Name one repair pass's result and the stage that produced it.
 
@@ -1390,7 +1394,7 @@ def _log_repair_finished(
     yields for foreground work, such as an apply that holds the mutation boundary.
     `declined_for` names the bound that ended a pass that declined for a moving
     source, or the refusal that left a catch-up's lag to a full pass, and is
-    absent for any other result.
+    absent for any other result. `space_wait` is the (needed, free) bytes of a pass that waits for space.
     """
     fields: dict[str, object] = {
         "kind": kind,
@@ -1406,6 +1410,8 @@ def _log_repair_finished(
         fields["declined_for"] = str(declined_for)
     if promoted is not None:
         fields["promoted"] = promoted
+    if space_wait is not None:
+        fields["space_needed_bytes"], fields["space_free_bytes"] = space_wait
     log_event(log, logging.INFO, "lexical_repair_finished", fields=fields)
 
 
@@ -2761,12 +2767,21 @@ def repair_progress(vault_root: Path) -> dict[str, object] | None:
             and progress.get("phase") != "idle"
             else 0.0
         )
-        return {
+        snapshot: dict[str, object] = {
             "phase": progress.get("phase", "idle"),
             "age_seconds": round(age, 3),
             "last_duration_seconds": progress.get("last_duration_seconds"),
             "last_result": progress.get("last_result"),
         }
+        space_wait = progress.get("space_wait")
+        if progress.get("last_result") == _WAITING_FOR_SPACE and isinstance(space_wait, tuple):
+            snapshot["space_needed_bytes"], snapshot["space_free_bytes"] = space_wait
+        return snapshot
+
+
+def _space_wait_of(store: object, outcome: str | None) -> tuple[int, int] | None:
+    """The (needed, free) bytes a pass waits for, when its `outcome` says it waits for space."""
+    return getattr(store, "_last_space_wait", None) if outcome == _WAITING_FOR_SPACE else None
 
 
 def _set_repair_progress(
@@ -2774,8 +2789,13 @@ def _set_repair_progress(
     phase: str,
     *,
     result: str | None = None,
+    space_wait: tuple[int, int] | None = None,
 ) -> None:
-    """Update process-local repair progress; caller holds `_REPAIRS_LOCK`."""
+    """Update process-local repair progress; caller holds `_REPAIRS_LOCK`.
+
+    `space_wait` is the (needed, free) bytes of a pass that declined to wait for space; it describes
+    `last_result`, so an idle update replaces it and the other phases keep it.
+    """
     now = time.monotonic()
     prior = _REPAIR_PROGRESS.get(key, {})
     started_at = prior.get("started_at")
@@ -2783,14 +2803,17 @@ def _set_repair_progress(
         started_at = now
     duration = prior.get("last_duration_seconds")
     last_result = prior.get("last_result")
+    waiting = prior.get("space_wait")
     if phase == "idle":
         duration = round(max(0.0, now - float(started_at)), 3)
         last_result = result or last_result
+        waiting = space_wait
     _REPAIR_PROGRESS[key] = {
         "phase": phase,
         "started_at": started_at,
         "last_duration_seconds": duration,
         "last_result": last_result,
+        "space_wait": waiting,
     }
 
 
@@ -3119,6 +3142,7 @@ def _schedule_repair(
                                 key,
                                 "idle",
                                 result=outcome or "delta_unavailable",
+                                space_wait=_space_wait_of(store, outcome),
                             )
                             return
                         rebuild = False
@@ -3142,6 +3166,7 @@ def _schedule_repair(
                             key,
                             "idle",
                             result=outcome or "targeted",
+                            space_wait=_space_wait_of(store, outcome),
                         )
                         return
                 if rebuild and published_handoff:
@@ -3255,6 +3280,7 @@ def _schedule_repair(
                                 key,
                                 "idle",
                                 result=outcome or "delta_unavailable",
+                                space_wait=_space_wait_of(store, outcome),
                             )
                             return
                         full_passes += 1
@@ -3329,6 +3355,7 @@ def _schedule_repair(
                     parked_s=getattr(store, "_last_parked_seconds", 0.0) if full_pass else 0.0,
                     declined_for=getattr(store, "_last_decline_cause", None) if full_pass else None,
                     promoted=promoted,
+                    space_wait=_space_wait_of(store, outcome) if full_pass else None,
                 )
                 pass_kind = None
                 if full_pass:
@@ -6797,6 +6824,9 @@ class LexicalStore:
         self._last_catch_up_advanced = False
         # Which bound ended the last pass that declined for a moving source.
         self._last_decline_cause: DeclineCause | None = None
+        # The (free bytes it needs, free bytes the volume has) of the last full pass that declined to wait for
+        # space (`_rebuild_space_wait`); None for any other result.
+        self._last_space_wait: tuple[int, int] | None = None
         self._last_catch_up_decline: CatchUpDecline | None = None
         # Seconds the last rebuild waited at its yields for foreground work:
         # requests and every wait for or hold of a mutation boundary.
@@ -10019,6 +10049,28 @@ class LexicalStore:
         finally:
             conn.close()
 
+    def _rebuild_space_wait(self) -> tuple[int, int] | None:
+        """The (bytes needed, bytes free) of a volume that cannot take a full rebuild yet, else None.
+
+        A rebuild copies the live catalogue beside it, so the volume holds the catalogue twice until the
+        replacement publishes. It also keeps the import reserve free (`cloud_import.reserve_bytes_from_env`, the
+        one setting that guards a volume against a full disk), so canonical writes that run meanwhile always
+        find room. The rebuild then waits: it costs a stale search, where an early start would cost saves.
+        A volume whose free space cannot be read does not wait: that is no evidence that space is short.
+        """
+        from . import cloud_import
+
+        wal, _shm = self._wal_shm_paths(self.path)
+        needed = cloud_import.reserve_bytes_from_env()
+        for member in (self.path, wal):
+            with contextlib.suppress(OSError):  # a missing member holds no bytes
+                needed += member.stat().st_size
+        try:
+            free = shutil.disk_usage(self.path.parent).free
+        except OSError:
+            return None
+        return None if free >= needed else (needed, free)
+
     @call_spans.timed("lexical.rebuild_atomic")
     def rebuild_atomic(self) -> bool:
         """Rebuild the catalog into a detached sibling sidecar, then publish it
@@ -10062,7 +10114,8 @@ class LexicalStore:
            with one `os.replace`. On any abort the live sidecar stays untouched.
 
         Returns True when it published, False when it declined (transient
-        failure, incomplete/overflowed delta, identity change mid-build, a WAL
+        failure, a volume without room for a second copy of the catalogue,
+        incomplete/overflowed delta, identity change mid-build, a WAL
         that could not be safely folded, or a live catalog that advanced past this
         build).
         Events that arrive after the captured target remain in the registry
@@ -10082,6 +10135,7 @@ class LexicalStore:
         self._last_replay_deferred = set()
         self._last_replay_publishing = False
         self._last_decline_cause = None
+        self._last_space_wait = None
         self._last_parked_seconds = 0.0
         if backend() == "python":
             return self._decline_rebuild("transient_failure")
@@ -10089,6 +10143,10 @@ class LexicalStore:
             self._sweep_orphan_rebuild_temps()
         except Exception:  # noqa: BLE001 - housekeeping never blocks a rebuild
             log.debug("lexical orphan rebuild-temp sweep failed", exc_info=True)
+        self._last_space_wait = self._rebuild_space_wait()
+        if self._last_space_wait is not None:
+            # The worker retries on its schedule; until then search lags and canonical writes keep their space.
+            return self._decline_rebuild(_WAITING_FOR_SPACE)
 
         from . import source_custody
 
@@ -10558,6 +10616,12 @@ class LexicalStore:
             return "quarantine"
         if not self.path.exists():
             return "missing"
+        # A copy into a WAL lands in the temp's `-wal` and the first commit folds it into the main file, which
+        # holds the catalogue twice beside the live one. Plain pages hold it once. A catalogue's free pages were
+        # under 1% of its size when measured (8,000 pages), so `VACUUM INTO` would save little and rewrite every index.
+        mode = conn.execute("PRAGMA journal_mode=DELETE").fetchone()
+        if not mode or str(mode[0]).lower() != "delete":
+            return "journal_mode"
         source = self._connect()
         try:
             # One backup step copies one consistent snapshot of the live main
@@ -10565,6 +10629,11 @@ class LexicalStore:
             source.backup(conn)
         finally:
             source.close()
+        try:
+            # The reconcile and the replays write few pages at a time, which WAL takes without a journal sync.
+            conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.Error as e:
+            log.debug("lexical temp journal-mode negotiation skipped (%s)", e)
         if not self._schema_is_current(conn):
             return "schema"
         if self._meta_catalog_identity(conn) != identity:

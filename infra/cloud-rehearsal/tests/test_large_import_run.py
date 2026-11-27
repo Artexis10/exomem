@@ -272,6 +272,25 @@ def test_each_file_call_keeps_its_counts_and_the_page_shows_files_per_call_and_p
     assert page["files_per_second"] == 100.0  # 100 files over two calls of 0.5 s
 
 
+def test_a_page_that_filed_more_files_than_it_consumed_shows_the_staged_copies_that_stayed():
+    """Catches a leftover staged copy of text files, which the folder's total consumed count would show only at the end."""
+    empty = _residual(0, {})
+    agent = Scripted({"file": [_working("r1", filed=5, token="a"), _done("r2", filed=9, residual=empty)],
+                      STATUS: [_stored(["a"], finish=_recorded(3, residual=empty)), _stored(["b"], finish=_recorded(4, residual=empty))]})
+    folder = _folder(name="media")
+
+    asyncio.run(large_import.file_pages(agent, _plan(), folder))
+
+    assert [page["filed_not_consumed"] for page in folder.report["pages"]] == [2, 0]
+
+
+def test_a_page_without_a_finish_count_leaves_its_unconsumed_files_unknown_not_zero():
+    steps = [large_import.file_step({"progress": {"filed": 5}}, 1.0, before=0)]
+
+    assert large_import.unconsumed_files(steps, None) is None
+    assert large_import.unconsumed_files(steps, 5) == 0
+
+
 def test_a_deadline_that_stops_filing_still_reports_the_calls_made():
     """Catches the report that lost every page because the deadline check came before the pages were recorded."""
     agent = Scripted({"file": [_working("r1", filed=40, token="a"), _working("r1", filed=90, token="b")]})

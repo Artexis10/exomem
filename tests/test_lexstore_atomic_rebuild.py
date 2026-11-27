@@ -1996,6 +1996,69 @@ def test_await_repairs_idle_waits_for_an_in_flight_repair() -> None:
     assert lexstore.await_repairs_idle(root, timeout=30.0) is True
 
 
+def _a_catalogue_of_several_megabytes(root: Path) -> lexstore.LexicalStore:
+    """A built, current live catalogue large enough that a second copy of it dwarfs the build's other files."""
+    pages = [
+        _kb_file(root, f"page-{n:03d}.md", " ".join(f"word{n}x{k}" for k in range(150)))
+        for n in range(250)
+    ]
+    _seed(root, pages)
+    lexstore.ensure_fresh(root)
+    return lexstore.get_store(root)
+
+
+def test_a_full_rebuild_holds_one_extra_copy_of_the_catalogue_not_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Copying the live catalogue into a temp in WAL mode lands it in the temp's `-wal`, and the first commit
+    folds it into the temp's main file: the volume held three copies. The reconcile starts right after that
+    commit, so the temp's files at its start are the build's high-water mark."""
+    store = _a_catalogue_of_several_megabytes(tmp_path)
+    live_bytes = store.path.stat().st_size
+    assert live_bytes > 2_000_000, "too small for a copy to outweigh the temp's fixed files"
+    real_reconcile = store._reconcile_catalog
+    temp_bytes: list[int] = []
+
+    def measure_then_reconcile(conn: sqlite3.Connection, *args: Any) -> Any:
+        temp = Path(conn.execute("PRAGMA database_list").fetchone()[2])
+        temp_bytes.append(sum(member.stat().st_size for member in temp.parent.glob(f"{temp.name}*")))
+        return real_reconcile(conn, *args)
+
+    monkeypatch.setattr(store, "_reconcile_catalog", measure_then_reconcile)
+    assert store.rebuild_atomic() is True
+
+    assert temp_bytes, "the build never reconciled a copy of the live catalogue"
+    assert temp_bytes[0] < 1.25 * live_bytes, f"the temp held {temp_bytes[0]} bytes beside a live {live_bytes}"
+
+
+def test_a_full_rebuild_waits_for_space_instead_of_starving_writes_and_runs_once_there_is_room(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A volume that cannot hold a second copy of the catalogue plus the import reserve leaves its last bytes
+    to canonical writes: the repair says so, writes nothing, and runs on its next flight once space returns."""
+    store = _a_catalogue_of_several_megabytes(tmp_path)
+    live = store.path.read_bytes()
+    monkeypatch.setenv("EXOMEM_IMPORT_RESERVE_BYTES", str(1 << 50))  # more than any volume holds
+
+    lexstore._schedule_repair(tmp_path)
+    assert lexstore.await_repairs_idle(tmp_path, timeout=_OBSERVE_SECONDS)
+
+    waiting = lexstore.repair_progress(tmp_path)
+    assert waiting is not None and waiting["last_result"] == "waiting_for_space"
+    assert waiting["space_needed_bytes"] >= (1 << 50) + len(live)
+    assert waiting["space_free_bytes"] < waiting["space_needed_bytes"]
+    assert store.path.read_bytes() == live
+    assert not list(store.path.parent.glob("*rebuild*")), "the pass wrote a temp before it waited"
+
+    monkeypatch.delenv("EXOMEM_IMPORT_RESERVE_BYTES")
+    lexstore._schedule_repair(tmp_path)
+    assert lexstore.await_repairs_idle(tmp_path, timeout=_OBSERVE_SECONDS)
+
+    published = lexstore.repair_progress(tmp_path)
+    assert published is not None and published["last_result"] == "published"
+    assert "space_needed_bytes" not in published
+
+
 def test_repair_progress_reports_bounded_phase_duration_and_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

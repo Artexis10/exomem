@@ -11,6 +11,7 @@ import re
 
 import pytest
 
+from cloud_rehearsal import drill_cluster, large_import
 from cloud_rehearsal import large_import_fixture as fixture
 from cloud_rehearsal.large_import_fixture import (
     FILED_ARTIFACT,
@@ -128,14 +129,31 @@ def _size(free_gib, **extra):
                               target_bytes=6_000_000_000, **extra)
 
 
-def test_a_roomy_disk_keeps_the_target_and_a_volume_under_two_copies():
+def test_a_roomy_disk_keeps_the_target_and_a_volume_that_cannot_hold_a_staged_copy():
     sizing = _size(120)
 
     assert not sizing.scaled
     assert sizing.notes_bytes + sizing.media_bytes == pytest.approx(6_000_000_000, rel=0.01)
-    assert sizing.volume_gib * GIB < 2 * sizing.notes_bytes
-    assert sizing.volume_gib * GIB > sizing.notes_bytes
+    assert sizing.volume_gib * GIB < sizing.with_staged_copy_bytes
     assert sizing.proves_one_copy_only
+
+
+def test_the_volume_holds_both_folders_what_the_cell_derives_and_one_more_catalogue_copy():
+    sizing = _size(120)
+    content = sizing.notes_bytes + sizing.media_bytes
+    files = sizing.files_notes + sizing.files_media
+
+    assert sizing.volume_gib * GIB >= content + fixture.derived_bytes(files) + fixture.rebuild_transient_bytes(files)
+    assert sizing.volume_gib * GIB >= sizing.fullest_volume_bytes
+    # More files at the same bytes need more room, because each file adds catalogue rows and a catalogue copy.
+    many = fixture.plan_sizes(free_bytes=120 * GIB, ceiling=200 * MIB, files=140_000, target_bytes=6_000_000_000)
+    assert many.volume_gib > sizing.volume_gib
+
+
+def test_the_volume_pool_for_a_full_size_run_fits_the_node_disk():
+    sizing = _size(120)
+
+    assert drill_cluster.pool_gib_for(sizing.volume_gib) <= large_import.MAX_POOL_GIB
 
 
 def test_a_tight_disk_scales_bytes_down_and_never_the_file_count():
@@ -144,7 +162,7 @@ def test_a_tight_disk_scales_bytes_down_and_never_the_file_count():
     assert tight.scaled and tight.notes_bytes < roomy.notes_bytes
     assert (tight.files_notes, tight.files_media) == (roomy.files_notes, roomy.files_media)
     assert tight.files_notes + tight.files_media == 70_000
-    assert fixture.peak_disk_bytes(tight.notes_bytes) <= 25 * GIB
+    assert fixture.peak_disk_bytes(tight.notes_bytes, tight.volume_gib) <= 25 * GIB
 
 
 def test_a_disk_too_small_for_the_fixed_files_is_refused_with_the_shortfall():
@@ -152,12 +170,13 @@ def test_a_disk_too_small_for_the_fixed_files_is_refused_with_the_shortfall():
         _size(2)
 
 
-def test_scaled_data_that_no_longer_exceeds_one_copy_says_it_proves_nothing():
-    sizing = _size(14)
+def test_data_that_leaves_room_for_a_staged_copy_says_it_proves_nothing():
+    # Few files and a small byte target: the platform's smallest volume holds the data and a staged copy of it.
+    sizing = fixture.plan_sizes(free_bytes=120 * GIB, ceiling=200 * MIB, files=5_000, target_bytes=50_000_000)
 
-    assert sizing.scaled and not sizing.proves_one_copy_only
-    assert "two copies" in sizing.note
-    assert sizing.volume_gib >= 4
+    assert not sizing.proves_one_copy_only
+    assert "staged copy" in sizing.note
+    assert sizing.volume_gib == fixture.MIN_VOLUME_GIB
 
 
 # --- judging a run against the key ---------------------------------------------------------
