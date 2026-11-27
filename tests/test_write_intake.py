@@ -29,6 +29,7 @@ from record_fixtures import (
     setup_ledger_collection,
 )
 from test_governance_egress import _receipt_records, write_scope
+from test_planning_mutation import _manifest as planning_manifest
 
 from exomem import (
     auth_sessions,
@@ -55,6 +56,7 @@ from exomem.governance.principal import (
     local_owner_principal,
     request_scope,
 )
+from exomem.plan_memory import plan_memory
 
 _HOLD_SECONDS = 30.0
 _LAND_SECONDS = 30.0
@@ -630,6 +632,139 @@ def test_a_record_value_its_collection_never_declares_is_refused_behind_the_queu
     with pytest.raises(Exception) as direct:
         _send(_command("record_memory"), vault, call, scope="principal:session-b")
     assert direct.value.code == "SCHEMA_ENUM"
+
+
+_PLANNING_COLLECTION_PATH = "Knowledge Base/Planning/Work/_collection.md"
+
+
+def _planning_collection(vault: Path) -> str:
+    """A Planning collection whose statuses are the shipped Planning values, and which declares an `effort`."""
+    manifest = planning_manifest().replace(
+        "    parent:\n      type: string\n", "    parent:\n      type: string\n    effort:\n      type: enum\n"
+        "      enum: [small, large]\n")
+    _send(_command("plan_memory"), vault, {"action": "create", "manifest_path": _PLANNING_COLLECTION_PATH,
+                                           "manifest_text": manifest, "why": "plan the work"})
+    return _PLANNING_COLLECTION_PATH
+
+
+def _plan_call(collection: str, action: str, title: str = "Ship the release", **values: str) -> dict:
+    """An add of a committed outcome with `values`, or an update of the item `values` names by its plan id."""
+    if action == "add":
+        return {"action": "add", "collection": collection, "why": "plan the release",
+                "item": {"title": title, "kind": "outcome", "status": "active", "commitment": "committed",
+                         "horizon": "week", **values}}
+    target = {name: values.pop(name) for name in ("plan_id", "expected_container_hash", "expected_item_version")}
+    return {"action": "update", "collection": collection, **target, "changes": values, "why": "correct the release"}
+
+
+def _planned_outcome(vault: Path, collection: str, title: str = "Ship the release") -> dict:
+    """The plan id and both guards of the item titled `title`, as a query reports them."""
+    view = _send(_command("plan_memory"), vault, {"action": "query", "collection": collection, "lifecycle": "all"})
+    (row,) = [row for row in view["rows"] if row["title"] == title]
+    return {"plan_id": row["plan_id"], "expected_container_hash": view["snapshot"],
+            "expected_item_version": row["item_version"]}
+
+
+@pytest.mark.parametrize(
+    ("action", "field", "value", "code", "message"),
+    [
+        ("add", "status", "resolved", "INVALID_PLAN",
+         "status must be one of: candidate, planned, active, blocked, completed, cancelled"),
+        ("update", "status", "resolved", "INVALID_PLAN",
+         "status must be one of: candidate, planned, active, blocked, completed, cancelled"),
+        ("add", "effort", "medium", "SCHEMA_ENUM", 'field is outside its enum: effort; allowed: "small", "large"'),
+    ],
+    ids=["add-planning-value", "update-planning-value", "add-declared-field"],
+)
+def test_a_plan_value_the_vault_never_declares_is_refused_behind_the_queue_and_never_queued(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch, action: str, field: str, value: str, code: str,
+    message: str,
+) -> None:
+    """Defect: a Planning status outside the Planning values came back "Queued, not saved yet" and failed only at the
+    replay, while the same call sent directly was refused at once."""
+    _writer, holder = managers
+    plan = _command("plan_memory")
+    collection = _planning_collection(vault)
+    target = {}
+    if action == "update":
+        _send(plan, vault, _plan_call(collection, "add"))
+        target = _planned_outcome(vault, collection)
+    call = _plan_call(collection, action, **target, **{field: value})
+    first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
+    with pytest.raises(OpError) as refused:
+        _send(plan, vault, call, scope="principal:session-b")
+    assert (refused.value.code, refused.value.message) == (code, message)
+    assert "nothing is held" in refused.value.remediation
+    assert [item["ref"] for item in write_intake.read(vault)["items"]] == [first]
+    paused.set()
+    _wait_for_state(vault, first, "applied")
+    # The same call sent directly reaches the commit, which refuses it the same way.
+    with request_scope(local_owner_principal(surface="mcp")), pytest.raises(OpError) as direct:
+        plan_memory(vault, **call)
+    assert (direct.value.code, direct.value.message) == (code, message)
+
+
+def test_a_plan_value_the_vault_declares_is_still_queued_behind_the_queue_and_lands(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _writer, holder = managers
+    collection = _planning_collection(vault)
+    first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
+    receipt = _send(_command("plan_memory"), vault, _plan_call(collection, "add", effort="large"),
+                    scope="principal:session-b")
+    assert receipt["state"] == "queued"
+    paused.set()
+    _wait_for_state(vault, first, "applied")
+    _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
+
+
+def test_a_plan_value_a_queued_manifest_revision_declares_is_queued_behind_it_and_saved(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The queued Planning revision declares the value before the add replays, so refusing it at once would be wrong."""
+    _writer, holder = managers
+    plan = _command("plan_memory")
+    collection = _planning_collection(vault)
+    lifecycle = _send(plan, vault, {"action": "inspect", "collection": collection})["lifecycle_guards"]
+    manifest_text = (vault / collection).read_text(encoding="utf-8").replace("[small, large]", "[small, medium, large]")
+    first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
+    revision = _send(plan, vault, {
+        "action": "revise", "collection": collection, "manifest_text": manifest_text, **lifecycle,
+        "why": "declare a medium effort",
+    }, scope="principal:session-b")
+    assert revision["state"] == "queued"
+    add = _send(plan, vault, _plan_call(collection, "add", effort="medium"), scope="principal:session-c")
+    assert add["state"] == "queued"
+    paused.set()
+    _wait_for_state(vault, add["queued_write"]["ref"], "applied")
+    (row,) = _send(plan, vault, {"action": "query", "collection": collection})["rows"]
+    assert row["effort"] == "medium"
+
+
+def test_a_busy_plan_update_that_keeps_a_status_the_owner_removed_is_queued_and_saved(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An item keeps a status after the owner removes it from the Planning values, and an update that sends it again
+    is saved. Refusing that value behind the queue would refuse what the commit accepts."""
+    _writer, holder = managers
+    plan, schema = _command("plan_memory"), _command("schema_memory")
+    collection = _planning_collection(vault)
+    before = _send(schema, vault, {"subject": "planning-values", "operation": "inspect"})
+    _send(schema, vault, {"subject": "planning-values", "operation": "save", "expected_hash": before["content_hash"],
+                          "proposal": {"upsert": {"status.waiting": {"attributes": {"class": "open"}}}},
+                          "why": "items that wait on someone else"})
+    _send(plan, vault, _plan_call(collection, "add", status="waiting"))
+    history = _send(schema, vault, {"subject": "planning-values", "operation": "history"})
+    _send(schema, vault, {"subject": "planning-values", "operation": "restore", "version": history["versions"][0]["version"],
+                          "expected_hash": history["content_hash"], "why": "keep the shipped statuses"})
+    call = _plan_call(collection, "update", **_planned_outcome(vault, collection), status="waiting", effort="small")
+    first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
+    receipt = _send(plan, vault, call, scope="principal:session-b")
+    assert receipt["state"] == "queued"
+    paused.set()
+    _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
+    (row,) = _send(plan, vault, {"action": "query", "collection": collection, "lifecycle": "all"})["rows"]
+    assert (row["status"], row["effort"]) == ("waiting", "small")
 
 
 def test_a_record_value_its_collection_declares_is_still_queued_behind_the_queue_and_lands(

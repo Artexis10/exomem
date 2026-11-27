@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal, Never
 
-from . import collection_refs, operation_entries, planning, structured_collections
+from . import collection_refs, operation_entries, planning, request_budget, structured_collections
 from .cli_ops import OpError, action_argument_contract
 from .query_compat import public_filter_annotation
 from .structured_collections import CollectionError, collection_remediation
@@ -330,6 +331,50 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
     if action == "query" and values["plan_id"] is not None and supplied - {"collection", "plan_id"}:
         _invalid_arguments("a query with plan_id reads that one item and its body, so it takes only collection; "
                            "remove " + ", ".join(sorted(supplied - {"collection", "plan_id"})))
+
+
+def value_refusal(
+    vault_root: Path, arguments: Mapping[str, Any], budget: request_budget.RequestBudget
+) -> OpError | None:
+    """The refusal that an add's `item`, an update's `changes` or a triage's `transition` gets from what the vault
+    declares: its Planning values and the collection's declared fields. None where that is not certain.
+
+    The busy intake raises it instead of queueing a save whose replay would refuse the same value
+    (`commands.declared_refusal_before_queueing`, which also decides whether a queued save may change the
+    declaration first). It takes no lock and no store writer, and reads within `budget`: the manifest, the
+    Planning values and, for an update or triage whose value is no longer active, whether a row stores it.
+    """
+    action = arguments.get("action")
+    values = (
+        arguments.get("item") if action == "add"
+        else arguments.get("changes") if action == "update"
+        else arguments.get("transition") if action == "triage"
+        else None
+    )
+    collection = arguments.get("collection")
+    if not isinstance(values, Mapping) or not values or type(collection) is not str:
+        return None
+    root = Path(vault_root)
+
+    def decide(manifest: structured_collections.CollectionManifest) -> CollectionError | None:
+        planning.require_planning_profile(manifest)
+        stored = None if action == "add" else partial(_stores, root, manifest.path)
+        return planning.supplied_value_refusal(root, manifest, values, stored=stored)
+
+    refusal = collection_refs.decide_on_declaration(root, collection, budget, profile="planning", decide=decide)
+    if refusal is None:
+        return None
+    code = _public_error_code(refusal)
+    return OpError(code, _public_error_message(refusal, code), collection_refs.RESEND_WITH_A_DECLARED_VALUE)
+
+
+def _stores(vault_root: Path, collection: str, name: str, value: Any) -> bool:
+    """Whether a row of `collection` that this caller may read stores `value` in `name` now, archived or not."""
+    view = planning.query(
+        vault_root, collection, filters=[{"column": name, "op": "eq", "value": value}], columns=[name],
+        limit=1, lifecycle="all",
+    )
+    return bool(view.get("rows"))
 
 
 def refuse_arguments(detail: str) -> Never:

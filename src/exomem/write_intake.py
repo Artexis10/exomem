@@ -1547,28 +1547,30 @@ def _summary_line(state_counts: Mapping[str, int]) -> str:
 
 
 def may_change_declaration(
-    vault_root: Path, *, rewriting: Sequence[str], manifest_command: str, manifest_field: str, seconds: float
+    vault_root: Path, *, rewriting: Sequence[str], manifest_commands: Sequence[str], manifest_field: str,
+    seconds: float,
 ) -> bool | None:
     """Whether a save that still waits or applies may change a declaration before a later save replays.
 
     A save of a command in `rewriting` may, whichever page it names: only its own resolution, when it
-    applies, decides which page that is. A save of `manifest_command` may when its `manifest_field` holds a
-    value other than null; MCP stores a field the caller left unset as null. One EXISTS query over the open
-    rows decides it inside SQLite, so no queued arguments reach Python. A query that has not answered within
-    `seconds` stops: None, unknown, as for a queue that cannot be read.
+    applies, decides which page that is. A save of a command in `manifest_commands` may when its
+    `manifest_field` holds a value other than null; MCP stores a field the caller left unset as null. One
+    EXISTS query over the open rows decides it inside SQLite, so no queued arguments reach Python. A query
+    that has not answered within `seconds` stops: None, unknown, as for a queue that cannot be read.
     """
     if seconds <= 0:
         return None
     deadline = time.monotonic() + seconds
     try:
         with _store(vault_root, mode="read") as conn:
-            # A row costs a handful of steps and only a `manifest_command` row is parsed, so the deadline is read often.
+            # A row costs a handful of steps and only a `manifest_commands` row is parsed, so the deadline is read often.
             conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 100)
             (found,) = conn.execute(
                 "SELECT EXISTS (SELECT 1 FROM intake WHERE state IN (?, ?) AND ("
                 "command IN (SELECT value FROM json_each(?)) "
-                "OR (command = ? AND json_extract(arguments, '$.' || ?) IS NOT NULL)))",
-                (*_OPEN_STATES, _json(list(rewriting)), manifest_command, manifest_field),
+                "OR (command IN (SELECT value FROM json_each(?)) "
+                "AND json_extract(arguments, '$.' || ?) IS NOT NULL)))",
+                (*_OPEN_STATES, _json(list(rewriting)), _json(list(manifest_commands)), manifest_field),
             ).fetchone()
         return bool(found)
     except FileNotFoundError:

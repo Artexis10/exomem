@@ -2,7 +2,7 @@
 
 ### Requirement: A save its arguments condemn is refused, not queued
 
-Before the intake accepts a save, the serving process SHALL apply the argument-only checks that exist for it: compact observation metadata, an episode recap's own validation, and the argument rules of `record_memory` and `plan_memory`. A save that one of them refuses SHALL get that refusal at once and SHALL NOT be queued, also when the terminal egress filter faults. A refusal that reads vault state SHALL stay at the replay, except the declared Records refusal that the requirements below define.
+Before the intake accepts a save, the serving process SHALL apply the argument-only checks that exist for it: compact observation metadata, an episode recap's own validation, and the argument rules of `record_memory` and `plan_memory`. A save that one of them refuses SHALL get that refusal at once and SHALL NOT be queued, also when the terminal egress filter faults. A refusal that reads vault state SHALL stay at the replay, except the declared value refusal that the requirements below define.
 
 #### Scenario: An oversized recap behind the queue is refused at once
 
@@ -35,31 +35,54 @@ Before the intake queues a `record_memory` append with an object `item`, or an u
 
 - **WHEN** an owner sends a `record_memory` append or update whose value lies outside a field's declared enum
 - **AND** earlier saves are still queued
-- **AND** there is no open queued save of a command that declares `sets_any_frontmatter_field`, and no open `record_memory` save carrying `manifest_text`
+- **AND** there is no open queued save of a command that declares `sets_any_frontmatter_field`, and no open `record_memory` or `plan_memory` save carrying `manifest_text`
 - **THEN** the call returns `SCHEMA_ENUM`
 - **AND** the intake holds only the earlier saves
 
-### Requirement: The declared Records check queues the save when it cannot be certain
+### Requirement: A Planning value that the vault does not define is refused before queueing
 
-The declared Records check SHALL leave the save queued when an open queued save of a command that declares `sets_any_frontmatter_field`, or an open `record_memory` save with a non-null `manifest_text`, exists; when the declaration read or the queue read fails or misses their shared 0.5 s budget; or when the egress filter faults. A declaration change made outside the queue and not committed at the check, such as a direct revise that holds the boundary, is not seen, so a value it adds is refused.
+Before the intake queues a `plan_memory` add with an object `item`, an update with an object `changes` or a triage with an object `transition`, whose `collection` is a string, the serving process SHALL check each supplied value that is not null: a field that the Planning values govern with the Planning commit's own rule, then every field with the declared per-field rules. A refused value SHALL get that refusal at once and SHALL NOT be queued. Rules that join fields SHALL stay at the replay.
+
+#### Scenario: A Planning status outside the Planning values behind the queue is refused at once
+
+- **WHEN** an owner sends a `plan_memory` add or update whose `status` is not one of the vault's Planning statuses
+- **AND** earlier saves are still queued
+- **AND** there is no open queued save of a command that declares `sets_any_frontmatter_field`, and no open `record_memory` or `plan_memory` save carrying `manifest_text`
+- **THEN** the call returns `INVALID_PLAN` with the statuses that the vault defines
+- **AND** the intake holds only the earlier saves
+
+### Requirement: The declared value check queues the save when it cannot be certain
+
+The declared value check SHALL leave the save queued when an open queued save of a command that declares `sets_any_frontmatter_field`, or an open save that carries a non-null `manifest_text`, exists; when the declaration read or the queue read fails or misses their shared 0.5 s budget; or when the egress filter faults. A declaration change outside the queue that has not committed at the check, such as a direct revise or a Planning values save, is not seen, so a value it adds is refused.
 
 #### Scenario: A Records value behind a queued edit of its manifest still queues
 
 - **WHEN** an owner sends a `record_memory` update whose value lies outside a field's declared enum
-- **AND** an open queued save of a command that declares `sets_any_frontmatter_field`, or an open `record_memory` save carrying `manifest_text`, has not been applied yet
+- **AND** an open queued save of a command that declares `sets_any_frontmatter_field`, or an open `record_memory` or `plan_memory` save carrying `manifest_text`, has not been applied yet
 - **THEN** the update is queued behind it
 - **AND** its replay checks the value against the declared fields that the queued save leaves
 
 #### Scenario: A value that a queued revision declares is saved
 
-- **WHEN** a `record_memory` revise that adds a value to a field's enum is queued
-- **AND** an owner then sends an update of an existing row, named by its id, with that value
-- **THEN** the update is queued
+- **WHEN** a `record_memory` or `plan_memory` revise that adds a value to a field's enum is queued
+- **AND** an owner then sends a save of that command with that value
+- **THEN** the save is queued
 - **AND** once its replay is applied, the row holds the value
 
-### Requirement: The declared Records refusal holds nothing and names the resend
+### Requirement: A Planning value that its item may keep is not refused before queueing
 
-The declared Records refusal SHALL carry the refusal code, the field, the allowed values in its message and the per-field issues. It SHALL hold nothing: no candidate is held and the intake keeps no copy of the save. Its remediation SHALL name resending as the route: with a value that the collection declares, or with the same value once a change that declares it has committed. It SHALL leave through the same terminal egress filter as a direct refusal.
+The Planning check SHALL leave a governed value to the replay when the caller cannot read the vault's Planning values. For a `plan_memory` update or triage, a value that the Planning values deprecate or no longer define SHALL stay queued while a row of the collection that the caller can read stores it, because the commit accepts a value that its item already stores.
+
+#### Scenario: A busy Planning update that keeps a removed status is saved
+
+- **WHEN** a Planning item stores a status that the owner has since removed from the Planning values
+- **AND** an owner sends a `plan_memory` update of that item with the same status behind queued saves
+- **THEN** the update is queued
+- **AND** once its replay is applied, the item holds the status
+
+### Requirement: The declared value refusal holds nothing and names the resend
+
+A declared Records refusal SHALL carry the refusal code, the field, the allowed values in its message and the per-field issues. A declared Planning refusal SHALL carry the code and message that the same `plan_memory` call gets directly. Each SHALL hold nothing: no candidate is held and the intake keeps no copy of the save. Its remediation SHALL name resending as the route. It SHALL leave through the same terminal egress filter as a direct refusal.
 
 #### Scenario: A busy refusal leaves through the egress filter as a direct one does
 

@@ -54,6 +54,8 @@ _OPTIONAL = frozenset(
 )
 #: Planning bounds `results` at 16 as it bounds `motivation`, so one item cannot carry an unbounded link list.
 _MAX_RESULTS = 16
+#: The refusal of a value that only vault Planning values this caller cannot read could define.
+_VALUES_UNAVAILABLE = "PLANNING_VALUES_UNAVAILABLE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,12 +151,44 @@ def _governed(
         _invalid(f"{name} is deprecated" + (f"; use {replacement}" if replacement else ""))
 
 
+def supplied_value_refusal(
+    vault_root: Path,
+    manifest: collections.CollectionManifest,
+    values: Mapping[str, Any],
+    *,
+    stored: Callable[[str, Any], bool | None] | None = None,
+) -> CollectionError | None:
+    """The refusal that a write of `values` gets from the Planning values and the manifest's per-field rules alone.
+
+    It runs the commit's own rules over the values that `values` names: `_governed` for each field that the
+    Planning values govern, in `normalize_item`'s order, then `records.supplied_value_refusal`. Nothing else
+    decides it: not a rule that joins fields, such as the lifecycle rules or what an area may carry, which
+    another field or an earlier write can still change. A null is an update's deletion, which the commit judges.
+    The Planning values that this caller cannot read leave their field unrefused.
+
+    A new item has no stored value. An update or triage keeps a stored value that is no longer active, so
+    for one `stored(name, value)` answers whether a row of the collection stores the value now: True, False,
+    or None where that is unknown. Such a value is refused only where no row stores it.
+    """
+    supplied = {name: value for name, value in values.items() if value is not None}
+    planning_values = PlanningValues(vault_root)
+    for name in planning_values.fields():
+        if name not in supplied:
+            continue
+        try:
+            _governed(planning_values, supplied, None, name)
+        except CollectionError as refusal:
+            if refusal.code != _VALUES_UNAVAILABLE and (stored is None or stored(name, supplied[name]) is False):
+                return refusal
+    return records.supplied_value_refusal(manifest, supplied)
+
+
 def _registered(planning_values: PlanningValues, name: str, value: Any) -> Any:
     try:
         return planning_values.find(name, value)
     except Unavailable:
         raise CollectionError(
-            "PLANNING_VALUES_UNAVAILABLE",
+            _VALUES_UNAVAILABLE,
             f"{name} needs vault Planning values that are withheld or invalid",
         ) from None
 

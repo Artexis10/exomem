@@ -16124,31 +16124,41 @@ def refusal_before_queueing(command: Command, arguments: Mapping[str, Any]) -> E
 _DECLARED_REFUSAL_SECONDS = 0.5
 
 
+#: The busy check of each command whose saves carry values that a collection declares: each reads the
+#: declaration within the budget it is given and answers the refusal its own commit would give, or None.
+_DECLARED_VALUE_REFUSALS = MappingProxyType({
+    operation_entries.RECORDS.command: record_memory_module.value_refusal,
+    operation_entries.PLANS.command: plan_memory_module.value_refusal,
+})
+
+
 def declared_refusal_before_queueing(
     command: Command, arguments: Mapping[str, Any], vault_root: Path
 ) -> Exception | None:
     """The refusal that a save's values get from what the vault declares, or None.
 
-    `refusal_before_queueing` reads nothing. This one reads a declaration (a collection's manifest),
-    so the intake runs it only for a save that is about to queue. The refusal holds only while no open
-    queued save can change that declaration before this one replays: a save of a command that declares
-    `Command.sets_any_frontmatter_field`, whichever page it names, or a Records save that carries a
-    manifest's text. A declaration change made outside the queue and not committed at this check, such
-    as a direct revise that holds the boundary, is not seen: the check refuses a value that the change
-    adds, and the refusal tells the caller to send it again once that change has committed.
+    `refusal_before_queueing` reads nothing. This one reads a declaration (a collection's manifest, and for
+    Planning the vault's Planning values), so the intake runs it only for a save that is about to queue. The
+    refusal holds only while no open queued save can change that declaration before this one replays: a save
+    of a command that declares `Command.sets_any_frontmatter_field`, whichever page it names, or a save that
+    carries a manifest's text. A declaration change made outside the queue and not committed at this check,
+    such as a direct revise that holds the boundary or a saved Planning value, is not seen: the check refuses
+    a value that the change adds, and the refusal tells the caller to send it again once that change has
+    committed.
     """
-    if command.name != operation_entries.RECORDS.command:
+    value_refusal = _DECLARED_VALUE_REFUSALS.get(command.name)
+    if value_refusal is None:
         return None
     from . import request_budget, write_intake
 
     budget = request_budget.RequestBudget(seconds=_DECLARED_REFUSAL_SECONDS)
-    refusal = record_memory_module.value_refusal(vault_root, arguments, budget)
+    refusal = value_refusal(vault_root, arguments, budget)
     if refusal is None:
         return None
     changing = write_intake.may_change_declaration(
         vault_root,
         rewriting=tuple(item.name for item in PRODUCT_COMMANDS if item.sets_any_frontmatter_field),
-        manifest_command=operation_entries.RECORDS.command,
+        manifest_commands=operation_entries.manifest_text_commands(),
         manifest_field=operation_entries.MANIFEST_TEXT_FIELD,
         seconds=budget.remaining(),
     )
