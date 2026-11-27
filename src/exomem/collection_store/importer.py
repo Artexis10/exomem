@@ -91,8 +91,9 @@ log = logging.getLogger(__name__)
 # nosemgrep: ep-word-set -- The import request grammar fixes these source formats.
 FORMATS = ("ndjson", "json-array", "csv", "json-document", "markdown-table")
 MAX_ROW_BYTES = 1 << 20
-# A Markdown page is parsed whole, so its size is capped: 256 KiB parses in about 0.15 s on the store
-# thread, and a larger table belongs in a csv file, which streams.
+# A Markdown page is parsed whole, once per page (``import_markdown.read_tables`` keeps the last few), so its size
+# is capped: a 256 KiB ledger parses in about 0.15 s on the store thread (measured 2026-11-27), and a larger
+# table belongs in a csv file, which streams. ``import_markdown.MAX_PARSE_TOKENS`` bounds the worst page.
 MAX_TABLE_SOURCE_BYTES = 256 << 10
 MAX_TABLES_LISTED = 20
 CELL_TEXT_CHARS = 200
@@ -117,8 +118,8 @@ MAX_LISTED_MEMBERS = 256
 MAX_SAVED_IMPORTS = 16
 # nosemgrep: ep-word-set -- The scalar kinds a CSV cell coerces to; a subset of SCALAR_TYPES.
 CSV_TYPES = ("string", "integer", "number", "boolean")
-# nosemgrep: ep-word-set -- A markdown-table cell coerces to a CSV kind or to a date; a subset of SCALAR_TYPES.
-TABLE_TYPES = (*CSV_TYPES, "date")
+# nosemgrep: ep-word-set -- A header-row format's cell (csv, markdown-table) coerces to a CSV kind or, when a mapping asks, a date; a subset of SCALAR_TYPES.
+HEADER_TYPES = (*CSV_TYPES, "date")
 # nosemgrep: ep-word-set -- JSON Schema fixes these kinds; number includes integer and finite float.
 JSON_TYPES = ("number", "string", "boolean", "null", "object", "array")
 _CHUNK = 1 << 16
@@ -185,7 +186,8 @@ def contract() -> dict[str, Any]:
                     f"1 to {MAX_MAPPED_FIELDS} declared target fields, each a dotted source path "
                     "(a csv or markdown-table column name, taken whole: a dot is part of the name), "
                     "{from, type?, scale?, source_type?} or {const}; type converts csv and markdown-table text "
-                    f"only: {', '.join(CSV_TYPES)}, and for markdown-table {', '.join(TABLE_TYPES[len(CSV_TYPES):])}; "
+                    f"only: {', '.join(HEADER_TYPES)}. A cell that is not a YYYY-MM-DD date leaves a date field "
+                    "missing instead of rejecting the row, and counts as unparsed; "
                     "source_type guards JSON by kind without conversion: "
                     f"{', '.join(JSON_TYPES)}. Nonmatching targets stay absent; every present guarded "
                     "path must match a declared kind or the row is rejected. Scale multiplies a number. In json-document a "
@@ -264,8 +266,9 @@ def contract() -> dict[str, Any]:
             "findings, row identity and recommended_declarations. With a valid mapping, every row then goes "
             "through the job's own mapping, validation and identity rule, as if on_invalid were skip: "
             "rows_total, would_insert, would_match_stored (null on a derived collection), would_reject by "
-            "code with its first coordinates, and would_collapse with sample keys. A markdown-table preview "
-            "adds columns (per mapped column: parsed, missing, unparsed and rejected cells) and names the "
+            "code with its first coordinates, and would_collapse with sample keys. A markdown-table preview, "
+            "and a csv preview whose mapping asks for a date type, add columns (per mapped column: parsed, "
+            "missing, unparsed and rejected cells and malformed rows, which add up to rows_total) and name the "
             "rejected cell's column and text in would_reject. check_sum adds the sum report: rows, missing "
             "(rows with no number), total, and groups with their rows and sums. coverage is full when "
             "every row was read and sampled when the mapping is not valid. It is partial when a row stopped "
@@ -281,11 +284,14 @@ def contract() -> dict[str, Any]:
             "and must be unique and non-empty; a fault stops the read as IMPORT_SOURCE_MALFORMED at the "
             "first bad cell, counted from 0. A cell keeps its text as typed, inline markup included. An "
             "empty cell is missing, as in csv. A cell for a number, integer or boolean field that does not "
-            "parse rejects its row as IMPORT_VALUE_INVALID; preview names the row, column and original text. "
-            "A cell for a date field that is not YYYY-MM-DD leaves the field missing and counts as unparsed; map "
-            "the same column to a string field to keep the original text. Rows commit with the page as their "
-            f"source. The page is read whole, so it may not exceed {MAX_TABLE_SOURCE_BYTES} bytes; members is "
-            "refused. Check a table against its own totals with preview's check_sum before start"
+            "parse rejects its row as IMPORT_VALUE_INVALID; preview names the row, column and original text. A "
+            "number may lead with + or -; a currency symbol, a thousands separator or parentheses reject the "
+            "row. A cell for a date field that is not YYYY-MM-DD leaves the field missing and counts as "
+            "unparsed; map the same column to a string field to keep the original text. Rows commit with the "
+            "page as their source, and status reports the same columns over the rows read so far. The "
+            "Evidence is your copy of the page's text, not the page: compare check_sum with the totals the "
+            f"page states. The page is read whole, so a page over {MAX_TABLE_SOURCE_BYTES} bytes or with too "
+            "many cells is refused as IMPORT_SOURCE_TOO_LARGE: save the table as csv instead. members is refused"
         ),
         "states": {
             "running": (
@@ -1062,7 +1068,7 @@ class _Reader:
         self.table = table  # markdown-table only: which table of the page holds the rows
         self.page: tuple[import_markdown.Table, ...] | None = None
         self.page_bytes = 0
-        self.fault: str | None = None
+        self.fault: tuple[str, str] | None = None  # a page the reader refuses: its code and what to change
         handle.seek(self.base)
 
     def position(self) -> dict[str, Any]:
@@ -1109,7 +1115,7 @@ class _Reader:
         return self._peek() is None
 
     def tables(self) -> tuple[import_markdown.Table, ...] | None:
-        """A markdown-table page's tables, parsed whole once; None when the page is over its cap or not UTF-8."""
+        """A markdown-table page's tables, parsed whole once; None when the page cannot be read as tables."""
         if self.page is None:
             self.handle.seek(0)
             data = bytearray()
@@ -1118,12 +1124,20 @@ class _Reader:
             self.page_bytes = len(data)
             try:
                 if len(data) > MAX_TABLE_SOURCE_BYTES:
-                    raise import_markdown.PageError("IMPORT_SOURCE_TOO_LARGE")
+                    raise import_markdown.PageError(
+                        "IMPORT_SOURCE_TOO_LARGE",
+                        f"page is over {MAX_TABLE_SOURCE_BYTES} bytes; save the table as csv and import that",
+                    )
                 self.page = import_markdown.read_tables(bytes(data))
             except import_markdown.PageError as error:
-                self.fault = error.code
+                self.fault = (error.code, error.at)
                 self.page = ()
         return None if self.fault else self.page
+
+    def prime(self) -> None:
+        """Read what a first row needs, so a batch's clock starts after a page's parse, not during it."""
+        if self.fmt == "markdown-table":
+            self.tables()
 
     def next(self) -> Row | None:
         if self.fmt == "markdown-table":
@@ -1247,7 +1261,7 @@ class _Reader:
         """The chosen table's next body row: header cells name the columns, an empty cell is absent, as in csv."""
         tables = self.tables()
         if tables is None:
-            return self._row(0, error=(self.fault, ""), fatal=True)
+            return self._row(0, error=self.fault, fatal=True)
         if self.table >= len(tables):
             return self._row(0, error=("IMPORT_TABLE_NOT_FOUND", "mapping.table"), fatal=True)
         table = tables[self.table]
@@ -1698,6 +1712,7 @@ class Plan:
     source_types: dict[_Path, tuple[str, ...]] = field(default_factory=dict, compare=False)
     local_datetime: str | None = None
     table: int = 0  # markdown-table only: which table of the page holds the rows, counted from 0
+    signed: bool = False  # markdown-table only: a number cell may lead with +, as a ledger writes it; csv keeps rejecting it
 
     @property
     def zoned(self) -> bool:
@@ -1722,7 +1737,7 @@ class Plan:
                 if kind != spec.source_type:
                     continue
             if spec.kind is not None:
-                found = _coerce(found, spec.kind)
+                found = _coerce(found, spec.kind, self.signed)
             if spec.scale is not None and found is not None and found is not _ABSENT:
                 found = _scaled(found, spec.scale)
             if found is _ABSENT:
@@ -1777,11 +1792,13 @@ def _lookup(value: Any, path: tuple[str, ...]) -> Any:
     return value
 
 
-def _coerce(text: Any, kind: str) -> Any:
+def _coerce(text: Any, kind: str, signed: bool = False) -> Any:
     if type(text) is not str:
         return _ABSENT
     if kind == "string":
         return text
+    if signed and kind in ("integer", "number") and text.startswith("+") and not text.startswith("+-"):
+        text = text[1:]  # a ledger writes +147.67 beside -150.00
     if kind == "date":
         try:
             dt.date.fromisoformat(text)
@@ -1987,9 +2004,8 @@ def _field(target: str, spec: Any, at: str, fmt: str, rows: _Rows | None) -> tup
             _mapping_invalid(
                 f"{at}.type", "only csv and markdown-table text is converted; JSON values keep their type", expected=None
             )
-        cell_types = TABLE_TYPES if fmt == "markdown-table" else CSV_TYPES
-        if spec["type"] not in cell_types:
-            _mapping_invalid(f"{at}.type", "unsupported cell type", allowed=list(cell_types))
+        if spec["type"] not in HEADER_TYPES:
+            _mapping_invalid(f"{at}.type", "unsupported cell type", allowed=list(HEADER_TYPES))
         kind = spec["type"]
     elif fmt in HEADER_FORMATS:
         kind = "string"
@@ -2229,6 +2245,7 @@ def compile_mapping(raw: Any, manifest: collections.CollectionManifest, fmt: str
         source_types,
         local_datetime,
         table,
+        fmt == "markdown-table",
     )
 
 
@@ -2244,6 +2261,7 @@ class Batch:
     source_bytes: int
     eof: bool
     members: list[tuple[str, int, str | None]] = field(default_factory=list)
+    columns: dict[str, dict[str, Any]] | None = None  # per-column cell counts of this batch's rows, when counted
 
 
 # A local time inside a gap does not exist; refusing it never stops the job.
@@ -2279,6 +2297,8 @@ def _next_batch(reader, plan: Plan, pending: list[Row], order: import_time.Fold 
                 cells.observe(row)  # before the row's value is released
             values, error = plan.apply(row.value, order)
             row.value = None
+        elif cells is not None and not row.fatal:
+            cells.malformed += 1  # the reader refused this row before any cell was read
         if error is not None and (row.fatal or (plan.on_invalid == "stop" and error[0] != _GAP)):
             stopped = _ordered(checkpoint or reader.position(), order)
             return Batch(rows, rejections, (row, *error), stopped, 0, False)
@@ -2603,6 +2623,7 @@ def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
         "next_position": position,
         "last_receipt": progress["last_receipt"],
         "rejections": rejections,
+        **({"columns": progress["columns"]} if progress.get("columns") is not None else {}),
         "error": error,
         "activity": _activity(writer, job, checkpoint["byte"], total),
         "resumable": state == "partial" and reason in _RESUMABLE,
@@ -2987,6 +3008,8 @@ def _record(
             progress[name] += tally[name]
         progress["imported"] += tally["inserted"] + tally["updated"] + tally["unchanged"]
         progress["duplicates"] += tally["collapsed_in_source"] + tally["restated_existing"]
+        if batch.columns is not None:
+            progress["columns"] = _added_columns(progress.get("columns"), batch.columns)
         logged = _logged(batch, kept, result, prepared, version) if "members" in job.binding["source"] else []
         tally = _members(writer, job, batch, progress, logged)
         writer._execute(
@@ -3009,6 +3032,17 @@ def _record(
         # Rows committed carry the change in their own transaction; otherwise record it.
         operation = "import_job_fail" if state == "failed" else "import_job_complete"
         _control(writer, job, operation, progress, checkpoint)
+
+
+def _added_columns(total: Mapping[str, Any] | None, part: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    """The job's per-column cell counts so far plus one batch's, inside the batch's own transaction."""
+    return {
+        target: {
+            name: value if name == "column" or total is None else total[target][name] + value
+            for name, value in counts.items()
+        }
+        for target, counts in part.items()
+    }
 
 
 # A member's running row digest starts here; each accepted row extends it (``_members``).
@@ -3594,7 +3628,11 @@ def _batch(root: Path, writer, job: _Job) -> str:
         else:
             with _open_source(proof) as handle:
                 reader = _Reader(handle, fmt, job.checkpoint, plan.table)
-                batch = _next_batch(reader, plan, [], order, deadline=time.monotonic() + BATCH_SECONDS)
+                reader.prime()
+                cells = _Cells(plan) if _counts_cells(plan, fmt) else None
+                batch = _next_batch(
+                    reader, plan, [], order, deadline=time.monotonic() + BATCH_SECONDS, cells=cells)
+                batch.columns = None if cells is None else cells.report()
     except (_Lost, OSError, vault.PathGuardError):
         return "authority_lost"
     sequence = job.checkpoint["batch"]
@@ -4412,10 +4450,17 @@ _UNREAD_BUDGET, _UNREAD_MAPPING = "time_budget", "no_valid_mapping"
 MAX_CHECK_GROUPS = 100
 
 
+def _counts_cells(plan: Plan, fmt: str) -> bool:
+    """Whether a read reports per-column cell counts: a markdown-table always, and a csv mapping that asks for a
+    `date`, since a date that does not parse is stored missing and these counts are where that shows."""
+    return fmt == "markdown-table" or any(spec.kind == "date" for spec in plan.fields)
+
+
 class _Cells:
     """Per mapped column: how many cells parsed, were missing, were present but not a date (stored missing),
-    or were rejected, whichever way their row ends. Each cell converts through the plan's own pipeline, one
-    field at a time, so the counts cannot disagree with what a job writes."""
+    or were rejected, whichever way their row ends, and how many rows the reader refused before it read a
+    cell (``malformed``, the same for each column). The five add up to the rows read. Each cell converts
+    through the plan's own pipeline, one field at a time, so the counts cannot disagree with what a job writes."""
 
     def __init__(self, plan: Plan) -> None:
         self.alone = [(spec, dataclasses.replace(plan, fields=(spec,), bases=())) for spec in plan.fields if spec.path]
@@ -4423,7 +4468,11 @@ class _Cells:
             spec.target: {"column": spec.path[0], "parsed": 0, "missing": 0, "unparsed": 0, "rejected": 0}
             for spec, _ in self.alone
         }
+        self.malformed = 0
         self.rejected: dict[int, dict[str, str]] = {}  # row ordinal -> its first rejected cell, for the first rows
+
+    def report(self) -> dict[str, dict[str, Any]]:
+        return {target: {**tally, "malformed": self.malformed} for target, tally in self.counts.items()}
 
     def observe(self, row: Row) -> None:
         first = None
@@ -4558,7 +4607,7 @@ class _Survey:
     def reported(self) -> dict[str, Any]:
         """The per-column and check_sum reports a preview asked for."""
         return {
-            **({"columns": self.cells.counts} if self.cells is not None else {}),
+            **({"columns": self.cells.report()} if self.cells is not None else {}),
             **({"check_sum": self.sums.report()} if self.sums is not None else {}),
         }
 
@@ -4580,13 +4629,17 @@ def _check_sum_plan(manifest, asked: tuple[str, str | None]) -> _Sums:
     return _Sums(field_name, group_by)
 
 
-def _table_listing(reader) -> list[dict[str, Any]] | None:
-    """A markdown-table page's tables as the agent picks one by `table`: place, columns and row count."""
+def _table_listing(reader) -> dict[str, Any] | None:
+    """A markdown-table page's tables as the agent picks one by `table`: place, columns and row count of the
+    first few, and how many the page holds in all."""
     tables = reader.tables() if isinstance(reader, _Reader) and reader.fmt == "markdown-table" else None
-    return None if tables is None else [
-        {"table": index, "columns": list(found.header), "rows": len(found.rows)}
-        for index, found in enumerate(tables[:MAX_TABLES_LISTED])
-    ]
+    return None if tables is None else {
+        "tables": [
+            {"table": index, "columns": list(found.header), "rows": len(found.rows)}
+            for index, found in enumerate(tables[:MAX_TABLES_LISTED])
+        ],
+        "tables_total": len(tables),
+    }
 
 
 def _surveyed(survey: _Survey, plan: Plan, reader, deadline: float) -> None:
@@ -4671,7 +4724,8 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
             except collections.CollectionError:
                 rows = None
         sums = None if request.check_sum is None else _check_sum_plan(manifest, request.check_sum)
-        reports = (*(("columns",) if request.format == "markdown-table" else ()), *(("check_sum",) if sums else ()))
+        counted = plan is not None and _counts_cells(plan, request.format)
+        reports = (*(("columns",) if counted else ()), *(("check_sum",) if sums else ()))
         # The page's table to read: the mapping's, else the first; an unmapped preview lists the tables to choose from.
         table = 0 if plan is None else plan.table
         tables = None
@@ -4698,7 +4752,7 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
     if plan is not None:
         survey = _Survey(
             writer, manifest, source.ref, row["collection_id"],
-            cells=_Cells(plan) if request.format == "markdown-table" else None, sums=sums,
+            cells=_Cells(plan) if counted else None, sums=sums,
         )
         try:
             with _row_reader(root, source, members, size, request.format, rows, plan.table) as reader:
@@ -4736,7 +4790,7 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
                 if members
                 else {}
             ),
-            **({"tables": tables} if tables is not None else {}),
+            **(tables or {}),
         },
         "rows": {
             "sampled": sample.rows,

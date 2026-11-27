@@ -6,13 +6,14 @@ The fixture is an invented ledger.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
-from test_collection_store_importer import CID, refused, run, setup, small
+from test_collection_store_importer import CID, importer, refused, run, setup, small
 from test_collection_store_writer import store as store  # noqa: F401 - the pytest fixture
 
 from exomem import commands
-from exomem.collection_store import typed_storage
+from exomem.collection_store import import_markdown, typed_storage
 from exomem.collection_store.preview import preview_store
 from exomem.governance.principal import owner_principal, request_scope
 
@@ -26,7 +27,7 @@ PAGE = """# Ledger, spring
 
 | Section | Rows |
 |---------|-----:|
-| Deposits and refunds | 5 |
+| Deposits and refunds | 9 |
 
 | Ref | Date | Counterparty | Amount | Note |
 |-----|------|--------------|-------:|------|
@@ -35,9 +36,23 @@ PAGE = """# Ledger, spring
 | L-03 | 2025-02-03 | Boris Fenn | 45.25 | |
 | L-04 | 2025-02-10 | Boris Fenn | about 60 | Estimate |
 | L-05 | 2025-03-01 | Ada Quill | 19.75 | Refund |
+| L-06 | ? (reported 2026-10-16) | Boris Fenn | +147.67 | Transfer in |
+| L-07 | 2026-10-22? (reported 2026-10-24) | Ada Quill | -150.00 | Transfer out |
+| L-08 | 2026-11-02 | Boris Fenn | $1,200.00 | Cash |
+| L-09 | 2026-11-03 | Ada Quill | (12.00) | Fee |
 
 Closing remarks.
 """
+# The nine ledger rows through each mapped column: L-02, L-06 and L-07 hold a date that is not YYYY-MM-DD, and
+# L-04, L-08 and L-09 hold an amount that is not a number.
+EXPECTED_COLUMNS = {
+    "ref": {"column": "Ref", "parsed": 9, "missing": 0, "unparsed": 0, "rejected": 0, "malformed": 0},
+    "entry_date": {"column": "Date", "parsed": 6, "missing": 0, "unparsed": 3, "rejected": 0, "malformed": 0},
+    "entry_date_text": {"column": "Date", "parsed": 9, "missing": 0, "unparsed": 0, "rejected": 0, "malformed": 0},
+    "counterparty": {"column": "Counterparty", "parsed": 9, "missing": 0, "unparsed": 0, "rejected": 0, "malformed": 0},
+    "amount": {"column": "Amount", "parsed": 6, "missing": 0, "unparsed": 0, "rejected": 3, "malformed": 0},
+    "note": {"column": "Note", "parsed": 8, "missing": 1, "unparsed": 0, "rejected": 0, "malformed": 0},
+}
 MAPPING = {
     "table": 1,
     "fields": {
@@ -70,22 +85,20 @@ def test_an_agent_previews_and_imports_a_ledger_table_from_preserved_evidence(st
 
     assert preview["mapping"]["findings"] == []
     assert [(found["table"], found["columns"][0], found["rows"]) for found in preview["source"]["tables"]] == [
-        (0, "Section", 1), (1, "Ref", 5)]
-    assert (preview["coverage"], preview["rows_total"], preview["would_insert"]) == ("full", 5, 4)
-    assert preview["columns"] == {
-        "ref": {"column": "Ref", "parsed": 5, "missing": 0, "unparsed": 0, "rejected": 0},
-        "entry_date": {"column": "Date", "parsed": 4, "missing": 0, "unparsed": 1, "rejected": 0},
-        "entry_date_text": {"column": "Date", "parsed": 5, "missing": 0, "unparsed": 0, "rejected": 0},
-        "counterparty": {"column": "Counterparty", "parsed": 5, "missing": 0, "unparsed": 0, "rejected": 0},
-        "amount": {"column": "Amount", "parsed": 4, "missing": 0, "unparsed": 0, "rejected": 1},
-        "note": {"column": "Note", "parsed": 4, "missing": 1, "unparsed": 0, "rejected": 0},
-    }
+        (0, "Section", 1), (1, "Ref", 9)]
+    assert preview["source"]["tables_total"] == 2
+    assert (preview["coverage"], preview["rows_total"], preview["would_insert"]) == ("full", 9, 6)
+    assert preview["columns"] == EXPECTED_COLUMNS
+    # Each column's counts add up to the rows read, so no row goes unaccounted for.
+    assert all(sum(count for name, count in tally.items() if name != "column") == 9
+               for tally in preview["columns"].values())
     rejected = preview["would_reject"]["IMPORT_VALUE_INVALID"]
-    assert rejected["rows"] == 1
-    assert [(cell["row"], cell["column"], cell["text"]) for cell in rejected["first"]] == [(3, "Amount", "about 60")]
+    assert rejected["rows"] == 3
+    assert [(cell["row"], cell["column"], cell["text"]) for cell in rejected["first"]] == [
+        (3, "Amount", "about 60"), (7, "Amount", "$1,200.00"), (8, "Amount", "(12.00)")]
     assert preview["check_sum"] == {
-        "field": "amount", "group_by": "counterparty", "rows": 4, "missing": 0, "total": 265.5,
-        "groups": [{"group": "Ada Quill", "rows": 3, "sum": 220.25}, {"group": "Boris Fenn", "rows": 1, "sum": 45.25}],
+        "field": "amount", "group_by": "counterparty", "rows": 6, "missing": 0, "total": 263.17,
+        "groups": [{"group": "Ada Quill", "rows": 4, "sum": 70.25}, {"group": "Boris Fenn", "rows": 2, "sum": 192.92}],
         "groups_total": 2,
     }
 
@@ -95,7 +108,8 @@ def test_an_agent_previews_and_imports_a_ledger_table_from_preserved_evidence(st
         if _agent(store, owner, mode="status", continuation=job["continuation"])["state"] != "running":
             break
     done = _agent(store, owner, mode="status", continuation=job["continuation"])
-    assert (done["state"], done["rows"]["imported"]) == ("complete", 4)
+    assert (done["state"], done["rows"]["imported"], done["rows"]["rejected"]) == ("complete", 6, 3)
+    assert done["columns"] == EXPECTED_COLUMNS  # the job reports the cells it lost, not only the preview
 
     committed = {values["ref"]: values for _, values in typed_storage.collection_values(store.connection, CID)}
     cited = {
@@ -103,12 +117,16 @@ def test_an_agent_previews_and_imports_a_ledger_table_from_preserved_evidence(st
             "SELECT s.source_ref FROM items i JOIN item_sources s "
             "ON s.row_id = i.row_id AND s.row_version = i.row_version WHERE i.collection_id = ?", (CID,))
     }
-    assert sorted(committed) == ["L-01", "L-02", "L-03", "L-05"]
+    assert sorted(committed) == ["L-01", "L-02", "L-03", "L-05", "L-06", "L-07"]
     assert cited == {kept["path"]}
     lost, kept_date = committed["L-02"], committed["L-01"]
     assert "entry_date" not in lost and lost["entry_date_text"] == "2025-??-??" and lost["amount"] == 80
     assert kept_date["entry_date"] == "2025-01-15" and kept_date["amount"] == 120.5
     assert "note" not in committed["L-03"]
+    # A ledger's signed amounts and its free-text dates: the sign parses, and the date text survives.
+    assert (committed["L-06"]["amount"], committed["L-07"]["amount"]) == (147.67, -150.0)
+    assert "entry_date" not in committed["L-06"] and committed["L-06"]["entry_date_text"] == "? (reported 2026-10-16)"
+    assert committed["L-07"]["entry_date_text"] == "2026-10-22? (reported 2026-10-24)"
 
 
 def test_a_table_import_resumes_across_batches_without_losing_or_repeating_a_row(store, monkeypatch):
@@ -124,9 +142,10 @@ def test_a_table_import_resumes_across_batches_without_losing_or_repeating_a_row
         done = _agent(store, owner, mode="status", continuation=job["continuation"])
         if done["state"] != "running":
             break
-    assert (done["state"], done["rows"]["inserted"], done["rows"]["rejected"]) == ("complete", 4, 1)
+    assert (done["state"], done["rows"]["inserted"], done["rows"]["rejected"]) == ("complete", 6, 3)
     assert sorted(values["ref"] for _, values in typed_storage.collection_values(store.connection, CID)) == [
-        "L-01", "L-02", "L-03", "L-05"]
+        "L-01", "L-02", "L-03", "L-05", "L-06", "L-07"]
+    assert done["columns"] == EXPECTED_COLUMNS  # five batches' counts add up to the whole page's
 
 
 def test_a_table_index_past_the_page_is_reported_with_the_tables_it_has(store):
@@ -170,6 +189,9 @@ def test_a_row_with_text_beyond_the_header_is_rejected_not_silently_cut(store):
     assert rejected["rows"] == 1
     assert [(found["row"], found["at"]) for found in rejected["first"]] == [(1, "row has 4 cells, header has 3")]
     assert (preview["would_insert"], preview["check_sum"]["total"]) == (3, 80)  # the empty extra cell of W-03 holds nothing
+    # The refused row is counted in every column, so each column's counts still add up to the rows read.
+    assert preview["rows_total"] == 4
+    assert all(tally["malformed"] == 1 and tally["parsed"] == 3 for tally in preview["columns"].values())
 
     job = _agent(store, owner, mode="start", source_ref=kept["path"], format="markdown-table", mapping=WIDE_MAPPING)
     for _ in range(8):
@@ -180,6 +202,7 @@ def test_a_row_with_text_beyond_the_header_is_rejected_not_silently_cut(store):
     assert (done["state"], done["rows"]["imported"]) == ("complete", 3)
     assert [(found["row"], found["code"], found["at"]) for found in done["rejections"]] == [
         (1, "IMPORT_ROW_MALFORMED", "row has 4 cells, header has 3")]
+    assert done["columns"] == preview["columns"]
     assert sorted(values["ref"] for _, values in typed_storage.collection_values(store.connection, CID)) == [
         "W-01", "W-03", "W-04"]
 
@@ -195,6 +218,53 @@ def test_a_header_that_cannot_name_the_columns_is_reported_at_its_cell(store):
                      mapping=WIDE_MAPPING)
     assert [(error["code"], error["at"]) for error in preview["errors"]] == [
         ("IMPORT_SOURCE_MALFORMED", "header cell 2 repeats cell 0")]
+
+
+def test_a_page_is_parsed_once_however_many_batches_read_it():
+    """Defect: every batch built a new reader and parsed the whole page again."""
+    first = import_markdown.read_tables(PAGE.encode())
+    assert import_markdown.read_tables(bytes(bytearray(PAGE.encode()))) is first
+
+
+def test_a_slow_page_parse_does_not_shrink_the_first_batch(store, monkeypatch):
+    """Defect: the batch clock started before the page's parse, so a slow parse made a one-row batch."""
+    setup(store, b"", title="Ledger", fields=LEDGER_FIELDS)
+    owner = owner_principal(surface="mcp")
+    with request_scope(owner):
+        kept = commands.op_preserve_evidence(store.root, "ledger", "spring", "slow.md", PAGE + "\nSlow.\n")
+    job = _agent(store, owner, mode="start", source_ref=kept["path"], format="markdown-table", mapping=MAPPING)
+
+    import_markdown._read.cache_clear()
+    parse = import_markdown.read_tables
+
+    def slow(data):
+        time.sleep(0.4)  # longer than the batch's clock
+        return parse(data)
+
+    monkeypatch.setattr(import_markdown, "read_tables", slow)
+    monkeypatch.setattr(importer(), "BATCH_SECONDS", 0.2)
+    run(store, max_batches=1)
+    status = _agent(store, owner, mode="status", continuation=job["continuation"])
+    assert (status["rows"]["imported"], status["rows"]["rejected"]) == (6, 3)  # all nine rows, in one batch
+
+
+def test_a_page_too_big_or_too_wide_to_read_is_refused_and_points_to_csv(store):
+    """Defect: a wide sparse table is cut short by the parser's autofill limit, and a huge page parsed for seconds."""
+    setup(store, b"", title="Ledger", fields=LEDGER_FIELDS)
+    owner = owner_principal(surface="mcp")
+    # 230 one-cell rows under 300 columns autofill 68,000 empty cells, past the parser's limit of 65,536.
+    wide = "|" + "|".join(f"c{n}" for n in range(300)) + "|\n|" + "|".join("-" for _ in range(300)) + "|\n" + "|x|\n" * 230
+    huge = "| c0 |\n|----|\n" + "| x |\n" * 45_000
+    mapping = {"fields": {"ref": "c0"}, "on_invalid": "skip", "coverage": {"c0": {"classification": None}}}
+    with request_scope(owner):
+        pages = {name: commands.op_preserve_evidence(store.root, "ledger", "limits", f"{name}.md", text)["path"]
+                 for name, text in (("wide", wide), ("huge", huge))}
+    assert len(huge) > importer().MAX_TABLE_SOURCE_BYTES
+    for path in pages.values():
+        preview = _agent(store, owner, mode="preview", source_ref=path, format="markdown-table", mapping=mapping)
+        assert preview["coverage"] != "full"
+        assert [error["code"] for error in preview["errors"]] == ["IMPORT_SOURCE_TOO_LARGE"]
+        assert "csv" in preview["errors"][0]["at"]
 
 
 def test_a_page_that_is_not_preserved_evidence_is_refused_with_the_save_evidence_route(store):
@@ -224,5 +294,23 @@ def test_read_instructions_serves_the_records_import_contract_and_a_call_that_wo
         kept = commands.op_preserve_evidence(store.root, "ledger", "taught", "ledger.md", PAGE.split("\n\n", 2)[2])
     taught = reply["examples"][0]["call"]["arguments"]["import_request"]
     preview = _agent(store, owner, **{**taught, "source_ref": kept["path"]})
-    assert (preview["mapping"]["findings"], preview["coverage"], preview["rows_total"]) == ([], "full", 5)
-    assert preview["check_sum"]["total"] == 265.5
+    assert (preview["mapping"]["findings"], preview["coverage"], preview["rows_total"]) == ([], "full", 9)
+    assert preview["check_sum"]["total"] == 263.17
+
+
+def test_a_csv_mapping_can_ask_for_a_date_and_then_reports_the_dates_it_could_not_read(store):
+    """Defect: a date type was markdown-only, so a csv date either could not be asked for or was lost unseen."""
+    setup(store, b"", title="Ledger", fields=LEDGER_FIELDS)
+    owner = owner_principal(surface="mcp")
+    with request_scope(owner):
+        kept = commands.op_preserve_evidence(
+            store.root, "ledger", "csv", "ledger.csv", "Ref,Date,Amount\nC-01,2025-01-15,5\nC-02,2025-??-??,6\n")
+    mapping = {
+        "fields": {"ref": "Ref", "entry_date": {"from": "Date", "type": "date"}, "amount": {"from": "Amount", "type": "number"}},
+        "on_invalid": "skip",
+        "coverage": {name: {"classification": None} for name in ("Ref", "Date", "Amount")},
+    }
+    preview = _agent(store, owner, mode="preview", source_ref=kept["path"], format="csv", mapping=mapping)
+    assert preview["rows_total"] == 2
+    assert preview["columns"]["entry_date"] == {
+        "column": "Date", "parsed": 1, "missing": 0, "unparsed": 1, "rejected": 0, "malformed": 0}

@@ -11,6 +11,10 @@
       Evidence: `test_a_page_that_is_not_preserved_evidence_is_refused_with_the_save_evidence_route`, and the existing withheld-as-absent test in `tests/test_collection_store_importer.py`.
 - [x] 1.5 Reject a row with text beyond the header's width, with its cell count, and report a header fault at its cell; verify through preview, start and status.
       Evidence: `test_a_row_with_text_beyond_the_header_is_rejected_not_silently_cut`, `test_a_header_that_cannot_name_the_columns_is_reported_at_its_cell`.
+- [x] 1.6 Parse a page once per distinct bytes, start the batch clock after the parse, bound the parse and refuse a page the reader cannot take whole with advice to import csv; verify through the cache, deadline and limit tests.
+      Evidence: `test_a_page_is_parsed_once_however_many_batches_read_it`, `test_a_slow_page_parse_does_not_shrink_the_first_batch`, `test_a_page_too_big_or_too_wide_to_read_is_refused_and_points_to_csv`.
+- [x] 1.7 Report per-column counts in job status, count malformed rows, accept a leading `+`, and make `date` opt-in for csv; verify the counts reconcile with `rows_total`.
+      Evidence: `test_an_agent_previews_and_imports_a_ledger_table_from_preserved_evidence`, `test_a_csv_mapping_can_ask_for_a_date_and_then_reports_the_dates_it_could_not_read`.
 
 ## 2. Teaching
 

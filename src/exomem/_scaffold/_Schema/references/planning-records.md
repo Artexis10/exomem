@@ -90,15 +90,21 @@ guards, and never replay an obsolete intent blindly.
 **Migrating a Markdown table into Records.** A page that holds a table of past entries, such as a ledger,
 imports as rows without retyping a cell. `read_instructions(topic="records.import")` gives the full contract.
 
-1. Save the page's own bytes with `save_evidence`. A note page, pasted text and a URL are not sources, and
-   `records.import` refuses them.
+1. Save the page's text with `save_evidence`. The Evidence is your copy of the page, not the page: nothing in
+   the product turns a note page into a source, so the copy can drift from the page. A note page, pasted text and
+   a URL are not sources, and `records.import` refuses them.
 2. Preview with the request below. The `columns` count shows each mapped column's parsed, missing, unparsed and
-   rejected cells. `would_reject` names the row, column and original text of each refused cell. `check_sum` gives
-   the total, so you can compare it with the total the page states.
+   rejected cells and malformed rows, which add up to the rows read. `would_reject` names the row, column and
+   original text of each refused cell. `check_sum` gives the total. Compare it with the total the page states:
+   that comparison is the check that your copy matches the page.
 3. Read the preview to the person before you start. An unparseable number rejects its row and is never stored as
-   null. A date such as `2025-??-??` leaves the date field missing, and a second field mapped to the same column
-   keeps the original text.
-4. Start the same request without `check_sum`, then poll `mode: "status"` until the job is complete.
+   null. A leading `+` or `-` is a sign; a currency symbol, a thousands separator or parentheses reject the row.
+   A date such as `2025-??-??` leaves the date field missing, and a second field mapped to the same column keeps
+   the original text.
+4. Start the same request without `check_sum`, then poll `mode: "status"` until the job is complete. Its
+   `columns` give the same counts as the preview.
+5. A page over 256 KiB, or with too many cells, is refused as `IMPORT_SOURCE_TOO_LARGE`. Save the table as csv
+   and import that.
 
 ```json
 {"mode": "preview", "source_ref": "<the Evidence path save_evidence returned>", "format": "markdown-table",

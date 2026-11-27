@@ -15,10 +15,19 @@ from dataclasses import dataclass
 from typing import Any
 
 from markdown_it import MarkdownIt
-from markdown_it.rules_block.table import escapedSplit, getLine
+from markdown_it.rules_block.table import MAX_AUTOCOMPLETED_CELLS, escapedSplit, getLine
 from markdown_it.rules_block.table import table as _table_rule
 
 _BOM = b"\xef\xbb\xbf"
+
+# The parser's cost is its token count: a 256 KiB ledger is about 70,000 tokens and parses in 0.14 s, while the
+# worst pages of that size (one-cell rows, a wide sparse table) reach 200,000 to 330,000 and take over a second.
+# Past this count the page is refused, so a read stays well inside a batch and a preview's budget.
+MAX_PARSE_TOKENS = 150_000
+# markdown-it-py ends a table early, and turns the rest into a paragraph, once its rows autofill more than this
+# many empty cells. Each autofilled cell is three tokens, so a page that reaches that limit is over the token cap
+# and is refused whole; a table is never read cut short. The cap must stay under the limit's tokens.
+assert MAX_PARSE_TOKENS < 3 * MAX_AUTOCOMPLETED_CELLS
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,11 +45,11 @@ class Table:
 
 
 class PageError(Exception):
-    """The page cannot be read as Markdown tables; ``code`` is the import refusal that names why."""
+    """The page cannot be read as Markdown tables; ``code`` is the import refusal and ``at`` says what to change."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, at: str) -> None:
         super().__init__(code)
-        self.code = code
+        self.code, self.at = code, at
 
 
 def _table_keeping_dropped_cells(state: Any, start: int, end: int, silent: bool) -> bool:
@@ -69,16 +78,31 @@ def _table_keeping_dropped_cells(state: Any, start: int, end: int, silent: bool)
 def _parser() -> MarkdownIt:
     parser = MarkdownIt("commonmark").enable("table")
     parser.block.ruler.at("table", _table_keeping_dropped_cells, {"alt": ["paragraph", "reference"]})
+    # A cell's text is read as typed from the block pass; the inline pass only builds children nobody reads,
+    # and costs up to 6 times as much on a page of brackets.
+    parser.disable(["inline"])
     return parser
 
 
 def read_tables(data: bytes) -> tuple[Table, ...]:
-    """Every table of the page in document order; raises :class:`PageError` for bytes that are not UTF-8."""
+    """Every table of the page in document order; raises :class:`PageError` for a page that cannot be read.
+
+    A job reads the page again for each batch, and a preview reads it twice, so the last few pages' tables are
+    kept. The key is the page's own bytes, so a hit is the same page: a changed page never reads a stale table.
+    """
+    tables, fault = _read(data)
+    if fault is not None:
+        raise PageError(*fault)
+    return tables
+
+
+@functools.lru_cache(maxsize=4)
+def _read(data: bytes) -> tuple[tuple[Table, ...], tuple[str, str] | None]:
     skipped = len(_BOM) if data.startswith(_BOM) else 0
     try:
         text = data[skipped:].decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise PageError("IMPORT_SOURCE_MALFORMED") from error
+    except UnicodeDecodeError:
+        return (), ("IMPORT_SOURCE_MALFORMED", "page is not UTF-8 text")
     # The parser counts a line at \n, \r\n or \r, the breaks bytes.splitlines also honours.
     starts, offset = [], skipped
     for line in data[skipped:].splitlines(keepends=True):
@@ -96,7 +120,10 @@ def read_tables(data: bytes) -> tuple[Table, ...]:
     cells: list[str] = []
     place, beyond = (0, 0), ()
     in_head = in_row = False
-    for token in _parser().parse(text):
+    parsed = _parser().parse(text)
+    if len(parsed) > MAX_PARSE_TOKENS:
+        return (), ("IMPORT_SOURCE_TOO_LARGE", "page has too many cells to read as tables; save the table as csv and import that")
+    for token in parsed:
         match token.type:  # markdown-it-py's own token types: the parser fixes this set
             case "table_open":
                 header, rows = (), []
@@ -114,4 +141,4 @@ def read_tables(data: bytes) -> tuple[Table, ...]:
                     rows.append(TableRow(tuple(cells), *place, beyond))
             case "table_close":
                 tables.append(Table(header, tuple(rows)))
-    return tuple(tables)
+    return tuple(tables), None
