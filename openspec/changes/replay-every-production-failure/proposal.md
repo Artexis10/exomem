@@ -16,7 +16,7 @@ The operator set the direction: one real-model replay set, with every production
 - The incident runner becomes the one replay set for production failures. Its case files are the only home of a production-failure case.
 - The runner gains the checks that the external answer keys need. These are:
   - a named page surfaced by a read before a named turn's answer, or before a write;
-  - a turn with no read at all;
+  - a turn with no read that surfaces a page or row of the vault;
   - pages changed, unchanged or created after the session;
   - per-turn tool checks that match a door operation, not only a tool name.
 - The runner reads which calls read, write or were refused from the arm: the `readOnlyHint` annotation that the arm's server gives each tool (which covers `recall_context`), the effect of each door operation in the arm's operation registry, and the error code in each result. No check that this change adds or ports matches a hand-kept list of tool names or refusal text. Answer content is judged by the blind judge against the case's reference, never by matching words in the answer.
