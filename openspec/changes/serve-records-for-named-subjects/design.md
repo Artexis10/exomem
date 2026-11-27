@@ -53,7 +53,7 @@ The Records load target for a filtered query applies per (anchor, collection): p
 
 ## Risks / Trade-offs
 
-- SQLite sums floating-point amounts in binary, so 0.1 + 0.2 - 4.15 reads -3.8500000000000005. The grouped aggregate also returns the most decimal places of the values each group sums, read from `printf('%!.15g')` so it is the same on every SQLite version, and the server rounds each sum to them. Integer amounts are exact, and an integer sum past the 64-bit range reads `unavailable`.
+- SQLite sums floating-point amounts in binary, so 0.1 + 0.2 - 4.15 reads -3.8500000000000005. The grouped aggregate also returns the most decimal places of the values each group sums, read from `printf('%!.15g')` so it is the same on every SQLite version, and the server rounds each sum to them. Between 1e-4 and 1e14 that text has no exponent, so one `printf` call per row reads the places; a value outside that range takes three. The server adds 0.0 after the round, so a sum that cancels reads 0.0, not -0.0. Integer amounts are exact, and an integer sum past the 64-bit range reads `unavailable`.
 - A number stored outside SQLite's plain range, such as a large decimal, makes the entry `unavailable` rather than inexact.
 - `subject` was an unchecked key before this change. A manifest that used it for another purpose still reads, with no ledger and a debug log. A collection create, `revise` or `validate_revision` refuses the value and names the key to change.
 - A stored datetime keeps its offset, so JSON rows order by `julianday()`, which reads the offset on SQLite 3.38, the store's floor.

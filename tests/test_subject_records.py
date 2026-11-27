@@ -170,18 +170,26 @@ def test_a_turn_naming_a_person_and_the_ledger_gets_their_sums_unknowns_and_newe
 
 
 @pytest.mark.parametrize("layout", ["sqlite", "markdown-items"], ids=["typed rows", "json rows"])
-def test_decimal_amounts_sum_to_the_places_they_were_written_with(store, monkeypatch, corpus_cache_on, layout):
+@pytest.mark.parametrize(("settled", "settled_sum", "total", "sentence"), [
+    ((0.1, 0.2, -4.15), -3.85, 8.5,
+     "amount sums to 8.5 over 4 rows (provisional 12.35 over 1 row, settled -3.85 over 3 rows)"),
+    # Binary floats sum these to -5.55e-17, which rounds to -0.0.
+    ((-0.1, -0.2, 0.3), 0.0, 12.35,
+     "amount sums to 12.35 over 4 rows (provisional 12.35 over 1 row, settled 0.0 over 3 rows)"),
+], ids=["float noise", "cancelling to zero"])
+def test_decimal_amounts_sum_to_the_places_they_were_written_with(store, monkeypatch, corpus_cache_on, layout,
+                                                                  settled, settled_sum, total, sentence):
     """Binary floats read 0.1 + 0.2 - 4.15 as -3.8500000000000005; a sum keeps the decimal places of its values."""
-    rows = (("r1", MARA_REF, 0.1, "settled", "2026-11-01", "coffee"),
+    rows = (("r1", MARA_REF, settled[0], "settled", "2026-11-01", "coffee"),
             ("r2", MARA_REF, 12.35, "provisional", "2026-11-03", "taxi"),
-            ("r3", MARA_REF, 0.2, "settled", "2026-11-05", "stamps"),
-            ("r4", MARA_REF, -4.15, "settled", "2026-11-07", "change back"))
+            ("r3", MARA_REF, settled[1], "settled", "2026-11-05", "stamps"),
+            ("r4", MARA_REF, settled[2], "settled", "2026-11-07", "change back"))
     build(store, monkeypatch, layout, rows=rows, fields=FIELDS.replace("type: integer", "type: number"))
     [entry] = blocks(_activate(store.root, turn=TURN))
     assert sorted(entry["by_state"], key=lambda group: group["state"]) == [
-        {"state": "provisional", "sum": 12.35, "rows": 1}, {"state": "settled", "sum": -3.85, "rows": 3}]
-    assert entry["total"] == {"sum": 8.5, "rows": 4}
-    assert "amount sums to 8.5 over 4 rows (provisional 12.35 over 1 row, settled -3.85 over 3 rows)" in entry["summary"]
+        {"state": "provisional", "sum": 12.35, "rows": 1}, {"state": "settled", "sum": settled_sum, "rows": 3}]
+    assert entry["total"] == {"sum": total, "rows": 4}
+    assert sentence in entry["summary"]
 
 
 @pytest.mark.parametrize("layout", ["sqlite", "markdown-items"], ids=["typed rows", "json rows"])

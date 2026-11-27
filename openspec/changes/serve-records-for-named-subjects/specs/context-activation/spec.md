@@ -45,6 +45,11 @@ A `ready` entry SHALL lead with `summary`, a sentence built at render time from 
 - **WHEN** a person's settled rows hold 0.1, 0.2 and -4.15
 - **THEN** the settled sum is -3.85 in `by_state` and in `summary`
 
+#### Scenario: Amounts that cancel sum to zero, not minus zero
+
+- **WHEN** a person's settled rows hold -0.1, -0.2 and 0.3
+- **THEN** the settled sum is 0.0 in `by_state` and in `summary`, never -0.0
+
 #### Scenario: The summary repeats the values
 
 - **WHEN** a `ready` entry is served

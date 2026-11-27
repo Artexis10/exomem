@@ -500,22 +500,27 @@ def _decimal_places(value: str) -> str:
     """SQL for the decimal places of the real ``value`` as it was written.
 
     `%!.15g` keeps the 15 significant digits that every double reads back as (DBL_DIG), so 12.35 reads '12.35' on
-    every SQLite the store supports, whose own text form of a real differs between versions. An exponent form, such
-    as '1.0e-20', moves the places by its exponent.
+    every SQLite the store supports, whose own text form of a real differs between versions. Between 1e-4 and 1e14
+    it writes no exponent, so the places are what follows the point, read from one formatting call per row. Outside
+    that range an exponent form, such as '1.0e-20', moves the places by its exponent.
     """
     text = f"printf('%!.15g',{value})"
     mark = f"instr({text},'e')"
-    return (f"CASE WHEN {mark} THEN max(0,{mark}-1-instr({text},'.')-CAST(substr({text},{mark}+1) AS INTEGER)) "
-            f"ELSE length({text})-instr({text},'.') END")
+    exponent = (f"CASE WHEN {mark} THEN max(0,{mark}-1-instr({text},'.')-CAST(substr({text},{mark}+1) AS INTEGER)) "
+                f"ELSE length({text})-instr({text},'.') END")
+    # ltrim's set is the closed alphabet of a plain decimal numeral: a sign and the digits before the point.
+    return (f"CASE WHEN abs({value}) BETWEEN 1e-4 AND 1e14 THEN length(ltrim({text},'-0123456789'))-1 "
+            f"ELSE {exponent} END")
 
 
 def _exact(total: Any, places: int) -> Any:
     """A sum of reals rounded to the most decimal places of its own values; an integer sum is already exact.
 
     Binary floats carry noise past those places (0.1 + 0.2 is 0.30000000000000004), and the exact decimal sum
-    of the values never has more places than they do.
+    of the values never has more places than they do. Adding 0.0 turns the -0.0 that a sum such as -0.1 - 0.2 + 0.3
+    rounds to into 0.0, so no sentence reads "-0.0".
     """
-    return round(total, places) if isinstance(total, float) else total
+    return round(total, places) + 0.0 if isinstance(total, float) else total
 
 
 def _without_numbers(reason: str, head: Mapping[str, Any], state: str) -> dict[str, Any]:
