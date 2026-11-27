@@ -34,6 +34,7 @@ from typing import Any
 
 from . import (
     activation,
+    build_record,
     call_spans,
     episode_capture,
     find_corpus,
@@ -1543,6 +1544,9 @@ def ensure_unlisted(
     if not catalogue.built():
         if _managed() and fold != FOLD_BACKGROUND:
             _schedule(root, freshness_stamp)
+            build_record.note_warming(
+                build_record.WAITING_ON_CONTEXT_CATALOGUE, working_set_runtime.background_build_state(root)
+            )
             return WARMING, None, False
         with _inline_lock(root.absolute()):
             if not catalogue.built():

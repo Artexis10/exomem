@@ -60,9 +60,14 @@ async def wait_until_warm(
 ) -> float:
     """Ask until the answer is not a warming abstention. Returns the seconds waited."""
     started = clock()
-    while is_warming(await ask()):
+    while is_warming(answer := await ask()):
         if clock() - started >= budget:
-            raise StillWarming(f"the server still answered {WARMING_REASON} after {budget:g} s")
+            # The server's own diagnostics name the warm-up it is stuck on, so the unknown unit is explained.
+            waiting = answer["abstention"].get("diagnostics")
+            raise StillWarming(
+                f"the server still answered {WARMING_REASON} after {budget:g} s"
+                + (f"; waiting on {json.dumps(waiting, sort_keys=True)}" if waiting else "")
+            )
         await sleep(poll)
     return round(clock() - started, 1)
 

@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 from . import (
     activation_conventions,
     activation_result,
+    build_record,
     call_spans,
     chance_band,
     context_intents,
@@ -969,7 +970,7 @@ def build_packet(
         "abstained": status != "resolved",
     }
     if packet["abstained"]:
-        packet["abstention"] = {"reason": status}
+        packet["abstention"] = _abstention(status)
     return working_set_conversation.InferredPacket(packet) if conversation_inferred else packet
 
 
@@ -1003,6 +1004,16 @@ def _listed_anchors(anchors: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
         if anchor.get("status") != "partial"
         or _LISTED_PARTIAL_KINDS.intersection(str(kind) for kind in anchor.get("evidence") or ())
     ]
+
+
+def _abstention(reason: str) -> dict[str, Any]:
+    """The abstention block; a warming one carries what this request's warming decision named."""
+    block: dict[str, Any] = {"reason": reason}
+    cause = build_record.warming_cause() if reason == activation_result.INDEX_WARMING else None
+    if cause is not None:
+        # Marked apart from `reason`: the agent repeats the reason, an operator reads these.
+        block["diagnostics"] = cause
+    return block
 
 
 def abstained_packet(
@@ -1061,7 +1072,7 @@ def abstained_packet(
         "budget": {"limit_chars": limit, "used_chars": used},
         "generation": dict(generation),
         "abstained": True,
-        "abstention": {"reason": reason},
+        "abstention": _abstention(reason),
     }
     if related:
         # Present only when the related-page listing found pages, so every other

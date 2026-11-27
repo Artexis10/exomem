@@ -51,6 +51,7 @@ from . import attention as attention_module
 from . import audit as audit_module
 from . import audit_fix as audit_fix_module
 from . import bootstrap_core as bootstrap_core_module
+from . import build_record as build_record_module
 from . import call_spans as call_spans_module
 from . import capabilities as capabilities_module
 from . import capture_attempts as capture_attempts_module
@@ -7925,6 +7926,7 @@ def _compile_guarded_activation(
     return _CompiledActivation(guarded, True, thread)
 
 
+@build_record_module.warming_scoped
 def _op_activate_context_body(
     vault_root: Path,
     turn: str = "",
@@ -8162,12 +8164,10 @@ def _op_activate_context_body(
                 # silent degrade to an empty freshness key, which would let the
                 # request keep serving against a registry it could not prove
                 # current for this principal's access policy.
-                reason = (
-                    working_set_runtime_module.WARMING
-                    if exc.status == "warming"
-                    else working_set_runtime_module.UNAVAILABLE
-                )
-                return _abstain(reason)
+                if exc.status == "warming":
+                    build_record_module.note_warming(build_record_module.WAITING_ON_RECALL_REGISTRY, site=exc.site)
+                    return _abstain(working_set_runtime_module.WARMING)
+                return _abstain(working_set_runtime_module.UNAVAILABLE)
             except Exception:  # noqa: BLE001 - unavailable freshness never grants disclosure
                 # Abstain right here rather than continuing in a half-state:
                 # freshness that could not be established grants nothing, and
@@ -8207,6 +8207,11 @@ def _op_activate_context_body(
             state, index = working_set_runtime_module.UNAVAILABLE, None
     if index is not None:
         index.close()
+    if managed_cold and state in (working_set_runtime_module.READY, working_set_runtime_module.WARMING):
+        # A pending seed makes the turn abstain whatever the index answered, so the seed is its cause.
+        build_record_module.note_warming(
+            build_record_module.WAITING_ON_RECALL_SEED, freshness_module.seed_state(vault_root, "kb")
+        )
     if state != working_set_runtime_module.READY or index is None:
         return _abstain(state)
 
