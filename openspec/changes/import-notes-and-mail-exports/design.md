@@ -104,7 +104,7 @@ The record is two files under `<state>/import-expansion/<import_id>/`.
 
 **Parsing.** The reader feeds a `defusedxml.ElementTree.DefusedXMLParser` in 1 MiB chunks, with a custom target instead of a tree builder.
 - The target keeps the text of `title`, `created`, `updated`, `tag` and `source-url`, and the note's `content` up to 64 MiB.
-- It streams each `resource/data` text through an incremental base64 decoder into a hidden temporary file in the stage, hashing the bytes as they arrive and keeping only the current chunk. The resource's type and file name come after its data, so at `</resource>` the reader renames the file to its final name, or deletes it when the type is not indexable. The transcript, whose `en-media` links need each resource's MD5, is written at `</note>`.
+- It streams each `resource/data` text through an incremental base64 decoder into a hidden part file under the export's `files/.incoming/` folder, hashing the bytes as they arrive and keeping only the current chunk. The resource's type and file name come after its data, so at `</resource>` the reader keeps the part, or deletes it when the type is not indexable. The transcript, whose `en-media` links need each resource's MD5, is built at `</note>`. The expander then moves the kept parts into place and writes the transcript last, before the item's row. A crash leaves only the hidden folder, which the next call clears.
 - It drops all other text.
 - A note whose content passes 64 MiB counts as failed with its reason, and the parser carries on to the next note.
 
