@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -63,11 +64,14 @@ class Comparison:
     differences: tuple[Difference, ...]
 
 
-def compare_tables(staged: sqlite3.Connection, expected_path: Path) -> Comparison:
+def compare_tables(
+    staged: sqlite3.Connection, expected_path: Path, *, only: Collection[str] | None = None
+) -> Comparison:
     """Compare every derived table of ``staged`` with the one in ``expected_path``, whole table by natural key.
 
     A table that differs is named with the number of differing rows and up to ``KEYS_REPORTED`` of its keys.
     Row ids are surrogates and never compared: a full-text row is read through the key of the row it indexes.
+    ``only`` limits the comparison to those tables, for a database that holds just some of them.
     """
     staged.execute("ATTACH DATABASE ? AS expected", (str(expected_path),))
     try:
@@ -76,7 +80,7 @@ def compare_tables(staged: sqlite3.Connection, expected_path: Path) -> Compariso
             "SELECT name, type FROM pragma_table_list WHERE schema = 'expected' "
             "AND type IN ('table', 'virtual') AND name NOT LIKE 'sqlite_%' ORDER BY name"
         ).fetchall():
-            if table in _BUILD_STAMP_TABLES:
+            if table in _BUILD_STAMP_TABLES or (only is not None and table not in only):
                 continue
             compared.append(table)
             difference = _table_difference(staged, table, indexed=kind == "virtual")
