@@ -125,7 +125,7 @@ def test_a_vault_command_refuses_with_one_message(unsupported) -> None:
     assert refusal is not None
     assert "cannot run here" in refusal
     assert "darwin" in refusal
-    assert "exomem doctor" in refusal
+    assert "evermatter doctor" in refusal
 
 
 @pytest.mark.parametrize(

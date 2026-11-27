@@ -430,7 +430,7 @@ def derived_behind():
         DERIVED_BEHIND,
         "This vault's store was set up by an older Evermatter build, and its link rows are not derived "
         "yet, so Evermatter cannot say which pages link here.",
-        "Start the Evermatter service: it derives the rows in the background. `exomem store-mode "
+        "Start the Evermatter service: it derives the rows in the background. `evermatter store-mode "
         "status` shows `owner_schema` as current once they are done.",
     )
 
@@ -521,7 +521,7 @@ def require_current_parser(conn: Connection) -> None:
         raise OpError(
             DERIVED_BEHIND,
             "The stored semantic rows are not yet qualified for the current parser, so this answer is not available yet.",
-            "Start the Exomem service to finish the background pass. Check `exomem store-mode status` "
+            "Start the Evermatter service to finish the background pass. Check `evermatter store-mode status` "
             "until `parser_version` equals `required_parser_version`.",
         )
 

@@ -30,13 +30,13 @@ dump only reads state. Signal the worker pid itself: `systemctl kill -s USR1` al
 
 ## Live-cell guardrails (2026-08 incident; standing until `bound-graph-recovery-funnel` lands in code)
 
-- **Never run an out-of-process drain (`exomem index --scope vault`) while the
+- **Never run an out-of-process drain (`evermatter index --scope vault`) while the
   service is running.** The CLI takes the graph claim, blocks at 0 CPU on the
   live boundary, and the service mints full-index receipts on every write
   meanwhile — a measured soft-deadlock (~2,100 receipts in 40 minutes).
   Stop-window only: stop the actual service with its platform manager → drain → restart that same service. Windows examples use `Stop-Service` / `Start-Service`; a WSL user unit uses `systemctl --user`.
-  Note: `exomem maintain --reconcile` does NOT drain the deferred queue;
-  `exomem index` does.
+  Note: `evermatter maintain --reconcile` does NOT drain the deferred queue;
+  `evermatter index` does.
 - **Test kill-switch env INSIDE the venv python, never in the shell.** Unowned
   site-packages `.pth` files inject `EXOMEM_*` flags at interpreter startup, so
   shell/user/machine/NSSM scopes all show them unset while every venv process
@@ -57,7 +57,7 @@ dump only reads state. Signal the worker pid itself: `systemctl kill -s USR1` al
   Windows. When inspecting a live cell, read them there — a `.sqlite` or
   `.graph-sync*.json` found under `Knowledge Base/` on a migrated cell is a
   dual-state leftover the doctor `state.placement` section will FAIL on
-  (`exomem maintain --adopt-state <which>` resolves it; never delete either
+  (`evermatter maintain --adopt-state <which>` resolves it; never delete either
   copy by hand).
 
 ## Cloud cells

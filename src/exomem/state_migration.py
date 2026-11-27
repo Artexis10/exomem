@@ -80,7 +80,7 @@ _FAMILY_STATES = frozenset({"pending", "published", "complete"})
 _ADOPT_CHOICES = ("vault", "external")
 _GOVERNANCE_VAULT_ADOPTION = "governance-store=vault"
 _REMEDIATION = (
-    "stop every process that can write this vault, then run `exomem maintain "
+    "stop every process that can write this vault, then run `evermatter maintain "
     "--migrate-state --offline --adopt-state external` to keep the external "
     "state root, or use `--adopt-state vault` to keep the in-vault copy"
 )
@@ -103,7 +103,7 @@ class StatePlacementConflict(RuntimeError):
         super().__init__(
             "machine-local state exists both under the vault and in the "
             "external state root; neither copy is silently preferred or "
-            "deleted — run `exomem doctor` to see both locations, then "
+            "deleted — run `evermatter doctor` to see both locations, then "
             f"{_REMEDIATION}"
         )
 
@@ -118,7 +118,7 @@ class StateMigrationManifestError(RuntimeError):
         log.error("state migration manifest at %s is invalid: %s", path, detail)
         super().__init__(
             "the state migration manifest is unreadable or invalid; startup "
-            "refuses to guess — run `exomem doctor` for the local path"
+            "refuses to guess — run `evermatter doctor` for the local path"
         )
 
 
@@ -131,7 +131,7 @@ class StateMigrationOfflineRequired(RuntimeError):
         log.error("machine-local state requires offline migration: %s", detail)
         super().__init__(
             "STATE_MIGRATION_OFFLINE_REQUIRED: machine-local state is not ready; "
-            "stop every legacy writer and run `exomem maintain --migrate-state "
+            "stop every legacy writer and run `evermatter maintain --migrate-state "
             "--offline` before starting Evermatter"
         )
 

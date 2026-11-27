@@ -1730,7 +1730,7 @@ def test_doctor_models_cache_warns_when_hf_cache_empty(
 
     check = next(c for c in report.checks if c.id == "models.cache")
     assert check.status == "warn"
-    assert "exomem warm" in (check.remediation or "")
+    assert "evermatter warm" in (check.remediation or "")
 
 
 def test_doctor_models_cache_passes_when_all_models_cached(

@@ -121,7 +121,7 @@ class ContinueScreen(ExomemScreen):
                     "They appear once the client hooks are installed and a session ends.",
                 ],
                 options=[
-                    ("hooks", "Copy the install command", "exomem install-hook"),
+                    ("hooks", "Copy the install command", "evermatter install-hook"),
                     ("refresh", "Look again", "u does the same thing"),
                 ],
                 budget=self.content_budget(),
@@ -140,8 +140,8 @@ class ContinueScreen(ExomemScreen):
     def on_recovery_panel_chosen(self, event: RecoveryPanel.Chosen) -> None:
         event.stop()
         if event.action == "hooks":
-            self.app.copy_to_clipboard("exomem install-hook")
-            self.app.notify("`exomem install-hook` copied — run it in a terminal.")
+            self.app.copy_to_clipboard("evermatter install-hook")
+            self.app.notify("`evermatter install-hook` copied — run it in a terminal.")
         else:
             self.refresh_data()
 

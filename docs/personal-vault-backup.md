@@ -6,7 +6,7 @@ This guide is for the owner of a personal install. It does not cover Evermatter 
 
 The service keeps dated [restic](https://restic.net) snapshots of your vault and of the machine-local state that nothing can rebuild (review decisions, voice profiles, the collection store and its archive, the media jobs store and the procedure approval key). It never copies an index or a cache, because the product rebuilds them.
 
-The service checks the repository, restores a sample to prove that the backup works, applies your keep rules, and shows each result in `exomem status`. It does nothing until you name a config file.
+The service checks the repository, restores a sample to prove that the backup works, applies your keep rules, and shows each result in `evermatter status`. It does nothing until you name a config file.
 
 ## Set it up
 
@@ -14,8 +14,8 @@ The service checks the repository, restores a sample to prove that the backup wo
 2. Write the repository password to a file outside the vault. Allow only your own account to read it. Keep a second copy away from this machine: nobody can read the repository without it.
 3. Write a config file outside the vault (example below). Allow only your own account to read it.
 4. Set `EVERMATTER_VAULT_BACKUP_CONFIG` to the config file in the service environment. Restart the service.
-5. Run `exomem backup run --init-repository`. The command creates the repository and takes the first backup.
-6. Run `exomem backup status`. Each line shows a state, and `findings` is empty.
+5. Run `evermatter backup run --init-repository`. The command creates the repository and takes the first backup.
+6. Run `evermatter backup status`. Each line shows a state, and `findings` is empty.
 
 The service never creates a repository by itself. A typo in `repository` then cannot start a new backup in the wrong place.
 
@@ -58,20 +58,20 @@ Retention only ever touches this vault's snapshots from this machine. Several va
 
 ## Read the status
 
-`exomem status` shows one `vault_backup` line. `exomem backup status` shows the last backup, retention, check and sampled restore, what is due next, and each finding with its path and code.
+`evermatter status` shows one `vault_backup` line. `evermatter backup status` shows the last backup, retention, check and sampled restore, what is due next, and each finding with its path and code.
 
 - `unknown` means the service cannot read the record. It never means zero. A lost record also makes `findings` and `last error` read `unknown`, because it cannot show that there are none.
 - `never` means the activity has not run yet.
 - `empty` means a sampled restore had nothing to draw, for example a vault with no notes. It never counts as a passed restore.
 - `restic not found` means restic is not on the `PATH` of this process.
 
-A damaged repository shows as a finding with `check` or `sample` as the activity. To start again, give `repository` a new location and run `exomem backup run --init-repository`.
+A damaged repository shows as a finding with `check` or `sample` as the activity. To start again, give `repository` a new location and run `evermatter backup run --init-repository`.
 
 ## Recover files
 
 The restore command never writes into the vault. It writes into a new or empty directory that you name.
 
-1. Run `exomem backup restore --target /path/to/new-directory --path "Knowledge Base/Notes/example.md"`.
+1. Run `evermatter backup restore --target /path/to/new-directory --path "Knowledge Base/Notes/example.md"`.
 2. Add `--snapshot <id>` to restore from an older snapshot. The default is the latest of this machine, or of another machine that backed up this vault path.
 3. Add `--state` instead of `--path` to restore the staged machine-local state.
 4. Copy the files you need back into the vault yourself.

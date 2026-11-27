@@ -308,7 +308,7 @@ def _plugin_manifest() -> dict:
                 "title": "Evermatter MCP URL",
                 "description": (
                     "Optional full Evermatter MCP service URL ending in /mcp. "
-                    "Leave blank and run `exomem setup` to configure a native client route."
+                    "Leave blank and run `evermatter setup` to configure a native client route."
                 ),
                 "default": "",
                 "required": False,
@@ -439,7 +439,7 @@ def package_skills(out_dir: Path | None = None, *, vault: Path | None = None) ->
     if not (_SKILL_SRC / "SKILL.md").is_file():
         raise FileNotFoundError(
             f"bundled skill missing at {_SKILL_SRC} (SKILL.md not found) — "
-            "is the exomem install intact?"
+            "is the Evermatter install intact?"
         )
 
     vault = Path(vault).expanduser() if vault is not None else None

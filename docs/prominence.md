@@ -3,7 +3,7 @@
 # Prominence — how much Evermatter speaks up
 
 Evermatter has one knob for how much it participates in a conversation. It is separate
-from `exomem mode`, which governs how much of your *machine* Evermatter may use. A laptop
+from `evermatter mode`, which governs how much of your *machine* Evermatter may use. A laptop
 on battery can still want maximal recall; a workstation can still want Evermatter to stay
 out of the way.
 
@@ -77,7 +77,7 @@ this request resolved under, and the effective level. All of it lives in one rec
 under one revision, so a set and a clear cannot interleave behind each other's back:
 whichever lands second is asked to inspect again.
 
-The older `exomem prominence <level>` command remains a machine-wide control.
+The older `evermatter prominence <level>` command remains a machine-wide control.
 Standalone hooks read that legacy configuration and environment; they do not
 inherit another authenticated identity's vault preference.
 
@@ -109,9 +109,9 @@ it is too chatty, not that you have to tune up to get it working.
 On a local install, where the setting reaches both the server and the CLI:
 
 ```
-exomem prominence              # show the active level and its full contract
-exomem prominence maximal      # set it
-exomem prominence --hook-env   # print shell lines that set this level's nudge tunables
+evermatter prominence              # show the active level and its full contract
+evermatter prominence maximal      # set it
+evermatter prominence --hook-env   # print shell lines that set this level's nudge tunables
 ```
 
 Precedence is `EVERMATTER_PROMINENCE` (env) → the saved value for this request's
@@ -144,7 +144,7 @@ Evermatter does not recognise, since an unrecognised client is far more likely t
 a hooked CLI than a web connector. Conversational clients get nothing, because
 there is genuinely no cadence there to be out of step with.
 
-Run `exomem prominence <level>` **on the machine running the hooks** to change
+Run `evermatter prominence <level>` **on the machine running the hooks** to change
 the nudge cadence. That command moves the hooks and nothing else: your saved
 preference still decides what the server serves, which is why the block says so
 in as many words. Where the server and the client are the same machine, the one
@@ -188,7 +188,7 @@ the casual-looking conversations where a real result tends to arrive.
 The level blocks state policy. This instruction is your own request to recall
 before a task and to save what the task establishes. Paste it ahead of the
 Balanced or Maximal block. With either block it is longer than one 1,500-character
-field, so on ChatGPT give it a field of its own. `exomem setup` offers the same
+field, so on ChatGPT give it a field of its own. `evermatter setup` offers the same
 text for Claude Code and Codex. Leave it out at Light and Off: those levels save
 only when you ask.
 

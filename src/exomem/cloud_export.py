@@ -241,7 +241,7 @@ def _failure_diagnostic(error: Exception) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="exomem cell-export")
+    parser = argparse.ArgumentParser(prog="evermatter cell-export")
     parser.add_argument("--export-id", required=True)
     parser.add_argument("--part-url", dest="part_urls", action="append", default=[])
     parser.add_argument("--part-bytes", type=int, default=64 * 1024 * 1024)

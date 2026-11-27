@@ -50,7 +50,7 @@ you land on in step 4:
 
 | Field | Value |
 | --- | --- |
-| Application name | `exomem` |
+| Application name | `Evermatter` |
 | Homepage URL | `https://<host>` |
 | Authorization callback URL | `https://<host>/auth/callback` |
 
@@ -86,7 +86,7 @@ python -c "import secrets;print(secrets.token_urlsafe(48))"
 ```
 
 Resolve the immutable account ID with `GET https://api.github.com/users/<login>`
-and copy its numeric `id`, or let `exomem setup --remote` resolve it. For an
+and copy its numeric `id`, or let `evermatter setup --remote` resolve it. For an
 offline/headless run, pass `--github-user-id <id>`. The login comparison is
 case-insensitive; the numeric ID is the durable trust anchor.
 
@@ -120,7 +120,7 @@ Local CLI calls and reconcile-class maintenance carry no budget at all.
 Validate:
 
 ```bash
-exomem doctor --profile remote
+evermatter doctor --profile remote
 ```
 
 ### 3. Start the server
@@ -136,7 +136,7 @@ doctor, starts the native service, and verifies `/mcp` before reporting success.
 Or run it in the foreground for a first test:
 
 ```bash
-exomem --transport http
+evermatter --transport http
 ```
 
 Validate — expect `401`, not a connection error:
@@ -197,7 +197,7 @@ This is the primary check — run it once the tunnel is up, so a broken
 connector path shows up now instead of when claude.ai's connector add fails:
 
 ```bash
-exomem doctor --profile remote --probe
+evermatter doctor --profile remote --probe
 ```
 
 The curl equivalents it runs under the hood, for anyone who wants to see the
@@ -263,7 +263,7 @@ managed install's `service.env`) and restart the service:
 EVERMATTER_OWNER_OAUTH_SUBJECT=github:<the value of EVERMATTER_GITHUB_USER_ID>
 ```
 
-`exomem setup --remote` asks this once and writes the line for you; with
+`evermatter setup --remote` asks this once and writes the line for you; with
 `--yes` it writes it only when you pass `--remote-owner` (`--no-remote-owner`
 removes it).
 
@@ -275,12 +275,12 @@ session opened locally cannot be resumed remotely, or the reverse.
 
 - The value is only ever read from the service environment, never from the
   vault. A malformed value is treated as unset and never stops the service.
-- `exomem doctor --profile remote` reports `env.EVERMATTER_OWNER_OAUTH_SUBJECT` as
+- `evermatter doctor --profile remote` reports `env.EVERMATTER_OWNER_OAUTH_SUBJECT` as
   unset, active, mismatch or malformed. Before enabling it, read
   `governance.remote_owner_former_audience`: rules or grants that name your
   remote connector's former `principal:` audience stop applying to it once
   bound. Nothing is migrated; removing the line restores them.
-- `exomem auth sessions` marks the sessions that act as the owner.
+- `evermatter auth sessions` marks the sessions that act as the owner.
 - On an HA pair, set the line on every replica, or the audience flips between
   replicas.
 
@@ -291,7 +291,7 @@ the service. From the directory containing `.env`, rerun local setup; it reads
 `EVERMATTER_BASE_URL` automatically. Or name the endpoint explicitly:
 
 ```bash
-exomem setup --vault "/path/to/vault" \
+evermatter setup --vault "/path/to/vault" \
   --mcp-url https://<host>/mcp \
   --replace-client-registration
 ```

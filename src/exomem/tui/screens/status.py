@@ -203,7 +203,7 @@ class StatusScreen(ExomemScreen):
                         receipt(skin, "warn", "hooks", "not fully wired", budget=budget)
                     )
                     text.append("\n")
-                    text.append_text(continuation(skin, "run: exomem install-hook", indent=2))
+                    text.append_text(continuation(skin, "run: evermatter install-hook", indent=2))
                     target.update(text)
             elif isinstance(data, dict):
                 target.update(render_mapping(data, skin, budget))

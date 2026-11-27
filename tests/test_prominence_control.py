@@ -810,7 +810,7 @@ def test_configure_memory_tells_a_hook_capable_client_what_its_hooks_read(
         "reads": "operator environment, then this client machine's exomem configuration file",
         "saved_preference_reaches_hooks": False,
         "change_with": (
-            "exomem prominence <level> on the client machine "
+            "evermatter prominence <level> on the client machine "
             "(changes hook cadence only; a saved preference still decides what is served)"
         ),
     }
@@ -854,7 +854,7 @@ def test_a_surface_without_the_preference_control_is_taught_a_route_it_can_take(
     change_with = payload["engagement"]["change_with"]
     assert change_with == prominence.custom_instructions_route()
     assert "custom instructions" in change_with
-    assert "exomem prominence" not in change_with
+    assert "evermatter prominence" not in change_with
     assert "configure_memory" not in change_with
 
 

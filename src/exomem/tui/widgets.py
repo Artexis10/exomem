@@ -47,7 +47,7 @@ class AppHeader(Horizontal):
 
     def compose(self) -> ComposeResult:
         left = Text()
-        left.append("exomem", style="bold")
+        left.append("evermatter", style="bold")
         left.append("  ")
         left.append(self._screen_title)
         yield Static(left, classes="header-left")

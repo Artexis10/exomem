@@ -59,7 +59,7 @@ def test_deep_queue_fails_names_index_command_and_never_claims_automatic_drain(
 
     assert check.status == "fail"
     assert check.remediation is not None
-    assert f'exomem index --vault "{vault}" --scope vault' in check.remediation
+    assert f'evermatter index --vault "{vault}" --scope vault' in check.remediation
     haystack = f"{check.message} {check.remediation}".lower()
     assert "automatic" not in haystack
     assert check.details["semantic_upserts"] == 2116
@@ -145,7 +145,7 @@ def test_graph_sync_recovery_required_fails_with_augmented_canned_remediation(
     canned = graph_sync.committed_graph_failure(checkpoint)["graph_sync_remediation"]
     assert check.remediation is not None
     assert canned in check.remediation
-    assert "exomem maintain --reconcile" in check.remediation
+    assert "evermatter maintain --reconcile" in check.remediation
     assert check.details["generation"] == 4
 
 
@@ -162,7 +162,7 @@ def test_graph_sync_recovery_required_keeps_an_already_specific_remediation(
         created_paths=(),
         scope="full",
     )
-    specific = "Run `exomem maintain --reconcile` after clearing the stuck lease."
+    specific = "Run `evermatter maintain --reconcile` after clearing the stuck lease."
     monkeypatch.setattr(
         graph_sync, "status", lambda _root: {"state": "recovery_required", "generation": 7}
     )
