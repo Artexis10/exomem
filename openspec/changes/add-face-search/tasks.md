@@ -14,6 +14,9 @@
 - [x] 2.5 Test: a people store restored without a face index re-attaches names after a re-scan, and faces stay off until the owner opts in again. Catches: a restore that turns faces on, or loses names.
   The setting and consent live in the rebuildable face index, and groups and names in the people store.
 
+- [ ] 2.6 Move unnamed groups into the face index: naming a group moves it (centroid, count, exclusions) into the people store, clearing its name moves it back, and the people store holds only people and their named groups. Test: after a scan with one named and several unnamed groups, a personal backup stages a people store whose groups are exactly the named ones. Catches: a stranger's one-face centroid in a restic snapshot.
+- [x] 2.7 Hosted deployments: one availability decision (`face_store.deployment_refusal`) keeps faces unavailable on a Cloud or hosted deployment unless `EXOMEM_FACES_HOSTED=1`. Test: a hosted deployment without the setting refuses turn-on and `people` with `FACES_UNAVAILABLE`. Catches: biometric processing of other accounts before the operator enables it. Evidence: tests/test_face_search.py test_a_hosted_deployment_runs_faces_only_when_its_operator_enabled_them, tests/test_face_operations.py (hosted CLI turn-on refused).
+
 ## 3. Detection pipeline
 
 - [x] 3.1 Face step in `media_worker` after the CLIP step, under the same identity and staleness checks; one decode pass serves CLIP and faces for a video; scene-frame images are skipped; failures soft-fail.
@@ -82,5 +85,6 @@
 ## 10. Delivery
 
 - [ ] 10.1 Add a user note under `user-notes/` in one plain sentence.
+- [ ] 10.4 Before release, record the new MCP discovery fingerprint as pending in the personal plugin contract, and upload both face model assets to the `served-models` release, built from the committed build script.
 - [ ] 10.2 Two blind review passes by separate reviewers (biometric data), each with the risk lens, before merge.
 - [ ] 10.3 After release, refresh hosted connector discovery for the new `search_memory` field and door operations.
