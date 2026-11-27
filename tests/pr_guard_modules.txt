@@ -3,6 +3,7 @@
 # elsewhere can break, and it stays cheap: a pull request runs it on each runtime
 # its tier covers. One path per line; scripts/ci_change_scope.py reads this file.
 tests/test_ci_reliability_contract.py
+tests/test_lazy_imports.py
 tests/test_membench_tool_selection_canonical.py
 tests/test_repository_docs_reads.py
 tests/test_scaffold_no_leak.py

@@ -173,7 +173,7 @@ def test_a_window_whose_artifacts_are_all_filed_reports_no_residual_file_for_its
     import_id = _window(vault, {"Recordings/a.pdf": consume.PDF}, series=["Recordings/a.pdf"])
     run_id, _plan_id, _reply = consume._adopt(vault, f"_Imports/{import_id}")
 
-    residual = adoption_run.finish(vault, run_id=run_id, today=consume.TODAY)["finish"]["residual"]
+    residual = consume._finish(vault, run_id)["finish"]["residual"]
 
     assert (residual["files"], residual["by_reason"], residual["discard"]) == (0, {}, None)
 

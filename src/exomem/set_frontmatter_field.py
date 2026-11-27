@@ -320,6 +320,7 @@ def set_frontmatter_field(
         log.exception("set_frontmatter_field write failed for %s", rel_path)
         warnings.append(f"partial write — reconcile on desktop: {error}")
         raise
+    warnings.extend(committed.review_field_warnings())
 
     return SetFrontmatterResult(
         path=rel_path,

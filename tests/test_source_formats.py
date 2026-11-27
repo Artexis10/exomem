@@ -89,7 +89,8 @@ def test_an_overlay_entry_with_a_parser_that_code_lacks_is_refused_and_the_other
 
     assert [finding["path"] for finding in snapshot.findings] == ["entries.odd-notes"]
     assert "INVALID_SOURCE_FORMAT" in snapshot.findings[0]["detail"]
-    assert {entry.key for entry in snapshot.active} == {"chatgpt-conversations", "claude-conversations", "kite-chats"}
+    assert {entry.key for entry in snapshot.active} == {
+        "chatgpt-conversations", "claude-conversations", "evernote-notes", "gmail-mbox", "kite-chats"}
 
 
 def test_an_overlay_entry_whose_file_name_pattern_matches_every_file_or_names_a_folder_is_refused(tmp_path):
@@ -120,4 +121,81 @@ def test_an_overlay_may_relabel_the_words_of_a_transcript_but_not_change_what_a_
     _overlay(root, "schema_version: 1\nentries:\n  claude-conversations:\n    attributes: {item_keys: [uuid]}\n")
     snapshot = registry.load(source_formats.SPEC, root)
     assert "PACK_ENTRY_FIXED" in snapshot.findings[0]["detail"]
-    assert {entry.key: entry.attributes["item_keys"] for entry in snapshot.active}["claude-conversations"] == ["chat_messages", "uuid"]
+    (claude,) = (entry for entry in snapshot.active if entry.key == "claude-conversations")
+    assert claude.attributes["item_keys"] == ["chat_messages", "uuid"]
+
+
+# ----- notes and mail (OpenSpec import-notes-and-mail-exports, group 1.1)
+
+ENEX_FACTS = "file_glob: '*.enex', root: en-export, parser: evernote-notes, item_kind: app-note, untitled: Untitled note"
+MBOX_FACTS = "file_glob: '*.mbox', label_header: X-Gmail-Labels, parser: gmail-mbox, item_kind: correspondence, untitled: No subject"
+ENEX_WORDS = "{created: Created, updated: Updated, tags: Tags, source: Source, attachments: Attachments, extracted: filed, kept: kept, cut_short: cut}"
+MBOX_WORDS = "{attachments: Attachments, extracted: filed, kept: kept, cut_short: cut}"
+
+
+def test_each_parser_recognises_its_own_container_and_no_other(tmp_path):
+    """Catches a registry that pairs a glob with the wrong container: a notebook is XML, a mailbox is a run of From lines."""
+    root = _vault(tmp_path)
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    notebook = stage / "notes.enex"
+    notebook.write_text('<?xml version="1.0"?><en-export><note><title>t</title></note></en-export>', encoding="utf-8")
+    mailbox = stage / "all.mbox"
+    mailbox.write_bytes(b"From 1@xxx Mon Mar  4 09:12:00 2024\nSubject: t\n\nbody\n")
+    wrong_root = stage / "other.enex"
+    wrong_root.write_text('<?xml version="1.0"?><html><body/></html>', encoding="utf-8")
+    not_mail = stage / "plain.mbox"
+    not_mail.write_text("just some notes\nnot a mailbox\n", encoding="utf-8")
+
+    assert source_formats.recognise(root, notebook).parser == "evernote-notes"
+    assert source_formats.recognise(root, mailbox).parser == "gmail-mbox"
+    assert source_formats.recognise(root, wrong_root) is None
+    assert source_formats.recognise(root, not_mail) is None
+
+
+def test_an_overlay_entry_that_lacks_a_fact_its_parser_needs_is_refused(tmp_path):
+    """Catches an entry that is accepted and then cannot read its container: each parser names the facts it reads."""
+    root = _vault(tmp_path)
+    _overlay(root, "schema_version: 1\nentries:\n"
+                   f"  no-root:\n    label: A\n    attributes: {{file_glob: 'a-*.enex', parser: evernote-notes, item_kind: app-note, untitled: U, words: {ENEX_WORDS}}}\n"
+                   f"  no-label-header:\n    label: B\n    attributes: {{file_glob: 'b-*.mbox', parser: gmail-mbox, item_kind: correspondence, untitled: U, skip_labels: [], words: {MBOX_WORDS}}}\n"
+                   f"  no-words:\n    label: C\n    attributes: {{{ENEX_FACTS.replace('*.enex', 'c-*.enex')}}}\n"
+                   f"  fine:\n    label: D\n    attributes: {{{MBOX_FACTS.replace('*.mbox', 'd-*.mbox')}, skip_labels: [], words: {MBOX_WORDS}}}\n")
+
+    snapshot = registry.load(source_formats.SPEC, root)
+
+    assert sorted(finding["path"] for finding in snapshot.findings) == ["entries.no-label-header", "entries.no-root", "entries.no-words"]
+    assert "fine" in {entry.key for entry in snapshot.active}
+
+
+def test_an_entry_whose_words_lack_a_key_its_parser_shows_is_refused(tmp_path):
+    """Catches a transcript that would show a blank where a word should be: the key set is the parser's, not the entry's."""
+    root = _vault(tmp_path)
+    _overlay(root, "schema_version: 1\nentries:\n"
+                   f"  short-words:\n    label: S\n    attributes: {{{MBOX_FACTS.replace('*.mbox', 's-*.mbox')}, skip_labels: [], words: {{attachments: A}}}}\n")
+
+    assert [finding["path"] for finding in registry.load(source_formats.SPEC, root).findings] == ["entries.short-words"]
+
+
+def test_an_overlay_may_change_the_skipped_labels_and_the_words_of_a_shipped_mail_entry(tmp_path):
+    """Catches a vault that cannot name its own Spam and Trash labels, such as those of a localised account."""
+    root = _vault(tmp_path)
+    _overlay(root, "schema_version: 1\nentries:\n  gmail-mbox:\n    attributes:\n"
+                   "      skip_labels: [Spam, Corbeille, Courrier indésirable]\n"
+                   "      words: {attachments: Pièces jointes, extracted: classée, kept: gardée, cut_short: '[texte tronqué]'}\n")
+
+    shown = {entry.key: entry for entry in source_formats.formats(root)}["gmail-mbox"]
+
+    assert shown.skip_labels == ("Spam", "Corbeille", "Courrier indésirable")
+    assert shown.words["attachments"] == "Pièces jointes" and shown.label_header == "X-Gmail-Labels"
+
+
+def test_an_overlay_that_changes_the_label_header_or_the_root_of_a_shipped_entry_is_refused(tmp_path):
+    """Catches a vault that retargets what a shipped format recognises: those facts are the vendor's."""
+    root = _vault(tmp_path)
+    for entry, change in (("gmail-mbox", "label_header: X-Other"), ("evernote-notes", "root: html"), ("gmail-mbox", "file_glob: '*.txt'")):
+        _overlay(root, f"schema_version: 1\nentries:\n  {entry}:\n    attributes: {{{change}}}\n")
+        snapshot = registry.load(source_formats.SPEC, root)
+        assert "PACK_ENTRY_FIXED" in snapshot.findings[0]["detail"], change
+    shipped = {entry.key: entry for entry in source_formats.formats(root)}
+    assert shipped["gmail-mbox"].label_header == "X-Gmail-Labels" and shipped["evernote-notes"].root == "en-export"

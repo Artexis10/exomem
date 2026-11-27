@@ -52,7 +52,13 @@ _ANCHOR_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?$")
 #: governed rows, such as a belief unit's credence, are written by hand and carried through
 #: an edit as written, so this command never writes a belief on a holder's behalf.
 # nosemgrep: ep-word-set -- this command's own argument names, fixed by its tool schema
-_GOVERNED_ARGUMENT_KEYS = ("verdict", "check_by", "as_of", "until")
+_RICH_ONLY_ARGUMENT_KEYS = ("verdict", "check_by")
+#: The two governed arguments that a compact call may carry: the server writes them on a rich
+#: unit of the kind that has the `dated_default` trait. Every other governed argument refuses
+#: the compact call.
+# nosemgrep: ep-word-set -- this command's own argument names, fixed by its tool schema
+_DATE_ARGUMENT_KEYS = ("as_of", "until")
+_GOVERNED_ARGUMENT_KEYS = (*_RICH_ONLY_ARGUMENT_KEYS, *_DATE_ARGUMENT_KEYS)
 
 #: Metadata rows this module renders from its own arguments. Every *other*
 #: authored row is carried through a reconstruction with its value intact.
@@ -341,6 +347,8 @@ def observe_memory(
     dropped_outcome: str | None = None
     lifted_frontmatter: list[tuple[str, str]] | None = None
     lift_resolver: Any = None
+    dated_default_kind: str | None = None
+    dated_fields: tuple[str, ...] = ()
     link_warnings: list[str] = []
     if proposal_mode == "remove":
         assert current_unit is not None
@@ -583,9 +591,41 @@ def observe_memory(
             )
         normalized_tags = _canonical_tags(tags or [])
         normalized_context = _canonical_context(context)
+        base_unit = current_unit if proposal_mode == "update" else None
+        normalized_verdict = _resolve_verdict(
+            verdict, base_unit, language,
+        )
+        normalized_check_by = _resolve_check_by(check_by, base_unit)
+        normalized_as_of = _resolve_governed_value(
+            as_of, base_unit, key="as_of",
+            normalize=lambda value: _canonical_date(value, "as_of"),
+        )
+        normalized_until = _resolve_governed_value(
+            until, base_unit, key="until",
+            normalize=lambda value: _canonical_date(value, "until"),
+        )
+        if (
+            normalized_as_of and normalized_until
+            and dt.date.fromisoformat(normalized_until) < dt.date.fromisoformat(normalized_as_of)
+        ):
+            raise ObserveMemoryError(
+                "INVALID_SEMANTIC_DATE_ORDER", "until must be on or after as_of",
+            )
+        dated_fields = _governed_names(as_of=normalized_as_of, until=normalized_until)
+        if (
+            kind is None
+            and selected_kind in semantic_kinds.compact_kinds()
+            and dated_fields
+            and not (normalized_verdict or normalized_check_by)
+        ):
+            # Only dates, and no kind: a compact unit carries no rows, so the dates go on a rich
+            # unit of the one kind the registry marks as the default for them. The decision comes
+            # before the relations below, so links on this call are handled as for a rich unit.
+            dated_default_kind = _dated_default_kind(language)
+            selected_kind = dated_default_kind
         # add and update both render the unit's whole edge set, which the seam owns.
         normalized_relations = unit_edges.add_unit_edges((), _canonical_relations(relations or []))
-        explicit_rich_kind = bool(
+        explicit_rich_kind = dated_default_kind is not None or bool(
             kind is not None
             and semantic_language_registry.normalize_label(kind) != _COMPACT_KIND
         )
@@ -616,32 +656,12 @@ def observe_memory(
             # Every relation is a provenance link to captured material, so the unit commits
             # compact and each target lands in its page field in the same atomic write.
             normalized_relations = ()
-        base_unit = current_unit if proposal_mode == "update" else None
         if base_unit is not None and relations is None and base_unit.relations:
             # `relations` replaces on update, so a call that omits it removes every relation the
             # unit had. A list the caller sent, even an empty one, is its stated intent.
             dropped_relations = tuple((item.kind, item.target) for item in base_unit.relations)
             dropped_outcome = _dropped_relations_outcome(
                 dropped_relations, compact=selected_kind in semantic_kinds.compact_kinds()
-            )
-        normalized_verdict = _resolve_verdict(
-            verdict, base_unit, language,
-        )
-        normalized_check_by = _resolve_check_by(check_by, base_unit)
-        normalized_as_of = _resolve_governed_value(
-            as_of, base_unit, key="as_of",
-            normalize=lambda value: _canonical_date(value, "as_of"),
-        )
-        normalized_until = _resolve_governed_value(
-            until, base_unit, key="until",
-            normalize=lambda value: _canonical_date(value, "until"),
-        )
-        if (
-            normalized_as_of and normalized_until
-            and dt.date.fromisoformat(normalized_until) < dt.date.fromisoformat(normalized_as_of)
-        ):
-            raise ObserveMemoryError(
-                "INVALID_SEMANTIC_DATE_ORDER", "until must be on or after as_of",
             )
         preserved_metadata = _preserved_metadata(base_unit)
         governed_passed = _governed_names(
@@ -652,8 +672,8 @@ def observe_memory(
         )
         if selected_kind == _COMPACT_KIND and (governed_passed or preserved_metadata):
             if base_unit is None or base_unit.form != "rich":
-                # A compact unit, new or existing, carries no rows, so the only exit that applies
-                # is to leave the fields out of this call.
+                # A compact unit, new or existing, carries no rows, so the only exits that apply
+                # are a rich kind, or leaving the other fields out so a date takes the default kind.
                 raise _compact_metadata_refusal(
                     passed=governed_passed,
                     kinds=_rich_kind_remediation(
@@ -662,6 +682,7 @@ def observe_memory(
                         projects=page_projects,
                         page_type=page_type,
                     ),
+                    kind_named=kind is not None,
                 )
             # Every exit named here has to actually exist. `verdict=""` and
             # `check_by=""` really do clear those rows, but no argument clears
@@ -679,10 +700,15 @@ def observe_memory(
                     projects=page_projects,
                     page_type=page_type,
                 )
-                + " Or, to convert this unit to compact form, clear each governed field "
-                "by passing an empty string and remove any remaining "
-                "metadata rows by editing the page, since no argument clears a "
-                "row this tool does not own.",
+                + (
+                    ""
+                    if any(str(value or "").strip() for value in (as_of, until))
+                    # A date in this call is there to be kept, so converting the unit is no exit.
+                    else " Or, to convert this unit to compact form, clear each governed field "
+                    "by passing an empty string and remove any remaining "
+                    "metadata rows by editing the page, since no argument clears a "
+                    "row this tool does not own."
+                ),
             )
         existing_anchors = {
             unit.anchor
@@ -778,6 +804,11 @@ def observe_memory(
         link_warnings.extend(lift_warnings)
     lifted_outcome = (
         _lifted_relations_outcome(lifted_cited, preview=previewing) if lifted_cited else None
+    )
+    dated_default_outcome = (
+        _dated_default_outcome(dated_fields, preview=previewing)
+        if dated_default_kind is not None
+        else None
     )
     after_source = _rebuild_source(
         editable.original_text,
@@ -901,6 +932,8 @@ def observe_memory(
                 dropped_outcome=dropped_outcome,
                 lifted_cited=lifted_cited,
                 lifted_outcome=lifted_outcome,
+                dated_default_kind=dated_default_kind,
+                dated_default_outcome=dated_default_outcome,
                 warnings=link_warnings,
             )
 
@@ -937,6 +970,7 @@ def observe_memory(
                 )
         except semantic_writes.SemanticWriteError as error:
             raise ObserveMemoryError(error.code, error.reason) from error
+        link_warnings.extend(committed.review_field_warnings())
 
         final = semantic_index.selected_parent_index_state(vault_root, editable.rel_path)
         final_unit = _unit_by_anchor(final.document, target_anchor)
@@ -960,6 +994,8 @@ def observe_memory(
             dropped_outcome=dropped_outcome,
             lifted_cited=lifted_cited,
             lifted_outcome=lifted_outcome,
+            dated_default_kind=dated_default_kind,
+            dated_default_outcome=dated_default_outcome,
             timings=(
                 timings.as_dict() if timings is not None and write_timings_enabled() else None
             ),
@@ -1408,24 +1444,53 @@ def _rich_kind_remediation(
     return f"{hint}Pass `kind` with one of the admitted kinds: {', '.join(kinds)}."
 
 
+def _dated_default_kind(
+    language: semantic_language_registry.SemanticLanguageRegistry,
+) -> str:
+    """The kind a dated observation takes when the caller names none.
+
+    The registry lets only the shipped pack give the `dated_default` trait, and the shipped kinds
+    are always admitted, so exactly one kind has it on every page.
+    """
+    (carrier,) = language.kinds_with("dated_default")
+    return carrier
+
+
 def _compact_metadata_refusal(
-    *, passed: tuple[str, ...], kinds: str, with_relations: bool = False
+    *,
+    passed: tuple[str, ...],
+    kinds: str,
+    with_relations: bool = False,
+    kind_named: bool = False,
 ) -> ObserveMemoryError:
-    """Governed metadata sent with a compact unit: name each field and both exits.
+    """Governed metadata sent with a compact unit: name each field and the exits that apply.
 
     The refusal for converting a rich unit to compact names no field, and its exits (convert
     the unit, edit the page to drop its rows) do not apply to a compact unit, which has no
     rows. Both exits here are a retry of the same call; `kinds` says which rich kinds to pass.
     A call that also passes relations keeps only the rich-kind exit: without its metadata, the
-    page may still refuse its relations for the same reason.
+    page may still refuse its relations for the same reason. A date is never offered up: the
+    caller sent it to keep it, so the second exit leaves out the other governed fields (and a
+    named compact `kind`, `kind_named`), and the date then lands in a dated block. A date alone
+    with no `kind` never reaches here, so that second exit always has something to leave out.
     """
     fields = ", ".join(passed)
-    remediation = (
-        f"Keep {fields} and the relations by passing a rich kind. {kinds}"
-        if with_relations
-        else f"Retry one of two ways: omit {fields} to keep a compact observation, or keep "
-        f"{fields} by passing a rich kind. {kinds}"
-    )
+    dates = tuple(name for name in passed if name in _DATE_ARGUMENT_KEYS)
+    if dates:
+        leave_out = [name for name in passed if name not in dates]
+        if kind_named:
+            leave_out.append("kind")
+        remediation = (
+            f"Retry one of two ways: pass a rich kind to keep {fields}, or omit "
+            f"{', '.join(leave_out)} to save {', '.join(dates)} in a dated block. {kinds}"
+        )
+    elif with_relations:
+        remediation = f"Keep {fields} and the relations by passing a rich kind. {kinds}"
+    else:
+        remediation = (
+            f"Retry one of two ways: omit {fields} to keep a compact observation, or keep "
+            f"{fields} by passing a rich kind. {kinds}"
+        )
     return ObserveMemoryError(
         "COMPACT_METADATA_REQUIRES_RICH_KIND",
         f"Governed unit metadata ({fields}) needs a rich kind, and a compact observation "
@@ -1440,7 +1505,8 @@ def argument_refusal(arguments: Mapping[str, Any]) -> ObserveMemoryError | None:
     The busy intake queues a save and replays it later, so a save that is certain to be
     refused would otherwise come back as a queued receipt and fail only at the replay. This
     reads no page. A unit reference without `kind` keeps the unit's own kind, which only the
-    page knows, so that call is left to the replay.
+    page knows, so that call is left to the replay. So is a call with dates and no `kind`:
+    the page's registry says whether one kind takes the dates.
     """
     passed = _compact_names_passed(arguments)
     if not passed:
@@ -1449,6 +1515,7 @@ def argument_refusal(arguments: Mapping[str, Any]) -> ObserveMemoryError | None:
         passed=passed,
         kinds=_core_kinds_remediation(),
         with_relations=bool(arguments.get("relations")),
+        kind_named=arguments.get("kind") is not None,
     )
 
 
@@ -1470,11 +1537,16 @@ def _compact_names_passed(arguments: Mapping[str, Any]) -> tuple[str, ...] | Non
     if not compact_kind:
         return None
     # A blank value is no value, as `_resolve_governed_value` reads it on an add.
-    return _governed_names(**{
+    passed = _governed_names(**{
         key: arguments[key]
         for key in _GOVERNED_ARGUMENT_KEYS
         if str(arguments.get(key) or "").strip()
     })
+    if kind is None and not any(key in passed for key in _RICH_ONLY_ARGUMENT_KEYS):
+        # With no `kind` the dates reach the page's registry, which may hold them on a default kind.
+        # A stated compact `kind` is certain to refuse them, so that call is refused here too.
+        return None
+    return passed
 
 
 def refusal_before_page(
@@ -1549,7 +1621,9 @@ def refusal_before_page(
         return None  # INVALID_SEMANTIC_DATE_ORDER wins, as `observe_memory` checks order first
     rel_path = page()
     kinds = None if rel_path is None else _page_kinds_remediation(vault_root, rel_path, category)
-    return _compact_metadata_refusal(passed=passed, kinds=kinds or _core_kinds_remediation())
+    return _compact_metadata_refusal(
+        passed=passed, kinds=kinds or _core_kinds_remediation(), kind_named=kind is not None
+    )
 
 
 def _page_kinds_remediation(vault_root: Path, rel_path: str, category: str) -> str | None:
@@ -1753,6 +1827,13 @@ def _lifted_relations_outcome(cited: list[str], *, preview: bool) -> str:
     if preview:
         return f"Committing this will cite {named} in the page's frontmatter."
     return f"Cited {named} in the page's frontmatter."
+
+
+def _dated_default_outcome(fields: tuple[str, ...], *, preview: bool) -> str:
+    """The sentence for a dated observation that the server saved on the dated default kind."""
+    saved = "Committing this will save it" if preview else "Saved"
+    dates = "dates" if len(fields) > 1 else "date"
+    return f"{saved} with its {dates}."
 
 
 def _canonical_relations(values: list[dict[str, Any]]) -> tuple[tuple[str, str], ...]:
@@ -2225,6 +2306,8 @@ def _result(
     dropped_outcome: str | None = None,
     lifted_cited: list[str] | None = None,
     lifted_outcome: str | None = None,
+    dated_default_kind: str | None = None,
+    dated_default_outcome: str | None = None,
     timings: dict[str, Any] | None = None,
     warnings: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -2244,6 +2327,9 @@ def _result(
     elif lifted_cited and lifted_outcome is not None:
         value["relations_cited"] = lifted_cited
         value["outcome"] = lifted_outcome
+    elif dated_default_kind is not None and dated_default_outcome is not None:
+        value["kind_defaulted"] = dated_default_kind
+        value["outcome"] = dated_default_outcome
     if timings is not None:
         value["timings"] = timings
     if warnings:

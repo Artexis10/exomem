@@ -52,6 +52,10 @@ AMBIGUOUS_BOUNDARY = "AMBIGUOUS_SIDECAR_BOUNDARY"
 READER_UNAVAILABLE = "this host has no decoder for the original's kind"
 RETIREMENT_UNCONFIRMED = "the Trash retirement of the original is unconfirmed"
 UNREADABLE_FOR_MATCHING = "the image could not be decoded for matching"
+CHANGED_WHILE_READ = "the page or its original kept changing while this run read it; rerun to include it"
+FOLDER_MOVED = "this folder was moved or removed while this run read it, so its pages are left out; rerun to include them"
+#: Pages read between two progress updates of the census.
+_PROGRESS_PAGES = 50
 
 
 class _Plan:
@@ -124,7 +128,27 @@ def backfill(
     if archive is not None:
         flags["originals_root"] = str(archive)
     maintenance_jobs.checkpoint("planning")
-    plan = _plan(root, archive, recovering)
+    try:
+        plan = _plan(root, archive, recovering)
+    except reserved_paths.ReservedPathLeafError as error:
+        # A changed page is a skip, not this: what is left is a folder that moved, a linked item, or a failed read.
+        if error.code in reserved_paths.CHANGE_CODES:
+            message, fix = (
+                "a folder was moved or removed while this run read the pages, so it stopped and changed no page",
+                "Run the preview again.",
+            )
+        elif error.code in ("UNSAFE_PATH", "RESERVED_PATH"):  # a linked item, or a name the walk must not read
+            message, fix = (
+                "the vault holds a linked file or folder, or a name this run cannot read safely, "
+                "so it stopped and changed no page",
+                "Replace any linked file or folder in the vault with the item itself, then run the preview again.",
+            )
+        else:
+            message, fix = (
+                f"the file system refused a read of the vault ({error.code}), so this run stopped and changed no page",
+                "Run the preview again. If it stops the same way, check that this service can read every vault folder.",
+            )
+        raise OpError(error.code, message, fix, details={"status": "terminal", "committed": False}) from error
     fresh = maintenance_jobs.plan_identity(MODE, flags, plan.entries())
     report: dict[str, Any] = {
         "dry_run": dry_run,
@@ -197,7 +221,11 @@ def _read_plan(root: Path, archive_folder: Path | None, recovering: bool) -> _Pl
         )
     archive = originals.ArchiveReads(root)
     # The canonical pages, which a store-mode vault keeps in its store and may not have projected to disk.
-    for rel, body in foreground_priority.yielding_in_bulk(media_bindings._pages(root, join_request=True)):  # noqa: SLF001 - the census's page source
+    # A page saved while the census reads it is read again; only one that keeps changing is skipped.
+    pages = media_bindings._pages(root, join_request=True, changed=lambda rel, kind: plan.skip(rel, FOLDER_MOVED if kind == "directory" else CHANGED_WHILE_READ))  # noqa: SLF001 - the census's page source
+    for read_so_far, (rel, body) in enumerate(foreground_priority.yielding_in_bulk(pages)):
+        if read_so_far % _PROGRESS_PAGES == 0:
+            maintenance_jobs.checkpoint("reading pages", read_so_far)
         data = bytes(body)
         try:
             fields, _body, marker = vault.parse_frontmatter(data.decode("utf-8"), custody=True)
@@ -246,8 +274,11 @@ def _plan_page(
         location = capture_match.Location(snapshot.local_path or snapshot.path, snapshot.path.suffix)
         if recovery is not None and view is not None and kind == "image":
             copy = _prepare_recovery(recovery, rel, fields, facts, location)
-    if view is None or (facts is None and not _still_local(root, snapshot)):
+    if view is None:
         plan.skip(rel, BYTES_NOT_ON_VOLUME)  # it left the volume between the census and the read
+        return
+    if facts is None and (gone := _left_volume(root, snapshot)) is not None:
+        plan.skip(rel, gone)
         return
     facts = capture_metadata.with_name_date(root, facts, kind, snapshot.path.name)
     if isinstance(copy, str):
@@ -353,8 +384,17 @@ def _reads_capture(original: str) -> bool:
     return media_types.media_type_for(original) in capture_metadata.KINDS
 
 
-def _still_local(root: Path, snapshot: Any) -> bool:
-    return originals.original_state(root, snapshot.path).state in ("local", "cached")
+def _left_volume(root: Path, snapshot: Any) -> str | None:
+    """Why an original that stated nothing no longer counts as read from the volume; None when it is still there."""
+    try:
+        state = originals.original_state(root, snapshot.path).state
+    except originals.RetirementUnconfirmed:
+        return RETIREMENT_UNCONFIRMED
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code not in reserved_paths.CHANGE_CODES:
+            raise
+        return CHANGED_WHILE_READ  # the census read this binding a moment ago
+    return None if state in ("local", "cached") else BYTES_NOT_ON_VOLUME
 
 
 @contextmanager

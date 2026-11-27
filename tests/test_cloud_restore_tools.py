@@ -735,9 +735,11 @@ def test_hash_ctime_records_each_entrys_own_change_time(tmp_path: Path) -> None:
 
 
 def test_exclude_patterns_print_cellctls_own_list(capsys) -> None:
+    # Loading the script puts cellctl on the path; the import must come after it.
+    manifests = _manifests()
     from cellctl.manifests import CATALOGUE_BACKUP_EXCLUDES
 
-    assert _manifests().main(["exclude-patterns"]) == 0
+    assert manifests.main(["exclude-patterns"]) == 0
 
     assert capsys.readouterr().out.splitlines() == list(CATALOGUE_BACKUP_EXCLUDES)
 

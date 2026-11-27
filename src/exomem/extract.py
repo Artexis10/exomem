@@ -1821,21 +1821,14 @@ def _extract_textfile(path: Path) -> ExtractResult:
 
 
 def _extract_eml(path: Path) -> ExtractResult:
-    """.eml → key headers + the plain/HTML body, via the stdlib email parser (no dep)."""
+    """.eml → key headers + the plain body, or the HTML body as text, through the renderer that mailbox import shares."""
     import email
     from email import policy
 
+    from . import mail_text
+
     msg = email.message_from_bytes(path.read_bytes(), policy=policy.default)
-    head = [f"{h}: {msg[h]}" for h in ("From", "To", "Cc", "Subject", "Date") if msg[h]]
-    body = ""
-    try:
-        part = msg.get_body(preferencelist=("plain", "html"))
-        if part is not None:
-            body = part.get_content()
-    except Exception:  # noqa: BLE001 — exotic MIME shouldn't fail the whole extract
-        body = ""
-    text = ("\n".join(head) + "\n\n" + (body or "")).strip()
-    return ExtractResult(text=text, media_type="email", engine="email")
+    return ExtractResult(text=mail_text.message_text(msg), media_type="email", engine="email")
 
 
 _ICS_FIELDS = ("SUMMARY", "DESCRIPTION", "LOCATION", "DTSTART", "DTEND", "ORGANIZER", "ATTENDEE")

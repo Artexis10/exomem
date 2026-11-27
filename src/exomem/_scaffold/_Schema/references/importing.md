@@ -55,10 +55,12 @@ progress first and agree with the person whether to resume or cancel it.
 3. File it. A cell that was asked to file, or that has seen any `imports.file` call on the stage,
    finishes it by itself. Read `inspect_memory(operation="imports.status", arguments={"path": "<stage path>",
    "view": "filing"})` until `state` is `done`.
-   - `state` is `working`, `parked` (with the `stop` code and `needs`), `done` or `discarded`.
-     `unknown` means the cell has no record of the stage, never zero files. A parked stage resumes
-     on a later `imports.file` call or a restart. A `done` view lists in `left_out` the members
-     that were not filed, by reason; tell the person.
+   - `state` is `working` (a `note` says that an agent's `imports.file` calls are filing the stage;
+     the cell files it itself if they stop), `parked` (with the `stop` code and `needs`), `done` or
+     `discarded`. `unknown` means the cell has no record of the stage, never zero files. A parked
+     stage resumes on a later `imports.file` call or a restart. A parked stage with no `needs` and a
+     reason that says the cell will try again resumes by itself: take no action. A `done` view lists
+     in `left_out` the members that were not filed, by reason; tell the person.
    - `manage_memory(operation="imports.file", arguments={"path": "<stage path>", "wait": false})`
      registers the stage under your login, which resumes one whose login ended, and files nothing
      in the call.
@@ -76,16 +78,20 @@ progress first and agree with the person whether to resume or cancel it.
    - The reply's `person` list names what only the person can do. Do none of it without asking.
 4. Use the step path when the folder has own-note rules or the person wants hidden files filed:
    `imports.file` applies neither. Call `imports.start` on the stage, then `imports.select`,
-   `imports.plan`, `imports.apply` and `imports.finish`. While a reply carries a `continuation`, call
-   the same action again with it. While a reply carries `next_after`, call `imports.start` again
-   with `after` set to it, then repeat this step.
+   `imports.plan`, `imports.apply` and `imports.finish`. Each ends early when the budget is spent or
+   another write waits for the vault (`stop_reason`). While a reply carries a `continuation`, call
+   the same action again with it, until `finish` reports `phase: "done"`; its `user_summary` and
+   `next_actions` say so when it has stopped. While a reply carries `next_after`, call
+   `imports.start` again with `after` set to it, then repeat this step.
    - A folder of the person's own notes can become notes. Ask which folders hold them; never guess
      from file names. Give that folder the rule `{"path": ..., "adopt_as": "note", "note_type": ...}`,
      with a `note_type` that `inspect_memory(operation="schema.inspect", arguments={"subject": "note-types"})`
      lists as compiled, and `project` or `domain` where that type needs one. Each file keeps its
      Source and gets a draft note that cites it. A draft is not live; promote it after review.
 5. Report the whole import from the reply's summary and progress counts, then the residual: the
-   files still staged, by reason. The last page's own result describes that page only, never the import. Review those files with the person.
+   files still staged, by reason. On the step path, read the residual only from the last page's
+   finished `finish` (`phase: "done"`). The last page's own result describes that page only, never
+   the import. Review those files with the person.
 6. Read `inspect_memory(operation="imports.status")`. A figure that reads `unknown` is not zero:
    while the file limit is unknown, do not say whether a file fits. Tell the person to keep the
    source folder while status says to keep it.

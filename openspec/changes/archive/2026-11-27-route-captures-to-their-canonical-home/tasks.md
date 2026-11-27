@@ -17,5 +17,5 @@
 
 ## 4. Delivery
 
-- [ ] 4.1 Scoped tests, the public-artifact privacy gate and the strict OpenSpec gate; one independent review; merge.
-- [ ] 4.2 After release and install, run the 2026-11-23 real-model replay (operator approval for spend) and update its row through governed tools.
+- [x] 4.1 Scoped tests, the public-artifact privacy gate and the strict OpenSpec gate; one independent review; merge. Evidence: #3185 merged as de10c15a2 after its blind review.
+- [x] 4.2 After release and install, run the 2026-11-23 real-model replay (operator approval for spend) and update its row through governed tools. Evidence: replay on v0.207.0 on 2026-11-27 passed 4 of 4 reference checks; the incident row is set to fixed.

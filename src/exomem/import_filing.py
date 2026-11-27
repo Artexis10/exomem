@@ -17,6 +17,7 @@ and write a record, never across a call.
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import datetime as dt
 import json
@@ -25,11 +26,11 @@ import math
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
-from . import import_stage, private_state, state_paths, vault
+from . import import_stage, mutation_lock, private_state, state_paths, vault
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +50,10 @@ STOP_LOGIN_ENDED = "IMPORT_FILING_LOGIN_ENDED"
 STOP_NOT_REPLAYABLE = "IMPORT_FILING_LOGIN_NOT_REPLAYABLE"
 #: The `file` reply could not be read as a reply.
 STOP_REPLY_UNREADABLE = "IMPORT_FILING_REPLY_UNREADABLE"
+#: The stage's `working` replies showed no movement for `adoption_run.FILING_STALL_CALLS` calls in a row; the filer waits and tries again.
+STOP_STALLED = "IMPORT_FILING_STALLED"
+#: What the filing view says of a `working` stage that an agent files, while the cell stands aside from it.
+AGENT_FILING_NOTE = "An assistant is filing this import now. If it stops, Evermatter carries on by itself."
 #: The mutation protocol's final answer for an identity: its outcome will never be known, so the next call has a new one.
 _OUTCOME_UNKNOWN = "MUTATION_OUTCOME_UNKNOWN"
 #: A continuation that `file` no longer knows: the next call names the stage alone and carries on its newest scan.
@@ -78,6 +83,13 @@ SPACE_CHECK_SECONDS = 3600.0
 HOLD_CHECK_SECONDS = 120.0
 #: A stage that waits on a read-only cell asks again this often; a `file` call or a restart asks sooner.
 READ_ONLY_CHECK_SECONDS = 60.0
+#: A stage whose calls move nothing waits this long, doubling at each stall to the cap, and then calls once more.
+STALL_FIRST_BACKOFF_SECONDS = 60.0
+STALL_MAX_BACKOFF_SECONDS = 900.0
+#: After an agent's `file` call on a stage returns, the filer leaves the stage alone for this long. A call ends inside
+#: one limit of a hold, and the agent reads the reply and calls again inside a second one; a stage that no agent has
+#: touched for longer has nobody driving it, which is the stage the filer is for.
+AGENT_QUIET_SECONDS = 2 * mutation_lock.DEFAULT_LONG_HOLDER_SECONDS
 #: What a fault that no call explains waits before the filer looks at the stage again.
 _FAULT_BACKOFF_SECONDS = 60.0
 _IDLE_WAIT_SECONDS = 3600.0
@@ -113,13 +125,17 @@ def _write_record(vault_root: Path, record: dict) -> None:
     private_state.sync_directory(store)
 
 
-def _update(vault_root: Path, import_id: str, change: Callable[[dict], None]) -> dict | None:
-    """Read the record, let `change` edit it in place and write it durably; None when there is no record."""
+def _update(vault_root: Path, import_id: str, change: Callable[[dict], bool | None]) -> dict | None:
+    """Read the record, let `change` edit it in place and write it durably; None when there is no record.
+
+    A `change` that returns False leaves the record as it is: nothing is written and `as_of` stays.
+    """
     with _RECORD_LOCK:
         record = read_record(vault_root, import_id)
         if record is None:
             return None
-        change(record)
+        if change(record) is False:
+            return record
         record["as_of"] = _now()
         _write_record(vault_root, record)
         return record
@@ -133,8 +149,18 @@ def _fresh_record(
         "version": RECORD_VERSION, "import_id": import_id, "state": WORKING, "principal": principal,
         "surface": surface, "collection": collection, "seq": 0, "call": None, "next_action": None, "continuation": None,
         "total": total, "progress": None, "left_out": None, "stop": None, "needs": [], "person": [],
-        "calls": [[time.time(), 0]] if baseline else [], "busy": [], "as_of": _now(),
+        "mark": None, "unmoved": 0, "stalls": 0, "calls": [[time.time(), 0]] if baseline else [], "busy": [], "as_of": _now(),
     }
+
+
+def _handled(counts: dict[str, int]) -> int:
+    """The files a reply's counts say were handled: filed, or skipped because the bytes were already stored."""
+    return counts["filed"] + counts["skipped_duplicates"]
+
+
+def _add_rate_sample(record: dict, counts: dict[str, int]) -> None:
+    """Add the sample that a finished call's counts give `rate`, keeping the newest `_RATE_CALLS`."""
+    record["calls"] = [*record["calls"], [time.time(), _handled(counts)]][-_RATE_CALLS:]
 
 
 def _rate(samples: list) -> dict | None:
@@ -163,7 +189,8 @@ def _progress(record: dict) -> dict | None:
         return None
     total = record.get("total")
     left_out = (record.get("left_out") or {}).get("count", 0)
-    settled = left_out if record["state"] == DONE else counts["failed"]
+    # Before `done` an item that the entry's rule left out (`set_aside`) is already settled, as a failed one is: it will never file.
+    settled = left_out if record["state"] == DONE else counts["failed"] + (record.get("set_aside") or 0)
     remaining = None if total is None else max(0, total - counts["filed"] - counts["skipped_duplicates"] - settled)
     return {
         "total": total, "filed": counts["filed"], "skipped_duplicates": counts["skipped_duplicates"],
@@ -174,9 +201,9 @@ def _progress(record: dict) -> dict | None:
 def read_view(vault_root: Path, import_id: str) -> dict:
     """What `adoption_studio status` answers with `view="filing"`: the stage's record, or `unknown` when it has none.
 
-    One record read. It opens no run, inventory or outcome file, so a client may poll it at any rate. A stage
-    with no record is `unknown` and reports no counts, never zero ones. The cell states no time left: a caller
-    that derives one from `rate` says "at the measured rate".
+    One record read and one look at the filer's memory. It opens no run, inventory or outcome file, so a client may
+    poll it at any rate. A stage with no record is `unknown` and reports no counts, never zero ones. The cell states
+    no time left: a caller that derives one from `rate` says "at the measured rate".
     """
     record = read_record(vault_root, import_id)
     if record is None:
@@ -189,6 +216,9 @@ def read_view(vault_root: Path, import_id: str) -> dict:
         view["left_out"] = {key: record["left_out"][key] for key in ("by_reason", "items", "truncated")}
     if (rate := _rate(record.get("calls") or [])) is not None:
         view["rate"] = rate
+    # The filer holds this in memory, and it ends by itself with the quiet window: a record would claim it for good.
+    if record["state"] == WORKING and (filer := filer_for(vault_root)) is not None and filer.agent_active(import_id):
+        view["note"] = AGENT_FILING_NOTE
     return view
 
 
@@ -203,17 +233,26 @@ def _counts(progress: object) -> dict[str, int] | None:
 def _stage_total(vault_root: Path, import_id: str) -> int | None:
     """The members that the stage's receipt or record lists, but the series file, and what filing has derived from app exports; None when it lists none.
 
-    A derived transcript, an item that could not be read and an export read in part each count as one member, so the
-    total grows while an export is being read. The export file is a member that stays unfiled until it is read, so
+    A derived file, an item that could not be read or was left out, and an export read in part each count as one member,
+    so the total grows while an export is being read. The export file is a member that stays unfiled until it is read, so
     `remaining` is not zero before then.
     """
     from . import export_expansion
 
-    stage = import_stage.read(vault_root, import_id)
+    stage = import_stage.read(vault_root, import_id, derived=False)  # the counts come from the expansion state, not its rows
     if stage is None:
         return None
     reading = export_expansion.read(vault_root, import_id)
-    return sum(1 for path in stage.members if path != import_stage.SERIES_FILE) + reading.files + len(reading.unfiled)
+    return (
+        sum(1 for path in stage.members if path != import_stage.SERIES_FILE) + reading.files
+        + reading.failed + reading.skipped + reading.partial)
+
+
+def _set_aside(vault_root: Path, import_id: str) -> int:
+    """The items of the stage's app exports that the registry entry's own rule left out, from the expansion state."""
+    from . import export_expansion
+
+    return export_expansion.read(vault_root, import_id).skipped
 
 
 def _left_out(vault_root: Path, import_id: str) -> dict:
@@ -271,6 +310,9 @@ class Filer:
         self._thread: threading.Thread | None = None
         #: Monotonic time at which each listed stage is due; `inf` while a call on it is in flight.
         self._due: dict[str, float] = {}
+        #: By stage: the agent `file` calls in flight, and the monotonic time before which the filer leaves it alone.
+        self._agent_calls: dict[str, int] = {}
+        self._agent_quiet_until: dict[str, float] = {}
 
     @property
     def running(self) -> bool:
@@ -328,6 +370,74 @@ class Filer:
             self._due[import_id] = 0.0
             self._condition.notify_all()
         return True
+
+    # ----- an agent that files the stage
+
+    def agent_began(self, import_id: str) -> None:
+        with self._condition:
+            self._agent_calls[import_id] = self._agent_calls.get(import_id, 0) + 1
+
+    def agent_ended(self, import_id: str, *, working: bool, counts: dict[str, int] | None = None) -> None:
+        """An agent's `file` call on the stage returned. A stage still working stays the agent's for the quiet window.
+
+        `counts` are the reply's: they go into the record before the window starts, so the view's counts and `as_of`
+        move with the agent's work and are no staler than a filer call's. A reply that is not `working` (the stage is
+        done, or stopped) leaves the agent nothing to call again, so the filer is woken to record that state at once
+        instead of after the window.
+        """
+        if counts is not None:
+            self._record_agent_counts(import_id, counts)
+        with self._condition:
+            left = self._agent_calls.get(import_id, 1) - 1
+            if left > 0:
+                self._agent_calls[import_id] = left
+            else:
+                self._agent_calls.pop(import_id, None)
+            if working:
+                self._agent_quiet_until[import_id] = time.monotonic() + AGENT_QUIET_SECONDS
+            else:
+                self._agent_quiet_until.pop(import_id, None)
+                if self._due.get(import_id, math.inf) != math.inf:
+                    self._due[import_id] = 0.0
+                    self._condition.notify_all()
+
+    def _record_agent_counts(self, import_id: str, counts: dict[str, int]) -> None:
+        """Store what an agent's call filed, as a filer call's reply would; never raises, the agent's call is done."""
+        def change(record: dict) -> bool | None:
+            if record["state"] in (DONE, DISCARDED):
+                return False
+            earlier = _counts(record.get("progress"))
+            if earlier is not None and _handled(counts) < _handled(earlier):
+                # A repeated agent call returns its stored reply, which is behind the record; if the handled count
+                # genuinely fell, the view would keep the higher counts while the agent files.
+                return False
+            record["progress"] = counts
+            _add_rate_sample(record, counts)
+            return None
+        try:
+            _update(self.vault_root, import_id, change)
+        except Exception:  # noqa: BLE001 - a store fault must not fail the agent's own file call
+            log.warning("import filer could not record the counts of an agent call on %s", import_id, exc_info=True)
+
+    def agent_left(self, import_id: str) -> None:
+        """The agent hands the stage to the cell (`file` with `wait` false): the quiet window ends, so the filer may call at once."""
+        with self._condition:
+            self._agent_quiet_until.pop(import_id, None)
+
+    def _agent_wait(self, import_id: str) -> float:
+        """Seconds that the filer leaves the stage alone: the quiet window while an agent files it, 0.0 otherwise."""
+        with self._condition:
+            if self._agent_calls.get(import_id):
+                return AGENT_QUIET_SECONDS
+            left = self._agent_quiet_until.get(import_id, 0.0) - time.monotonic()
+            if left <= 0:
+                self._agent_quiet_until.pop(import_id, None)
+                return 0.0
+            return left
+
+    def agent_active(self, import_id: str) -> bool:
+        """Whether an agent files the stage now: a call is in flight, or the quiet window after one has not ended."""
+        return self._agent_wait(import_id) > 0.0
 
     # ----- the loop
 
@@ -426,6 +536,11 @@ class Filer:
         record = read_record(self.vault_root, import_id)
         if record is None or record["state"] in (DONE, DISCARDED):
             return None
+        if (aside := self._agent_wait(import_id)) > 0.0:
+            # An agent that files the stage takes the boundary at each of its calls, so a call of the filer's would end
+            # after one turn for it, and pay the fixed cost of a call again. Not a stall, and no write: the stage
+            # stays `working`, and the view reads the window from memory (`read_view`).
+            return aside
         principal = write_intake.restore_principal(record["principal"])
         login = write_intake.login_state(principal)
         if login is auth_sessions.OriginLogin.UNREADABLE:
@@ -458,7 +573,7 @@ class Filer:
 
     def _invoke(self, record: dict, call: dict, principal: Any) -> Any:
         from . import schema as schema_module
-        from . import write_intake
+        from . import write_intake, writer_lease
 
         command = write_intake.command_named("adoption_studio")
         import_id = record["import_id"]
@@ -475,13 +590,16 @@ class Filer:
             else (self.vault_root,)
         )
         descriptor = write_intake.restore_surface(record.get("surface"), command.name)
-        return write_intake.invoke_in_background(
-            principal, descriptor, command, *injected,
-            idempotency_key=f"import-file:{import_id}:{call['seq']}",
-            idempotency_principal_scope=principal.audience_id,
-            mutation_request_id=str(uuid.uuid5(_REQUEST_NAMESPACE, f"{import_id}:{call['seq']}:{call['attempt']}")),
-            **arguments,
-        )
+        # Background: an import nobody waits for. Its wait for the boundary is no writer's, so an agent's own `file`
+        # call or the owner's write does not end early to let it in (`writer_lease.as_background_work`).
+        with writer_lease.as_background_work():
+            return write_intake.invoke_in_background(
+                principal, descriptor, command, *injected,
+                idempotency_key=f"import-file:{import_id}:{call['seq']}",
+                idempotency_principal_scope=principal.audience_id,
+                mutation_request_id=str(uuid.uuid5(_REQUEST_NAMESPACE, f"{import_id}:{call['seq']}:{call['attempt']}")),
+                **arguments,
+            )
 
     def _after_reply(self, import_id: str, reply: Any, call: dict) -> float | None:
         """Record a `file` reply: `done` leaves the list, `working` goes again at once, and a stop parks the stage.
@@ -510,22 +628,41 @@ class Filer:
         left_out = _left_out(self.vault_root, import_id) if filing == _REPLY_DONE else None
         needs = _stopped_needs(self.vault_root, reply, person) if filing == _REPLY_STOPPED else []
         total = _stage_total(self.vault_root, import_id)  # filing derives members from an app export, so the total grows
+        set_aside = _set_aside(self.vault_root, import_id)
+        from . import adoption_run
+
+        # The mark of a `working` reply, as the Cloud CLI reads it: the same counts and position twice is no movement.
+        mark = adoption_run.filing_mark(reply.get("progress")) if filing == _REPLY_WORKING else None
+        stored_mark = None if mark is None else [list(mark[0]), mark[1]]
 
         def change(record: dict) -> None:
             record.update(call=None, progress=counts, left_out=left_out, needs=needs, person=person, busy=[])
+            repeated = stored_mark is not None and record.get("mark") == stored_mark
+            record["unmoved"] = record.get("unmoved", 0) + 1 if repeated else 0
+            if not repeated:
+                record["stalls"] = 0  # a call that moved, or any other reply, ends the run of stalls
+            record["mark"] = stored_mark
             if total is not None:
                 record["total"] = total
+                record["set_aside"] = set_aside
             record["state"] = {_REPLY_WORKING: WORKING, _REPLY_STOPPED: PARKED, _REPLY_DONE: DONE}[filing]
             record["continuation"] = None if filing == _REPLY_DONE else continuation
             record["stop"] = stop if filing == _REPLY_STOPPED else None
             if counts is not None:
-                handled = counts["filed"] + counts["skipped_duplicates"]
-                record["calls"] = [*record["calls"], [time.time(), handled]][-_RATE_CALLS:]
+                _add_rate_sample(record, counts)
 
-        _update(self.vault_root, import_id, change)
+        record = _update(self.vault_root, import_id, change)
         if filing == _REPLY_DONE:
             return None
         if filing == _REPLY_WORKING:
+            if record is not None and record["unmoved"] >= adoption_run.FILING_STALL_CALLS:
+                # Calling again at once would repeat this for ever, and keep the boundary busy while it does.
+                return self._stall(import_id, record["unmoved"])
+            from .writer_lease import get_manager
+
+            # The call released the boundary, and the next one asks for it at once. A writer that polls for it, above
+            # all one in another process, would lose that race for good, so the filer waits while one still waits.
+            get_manager().yield_to_waiting_writes(self.vault_root)
             return 0.0
         if continuation is not None:
             # A stop with a continuation is a hold or the free-space stop: ask again later.
@@ -590,11 +727,31 @@ class Filer:
         tries = len(record["busy"])
         return 0.0 if new_call else min(MAX_BACKOFF_SECONDS, FIRST_BACKOFF_SECONDS * 2 ** max(0, tries - 1))
 
+    def _stall(self, import_id: str, calls: int) -> float:
+        """Show why a stage whose calls move nothing waits, and give the seconds until its next call.
+
+        The wait doubles at each stall in a row, from `STALL_FIRST_BACKOFF_SECONDS` to `STALL_MAX_BACKOFF_SECONDS`, so a
+        stage that stays stuck costs the boundary one call each quarter hour. The stage stays on the list and asks
+        for no support: a stall is not a fault the person can mend, and a step that is only slow moves on later.
+        """
+        waits: list[float] = []
+
+        def change(record: dict) -> None:
+            stalls = record.get("stalls", 0)
+            waits.append(min(STALL_MAX_BACKOFF_SECONDS, STALL_FIRST_BACKOFF_SECONDS * 2 ** min(stalls, 16)))
+            record.update(
+                state=PARKED, needs=[], person=[], stalls=stalls + 1,
+                stop={"code": STOP_STALLED, "reason": f"filing made no progress in {calls} calls; it will try again"})
+
+        _update(self.vault_root, import_id, change)
+        return waits[0] if waits else STALL_FIRST_BACKOFF_SECONDS
+
     def _park(
         self, import_id: str, code: str, reason: str, *, person: list, needs: list[dict], clear_call: bool = False,
     ) -> None:
         def change(record: dict) -> None:
             record.update(state=PARKED, stop={"code": code, "reason": reason}, needs=needs, person=person)
+            record.update(mark=None, unmoved=0)  # a stage woken from a park gets its full count of calls again
             if clear_call:
                 record["call"] = None
         _update(self.vault_root, import_id, change)
@@ -645,17 +802,47 @@ def _import_id_of(path: str) -> str | None:
     return parts[1] if ok else None
 
 
-def note_file_call(vault_root: Path, path: str, collection: str | None = None) -> None:
-    """Register the stage that a `file` call names, so the cell finishes it after the call returns.
+class AgentFileCall:
+    """An agent's `file` call as it runs: its reply says whether the stage is still the agent's to file."""
 
-    It registers only where a filer runs (the serving HTTP runtime), and only a caller whose authority may be
-    replayed: a delegated authorization session stays foreground, as for a queued save. Never raises: the
-    caller's own call goes on whatever happens here.
+    def __init__(self) -> None:
+        self.working = True  # a call that returns no reply (it raised) leaves the stage with the agent for the window
+        self.counts: dict[str, int] | None = None
+
+    def returned(self, reply: Any) -> None:
+        filing = reply.get("filing") if isinstance(reply, dict) else None
+        self.working = filing not in (_REPLY_DONE, _REPLY_STOPPED)
+        self.counts = _counts(reply.get("progress")) if isinstance(reply, dict) else None
+
+
+@contextlib.contextmanager
+def agent_filing(vault_root: Path, path: str, collection: str | None = None) -> Iterator[AgentFileCall]:
+    """Wrap an agent's `file` call on a staged folder: the cell finishes the stage after it, and stands aside while it runs.
+
+    It registers the stage with the filer, where one runs (the serving HTTP runtime), and only for a caller whose
+    authority may be replayed: a delegated authorization session stays foreground, as for a queued save. The
+    filer then leaves the stage alone during the call and for `AGENT_QUIET_SECONDS` after it (`Filer.agent_ended`).
+    The filer's own `file` call comes through the same command and is no agent: listing the stage again from it
+    would reset the stage's due time and its back-off. Never raises: the caller's own call goes on whatever
+    happens here.
     """
+    from . import writer_lease
+
+    call = AgentFileCall()
     filer = filer_for(vault_root)
     import_id = _import_id_of(path)
-    if filer is None or import_id is None:
+    if filer is None or import_id is None or writer_lease.in_background_work():
+        yield call
         return
+    filer.agent_began(import_id)  # before the listing wakes the filer, so that it finds the agent there
+    try:
+        _register_caller(filer, import_id, path, collection)
+        yield call
+    finally:
+        filer.agent_ended(import_id, working=call.working, counts=call.counts)
+
+
+def _register_caller(filer: Filer, import_id: str, path: str, collection: str | None) -> None:
     try:
         from . import write_intake
         from .governance import principal as principal_module
@@ -698,5 +885,6 @@ def wake(vault_root: Path, path: str, collection: str | None = None) -> None:
             STOP_NOT_REPLAYABLE,
             "this login cannot be replayed by the cell, so it cannot file in the background; "
             "call file again with its continuation until filing is not working")
+    filer.agent_left(import_id)  # the agent hands the stage over: the window that its earlier calls left must not delay the cell
     filer.register(
         import_id, principal=principal, surface=write_intake.surface_record(), collection=collection, fresh_stage=True)
