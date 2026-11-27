@@ -288,32 +288,6 @@ class RequestBudget:
         }
 
 
-class _NarrowedBudget(RequestBudget):
-    """A budget cut short by `seconds`; what a stage skips or truncates under it is also the parent's."""
-
-    __slots__ = ("_parent",)
-
-    def __init__(self, parent: RequestBudget, *, seconds: float) -> None:
-        super().__init__(seconds=seconds)
-        self.request = parent.request
-        self._parent = parent
-
-    def note_skipped(self, stage: str) -> None:
-        super().note_skipped(stage)
-        self._parent.note_skipped(stage)
-
-    def note_truncated(self, stage: str) -> None:
-        super().note_truncated(stage)
-        self._parent.note_truncated(stage)
-
-
-def narrowed(parent: RequestBudget, seconds: float) -> RequestBudget:
-    """`parent`, or a budget that ends `seconds` from now when that is nearer, for a call whose own limit is not the request's."""
-    if seconds >= parent.remaining():
-        return parent
-    return _NarrowedBudget(parent, seconds=max(0.0, seconds))
-
-
 def current() -> RequestBudget | None:
     """The in-flight call's budget, or None off the MCP dispatch path."""
     return _BUDGET.get()
@@ -412,6 +386,26 @@ def capped(seconds: float) -> Iterator[None]:
     deadline = min(parent.deadline - ACTIVATION_STAGE_RESERVE_SECONDS, now + float(seconds))
     with _running_until(parent, deadline, now):
         yield
+
+
+@contextmanager
+def bound_to(seconds: float | None) -> Iterator[RequestBudget]:
+    """Run under the call's budget, cut to end `seconds` from now when that is nearer; `None` cuts nothing.
+
+    For work whose own limit is shorter than the request's, such as a hold of the vault's boundary that a waiting
+    writer is refused for once it is overdue. The cut budget is the bound one, so a reader that this work calls
+    (`find`, a lexical read, a wait for a build) obeys it too. A call with no budget, such as the import filer's,
+    gets a fresh one of the usual length. Skips and truncations are recorded on the parent too.
+    """
+    parent = current()
+    if parent is not None and (seconds is None or seconds >= parent.remaining()):
+        yield parent
+        return
+    parent = parent or RequestBudget(seconds=budget_seconds())
+    now = time.monotonic()
+    deadline = parent.deadline if seconds is None else min(parent.deadline, now + max(0.0, seconds))
+    with _running_until(parent, deadline, now):
+        yield current()
 
 
 class ReadBudgetExhausted(BaseException):

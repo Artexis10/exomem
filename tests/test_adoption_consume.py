@@ -350,31 +350,32 @@ def test_a_finish_that_stopped_after_a_removal_reads_the_item_as_consumed_on_rep
     assert finished["finish"]["consumed"] == 1 and finished["finish"]["residual"]["files"] == 0
 
 
-def test_finish_stops_starting_removals_when_its_budget_runs_low_and_reports_the_rest_as_not_yet_verified(
+def test_finish_stops_starting_removals_when_its_budget_runs_low_and_the_next_call_removes_the_rest(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     vault = _vault(tmp_path)
     notes = {f"note-{n}.md": f"# Note {n}\n\nInvented note {n}.\n".encode() for n in range(3)}
     staged = _stage(tmp_path, vault, notes)
     run_id, _plan_id, _reply = _adopt(vault, staged["start_path"])
 
-    class AffordsOneStart(request_budget.RequestBudget):
-        affordable = 1
-
+    class AffordsNothing(request_budget.RequestBudget):
         def can_afford(self, reserve: float) -> bool:
-            self.affordable -= 1
-            return self.affordable >= 0
+            return False
 
-    monkeypatch.setattr(adoption_run, "_call_budget", lambda _root: AffordsOneStart(seconds=50))
+    with monkeypatch.context() as patch:
+        patch.setattr(adoption_run, "_call_budget", lambda: AffordsNothing(seconds=50))
+        stopped = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+
+    # The call made progress (one copy) and stopped: the rest is not reported as unverified, for the run is not done.
+    run = adoption_run.AdoptionRunStore(vault).load(run_id)
+    left = [name for name in notes if _staged(vault, staged, name).exists()]
+    assert stopped["stop_reason"] == adoption_run.STOP_FOR_BUDGET and run["phase"] == "applied" and run["finish"] is None
+    assert len(left) == 2 and adoption_run._consumed_count(run["outcomes"]) == 1
 
     finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
 
-    left = [name for name in notes if _staged(vault, staged, name).exists()]
     residual = finished["finish"]["residual"]
-    assert len(left) == 2 and finished["finish"]["consumed"] == 1
-    assert residual["by_reason"] == {"unchecked": {"files": 2, "bytes": sum(len(notes[name]) for name in left)}}
-    assert residual["summary"] == "2 files need review: 2 not yet verified against their Source page."
-    actions = {action["action"]: action["description"] for action in finished["next_actions"]}
-    assert set(actions) == {"work-item", "review-residual", "discard"} and "agrees" in actions["discard"]
+    assert not any(_staged(vault, staged, name).exists() for name in notes) and finished["finish"]["consumed"] == 3
+    assert residual["files"] == 0 and "unchecked" not in residual["by_reason"]
 
 
 def test_a_run_started_with_consume_false_keeps_every_staged_copy(tmp_path: Path) -> None:

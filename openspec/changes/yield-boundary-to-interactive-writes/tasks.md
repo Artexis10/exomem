@@ -5,7 +5,10 @@
 - [x] 1.3 Hand the boundary over after a waiter-prompted release in `chunk_hold` and the derived-drain turns, within the foreground-priority floors.
 - [x] 1.4 Run the reconcile unit-sidecar and embedding phases in short holds that end for a waiting writer; name each hold by its phase.
 - [x] 1.5 Leave the Windows waiter signal process-local and say so in the design.
-- [x] 1.6 End an import `plan`, a `finish` and the steps of a `file` call at an item or step boundary for a waiting interactive writer, and narrow each call's budget to the room its hold has left under the overdue limit.
+- [x] 1.6 End an import `plan`, a `finish` and the steps of a `file` call at an item or step boundary for a waiting interactive writer, and bind each call's budget cut to the room its hold has left under the overdue limit as the current budget.
+- [x] 1.7 Make `finish` resume after a stop for a waiting writer or a short budget, with its tail in the call that completes it; apply the Sources read floor to the first step of a call only; stop `apply`'s full Sources read for a waiting writer.
+- [x] 1.8 Make the cell's filer wait for a waiting writer between its calls, and wait for the boundary as background work.
+- [x] 1.9 Remember each Source page's entries per process, and record the cache's invalidation, memory and cost in the design.
 
 ## 2. Replay marker
 
@@ -17,7 +20,7 @@
 
 - [x] 3.1 End-to-end: an import apply is running; an agent write and a CLI write each commit once with no `MUTATION_BUSY` and no counter movement; the import returns a continuation and finishes every item once.
 - [x] 3.2 Unit: interactive waiter count; the handoff wait bound; a maintenance phase lets a waiting writer in within one batch and applies every item once; the replay marker; the NFC digest.
-- [x] 3.3 End-to-end: a slowed `plan` meets a waiting `create_note` and CLI write, and a waiting `file`; a `file` call ends between steps for a waiting writer; a call with no waiter ends before the scaled overdue limit.
+- [x] 3.3 End-to-end: a slowed `plan` meets a waiting `create_note` and CLI write, and a waiting `file`; a `file` call ends between steps for a waiting writer; a call with no waiter ends before the scaled overdue limit, with and without a bound request budget; a `finish`, an export expansion and the reads of the Sources end for a waiting writer; the filer lets a CLI write in between its calls.
 
 ## 4. Closure
 

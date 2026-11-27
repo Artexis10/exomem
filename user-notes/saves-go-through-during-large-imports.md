@@ -1,1 +1,1 @@
-Your own notes now save while a large import is running, and later pages of a big import no longer slow down as your memory grows.
+Your own notes now save while a large import is running, and checking one file against earlier imports no longer takes longer as your memory grows.

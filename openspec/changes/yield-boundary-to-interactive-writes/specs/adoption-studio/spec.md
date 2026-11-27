@@ -25,7 +25,7 @@
 
 ### Requirement: Every Import Step Yields For A Waiting Interactive Write And Releases The Boundary Before It Is Overdue
 
-`plan`, `finish` and each step of a `file` call SHALL end their call at the next item or step boundary when an interactive writer waits for the vault mutation boundary and the call has handled one item or step. A call SHALL release the boundary before its hold turns overdue, with or without a request budget. A `plan` or `finish` call that ends for a waiting writer SHALL carry `stop_reason: interactive_write_waiting`, and the next call SHALL resume without repeating an item.
+`plan`, `finish` and each step of a `file` call SHALL end their call at the next item or step boundary when an interactive writer waits for the vault boundary and the call has handled one item or step. Each SHALL stop starting items once the room left to its hold under the overdue limit cannot cover the delivery reserve, whatever the request budget. A call that ends for a waiting writer SHALL carry `stop_reason: interactive_write_waiting`; the next call SHALL resume without repeating an item.
 
 #### Scenario: An agent write arrives during a slow plan
 
@@ -45,23 +45,48 @@
 - **WHEN** a `file` call has run one step and an interactive writer waits
 - **THEN** the call returns `filing: working` before it starts the next step
 - **AND** the next call carries on from the saved phase
-- **AND** a default `file` call on a stage that the cell's filer owns answers as before
 
-#### Scenario: The first read of many Sources ends for a waiting write
+#### Scenario: A later step reads no Source page without room
 
-- **WHEN** a `plan` call has to read the earlier imports of a vault with many Sources that the process has not read
+- **WHEN** a `plan` step that follows another step of its call has to read the earlier imports of a vault with many Sources that the process has not read
 - **AND** an interactive writer waits, or the hold nears the overdue limit
-- **THEN** the call ends before it plans an item, with a `continuation`, and the writer commits
+- **THEN** the step ends before it plans an item, with a `continuation`, and the writer commits
 - **AND** the next call carries on from the pages already read, and the plan covers every item once
+
+#### Scenario: The first step of a call reads a floor of Source pages
+
+- **WHEN** a `plan` or `apply` that opens its call has to read the Sources in full and its room is already spent
+- **THEN** it reads 2,000 pages before it asks whether to stop, and then ends with a `continuation`
+- **AND** each call moves that read on, so a call with no room still progresses
+
+#### Scenario: An apply whose Sources seal broke ends its full read
+
+- **WHEN** an `apply` has to read every Source page because a Source was filed after its plan
+- **AND** an interactive writer waits during that read
+- **THEN** the call ends before it files a chunk, with a `continuation` and `stop_reason: interactive_write_waiting`
+- **AND** the next call carries on from the pages already read
 
 #### Scenario: A finish call yields and resumes
 
-- **WHEN** a `finish` call has removed some staged copies and an interactive writer waits
-- **THEN** the call returns with the run still in its phase and `stop_reason: interactive_write_waiting`
+- **WHEN** a `finish` call has removed some staged copies and an interactive writer waits, or its budget cannot cover the delivery reserve
+- **THEN** the call returns with the run still in its phase, reports none of the copies it did not reach as unverified, and carries `stop_reason: interactive_write_waiting` or `call_budget_spent`
 - **AND** a later `finish` removes the remaining copies, each once, and completes the run
+- **AND** the recall check, the coverage and the manifest run only in a call that still has the reserve after the removals
+
+#### Scenario: Work that no step can split runs to its end
+
+- **WHEN** a call is inside a piece of work that cannot stop part-way, such as the first summary of a stage
+- **THEN** it runs to its end and the call ends after it, so the hold can pass the overdue limit by that piece's length
+- **AND** the design lists each such piece with its cost
 
 #### Scenario: No writer waits and no budget is bound
 
 - **WHEN** no interactive writer waits during an import step and the call binds no request budget
 - **THEN** the call stops starting items before its hold reaches the long-holder limit of the mutation lock
 - **AND** the reply carries no `stop_reason: interactive_write_waiting`
+
+#### Scenario: The cell's filer lets a waiting writer in before it calls again
+
+- **WHEN** a call of the cell's import filer ends and an interactive writer, in this process or another, waits for the boundary
+- **THEN** the filer's next call does not start until that writer has committed, within the foreground-priority cap
+- **AND** the filer's own wait for the boundary does not count as an interactive writer's, so an agent's `file` call or the owner's write does not end early for it

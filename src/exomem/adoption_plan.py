@@ -333,15 +333,17 @@ INDEX_READ_FLOOR = 2_000
 
 
 def _refresh_import_index(
-    root: Path, stop: Callable[[], bool] | None
+    root: Path, stop: Callable[[], bool] | None, floor: int | None = None
 ) -> tuple[list[EarlierImport], bool]:
     """The index and whether the pass read every page, reading only the pages whose file signature moved.
 
     Reading every Source page on every plan call cost the Sources the vault holds each time, which a plan that
     ends for a waiting writer pays again at each continuation. The signature rule is the note index's (`NoteIndex`).
     With `stop`, the pass ends before a read when it returns True and gives no index (`[]`, `False`): the pages it
-    did read stay remembered, so the next pass carries on from them.
+    did read stay remembered, so the next pass carries on from them. It reads `floor` pages (default
+    `INDEX_READ_FLOOR`) before it asks.
     """
+    floor = INDEX_READ_FLOOR if floor is None else floor
     key = os.path.realpath(root)
     with _SOURCE_PAGES_LOCK:
         known = _SOURCE_PAGES.get(key, {})
@@ -359,7 +361,7 @@ def _refresh_import_index(
         seen = known.get(rel)
         if seen is None or seen.signature != signature:
             # Asked before a read, never before a page the process already knows.
-            if stop is not None and read >= INDEX_READ_FLOOR and stop():
+            if stop is not None and read >= floor and stop():
                 complete = False
                 break
             read += 1
@@ -389,9 +391,15 @@ def read_import_index(root: Path) -> list[EarlierImport]:
     return _refresh_import_index(root, None)[0]
 
 
-def read_import_index_until(root: Path, stop: Callable[[], bool]) -> list[EarlierImport] | None:
-    """`read_import_index`, or None when `stop` ended the read first; the next call resumes where it left off."""
-    index, complete = _refresh_import_index(root, stop)
+def read_import_index_until(
+    root: Path, stop: Callable[[], bool], *, floor: int | None = None
+) -> list[EarlierImport] | None:
+    """`read_import_index`, or None when `stop` ended the read first; the next call resumes where it left off.
+
+    A call that has run no step yet leaves `floor` at `INDEX_READ_FLOOR`, so it moves the read on whatever its
+    budget; a step that follows another in the same call passes 0, since the call has made progress already.
+    """
+    index, complete = _refresh_import_index(root, stop, floor)
     return index if complete else None
 
 

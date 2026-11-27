@@ -447,7 +447,7 @@ class Filer:
 
     def _invoke(self, record: dict, call: dict, principal: Any) -> Any:
         from . import schema as schema_module
-        from . import write_intake
+        from . import write_intake, writer_lease
 
         command = write_intake.command_named("adoption_studio")
         import_id = record["import_id"]
@@ -464,13 +464,16 @@ class Filer:
             else (self.vault_root,)
         )
         descriptor = write_intake.restore_surface(record.get("surface"), command.name)
-        return write_intake.invoke_in_background(
-            principal, descriptor, command, *injected,
-            idempotency_key=f"import-file:{import_id}:{call['seq']}",
-            idempotency_principal_scope=principal.audience_id,
-            mutation_request_id=str(uuid.uuid5(_REQUEST_NAMESPACE, f"{import_id}:{call['seq']}:{call['attempt']}")),
-            **arguments,
-        )
+        # Background: an import nobody waits for. Its wait for the boundary is no writer's, so an agent's own `file`
+        # call or the owner's write does not end early to let it in (`writer_lease.as_background_work`).
+        with writer_lease.as_background_work():
+            return write_intake.invoke_in_background(
+                principal, descriptor, command, *injected,
+                idempotency_key=f"import-file:{import_id}:{call['seq']}",
+                idempotency_principal_scope=principal.audience_id,
+                mutation_request_id=str(uuid.uuid5(_REQUEST_NAMESPACE, f"{import_id}:{call['seq']}:{call['attempt']}")),
+                **arguments,
+            )
 
     def _after_reply(self, import_id: str, reply: Any, call: dict) -> float | None:
         """Record a `file` reply: `done` leaves the list, `working` goes again at once, and a stop parks the stage.
@@ -515,6 +518,11 @@ class Filer:
         if filing == _REPLY_DONE:
             return None
         if filing == _REPLY_WORKING:
+            from .writer_lease import get_manager
+
+            # The call released the boundary, and the next one asks for it at once. A writer that polls for it, above
+            # all one in another process, would lose that race for good, so the filer waits while one still waits.
+            get_manager().yield_to_waiting_writes(self.vault_root)
             return 0.0
         if continuation is not None:
             return SPACE_CHECK_SECONDS  # a stop with a continuation is the free-space stop: ask again later

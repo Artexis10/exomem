@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 
 import pytest
+import test_import_filing as filing_tests
 from _public_call import public_call
 from fastmcp import Client
 from test_adoption_paging import PDF, _stage
@@ -32,13 +33,16 @@ from exomem import (
     adoption_run,
     command_surface,
     export_expansion,
+    import_filing,
     import_stage,
     metrics,
     mutation_lock,
     request_budget,
     server,
+    write_intake,
     writer_lease,
 )
+from exomem.governance import principal as principal_module
 
 DOCUMENTS = 8
 CHUNK_ITEMS = 2
@@ -205,6 +209,12 @@ def scaled_boundary(vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     writer_lease.reset_managers_for_tests()
     yield logs
     writer_lease.reset_managers_for_tests()
+
+
+@pytest.fixture
+def private_journal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The filer's stage record goes to a temporary private folder, as in the filer's own tests."""
+    monkeypatch.setattr(filing_tests.consume.local_import, "user_state_dir", lambda name: str(tmp_path / "user-state"))
 
 
 def _settle(monkeypatch: pytest.MonkeyPatch, settled: threading.Event) -> None:
@@ -426,7 +436,9 @@ def test_a_slow_first_read_of_the_sources_ends_for_a_waiting_write_and_the_plan_
     """Catches a plan whose read of the earlier imports cannot stop, on a vault with many Sources the process has not read."""
     staged = _staged_folder(vault)
     running, settled = threading.Event(), threading.Event()
-    monkeypatch.setattr(adoption_plan, "INDEX_READ_FLOOR", 1)
+    # The call's plan is a later step of its chain, so it reads no page before asking whether to stop; a floor that
+    # applied to it would read all five pages here.
+    monkeypatch.setattr(adoption_plan, "INDEX_READ_FLOOR", 1000)
     # Five Source pages at 0.9 s each take longer than the room that the scaled overdue limit leaves a call.
     _slowed(monkeypatch, adoption_plan, "page_import_entries", 0.9, running=running, settled=settled)
 
@@ -474,3 +486,184 @@ def test_a_file_call_ends_an_export_expansion_for_a_waiting_write_and_the_next_c
     # The first call stopped as soon as the writer waited: one more conversation at most, not the room of the call.
     assert 0 < read <= 3 and first["filing"] == "working", (read, first)
     assert done.get("filing") == "done" and done["progress"]["filed"] == len(conversations) + 1, done
+
+
+def test_an_apply_whose_sources_seal_broke_ends_its_full_read_for_a_waiting_write_and_the_next_call_goes_on(
+    vault: Path, scaled_boundary: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches an apply that reads every Source page of a vault in one hold when a Source was filed since its plan."""
+    staged = _staged_folder(vault)
+    page = adoption_run.start(vault, path=staged, collection="Field Notes")
+    adoption_run.select(vault, run_id=page["run_id"], include=[staged])
+    plan_id = adoption_run.plan(vault, run_id=page["run_id"])["plan"]["plan_id"]
+    # A Source that someone else filed after the plan breaks the run's seal, so only a full read can tell what is imported.
+    (vault / "Knowledge Base" / "Sources" / "filed-by-someone-else.md").write_text(
+        "---\nimported_from: Elsewhere/other.md\noriginal_sha256: " + "0" * 64 + "\ncaptured: 2026-10-27\n---\n# Other\n",
+        encoding="utf-8",
+    )
+    adoption_plan._SOURCE_PAGES.clear()  # a process that has read no Source yet
+    running, settled = threading.Event(), threading.Event()
+    monkeypatch.setattr(adoption_plan, "INDEX_READ_FLOOR", 1)
+    # Six Source pages at 0.9 s each take longer than the room that the scaled overdue limit leaves a call.
+    _slowed(monkeypatch, adoption_plan, "page_import_entries", 0.9, running=running, settled=settled)
+    apply_args = {"operation": {"kind": "apply", "run_id": page["run_id"], "plan_id": plan_id}}
+
+    async def journey() -> tuple[dict, dict, dict]:
+        async with Client(server.build_server(require_auth=False)) as client:
+            applying = asyncio.create_task(client.call_tool(*public_call("import_memory", apply_args), raise_on_error=False))
+            assert await asyncio.to_thread(running.wait, 30), "the apply never read an earlier Source"
+            note = await client.call_tool(*public_call("create_note", _remember("agent")), raise_on_error=False)
+            first = (await applying).structured_content
+            _settle(monkeypatch, settled)
+            more = {"operation": {**apply_args["operation"], "continuation": first["continuation"]}}
+            second = await client.call_tool(*public_call("import_memory", more), raise_on_error=False)
+            return first, note.structured_content, second.structured_content
+
+    first, note, second = asyncio.run(journey())
+
+    assert "MUTATION_BUSY" not in json.dumps([first, note, second]), (first, note, second)
+    assert len(_notes_titled(vault, "agent")) == 1
+    assert first["stop_reason"] == adoption_run.STOP_FOR_WAITING_WRITE and first["progress"]["applied"] == 0, first
+    assert "continuation" not in second and second["progress"]["applied"] == STAGED_FILES, second
+
+
+def test_the_import_filer_lets_a_waiting_cli_write_in_before_its_next_call(
+    vault: Path, scaled_boundary: Path, private_journal: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a filer, which binds no request budget, that plans past the overdue limit while a writer in another process waits."""
+    import_id = filing_tests._stage(vault, files={f"doc{number}.pdf": PDF + bytes([number]) for number in range(STAGED_FILES)})
+    running, settled = threading.Event(), threading.Event()
+    _slowed(monkeypatch, adoption_plan, "plan_item", 0.6, running=running, settled=settled)
+    gate = tmp_path / "cli-gate"
+    cli = subprocess.Popen(
+        [
+            sys.executable, "-c", GATED_CLI, str(gate), "create_note", "--json",
+            "--title", "Cli write beside the import", "--content", NOTE.format(name="CLI"),
+        ],
+        env={**os.environ, "PYTHONPATH": str(Path(adoption_run.__file__).parents[1])},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    filer = import_filing.Filer(vault)
+    assert filer.register(import_id, principal=filing_tests._owner(), surface=None)
+    # The filer binds no request budget and calls again at once after each reply, as its thread does.
+    assert request_budget.current() is None
+    failures: list[BaseException] = []
+
+    def drive() -> None:
+        try:
+            filing_tests._drive(filer, import_id)
+        except BaseException as error:  # noqa: BLE001 - reported by the test thread below
+            failures.append(error)
+
+    filing_thread = threading.Thread(target=drive)
+    filing_thread.start()
+    try:
+        assert running.wait(30), "the filer never reached a plan item"
+        gate.touch()
+        cli.wait(60)
+        _settle(monkeypatch, settled)
+        filing_thread.join(120)
+    finally:
+        cli.kill()
+        settled.set()
+    cli_out, cli_err = cli.communicate()
+
+    assert not failures and not filing_thread.is_alive(), failures
+    assert "MUTATION_BUSY" not in cli_out + cli_err, (cli_out, cli_err)
+    assert [row for row in _journal(scaled_boundary) if row["error_code"] == "MUTATION_BUSY"] == []
+    assert cli.returncode == 0 and json.loads(cli_out)["success"] is True, (cli_out, cli_err)
+    assert len(_notes_titled(vault, "Cli")) == 1
+    assert import_filing.read_view(vault, import_id)["progress"]["filed"] == STAGED_FILES
+
+
+def test_a_filer_call_that_no_writer_waits_for_and_no_budget_bounds_ends_before_the_overdue_limit(
+    vault: Path, scaled_boundary: Path, private_journal: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Catches a call of the filer, which no dispatcher bounds, that plans on past the boundary's overdue limit."""
+    import_id = filing_tests._stage(vault, files={f"doc{number}.pdf": PDF + bytes([number]) for number in range(20)})
+    _slowed(monkeypatch, adoption_plan, "plan_item", 0.25, running=threading.Event(), settled=threading.Event())
+    filer = import_filing.Filer(vault)
+    assert filer.register(import_id, principal=filing_tests._owner(), surface=None)
+    assert request_budget.current() is None
+
+    with caplog.at_level("WARNING", logger=mutation_lock.__name__):
+        delay = filer.run_once(import_id)
+
+    assert not [record for record in caplog.records if "held too long" in record.getMessage()]
+    assert delay == 0.0 and import_filing.read_view(vault, import_id)["state"] == "working"
+
+
+def test_the_import_filer_waiting_for_the_boundary_is_no_interactive_writer_and_an_agents_call_is(
+    vault: Path, scaled_boundary: Path, private_journal: None
+) -> None:
+    """Catches a filer whose wait counts as a writer's, which ends an agent's own `file` call early to let the filer in."""
+    import_id = filing_tests._stage(vault)
+    filer = import_filing.Filer(vault)
+    assert filer.register(import_id, principal=filing_tests._owner(), surface=None)
+    manager = writer_lease.get_manager()
+    ends: list[BaseException] = []
+
+    def run(call) -> threading.Thread:
+        def guarded() -> None:
+            try:
+                call()
+            except BaseException as error:  # noqa: BLE001 - the refusal at the end of the wait is expected
+                ends.append(error)
+
+        thread = threading.Thread(target=guarded)
+        thread.start()
+        return thread
+
+    def agent_file_call() -> None:
+        with principal_module.request_scope(principal_module.local_owner_principal(surface="mcp")):
+            writer_lease.invoke_command(
+                write_intake.command_named("adoption_studio"), vault, action="file", path=f"_Imports/{import_id}")
+
+    with manager.mutation_guard(vault, operation="test_holder"):
+        filer_thread = run(lambda: filer.run_once(import_id))
+        time.sleep(0.6)  # the filer's call is at the boundary by now
+        counted_with_the_filer = manager.writers_waiting(vault)
+        agent_thread = run(agent_file_call)
+        deadline = time.monotonic() + 1.2
+        while manager.writers_waiting(vault) < 1 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        counted_with_the_agent = manager.writers_waiting(vault)
+    for thread in (filer_thread, agent_thread):
+        thread.join(120)
+
+    assert counted_with_the_filer == 0, "the filer's wait counted as an interactive writer's"
+    assert counted_with_the_agent == 1, "only the agent's call is an interactive writer"
+
+
+def test_the_import_filer_waits_for_a_waiting_writer_before_it_calls_again(
+    vault: Path, scaled_boundary: Path, private_journal: None
+) -> None:
+    """Catches a filer that asks for the boundary again at once after each reply and takes it back from a polling writer."""
+    import_id = filing_tests._stage(vault)
+    filer = import_filing.Filer(vault)
+    assert filer.register(import_id, principal=filing_tests._owner(), surface=None)
+    manager = writer_lease.get_manager()
+    order: list[str] = []
+
+    def writer() -> None:
+        with manager.mutation_guard(vault, operation="interactive_write"):
+            order.append("writer holds the boundary")
+
+    def filer_between_calls() -> None:
+        filer._after_reply(import_id, {"filing": "working", "progress": {}}, {"action": "file"})
+        order.append("filer calls again")
+
+    with manager.mutation_guard(vault, operation="test_holder"):
+        writing = threading.Thread(target=writer)
+        writing.start()
+        deadline = time.monotonic() + 10
+        while manager.writers_waiting(vault) < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert manager.writers_waiting(vault) == 1, "the writer never waited for the boundary"
+        between = threading.Thread(target=filer_between_calls)
+        between.start()
+        time.sleep(0.3)  # the filer's reply is recorded by now, and the writer still waits
+    for thread in (writing, between):
+        thread.join(60)
+
+    assert order == ["writer holds the boundary", "filer calls again"], order
