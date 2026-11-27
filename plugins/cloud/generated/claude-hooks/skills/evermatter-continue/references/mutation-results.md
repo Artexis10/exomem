@@ -61,19 +61,23 @@ Retry only the failed items, in a new request.
 
 ## Retries and identity
 
-Every write has an identity. The same identity with the same payload replays the first reply with a
-top-level `replayed: true`, and never writes twice. A reply that defines its own `replayed` field keeps
-that field as it was. A new identity is a new write.
+While the server holds a completed receipt, the same identity and payload replay the first reply
+with a top-level `replayed: true`. A reply that defines its own `replayed` field keeps that field.
+
+For most note edits, the server derives the identity from the call. It keeps the completed receipt
+for 10 minutes on the server replica that handled the call. Outside that window, or on another
+replica, an identical append can write the same line again.
 
 1. When a call-level warming or busy error says nothing committed, wait for its `retry` hint. Then
    retry with the same identity and the same payload.
 2. When a batch stored some files and failed others, the batch is settled. Repeating it replays the
    same outcome. Retry only the failed files in a new call, under a new identity.
-3. When the acknowledgement is pending or the commit is uncertain, never send a new identity or a
-   changed payload. Replay the same call, or read the collection row by its natural key and write
-   only what is missing.
-4. When a lost reply leaves a batch's outcome unknown, repeat the identical call. It returns the
-   recorded result without writing again.
+3. When the acknowledgement is pending, the commit is uncertain or the reply is lost, repeat the
+   identical call only if it is still within its replay window and can reach the original receipt.
+   Otherwise read the page, row or Source first. Wait if the original write is still pending.
+   Once it has settled, write only what is missing.
+4. When a stale-page refusal answers your retry, your own earlier write may have changed the page.
+   Read the page before you edit it again.
 
 A read refused because the collection store is busy committed nothing; retry it later.
 
