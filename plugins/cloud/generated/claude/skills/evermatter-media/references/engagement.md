@@ -76,10 +76,14 @@ later decision. Write each page through the [agent write loop](writing.md#agent-
   elapsed time is never an outcome.
 - A **held view, an unsure report, an open question or a settled value** is saved at its true
   strength, never more certain, general or settled than its source made it. Attribute a held view or
-  an unsettled interpretation to its holder, with its uncertainty; a passing remark is not a held
-  view. Save an unsure report as unsure and attributed, never as fact, event or baseline. Save an
+  an unsettled interpretation to its holder, with its uncertainty; a momentary reaction is not a
+  held view. Save an unsure report as unsure and attributed, never as fact, event or baseline. Save an
   open question as open, including whether something happened at all. Save settled values (times,
   prices, terms, contacts, limits) in full, never as a pointer to a working file.
+- **What the person says about themselves**: their aims, priorities, the people they know, their
+  belongings and their past. Save it in the turn they say it, even as an aside and whatever the
+  task, at its true strength; this class does not wait for a landing. Save just that statement, not
+  the task detail around it, and put a fact about a known person on that person's entity.
 
 Not a stepping-stone: mid-thought exploration, brainstorm tangents and incidental names. A write
 never mentions what stays unwritten. Capture at the landing, not during the flight. Do not wait to

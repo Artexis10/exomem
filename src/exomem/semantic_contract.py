@@ -6843,6 +6843,17 @@ def _page_rule_findings(
 RELATION_DISPOSITION_RULE: tuple[str, str, str] = ("relations", "*", "disposition")
 
 
+def spells_unlinked_reason() -> bool:
+    """Whether the tool serving this call takes a reviewed-none decision as `unlinked_reason`."""
+    if capabilities.current_tool_shape() != "public":
+        return False
+    from . import command_surface, public_tools
+
+    tool = public_tools.TOOLS.get(command_surface.current_rendering())
+    # Door operations keep grouped parameters; only typed tools declare this alias.
+    return tool is not None and "unlinked_reason" in tool.model.model_fields
+
+
 def _disposition_finding(
     page: SemanticPageState,
     disposition: RelationDisposition,
@@ -6851,14 +6862,11 @@ def _disposition_finding(
 ) -> ContractFinding | None:
     if disposition.satisfied or not page.eligible_compiled:
         return None
-    decision_arguments = 'relation_disposition="reviewed_none" and relation_review_reason'
-    if capabilities.current_tool_shape() == "public":
-        from . import command_surface, public_tools
-
-        tool = public_tools.TOOLS.get(command_surface.current_rendering())
-        # Door operations keep grouped parameters; only typed tools declare this alias.
-        if tool is not None and "unlinked_reason" in tool.model.model_fields:
-            decision_arguments = "unlinked_reason explaining your bounded review decision"
+    decision_arguments = (
+        "unlinked_reason explaining your bounded review decision"
+        if spells_unlinked_reason()
+        else 'relation_disposition="reviewed_none" and relation_review_reason'
+    )
     return ContractFinding(
         code=(
             "RELATION_DISPOSITION_STALE"

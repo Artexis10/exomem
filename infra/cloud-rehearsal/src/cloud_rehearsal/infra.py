@@ -481,5 +481,7 @@ def environment_facts() -> dict[str, object]:
         "memory_bytes": docker.get("MemTotal"),
         "kernel": docker.get("KernelVersion"),
         **host_speed.cpu_facts(),
+        **host_speed.provider_facts(),
+        **host_speed.root_disk_facts(),
         "ci": bool(os.environ.get("CI")),
     }

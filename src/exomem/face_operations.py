@@ -323,7 +323,12 @@ def turn_off(vault_root: Path) -> dict[str, Any]:
             raise  # Another connection holds the store: it is readable, and the caller retries.
         if isinstance(error, face_store.NewerStore):
             # The release that wrote the store still reads faces as on; an off recorded nowhere would be lost there.
-            raise face_search.faces_unreadable(error) from error
+            raise OpError(
+                "FACES_UNREADABLE",
+                "A newer release of Exomem wrote the face data, so this release cannot turn faces off. Nothing changed.",
+                "Turn faces off in the release that wrote the face data, or the owner erases it with faces.delete.",
+                details={"error": str(error)},
+            ) from error
         # No face work runs on a damaged store, so off is already in effect.
         answer = _unreadable(error)
         answer["outcome"] = "Faces are already off in effect: the face data cannot be read, so no picture is scanned."
@@ -354,8 +359,11 @@ def delete(vault_root: Path) -> dict[str, Any]:
 
     try:
         turn_off(vault_root)
-    except (sqlite3.DatabaseError, OpError):  # OpError: FACES_UNREADABLE for a store a newer release wrote.
+    except (sqlite3.DatabaseError, OpError) as error:
         # A damaged or newer face index cannot record "off". Erasing it below turns faces off all the same.
+        # Any other refusal is not about the store's readability, so the delete stops on it.
+        if isinstance(error, OpError) and error.code != "FACES_UNREADABLE":
+            raise
         log.warning("faces: the face index could not record off before its delete", exc_info=True)
     # Faces may have been off already, with an earlier backfill still finishing its picture.
     face_scan.stop_backfill(vault_root, timeout=30)

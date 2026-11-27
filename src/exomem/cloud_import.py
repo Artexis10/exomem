@@ -63,6 +63,7 @@ IMPORT_STAGING_UNAVAILABLE = "IMPORT_STAGING_UNAVAILABLE"
 DEFAULT_MAX_MEMBERS = 500_000
 DEFAULT_RESERVE_BYTES = 256 * 1024 * 1024
 RESERVE_BYTES_ENV = "EXOMEM_IMPORT_RESERVE_BYTES"
+MAX_MEMBERS_ENV = "EXOMEM_IMPORT_MAX_MEMBERS"
 #: What may follow the end-of-archive block when a caller stops reading there: tar pads to a whole record.
 END_WINDOW_BYTES = 2 * tarfile.RECORDSIZE
 
@@ -115,6 +116,12 @@ class UnpackResult:
     files: int
     directories: int
     bytes: int
+
+
+def max_members_from_env() -> int:
+    """The most members one import may stage, here and in the expansion of an app export: the operator's setting, else the default."""
+    raw = os.environ.get(MAX_MEMBERS_ENV, "").strip()
+    return int(raw) if raw.isascii() and raw.isdigit() else DEFAULT_MAX_MEMBERS
 
 
 def reserve_bytes_from_env() -> int:

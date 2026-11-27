@@ -138,6 +138,22 @@ def test_links_resolve_by_path_basename_alias_and_embed_and_leave_a_shared_basen
 
 
 # --- 2.2: folder rules --------------------------------------------------------
+def test_an_apply_call_logs_its_sources_read_and_its_first_chunk_so_a_long_hold_can_be_attributed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Catches an apply whose hold of the boundary cannot be read from the cell log: the filer's calls leave no spans."""
+    vault = _vault(tmp_path, {f"Coll/note-{n}.md": f"# Note {n}\n\ntext {n}\n" for n in range(3)})
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+
+    with caplog.at_level("INFO", logger="exomem.adoption_run"):
+        adoption_run.apply(vault, run_id=run_id, plan_id=planned["plan"]["plan_id"], today=TODAY)
+
+    (opening,) = [r for r in caplog.records if getattr(r, "event", None) == "adoption_apply_opening"]
+    assert opening.fields["first_chunk_items"] >= 1
+    assert opening.fields["pending_items"] == 3
+    assert opening.fields["index_read_ms"] is not None and opening.fields["first_chunk_prework_ms"] is not None
+
+
 def test_a_ruled_folder_lands_in_its_kind_directory_and_an_unregistered_kind_changes_nothing(
     tmp_path: Path,
 ) -> None:
@@ -1158,13 +1174,16 @@ def test_a_continuing_apply_call_does_not_open_the_sources_an_earlier_run_filed(
     run_id, planned = _import(vault, path="New", include=["New"])
     own_pages = {item["target_path"] for item in planned["plan"]["items"]}
     opened: list[str] = []
-    real_entries = adoption_plan.read_import_entries
+    real_entries = adoption_plan.page_import_entries
 
     def recording_entries(root: Path, page: Path):
         opened.append(page.relative_to(root).as_posix())
         return real_entries(root, page)
 
-    monkeypatch.setattr(adoption_plan, "read_import_entries", recording_entries)
+    # Every read of a Source page, the full read of the index and the read of one page alike, goes through this function.
+    # The cache of pages the plan read is emptied, so that a call which read the index in full would open the earlier run's pages.
+    monkeypatch.setattr(adoption_plan, "page_import_entries", recording_entries)
+    adoption_plan._SOURCE_PAGES.clear()
 
     applied, calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
 
@@ -1254,6 +1273,73 @@ def test_a_slow_media_request_prices_media_for_its_own_call_and_not_for_the_call
     admitted = len(resumed.next_chunk(photos[2:], first=False))
 
     assert admitted == len(measured_alone.next_chunk(photos[2:], first=False)) > 1
+
+
+def _pacer_with_chunks_timed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *timed: tuple[int, float]):
+    """A pacer with a 50 s budget that has timed `(size, seconds)` chunks of text items, and the items left to file."""
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(request_budget, "time", types.SimpleNamespace(monotonic=lambda: clock["now"]))
+    monkeypatch.setattr(writer_lease, "active_derived_batch_custody", lambda root: True)
+    monkeypatch.setattr(
+        writer_lease, "owed_custody_handoff_seconds",
+        lambda root, more_batches: adoption_run.CUSTODY_RESERVE_FLOOR_SECONDS,
+    )
+    pacer = adoption_run._ApplyPacer(tmp_path, request_budget.RequestBudget(seconds=50.0, entry=clock["now"]))
+    pending = [{"form": "text", "original_bytes": 1500} for _ in range(400)]
+    for size, seconds in timed:
+        pacer.record(pending[:size], seconds, [])
+    return pacer, pending
+
+
+def test_a_chunk_is_never_more_than_twice_the_largest_the_pacer_timed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches a price extrapolated far beyond what was timed.
+
+    A 1-item and a 16-item chunk of nearly equal seconds fit to a near-zero rate per item, which priced a
+    253-item chunk at a fraction of the 19.6 s it took and held the boundary for 30.7 s.
+    """
+    pacer, pending = _pacer_with_chunks_timed(tmp_path, monkeypatch, (1, 0.100), (16, 0.104))
+
+    assert len(pacer.next_chunk(pending, first=False)) == 2 * 16
+
+
+def test_a_chunk_that_a_waiting_writer_would_outwait_lasts_one_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call's first chunk is committed before it looks for a waiting writer, so its size is that writer's wait."""
+    pacer, pending = _pacer_with_chunks_timed(tmp_path, monkeypatch, (10, 1.0), (20, 1.5))  # 0.5 s fixed, 50 ms per item
+
+    free = pacer.next_chunk(pending, first=True)
+    waited_for = pacer.next_chunk(pending, first=True, writer_waits=True)
+
+    assert len(free) == 40
+    assert 0 < len(waited_for) <= 10  # 0.5 s fixed + 10 items at 50 ms is the one second of a turn
+
+
+def test_the_first_chunk_of_an_apply_is_cut_to_a_turn_when_a_writer_waits_for_the_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches the wiring: `apply` must tell its pacer that a writer waits, or the first chunk outlasts the turn."""
+    sizes: list[int] = []
+    real_record = adoption_run._ApplyPacer.record
+    monkeypatch.setattr(
+        adoption_run._ApplyPacer, "record",
+        lambda self, chunk, elapsed, extractions: (sizes.append(len(chunk)), real_record(self, chunk, elapsed, extractions))[1],
+    )
+
+    def first_chunk(name: str, *, writer_waits: bool) -> int:
+        monkeypatch.setattr(adoption_run, "_writer_waits", lambda root: writer_waits)
+        files = {f"Coll/note-{n:03d}.md": f"# Note {n}\n\ntext {n}\n" for n in range(30)}
+        vault = _vault(tmp_path / name, files)
+        run_id, planned = _import(vault, path="Coll", include=["Coll"])
+        sizes.clear()
+        adoption_run.apply(vault, run_id=run_id, plan_id=planned["plan"]["plan_id"], today=TODAY)
+        return sizes[0]
+
+    # A pacer that has timed nothing prices an item at INITIAL_ITEM_SECONDS, so a turn holds two of them at most.
+    assert first_chunk("alone", writer_waits=False) > first_chunk("waited-for", writer_waits=True)
+    assert sizes[0] <= adoption_run.TURN_SECONDS / adoption_run.INITIAL_ITEM_SECONDS
 
 
 def test_a_chunk_that_ran_slower_than_its_size_does_not_let_the_pacer_start_a_chunk_past_the_deadline(

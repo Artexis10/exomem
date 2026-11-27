@@ -20,6 +20,7 @@ import sys
 import time
 import zlib
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from .shell import CommandFailed, run
@@ -148,3 +149,76 @@ def cpu_facts() -> dict[str, Any]:
         fields = {}
     return {"cpu_model": fields.get("Model name"), "cpu_count_lscpu": _number(fields.get("CPU(s)"), int),
             "cpu_mhz": _number(fields.get("CPU MHz"), float)}
+
+
+# The DMI fields in which a hypervisor names itself, and the variables that GitHub documents for a hosted runner.
+# Both are closed sets that the platforms fix; a value that a host does not give stays None.
+DMI_FIELDS = ("sys_vendor", "product_name", "board_vendor", "bios_vendor", "chassis_asset_tag")
+RUNNER_VARIABLES = ("RUNNER_ENVIRONMENT", "RUNNER_OS", "RUNNER_ARCH", "ImageOS", "ImageVersion")
+
+
+def _read_text(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").strip() or None
+    except OSError:
+        return None
+
+
+def provider_facts(dmi_root: Path = Path("/sys/class/dmi/id"), env: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Who runs the host: the DMI fields the kernel exposes and the variables a hosted runner sets about itself.
+
+    Two runners of the same label were different machine classes (a different vendor, CPU and root disk) and ran
+    the same code 1.4 times apart, so the report names the machine, not only its label.
+    """
+    env = os.environ if env is None else env
+    return {"host_provider": {"dmi": {name: _read_text(dmi_root / name) for name in DMI_FIELDS},
+                              "runner": {name: env.get(name) for name in RUNNER_VARIABLES}}}
+
+
+def parse_mountinfo(text: str, mountpoint: str = "/") -> dict[str, str | None] | None:
+    """The newest mount at `mountpoint` in `/proc/self/mountinfo`; None when there is none.
+
+    The format is fixed by proc(5): the fields before a lone `-` are the mount's ids, its root, its mount point and
+    its options, and the three after it are the filesystem type, the source and the superblock options.
+    """
+    found = None
+    for line in text.splitlines():
+        before, separator, after = line.partition(" - ")
+        fields, tail = before.split(), after.split()
+        if separator and len(fields) >= 5 and len(tail) >= 2 and fields[4] == mountpoint:
+            found = {"device_number": fields[2], "mount_options": fields[5] if len(fields) > 5 else None,
+                     "filesystem": tail[0], "source": tail[1]}
+    return found
+
+
+def block_device_facts(device_number: str, sys_root: Path = Path("/sys")) -> dict[str, Any] | None:
+    """The block device behind a `major:minor` number, from sysfs: its disk, whether it spins, its model, what it sits on.
+
+    A partition reports its whole disk's queue and model. A device-mapper device reports the devices under it,
+    which is where a copy-on-write snapshot shows. None when the number names no block device, as for an overlay.
+    """
+    try:
+        device = (sys_root / "dev" / "block" / device_number).resolve(strict=True)
+    except OSError:
+        return None
+    disk = device.parent if (device / "partition").exists() else device
+    rotational = _read_text(disk / "queue" / "rotational")
+    try:
+        under = sorted(entry.name for entry in (disk / "slaves").iterdir())
+    except OSError:
+        under = []
+    return {"name": device.name, "disk": disk.name, "rotational": None if rotational is None else rotational == "1",
+            "model": _read_text(disk / "device" / "model"), "mapper_name": _read_text(disk / "dm" / "name"),
+            "devices_under": under}
+
+
+def root_disk_facts(mountinfo: Path = Path("/proc/self/mountinfo"), sys_root: Path = Path("/sys")) -> dict[str, Any]:
+    """The root filesystem the runner's work lands on: its type and source, and the block device behind it.
+
+    A fact the host does not give stays None. This records facts and names no kind: a model such as an NVMe
+    direct disk, or a mapper over a snapshot, is what tells two runners' disks apart.
+    """
+    text = _read_text(mountinfo)
+    mount = None if text is None else parse_mountinfo(text)
+    device = None if mount is None else block_device_facts(mount["device_number"], sys_root)
+    return {"root_disk": {"mount": mount, "block_device": device}}

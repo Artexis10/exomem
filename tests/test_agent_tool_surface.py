@@ -182,42 +182,115 @@ def test_an_agent_adds_an_observation_then_edits_it_by_unit_id(build, vault) -> 
     assert "Fixed intervals line retrying clients up #reliability" not in text and "Original wording" in text
 
 
-def test_a_compact_add_with_unit_metadata_is_refused_with_both_ways_out(build, vault) -> None:
+def test_a_dated_observation_with_no_kind_is_kept_as_a_record(build, vault) -> None:
+    async def scenario(client):
+        await _new_note(client, "Jitter policy")
+        added = await _call(client, "add_observation", {
+            "note": "Jitter policy", "category": "operating_constraint", "text": "Retries stay under five",
+            "as_of": "2026-11-25", "until": "2027-01-31",
+        })
+        units = await _call(client, "read_page", {"page": "Jitter policy", "part": "units"})
+        return added, units
+
+    added, units = _session(build(), scenario)
+
+    assert "error" not in added, added
+    assert "Saved with its dates." in added["user_summary"], added
+    stored = next(unit for unit in units["units"] if unit["id"] == added["unit_id"])
+    assert (stored["category"], stored["as_of"]) == ("operating_constraint", "2026-11-25"), units
+    text = _vault_text(vault, "Jitter policy")
+    # A record is the neutral kind: it carries no assertion trait, so it takes no inference mode.
+    assert "## Record" in text and "- as_of: 2026-11-25" in text
+    assert "- until: 2027-01-31" in text and "Retries stay under five" in text
+
+
+def test_a_dated_observation_with_a_verdict_and_no_kind_is_refused_without_offering_to_drop_the_date(
+    build, vault
+) -> None:
     async def scenario(client):
         await _new_note(client, "Jitter policy")
         return await _call(client, "add_observation", {
             "note": "Jitter policy", "category": "operating_constraint", "text": "Retries stay under five",
-            "as_of": "2026-11-25",
+            "as_of": "2026-11-25", "verdict": "confirmed",
         })
 
     refused = _session(build(), scenario)
 
     error = refused.get("error", {})
     assert error.get("code") == "COMPACT_METADATA_REQUIRES_RICH_KIND", refused
-    # One retry is enough: the refusal names the field the call passed and the rich-kind route.
-    assert "as_of" in error["message"] and "`kind`" in error["message"], refused
+    message = error["message"]
+    # Two exits, and neither loses the date: pass a kind that takes the fields, or drop the verdict.
+    assert "pass a rich kind to keep verdict, as_of" in message, refused
+    assert "omit verdict to save as_of in a dated block" in message, refused
+    assert "omit verdict, as_of" not in message and "omit as_of" not in message, refused
     assert "Retries stay under five" not in _vault_text(vault, "Jitter policy")
 
 
-def test_editing_a_compact_observation_with_unit_metadata_names_the_field_and_the_rich_kind_route(build, vault) -> None:
+def test_dating_a_compact_observation_moves_it_to_a_dated_record_block_at_the_end_of_the_page(
+    build, vault
+) -> None:
     async def scenario(client):
         await _new_note(client, "Jitter policy")
         added = await _call(client, "add_observation", {
             "note": "Jitter policy", "category": "finding", "text": "First wording", "tags": ["reliability"],
         })
-        return await _call(client, "edit_note", {
+        edited = await _call(client, "edit_note", {
             "note": "Jitter policy", "why": "Date it", "action": "edit_observation",
             "observation": added.get("unit_id"), "category": "finding", "text": "First wording",
             "as_of": "2026-11-25",
         })
+        units = await _call(client, "read_page", {"page": "Jitter policy", "part": "units"})
+        return added, edited, units
 
-    refused = _session(build(), scenario)
+    added, edited, units = _session(build(), scenario)
 
-    error = refused.get("error", {})
-    assert error.get("code") == "COMPACT_METADATA_REQUIRES_RICH_KIND", refused
-    # The unit is already compact and has no rows, so the exits are on this call, not on the page.
-    assert "as_of" in error["message"] and "`kind`" in error["message"], refused
-    assert "editing the page" not in error["message"], refused
+    assert "error" not in edited, edited
+    assert "Saved with its date." in edited["user_summary"], edited
+    # The unit keeps its anchor, and its id changes with the new version, as it does on every edit.
+    assert edited["unit_id"].split(".")[0] == added["unit_id"].split(".")[0], (added, edited)
+    assert edited["unit_id"] != added["unit_id"], (added, edited)
+    dated = [unit for unit in units["units"] if unit["as_of"] == "2026-11-25"]
+    assert [unit["id"] for unit in dated] == [edited["unit_id"]], units
+    text = _vault_text(vault, "Jitter policy")
+    assert text.count("First wording") == 1 and "- [finding] First wording" not in text, text
+    # The compact line leaves the observation list, and the dated block closes the page body.
+    assert text.index("Original wording") < text.index("## Record"), text
+    assert text.rstrip().endswith("- as_of: 2026-11-25\n\nFirst wording"), text
+
+
+def test_an_unlinked_reason_on_a_page_that_takes_no_link_review_is_ignored_and_the_reply_says_so(build, vault) -> None:
+    entity = vault / "Knowledge Base" / "Entities" / "Harbour Co-op.md"
+    entity.parent.mkdir(parents=True, exist_ok=True)
+    entity.write_text(
+        "---\ntitle: Harbour Co-op\ntype: entity\nentity_type: organisation\nstatus: active\n"
+        "exomem_id: 00000000-0000-4000-8000-000000000092\nupdated: 2026-07-15\n---\n\n"
+        "# Harbour Co-op\n\n## Suppliers\n- Sells seeds.\n",
+        encoding="utf-8",
+    )
+
+    async def scenario(client):
+        added = await _call(client, "add_observation", {
+            "note": "Harbour Co-op", "category": "finding", "text": "Opens at nine",
+            "unlinked_reason": "No other page relates to this fact.",
+        })
+        edit = {
+            "note": "Harbour Co-op", "why": "More detail", "action": "replace_text",
+            "old_text": "Sells seeds.", "new_text": "Sells seeds and bulbs.",
+            "unlinked_reason": "No other page relates to this fact.",
+        }
+        previewed = await _call(client, "edit_note", {**edit, "preview": True})
+        edited = await _call(client, "edit_note", edit)
+        return added, previewed, edited
+
+    added, previewed, edited = _session(build(), scenario)
+
+    sentence = "No link review applies to this page, so the unlinked reason was not recorded."
+    assert "error" not in added and sentence in str(added), added
+    assert "error" not in edited and sentence in str(edited), edited
+    # The preview names the one field this tool takes, not the grouped fields it fills in.
+    assert "'relation_review_fields': {'ignored': ['unlinked_reason']}" in str(previewed), previewed
+    text = entity.read_text(encoding="utf-8")
+    assert "Opens at nine" in text and "Sells seeds and bulbs." in text
 
 
 def test_a_stale_unit_id_is_refused_and_leaves_the_page_unchanged(build, vault) -> None:

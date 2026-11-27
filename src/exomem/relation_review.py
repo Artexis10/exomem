@@ -195,13 +195,30 @@ class ReviewFieldCheck:
     ignored: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, list[str]]:
-        found = {"missing": self.missing, "ignored": self.ignored}
+        found = {"missing": self.missing, "ignored": _named_for_the_caller(self.ignored)}
         return {name: list(fields) for name, fields in found.items() if fields}
 
 
+def _named_for_the_caller(ignored: tuple[str, ...]) -> tuple[str, ...]:
+    """The fields the caller sent: a typed tool sends the whole review as `unlinked_reason`, so a
+    preview names that and not the grouped fields the tool filled in."""
+    return ("unlinked_reason",) if ignored and semantic_contract.spells_unlinked_reason() else ignored
+
+
 def ignored_review_fields_warning(ignored: tuple[str, ...]) -> str:
-    """The one warning a commit returns when it drops the review fields of a page that needs none."""
+    """The one warning a commit returns when it drops the review fields of a page that needs none.
+
+    A typed tool takes the whole decision as `unlinked_reason`, so it names that and not the
+    grouped fields the caller never sent.
+    """
+    if semantic_contract.spells_unlinked_reason():
+        return "No link review applies to this page, so the unlinked reason was not recorded."
     return f"This page needs no relation review, so these fields were ignored: {', '.join(ignored)}."
+
+
+def review_field_warnings(ignored: tuple[str, ...]) -> list[str]:
+    """The warnings a commit owes for the review fields it dropped: none, or the one above."""
+    return [ignored_review_fields_warning(ignored)] if ignored else []
 
 
 def review_applies(disposition_kind: str) -> bool:
