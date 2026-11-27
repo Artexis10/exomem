@@ -98,9 +98,10 @@ TOOL_CEILINGS: dict[str, int] = {
     "edit_plan_item": 750,
     "edit_record": 850,
     # inspect_name_drift joined the read door on 2026-11-23 (align-names-with-titles).
-    "inspect_memory": 2250,
+    # `files.classify` joined both doors on 2026-11-25 (classify-sensitive-material-at-capture).
+    "inspect_memory": 2270,
     "list_review_items": 750,
-    "manage_memory": 2650,
+    "manage_memory": 2660,
     "query_plan_items": 1050,
     # `options` names `query`, the typed version-1 query that a derived collection also answers, added 32 B on
     # 2026-11-25 (legacy arguments on a derived collection).
