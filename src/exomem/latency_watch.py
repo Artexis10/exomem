@@ -645,7 +645,7 @@ def samples_from_ledger(
     paths = [path]
     failed_scan = False
     try:
-        paths.extend(_archive_generations_newest_first(archive_dir))
+        paths.extend(archive_generations_newest_first(archive_dir))
     except OSError:
         failed_scan = True
     out = _read_sources(paths, now=now, window_seconds=window_seconds)
@@ -667,7 +667,7 @@ def samples_from_activations(path: Path, *, now: float) -> SourceRead:
     return out
 
 
-def _archive_generations_newest_first(archive_dir: Path | None) -> list[Path]:
+def archive_generations_newest_first(archive_dir: Path | None) -> list[Path]:
     """Archived ledger segments, newest first, placed by the `sequence` their
     first row carries.
 

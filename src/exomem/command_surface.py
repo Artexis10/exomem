@@ -1346,35 +1346,15 @@ def mcp_caller_identity() -> dict[str, str | None]:
     return identity
 
 
-def _declared_capabilities(
-    metadata: Mapping[str, typing.Any] | None, session: object
-) -> Mapping[str, typing.Any] | None:
-    """The capabilities the client declares: this request's `_meta`, else the handshake's.
-
-    A 2026-07-28 request states them itself. A request on an older revision has them only
-    when the transport kept the initialize exchange, which stateless HTTP does not.
-    """
-    from mcp_types import CLIENT_CAPABILITIES_META_KEY
-
-    from_meta = (metadata or {}).get(CLIENT_CAPABILITIES_META_KEY)
-    if isinstance(from_meta, Mapping):
-        return from_meta
-    declared = getattr(session, "client_capabilities", None)
-    if declared is None:
-        return None
-    try:
-        return declared.model_dump(by_alias=True, exclude_none=True)
-    except (AttributeError, TypeError, ValueError):
-        return None
-
-
 def mcp_protocol_features() -> dict[str, typing.Any]:
     """The protocol revision and the declared extensions of the active MCP call.
 
-    `client_extensions` is the sorted identifiers of the declared extensions plus
-    one `elicitation:<mode>` entry for each declared elicitation mode. `None` means
-    the request does not say, which is not the same as `[]`, a client that
-    declares nothing. Protocol identifiers only: no request content.
+    `client_extensions` is the sorted identifiers of the declared extensions plus one
+    `elicitation:<mode>` entry for each declared elicitation mode. `None` means the
+    request does not say, which is not the same as `[]`, a client that declares nothing:
+    stateless HTTP on a revision before 2026-07-28 keeps no handshake. The SDK fills
+    `client_capabilities` from the initialize exchange, or on 2026-07-28 from each
+    request's own envelope. Protocol identifiers only: no request content.
 
     Never raises. Outside an MCP call both values are `None`.
     """
@@ -1382,26 +1362,27 @@ def mcp_protocol_features() -> dict[str, typing.Any]:
     dependencies = _request_dependencies()
     if dependencies is None:
         return features
+    version = capabilities = None
     try:
         context = dependencies.get_context()
-    except (LookupError, RuntimeError):
-        return features
-    request_context = getattr(context, "request_context", None)
-    session = getattr(context, "session", None)
-    metadata = getattr(request_context, "meta", None)
-    version = getattr(request_context, "protocol_version", None) or getattr(
-        session, "protocol_version", None
-    )
+        version = getattr(context.request_context, "protocol_version", None)
+        # Raises RuntimeError on a server-side call that no client session carries.
+        session = context.session
+        version = version or session.protocol_version
+        capabilities = session.client_capabilities
+    except (AttributeError, LookupError, RuntimeError, ValueError):
+        pass
     if isinstance(version, str) and version:
         features["protocol_version"] = version
-    capabilities = _declared_capabilities(metadata, session)
     if capabilities is None:
         return features
-    extensions = capabilities.get("extensions")
-    names = {str(name) for name in extensions} if isinstance(extensions, Mapping) else set()
-    elicitation = capabilities.get("elicitation")
-    if isinstance(elicitation, Mapping):
-        names.update(f"elicitation:{mode}" for mode in elicitation)
+    names = set(capabilities.extensions or ())
+    elicitation = capabilities.elicitation
+    if elicitation is not None:
+        # The modes are the typed model's own fields, which drops any mode the client invented.
+        # An empty object is the 2025-06-18 spelling of form mode, which 2025-11-25 keeps.
+        modes = [mode for mode in type(elicitation).model_fields if getattr(elicitation, mode) is not None]
+        names.update(f"elicitation:{mode}" for mode in modes or ["form"])
     features["client_extensions"] = sorted(names)
     return features
 

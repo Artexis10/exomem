@@ -7,7 +7,7 @@ import logging
 import os
 import re
 import threading
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 _FALSE = frozenset({"", "0", "false", "no", "off"})
 _INSTALL_LOCK = threading.Lock()
@@ -90,6 +90,32 @@ def log_client_version(value: object, *, env: Mapping[str, str] | None = None) -
     if not content_private_logging_enabled(env):
         return text
     return text if _CLIENT_VERSION.fullmatch(text) else None
+
+
+#: The extension namespace the MCP specification itself fixes; every other id is a name the client chose.
+_SPEC_EXTENSION_NAMESPACE = "io.modelcontextprotocol/"
+#: The two elicitation modes the specification defines, as the census records them.
+_ELICITATION_ENTRIES = frozenset({"elicitation:form", "elicitation:url"})  # nosemgrep: ep-word-set -- the specification's closed elicitation modes, not text to interpret
+
+
+def log_client_extensions(
+    names: Iterable[str], *, env: Mapping[str, str] | None = None
+) -> tuple[list[str], int]:
+    """The declared extension ids a log row may carry, and how many it withheld.
+
+    Kept verbatim outside content-private mode. Inside it, an id is caller-chosen text,
+    so only the specification's own namespace and the elicitation entries survive and
+    the rest is counted, the way `client_family` reduces a client name to a family.
+    """
+
+    kept = sorted(set(names))
+    if not content_private_logging_enabled(env):
+        return kept, 0
+    safe = [
+        name for name in kept
+        if name.startswith(_SPEC_EXTENSION_NAMESPACE) or name in _ELICITATION_ENTRIES
+    ]
+    return safe, len(kept) - len(safe)
 
 
 _HTTP_METHODS = frozenset(

@@ -267,18 +267,22 @@ it with `exomem logs verify`.
   from `User-Agent`. On a cloud cell, the gateway's `x-exomem-oauth-client`
   header comes first, because the gateway forwards no `User-Agent`.
 - **`protocol_version` / `client_extensions`** say which MCP revision the call
-  used and which extensions the client declared. A 2026-07-28 request states
-  both in its own `_meta`; a stdio or other stateful call takes them from the
-  initialize handshake. They are protocol identifiers, so content-private
-  logging keeps them. `client_extensions` is the sorted extension ids plus one
-  `elicitation:<mode>` entry per declared mode, at most 16 entries of 64
-  characters each; a longer list records the dropped count in
-  `client_extensions_truncated`. `[]` is a client that declares nothing. The
-  field is absent when the request does not say (a stateless call on an older
-  revision keeps no handshake) and on rows written before the census.
-  `exomem doctor` reads the last 24 hours of these rows and prints one line
-  for each client name and revision with its declared extensions, counted per
-  tool call.
+  used and which extensions the client declared. The SDK reads them from the
+  initialize handshake, or on 2026-07-28 from each request's own envelope.
+  `client_extensions` is the sorted extension ids plus one `elicitation:<mode>`
+  entry per declared mode (`elicitation: {}` counts as `elicitation:form`), at
+  most 16 entries of 64 characters each; a longer list records the dropped count
+  in `client_extensions_truncated`. `[]` is a client that declares nothing. The
+  fields are absent when the request does not say (a stateless call on an older
+  revision keeps no handshake, and a server-side call has no client) and on rows
+  written before the census. Extension ids are client-chosen text, and rows
+  cannot be scrubbed once chained, so content-private logging keeps only ids in
+  the specification's `io.modelcontextprotocol/` namespace and records the rest
+  as the count `client_extensions_other`. `exomem doctor` reads the last 24 hours
+  of these rows, from the live ledger and its archive, and prints one line that
+  names each client and revision with its declared extensions, counted per tool
+  call. It says "partial" and from when it counts when the history is shorter
+  than a day, a call may have left no row, or the read hit its row bound.
 - **`principal_kind`** says which kind of caller that is: `owner` (stdio, the
   CLI or the REST key), `owner-oauth` (a remote sign-in the host bound as the
   owner with `EXOMEM_OWNER_OAUTH_SUBJECT`), `principal`, or `unresolved`. An

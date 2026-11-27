@@ -756,7 +756,10 @@ def _record_ledger_row(
         from .governance.principal import resolve_mcp_principal
 
         identity = mcp_caller_identity()
-        features = mcp_protocol_features()
+        try:
+            features = mcp_protocol_features()
+        except Exception:  # noqa: BLE001 - a missing census must not lose the row
+            features = {"protocol_version": None, "client_extensions": None}
         try:
             principal_kind: str | None = resolve_mcp_principal().principal_kind
         except Exception:  # noqa: BLE001 - a missing label must not lose the row

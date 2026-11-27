@@ -459,7 +459,12 @@ def build_row(
 ) -> dict[str, Any]:
     """Assemble one complete, self-hashing ledger row."""
     from .cloud_cell import canonical_app_id
-    from .privacy_log import log_client_label, log_client_version, log_session_ref
+    from .privacy_log import (
+        log_client_extensions,
+        log_client_label,
+        log_client_version,
+        log_session_ref,
+    )
 
     # Caller-chosen header and handshake text: bounded under content-private
     # logging, verbatim otherwise.
@@ -550,12 +555,18 @@ def build_row(
         # Sorted extension ids and `elicitation:<mode>` entries the client declared.
         # `[]` is a client that declares nothing; absent is a request that does not say
         # (a pre-2026-07-28 call over stateless HTTP keeps no handshake). The client chooses
-        # these strings, so count and length are capped like every other caller-chosen field.
-        declared = sorted({str(name)[:_MAX_EXTENSION_CHARS] for name in client_extensions})
+        # these strings, so count and length are capped like every other caller-chosen field,
+        # and content-private logging keeps only the specification's own ids (see
+        # `log_client_extensions`) and counts the rest.
+        declared, withheld = log_client_extensions(
+            str(name)[:_MAX_EXTENSION_CHARS] for name in client_extensions
+        )
         row["client_extensions"] = declared[:_MAX_EXTENSIONS]
         if len(declared) > _MAX_EXTENSIONS:
             # A cut list says so, as `spans_truncated` does.
             row["client_extensions_truncated"] = len(declared) - _MAX_EXTENSIONS
+        if withheld:
+            row["client_extensions_other"] = withheld
     from .activation_result import project_block
 
     observation = project_block(activation_result)
