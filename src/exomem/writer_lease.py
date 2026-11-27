@@ -5052,6 +5052,11 @@ def as_background_work() -> Iterator[None]:
         _BACKGROUND_WORK.reset(token)
 
 
+def in_background_work() -> bool:
+    """Whether the commands this thread runs are background work (`as_background_work`)."""
+    return _BACKGROUND_WORK.get()
+
+
 def _dispatch_holder_kind() -> str:
     """How a command's wide boundary hold names its holder to a blocked writer: background work, a job's run or a command."""
     from . import maintenance_jobs

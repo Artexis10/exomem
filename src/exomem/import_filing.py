@@ -17,6 +17,7 @@ and write a record, never across a call.
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import datetime as dt
 import json
@@ -25,11 +26,11 @@ import math
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
-from . import import_stage, private_state, state_paths, vault
+from . import import_stage, mutation_lock, private_state, state_paths, vault
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +52,8 @@ STOP_NOT_REPLAYABLE = "IMPORT_FILING_LOGIN_NOT_REPLAYABLE"
 STOP_REPLY_UNREADABLE = "IMPORT_FILING_REPLY_UNREADABLE"
 #: The stage's `working` replies showed no movement for `adoption_run.FILING_STALL_CALLS` calls in a row; the filer waits and tries again.
 STOP_STALLED = "IMPORT_FILING_STALLED"
+#: An agent is filing the stage: the cell stands aside and carries on if the agent stops.
+STOP_AGENT_FILING = "IMPORT_FILING_AGENT_ACTIVE"
 #: The mutation protocol's final answer for an identity: its outcome will never be known, so the next call has a new one.
 _OUTCOME_UNKNOWN = "MUTATION_OUTCOME_UNKNOWN"
 #: A continuation that `file` no longer knows: the next call names the stage alone and carries on its newest scan.
@@ -81,6 +84,10 @@ READ_ONLY_CHECK_SECONDS = 60.0
 #: A stage whose calls move nothing waits this long, doubling at each stall to the cap, and then calls once more.
 STALL_FIRST_BACKOFF_SECONDS = 60.0
 STALL_MAX_BACKOFF_SECONDS = 900.0
+#: After an agent's `file` call on a stage returns, the filer leaves the stage alone for this long. A call ends inside
+#: one limit of a hold, and the agent reads the reply and calls again inside a second one; a stage that no agent has
+#: touched for longer has nobody driving it, which is the stage the filer is for.
+AGENT_QUIET_SECONDS = 2 * mutation_lock.DEFAULT_LONG_HOLDER_SECONDS
 #: What a fault that no call explains waits before the filer looks at the stage again.
 _FAULT_BACKOFF_SECONDS = 60.0
 _IDLE_WAIT_SECONDS = 3600.0
@@ -265,6 +272,9 @@ class Filer:
         self._thread: threading.Thread | None = None
         #: Monotonic time at which each listed stage is due; `inf` while a call on it is in flight.
         self._due: dict[str, float] = {}
+        #: By stage: the agent `file` calls in flight, and the monotonic time before which the filer leaves it alone.
+        self._agent_calls: dict[str, int] = {}
+        self._agent_quiet_until: dict[str, float] = {}
 
     @property
     def running(self) -> bool:
@@ -322,6 +332,51 @@ class Filer:
             self._due[import_id] = 0.0
             self._condition.notify_all()
         return True
+
+    # ----- an agent that files the stage
+
+    def agent_began(self, import_id: str) -> None:
+        with self._condition:
+            self._agent_calls[import_id] = self._agent_calls.get(import_id, 0) + 1
+
+    def agent_ended(self, import_id: str, *, working: bool) -> None:
+        """An agent's `file` call on the stage returned. A stage still working stays the agent's for the quiet window.
+
+        A reply that is not `working` (the stage is done, or stopped) leaves the agent nothing to call again, so the
+        filer is woken to record that state at once instead of after the window.
+        """
+        with self._condition:
+            left = self._agent_calls.get(import_id, 1) - 1
+            if left > 0:
+                self._agent_calls[import_id] = left
+            else:
+                self._agent_calls.pop(import_id, None)
+            if working:
+                self._agent_quiet_until[import_id] = time.monotonic() + AGENT_QUIET_SECONDS
+            else:
+                self._agent_quiet_until.pop(import_id, None)
+                if self._due.get(import_id, math.inf) != math.inf:
+                    self._due[import_id] = 0.0
+                    self._condition.notify_all()
+
+    def _agent_wait(self, import_id: str) -> float:
+        """Seconds that the filer leaves the stage alone: the quiet window while an agent files it, 0.0 otherwise."""
+        with self._condition:
+            if self._agent_calls.get(import_id):
+                return AGENT_QUIET_SECONDS
+            left = self._agent_quiet_until.get(import_id, 0.0) - time.monotonic()
+            if left <= 0:
+                self._agent_quiet_until.pop(import_id, None)
+                return 0.0
+            return left
+
+    def _stand_aside(self, import_id: str) -> None:
+        """Show that an agent files the stage: parked with the reason and no need, for a person or a client to read."""
+        record = read_record(self.vault_root, import_id)
+        if record is None or (record.get("stop") or {}).get("code") == STOP_AGENT_FILING:
+            return
+        stop = {"code": STOP_AGENT_FILING, "reason": "an agent is filing this import; the cell carries on if it stops"}
+        _update(self.vault_root, import_id, lambda held: held.update(state=PARKED, needs=[], person=[], stop=stop))
 
     # ----- the loop
 
@@ -420,6 +475,11 @@ class Filer:
         record = read_record(self.vault_root, import_id)
         if record is None or record["state"] in (DONE, DISCARDED):
             return None
+        if (aside := self._agent_wait(import_id)) > 0.0:
+            # An agent that files the stage takes the boundary at each of its calls, so a call of the filer's would end
+            # after one turn for it, and pay the fixed cost of a call again. Not a stall: no count, no support need.
+            self._stand_aside(import_id)
+            return aside
         principal = write_intake.restore_principal(record["principal"])
         login = write_intake.login_state(principal)
         if login is auth_sessions.OriginLogin.UNREADABLE:
@@ -679,17 +739,45 @@ def _import_id_of(path: str) -> str | None:
     return parts[1] if ok else None
 
 
-def note_file_call(vault_root: Path, path: str, collection: str | None = None) -> None:
-    """Register the stage that a `file` call names, so the cell finishes it after the call returns.
+class AgentFileCall:
+    """An agent's `file` call as it runs: its reply says whether the stage is still the agent's to file."""
 
-    It registers only where a filer runs (the serving HTTP runtime), and only a caller whose authority may be
-    replayed: a delegated authorization session stays foreground, as for a queued save. Never raises: the
-    caller's own call goes on whatever happens here.
+    def __init__(self) -> None:
+        self.working = True  # a call that returns no reply (it raised) leaves the stage with the agent for the window
+
+    def returned(self, reply: Any) -> None:
+        filing = reply.get("filing") if isinstance(reply, dict) else None
+        self.working = filing not in (_REPLY_DONE, _REPLY_STOPPED)
+
+
+@contextlib.contextmanager
+def agent_filing(vault_root: Path, path: str, collection: str | None = None) -> Iterator[AgentFileCall]:
+    """Wrap an agent's `file` call on a staged folder: the cell finishes the stage after it, and stands aside while it runs.
+
+    It registers the stage with the filer, where one runs (the serving HTTP runtime), and only for a caller whose
+    authority may be replayed: a delegated authorization session stays foreground, as for a queued save. The
+    filer then leaves the stage alone during the call and for `AGENT_QUIET_SECONDS` after it (`Filer.agent_ended`).
+    The filer's own `file` call comes through the same command and is no agent: listing the stage again from it
+    would reset the stage's due time and its back-off. Never raises: the caller's own call goes on whatever
+    happens here.
     """
+    from . import writer_lease
+
+    call = AgentFileCall()
     filer = filer_for(vault_root)
     import_id = _import_id_of(path)
-    if filer is None or import_id is None:
+    if filer is None or import_id is None or writer_lease.in_background_work():
+        yield call
         return
+    filer.agent_began(import_id)  # before the listing wakes the filer, so that it finds the agent there
+    try:
+        _register_caller(filer, import_id, path, collection)
+        yield call
+    finally:
+        filer.agent_ended(import_id, working=call.working)
+
+
+def _register_caller(filer: Filer, import_id: str, path: str, collection: str | None) -> None:
     try:
         from . import write_intake
         from .governance import principal as principal_module

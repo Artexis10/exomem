@@ -334,6 +334,31 @@ def files_per_second(steps: Sequence[Mapping[str, Any]]) -> float | None:
     return round(sum(step["files"] for step in steps) / seconds, 2)
 
 
+def import_projection(pages: Sequence[Mapping[str, Any]], *, deadline_seconds_left: float) -> dict[str, Any] | None:
+    """What the `file` calls so far say about the whole import: its rate, and the seconds that the rest needs at it.
+
+    The rest is the newest reply's `remaining`, so the projection reaches the whole stage (about 69,300 files in the
+    large import) with no arithmetic by hand. Two rates, because the rate of a page falls as the vault grows: all
+    pages, and the newest page alone (partial when the run is still on it). The seconds are `file` call seconds, as
+    `files_per_second` counts them. A rate or a count that a reply does not carry stays None, never 0.
+    None until a `file` call has been made.
+    """
+    steps = [step for page in pages for step in page["file_steps"]]
+    if not steps:
+        return None
+    remaining = steps[-1]["remaining"]
+    overall, newest = files_per_second(steps), files_per_second(pages[-1]["file_steps"])
+
+    def seconds_needed(rate: float | None) -> int | None:
+        return round(remaining / rate) if rate and remaining is not None else None
+
+    return {"files_filed": steps[-1]["filed"], "files_remaining": remaining,
+            "files_per_second_all_pages": overall, "files_per_second_newest_page": newest,
+            "seconds_to_finish_at_all_pages_rate": seconds_needed(overall),
+            "seconds_to_finish_at_newest_page_rate": seconds_needed(newest),
+            "deadline_seconds_left": round(deadline_seconds_left)}
+
+
 def is_drained(polls: Sequence[Mapping[str, int | None]], needed: int = DRAIN_POLLS) -> bool:
     """The index queues were all empty on the last `needed` readings. A failed reading is not empty."""
     last = polls[-needed:]
@@ -752,6 +777,8 @@ async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder) -> dic
     while True:
         # Kept current before the deadline check, so a run that the deadline stops still reports each call.
         folder.report["pages"] = list(pages.values())
+        folder.report["file_projection"] = import_projection(
+            list(pages.values()), deadline_seconds_left=plan.deadline - time.monotonic())
         plan.require_time(f"the {folder.name} folder was filed")
         reply, took = await agent.import_op("file", **fields)
         page = pages.setdefault(reply["run_id"], {"page": len(pages) + 1, "run_id": reply["run_id"], "file_seconds": 0.0,
@@ -796,6 +823,9 @@ async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder) -> dic
               f"consumed {page['consumed']}", flush=True)
     folder.report["pages"] = list(pages.values())
     folder.report["file_seconds_by_page"] = file_seconds_by_page(list(pages.values()))
+    folder.report["file_projection"] = import_projection(
+        list(pages.values()), deadline_seconds_left=plan.deadline - time.monotonic())
+    print(f"[rehearsal] large-import {folder.name} projection: {folder.report['file_projection']}", flush=True)
     folder.residual = (reply.get("filed") or {}).get("residual")
     folder.consumed = consumed
     folder.report["residual_by_reason_files"] = fixture.residual_files_by_reason(folder.residual)

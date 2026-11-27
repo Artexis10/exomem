@@ -274,6 +274,30 @@ def test_each_file_call_keeps_its_counts_and_the_page_shows_files_per_call_and_p
         {"page": 1, "calls": 2, "file_seconds": 1.0, "longest_call_seconds": 0.5}]
 
 
+def test_the_projection_reaches_the_whole_stage_from_the_rate_of_all_pages_and_of_the_newest_page():
+    """Catches a report that needs arithmetic by hand to say whether the import ends inside its deadline."""
+    fast = {"seconds": 50.0, "files": 500, "filed": 0, "remaining": 0}
+    slow = {"seconds": 100.0, "files": 500, "filed": 0, "remaining": 0}
+    pages = [{"file_steps": [fast, {**fast, "filed": 1000, "remaining": 1500}]},
+             {"file_steps": [slow, {**slow, "filed": 2000, "remaining": 500}]}]
+
+    projection = large_import.import_projection(pages, deadline_seconds_left=600.4)
+
+    assert projection == {
+        "files_filed": 2000, "files_remaining": 500,
+        "files_per_second_all_pages": 6.67, "files_per_second_newest_page": 5.0,  # 2,000 files in 300 s; 1,000 in 200 s
+        "seconds_to_finish_at_all_pages_rate": 75, "seconds_to_finish_at_newest_page_rate": 100,
+        "deadline_seconds_left": 600}
+
+
+def test_a_projection_with_an_unknown_count_leaves_what_depends_on_it_unknown():
+    steps = [large_import.file_step({}, 2.0, before=0)]  # a reply with no counts
+
+    projection = large_import.import_projection([{"file_steps": steps}], deadline_seconds_left=10.0)
+
+    assert projection["files_per_second_all_pages"] is None and projection["seconds_to_finish_at_all_pages_rate"] is None
+
+
 def test_a_deadline_that_stops_filing_still_reports_the_calls_made():
     """Catches the report that lost every page because the deadline check came before the pages were recorded."""
     agent = Scripted({"file": [_working("r1", filed=40, token="a"), _working("r1", filed=90, token="b")]})
@@ -293,6 +317,7 @@ def test_a_deadline_that_stops_filing_still_reports_the_calls_made():
 
     (page,) = folder.report["pages"]
     assert [step["files"] for step in page["file_steps"]] == [40, 50]
+    assert folder.report["file_projection"]["files_filed"] == 90  # kept current before the deadline check, as the pages are
 
 
 def test_a_reply_without_counts_leaves_its_files_and_the_rate_unknown_not_zero():

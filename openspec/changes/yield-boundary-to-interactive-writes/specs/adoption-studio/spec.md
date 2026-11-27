@@ -137,6 +137,21 @@ The cell's filer SHALL stop calling `file` on a stage once `adoption_run.FILING_
 - **AND** the filer calls again after the delay, and a stall in a row doubles it up to 15 minutes
 - **AND** an agent's `file` call lists it again with its full count of calls
 
+### Requirement: The Cell's Filer Stands Aside From A Stage That An Agent Files
+
+The cell's filer SHALL make no `file` call on a stage while an agent's `file` call on it runs or ended less than twice the mutation lock's hold limit ago. It SHALL show the stage as parked with the stop `IMPORT_FILING_AGENT_ACTIVE` and no need, SHALL count no stall for it, and SHALL carry on once no agent has called for that long. A `done` or `stopped` reply of the agent's call SHALL end the wait. The filer's own `file` call SHALL NOT list the stage with the filer again.
+
+#### Scenario: An agent files a stage the cell also lists
+
+- **WHEN** an agent's `file` calls on a registered stage keep arriving, each returning `working`
+- **THEN** the filer makes no call on the stage and the stage is parked with `IMPORT_FILING_AGENT_ACTIVE`, with no need
+- **AND** once no agent has called for the quiet window, the filer files the stage to its end and each file is filed once
+
+#### Scenario: The filer's own call
+
+- **WHEN** the filer's `file` call on a stage runs the `file` command
+- **THEN** the command does not list the stage with the filer again
+
 ### Requirement: A Step That Moves Shows Its Progress In The Page Position
 
 The page position of a `file` reply SHALL change while a step makes progress with no count changing: `sources_read` while the plan or the apply reads the Sources over several calls, and `copies_settled` while a `finish` removes staged copies. A field SHALL be present only while its step runs.

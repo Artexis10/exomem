@@ -207,6 +207,54 @@ def test_a_foreground_file_call_and_the_filer_share_one_run_and_file_each_file_o
     assert len(adoption_run.AdoptionRunStore(vault).runs_at(f"_Imports/{import_id}")) == 1
 
 
+def test_the_filer_stands_aside_while_an_agent_files_the_stage_and_files_it_once_the_agent_stops(
+    vault: Path, one_step_calls, monkeypatch
+) -> None:
+    """Catches a filer that takes the boundary between an agent's calls: each of its calls ends after one turn for the
+    agent that waits, and pays the fixed cost of a call again, so the two together file slower than the agent alone."""
+    monkeypatch.setattr(import_filing, "AGENT_QUIET_SECONDS", 1.5)
+    import_id = _stage(vault, filing=None)
+    import_filing.start(vault)
+    try:
+        replies = [_file_call(vault, import_id), _file_call(vault, import_id)]
+        time.sleep(0.5)  # the filer was woken by each call, and would have taken the boundary by now
+        while_agent_files = import_filing.read_record(vault, import_id)
+        view = import_filing.read_view(vault, import_id)
+        done = _wait_for(vault, import_id, "done", seconds=60)  # the agent stops calling; the quiet window passes
+        after = import_filing.read_record(vault, import_id)
+    finally:
+        import_filing.stop(vault)
+
+    assert [reply["filing"] for reply in replies] == ["working", "working"]
+    assert while_agent_files["seq"] == 0  # the filer made no call while the agent filed
+    assert view["state"] == "parked" and view["stop"]["code"] == import_filing.STOP_AGENT_FILING and view["needs"] == []
+    assert done["state"] == "done" and after["seq"] > 0  # then the cell carried the stage to its end
+    assert len(_sources(vault)) == len(FILES)
+    assert len(adoption_run.AdoptionRunStore(vault).runs_at(f"_Imports/{import_id}")) == 1
+
+
+def test_the_filers_own_file_call_does_not_list_its_stage_with_itself_again(vault: Path) -> None:
+    """Catches a filer whose own `file` call listed the stage again: that reset its due time, so no back-off held."""
+    import_id = _stage(vault, filing=None)
+    path = f"_Imports/{import_id}"
+    principal = write_intake.restore_principal(_owner())
+    import_filing.start(vault)
+    try:
+        with principal_module.request_scope(principal), writer_lease.as_background_work():
+            with import_filing.agent_filing(vault, path):
+                pass
+        from_the_filer = import_filing.read_record(vault, import_id)
+        with principal_module.request_scope(principal):
+            with import_filing.agent_filing(vault, path):
+                pass
+        from_an_agent = import_filing.read_record(vault, import_id)
+    finally:
+        import_filing.stop(vault)
+
+    assert from_the_filer is None
+    assert from_an_agent is not None  # the same call from an agent lists the stage: the check above is not vacuous
+
+
 def test_a_free_space_stop_parks_the_stage_and_a_later_call_resumes_it(vault: Path, monkeypatch) -> None:
     """A stage that stops for space must say so and carry on once there is room, without filing around the stop."""
     import_id = _stage(vault)

@@ -606,7 +606,7 @@ def test_own_note_continuations_leave_time_for_mandatory_custody(
         if continuation:
             arguments["continuation"] = continuation
         terminal = manager.invoke(command, (vault,), arguments, idempotency_key=f"paced-notes-{call}")
-        assert clock["now"] - began <= mutation_lock._DEFAULT_LONG_HOLDER_SECONDS  # a call ends inside its hold's room
+        assert clock["now"] - began <= mutation_lock.DEFAULT_LONG_HOLDER_SECONDS  # a call ends inside its hold's room
         assert manager.invoke(command, (vault,), arguments, idempotency_key=f"paced-notes-{call}") == {
             **terminal, "replayed": True
         }

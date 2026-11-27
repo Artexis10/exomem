@@ -42,7 +42,7 @@ _DEFAULT_TIMEOUT_SECONDS = 5.0
 _DEFAULT_POLL_INTERVAL_SECONDS = 0.025
 _BUSY_ERRNOS = frozenset({errno.EACCES, errno.EAGAIN, errno.EDEADLK})
 _SAFE_LABEL = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
-_DEFAULT_LONG_HOLDER_SECONDS = 30.0
+DEFAULT_LONG_HOLDER_SECONDS = 30.0
 _STATUS_TIMEOUT_SECONDS = 0.25
 # Boundary log volume.  Reserved-state identity coordination takes and releases
 # this boundary several times a second per cell, for holds measured in
@@ -2021,7 +2021,7 @@ class _LocalLockState:
     operation: str | None = None
     holder_kind: str | None = None
     acquired_at: float | None = None
-    long_holder_seconds: float = _DEFAULT_LONG_HOLDER_SECONDS
+    long_holder_seconds: float = DEFAULT_LONG_HOLDER_SECONDS
     long_warning_emitted: bool = False
     after_release: dict[object, Callable[[], None]] = field(default_factory=dict)
     # Contention attribution. These are *measurement only* — nothing in the
@@ -2399,7 +2399,7 @@ class VaultMutationCoordinator:
         *,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
         poll_interval_seconds: float = _DEFAULT_POLL_INTERVAL_SECONDS,
-        long_holder_seconds: float = _DEFAULT_LONG_HOLDER_SECONDS,
+        long_holder_seconds: float = DEFAULT_LONG_HOLDER_SECONDS,
         kind: str = COORDINATOR_VAULT_BOUNDARY,
         name: str | None = None,
         queued_writers: Callable[[], int] | None = None,
