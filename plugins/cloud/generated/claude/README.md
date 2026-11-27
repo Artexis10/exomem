@@ -26,7 +26,7 @@ MCP tool arguments, including user turns sent to `recall_context`, reach the aut
 
 Skills and the remote MCP connector carry the portable operating contract. This public directory package contains skills and a remote MCP connection, without lifecycle hooks.
 
-Lifecycle hooks are available in the full Evermatter plugin. They add automatic recall, capture checks and continuation on Claude Code and Cowork. To use it in Claude Code, run `/plugin install exomem-cloud --marketplace substrate-systems/evermatter` instead of installing this edition.
+Lifecycle hooks are available in the full Evermatter plugin. They add automatic recall, capture checks and continuation on Claude Code and Cowork. To use it in Claude Code, run `/plugin marketplace add substrate-systems/evermatter-plugins`, then `/plugin install evermatter@evermatter` instead of installing this edition.
 
 ## Release notes
 

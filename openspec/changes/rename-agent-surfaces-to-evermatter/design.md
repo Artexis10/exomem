@@ -95,7 +95,7 @@ Release C1 covers local installs:
 - The renamed plugin's SessionStart hook shows a notice naming the sign-in step once per install after the rename, when the plugin has a server address configured. The hook cannot see whether Claude Code holds a sign-in, because the hooks authenticate with their own local credential.
 - `setup --migrate` keeps the `exomem` key for a URL registration that points at the current Cloud host. That registration moves in C2 with the address, so its user signs in once.
 
-Release C2 renames `exomem-cloud` to `evermatter-cloud`, with server key `evermatter`, and moves its address to `https://mcp.evermatter.ai/mcp`. It ships only after the Cloud serves that host and accepts its token audience, and after the service notice has gone out.
+Release C2 renames `exomem-cloud` to `evermatter` in every Cloud edition and release asset, renames its server key to `evermatter`, and moves its address to `https://mcp.evermatter.ai/mcp`, all in one release (D6). In this repository's marketplace `evermatter` names the local plugin, so Claude Code installs the Cloud plugin as `evermatter@evermatter` from the separate marketplace `substrate-systems/evermatter-plugins`, whose one entry points at the hooked edition's folder. That needs no `renames` entry here; an `exomem-cloud@exomem` install stops updating, and its user installs the new plugin and signs in once. C2 ships only after all of these hold: the Cloud serves that host and accepts its token audience; substrate's `move-cloud-to-evermatter-hosts` task 4.8 has shipped, so the host names the evermatter.ai sign-in issuer; and the service notice has gone out.
 
 ## Risks / Trade-offs
 

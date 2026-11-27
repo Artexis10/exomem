@@ -30,10 +30,15 @@ Claude has three editions. The directory edition, `generated/claude`, contains
 skills, the remote MCP connection, the icon, README and LICENSE. The Claude
 directory refuses command hooks and non-text files from publishers that are not
 Verified organizations, so the build fails if a hook or another file type enters
-this edition. Its README names the install command for the hooked edition.
+this edition. Its README names the Claude Code install commands for the hooked edition.
 
-The hooked edition, `generated/claude-hooks`, is listed in the repository
-marketplace as `exomem-cloud`. It registers the release-owned retrieval, capture
+The hooked edition, `generated/claude-hooks`, is named `evermatter` like the
+directory edition. Claude Code installs it from the separate marketplace
+`substrate-systems/evermatter-plugins` (`/plugin install evermatter@evermatter`),
+whose one entry points at this folder on the main branch. It stays out of this
+repository's marketplace, where `evermatter` names the local plugin; `listed: false`
+in its identity keeps it out. In Claude and Cowork, the release asset
+`evermatter-claude-hooks.zip` uploads as a plugin. It registers the release-owned retrieval, capture
 and continuation hooks through `hooks/hooks.json`. The adapter copies canonical
 scripts byte-for-byte, passes `--client claude` and a writable plugin-local
 state home, and uses `--activation-mode mcp` for retrieval/capture. The hooks
@@ -60,7 +65,7 @@ The template keeps the release placeholder in its skills and manifest, and the
 server fills in its installed release, so a release cut leaves it unchanged.
 `scripts/cloud-plugin.py check` compares the packaged template with a fresh build.
 
-The two marketplace editions name themselves in `plugins/cloud/definition.json`
+The hooked and connector editions name themselves in `plugins/cloud/definition.json`
 under `edition_identities`. The hooked edition shows as "Evermatter" and the
 connector edition as "Evermatter (self-hosted)". Each description opens with the
 account it serves, so a person can choose from the listing alone. Claude
@@ -85,9 +90,12 @@ user-invocable workflows; additional command/agent copies are not required.
 The package version comes from the checked-out `pyproject.toml`, not an installed
 Python distribution. Regenerate when the release version, canonical skill,
 definition or `plugins/cloud/evals/cases.json` changes. Release Please regenerates
-the Cloud packages on its release branch. GitHub release assets include
-`exomem-cloud-claude.zip`, `exomem-cloud-openai.zip` and
-`exomem-cloud-release.json`. Verify their digests against the tagged source before
+the Cloud packages on its release branch. GitHub release assets carry
+the names that `release_assets` in `plugins/cloud/definition.json` sets:
+`evermatter-claude.zip`, `evermatter-claude-hooks.zip`, `evermatter-openai.zip` and
+`evermatter-release.json`. `release_asset_aliases` also uploads an archive under a
+former name while a published download link still uses it; remove the alias once
+the link moves. Verify their digests against the tagged source before
 uploading them to a directory.
 
 ## Native acceptance
@@ -248,7 +256,7 @@ After operator approval, use the existing OpenAI plugin:
 
 After operator approval, use the existing Claude listing:
 
-1. Confirm the tracked repository, branch and plugin folder; the existing submission remains identified.
+1. Confirm the tracked repository, branch and plugin folder `plugins/cloud/generated/claude`; the existing submission remains identified.
 2. Release the reviewed change through that tracked branch; the portal observes the intended new version.
 3. Inspect its validation, security findings and icon previews; the package contains no hooks or scripts.
 4. If the listing still shows an older icon, change the listing icon in the portal where it allows that; the package icon cannot change it.

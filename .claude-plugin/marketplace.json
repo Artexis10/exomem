@@ -28,11 +28,6 @@
       ]
     },
     {
-      "name": "exomem-cloud",
-      "source": "./plugins/cloud/generated/claude-hooks",
-      "category": "knowledge"
-    },
-    {
       "name": "evermatter-self-hosted",
       "source": "./plugins/cloud/generated/claude-connector-hooks",
       "category": "knowledge"
