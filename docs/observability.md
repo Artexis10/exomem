@@ -37,7 +37,7 @@ directory independently.
 | `archive/exomem-*.log`   | Prior sessions' `exomem.log`, archived (not deleted) on restart.  |
 
 Each JSONL file rotates at a size cap (`EVERMATTER_JSONL_MAX_MB`, default 64MB),
-keeping exactly one prior generation (`<file>.1`). `usage.py` and `exomem
+keeping exactly one prior generation (`<file>.1`). `usage.py` and `evermatter
 trace`/`evermatter logs` read both the live file and that generation. `ledger.jsonl`
 rotates differently — see below.
 `exomem.log`/`exomem-cli.log`/`exomem-media.log` use Python's standard

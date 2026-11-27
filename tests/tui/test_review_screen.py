@@ -57,7 +57,7 @@ async def test_studio_is_a_pointer_not_an_affordance(make_app):
         await _open(app, pilot)
         studio = " ".join(_text(app, "#review-studio").split())
         assert "Review Studio" in studio
-        assert "evermatter serve http" in studio and "/studio/" in studio
+        assert "evermatter --transport http" in studio and "/studio/" in studio
 
 
 async def test_dismiss_leaves_a_struck_receipt_in_place(make_app, fake_backend):

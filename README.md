@@ -41,7 +41,7 @@ vault: /tmp/exomem-demo-XXXXXX
 4. audit: PASS (0.0s)
 
 demo PASS — total 1.0s. This is your proof: agents search files you own.
-Next: connect your own vault with `exomem setup`
+Next: connect your own vault with `evermatter setup`
 ```
 
 Runs fully local and read-only against a sample vault bundled in the package.

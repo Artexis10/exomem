@@ -189,6 +189,6 @@ def require(command: str, vault_root: Path) -> None:
     if in_store_mode:
         raise StoreFenceRefusal(
             REFUSED,
-            f"`exomem {command}` works on pages, projections or file-mode indexes outside the service, "
+            f"`evermatter {command}` works on pages, projections or file-mode indexes outside the service, "
             f"and this vault keeps its pages in the collection store. {declared.remedy}",
         )

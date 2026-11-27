@@ -203,7 +203,7 @@ def render_oauth_fields(base_url: str) -> str:
         "Create a GitHub OAuth App — https://github.com/settings/developers",
         "  → OAuth Apps → New OAuth App — with these EXACT fields:",
         "",
-        "    Application name             exomem",
+        "    Application name             Evermatter",
         f"    Homepage URL                 {base_url}",
         f"    Authorization callback URL   {callback_url(base_url)}",
         "",

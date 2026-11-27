@@ -19,7 +19,7 @@ retrieval path and never writes vault files directly.
 The UI stack is an optional extra so lean and server installs never carry it:
 
     uv sync --extra tui              # source checkout
-    pip install 'exomem[tui]'        # package install
+    pip install 'evermatter[tui]'        # package install
 
 Without the extra, `evermatter tui` prints a one-line install hint and exits
 non-zero. Snapshot/interaction tests additionally need the dev group:
@@ -32,8 +32,8 @@ with status 2.
 
 ## Launch
 
-    exomem tui                       # uses $EVERMATTER_VAULT_PATH
-    exomem tui --vault /path/to/vault
+    evermatter tui                       # uses $EVERMATTER_VAULT_PATH
+    evermatter tui --vault /path/to/vault
 
 With no resolvable vault, first run opens.
 

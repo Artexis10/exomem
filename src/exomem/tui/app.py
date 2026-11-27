@@ -356,7 +356,7 @@ class ExomemTuiApp(App):
 
         self.push_screen(
             ConfirmModal(
-                "Quit exomem?",
+                "Quit Evermatter?",
                 "Everything saved is already written to your vault.\n"
                 "Anything still being typed here is not.",
                 "Quit",

@@ -50,7 +50,7 @@ you land on in step 4:
 
 | Field | Value |
 | --- | --- |
-| Application name | `exomem` |
+| Application name | `Evermatter` |
 | Homepage URL | `https://<host>` |
 | Authorization callback URL | `https://<host>/auth/callback` |
 

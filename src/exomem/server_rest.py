@@ -705,7 +705,7 @@ def register_rest_facade(
         return JSONResponse(
             {
                 "openapi": "3.1.0",
-                "info": {"title": "exomem personal REST facade", "version": "1.0.0"},
+                "info": {"title": "Evermatter personal REST facade", "version": "1.0.0"},
                 "components": {
                     "securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}},
                     "schemas": {

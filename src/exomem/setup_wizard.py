@@ -922,7 +922,7 @@ def run_setup(
     else:
         if route.transport == "stdio" and route.command[0] == "uvx":
             print_fn(
-                "  Note: exomem is not durably installed, so the server will be "
+                "  Note: Evermatter is not durably installed, so the server will be "
                 "registered as `uvx exomem`. For a registration that never "
                 "re-resolves, run `uv tool install exomem` first."
             )
@@ -1142,7 +1142,7 @@ def setup_main(argv: list[str]) -> int:
             f"{managed_root_rel()}, pick a "
             "search profile, run doctor, register with Claude Code, and install "
             "the skill — one idempotent command. Existing vault content is never "
-            f"touched; exomem writes only under {managed_join('')}. For remote "
+            f"touched; Evermatter writes only under {managed_join('')}. For remote "
             "connector setup (claude.ai / iOS), use `evermatter setup --remote`."
         ),
     )

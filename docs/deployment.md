@@ -222,7 +222,7 @@ At <https://github.com/settings/developers> → **OAuth Apps** → **New OAuth A
 
 | Field | Value |
 |---|---|
-| Application name | `exomem` |
+| Application name | `Evermatter` |
 | Homepage URL | `https://kb.example.com` |
 | Authorization callback URL | `https://kb.example.com/auth/callback` |
 
@@ -452,7 +452,7 @@ than resolving to a nearby unit; authored `^anchors` remain the stable reference
 mechanism. A full `maintain_memory(mode="fix", rebuild_embeddings=true)` rebuild
 is optional when exact vector regeneration is required.
 
-Upgrading by hand is the trap this replaces: `uv pip install --upgrade exomem[...]`
+Upgrading by hand is the trap this replaces: `uv pip install --upgrade evermatter[...]`
 ignores `[tool.uv.sources]` (only `uv sync` reads it), so it silently pulls the PyPI
 **CPU** torch wheel over the CUDA build and moves embeddings/media onto the CPU with
 no other symptom. `doctor` now fails on that state when an NVIDIA driver is present
@@ -867,7 +867,7 @@ admit the published store, because admitting it would lose that change:
 To finish the migration:
 
 1. Keep the Evermatter service stopped on every host that serves the vault.
-2. Run `EVERMATTER_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> exomem collections migrate --vault <vault> --apply`.
+2. Run `EVERMATTER_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> evermatter collections migrate --vault <vault> --apply`.
 3. If the apply reports `status: restored`, wait until the writer lease expires, then run step 2 again.
 4. If the apply reports `COLLECTION_STORE_SYNC_PENDING`, wait for the vault replica, start and stop the service once, then repeat step 2.
 5. If the apply reports `COLLECTION_STORE_DIVERGED`, run `evermatter collections adopt-local --vault <vault> --why "<reason>" --dry-run`, apply that preview with `--preview-id`, then run step 2 again.
@@ -1071,7 +1071,7 @@ operator credential, `EVERMATTER_LEASE_COORDINATOR_OPERATOR_TOKEN`, set.
 2. Preview the export: `evermatter collections export --vault <vault> --dry-run`
 3. If the verdict is `blocked`, resolve each collection that the preview names, then preview again.
 4. Note the `plan_id` value in the preview.
-5. Apply it: `EVERMATTER_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> exomem collections export --vault <vault> --plan-id <plan_id> --why "<reason>"`
+5. Apply it: `EVERMATTER_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> evermatter collections export --vault <vault> --plan-id <plan_id> --why "<reason>"`
 6. If the apply stops before it reports `exported`, run step 5 again with the same `plan_id`.
 7. If the apply reports `COLLECTION_STORE_EXPORT_STALE`, start again at step 2.
 8. If the apply reports `COLLECTION_STORE_COORDINATOR_UPGRADE_REQUIRED`, upgrade the coordinator, then start again at step 2.
@@ -1188,7 +1188,7 @@ abandons it, on this host and on every host that adopts the replica.
 To abandon an export:
 
 1. Keep the Evermatter service stopped on every host that serves the vault.
-2. Run `EVERMATTER_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> exomem collections export --vault <vault> --abandon --plan-id <plan_id> --why "<reason>"`.
+2. Run `EVERMATTER_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> evermatter collections export --vault <vault> --abandon --plan-id <plan_id> --why "<reason>"`.
 3. Start the Evermatter services. The services serve every store collection again.
 
 The command reports `abandoned`. The vault stays routed to the store, and the
@@ -1781,8 +1781,8 @@ Pick the strongest option that fits the situation:
 
 | Situation | Action |
 |---|---|
-| Suspect the GitHub OAuth grant is compromised | Revoke at <https://github.com/settings/applications> → find `exomem` → Revoke. claude.ai's token dies on the next call (the verifier hits `api.github.com/user` per request). |
-| Suspect the GitHub OAuth App secret leaked | Rotate the secret at <https://github.com/settings/developers> → `exomem` → "Generate a new client secret". Update `GITHUB_CLIENT_SECRET` in `.env`, restart the service. |
+| Suspect the GitHub OAuth grant is compromised | Revoke at <https://github.com/settings/applications> → find the app you named at setup (`Evermatter` by default; `exomem` if you created it earlier) → Revoke. claude.ai's token dies on the next call (the verifier hits `api.github.com/user` per request). |
+| Suspect the GitHub OAuth App secret leaked | Rotate the secret at <https://github.com/settings/developers> → your OAuth App (`Evermatter` by default; `exomem` if you created it earlier) → "Generate a new client secret". Update `GITHUB_CLIENT_SECRET` in `.env`, restart the service. |
 | Want to disconnect just claude.ai | Delete the connector in claude.ai → Settings → Connectors. |
 | Want to take the endpoint offline entirely | `tailscale funnel --https=443 off` (or stop the Cloudflare tunnel). The endpoint becomes unreachable from the public internet. |
 | Want to stop the service but leave the public URL configured | Stop the service (e.g. elevated `Start-Process -Verb RunAs -Wait sc.exe -ArgumentList 'stop','exomem'`). The tunnel stays up but proxies to nothing. |
@@ -2437,7 +2437,7 @@ the service, so day-to-day restarts don't need UAC:
 ```powershell
 sc.exe stop exomem
 sc.exe start exomem
-$logDir = ((exomem doctor --json | ConvertFrom-Json).checks | Where-Object { $_.id -eq 'observability' }).details.log_dir
+$logDir = ((evermatter doctor --json | ConvertFrom-Json).checks | Where-Object { $_.id -eq 'observability' }).details.log_dir
 Get-Content "$logDir\exomem.log" -Tail 6
 ```
 
@@ -2489,7 +2489,7 @@ sc.exe start exomem
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | claude.ai "Couldn't reach the MCP server" during connector add | OAuth discovery failed | `curl.exe -i https://<your-host>/.well-known/oauth-authorization-server` should return JSON (or run `evermatter doctor --profile remote --probe`, which checks this plus the bare well-known path). If 404, the OAuthProxy isn't mounted — most likely `EVERMATTER_BASE_URL` has a trailing slash or includes `/mcp`. |
-| GitHub redirects to "The redirect_uri MUST match…" error | OAuth App callback URL mismatch | At github.com/settings/developers → exomem, set the callback to exactly `https://<your-host>/auth/callback` (no trailing slash). |
+| GitHub redirects to "The redirect_uri MUST match…" error | OAuth App callback URL mismatch | At github.com/settings/developers → your OAuth App (`Evermatter` by default; `exomem` if created earlier), set the callback to exactly `https://<your-host>/auth/callback` (no trailing slash). |
 | GitHub: "The redirect_uri is not associated with this application" on a *second* machine | Reused another host's OAuth App client ID/secret (the app's one callback points at the other host) | Create a per-host OAuth App with callback `https://<this-host>.example.com/auth/callback`, put its client ID/secret in this `.env`, restart the service. See § Deploying on a second machine. |
 | claude.ai connector connects but every tool call returns 401 | Wrong GitHub user | `EVERMATTER_GITHUB_USERNAME` must equal the login of the GitHub account you authorized with. Check the exomem log for `rejecting token for github login=...`. |
 | Existing client receives one `401 invalid_token` after the durable-session cutover | Legacy FastMCP reference JWT is intentionally not dual-read | Complete one final login without deleting or changing the connector URL. If a durable session later gets 401, inspect it with `evermatter auth sessions`. |

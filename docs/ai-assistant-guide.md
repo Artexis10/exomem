@@ -516,7 +516,7 @@ Use Evermatter as the memory for my work. Before you start a task, recall what E
 The agent then recalls what Evermatter holds before a task and saves what it learns.
 The learning instruction is your own request, so it goes where the client reads
 your instructions. With the instruction block it is longer than a 1,500-character
-field, so where the client caps a field, give each text its own field. `exomem
+field, so where the client caps a field, give each text its own field. `evermatter
 setup` offers the same text for Claude Code (`CLAUDE.md`) and Codex
 (`AGENTS.md`). Leave it out at the `light` and `off` prominence levels: they save
 only when you ask.

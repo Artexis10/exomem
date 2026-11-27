@@ -119,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return _main(argv)
     except env_compat.SettingsConflict as conflict:
-        print(f"exomem: not run. {conflict}", file=sys.stderr)
+        print(f"evermatter: not run. {conflict}", file=sys.stderr)
         return 2
 
 
@@ -147,7 +147,7 @@ def _main(argv: list[str] | None) -> int:
         )
         if not drained:
             print(
-                "exomem: a graph rebuild did not finish before exit; the change is "
+                "evermatter: a graph rebuild did not finish before exit; the change is "
                 "committed and `evermatter reconcile` will bring the graph up to date",
                 file=sys.stderr,
             )
@@ -206,7 +206,7 @@ def _unsupported_platform_refusal(raw: list[str]) -> str | None:
         return None
     command = raw[0] if raw else "exomem"
     return (
-        f"exomem: {command} cannot run here. {support.reason}. "
+        f"evermatter: {command} cannot run here. {support.reason}. "
         "Run `evermatter doctor` for the full report."
     )
 
@@ -1177,7 +1177,7 @@ def _serve_main(argv: list[str]) -> int:
     except KeyboardInterrupt:
         return 130
     except Exception as e:  # noqa: BLE001 — top-level CLI guard: report and exit non-zero
-        print(f"exomem failed: {e}", file=sys.stderr)
+        print(f"evermatter failed: {e}", file=sys.stderr)
         return 1
     return 0
 
@@ -1267,7 +1267,7 @@ def _tui_main(argv: list[str]) -> int:
     if not _module_available("textual"):
         print(
             "evermatter tui needs the optional TUI stack: run `uv sync --extra tui` "
-            "(source checkout) or `pip install 'exomem[tui]'`, then retry.",
+            "(source checkout) or `pip install 'evermatter[tui]'`, then retry.",
             file=sys.stderr,
         )
         return 1
@@ -1536,7 +1536,7 @@ def _prominence_main(argv: list[str]) -> int:
     canonical = prom_mod.normalize(args.level)
     print(f"Prominence set to '{canonical}'  ({path})")
     print(f"  {prom_mod.CONTRACTS[canonical].summary}")
-    print("A running exomem server serves it to new sessions via bootstrap().")
+    print("A running Evermatter server serves it to new sessions via bootstrap().")
     print("Reinstall hooks (evermatter install-hook) to apply the matching nudge cadence.")
     return 0
 
@@ -1632,7 +1632,7 @@ def _mode_main(argv: list[str]) -> int:
         )
         return 1
     print(f"Compute mode set to '{persisted}'  ({path})")
-    print("A running exomem server applies it live within ~10s (or restart to apply now).")
+    print("A running Evermatter server applies it live within ~10s (or restart to apply now).")
     print("CLI ops (evermatter index / warm) use it on their next run.")
     return 0
 
@@ -1694,12 +1694,12 @@ def _dreamer_main(argv: list[str]) -> int:
         # A running worker re-reads the setting; a server started with the
         # dreamer off starts one from its config poll.
         print(
-            "A running exomem server whose worker is running applies it within one poll "
+            "A running Evermatter server whose worker is running applies it within one poll "
             "(about 30s); a server started with the dreamer off starts its worker within "
             "one config poll (about 10s)."
         )
     else:
-        print("A running exomem server applies it within one poll (about 30s).")
+        print("A running Evermatter server applies it within one poll (about 30s).")
     return 0
 
 
@@ -1807,7 +1807,7 @@ def _install_info_main(argv: list[str]) -> int:
 def _doctor_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="evermatter doctor",
-        description="Read-only local setup preflight for exomem installs.",
+        description="Read-only local setup preflight for Evermatter installs.",
     )
     parser.add_argument(
         "--vault",
@@ -2132,7 +2132,7 @@ def _warm_main(argv: list[str]) -> int:
             print(
                 "warm: the ML stack is not installed — this is a lean install. "
                 "Add it with `uv sync --extra embeddings` (source checkout) or "
-                "`pip install 'exomem[embeddings]'`, then re-run `evermatter warm`.",
+                "`pip install 'evermatter[embeddings]'`, then re-run `evermatter warm`.",
                 file=sys.stderr,
             )
             return 1
