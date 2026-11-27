@@ -98,11 +98,16 @@ def run(
     face_search.require_owner(vault_root)
     if action == "status":
         return status(vault_root, page=page, limit=limit, cursor=cursor)
-    if action == "set":
-        return change_setting(vault_root, state=state, thresholds=thresholds)
     if action == "delete":
         return delete(vault_root)
-    return change_name(vault_root, group=group, person=person, face=face, name=name, clear=clear)
+    try:
+        if action == "set":
+            return change_setting(vault_root, state=state, thresholds=thresholds)
+        return change_name(vault_root, group=group, person=person, face=face, name=name, clear=clear)
+    except sqlite3.OperationalError:
+        raise  # Busy or locked: the store is readable, and the caller retries.
+    except sqlite3.DatabaseError as error:
+        raise face_search.faces_unreadable(error) from error
 
 
 # --- status ---------------------------------------------------------------------------------------
@@ -384,9 +389,10 @@ def delete(vault_root: Path) -> dict[str, Any]:
         # On Windows a media child keeps its store connections, and so the files, open until it exits idle.
         minutes = max(1, math.ceil(media_worker.idle_seconds_setting() / 60))
         sentence = (f"Faces are off, but the delete is partial: {', '.join(remaining)} could not be removed. "
-                    "Repeat faces.delete to finish it. If it stays partial, the media worker still holds the "
-                    f"files: repeat it once no picture has been processed for {minutes} "
-                    f"minute{'s' if minutes != 1 else ''}, when the worker closes them.")
+                    "Repeat faces.delete to finish it. If it stays partial, a running Exomem process still holds "
+                    f"the files: repeat it once no picture has been processed for {minutes} "
+                    f"minute{'s' if minutes != 1 else ''}, when the media worker closes them, or after the "
+                    "service restarts if it still stays partial.")
     else:
         sentence = "Faces are off, and every face, group and name in this account's face store is deleted."
     return {

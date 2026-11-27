@@ -404,6 +404,21 @@ def test_status_on_a_face_index_this_release_cannot_open_names_it_and_points_to_
     assert "faces.delete" in status["next_action"]
 
 
+def test_naming_on_a_damaged_face_index_is_refused_and_points_to_delete(doors, vault) -> None:
+    """Catches a raw database error from faces.name or faces.set instead of the fix the owner needs."""
+    seed_two_people_and_strangers(vault)
+    index_file = face_store.index_path(vault)
+    index_file.write_bytes(b"not a database, just bytes" * 200)
+    for suffix in ("-wal", "-shm"):
+        Path(f"{index_file}{suffix}").unlink(missing_ok=True)
+
+    reply = doors("manage_memory", "faces.name", {"person": "Ada Fixture", "name": "Ada Renamed"})
+
+    error = reply.get("error") or reply
+    assert error.get("code") == "FACES_UNREADABLE", reply
+    assert "faces.delete" in str(error), reply
+
+
 def test_the_delete_result_and_status_name_what_the_delete_cannot_reach_and_when_it_ends(doors, vault) -> None:
     """Catches a delete that lets the owner believe no copy of their face data remains anywhere."""
     seed_two_people_and_strangers(vault)

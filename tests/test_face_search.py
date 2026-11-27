@@ -186,6 +186,19 @@ def test_with_faces_off_a_person_search_is_refused_and_names_how_to_turn_faces_o
     assert "faces.set" in error["message"]
 
 
+def test_a_damaged_face_index_refuses_a_person_search_and_points_to_the_fix(wire, album, vault) -> None:
+    """Catches a raw database error reaching the agent instead of a refusal it can relay."""
+    index_file = face_store.index_path(vault)
+    index_file.write_bytes(b"not a database, just bytes" * 200)
+    for suffix in ("-wal", "-shm"):
+        Path(f"{index_file}{suffix}").unlink(missing_ok=True)
+
+    error = refused(wire({"query": "", "people": ["Ada Fixture"]}))
+
+    assert error["code"] == "FACES_UNREADABLE", error
+    assert "faces.delete" in error["message"]
+
+
 def test_when_the_face_models_cannot_run_a_person_search_is_refused_as_unavailable(wire, album, vault) -> None:
     """Catches a silent fallback that shows photos of other people."""
     with closing(face_store.connect_index(vault)) as index:

@@ -13,6 +13,7 @@ repeat to the owner and names the fix, and a refused restriction never falls bac
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -71,6 +72,19 @@ class Restriction:
     generation: str
 
 
+def faces_unreadable(error: sqlite3.DatabaseError) -> OpError:
+    """A face store this release cannot read: damaged, or written by a newer release."""
+    newer = isinstance(error, face_store.NewerStore)
+    cause = "a newer release of Exomem wrote it" if newer else "it is damaged"
+    return OpError(
+        "FACES_UNREADABLE",
+        f"The face data cannot be read: {cause}, so nothing ran.",
+        "Search without people for now. faces.status explains the fix; the owner erases the face data with "
+        "faces.delete and turns faces on again.",
+        details={"error": str(error)},
+    )
+
+
 def admit(vault_root: Path, people: Sequence[str]) -> Restriction:
     """Check the caller, the face setting and availability for a search with `people`.
 
@@ -82,7 +96,12 @@ def admit(vault_root: Path, people: Sequence[str]) -> Restriction:
     refusal = face_store.deployment_refusal()
     if refusal is not None:
         raise faces_unavailable(refusal)
-    setting = face_store.read_setting(vault_root)
+    try:
+        setting = face_store.read_setting(vault_root)
+    except sqlite3.OperationalError:
+        raise  # Busy or locked: the store is readable, and the caller retries.
+    except sqlite3.DatabaseError as error:
+        raise faces_unreadable(error) from error
     if setting is None or not setting.enabled:
         raise faces_off()
     reason = face_store.unavailable_reason(setting)
@@ -98,7 +117,12 @@ def pages(vault_root: Path, restriction: Restriction, people: Sequence[str]) -> 
     A video matches through its keyframes and returns as the video's page. Refuses a name no person has
     with `UNKNOWN_PERSON`.
     """
-    found = face_groups.person_pages(vault_root, restriction.names)
+    try:
+        found = face_groups.person_pages(vault_root, restriction.names)
+    except sqlite3.OperationalError:
+        raise
+    except sqlite3.DatabaseError as error:
+        raise faces_unreadable(error) from error
     unknown = [name.strip() for name in people if face_store.fold_name(name.strip()) not in found]
     if unknown:
         named = face_groups.named_people(vault_root, limit=LISTED_PEOPLE)

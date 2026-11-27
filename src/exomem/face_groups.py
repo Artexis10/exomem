@@ -88,7 +88,11 @@ def policy() -> dict[str, Any]:
 
 
 def ranges() -> dict[str, tuple[float, float]]:
-    """Each setting's lowest and highest allowed value from the policy record; no upper bound is infinity."""
+    """Each setting's lowest and highest allowed value from the policy record; no upper bound is infinity.
+
+    A value outside its range (a similarity above 1, a score above 1) would silently stop all grouping or
+    storage. Refusing it rejects no meaningful value and costs the owner one error message naming the range.
+    """
     return {
         name: (float(low), math.inf if high is None else float(high))
         for name, (low, high) in ((name, entry["range"]) for name, entry in policy().items())
