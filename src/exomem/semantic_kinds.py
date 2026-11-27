@@ -40,6 +40,10 @@ KIND_TRAITS = frozenset(
         "position",
         # The kind a supersede uses when the caller names none: the one admitted kind carrying it.
         "replacement",
+        # The kind a dated observation takes when the caller names none: a compact unit carries no
+        # metadata rows, so `as_of` or `until` with no `kind` writes the one kind carrying it. Only
+        # the shipped pack sets it, so every vault has exactly one such kind.
+        "dated_default",
     )
 )
 

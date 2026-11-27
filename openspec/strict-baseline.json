@@ -499,6 +499,8 @@
     "too-long change/declare-collection-capture-methods/command-surface :: Compiled and Evidence writes may return one advisory Records routing hint",
     "too-long change/declare-collection-capture-methods/context-activation :: A routed collection serves its declared capture method",
     "too-long change/declare-collection-capture-methods/structured-collections :: A collection manifest may declare one capture method",
+    "too-long change/default-dated-observations-to-a-rich-kind/existing-edit-review-handshake :: Review Intent Is Non-Circular During Validation",
+    "too-long change/default-dated-observations-to-a-rich-kind/semantic-write-contract :: Reviewed-None Creation Is Logically Atomic, Crash-Recoverable, And Content-Bound",
     "too-long change/deliver-capture-reminder-next-turn/agent-bootstrap-contract :: The client capture reminder can be delivered on the session's next prompt",
     "too-long change/deliver-session-context-and-skills/agent-prominence-control :: Recall is asked for per new subject",
     "too-long change/deliver-session-context-and-skills/retrieve-inject-hook :: Native activation injects changed session context",
