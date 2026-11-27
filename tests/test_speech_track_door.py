@@ -22,6 +22,7 @@ from exomem import (
     commands,
     extract,
     media_jobs,
+    media_processing,
     media_worker,
     onnx_asr_runtime,
     preserve,
@@ -196,6 +197,22 @@ def test_a_declaration_reaches_the_worker_and_the_published_page_keeps_it(
     work(vault, execution_mode)
 
     assert engine.asked == [PINNED]
+    assert pinned(sidecar) == PINNED
+
+
+def test_a_recording_whose_bytes_change_keeps_its_declaration_and_is_read_by_its_tracks_again(
+    vault: Path, engine: Engine
+) -> None:
+    relative, binary, sidecar = recording(vault, "interview.m4a")
+    commands.op_process_media(vault, path=relative, operation="process", tracks=HOST_AND_GUEST)
+    work(vault)
+
+    binary.write_bytes(b"the same interview, re-exported")
+    media_processing.reconcile_media(vault, binary)
+
+    assert pinned(sidecar) == PINNED
+    work(vault)
+    assert engine.asked == [PINNED, PINNED]
     assert pinned(sidecar) == PINNED
 
 

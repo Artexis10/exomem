@@ -1931,6 +1931,8 @@ def _render_pending_sidecar(
         rendered = preserve._set_frontmatter_field(rendered, "exomem_id", existing_id)
     if original is not None:
         rendered = preserve.set_diarize_pin(rendered, preserve.diarize_pin(original))
+        # The tracks are a declaration, not an extraction fact: new bytes keep them, as an upload does.
+        rendered = preserve.set_speech_tracks_pin(rendered, preserve.declared_speech_tracks(original))
     rendered = _set_fields(rendered, _pending_fields(provenance))
     if preserved_notes:
         rendered = (
