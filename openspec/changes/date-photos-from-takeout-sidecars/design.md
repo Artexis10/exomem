@@ -32,22 +32,20 @@ These are vendor facts that change as Google changes, so they live in the regist
 
 The container is one JSON object of at most 1 MiB, read whole. A larger file is not opened. An album's `metadata.json` has no `photoTakenTime`, so it is not recognised.
 
-The parser derives no files. At the start of `file`, it runs one pass over the stage's recognised sidecars. The pass has one state entry, uses the expansion slice budget, and resumes from its last row. It appends one row per sidecar with:
-- the sidecar's path;
-- the paired media path, or none;
-- the outcome;
-- the time and the caption it carries.
+The parser derives no files. At the start of `file`, it runs one pass over the stage's recognised sidecars. The pass has one state entry, uses the expansion slice budget and resumes from its last row. It appends one row per sidecar, holding the sidecar's path, its name key (Decision 2, steps 1 and 3), and the time and the caption it carries. A row never holds a position.
 
-A row never holds a position. A sidecar row is not a derived file and adds nothing to the stage total. Each sidecar counts once, as a staged member that is left out.
+**Photos wait for the pass.** While the pass runs, the stage's images and videos stay out of selection, the same way an export that is still being read stays out today. When the pass ends, it decides every pair in the stage in one step from its rows (Decision 2, step 4) and records the pairs. Only then do the photos file, each carrying its pair's time and caption on its planned item. The cost is a delay: photos start filing after the pass, which reads about a kilobyte per sidecar.
+
+A sidecar row is not a derived file and adds nothing to the stage total. Each sidecar counts once, as a staged member that is left out. Its reason is worked out when filing reaches done, from its photo's filing result (Decision 5).
 
 ## Decision 2: pair one to one, by name and by title together
 
-Names are compared exactly after NFC normalisation. Candidates are the images and videos in the sidecar's own staged folder.
+Names are compared exactly after NFC normalisation, without their copy numbers, which are compared separately. Candidates are the images and videos in the sidecar's own staged folder.
 
 1. **From the sidecar's name.** Strip `.json`, a copy number `(n)` before it, and the suffix word or any cut form of it. What remains is the base. The base may carry its own copy number before its extension.
-2. **By name.** A media file fits when its name equals the base, or when the base is the media name cut at the point where the sidecar name reached its limit. A copy number must agree too: when the sidecar has one, in either place, the media name has the same one, and when the sidecar has none, the media name has none.
+2. **By name.** A media file fits when its stem equals the base's stem, or the base's stem is the media stem cut where the sidecar name reached its limit, and both extensions name the same media type. A copy number must agree too: when the sidecar has one, in either place, the media name has the same one, and when the sidecar has none, the media name has none. A `(n)` that is part of the name itself (`photo (1).jpg`) is read both ways, and the reading that the title confirms is used.
 3. **By title.** The media name without its copy number must agree with `title`. Apply the replaced characters and the media-name limit to the title first, compare the stems, and require that both extensions name the same media type.
-4. **One to one.** A sidecar pairs only when exactly one file fits it, and that file fits no other sidecar. In every other case, each sidecar involved stays unpaired with a reason: `no-photo` or `ambiguous`.
+4. **One to one.** When the pass ends, a sidecar pairs only when exactly one file fits it and that file fits no other sidecar in the stage. In every other case, each sidecar involved stays unpaired with a reason: `no-photo` or `ambiguous`.
 
 The copy-number and suffix-cut forms are read with one regex built from the registry's suffix word. Its one-line reason in code names the vendor's naming format. Task 1.1 tests the forms that TakeoutExtractor and GPTH Neo document, not invented ones.
 
@@ -60,18 +58,18 @@ The copy-number and suffix-cut forms are read with one regex built from the regi
 ## Decision 4: rank below every read of the picture, and keep the date
 
 - **Rank.** `capture-date-sources.yaml` gains `export-sidecar`, with `class: evidence` and `producer: export-sidecar`, placed last among the evidence entries, after `file-name`. A camera time, a matched original or a file name therefore always wins. Recovery still tries to match these photos. An owner who changed a date in Google Photos loses that edit when the file states its own time. This is a decision: the file's own statement wins.
-- **Write.** Filing writes the time into the paired photo's capture record. It sets `capture_date_source: export-sidecar`, `capture_date_basis: utc`, and `capture_date_matched_from` set to the sidecar's path in the export, so a wrong pair can be audited. No separate page field holds the time.
+- **Write.** Filing writes the photo's Source page, which is also its media sidecar, so it writes the time into that page's capture record. It sets `capture_date_source: export-sidecar`, `capture_date_basis: utc`, and `capture_date_matched_from` set to the sidecar's path in the export, so a wrong pair can be audited. No separate page field holds the time. The owner backfill's list of matches (`matched_listed`) is chosen by `capture_date_source: matched-original`, not by the presence of `capture_date_matched_from`.
 - **Survival.** `capture_dates.survives_extraction` stops naming `perceptual-match`. It reads a closed pack attribute, `reread: false`, that marks the sources that no re-read can reproduce: `matched-original` and `export-sidecar`. Every writer (the media worker, the owner backfill and recovery) already goes through it, so each keeps the date unless it reads a source of higher precedence.
 
 ## Decision 5: honest counts
 
-The filing view counts each recognised sidecar in `left_out`, under one of these reasons:
+When filing reaches done, the filing view counts each recognised sidecar in `left_out`, under one of these reasons, from its photo's filing result:
 - `IMPORT_SIDECAR_APPLIED`: the photo filed, and a time or a caption was applied;
 - `IMPORT_SIDECAR_EMPTY`: the photo filed, but the sidecar carried nothing (no usable time and no caption);
 - `IMPORT_SIDECAR_PHOTO_NOT_FILED`: the photo was skipped as already imported, or it failed;
 - `IMPORT_SIDECAR_UNPAIRED`: no file, or more than one, fits the sidecar. The view lists these by path.
 
-Skipped times are counted within `APPLIED` and `EMPTY`.
+Within `APPLIED`, the view also counts the photos that received a date and those that received a caption. Across `APPLIED` and `EMPTY`, it counts the times skipped as upload times.
 
 ## Scale
 

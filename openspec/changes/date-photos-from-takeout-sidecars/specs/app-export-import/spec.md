@@ -1,5 +1,19 @@
 ## MODIFIED Requirements
 
+### Requirement: A registry declares each recognised export format
+
+The `source-formats` registry SHALL declare each recognised format as a shipped pack with a vault overlay. Each entry SHALL carry `file_glob`, a closed `parser` value that code implements, and the facts and words its parser needs: `item_kind` for a parser that derives items, `item_keys`, `root`, `label_header`, `skip_labels`, the naming facts of a sidecar parser, `roles`, `untitled`, `attachment` and `words`. An entry lacking a fact its parser needs, or naming an unimplemented `parser`, SHALL be refused. An overlay MAY retire an entry or change its words and `skip_labels`; a shipped entry's recognition facts SHALL stay fixed.
+
+#### Scenario: A vault retires a format
+
+- **WHEN** the vault overlay retires the ChatGPT entry
+- **THEN** a ChatGPT export files as one ordinary file and nothing is derived from it
+
+#### Scenario: An overlay names an unknown parser
+
+- **WHEN** a vault overlay adds an entry whose `parser` is not implemented
+- **THEN** the registry refuses that entry and keeps the others
+
 ### Requirement: An export is recognised by its name pattern and its items' keys
 
 A staged member SHALL be recognised only when its name matches an entry's `file_glob` and its content matches what the entry's parser reads: a JSON array whose first item carries every key in `item_keys`, an XML document whose root element is `root`, an mbox whose first line starts with `From `, or a JSON object of at most 1 MiB that carries every key in `item_keys`. A file that an expansion wrote SHALL never be recognised. Code SHALL branch only on `parser`.
@@ -51,8 +65,8 @@ A recognised Takeout sidecar SHALL pair with an image or video in its own staged
 
 #### Scenario: Duplicates with the copy number in either place
 
-- **WHEN** a folder holds `IMG.jpg`, `IMG(1).jpg`, `IMG.jpg.json` and `IMG(1).jpg.supplemental-metadata.json`, both sidecars titled `IMG.jpg`
-- **THEN** each sidecar pairs with its own photo, and neither photo receives the other's time or caption
+- **WHEN** a folder holds `IMG.jpg`, `IMG(1).jpg`, `IMG(2).jpg`, `IMG.jpg.json`, `IMG.jpg(1).json` and `IMG(2).jpg.supplemental-metadata.json`, every sidecar titled `IMG.jpg`
+- **THEN** each sidecar pairs with its own photo, and no photo receives another's time or caption
 
 #### Scenario: A long name cut by Takeout
 
@@ -66,7 +80,7 @@ A recognised Takeout sidecar SHALL pair with an image or video in its own staged
 
 ### Requirement: A Takeout sidecar is counted by its outcome, never filed
 
-A recognised sidecar SHALL never file as a Source. The filing view SHALL count it in `left_out` under exactly one reason: `IMPORT_SIDECAR_APPLIED` (its photo filed and received a time or caption), `IMPORT_SIDECAR_EMPTY` (its photo filed and it carried nothing), `IMPORT_SIDECAR_PHOTO_NOT_FILED` (its photo was skipped or failed), or `IMPORT_SIDECAR_UNPAIRED` (listed by path). It SHALL NOT add to the stage total as a derived file.
+A recognised sidecar SHALL never file as a Source. When filing reaches done, the filing view SHALL count each sidecar in `left_out` under exactly one reason, from its photo's filing result: `IMPORT_SIDECAR_APPLIED` (its photo filed and received a time or caption), `IMPORT_SIDECAR_EMPTY` (its photo filed and it carried nothing), `IMPORT_SIDECAR_PHOTO_NOT_FILED` (its photo was skipped or failed), or `IMPORT_SIDECAR_UNPAIRED` (listed by path). It SHALL NOT add to the stage total as a derived file.
 
 #### Scenario: A Takeout album
 
@@ -82,6 +96,15 @@ A recognised sidecar SHALL never file as a Source. The filing view SHALL count i
 
 - **WHEN** the same Takeout is imported again unchanged
 - **THEN** every photo is skipped as already imported, no JSON Source files, and every sidecar counts as `IMPORT_SIDECAR_PHOTO_NOT_FILED`
+
+### Requirement: Photos wait for their sidecars
+
+The images and videos of a stage that holds recognised sidecars SHALL stay out of selection until every sidecar in the stage is read and the pairs are decided. Each paired photo SHALL then file with its sidecar's time and caption.
+
+#### Scenario: A Takeout larger than one call's budget
+
+- **WHEN** a stage holds more sidecars than one `file` call reads
+- **THEN** no photo files before every sidecar is read, and every paired photo carries its sidecar's time and caption
 
 ### Requirement: The owner's caption is kept on the photo
 
