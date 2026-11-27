@@ -23,7 +23,10 @@ from exomem import (
     speech_attach,
     speech_session,
 )
+from exomem import find as find_module
 from exomem.cli_ops import OpError
+from exomem.governance import egress, membership, policy
+from exomem.governance.principal import RequestPrincipal, library_scope, request_scope
 from exomem.vault import parse_frontmatter
 
 RATE = 48000
@@ -282,3 +285,112 @@ def test_a_title_that_names_another_page_is_refused_and_the_page_is_not_touched(
         group(vault, {"Host": host, "Guest": guest})
 
     assert taken.read_text(encoding="utf-8").endswith("My own page.\n")
+
+
+
+# A session page copies its members' text, so it is never more readable than any one member.
+
+SCOPE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+RULE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FB0"
+HOST_TURNS = [{"start": 0.0, "end": 4.0, "label": "SPEAKER_00"}]
+
+
+def clear_governance_caches() -> None:
+    policy._CACHE.clear()
+    membership.clear_memo()
+    egress.clear_decision_memo()
+    find_module.clear_cache()
+
+
+def restrict(vault: Path, *paths: str) -> None:
+    """Make `paths` (relative to the Knowledge Base) one governance scope, of which `client-a` may read nothing."""
+    root = vault / "Knowledge Base" / "_Governance"
+    (root / "scopes").mkdir(parents=True, exist_ok=True)
+    (root / "rules").mkdir(parents=True, exist_ok=True)
+    quoted = ", ".join(f'"{path}"' for path in paths)
+    (root / "scopes" / "private.yaml").write_text(
+        f"governance_version: 1\nid: {SCOPE_ID}\nname: Private\npaths: [{quoted}]\n", encoding="utf-8"
+    )
+    (root / "rules" / "private-client-a.yaml").write_text(
+        f'governance_version: 1\nid: {RULE_ID}\nscope_ids: ["{SCOPE_ID}"]\naudience: client-a\nceiling: 0\n', encoding="utf-8"
+    )
+    clear_governance_caches()
+
+
+def lift_restriction(vault: Path) -> None:
+    for name in ("scopes/private.yaml", "rules/private-client-a.yaml"):
+        (vault / "Knowledge Base" / "_Governance" / name).unlink()
+    clear_governance_caches()
+
+
+def client_a_is_released(vault: Path, session_path: str, phrase: str) -> tuple[bool, bool]:
+    """Whether the caller `client-a` reads `phrase` on the session page, and is shown the page by a search for it."""
+    with request_scope(RequestPrincipal(audience_id="client-a", surface="mcp")):
+        try:
+            read = phrase in str(commands.op_read_memory(vault, path=session_path))
+        except ValueError:  # a page that the caller may not read is not found for that caller
+            read = False
+        listed = session_path in str(commands.op_find(vault, query=phrase, limit=10))
+    return read, listed
+
+
+def test_a_recording_that_a_reader_of_the_page_could_not_read_is_refused_and_no_page_is_written(vault: Path) -> None:
+    host = recording(vault, "host.wav", HOST_SEGMENTS)
+    guest = recording(vault, "guest.wav", GUEST_SEGMENTS)
+    restrict(vault, "Evidence/Audio/host.wav*")
+
+    with library_scope(), pytest.raises(OpError, match=r"SESSION_MEMBER_MORE_RESTRICTED.*track 'Host'.*Notes/Sessions/\*\*"):
+        group(vault, {"Host": host, "Guest": guest})
+
+    assert not (vault / "Knowledge Base" / "Notes" / "Sessions").exists()
+
+
+def test_a_session_page_in_the_scope_of_its_restricted_member_is_grouped_and_released_to_no_one_the_scope_bars(
+    vault: Path,
+) -> None:
+    host = recording(vault, "host.wav", HOST_SEGMENTS)
+    guest = recording(vault, "guest.wav", GUEST_SEGMENTS)
+    restrict(vault, "Evidence/Audio/host.wav*", "Notes/Sessions/**")
+
+    with library_scope():
+        reply = group(vault, {"Host": host, "Guest": guest})
+
+    assert reply["outcome"] == "grouped" and "Welcome to the show." in read(vault, reply["session_path"])[1]
+    assert client_a_is_released(vault, reply["session_path"], "Welcome to the show.") == (False, False)
+    assert client_a_is_released(vault, reply["session_path"], "Thanks for having me.") == (False, False)
+
+
+def test_a_member_that_becomes_more_restricted_loses_its_text_from_the_page_at_the_next_refresh(vault: Path) -> None:
+    host = recording(vault, "host.wav", HOST_SEGMENTS, turns=HOST_TURNS)
+    guest = recording(vault, "guest.wav", GUEST_SEGMENTS)
+    ours = group(vault, {"Host": host, "Guest": guest})["session_path"]
+    assert client_a_is_released(vault, ours, "Welcome to the show.") == (True, True)
+    restrict(vault, "Evidence/Audio/host.wav*")
+
+    with library_scope():
+        renamed = commands.op_process_media(vault, path=host, operation="rename-speakers", renames={"Speaker A": "Alice"})
+
+    assert client_a_is_released(vault, ours, "Welcome to the show.") == (False, False)
+    assert renamed["sessions"] == {"updated": [ours], "withheld": [ours]}
+    # The page withholds the one track; the other recording's words are still the page's.
+    assert client_a_is_released(vault, ours, "Thanks for having me.") == (True, True)
+    assert "text withheld" in read(vault, ours)[1].split("## Transcript", 1)[0]
+    # Once the recording is no more restricted than the page, a repeat of the call puts its text back.
+    lift_restriction(vault)
+    with library_scope():
+        assert group(vault, {"Host": host, "Guest": guest})["outcome"] == "regrouped"
+    assert "[0:00] [Host: Alice]: Welcome to the show." in read(vault, ours)[1]
+
+
+def test_a_member_that_an_access_file_excludes_loses_its_text_from_the_page_at_the_next_refresh(vault: Path) -> None:
+    host = recording(vault, "host.wav", HOST_SEGMENTS, turns=HOST_TURNS)
+    guest = recording(vault, "guest.wav", GUEST_SEGMENTS)
+    ours = group(vault, {"Host": host, "Guest": guest})["session_path"]
+    (vault / "Knowledge Base" / "_access.yaml").write_text("excluded:\n  - Evidence/Audio/guest.wav.md\n", encoding="utf-8")
+
+    renamed = commands.op_process_media(vault, path=host, operation="rename-speakers", renames={"Speaker A": "Alice"})
+
+    assert renamed["sessions"] == {"updated": [ours], "withheld": [ours]}
+    body = read(vault, ours)[1]
+    assert "Welcome to the show." in body and "Thanks for having me." not in body
+
