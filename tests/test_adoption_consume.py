@@ -442,6 +442,22 @@ def test_a_finish_that_removed_copies_leaves_its_checks_to_the_next_call_which_h
     assert "stop_reason" not in checking and checking["finish"]["recall_check"] and checking["finish"]["consumed"] == 3
 
 
+def test_a_finish_repeated_on_a_finished_page_returns_the_finished_reply_not_a_phase_error(tmp_path: Path) -> None:
+    """Catches a retry of the completing call, with a new key or after the replay window, answered "got 'done'. Nothing was saved."."""
+    vault = _vault(tmp_path)
+    notes = {f"note-{n}.md": f"# Note {n}\n\nInvented note {n}.\n".encode() for n in range(3)}
+    staged = _stage(tmp_path, vault, notes)
+    run_id, _plan_id, _reply = _adopt(vault, staged["start_path"])
+    removing = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    completing = adoption_run.finish(vault, run_id=run_id, continuation=removing["continuation"], today=TODAY)
+    assert completing["phase"] == "done"
+
+    retried = adoption_run.finish(vault, run_id=run_id, continuation=removing["continuation"], today=TODAY)
+    bare = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+
+    assert retried == completing and bare == completing
+
+
 def _twelve_filed_notes(tmp_path: Path) -> tuple[Path, str]:
     vault = _vault(tmp_path)
     notes = {f"note-{n:02d}.md": f"# Note {n}\n\nInvented note {n}.\n".encode() for n in range(12)}

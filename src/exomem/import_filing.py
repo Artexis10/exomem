@@ -398,7 +398,8 @@ class Filer:
                 return False
             earlier = _counts(record.get("progress"))
             if earlier is not None and _handled(counts) < _handled(earlier):
-                # An agent that repeats an earlier call is answered with that call's stored reply, which is behind the record.
+                # A repeated agent call returns its stored reply, which is behind the record; if the handled count
+                # genuinely fell, the view would keep the higher counts while the agent files.
                 return False
             record["progress"] = counts
             _add_rate_sample(record, counts)

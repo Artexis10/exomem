@@ -110,8 +110,13 @@ STOP_FOR_TAIL = "finish_check_next_call"
 
 
 def _unfinished_sentence(action: str) -> str:
-    """The lead of a `plan` or `finish` reply that ended before its end: the person reads it, and the agent acts on it."""
-    return f"The import's {action} step has not finished: call {action} again with the continuation until it has."
+    """The lead of a `plan` or `finish` reply that ended before its end, which the agent repeats to the person.
+
+    It states the outcome only, in place of the generic "Saved" lead; the call to make again is in `next_actions`.
+    """
+    return f"The import's {action} step has not finished yet."
+
+
 # An item loop (`plan`, the removal of staged copies in `finish`) that a waiting writer interrupts first works this
 # long. A call pays a fixed cost before its first item (the read of the earlier imports, the saved run, the reply), and
 # an item costs milliseconds, so two import calls that yield to each other after one item each would pay that cost
@@ -4853,6 +4858,8 @@ def _consume_filed_text(
     turn_began = time.monotonic()
     for planned in (run.get("plan") or {}).get("items") or []:
         outcome = outcomes.get(planned["original_path"])
+        # A copy that `stays` is final for the run: one held by a for-now filesystem refusal makes the person review a
+        # file that is fine, as when `finish` ran once.
         if (
             planned["form"] != "text" or outcome is None or outcome.get("consumed") or outcome.get("stays")
             or outcome.get("status") not in _APPLIED_STATUSES
@@ -4895,6 +4902,10 @@ def finish(
     store = AdoptionRunStore(root)
     with _LOCK:
         run = store.load_for_update(run_id)
+        if run["phase"] == "done":
+            # A retry of the call that finished the page (a new key, or after the replay window) and a bare `finish` on a
+            # finished page get the recorded result; nothing runs again, so repeating the call costs nothing.
+            return _present(root, run, coverage=(run.get("finish") or {}).get("coverage"))
         if run["phase"] not in _FINISH_PHASES:
             raise AdoptionRunError(
                 "INVALID_PHASE", f"finish requires phase 'applied' or 'partial', got {run['phase']!r}"

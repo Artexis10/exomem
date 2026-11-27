@@ -238,6 +238,26 @@ def _slowed(monkeypatch: pytest.MonkeyPatch, module, name: str, seconds: float, 
     monkeypatch.setattr(module, name, slow)
 
 
+def _held_until_a_writer_waits(monkeypatch: pytest.MonkeyPatch, module, name: str, root: Path, *, running: threading.Event) -> None:
+    """Hold the first call of `module.name` until a writer waits for the boundary, and say when it starts.
+
+    It waits for the writer's arrival, not for a time, so a slow machine only makes the test slower.
+    """
+    real = getattr(module, name)
+    held = threading.Event()
+
+    def hold(*args, **kwargs):
+        running.set()
+        if not held.is_set():
+            held.set()
+            deadline = time.monotonic() + 30
+            while not adoption_run._writer_waits(root) and time.monotonic() < deadline:
+                time.sleep(0.02)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(module, name, hold)
+
+
 async def _file(client: Client, key: str, staged: str, continuation: str | None = None) -> dict:
     """One `imports.file` call under its own idempotency key; the reply is what the agent reads."""
     operation = {"kind": "file", "path": staged, **({"continuation": continuation} if continuation else {})}
@@ -478,7 +498,9 @@ def test_an_agent_that_follows_the_skills_step_path_reaches_done_though_each_ste
 
     assert finished["phase"] == "done" and "residual" in finished["finish"], finished
     for reply in (reply for reply in stopped if reply["phase"] in {"applied", "partial"}):
+        # The lead is an outcome the agent repeats to the person; the call to make again is in `next_actions`.
         assert "finish" in reply["user_summary"] and not reply["user_summary"].startswith("Saved"), reply
+        assert "continuation" not in reply["user_summary"], reply
         assert any("continuation" in action["description"] for action in reply["next_actions"]), reply
     assert any(reply["phase"] == "applied" for reply in stopped), "finish never ended early, so nothing was proved"
 
@@ -580,10 +602,19 @@ def test_a_file_call_that_read_an_export_ends_before_it_scans_so_the_scan_has_a_
     assert reply["filing"] == "done" and reply["progress"]["filed"] == len(conversations) + 2, reply
     assert sum(read_in_call.values()) == len(conversations)
     assert not any(read_in_call.get(call) for call in scans), (scans, read_in_call)
+
+
 def test_an_apply_whose_sources_seal_broke_ends_its_full_read_for_a_waiting_write_and_the_next_call_goes_on(
     vault: Path, scaled_boundary: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Catches an apply that reads every Source page of a vault in one hold when a Source was filed since its plan."""
+    """Catches an apply that reads every Source page of a vault in one hold when a Source was filed since its plan.
+
+    The first read waits for the writer itself, not for a clock, and the boundary has its default room, so the only
+    reason left for the call to end after one page is the waiting writer.
+    """
+    monkeypatch.setitem(mutation_lock.VaultMutationCoordinator.__init__.__kwdefaults__, "long_holder_seconds", 30.0)
+    monkeypatch.setattr(request_budget, "DELIVERY_RESERVE_SECONDS", 5.0)
+    writer_lease.reset_managers_for_tests()
     staged = _staged_folder(vault)
     page = adoption_run.start(vault, path=staged, collection="Field Notes")
     adoption_run.select(vault, run_id=page["run_id"], include=[staged])
@@ -594,10 +625,9 @@ def test_an_apply_whose_sources_seal_broke_ends_its_full_read_for_a_waiting_writ
         encoding="utf-8",
     )
     adoption_plan._SOURCE_PAGES.clear()  # a process that has read no Source yet
-    running, settled = threading.Event(), threading.Event()
+    running = threading.Event()
     monkeypatch.setattr(adoption_plan, "INDEX_READ_FLOOR", 1)
-    # Six Source pages at 0.9 s each take longer than the room that the scaled overdue limit leaves a call.
-    _slowed(monkeypatch, adoption_plan, "page_import_entries", 0.9, running=running, settled=settled)
+    _held_until_a_writer_waits(monkeypatch, adoption_plan, "page_import_entries", vault, running=running)
     apply_args = {"operation": {"kind": "apply", "run_id": page["run_id"], "plan_id": plan_id}}
 
     async def journey() -> tuple[dict, dict, dict]:
@@ -606,10 +636,14 @@ def test_an_apply_whose_sources_seal_broke_ends_its_full_read_for_a_waiting_writ
             assert await asyncio.to_thread(running.wait, 30), "the apply never read an earlier Source"
             note = await client.call_tool(*public_call("create_note", _remember("agent")), raise_on_error=False)
             first = (await applying).structured_content
-            _settle(monkeypatch, settled)
-            more = {"operation": {**apply_args["operation"], "continuation": first["continuation"]}}
-            second = await client.call_tool(*public_call("import_memory", more), raise_on_error=False)
-            return first, note.structured_content, second.structured_content
+            # A later call files as many items as its room pays for, a count that varies with the host's speed, so the
+            # agent repeats the call with each continuation until the page is applied.
+            last, calls = first, 0
+            while last.get("continuation") and calls < 10:
+                calls += 1
+                more = {"operation": {**apply_args["operation"], "continuation": last["continuation"]}}
+                last = (await client.call_tool(*public_call("import_memory", more), raise_on_error=False)).structured_content
+            return first, note.structured_content, last
 
     first, note, second = asyncio.run(journey())
 
