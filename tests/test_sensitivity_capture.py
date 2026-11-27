@@ -123,6 +123,7 @@ def test_a_kind_default_naming_no_registered_class_never_stops_the_capture(vault
     kept = commands.op_capture_source(vault, source_schema, title="Card front", source_kind="id-scan", content=CARD)
 
     assert kept["sensitivity"]["classes"] == ["identity"] and kept["sensitivity"]["basis"] == "kind-default"
+    assert kept["sensitivity"]["skipped_defaults"]["keys"] == ["idenity"]
     assert _page(vault, kept["source"]["path"])[0]["sensitivity"] == ["identity"]
 
 

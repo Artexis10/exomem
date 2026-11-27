@@ -77,10 +77,12 @@ a pointer to protect it. Only an authenticator is never kept: a payment card num
 code, a password or a live credential. Ask for a copy with it covered, and say why.
 
 `sensitivity` lists the classes you judge the material to hold. The server never infers one from
-content. `save_source`, `save_evidence`, `create_note`, `save_episode` and `add_record` take it.
+content. `save_source`, `save_evidence`, `create_note` and `save_episode` take it, and so does `add_record` when
+the collection's schema declares a `sensitivity` field.
 An unknown key refuses with `SENSITIVITY_CLASS_UNKNOWN`, names the registered keys and writes
 nothing. A Source kind may declare a default class for a Source or Evidence capture that gives
-none; a default that names no registered class is skipped, never a refusal. A page without the field is unclassified.
+none; a default key that the registry does not hold is skipped, never a refusal, and the result names
+it in `skipped_defaults`. A page without the field is unclassified.
 
 The class is metadata: it never changes the captured bytes. Each capture result reports
 `sensitivity: {classes, basis, disclosure}`. `basis` is `declared`, `kind-default` or `none`.

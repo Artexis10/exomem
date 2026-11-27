@@ -62,10 +62,11 @@ A page without the field SHALL read as unclassified. On a compiled page, a plain
 
 - **WHEN** a Source kind's default lists `identity` and a key the registry does not hold
 - **THEN** the capture keeps the material, applies `identity`, and reports `basis: kind-default`
+- **AND** the result names the skipped key, so the owner can register it or fix the kind
 
 ### Requirement: Results report the class and the disclosure in force
 
-Each capture and classify result SHALL report `sensitivity` with:
+Each single-item capture and classify result SHALL report `sensitivity` with:
 - `classes`
 - `basis`: `declared`, `kind-default`, `collection-floor` or `none`
 - `disclosure`, taken from live governance state

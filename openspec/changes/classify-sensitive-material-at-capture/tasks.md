@@ -19,9 +19,9 @@
 
 ## 4. Proof and delivery
 
-- [ ] 4.1 Run the real-model incident replay on the delivered instructions, against main as the baseline, one draw each:
+- [ ] 4.1 Run the real-model incident replay on the delivered instructions, against main as the baseline, one draw each. Compare the arms on what the agent did: the judge check and the recall check. The class check runs on the changed arm only, because main cannot write the field.
   - Synthetic identity-card photos: the agent keeps them in full and classifies them without asking for a covered copy.
   - A synthetic payment-card photo: the agent keeps no card number and asks for a covered copy.
   - A synthetic identity scan with a text layer: a later owner session reads the document number back. Reading a number from a photo needs server OCR, which this change does not add.
-- [x] 4.3 Prove classify and revert leave a page body and its stored file byte-identical (`tests/test_sensitivity_classification.py`).
+- [x] 4.3 Prove classify and revert change only the page's `sensitivity` field and restore its exact bytes (`tests/test_sensitivity_classification.py`). Classify writes only the `.md` page, never a stored binary.
 - [ ] 4.2 Run the full suite, `openspec validate --all --strict` and the privacy gate. Obtain two independent reviews, merge, and verify the ordinary release.

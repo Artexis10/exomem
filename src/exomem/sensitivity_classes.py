@@ -103,6 +103,8 @@ class Classification:
 
     classes: tuple[str, ...] = ()
     basis: str = BASIS_NONE
+    #: Kind-default keys the registry does not hold, which the capture skipped; a result names them.
+    skipped: tuple[str, ...] = ()
 
     def frontmatter(self) -> dict[str, list[str]]:
         """The field the page records, or nothing when it is unclassified."""
@@ -123,17 +125,26 @@ def classify_capture(
         classes = validated(vault_root, declared)
         return Classification(classes, BASIS_DECLARED if classes else BASIS_NONE)
     known = active_keys(vault_root)
-    defaults = tuple(dict.fromkeys(key for key in map(registry.token, kind_default) if key in known))
-    return Classification(defaults, BASIS_KIND_DEFAULT if defaults else BASIS_NONE)
+    keys = tuple(dict.fromkeys(map(registry.token, kind_default)))
+    defaults = tuple(key for key in keys if key in known)
+    skipped = tuple(key for key in keys if key not in known)
+    return Classification(defaults, BASIS_KIND_DEFAULT if defaults else BASIS_NONE, skipped)
 
 
 def report(vault_root: Path, classification: Classification, *, rel_path: str | None) -> dict[str, Any]:
     """`sensitivity` as a capture or classify result states it: the classes, their basis and the disclosure in force."""
-    return {
+    out: dict[str, Any] = {
         "classes": list(classification.classes),
         "basis": classification.basis,
         "disclosure": disclosure(vault_root, rel_path),
     }
+    if classification.skipped:
+        out["skipped_defaults"] = {
+            "keys": list(classification.skipped),
+            "statement": "The Source kind's default names classes the registry does not hold, so they were not "
+                         "applied. Register them or fix the kind, then classify this page.",
+        }
+    return out
 
 
 def disclosure(vault_root: Path, rel_path: str | None) -> dict[str, Any]:
