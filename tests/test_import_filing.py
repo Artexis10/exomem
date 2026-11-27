@@ -6,7 +6,6 @@ filer calls `adoption_studio file` through the real dispatcher. Each test names 
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import threading
 import time
@@ -324,7 +323,9 @@ def test_a_read_of_many_unread_sources_under_a_waiting_writer_is_not_a_stall(vau
         page.write_text(
             f"---\nimported_from: Elsewhere/earlier-{number}.md\noriginal_sha256: {number:064x}\ncaptured: 2026-10-27\n---\n# E\n",
             encoding="utf-8")
-        os.utime(page, (1_700_000_000, 1_700_000_000))  # settled long ago, so the process remembers what it read
+    # A page whose change time is within the racy window is read again at every pass, and `os.utime` cannot move the
+    # change time, so the window is closed for the test: each page read is a page the process remembers.
+    monkeypatch.setattr(adoption_plan, "_RACY_NS", 0)
     adoption_plan._SOURCE_PAGES.clear()  # a process that has read no Source yet
     monkeypatch.setattr(adoption_plan, "INDEX_READ_FLOOR", 1)
     _every_call_ends_for_a_waiting_writer(monkeypatch)

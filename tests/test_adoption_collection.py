@@ -138,6 +138,22 @@ def test_links_resolve_by_path_basename_alias_and_embed_and_leave_a_shared_basen
 
 
 # --- 2.2: folder rules --------------------------------------------------------
+def test_an_apply_call_logs_its_sources_read_and_its_first_chunk_so_a_long_hold_can_be_attributed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Catches an apply whose hold of the boundary cannot be read from the cell log: the filer's calls leave no spans."""
+    vault = _vault(tmp_path, {f"Coll/note-{n}.md": f"# Note {n}\n\ntext {n}\n" for n in range(3)})
+    run_id, planned = _import(vault, path="Coll", include=["Coll"])
+
+    with caplog.at_level("INFO", logger="exomem.adoption_run"):
+        adoption_run.apply(vault, run_id=run_id, plan_id=planned["plan"]["plan_id"], today=TODAY)
+
+    (opening,) = [r for r in caplog.records if getattr(r, "event", None) == "adoption_apply_opening"]
+    assert opening.fields["first_chunk_items"] >= 1
+    assert opening.fields["pending_items"] == 3
+    assert opening.fields["index_read_ms"] is not None and opening.fields["first_chunk_prework_ms"] is not None
+
+
 def test_a_ruled_folder_lands_in_its_kind_directory_and_an_unregistered_kind_changes_nothing(
     tmp_path: Path,
 ) -> None:

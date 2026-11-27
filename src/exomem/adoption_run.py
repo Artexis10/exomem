@@ -22,6 +22,7 @@ import datetime as dt
 import functools
 import hashlib
 import json
+import logging
 import os
 import posixpath
 import secrets
@@ -63,6 +64,7 @@ from . import overview as overview_module
 from .adopt import _TEXT_IMPORT_SUFFIXES
 from .governance import raw_protection
 from .kbdir import is_in_managed_root, managed_join, managed_root
+from .log_events import log_event
 from .vault import PlannedWrite, batch_atomic_write, is_import_id, kb_root, parse_frontmatter
 from .writer_lease import _FAST_ACK_DEADLINE_SECONDS
 
@@ -194,6 +196,7 @@ _REASONS = {
 }
 
 _LOCK = threading.Lock()
+_log = logging.getLogger(__name__)
 
 
 class AdoptionRunError(Exception):
@@ -259,6 +262,27 @@ def _within_hold(step: Callable[..., dict]) -> Callable[..., dict]:
             return step(root, *args, **kwargs)
 
     return bounded
+
+
+def _log_apply_opening(
+    index_seconds: float | None, *, items: int, prework_ms: int, chunk_seconds: float, pending: int, writer_waited: bool
+) -> None:
+    """Log what the opening of an `apply` call cost: the Sources read, the first chunk's size, its preparation and its commit.
+
+    The cell filer's calls leave no spans in the call ledger, so this line in the cell log is the one record of why such a
+    call held the boundary as long as it did. A call that ended before any chunk logs `first_chunk_items=0`.
+    """
+    log_event(
+        _log, logging.INFO, "adoption_apply_opening",
+        fields={
+            "index_read_ms": None if index_seconds is None else round(index_seconds * 1000),
+            "first_chunk_items": items,
+            "first_chunk_prework_ms": prework_ms,
+            "first_chunk_ms": round(chunk_seconds * 1000),
+            "pending_items": pending,
+            "writer_waited": writer_waited,
+        },
+    )
 
 
 def _writer_waits(root: Path) -> bool:
@@ -3176,9 +3200,9 @@ def _apply_chunk(
                 item.artifact.placed = True
                 placed[path] = moved
             survivors.append((planned, item))
-    call_spans.record_span(
-        "adoption.prework", (time.monotonic() - prework_started) * 1000.0, {"items": len(chunk)}
-    )
+    prework_ms = (time.monotonic() - prework_started) * 1000.0
+    call_spans.record_span("adoption.prework", prework_ms, {"items": len(chunk)})
+    stats["prework_ms"] += int(prework_ms)
     landed = _file_survivors(
         root, store, run, survivors, stage=stage, placed=placed, run_date=run_date, ceiling=ceiling, reads=reads,
         page_final=page_final,
@@ -3889,15 +3913,18 @@ def apply(
         written: list[str] = []
         pending = _pending(run)
         opened = True
+        index_seconds: float | None = None
         if pending:
             # Held in memory until a chunk commits it: a call whose every source drifted
             # refuses below with nothing written, as before.
             run["phase"] = "applying"
             run["inflight"] = True
             # Read once here, before the first chunk's timer, so the pacer does not price it into items.
+            index_started = time.monotonic()
             opened = reads.open_sources(
                 root, run, stop=lambda: _stop_now(root, budget) is not None, floor=index_floor
             )
+            index_seconds = time.monotonic() - index_started
             _note_sources_read(root, run, not opened)
 
         pacer = _ApplyPacer(root, budget, carried=run.get(_APPLY_PACE))
@@ -3941,14 +3968,25 @@ def apply(
                 budget=budget, stats=stats, written=written, reads=reads, pacer=pacer,
                 page_final=len(chunk) == len(pending),
             )
-            pacer.record(chunk, time.monotonic() - started, extractions)
+            chunk_seconds = time.monotonic() - started
+            pacer.record(chunk, chunk_seconds, extractions)
             completed_paths = {item["original_path"] for item in chunk}
             pending = [item for item in pending if item["original_path"] not in completed_paths]
             chunks += 1
+            if chunks == 1:
+                _log_apply_opening(
+                    index_seconds, items=len(chunk), prework_ms=stats["prework_ms"], chunk_seconds=chunk_seconds,
+                    pending=len(pending) + len(chunk), writer_waited=waiting,
+                )
             if stats["notes_deferred"]:
                 stopped = True
                 break
 
+        if not chunks and index_seconds is not None:
+            _log_apply_opening(
+                index_seconds, items=0, prework_ms=0, chunk_seconds=0.0, pending=len(pending),
+                writer_waited=_writer_waits(root),
+            )
         outcomes = run["outcomes"]
         # Every requested source drifted or vanished, and nothing was ever imported: refuse
         # before the run reports a result, so the still-valid selection survives a re-plan.

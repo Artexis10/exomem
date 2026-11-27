@@ -551,7 +551,7 @@ def test_own_note_continuations_leave_time_for_mandatory_custody(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Leaf-only pacing must not spend the time needed to publish committed custody."""
-    from exomem import adopt, adoption_run, commands, request_budget
+    from exomem import adopt, adoption_run, commands, mutation_lock, request_budget
 
     monkeypatch.delenv("EXOMEM_FAST_DURABLE_ACK", raising=False)
     folder = vault / "Collection"
@@ -606,7 +606,7 @@ def test_own_note_continuations_leave_time_for_mandatory_custody(
         if continuation:
             arguments["continuation"] = continuation
         terminal = manager.invoke(command, (vault,), arguments, idempotency_key=f"paced-notes-{call}")
-        assert clock["now"] - began <= request_budget.MCP_REQUEST_BUDGET_SECONDS
+        assert clock["now"] - began <= mutation_lock._DEFAULT_LONG_HOLDER_SECONDS  # a call ends inside its hold's room
         assert manager.invoke(command, (vault,), arguments, idempotency_key=f"paced-notes-{call}") == {
             **terminal, "replayed": True
         }

@@ -148,7 +148,7 @@ The page position of a `file` reply SHALL change while a step makes progress wit
 
 ### Requirement: A Chunk's Size Is Bounded By Its Timed Evidence
 
-A chunk SHALL be at most `APPLY_CHUNK_GROWTH` times the largest chunk the run has timed. While a writer waits for the boundary, the first chunk of a call SHALL last about one turn, and the call SHALL end after it.
+A chunk SHALL be at most `APPLY_CHUNK_GROWTH` times the largest chunk the run has timed. While a writer waits for the boundary, the first chunk of a call SHALL be sized to last one turn, or up to twice the commit's fixed part when that is longer, and the call SHALL end after it.
 
 #### Scenario: A pacer has timed only small chunks
 
