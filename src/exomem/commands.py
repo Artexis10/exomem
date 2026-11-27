@@ -7487,13 +7487,15 @@ def op_activate_context(
                             observation_timings=observation_timings,
                             trigger=trigger,
                             intent_resolution=intent_resolution,
-                            reserved_chars=capture_policy.reserve if capture_policy else 0,
+                            reserved_chars=(capture_policy.reserve if capture_policy else 0)
+                            + read_next_action.later_turns_reserve(continuity, requested_chars),
                             native_skills=vault_skills_module.bounded_native_names(native_skills),
                         )
                         # Spend the reserved move before optional carriers share the public ceiling.
                         if isinstance(packet.get("budget"), dict):
                             packet["budget"]["limit_chars"] = requested_chars
                         read_next_action.attach(packet)
+                        read_next_action.attach_later_turns(packet, continuity)
                         # Outside the packet cache, like `continuity`: the live disposition is read per request.
                         capture_carrier_module.for_packet(packet, capture_policy)
                         # After the guard and outside the packet cache, like `continuity`:

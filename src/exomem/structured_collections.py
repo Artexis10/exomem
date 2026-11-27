@@ -1315,6 +1315,25 @@ _MANIFEST_PARSE_CACHE: dict[
 _MANIFEST_PARSE_CACHE_CAP = 256
 
 
+def assign_missing_id(manifest_text: str) -> tuple[str, str | None]:
+    """Give a new collection's manifest an exomem_id when it names none.
+
+    A client with no shell has no UUID source, so the server mints the id. Returns the text to
+    use and the assigned id, or the text unchanged and None when the manifest has no
+    frontmatter or names an id already: a malformed id stays the author's to fix.
+    """
+    try:
+        frontmatter, _body, raw = vault.parse_frontmatter(manifest_text)
+    except vault.FrontmatterError:
+        return manifest_text, None
+    if raw is None or not isinstance(frontmatter, Mapping) or "exomem_id" in frontmatter:
+        return manifest_text, None
+    fence, newline, rest = manifest_text.partition("\n")
+    eol = "\r\n" if fence.endswith("\r") else "\n"
+    assigned = memory_refs.new_id()
+    return f"{fence}{newline}exomem_id: {assigned}{eol}{rest}", assigned
+
+
 def parse_manifest_bytes(
     vault_root: Path,
     path: Path | str,
@@ -2073,7 +2092,7 @@ def _manifest_from_frontmatter(
     if collection_id is None:
         raise CollectionError(
             "INVALID_COLLECTION_ID",
-            "manifest requires a UUID exomem_id",
+            "manifest exomem_id must be a UUID; leave the line out and create assigns one",
             {
                 "field": "exomem_id",
                 "received": frontmatter.get("exomem_id"),

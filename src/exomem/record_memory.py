@@ -264,6 +264,10 @@ def record_memory(
         _invalid_arguments(f"{action} requires item_id, or item_key with expected_container_hash and expected_item_version")
     from .query_engine.errors import QueryError
 
+    assigned_id = None
+    if action in {"create", "validate"} and collection is None and isinstance(manifest_text, str):
+        manifest_text, assigned_id = structured_collections.assign_missing_id(manifest_text)
+        values["manifest_text"] = manifest_text
     try:
         from .collection_store import preview
 
@@ -275,7 +279,7 @@ def record_memory(
             return _append_creating(vault_root, values, new_collection)
         selected, result = preview.dispatch(vault_root, "records", action, values)
         if selected:
-            return result
+            return _note_assigned_id(result, action, assigned_id)
         if action in {"import", "retract"} or query is not None or (action == "query" and item_key is not None):
             # Resolve under the caller's authority first: an absent or withheld selector
             # answers exactly as a sealed store-routed collection does, so the refusal
@@ -307,11 +311,15 @@ def record_memory(
             if collection is not None:
                 return records.validate_collection_revision(vault_root, collection, manifest_text)
             assert manifest_path is not None
-            return records.validate_collection_create(
-                vault_root,
-                manifest_path,
-                manifest_text,
-                scaffold=True if scaffold is None else scaffold,
+            return _note_assigned_id(
+                records.validate_collection_create(
+                    vault_root,
+                    manifest_path,
+                    manifest_text,
+                    scaffold=True if scaffold is None else scaffold,
+                ),
+                action,
+                assigned_id,
             )
         if action == "inspect":
             if collection is None:
@@ -490,6 +498,17 @@ def record_memory(
 
         refusal = route.details(error)
         raise OpError(error.code, error.message, refusal["repair"], details=refusal) from error
+
+
+def _note_assigned_id(result: Any, action: str, assigned_id: str | None) -> Any:
+    """Tell a validate caller that the id it sees is a placeholder: create mints its own."""
+    if assigned_id is None or action != "validate" or not isinstance(result, dict):
+        return result
+    note = {
+        "code": "COLLECTION_ID_ASSIGNED_AT_CREATE",
+        "message": "the manifest names no exomem_id, so create assigns one and reports it as collection_id",
+    }
+    return {**result, "warnings": [*result.get("warnings", []), note]}
 
 
 def _append_creating(vault_root: Path, values: dict[str, Any], declared: dict[str, Any]) -> dict[str, Any]:
