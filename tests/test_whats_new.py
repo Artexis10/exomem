@@ -20,10 +20,30 @@ from exomem import cloud_cell, commands, release_notes, state_paths
 APP = "11111111-1111-4111-8111-111111111111"
 OTHER_APP = "22222222-2222-4222-8222-222222222222"
 
+def note(text: str, title: str | None = None) -> dict:
+    return {"title": title, "text": text}
+
+
 RELEASES = [
-    {"version": "1.3.0", "released_on": "2026-11-20", "notes": ["Newest change.", "Second change."]},
-    {"version": "1.2.1", "released_on": "2026-11-10", "notes": ["Third change."]},
-    {"version": "1.2.0", "released_on": "2026-11-01", "notes": ["Old change."]},
+    {
+        "version": "1.3.0",
+        "released_on": "2026-11-20",
+        "notes": [note("Newest change.", "Newest"), note("Second change.", "Second")],
+    },
+    {"version": "1.2.1", "released_on": "2026-11-10", "notes": [note("Third change.", "Third")]},
+    {"version": "1.2.0", "released_on": "2026-11-01", "notes": [note("Old change.")]},  # a note merged without the check: no title
+]
+
+#: What Home receives for RELEASES: `notes` stays the list of sentences that every earlier Home reads, `items` adds the titles.
+SERVED = [
+    {
+        "version": "1.3.0",
+        "released_on": "2026-11-20",
+        "notes": ["Newest change.", "Second change."],
+        "items": [note("Newest change.", "Newest"), note("Second change.", "Second")],
+    },
+    {"version": "1.2.1", "released_on": "2026-11-10", "notes": ["Third change."], "items": [note("Third change.", "Third")]},
+    {"version": "1.2.0", "released_on": "2026-11-01", "notes": ["Old change."], "items": [note("Old change.")]},
 ]
 
 
@@ -46,7 +66,7 @@ def image(monkeypatch, tmp_path):
             if releases is None:
                 path.unlink(missing_ok=True)
             else:
-                path.write_text(releases if isinstance(releases, str) else json.dumps({"schema": 1, "releases": releases}))
+                path.write_text(releases if isinstance(releases, str) else json.dumps({"schema": 2, "releases": releases}))
             release_notes.releases.cache_clear()
 
         def read(self) -> str:
@@ -110,8 +130,8 @@ def test_an_app_is_told_once_about_an_upgrade_with_notes_and_a_new_app_is_told_n
         image.version = "1.4.0"
         image.notes(
             [
-                {"version": "1.4.0", "released_on": "2026-11-25", "notes": ["Fourth change."]},
-                {"version": "1.3.1", "released_on": "2026-11-23", "notes": ["The change in the image without notes."]},
+                {"version": "1.4.0", "released_on": "2026-11-25", "notes": [note("Fourth change.", "Fourth")]},
+                {"version": "1.3.1", "released_on": "2026-11-23", "notes": [note("The change in the image without notes.")]},
                 *RELEASES,
             ]
         )
@@ -198,7 +218,7 @@ def test_a_rollback_keeps_the_apps_record_so_the_next_upgrade_does_not_repeat_th
 
 def test_the_notice_is_one_bounded_sentence_even_when_a_note_is_too_long(image, vault):
     long_note = "A very long note. " * 30
-    image.notes([{"version": "1.3.0", "released_on": "2026-11-20", "notes": [long_note, "Other."]}])
+    image.notes([{"version": "1.3.0", "released_on": "2026-11-20", "notes": [note(long_note, "Long"), note("Other.", "Other")]}])
     release_notes.update_notice(vault, APP)
     image.version = "1.3.0"
 
@@ -217,7 +237,7 @@ def test_the_whats_new_section_gives_the_running_version_and_the_releases_newest
     first = commands.op_bootstrap(vault, section="whats_new")
     second = commands.op_bootstrap(vault, section="whats_new")
 
-    assert first == {"whats_new": {"version": "1.3.0", "releases": RELEASES, "notes_available": True}}
+    assert first == {"whats_new": {"version": "1.3.0", "releases": SERVED, "notes_available": True}}
     assert second == first
     assert image.reads == 1
 
@@ -229,7 +249,7 @@ def test_the_whats_new_section_is_served_to_home_through_the_cell(run_cell, imag
         # Home's call exactly as Home sends it; the cell refuses the command name `bootstrap`.
         return await call(client, "read_instructions", {"profile": "compact", "section": "whats_new"})
 
-    assert run_cell(scenario) == {"whats_new": {"version": "1.3.0", "releases": RELEASES, "notes_available": True}}
+    assert run_cell(scenario) == {"whats_new": {"version": "1.3.0", "releases": SERVED, "notes_available": True}}
 
 
 @pytest.mark.parametrize(
@@ -237,10 +257,12 @@ def test_the_whats_new_section_is_served_to_home_through_the_cell(run_cell, imag
     [
         None,
         "{not json",
-        json.dumps({"schema": 2, "releases": RELEASES}),
-        json.dumps({"schema": 1, "releases": [*RELEASES, {"version": "next", "released_on": "x", "notes": ["A."]}]}),
+        json.dumps({"schema": 1, "releases": [{**RELEASES[0], "notes": ["Newest change."]}]}),
+        json.dumps({"schema": 3, "releases": RELEASES}),
+        json.dumps({"schema": 2, "releases": [*RELEASES, {"version": "next", "released_on": "x", "notes": [note("A.")]}]}),
+        json.dumps({"schema": 2, "releases": [{**RELEASES[0], "notes": ["Newest change."]}]}),
     ],
-    ids=["no file", "not JSON", "unknown schema", "a release the cell cannot read"],
+    ids=["no file", "not JSON", "schema 1 file", "unknown schema", "a release the cell cannot read", "a note that is a bare string"],
 )
 def test_an_image_without_usable_notes_says_the_notes_are_unavailable_and_never_fails(image, vault, file):
     """Home must tell "unknown" from "nothing to show": an empty list alone reads as the second."""
@@ -281,3 +303,21 @@ def test_a_personal_service_without_a_notes_file_logs_nothing(image, vault, capl
         release_notes.payload()
 
     assert caplog.records == []
+
+
+def test_the_notes_file_round_trips_titles_and_refuses_a_note_it_cannot_read_whole():
+    """The release build writes through `document` and the cell reads through `parse_document`: one reading
+    of a note, with a null title kept and any other shape refused rather than served in part."""
+    from exomem import release_notes_format as fmt
+
+    release = fmt.Release("1.3.0", (1, 3, 0), "2026-11-20", (fmt.Note("Newest", "Newest change."), fmt.Note(None, "Old change.")))
+
+    assert fmt.parse_document(json.dumps(fmt.document([release]))) == (release,)
+    for broken in (
+        {"title": "", "text": "A."},  # an empty title is null or text, never blank
+        {"title": "T", "text": ""},
+        {"title": "T", "text": "A.", "kind": "fixed"},
+        {"text": "A."},
+    ):
+        with pytest.raises(ValueError):
+            fmt.parse_document(json.dumps({"schema": 2, "releases": [{**RELEASES[0], "notes": [broken]}]}))
