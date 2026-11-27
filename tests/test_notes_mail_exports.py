@@ -191,6 +191,20 @@ def test_an_attachment_files_with_the_kind_and_media_type_that_the_same_file_has
     assert (inside["source_type"], inside["media_type"]) == (alone["source_type"], alone["media_type"]) == ("unclassified", "image")
 
 
+def test_a_link_where_a_notebook_keeps_its_photos_is_refused_and_nothing_outside_the_stage_changes(vault: Path, tmp_path: Path) -> None:
+    """Catches resource parts written into, or a leftover sweep run inside, a folder that a link in the stage points to."""
+    import_id = stage_export(vault, enex([enex_note(0, resources=(("Счёт.jpg", "image/jpeg", JPEG),))]), name="notebook.enex")
+    outside = tmp_path / "outside"
+    (outside / ".incoming").mkdir(parents=True)
+    (outside / ".incoming" / "keep.txt").write_text("not the stage's")
+    (vault / "_Imports" / import_id / "notebook files").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(OSError, match="is a link"):
+        export_expansion.expand(vault, import_id, keep_going=lambda: True)
+
+    assert sorted(path.relative_to(outside).as_posix() for path in outside.rglob("*")) == [".incoming", ".incoming/keep.txt"]
+
+
 def test_an_enex_that_declares_entities_is_not_expanded_and_files_as_one_ordinary_file(vault: Path) -> None:
     """Catches an entity-expansion document that is parsed: a few bytes of declarations must never grow into gigabytes."""
     bomb = (

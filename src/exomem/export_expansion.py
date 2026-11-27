@@ -244,7 +244,9 @@ def _slice(root: Path, record: _Record, export: str, state: dict, keep_going: Ca
     import_id = record.import_id
     fmt = next((candidate for candidate in source_formats.formats(root) if candidate.key == state.get("format")), None)
     base = root / import_stage.STAGE_DIR / import_id
-    workdir = base / _files_folder_of(export) / ".incoming"
+    incoming = f"{_files_folder_of(export)}/.incoming"
+    _refuse_links(base, incoming)  # like every derived folder: nothing is written or removed through a link
+    workdir = base / incoming
     shutil.rmtree(workdir, ignore_errors=True)  # what an earlier call left half-written
     taken = {
         path for _after, row in import_stage.read_expansion_rows(root, import_id) if row.get("export") == export
@@ -411,6 +413,15 @@ def _discard(item: Transcript) -> None:
     for part in item.parts:
         if isinstance(part.data, Path):
             part.data.unlink(missing_ok=True)
+
+
+def _refuse_links(base: Path, relative: str) -> None:
+    """Refuse a link at any existing step of the stage path `relative`; the folders themselves are made later, when needed."""
+    folder = base
+    for name in PurePosixPath(relative).parts:
+        folder = folder / name
+        if folder.is_symlink():
+            raise OSError(f"{name} is a link, so nothing is derived into it")
 
 
 def _folder(base: Path, relative: str) -> Path:
