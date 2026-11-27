@@ -1458,3 +1458,20 @@ def test_a_source_erasure_retires_the_request_held_view(
     assert rel not in {hit.parent_path for hit in after.value or ()}
     assert (after.readiness.status, after.value) == ("stale", None)
     assert repairs == []
+
+
+def test_a_rollback_journal_catalogue_binds_no_request_view(vault: Path, warm_managed_cell) -> None:
+    """Where WAL fails, the catalogue runs a rollback journal. A held view's read transaction then kept a SHARED
+    lock, so every catalogue commit waited behind the request's whole compilation."""
+    import contextlib
+    import sqlite3
+
+    warm_managed_cell(vault)
+    store = lexstore.get_store(vault)
+    # `_connect_setup` logs a refused WAL switch and builds on; this is the mode it leaves.
+    with contextlib.closing(sqlite3.connect(store.path)) as conn:
+        assert conn.execute("PRAGMA journal_mode=DELETE").fetchone() == ("delete",)
+
+    with lexstore.request_catalog_view(vault, lag_dispatch=lambda _root: None):
+        checkpoint = freshness.recall_checkpoint(vault, "kb")
+        assert lexstore.retain_request_view(vault, checkpoint) is None

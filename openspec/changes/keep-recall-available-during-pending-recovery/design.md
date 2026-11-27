@@ -75,7 +75,7 @@ Apply widening exclusions after primary reranking without increasing its existin
 Run reranking and later assembly after closing the transaction, using retained selections and passages.
 Cache hits, exceptions, and cancellation close the view; nested recalls restore their caller's binding.
 A copied execution context must not share a SQLite connection across threads.
-No model load, query encoding, or reranking may retain that connection, except the maps packet's request read view, which `accelerate-governed-recall` bounds to the packet's compilation and its request budget's deadline.
+No model load, query encoding, or reranking may retain that connection, except the maps packet's request read view, which `accelerate-governed-recall` bounds to the packet's compilation, which the request budget stops cooperatively.
 
 The catalogue view does not freeze canonical files, vector indexes, media, or graph state.
 Retain pending suppression and request-owned proven pages after global custody retirement.
@@ -90,7 +90,7 @@ Current policy or semantic identity changes still invalidate its interpretation.
 Disclose known projection lag and incomplete evidence through existing response fields, and keep partial results out of shared caches.
 Preserve the existing decline for widening that was already lagging at admission.
 Atomic replacement retains its WAL quiescence proof and may decline while a reader holds the old view.
-Keep selection short because a retained WAL reader can delay replacement and a DELETE-mode reader can block incremental commits.
+Keep selection short because a retained WAL reader can delay replacement and a DELETE-mode reader blocks every commit while it is held. The maps packet's request read view, which is held longer, binds only in WAL mode.
 
 ### Separate redaction evidence from current reference resolution
 
@@ -165,7 +165,7 @@ The former protects data and authorization; the latter avoids making unrelated r
 - Missing reference identity can hide a duplicate. Preserve typed unavailability for exact identifier operations that need a uniqueness proof.
 - Automatic replay can disturb retry order. Preserve backoff, fair bounded selection, exact claims, and existing fan-out ownership.
 - A completed batch can retain custody after a crash. Retire it independently of new foreground requests or hydrated overlay state.
-- A retained reader can delay publication. Close it before provider work and preserve the publisher's existing safe decline and recovery. The maps packet's request read view is the one reader held across provider work: it closes after the packet's compilation, at the latest at its request budget's deadline, and while it is held the publisher declines with `wal_busy` and keeps the pass for a later flight.
+- A retained reader can delay publication. Close it before provider work and preserve the publisher's existing safe decline and recovery. The maps packet's request read view is the one reader held across provider work: it closes after the packet's compilation, which the request budget stops cooperatively, it binds only in WAL mode, and while it is held the publisher declines with `wal_busy` and keeps the pass for a later flight.
 
 ## Migration Plan
 

@@ -510,16 +510,17 @@ it with the current path on the reference corpus.
   publication is the view's age, not catalogue lag, and revokes no readiness.
   The request closes the view after compilation, then dispatches any lag that
   it showed. The final evidence checks run after it closes, on live state.
-  The view is never an admission: find's selections capture their own view,
-  and the view stays out of the admitted-catalogue slot that find reads.
+  Lexical selections admit the view: inside each one it is the admitted
+  catalogue that the selection's reads use. Find never borrows it: find's
+  selections capture their own view.
 
-  The view binds at the start of the map's compilation, not at the request's
-  freshness snapshot. Binding at the snapshot would hold the reader through
-  the index warm wait, where it could make a repair's publish decline, so a
-  publication between the snapshot and the bind still makes the exact reads
-  stale. A catalogue that already trails the request's checkpoint, other than
-  by pages withheld from the reader, binds no view; that case is out of scope
-  here.
+  The first bind runs at the start of the map's compilation, not at the
+  request's freshness snapshot. Binding at the snapshot would hold the reader
+  through the index warm wait, where it could make a repair's publish decline,
+  so a publication between the snapshot and the bind still makes the exact
+  reads stale. A catalogue that already trails the request's checkpoint, other
+  than by pages withheld from the reader, binds no view; that case is out of
+  scope here.
 
   A foreground delta cannot replace the held view. The catalogue keeps only
   each page's newest rows, so once a later save has published, no read of
@@ -542,13 +543,18 @@ it with the current path on the reference corpus.
   serve no text. Only the request-held view is fenced, and a
   selection's own view keeps its behaviour, unreadable generation included.
 
-  Holding the view retains the WAL; it never blocks a writer. SQLite readers
-  never block writers, so saves and publications proceed, but the WAL cannot
-  checkpoint past the snapshot while the view is held. The view is held for
-  the map's compilation, which field measurements put at 14 to 36 seconds,
-  and never past the deadline of the request budget it opened under (50
-  seconds for an MCP call). A borrow past that deadline closes the view on
-  its owner thread, and later reads read the live catalogue. While a view is
+  The view binds only on a catalogue in WAL mode. There a held reader blocks
+  no writer: saves and publications proceed, but the WAL cannot checkpoint
+  past the snapshot while the view is held. `_connect_setup` keeps building
+  when a journal-hostile filesystem refuses WAL, and in rollback-journal mode
+  an open read transaction holds a SHARED lock, so every catalogue commit
+  would wait behind the view. A capture in that mode binds no view, and the
+  request reads as it did before the view existed. The view stays open until
+  compilation ends, which the request budget stops cooperatively, and no
+  view binds past that budget's deadline (50 seconds for an MCP call). The
+  activation log recorded whole activation requests of 14.0 and 35.8
+  seconds; these are request times, not compile times, and the compilation
+  is one part of each. While a view is
   held, `rebuild_atomic` cannot fold the live WAL, so its publish declines
   with `wal_busy`, and the repair worker keeps the declined pass for a later
   flight, as it does for any other reader.
@@ -1264,8 +1270,9 @@ it, and the timing table keeps one row per stage:
   closes it before model loading, encoding and reranking
   (`keep-recall-available-during-pending-recovery`). The maps packet's
   request read view is the one exception: it stays open across the packet's
-  compilation, query encodes included, and closes before final evidence
-  checks or at the deadline of its request budget, whichever comes first.
+  compilation, query encodes included, until compilation ends, which its
+  request budget stops cooperatively. It closes before final evidence checks
+  and binds only on a catalogue in WAL mode.
   An ordinary data
   publication during the request leaves the selected rows, membership and
   statistics unchanged, and the response discloses the lag known at

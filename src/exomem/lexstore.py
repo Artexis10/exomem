@@ -429,7 +429,7 @@ class _RequestCatalog:
 
     root: Path
     owner_thread: int = field(default_factory=threading.get_ident)
-    #: The monotonic deadline of the budget the slot opened under; the view is not borrowed or bound past it.
+    #: The monotonic deadline of the budget the slot opened under; no view binds past it.
     deadline: float | None = None
     view: _CatalogReadView | None = None
     lagging: tuple[str, ...] = ()
@@ -451,9 +451,9 @@ def request_catalog_view(vault_root: Path, *, lag_dispatch: Callable[[Path], Non
     checkpoint then reads the view's snapshot, so a publication by another write during the request cannot
     turn the read stale. The view is never the request's ambient admission (`_ADMITTED_CATALOG`): only a read
     that names the view's checkpoint borrows it, and a lexical selection scope inside the request. The view
-    holds a WAL reader, so it closes at the deadline of the budget it opened under at the latest: a borrow past
-    that deadline closes it, and later reads read the live catalogue. On exit the view closes first, then a lag
-    the view showed when it bound is dispatched, so the repair never meets this reader.
+    holds a WAL reader until the request ends, which the request budget stops cooperatively, and no view binds
+    past that budget's deadline. On exit the view closes first, then a lag the view showed when it bound is
+    dispatched, so the repair never meets this reader.
     """
     budget = request_budget.current()
     slot = _RequestCatalog(Path(vault_root).resolve(), deadline=None if budget is None else budget.deadline)
@@ -506,20 +506,12 @@ def retain_request_view(vault_root: Path, checkpoint: object) -> object | None:
 
 
 def _request_catalog_view(vault_root: Path) -> _CatalogReadView | None:
-    """The read view this request bound for `vault_root`, on the thread that bound it, or None.
-
-    Past the slot's deadline the view closes here, on its owner thread, unless a selection is reading it now:
-    that selection keeps its snapshot to its end.
-    """
+    """The read view this request bound for `vault_root`, on the thread that bound it, or None."""
     slot = _REQUEST_CATALOG.get()
     if slot is None or slot.root != Path(vault_root).resolve():
         return None
     view = slot.view
     if view is None or view.owner_thread != threading.get_ident() or view.connection is None:
-        return None
-    if slot.expired() and _admitted_catalog_view(slot.root) is not view:
-        slot.view = None
-        view.close()
         return None
     return view
 
@@ -7017,7 +7009,8 @@ class LexicalStore:
         """Capture both published scopes from one already-pinned transaction.
 
         `fenced` is for the request-held view (`retain_request_view`), which a Source erasure retires
-        (`_CatalogReadView.retired`). A selection's own view closes before provider work and is not fenced.
+        (`_CatalogReadView.retired`) and which is captured only on a WAL connection. A selection's own view closes
+        before provider work and is neither fenced nor limited to WAL.
         """
         from . import freshness as freshness_module
         from . import source_custody
@@ -7045,6 +7038,13 @@ class LexicalStore:
                     or self._meta_catalog_identity(conn) != identity
                 ):
                     return None
+                if fenced:
+                    # `_connect_setup` soft-fails WAL on a journal-hostile filesystem. In rollback-journal mode
+                    # a held read transaction keeps a SHARED lock, so every catalogue commit would wait behind
+                    # the request's whole compilation. The read above fixed the mode for this transaction.
+                    mode = conn.execute("PRAGMA journal_mode").fetchone()
+                    if not mode or str(mode[0]).lower() != "wal":
+                        return None
                 checkpoints: dict[str, object] = {}
                 for scope in freshness_module.SCOPES:
                     checkpoint = self._meta_checkpoint(conn, scope)
@@ -12226,7 +12226,9 @@ class LexicalStore:
         if view is not None and view.store is self:
             ready = self._catalogue_view_status(view, scope)
             if not ready.complete:
-                _schedule_repair(self.vault_root)
+                if not view.retired():
+                    _schedule_repair(self.vault_root)
+                # A retired view schedules nothing: the eraser drops the rows from the catalogue itself.
                 return None
             # Legacy content lanes borrow A too; reconciliation would replace its proof.
             return query_fn(view.connection)

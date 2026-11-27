@@ -29,7 +29,7 @@ Ordinary recall SHALL continue over its admitted retrieval projection and servab
 
 After managed warm-up, and during it once this process has made a strict catalogue proof since its warm began, ordinary recall SHALL re-prove a policy-compatible published catalogue even when strict live-projection readiness has been demoted. Catalogue selection SHALL retain one transaction that binds both scope checkpoints, schema, semantic identity, and policy identity. Every catalogue read SHALL use that view, suppress every pending identity, and add only proven pending content. Exact and stale projections SHALL load their paths from that view without walking canonical files. Request admission SHALL NOT promote strict health readiness or escape into another request, vault, thread, or scope. Strict health retrieval readiness (`ready`, `admitted=true`) SHALL stay strict; only the serving status MAY follow a servable lag, after this process has made a strict proof, as `install-readiness` defines.
 
-Selection SHALL materialize the evidence needed after the transaction closes. Query encoding, model loading, and reranking SHALL NOT retain the transaction, except the maps activation packet's request read view that `recall-latency-contract` defines: it MAY stay open across that packet's compilation, query encodes included, and SHALL close before final evidence checks, at the latest at the deadline of the request budget it opened under. Canonical hydration SHALL match selected content hashes or exact request-owned pending evidence. A mismatch SHALL omit affected evidence and disclose incomplete coverage. Catalogue admission SHALL NOT weaken existing generation checks for independent indexes or claim a snapshot across separate stores. Partial results SHALL NOT enter shared result caches. Current disclosure authority and terminal byte checks SHALL remain mandatory.
+Selection SHALL materialize the evidence needed after the transaction closes. Query encoding, model loading, and reranking SHALL NOT retain the transaction, except the maps activation packet's request read view that `recall-latency-contract` defines: it MAY stay open across that packet's compilation, query encodes included, until compilation ends, which the request budget stops cooperatively, and SHALL close before final evidence checks. Canonical hydration SHALL match selected content hashes or exact request-owned pending evidence. A mismatch SHALL omit affected evidence and disclose incomplete coverage. Catalogue admission SHALL NOT weaken existing generation checks for independent indexes or claim a snapshot across separate stores. Partial results SHALL NOT enter shared result caches. Current disclosure authority and terminal byte checks SHALL remain mandatory.
 
 #### Scenario: Repair demotes readiness while a pending edit is durable
 
@@ -66,7 +66,7 @@ Selection SHALL materialize the evidence needed after the transaction closes. Qu
 
 - **WHEN** the maps activation packet encodes a query while its request read view is bound
 - **THEN** the view stays open across the encode
-- **AND** it closes before final evidence checks, and at the latest at the deadline of the request budget it opened under
+- **AND** it stays open until compilation ends, which the request budget stops cooperatively, and closes before final evidence checks
 
 #### Scenario: Strict health observes a newer publication
 

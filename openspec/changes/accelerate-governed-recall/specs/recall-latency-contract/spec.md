@@ -336,11 +336,16 @@ selection. A request MAY use a cache-probe selection and a selection after
 encoding. Activation MAY use an initial lexical selection and a selection for
 synchronous compilation after semantic evidence. Each selection SHALL close
 before provider work or final evidence checks, respectively, except that the
-maps packet SHALL hold one request read view from the point it binds, at the
-start of its compilation and at its pinned lexical checkpoint, across that
-compilation, query encodes included. The request SHALL close the view before
-final evidence checks, and at the latest at the deadline of the request budget
-it opened under. Its exact catalogue reads at that checkpoint and its lexical
+maps packet SHALL hold one request read view across its compilation, query
+encodes included, from the point the view binds. The view binds at the start
+of the compilation, at the request's checkpoint. When the catalogue differs
+from that checkpoint only by pages withheld from the reader, the view binds
+later, when the request pins its lexical checkpoint, at the pinned checkpoint.
+A view SHALL bind only on a catalogue in WAL mode, and not past the deadline
+of the request budget it opened under. The view SHALL stay open until
+compilation ends, which the request budget stops cooperatively, and SHALL
+close before final evidence checks. Its exact catalogue reads at that
+checkpoint and its lexical
 selections SHALL read that view; find's catalogue selections SHALL NOT. While
 the view is bound, a catalogue publication by another write SHALL NOT make
 those reads stale, and a lexical selection that reads the view SHALL report no
