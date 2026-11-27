@@ -46,9 +46,10 @@ if TYPE_CHECKING:
 #: A note whose text is longer than this counts as failed; the notes after it file.
 MAX_CONTENT_CHARS = 64 * 1024 * 1024
 _CHUNK = 1024 * 1024
-#: Bytes that the reader feeds with no event from the parser: expat holds a whole comment, instruction or attribute value
-#: before it reports one, so a token this long would hold memory far past the content bound. The export ends there.
-_MAX_QUIET_BYTES = 64 * 1024 * 1024
+#: Bytes that the reader feeds with no event from the parser: expat holds a whole comment, instruction, attribute value or
+#: start tag before it reports one, and a tag's attributes take many times their bytes, so a token this long would hold
+#: memory far past its size. Note text and resource data arrive as events in every chunk. The export ends there.
+_MAX_QUIET_BYTES = 4 * 1024 * 1024
 #: Bounds on the document's shape, far above what the export format uses (about 5 levels and a few dozen names; note text
 #: is CDATA). The parser keeps a stack entry per open element and a table entry per distinct name, so a crafted file of
 #: unclosed or ever-new elements would hold memory many times its size. The export ends there.
@@ -218,6 +219,11 @@ class _Target:
 
     def comment(self, text: str) -> None:
         self._event()
+
+    def start_ns(self, prefix: str, uri: str) -> None:
+        # The export format declares no namespace (note text is CDATA), and the parser keeps a table entry for each
+        # prefixed name, which a crafted file could grow without bound past every name check.
+        raise ValueError("the document declares an XML namespace, which an Evernote export never does")
 
     def pi(self, target: str, data: str) -> None:
         self._event()
@@ -405,7 +411,7 @@ def read(fmt: SourceFormat, stream: BinaryIO, *, start: int = 0, workdir: Path |
                 fault = type(error).__name__
             quiet = 0 if target.events != events else quiet + len(chunk)
             if fault is None and quiet > _MAX_QUIET_BYTES:
-                fault = "a single comment, instruction or attribute value is longer than 64 MiB"
+                fault = "a single comment, instruction, attribute value or start tag is longer than 4 MiB"
             yield from target.drain()
             if fault is not None or not chunk:
                 break

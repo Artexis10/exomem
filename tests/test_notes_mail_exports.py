@@ -246,15 +246,32 @@ def test_a_note_longer_than_the_limit_fails_by_its_position_and_the_other_notes_
     assert view["progress"]["failed"] == 1 and view["progress"]["remaining"] == 0
 
 
-_MEASURE = """
-import resource, sys, io
+#: The measuring child's own peak memory in bytes. On Linux, `ru_maxrss` keeps the forking parent's high-water mark
+#: across exec, so a busy test worker would be measured instead of the reader; VmHWM starts fresh at exec.
+_PEAK = """
+import sys
+def peak():
+    try:
+        with open("/proc/self/status") as status:
+            for line in status:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    import resource
+    used = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return used if sys.platform == "darwin" else used * 1024
+"""
+
+_MEASURE = _PEAK + """
+import io
 from pathlib import Path
 from exomem import export_notes, source_formats
 fmt = {f.key: f for f in source_formats.formats(Path(sys.argv[3]))}["evernote-notes"]
-before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+before = peak()
 with open(sys.argv[1], "rb") as stream:
     items = list(export_notes.read(fmt, stream, workdir=Path(sys.argv[2])))
-after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+after = peak()
 print(len(items), before, after)
 """
 
@@ -280,13 +297,11 @@ def test_a_note_with_a_200_mib_resource_is_read_in_well_under_256_mib_of_memory(
 
     export.unlink()  # a 280 MB file: do not leave it to the test folder's retention
     items, before, after = (int(value) for value in run.stdout.split())
-    unit = 1 if sys.platform == "darwin" else 1024  # ru_maxrss is in KiB on Linux
     assert items == 1
-    assert after * unit < 256 * 1024 * 1024, f"peak {after * unit >> 20} MiB after reading, {before * unit >> 20} MiB before"
+    assert after < 256 * 1024 * 1024, f"peak {after >> 20} MiB after reading, {before >> 20} MiB before"
 
 
-_MEASURE_STALL = """
-import resource, sys
+_MEASURE_STALL = _PEAK + """
 from pathlib import Path
 from exomem import export_notes, export_transcripts, source_formats
 fmt = {f.key: f for f in source_formats.formats(Path(sys.argv[3]))}["evernote-notes"]
@@ -297,14 +312,16 @@ with open(sys.argv[1], "rb") as stream:
             items += 1
     except export_transcripts.ExportFault as error:
         fault = str(error)
-print(items, resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, len(fault) > 0)
+print(items, peak(), len(fault) > 0)
 """
 
 
 @pytest.mark.parametrize("crafted", [
     b"<a>" * 1_000 + b"</a>" * 1_000,  # deep nesting: the parser keeps a stack entry per open element
     b"".join(b"<e%d/>" % number for number in range(10_000)),  # ever-new names: the parser keeps a table entry per name
-], ids=["deep nesting", "distinct names"])
+    b"".join(b'<p%d:a xmlns:p%d="u"/>' % (number, number) for number in range(10_000)),  # prefixed names hide from a name count
+    b"<a " + b"".join(b'x%d="%s" ' % (number, b"v" * 2_000) for number in range(3_000)) + b"/>",  # one 6 MB start tag
+], ids=["deep nesting", "distinct names", "namespace prefixes", "one huge tag"])
 def test_an_enex_of_a_crafted_shape_ends_as_partial_and_keeps_the_notes_before_it(vault: Path, crafted: bytes) -> None:
     """Catches a reader whose parser memory grows with the document's shape: 20 MiB of such tags held over 1 GB."""
     data = enex([enex_note(0), enex_note(1)])
@@ -333,9 +350,8 @@ def test_an_enex_with_one_huge_comment_ends_as_partial_in_bounded_memory_and_kee
 
     export.unlink()
     items, peak, faulted = run.stdout.split()
-    unit = 1 if sys.platform == "darwin" else 1024  # ru_maxrss is in KiB on Linux
     assert items == "1" and faulted == "True"  # the note before the comment is read; the export ends as partial
-    assert int(peak) * unit < 256 * 1024 * 1024, f"peak {int(peak) * unit >> 20} MiB"
+    assert int(peak) < 256 * 1024 * 1024, f"peak {int(peak) >> 20} MiB"
 
 
 # ----- Gmail mail
