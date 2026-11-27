@@ -409,6 +409,10 @@ def note_checked_hash(path, digest):
         checked[path] = digest
 
 
+class _DeadlinePassed(Exception):
+    """The request's store read reached its completion deadline before it decided every page."""
+
+
 class _Decide:
     """The work of one store request: each page asked, answered as its own call would be."""
 
@@ -416,6 +420,8 @@ class _Decide:
         self.read, self.vault_root, self.calls = read, vault_root, calls
         #: The pages this request decides, for the observability span (`StoreServer.call`).
         self.pages = len(calls)
+        #: When a request's read must stop deciding pages: its budget's deadline; None outside a request.
+        self.deadline = None
 
     def __call__(self):
         from ..cli_ops import OpError
@@ -425,6 +431,8 @@ class _Decide:
         try:
             for path, (args, kwargs) in self.calls.items():
                 request_budget.checkpoint()
+                if self.deadline is not None and time.monotonic() >= self.deadline:
+                    raise _DeadlinePassed()
                 try:
                     kind, payload = "value", self.read(self.vault_root, *args, **kwargs)
                 except (CollectionStoreError, OpError) as error:
@@ -448,8 +456,16 @@ def _request(server, decisions, work):
     """
     from ..cli_ops import OpError
 
+    if (budget := request_budget.current()) is not None:
+        # A read beside the store thread runs on the request's own thread, so it stops deciding pages at the
+        # deadline of the stage it serves, and the pages it has not decided are withheld together. A bound
+        # read checkpoint already stops it at each page (`request_budget.checkpoint`).
+        work.deadline = budget.deadline
     try:
-        return server.read_beside(work, initial=None, progress=False)
+        try:
+            return server.read_beside(work, initial=None, progress=False)
+        except _DeadlinePassed:
+            raise server.missed_read() from None
     except (CollectionStoreError, OpError) as error:
         if decisions is not None:
             decisions.refusals.setdefault(server, error)
