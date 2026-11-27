@@ -6,7 +6,7 @@ The `cloud-deploy` workflow SHALL run once a day on `main`. After it reads the r
 
 #### Scenario: The fleet stays behind several releases
 
-- **WHEN** the newest release is 2 hours old, the fleet lacks four releases, the oldest of them was published longer ago than the threshold, and a platform upgrade is still needed
+- **WHEN** the newest release is 2 hours old, the fleet lacks four releases, the oldest of them was published longer ago than the threshold, a platform upgrade is still needed, and no older release that the platform carries qualifies
 - **THEN** the run sends `cloud-release-behind` as active, and it then stops with `cloud-release-platform-needed`
 
 #### Scenario: The fleet missed only a young release
