@@ -5,6 +5,7 @@
 - [x] 1.3 Hand the boundary over after a waiter-prompted release in `chunk_hold` and the derived-drain turns, within the foreground-priority floors.
 - [x] 1.4 Run the reconcile unit-sidecar and embedding phases in short holds that end for a waiting writer; name each hold by its phase.
 - [x] 1.5 Leave the Windows waiter signal process-local and say so in the design.
+- [x] 1.6 End an import `plan`, a `finish` and the steps of a `file` call at an item or step boundary for a waiting interactive writer, and narrow each call's budget to the room its hold has left under the overdue limit.
 
 ## 2. Replay marker
 
@@ -16,6 +17,7 @@
 
 - [x] 3.1 End-to-end: an import apply is running; an agent write and a CLI write each commit once with no `MUTATION_BUSY` and no counter movement; the import returns a continuation and finishes every item once.
 - [x] 3.2 Unit: interactive waiter count; the handoff wait bound; a maintenance phase lets a waiting writer in within one batch and applies every item once; the replay marker; the NFC digest.
+- [x] 3.3 End-to-end: a slowed `plan` meets a waiting `create_note` and CLI write, and a waiting `file`; a `file` call ends between steps for a waiting writer; a call with no waiter ends before the scaled overdue limit.
 
 ## 4. Closure
 

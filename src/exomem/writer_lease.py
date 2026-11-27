@@ -5775,6 +5775,14 @@ class LeaseManager:
         """
         return self._mutation_coordinator_for(vault_root).waiter_count()
 
+    def hold_room(self, vault_root: os.PathLike[str] | str) -> float | None:
+        """Seconds before this thread's hold of the vault's boundary turns overdue; None when it holds none.
+
+        For a long mutation that must end its call before a waiting writer is refused for the length of the
+        hold (`VaultMutationCoordinator.hold_room`).
+        """
+        return self._mutation_coordinator_for(vault_root).hold_room()
+
     def yield_to_waiting_writes(
         self,
         vault_root: os.PathLike[str] | str,

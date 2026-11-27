@@ -12,6 +12,7 @@ A retry after a lost reply replays the original commit, but the reply is the sam
 ## What Changes
 
 - An import apply ends its call at a chunk boundary when an interactive writer waits and the call has committed at least one chunk. It returns the existing continuation and a visible `stop_reason`. It never releases the boundary mid-call and adds no run lease.
+- An import `plan`, a `finish` and the steps of a `file` call end at an item or step boundary for a waiting interactive writer too, and every import step ends before its hold turns overdue, whether or not the call binds a request budget.
 - A waiter counts for yielding only when it is interactive. A machine hold, a maintenance job and a borrower of a lent boundary do not count. The keyed writes queued behind the head of the capture line do count. A waiter in another process counts.
 - After a hold that ended for a waiter, a maintenance job, the reconcile phases and the drain turns wait while a writer still waits, within the existing foreground-priority floors, before they take the boundary again. The wait holds no lock and never runs on the collection store thread.
 - The reconcile phases for unit sidecars and embeddings run in short holds that each end after one second or when an interactive writer waits. Every hold names its phase.
@@ -24,7 +25,7 @@ No wait is lengthened, no governed write is queued, the boundary is not lent to 
 ### Modified Capabilities
 
 - `hosted-mutation-safety`: background holders step aside for interactive waiters only and hand the boundary over; maintenance phases hold in short holds.
-- `adoption-studio`: an import apply ends its call for a waiting interactive write.
+- `adoption-studio`: an import apply, plan, finish and the steps of a `file` call end for a waiting interactive write, inside the overdue limit.
 - `retry-safe-mutations`: a replay says so; the implicit window is stated as 600 s; the digest is Unicode-normalised.
 
 ## Impact

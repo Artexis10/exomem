@@ -28,7 +28,7 @@ The filer keeps one private-state record per stage at `<state>/import-filing/<im
 
 ### One call at a time, exactly once
 
-Before each call, the filer stores the mutation identity `import-file:<import_id>:<seq>` and the continuation in the record. After a crash, it repeats that exact call under the same identity, which is what `file`'s reconciliation and `writer_lease` need. The vault's mutation boundary makes the filer and a foreground `file` call take turns, and a `file` call that meets a waiting writer ends at its next chunk. A short in-process lock guards only the reads and writes of one record, never a call.
+Before each call, the filer stores the mutation identity `import-file:<import_id>:<seq>` and the continuation in the record. After a crash, it repeats that exact call under the same identity, which is what `file`'s reconciliation and `writer_lease` need. The vault's mutation boundary makes the filer and a foreground `file` call take turns. Each import step (`plan` per item, `apply` per chunk, `finish` per staged copy, and the `file` chain between steps) ends at its next item boundary for a waiting writer, and no step holds the boundary past the mutation lock's overdue limit. A short in-process lock guards only the reads and writes of one record, never a call.
 
 The filer runs `file` through `writer_lease.invoke_command`, under the principal that registered the stage. For a series-file registration that is the vault owner on the internal `cloud-import` surface.
 

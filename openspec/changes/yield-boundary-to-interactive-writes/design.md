@@ -12,6 +12,16 @@ Rejected: releasing the boundary in the middle of a call. It needs a per-run lea
 
 The one-chunk minimum is the progress floor: under a stream of writes, each call still commits a chunk.
 
+### D1a. Every import step yields, and a hold ends before it is overdue
+
+D1 covered only `apply`. A rehearsal of a large import showed the other steps hold the boundary as long as a request lets them: `plan` ran for as long as its 50 s request budget, a `file` call chained `start`, `select` and `plan` in one hold, and the cell's filer binds no request budget, so each of its steps began with a fresh 50 s. A waiting writer is refused `MUTATION_BUSY` once the hold age reaches the mutation lock's long-holder limit (30 s), well before that.
+
+The same rule now covers each import step loop: `plan` per item, `finish`'s staged-copy removal per copy, and `file` between steps. Each checks `writers_waiting()` after it has handled one item, as `apply` does. `plan` returns its draft cursor with `stop_reason`. `finish` leaves the run in its phase, so the `file` chain re-runs it and its removals resume; it records the recall check, the coverage and the manifest only in the call that completes.
+
+The overdue bound is one rule in one place. `_call_budget` narrows the call's request budget to the room the hold has left (the hold's own long-holder limit minus its age, read from the mutation lock), so every loop that already checks the budget stops with the delivery reserve to spare. No second copy of the 30 s limit exists, and the loops stay unaware of it.
+
+Rejected: a per-loop deadline constant (a second copy of the limit in each loop); leaving a `finish` that meets a waiter as a final call (it would strand staged copies as `unchecked` for a person to review).
+
 ### D2. A waiter counts only when it is interactive
 
 `waiter_count()` counts threads of the process that wait with an interactive holder kind, plus the keyed writes queued behind the head of the capture line, plus a waiter in another process. Machine holder kinds and `maintenance-job` waiters are excluded, so background work does not yield to other background work. A borrower of a lent boundary waits for a loan and is excluded. The thread that polls the boundary's lock file raises the cross-process signal while it is interactive or while an interactive writer waits behind it in the process, re-evaluated at each poll, so a writer queued behind a local machine poller is still seen by a holder in another process.
@@ -44,7 +54,7 @@ Skipped: `repeat_of`, a field that lets an agent repeat a write on purpose. An a
 
 ## Risks
 
-- An import under a steady stream of writes returns one chunk per call. Each call makes progress, so the import finishes.
+- An import under a steady stream of writes returns one chunk, one planned item or one removed copy per call. Each call makes progress, so the import finishes.
 - The handoff wait delays a maintenance job by at most the cap per release, and only while a writer waits.
 - A writer in another process that never gets served keeps the signal for its wait bound; the handoff wait ends at the cap.
 

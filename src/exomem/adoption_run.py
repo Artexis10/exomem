@@ -207,7 +207,7 @@ def _rel(root: Path, p: Path) -> str:
     return p.relative_to(root).as_posix()
 
 
-def _call_budget() -> request_budget.RequestBudget:
+def _call_budget(root: Path) -> request_budget.RequestBudget:
     """This call's deadline, which `plan` and `apply` pace themselves against.
 
     Over MCP, stdio and HTTP alike, the dispatcher binds one `RequestBudget` per
@@ -216,10 +216,28 @@ def _call_budget() -> request_budget.RequestBudget:
     time the request has already spent. The REST and CLI doors bind none, so they
     get a fresh budget of the same length that starts here. Either way the call
     stops starting work `request_budget.DELIVERY_RESERVE_SECONDS` before the end.
+
+    The end is also inside the hold's room: a writer that waits for the boundary is refused once
+    the hold turns overdue, which is sooner than the request's own budget runs out.
     """
-    return request_budget.current() or request_budget.RequestBudget(
+    from .writer_lease import active_manager
+
+    budget = request_budget.current() or request_budget.RequestBudget(
         seconds=request_budget.budget_seconds()
     )
+    room = active_manager().hold_room(root)
+    return budget if room is None else request_budget.narrowed(budget, room)
+
+
+def _writer_waits(root: Path) -> bool:
+    """Whether an interactive writer waits for the vault's boundary now.
+
+    An item loop that has handled an item ends its call when one does: the draft or cursor it saves lets
+    the next call resume, and the writer commits when this call releases the boundary.
+    """
+    from .writer_lease import active_manager
+
+    return bool(active_manager().writers_waiting(root))
 
 
 # --------------------------------------------------------------------------- #
@@ -2063,16 +2081,26 @@ def plan(
         # A recognised export files as an artifact, so its conversations are indexed once, as the transcripts derived from it.
         exports = set(export_expansion.read(root, stage_id).exports) if stage_id is not None else set()
         stage_prefix = f"{IMPORT_STAGE_DIR}/{stage_id}/"
-        index = adoption_plan.read_import_index(root)
+        budget = _call_budget(root)
+        with call_spans.span("adoption.plan_index", {}) as measured:
+            # The first read of a large vault is long, so it ends like an item loop does and the next call resumes it.
+            entries = adoption_plan.read_import_index_until(
+                root, lambda: not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS) or _writer_waits(root)
+            )
+            measured["entries"] = len(entries or ())
+        index = adoption_plan.ImportIndex(entries or ())
         notes = adoption_plan.NoteIndex(root)
         destinations = adoption_plan.Destinations.frozen_by(root, draft["items"])
         seen = adoption_plan.seen_in_plan(draft["items"])
 
-        budget = _call_budget()
         handled = 0
-        with lexstore.shared_reads(root):
-            while draft["next"] < len(selected):
+        stop_reason = STOP_FOR_WAITING_WRITE if entries is None and _writer_waits(root) else None
+        with lexstore.shared_reads(root), call_spans.span("adoption.plan_items", {}) as measured:
+            while entries is not None and draft["next"] < len(selected):
                 if handled and not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS):
+                    break
+                if handled and _writer_waits(root):
+                    stop_reason = STOP_FOR_WAITING_WRITE
                     break
                 rel = selected[draft["next"]]
                 result = adoption_plan.plan_item(
@@ -2094,6 +2122,7 @@ def plan(
                     if (item_time := derived.get(rel.removeprefix(stage_prefix))) is not None:
                         _carry_item_time(result[0], item_time)
                     draft["items"].append(result[0])
+            measured["items"] = handled
 
         progress = {
             "planned": draft["next"],
@@ -2103,6 +2132,8 @@ def plan(
         if draft["next"] < len(selected):
             token = _issue_cursor(run, "plan")
             reply = {"progress": progress, "continuation": token}
+            if stop_reason is not None:
+                reply["stop_reason"] = stop_reason
             if entry is not None:
                 entry["state"], entry["reply"] = "used", reply
             run["plan_draft"] = draft
@@ -3772,7 +3803,7 @@ def apply(
                 ):
                     _settle_staged(root, run, reads, by_path[path], outcome, stats)
         run.pop("apply_stop", None)
-        budget = _call_budget()
+        budget = _call_budget(root)
         ceiling = client_artifacts.adoption_ceiling()
         written: list[str] = []
         pending = _pending(run)
@@ -3789,7 +3820,7 @@ def apply(
         stop_reason: str | None = None
         chunks = 0
         while pending:
-            if chunks and active_manager().writers_waiting(root):
+            if chunks and _writer_waits(root):
                 # Each chunk is committed whole, so the call may end here: the writer that waits commits
                 # when this call releases the boundary, and the continuation resumes the import.
                 stopped, stop_reason = True, STOP_FOR_WAITING_WRITE
@@ -4093,7 +4124,12 @@ def _extraction_states(root: Path, run: dict, budget: request_budget.RequestBudg
         jobs = media_jobs.MediaJobStore(root)
     except Exception:  # noqa: BLE001 - an unreadable ledger is "unknown", not a failed finish
         return {"unknown": len(media)}
-    for artifact, media_type in media:
+    for reached, (artifact, media_type) in enumerate(media):
+        if not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS):
+            # An artifact the call had no time to read is unknown, so the hold stays under the overdue limit.
+            budget.note_truncated("finish.extraction_states")
+            counts["unknown"] += len(media) - reached
+            break
         try:
             page = f"{artifact}.md"
             with reserved_paths.open_generic_binary(root, page, physical=True) as source:
@@ -4182,7 +4218,7 @@ def _coverage(root: Path, run: dict, budget: request_budget.RequestBudget) -> di
     }
 
 
-def _consume_filed_text(root: Path, run: dict, budget: request_budget.RequestBudget) -> None:
+def _consume_filed_text(root: Path, run: dict, budget: request_budget.RequestBudget) -> bool:
     """Remove the staged copy of each filed text item whose Source page still holds its text, and mark it consumed.
 
     `apply` keeps a text item's copy, because the item may still owe its note. By `finish` an item that is
@@ -4192,14 +4228,18 @@ def _consume_filed_text(root: Path, run: dict, budget: request_budget.RequestBud
     and `copy_changed` when the copy is no longer the file that the manifest and the plan describe. A copy that is
     already gone (a `finish` stopped after its removal) is settled through its Source. The call stops starting
     removals when its budget runs low, and the copies it did not reach stay unverified in the residual.
+
+    It returns True when it stopped for a waiting writer with copies still to reach: the marks it made are
+    kept, and the next `finish` carries on from them. A call that has handled no copy handles one first.
     """
     if not run.get("consume", True):
-        return
+        return False
     reads = _CallReads()
     stage = reads.recorded_stage(root, run)
     if stage is None:
-        return
+        return False
     outcomes = run.get("outcomes") or {}
+    handled = 0
     for planned in (run.get("plan") or {}).get("items") or []:
         outcome = outcomes.get(planned["original_path"])
         if (
@@ -4209,7 +4249,10 @@ def _consume_filed_text(root: Path, run: dict, budget: request_budget.RequestBud
             continue
         if not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS):
             budget.note_truncated("finish.consume_text")
-            return
+            return False
+        if handled and _writer_waits(root):
+            return True
+        handled += 1
         if os.path.lexists(root / planned["original_path"]):
             if not _text_source_holds(root, outcome.get("target_path") or planned["target_path"], planned):
                 outcome["stays"] = "source_differs"
@@ -4219,6 +4262,7 @@ def _consume_filed_text(root: Path, run: dict, budget: request_budget.RequestBud
                 outcome["consumed"] = True
         elif _filed_and_gone(root, run, reads, planned) is not None:
             outcome["consumed"] = True
+    return False
 
 
 def finish(
@@ -4237,10 +4281,14 @@ def finish(
             raise AdoptionRunError(
                 "INVALID_PHASE", f"finish requires phase 'applied' or 'partial', got {run['phase']!r}"
             )
+        budget = _call_budget(root)
+        if _consume_filed_text(root, run, budget):
+            # A writer waits and copies remain: keep the marks made so far and leave the phase, so the next
+            # `finish` (the `file` chain re-runs it) resumes and the recall check and coverage run once, at the end.
+            store.save(run)
+            return _present(root, run, stop_reason=STOP_FOR_WAITING_WRITE)
         recall = _recall_check(root, run)
-        budget = _call_budget()
         coverage = _coverage(root, run, budget)
-        _consume_filed_text(root, run, budget)
         # Empty folders go only for a run that consumes; the residual is reported for any recorded stage.
         removed_folders = adoption_consume.remove_empty_folders(root, run) if run.get("consume", True) else 0
         stage_residual = adoption_consume.residual(root, run, _APPLIED_STATUSES, _earlier_pages(store, run))
@@ -4566,9 +4614,10 @@ def _file_step(
         # A scan that continues a paged one does not expand: new files would move the pages under it.
         stage_id = _stage_id_of(run["source_root"] if run is not None else path)
         if stage_id is not None:
-            held = budget or _call_budget()
+            held = budget or _call_budget(root)
             export_expansion.expand(
-                root, stage_id, keep_going=lambda: held.can_afford(request_budget.DELIVERY_RESERVE_SECONDS),
+                root, stage_id,
+                keep_going=lambda: held.can_afford(request_budget.DELIVERY_RESERVE_SECONDS) and not _writer_waits(root),
                 rewalk=step == "rescan")
     if step == "start":
         if run is None:
@@ -4628,7 +4677,8 @@ def file(
     carries on from wherever the run stands, however it got there. A page with failed files retries them once
     with `apply`, then finishes, or is closed when every file failed, and the scan goes on to the next page.
     A call ends after an `apply` or `finish`, when `plan` needs another call, when the next step is `start`
-    of another page and the call has run a step, or when the budget cannot cover the delivery reserve. The
+    of another page and the call has run a step, when the budget cannot cover the delivery reserve, or when a
+    writer waits for the boundary and the call has run a step. The
     reply's `continuation` is fresh each time: a call that repeats an earlier one's arguments gets that call's
     stored answer and does no work.
 
@@ -4645,7 +4695,7 @@ def file(
     run = _filing_page(root, store, path, collection, continuation)
     identity = active_mutation_recovery_identity()
     reconciling = identity is not None and identity[2]
-    budget = _call_budget()
+    budget = _call_budget(root)
     steps = 0
     try:
         held = _held_apply(store, run, identity[0]) if reconciling and run is not None else None
@@ -4660,7 +4710,10 @@ def file(
             step = "start" if run is None else _filing_step(root, store, run)
             if step == "done":
                 break
-            if steps and (step in _SCAN_STEPS or not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS)):
+            if steps and (
+                step in _SCAN_STEPS or not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS)
+                or _writer_waits(root)
+            ):
                 break
             if step in _APPLY_STEPS and reconciling:
                 # Only the identity's own held apply may run under reconciliation; this attempt published nothing.

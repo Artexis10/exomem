@@ -2436,6 +2436,18 @@ class VaultMutationCoordinator:
         """Whether this thread owns this vault/cell's exact mutation boundary."""
         return _state_for(self.lock_path).owner_thread == threading.get_ident()
 
+    def hold_room(self) -> float | None:
+        """Seconds before this thread's hold turns overdue, which is when a waiting writer is refused; None when it holds none.
+
+        The limit is the hold's own (`long_holder_seconds`), so a step that ends its call inside this room
+        never needs a second copy of it. Negative once the hold is overdue.
+        """
+        state = _state_for(self.lock_path)
+        with state.metadata_guard:
+            if state.owner_thread != threading.get_ident() or state.acquired_at is None:
+                return None
+            return state.long_holder_seconds - (time.monotonic() - state.acquired_at)
+
     def held_by_another_thread(self) -> bool:
         """Whether another thread of this process holds this boundary now, observed without waiting.
 

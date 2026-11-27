@@ -288,6 +288,32 @@ class RequestBudget:
         }
 
 
+class _NarrowedBudget(RequestBudget):
+    """A budget cut short by `seconds`; what a stage skips or truncates under it is also the parent's."""
+
+    __slots__ = ("_parent",)
+
+    def __init__(self, parent: RequestBudget, *, seconds: float) -> None:
+        super().__init__(seconds=seconds)
+        self.request = parent.request
+        self._parent = parent
+
+    def note_skipped(self, stage: str) -> None:
+        super().note_skipped(stage)
+        self._parent.note_skipped(stage)
+
+    def note_truncated(self, stage: str) -> None:
+        super().note_truncated(stage)
+        self._parent.note_truncated(stage)
+
+
+def narrowed(parent: RequestBudget, seconds: float) -> RequestBudget:
+    """`parent`, or a budget that ends `seconds` from now when that is nearer, for a call whose own limit is not the request's."""
+    if seconds >= parent.remaining():
+        return parent
+    return _NarrowedBudget(parent, seconds=max(0.0, seconds))
+
+
 def current() -> RequestBudget | None:
     """The in-flight call's budget, or None off the MCP dispatch path."""
     return _BUDGET.get()

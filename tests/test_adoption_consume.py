@@ -364,7 +364,7 @@ def test_finish_stops_starting_removals_when_its_budget_runs_low_and_reports_the
             self.affordable -= 1
             return self.affordable >= 0
 
-    monkeypatch.setattr(adoption_run, "_call_budget", lambda: AffordsOneStart(seconds=50))
+    monkeypatch.setattr(adoption_run, "_call_budget", lambda _root: AffordsOneStart(seconds=50))
 
     finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
 
