@@ -2,7 +2,7 @@
 
 ### Requirement: User methods are live portable knowledge
 
-Supported clients SHALL obtain applicable user-authored methods through the same governed runtime projection. A method edit SHALL NOT require reinstalling a static skill package or using client-native memory. The shared skill SHALL explain selection, source reads, current user overrides and revision refresh without loading every method on every turn.
+Supported clients SHALL obtain applicable user-authored methods through the same governed runtime projection: an approved, declared or selected method as a method item, and any other relevant method page as a candidate with its read route. A method edit SHALL NOT require reinstalling a static skill package or using client-native memory. The shared skill SHALL explain selection, source reads, current user overrides and revision refresh without loading every method on every turn.
 
 #### Scenario: A fresh generic client needs a method
 - **WHEN** a client has only the portable Exomem contract and activates a relevant task

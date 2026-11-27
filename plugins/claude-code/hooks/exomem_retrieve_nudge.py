@@ -2612,7 +2612,9 @@ def _format_task_context(block: object, max_chars: int, slice_block: object = No
         if any(item.get("source_ref") == method.get("source_ref") for method in selected):
             continue  # the selected skill's own line already routes to it
         carried = next((ref for ref in (item.get("ref"), item.get("source_ref")) if ref and str(ref) in shown), "")
-        lead = "" if carried else _packet_line("task lead", f"{item.get('title', '')}: {item.get('reason', '')}", str(item.get("read_ref") or ""))
+        # A skill lead says so, because the catalogue arrives once per conversation; its name is page text, so it is quoted.
+        label = f"skill {json.dumps(str(item.get('name', '')), ensure_ascii=False)}" if item.get("kind") == "skill" else item.get("title", "")
+        lead = "" if carried else _packet_line("task lead", f"{label}: {item.get('reason', '')}", str(item.get("read_ref") or ""))
         entries.append((lead, _task_link_line(item, str(carried)) if links else ""))
     for item in methods.get("items") or ():
         read_ref = str(item.get("read_ref") or "")

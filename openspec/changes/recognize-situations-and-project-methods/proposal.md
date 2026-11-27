@@ -10,7 +10,7 @@ Existing continuity and method contracts promise this behavior, but discovery an
 - Discover relevant notes, episodes, intentions, methods and collection descriptions through existing retrieval and graph primitives, independently of successful anchor resolution.
 - Keep maps for orientation and profiles for depth; combine useful candidates under the existing packet budget and selective refresh workflow.
 - Reconcile intentions with corrections and closure evidence before presenting them as ongoing work.
-- Project user-authored methods from governed knowledge with identity, applicability, exclusions, source versions and attribution.
+- Project user-authored methods that the owner approved, a collection declares or the judgment selects, with identity, applicability, exclusions, source versions and attribution. Any other relevant method page stays a candidate with its read route.
 - Deliver revised or withdrawn methods at the next relevant activation across supported clients, without distributing another static skill package.
 - Add a provider-neutral boundary for one optional, ephemeral context-fit judgment over admitted candidates. Prefer local execution; require explicit configuration for API placement.
 - Keep that model path default-off and soft-failing. Compare it with agent interpretation before enabling any deployment.

@@ -16,30 +16,31 @@ Maps packets SHALL carry a bounded `task_context` section beside the map and tur
 - **AND** it keeps each candidate's offered links as relation and target ref, with the count of omitted links and no title, so a later read can be credited to a link that was offered
 - **AND** earlier records without task metadata remain readable with an explicit unrecorded task state
 
-### Requirement: While the method judgment is disabled, retrieval rank makes no method item
+### Requirement: A method item comes from approval, a declared capture method or the judgment's selection
 
-While the method judgment is disabled, `task_context.methods.items` SHALL hold only the method units of a page whose approval verdict for the caller is `approved` or `stale`, and the page that a collection manifest declares as its capture method. Every other retrieval lead, including a skill page, SHALL stay in `task_context.candidates` and project no method item. No lead SHALL leave `task_context.candidates` for that reason. `next_action` SHALL name only items that the packet carries.
+In every `method_fit` state, `task_context.methods.items` SHALL hold only the judgment's selections (state `ready`), the method units of a page whose approval verdict for the caller is `approved` or `stale`, and the page that a collection manifest declares as its capture method. Retrieval rank SHALL decide only which leads appear. Every other lead, including a skill page that the judgment declined, SHALL stay a candidate unless the turn slice covers it, and project no method item.
 
 #### Scenario: A lead whose methods nobody approved is a candidate only
-- **WHEN** `method_fit.state` is `disabled` (no method-fit placement, a `method_fit_max_items` of 0, or a caller to whom the judgment is not offered) and discovery admits a page whose method units the owner never approved
-- **THEN** the page is a candidate with its read route and `task_context.methods.items` holds no item for it
+- **WHEN** discovery admits a page whose method units the owner never approved, in any `method_fit` state, and the judgment did not select it
+- **THEN** the page is a candidate with its read route, unless the turn slice covers it, and `task_context.methods.items` holds no item for it
+- **AND** a restricted caller receives no candidate, because its task context is unavailable by default
 
 #### Scenario: An approved procedure is a method, and an edit makes it stale for the owner
-- **WHEN** the method judgment is disabled, the owner approved a page's exact version and discovery admits the page
+- **WHEN** the owner approved a page's exact version and discovery admits the page, in any `method_fit` state
 - **THEN** its method item carries `approval` set to `approved`
 - **AND** after an edit of the page the owner's item carries `stale`, and every other caller's packet carries the page as a candidate only
 
 #### Scenario: Approval selects the method items and never orders the leads
-- **WHEN** the method judgment is disabled, two procedures lead a task equally and the owner has approved only one of them
+- **WHEN** two procedures lead a task equally and the owner has approved only one of them
 - **THEN** only the approved procedure is a method item, and both stay candidates in the order they hold when neither is approved
 
 #### Scenario: A declared capture method is a method
-- **WHEN** the method judgment is disabled and a turn routes to a collection whose manifest declares a capture method
+- **WHEN** a turn routes to a collection whose manifest declares a capture method, in any `method_fit` state
 - **THEN** the declared page is a method item, approved or not, as "A routed collection serves its declared capture method" requires
 
-#### Scenario: An enabled judgment keeps the retrieval projection
-- **WHEN** the method judgment is enabled and discovery admits a skill page or a page with method units
-- **THEN** each projects as a method item as it did before this requirement
+#### Scenario: The judgment's selection is a method
+- **WHEN** `method_fit.state` is `ready` and the judgment selects a skill page or a collection manifest
+- **THEN** it is a method item with `selection: "method_fit"`, whether or not anyone approved it
 
 ### Requirement: Method continuation cannot certify stale behavior
 
@@ -358,7 +359,7 @@ A `maps` packet SHALL carry a `turn_slice` block beside the map, unless `EXOMEM_
 
 ### Requirement: Method items carry the approval verdict
 
-An item of `task_context.methods` SHALL carry an `approval` field only when the caller's verdict is `approved` or `stale`, and an item without the field SHALL read `unapproved`. The value SHALL come from the verdict function of the `procedure-approval` capability, for the caller's view. A caller that is not the vault owner SHALL receive `approved` or no field. An `approved` item's prose line, 'Approved procedure: "<title>". Read it, then follow it where it fits.', SHALL replace its method line, and the shared prose counter SHALL charge it in place of that line. The title SHALL come from the approved bytes: the frontmatter title, else the first H1, else the page's ref, and never the file name. An `approved` item's `read_ref` SHALL be the page's stable ref, never its path. Every method line SHALL quote and escape its title, so that no title reads as part of the fixed instruction. The line SHALL carry no step and no page text other than that title. An item that does not fit with its line SHALL follow the existing overflow rules. While the method judgment is enabled, approval SHALL NOT change which methods the packet selects or their order. A `method_versions` entry of the continuity token SHALL carry the item's `approval` only when the item carries it. Revalidation SHALL compare each carried entry's `approval` with the caller's current verdict. When they differ, revalidation SHALL reset the held methods with the existing generic reset, even when the page bytes are unchanged. When the approvals ledger cannot be read for a method's ref, the page SHALL read `unapproved` and the packet SHALL report the task-context lane as failed.
+An item of `task_context.methods` SHALL carry an `approval` field only when the caller's verdict is `approved` or `stale`, and an item without the field SHALL read `unapproved`. The value SHALL come from the verdict function of the `procedure-approval` capability, for the caller's view. A caller that is not the vault owner SHALL receive `approved` or no field. An `approved` item's prose line, 'Approved procedure: "<title>". Read it, then follow it where it fits.', SHALL replace its method line, and the shared prose counter SHALL charge it in place of that line. The title SHALL come from the approved bytes: the frontmatter title, else the first H1, else the page's ref, and never the file name. An `approved` item's `read_ref` SHALL be the page's stable ref, never its path. Every method line SHALL quote and escape its title, so that no title reads as part of the fixed instruction. The line SHALL carry no step and no page text other than that title. An item that does not fit with its line SHALL follow the existing overflow rules. Approval SHALL NOT order the methods or change which methods the judgment selects. A `method_versions` entry of the continuity token SHALL carry the item's `approval` only when the item carries it. Revalidation SHALL compare each carried entry's `approval` with the caller's current verdict. When they differ, revalidation SHALL reset the held methods with the existing generic reset, even when the page bytes are unchanged. When the approvals ledger cannot be read for a method's ref, the page SHALL read `unapproved` and the packet SHALL report the task-context lane as failed.
 
 #### Scenario: An approved method carries one line
 - **WHEN** the owner approved a release procedure and a client activates a matching software task
@@ -372,8 +373,8 @@ An item of `task_context.methods` SHALL carry an `approval` field only when the 
 - **AND** any method item that the packet still carries for the page carries no `approval` field, and neither does its entry in the new token
 
 #### Scenario: Approval does not rank
-- **WHEN** the method judgment is enabled, two methods match a task equally and the owner has approved only one of them
-- **THEN** the packet selects and orders them as it does when neither is approved
+- **WHEN** the method judgment selects a skill and the owner has approved a different page
+- **THEN** the selected skill is served first with `selection: "method_fit"`, whatever the approval
 
 #### Scenario: An older token carries no approval field
 - **WHEN** an activation receives a valid token whose method entries have no `approval`

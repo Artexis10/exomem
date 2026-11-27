@@ -30,6 +30,7 @@ from exomem import (
     vault_skills,
     working_set_runtime,
 )
+from exomem._hooks import exomem_retrieve_nudge as hook
 from exomem.governance import principal
 from exomem.writer_lease import invoke_command
 
@@ -165,6 +166,17 @@ def test_a_skill_that_retrieval_leads_to_is_a_lead_and_the_catalogue_is_the_poin
     assert task["methods"]["items"] == []
     assert ZETA in [item["ref"] for item in packet["skills"]["items"]]
     assert packet["next_action"]["state"] == "skill_check"
+
+
+def test_a_skill_lead_after_the_catalogue_turn_still_reaches_the_agent_marked_as_a_skill(skills_vault):
+    """The catalogue arrives once per conversation, so a later turn's lead must say it is a skill, and no more."""
+    first = _activate(skills_vault)
+    later = _activate(skills_vault, turn=NO_SKILL_NAMED, continuity=first["continuity"])
+
+    assert later["skills"]["state"] == "unchanged"
+    (lead,) = [item for item in later["task_context"]["candidates"] if item["source_ref"] == ZETA]
+    assert (lead["kind"], lead["name"]) == ("skill", "zeta") and "description" not in lead
+    assert 'task lead: skill "zeta":' in hook._format_task_context(later["task_context"], 4000)
 
 
 def test_native_skills_leave_the_catalogue_but_a_task_still_leads_to_them(skills_vault):

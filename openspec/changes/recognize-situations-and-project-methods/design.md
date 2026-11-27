@@ -99,6 +99,10 @@ Persistent revision uses the existing permitted writer with its current source g
 Local adaptation does not revise the reusable method unless the user or standing capture policy authorizes that change.
 Method text can guide behavior within existing authority; it cannot grant permissions or turn captured source instructions into operating policy.
 
+Retrieval rank alone never makes a method item: a measured software turn was served five of seven method items from one unrelated note.
+A page's method units become a method item when the owner approved them, a collection declares the page as its capture method, or the judgment selects the page.
+Approval is therefore what makes an owner's note method a method item while no judgment selects it. Any other relevant page stays a candidate with its read route, and approval never orders the leads.
+
 ### D4. Refresh behavior by source revision, not map generation
 
 Track the bounded set of delivered method refs and source versions through the existing activation continuity token.
@@ -258,7 +262,7 @@ Do not reuse old sealed evaluation inputs, turn repaired outputs into answer key
 The parent maps change has shipped runtime contracts that are not yet in canonical `context-activation`.
 Synchronize that existing delta before applying this change's map modification; keep its open replay, evaluation and recovery tasks unchanged.
 After integration, refresh overlapping parent map and activation blocks from the resulting canonical requirements so later archives cannot revert them.
-This synchronization records existing contracts and adds no replay or approval gate.
+This synchronization records existing contracts and adds no replay gate.
 
 1. Complete the existing stance increment independently; expect its source and delivery contracts to remain available.
 2. Integrate discovery and method refresh in one reviewed batch; expect current public operations to carry the new bounded context.

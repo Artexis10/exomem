@@ -137,33 +137,33 @@ On the turn that receives listed items, `next_action` SHALL be `skill_check`, po
 
 A request MAY name skills the client already loads natively in `native_skills`, a list of skill names.
 The catalogue SHALL omit visible skills whose `name` equals a listed name, and SHALL count them in neither `items` nor `omitted`.
-Native omission SHALL NOT change task discovery, which may still lead to an omitted skill as a candidate and, under "A skill is projected as a method only while the judgment is enabled or a collection declares it", may still project it as a method.
+Native omission SHALL NOT change task discovery, which may still lead to an omitted skill as a candidate, or serve it as a method where the judgment selects it.
 
 #### Scenario: A client with native copies receives only the rest
 
 - **WHEN** a vault holds skills `a`, `b` and `c` and the request names `native_skills: ["a", "b"]`
 - **THEN** the catalogue lists only `c`
 
-### Requirement: A skill is projected as a method only while the judgment is enabled or a collection declares it
+### Requirement: A skill is a method item only when selected or declared
 
-While the method judgment is disabled, a skill page SHALL reach the agent through the catalogue and stay a candidate, never a method item, whatever its retrieval rank, unless a collection manifest declares it as its capture method.
-While the judgment is enabled, an admitted skill page SHALL project as a method item with its `name`, full `description`, `kind: "skill"` and a `read_ref`, counted against the turn-context allowance.
+A skill page SHALL be a method item only when the method judgment selects it or a collection manifest declares it as its capture method, in every `method_fit` state. Retrieval rank alone SHALL NOT make it one. A skill page that task discovery leads to, and that the turn slice does not cover, SHALL be a candidate with `kind: "skill"` and its `name` and no description, because the catalogue arrives once per conversation.
 
-#### Scenario: A disabled judgment leaves a matching skill a lead
+#### Scenario: A skill the judgment declined stays a lead
+- **WHEN** `method_fit.state` is `ready`, the judgment answers with no label, and discovery leads to a skill page that the turn slice does not cover
+- **THEN** `task_context.candidates` holds the skill page with `kind: "skill"` and its `name`, and `task_context.methods` holds no item for it
 
-- **WHEN** `method_fit.state` is `disabled` (no method-fit placement, a `method_fit_max_items` of 0, or a caller to whom the judgment is not offered), a turn asks for work that a visible skill's description covers and task discovery admits that skill page
-- **THEN** `task_context.candidates` contains the skill page as a retrieval lead and `task_context.methods` contains no item for it
+#### Scenario: Without a judgment a matching skill stays a lead
+- **WHEN** `method_fit.state` is `disabled`, `empty` or `unavailable` and discovery leads to a skill page that a visible skill's description covers
+- **THEN** the page is a candidate and `task_context.methods` holds no item for it
 - **AND** the catalogue lists the skill and `next_action.state` is `skill_check`
 
-#### Scenario: An enabled judgment surfaces a matching skill and its trigger text
+#### Scenario: A later turn marks the lead as a skill
+- **WHEN** the catalogue arrived on an earlier turn and a later turn leads to a skill page
+- **THEN** the candidate carries `kind: "skill"` and the skill's `name`, and the start-of-turn hook shows the marker
 
-- **WHEN** the method judgment is enabled, a turn asks for work that a visible skill's description covers and task discovery admits that skill page
-- **THEN** `task_context.methods` contains the skill with its full description and the read reference
-
-#### Scenario: Delivery grants no authority
-
-- **WHEN** a skill is projected as a method item
-- **THEN** the agent reads the skill and decides whether it applies
+#### Scenario: A selected skill carries its trigger text
+- **WHEN** the judgment selects a skill page
+- **THEN** `task_context.methods` holds it with its full `description`, `kind: "skill"` and a `read_ref`, counted against the turn-context allowance, and the agent reads it and decides whether it applies
 
 ### Requirement: A bounded judgment selects the methods a turn needs
 
@@ -221,12 +221,12 @@ Selection SHALL grant no authority: the agent decides whether the method applies
 ### Requirement: The method judgment reports its state
 
 `task_context.method_fit` SHALL report `disabled` without a placement, `empty` when nothing could be offered, `ready` with the model identity after a judgment, and `unavailable` when the call fails, times out or answers outside the schema.
-Every state except `ready` SHALL select nothing and leave the rest of the response unchanged.
+Every state except `ready` SHALL select nothing; the methods served are then those that approval or a collection's declaration makes.
 
 #### Scenario: A failed judgment keeps the turn
 
 - **WHEN** the model call times out or names a label it was not offered
-- **THEN** no method is selected, `method_fit.state` is `unavailable`, and the leads and other methods are served as without a placement
+- **THEN** no method is selected, `method_fit.state` is `unavailable`, and the methods and leads are those served without a placement
 
 #### Scenario: No placement, no judgment
 

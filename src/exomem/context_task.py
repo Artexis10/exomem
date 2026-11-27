@@ -99,7 +99,9 @@ def item_line(item: Mapping[str, Any], *, method: bool = False) -> str:
             # The line is part of the method, so the allowance charges it with the method. It carries only the title.
             return f"Approved procedure: {title}. Read it, then follow it where it fits."
         return f"Method: {title}. Read the source for applicability and exclusions."
-    line = f"{item.get('title', '')}: {item.get('reason', '')}"
+    # A skill lead names itself a skill; its name is page text, so it is quoted and escaped like a method's.
+    label = f"Skill {json.dumps(str(item.get('name', '')), ensure_ascii=False)}" if item.get("kind") == SKILL_KIND else item.get("title", "")
+    line = f"{label}: {item.get('reason', '')}"
     # The listed links are served beside the lead, so the allowance charges them with it.
     # The title is page text, so it is quoted and escaped exactly as the hook renderer quotes it.
     links = [
@@ -818,6 +820,10 @@ def compile_context(
                 item["ref"] = source.public.get("ref") or source.public["path"]
             if source.title:
                 item["title"] = source.title
+            if skill := vault_skills.recognise(source.public["path"], source.public.get("frontmatter")):
+                # The catalogue arrives once per conversation, so a skill lead says what it is on every turn. Its
+                # description stays in the catalogue: a lead must stay cheap.
+                item["kind"], item["name"] = SKILL_KIND, skill.name
             if source.carrier:
                 item["carrier"] = source.carrier
             identity = item["ref"], item["source_version"]
@@ -873,14 +879,14 @@ def compile_context(
                     method["attribution"] = approved_title(sources[path])
                     # The read handle is the stable ref, never the path: a rename must not put words into the line.
                     method["read_ref"] = sources[path].ref
-        if block["method_fit"]["state"] == "disabled":
-            # Without the method-fit judgment, retrieval rank decides nothing the agent is told to read first. A
-            # lead's methods are served only when the owner approved them (an item carries `approval` only then,
-            # and a skill never does: the catalogue offers it), and a declared capture method is the collection's
-            # own declaration. A lead that serves no method stays a candidate.
-            for path, methods in methods_by_source.items():
-                if path not in declared:
-                    methods[:] = [method for method in methods if "approval" in method]
+        # Retrieval rank decides which leads appear and never which pages the agent is told to read first. A lead's
+        # methods are served only when the owner approved them (an item carries `approval` only then, and a skill
+        # never does: the catalogue offers it), or when a collection declared the page as its capture method. The
+        # method-fit judgment's own selections are served apart from the leads, and only in the `ready` state. A
+        # lead that serves no method stays a candidate.
+        for path, methods in methods_by_source.items():
+            if path not in declared:
+                methods[:] = [method for method in methods if "approval" in method]
         target_paths: dict[str, str] = {}
         for reason in working_set.attach_task_links(
             root, candidates, link_targets=link_targets, caller=caller, timings=timings, target_paths=target_paths,

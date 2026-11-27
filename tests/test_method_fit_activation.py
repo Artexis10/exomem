@@ -91,16 +91,15 @@ def test_a_selected_skill_is_served_first_with_its_whole_contract(vault: Path, m
     assert SKILL not in [item["source_ref"] for item in packet["task_context"]["candidates"]]
 
 
-def test_with_a_placement_a_skill_that_retrieval_leads_to_still_projects_as_a_method(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Retrieval stops projecting skills as methods only where no judgment runs; with a placement it is unchanged."""
+def test_a_skill_the_judgment_declines_stays_a_lead_and_is_never_a_method(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With a placement, a skill that retrieval ranks is still no method unless the judgment selects it."""
     _seed(vault)
     _judge(monkeypatch, {"methods": []})
-    packet = _activate(vault, turn="Fire the bisque kiln and log the cone result", max_chars=6000)
-    (method,) = [item for item in packet["task_context"]["methods"]["items"] if item.get("kind") == "skill"]
-    assert method["read_ref"] == SKILL and "selection" not in method
-    assert packet["task_context"]["method_fit"]["state"] == "ready"
+    packet = _activate(vault, turn="How do I fire a bisque load safely?", max_chars=6000)
+    task = packet["task_context"]
+    assert task["method_fit"]["state"] == "ready"
+    assert task["methods"]["items"] == []
+    assert [(lead["kind"], lead["name"]) for lead in task["candidates"] if lead["source_ref"] == SKILL] == [("skill", "kiln-firing")]
 
 
 def test_a_selected_collection_is_served_with_its_contract(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
