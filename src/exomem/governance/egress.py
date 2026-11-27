@@ -6717,14 +6717,51 @@ def _name_committed_file_item(
 
 def _name_receipt_title(result: dict[str, Any], path: str, title: str | None) -> dict[str, Any]:
     """Replace the one subject of the summary and preserve the receipt fields."""
+    if path and isinstance(title, str) and title.strip():
+        return _rename_receipt_subject(result, [path], f" -> {title}")
+    return result
+
+
+def _rename_receipt_subject(result: dict[str, Any], paths: Sequence[str], subject: str) -> dict[str, Any]:
+    """Put `subject` where the summary names `paths`, keeping the verb before it and the store name after it."""
     from ..mutation_terminal import _lead
 
     summary = result.get("user_summary")
-    if isinstance(summary, str) and path and isinstance(title, str) and title.strip():
-        head, separator, tail = summary.partition(_lead("", [path]))
+    if isinstance(summary, str) and paths:
+        head, separator, tail = summary.partition(_lead("", paths))
         if separator:
-            return {**result, "user_summary": f"{head} -> {title}{tail}"}
+            return {**result, "user_summary": f"{head}{subject}{tail}"}
     return result
+
+
+def _name_committed_store_row(writer: Any, payload: Mapping[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    """Name a store-backed Records write by its row and its collection, the way a person recognises them.
+
+    The summary was built from the pages the write touched, which for a summary collection are the
+    collection page and its rendered views. The receipt keeps those in `paths`. The row's label and the
+    collection's title come from the caller's own governed read; where either cannot be read or proved,
+    the sentence says "a row" and leaves out the collection rather than state what was not released.
+    A collection the store does not hold keeps its summary, so a file collection is named by its file.
+    """
+    from ..collection_store import receipt_names
+
+    paths, collection, key = payload.get("paths"), result.get("collection_id"), result.get("item_key")
+    if (not isinstance(result.get("user_summary"), str) or not isinstance(paths, list) or not paths
+            or not all(isinstance(path, str) for path in paths)
+            or not isinstance(collection, str) or not isinstance(key, str)):
+        return result
+    version = result.get("after_item_hash")
+    owned, title, label = False, None, None
+    try:
+        owned = receipt_names.owns(writer, collection)
+        if owned:
+            title, label = receipt_names.receipt_names(
+                writer, collection, key, version if isinstance(version, str) else None)
+    except Exception as error:  # noqa: BLE001 - optional prose cannot refuse a commit
+        log.warning("receipt names unreadable for collection %s: %s", collection, type(error).__name__)
+    if not owned:
+        return result
+    return _rename_receipt_subject(result, paths, f" {label or 'a row'}" + (f" in {title}" if title else ""))
 
 
 @_at_release_boundary
@@ -10329,6 +10366,8 @@ def filter_withheld_entries(
             for resolved in _resolve_vault_item(candidate)
         )
     filtered = _walk(payload)
+    if _item_receipt and writer is not None and isinstance(filtered, dict) and isinstance(payload, Mapping):
+        filtered = _name_committed_store_row(writer, payload, filtered)
     if _item_receipt and policy.empty and who.resolved and writer is None and isinstance(filtered, dict):
         paths, version = filtered.get("paths"), filtered.get("after_item_hash")
         if (isinstance(paths, list) and len(paths) == 1 and isinstance(paths[0], str)

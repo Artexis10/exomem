@@ -176,6 +176,33 @@ def test_validation_names_the_review_fields_a_commit_would_ignore(vault: Path) -
     }
 
 
+def test_an_entity_page_edit_ignores_the_review_fields_and_records_no_decision(vault: Path) -> None:
+    page = "Knowledge Base/Entities/Harbour Co-op.md"
+    entity = vault / page
+    entity.parent.mkdir(parents=True, exist_ok=True)
+    entity.write_text(
+        "---\ntitle: Harbour Co-op\ntype: entity\nentity_type: organisation\nstatus: active\n"
+        "exomem_id: 00000000-0000-4000-8000-000000000092\nupdated: 2026-07-15\n---\n\n"
+        "# Harbour Co-op\n\n## Suppliers\n- Sells seeds.\n",
+        encoding="utf-8",
+    )
+    observation = {
+        "path": page, "operation": "add", "category": "finding", "content": "Opens at nine",
+        "relation_disposition": "reviewed_none", "relation_review_reason": REASON,
+    }
+    reviews_before = relation_review.load_relation_reviews(vault)
+
+    preview = commands.op_observe_memory(vault, **{**observation, "operation": "validate"})
+    result = commands.op_observe_memory(vault, **observation)
+
+    assert preview["semantic"]["relation_review_fields"] == {
+        "ignored": ["relation_disposition", "relation_review_reason"]
+    }
+    assert [w for w in result["warnings"] if "ignored" in w] == [IGNORED_WARNING]
+    assert "Opens at nine" in entity.read_text(encoding="utf-8")
+    assert relation_review.load_relation_reviews(vault) == reviews_before
+
+
 def _mcp(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(server_module, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")

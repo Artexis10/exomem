@@ -30,7 +30,7 @@ kinds:
   metric: {description: Portable metric semantic block, labels: {en: Metric}, heading_aliases: [metrics]}
   failure: {description: Portable failure semantic block, labels: {en: Failure}, heading_aliases: [failures]}
   pattern: {description: Portable pattern semantic block, labels: {en: Pattern}, heading_aliases: [patterns]}
-  record: {description: Portable record semantic block, labels: {en: Record}, heading_aliases: [records]}
+  record: {description: Portable record semantic block, labels: {en: Record}, heading_aliases: [records], traits: [dated_default]}
   case: {description: Portable case semantic block, labels: {en: Case}, heading_aliases: [cases]}
   timeline_event: {description: Portable timeline event semantic block, labels: {en: Timeline event}, heading_aliases: [timeline, timelines, timeline_events, events], traits: [dated_event]}
   requirement: {description: Portable requirement semantic block, labels: {en: Requirement}, heading_aliases: [requirements]}
