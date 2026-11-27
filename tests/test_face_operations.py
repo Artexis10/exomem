@@ -439,7 +439,8 @@ def test_turning_faces_off_on_a_store_a_newer_release_wrote_is_refused_not_claim
 
     error = reply.get("error") or reply
     assert error.get("code") == "FACES_UNREADABLE", reply
-    assert "newer release" in str(error), reply
+    assert "release that wrote the face data" in str(error), reply
+    assert "turns faces on again" not in str(error), reply
 
 
 def test_a_store_busy_with_an_extended_code_is_retried_not_called_damaged() -> None:
