@@ -1,13 +1,14 @@
 locals {
   # Public identifier of the existing widget; it ships in the sign-in page.
-  turnstile_site_key = "0x4AAAAAAAFUaR73ufpHqlCsr"
+  turnstile_site_key = "0x4AAAAAAFUaR73ufpHqICsr"
 
-  # The set of app hosts that serve the sign-in form: the web app's Turnstile
-  # check accepts exactly these. The first saved plan must show no change to
-  # the widget other than intended, and this list must match the dashboard's.
+  # The hosts the widget accepts, in the order Cloudflare returns them. The
+  # widget refuses a token solved on any other host, so a host that serves the
+  # sign-in form must be listed. This is the adopted dashboard list.
   turnstile_hostnames = [
+    "127.0.0.1",
+    "localhost",
     "substratesystems.io",
-    "evermatter.ai",
   ]
 }
 
@@ -23,7 +24,14 @@ resource "cloudflare_turnstile_widget" "signin" {
   account_id = var.cloudflare_account_id
   name       = "substratesystems.io"
   mode       = "managed"
+  region     = "world"
   domains    = local.turnstile_hostnames
+
+  # The adopted widget's live settings, set so that a plan shows no change.
+  bot_fight_mode  = false
+  clearance_level = "no_clearance"
+  ephemeral_id    = false
+  offlabel        = false
 
   # Destroying it breaks every sign-in until a new site key is redeployed.
   lifecycle {

@@ -1,4 +1,4 @@
-# The sign-in widget accepts only its listed hosts. Dropping one breaks sign-in there.
+# The sign-in widget accepts only its listed hosts. Dropping the sign-in host breaks sign-in.
 mock_provider "hcloud" {}
 mock_provider "cloudflare" {}
 mock_provider "random" {}
@@ -34,10 +34,7 @@ run "signin_widget_keeps_the_app_hosts" {
   command = plan
 
   assert {
-    condition = (
-      contains(cloudflare_turnstile_widget.signin.domains, "evermatter.ai") &&
-      contains(cloudflare_turnstile_widget.signin.domains, "substratesystems.io")
-    )
-    error_message = "The sign-in Turnstile widget must keep evermatter.ai and substratesystems.io, or sign-in fails there."
+    condition     = contains(cloudflare_turnstile_widget.signin.domains, "substratesystems.io")
+    error_message = "The sign-in Turnstile widget must keep substratesystems.io, or sign-in fails there."
   }
 }
