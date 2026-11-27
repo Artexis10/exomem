@@ -285,6 +285,44 @@ def test_a_note_with_a_200_mib_resource_is_read_in_well_under_256_mib_of_memory(
     assert after * unit < 256 * 1024 * 1024, f"peak {after * unit >> 20} MiB after reading, {before * unit >> 20} MiB before"
 
 
+_MEASURE_STALL = """
+import resource, sys
+from pathlib import Path
+from exomem import export_notes, export_transcripts, source_formats
+fmt = {f.key: f for f in source_formats.formats(Path(sys.argv[3]))}["evernote-notes"]
+items, fault = 0, ""
+with open(sys.argv[1], "rb") as stream:
+    try:
+        for _ in export_notes.read(fmt, stream, workdir=Path(sys.argv[2])):
+            items += 1
+    except export_transcripts.ExportFault as error:
+        fault = str(error)
+print(items, resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, len(fault) > 0)
+"""
+
+
+def test_an_enex_with_one_huge_comment_ends_as_partial_in_bounded_memory_and_keeps_the_notes_before_it(tmp_path: Path, vault: Path) -> None:
+    """Catches a reader that lets the parser hold a whole comment or attribute value: a 150 MiB one more than doubled the peak."""
+    size = 150 * 1024 * 1024
+    export = tmp_path / "comment.enex"
+    with open(export, "wb") as sink:
+        sink.write((ENEX_HEAD + enex_note(1)).encode() + b"<!--")
+        for _ in range(size // (1024 * 1024)):
+            sink.write(b"x" * 1024 * 1024)
+        sink.write(b"-->" + enex_note(2).encode() + b"</en-export>")
+
+    run = subprocess.run(
+        [sys.executable, "-c", _MEASURE_STALL, str(export), str(tmp_path / "work"), str(vault)],
+        capture_output=True, text=True, check=True, cwd=tmp_path,
+        env={"PYTHONPATH": ":".join(path for path in sys.path if path), "EXOMEM_STATE_ROOT": str(tmp_path / "state")})
+
+    export.unlink()
+    items, peak, faulted = run.stdout.split()
+    unit = 1 if sys.platform == "darwin" else 1024  # ru_maxrss is in KiB on Linux
+    assert items == "1" and faulted == "True"  # the note before the comment is read; the export ends as partial
+    assert int(peak) * unit < 256 * 1024 * 1024, f"peak {int(peak) * unit >> 20} MiB"
+
+
 # ----- Gmail mail
 
 

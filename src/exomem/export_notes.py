@@ -46,6 +46,9 @@ if TYPE_CHECKING:
 #: A note whose text is longer than this counts as failed; the notes after it file.
 MAX_CONTENT_CHARS = 64 * 1024 * 1024
 _CHUNK = 1024 * 1024
+#: Bytes that the reader feeds with no event from the parser: expat holds a whole comment, instruction or attribute value
+#: before it reports one, so a token this long would hold memory far past the content bound. The export ends there.
+_MAX_QUIET_BYTES = 64 * 1024 * 1024
 #: The part of a document that decides whether it is an Evernote export: its root element comes before any note.
 _RECOGNISE_BYTES = 64 * 1024
 _MAX_FIELD_CHARS = 64 * 1024
@@ -202,12 +205,24 @@ class _Target:
         self._blob: _Blob | None = None
         self.ready: list[ReadItem] = []
         self.root: str | None = None
+        self.expat: Any = None  # the underlying parser, set by `read`: its byte index says where the last event came from
+        self.seen = 0  # the byte index of the last event
+
+    def _event(self) -> None:
+        self.seen = self.expat.CurrentByteIndex
+
+    def comment(self, text: str) -> None:
+        self._event()
+
+    def pi(self, target: str, data: str) -> None:
+        self._event()
 
     def drain(self) -> Iterator[ReadItem]:
         ready, self.ready = self.ready, []
         yield from ready
 
     def start(self, tag: str, attrib: Mapping[str, str]) -> None:
+        self._event()
         self._path.append(tag)
         if len(self._path) == 1:
             self.root = tag
@@ -234,6 +249,7 @@ class _Target:
         return _Blob(self._workdir / f"{self._files}.part")
 
     def data(self, text: str) -> None:
+        self._event()
         note = self._note
         if note is None or self._mode is None:
             return
@@ -254,6 +270,7 @@ class _Target:
             self._buffered += len(text)
 
     def end(self, tag: str) -> None:
+        self._event()
         key = tuple(self._path[2:])
         note = self._note
         if note is not None and len(self._path) >= 3:
@@ -365,20 +382,25 @@ def read(fmt: SourceFormat, stream: BinaryIO, *, start: int = 0, workdir: Path |
         raise ValueError("a notes reader needs a hidden folder for the resources that it keeps")
     target = _Target(fmt, start, workdir)
     parser = DefusedXMLParser(target=target, forbid_dtd=False)
-    fault: Exception | None = None
+    target.expat = parser.parser
+    fault: str | None = None
+    fed = 0
     try:
         while True:
             chunk = stream.read(_CHUNK)
+            fed += len(chunk)
             try:
                 parser.feed(chunk) if chunk else parser.close()
             except (ParseError, ValueError, OSError) as error:  # a refused entity is a ValueError
-                fault = error
+                fault = type(error).__name__
+            if fault is None and fed - target.seen > _MAX_QUIET_BYTES:
+                fault = "a single comment, instruction or attribute value is longer than 64 MiB"
             yield from target.drain()
             if fault is not None or not chunk:
                 break
     finally:
         target.abandon()
     if fault is None and target.root != fmt.root:
-        fault = ValueError("not the document that the format names")
+        fault = "not the document that the format names"
     if fault is not None:
-        raise ExportFault(type(fault).__name__)
+        raise ExportFault(fault)

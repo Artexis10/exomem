@@ -8,6 +8,7 @@ from __future__ import annotations
 import dataclasses
 import io
 import json
+import time
 
 import pytest
 
@@ -258,6 +259,17 @@ def test_a_long_name_is_cut_on_a_character_boundary_to_at_most_255_bytes_and_kee
     (name,) = export_transcripts.part_names([("Ж" * 300 + ".jpg", "image/jpeg")])
 
     assert len(name.encode("utf-8")) <= 255 and name.endswith(".jpg") and set(name[:-4]) == {"Ж"}
+
+
+def test_a_name_that_is_hostile_in_length_or_repetition_is_fitted_in_linear_time() -> None:
+    """Catches name fitting that is quadratic on untrusted names: a 200k-character filename and 20k parts of one name each took seconds."""
+    started = time.perf_counter()
+    (long_name,) = export_transcripts.part_names([("é" * 200_000 + ".jpg", "image/jpeg")])
+    same = export_transcripts.part_names([("image001.png", "image/png")] * 20_000)
+
+    assert time.perf_counter() - started < 2
+    assert len(long_name.encode("utf-8")) <= 255 and long_name.endswith(".jpg")
+    assert len({name.casefold() for name in same}) == 20_000 and same[-1] == "image001 (20000).png"
 
 
 def test_a_name_is_normalised_to_nfc() -> None:

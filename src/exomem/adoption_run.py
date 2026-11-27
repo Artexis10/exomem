@@ -97,7 +97,8 @@ APPLY_CHUNK_BUDGET_SHARE = 0.1
 # The `stop_reason` of a call that ended after a chunk because a write waited for the boundary.
 STOP_FOR_WAITING_WRITE = "interactive_write_waiting"
 # The `apply_stop` code of a chunk that the vault's volume has no room for; the person frees space.
-_SPACE_STOP = "INSUFFICIENT_SPACE"
+# One literal with the expansion's own full-volume stop, which has the same code and one remedy.
+_SPACE_STOP = export_expansion.CODE_SPACE
 # What a call assumes before it has timed a chunk: seconds per item, and per media
 # artifact for its extraction request (both pessimistic starts).
 INITIAL_ITEM_SECONDS = 0.5
@@ -2306,7 +2307,11 @@ def plan(
         ceiling = client_artifacts.adoption_ceiling()
         stage = adoption_consume.recorded(root, run) if run.get("consume", True) else None
         stage_id = _stage_id_of(run["source_root"])
-        derived = import_stage.derived_files(root, stage_id) if stage_id is not None else {}
+        # The recorded stage already carries what the rows derived (one read of the rows file); another read is for a run with no such stage.
+        if stage is not None and stage.import_id == stage_id:
+            derived = stage.derived
+        else:
+            derived = import_stage.derived_files(root, stage_id) if stage_id is not None else {}
         # A recognised export files as an artifact, so its conversations are indexed once, as the transcripts derived from it.
         exports = set(export_expansion.read(root, stage_id).exports) if stage_id is not None else set()
         stage_prefix = f"{IMPORT_STAGE_DIR}/{stage_id}/"

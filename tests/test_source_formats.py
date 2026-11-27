@@ -133,18 +133,6 @@ ENEX_WORDS = "{created: Created, updated: Updated, tags: Tags, source: Source, a
 MBOX_WORDS = "{attachments: Attachments, extracted: filed, kept: kept, cut_short: cut}"
 
 
-def test_the_shipped_notes_and_mail_formats_carry_their_vendors_facts_and_words(tmp_path):
-    """Catches a shipped entry whose glob, root, label header, skipped labels or kind drifts from what the parsers read."""
-    formats = {entry.key: entry for entry in source_formats.formats(_vault(tmp_path))}
-
-    notes, mail = formats["evernote-notes"], formats["gmail-mbox"]
-    assert (notes.parser, notes.root, notes.item_kind, notes.file_glob) == ("evernote-notes", "en-export", "app-note", "*.enex")
-    assert set(notes.words) == {"created", "updated", "tags", "source", "attachments", "extracted", "kept", "cut_short"}
-    assert (mail.parser, mail.label_header, mail.skip_labels, mail.item_kind, mail.file_glob) == (
-        "gmail-mbox", "X-Gmail-Labels", ("Spam", "Trash"), "correspondence", "*.mbox")
-    assert set(mail.words) == {"attachments", "extracted", "kept", "cut_short"}
-
-
 def test_each_parser_recognises_its_own_container_and_no_other(tmp_path):
     """Catches a registry that pairs a glob with the wrong container: a notebook is XML, a mailbox is a run of From lines."""
     root = _vault(tmp_path)

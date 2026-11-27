@@ -5,6 +5,8 @@ Each case is one behaviour that a harmless refactor must keep: what a person rea
 
 from __future__ import annotations
 
+import time
+
 from exomem import html_text
 
 
@@ -70,3 +72,14 @@ def test_a_tag_cut_in_two_by_the_limit_does_not_show_as_text() -> None:
     converted = html_text.to_text(markup)
 
     assert converted.cut and "href" not in converted.text and "<" not in converted.text
+
+
+def test_deeply_nested_links_convert_in_linear_time() -> None:
+    """Catches a link close that re-reads the output since its link opened: 80k nested links took seconds."""
+    count = 80_000
+    started = time.perf_counter()
+
+    converted = html_text.to_text("<a>x" * count + "</a>" * count)
+
+    assert time.perf_counter() - started < 2
+    assert converted.text.startswith("xxxx")

@@ -41,6 +41,8 @@ _NO_CONTROLS = {code: None for code in range(0x20) if code not in (0x09, 0x0A)}
 _MAX_NAME_BYTES = 255
 #: The extension of a staged file that the media pipeline reads: the longest one that a vendor's name keeps.
 _MAX_EXTENSION_CHARS = 16
+#: Characters of a vendor name that are read for its stem or its extension; a name is untrusted and may be megabytes long.
+_MAX_SCANNED_CHARS = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,11 +140,9 @@ def _clean_stem(stem: str) -> str:
 
 
 def _fit(stem: str, suffix: str) -> str:
-    """The stem cut so that `stem + suffix` is at most 255 bytes, on a character boundary."""
+    """The stem cut so that `stem + suffix` is at most 255 bytes, on a character boundary; a cut of a stem that is already NFC stays NFC."""
     room = _MAX_NAME_BYTES - len(suffix.encode("utf-8"))
-    while len(stem.encode("utf-8")) > room:
-        stem = stem[:-1]
-    return stem
+    return stem.encode("utf-8")[:room].decode("utf-8", errors="ignore")
 
 
 def part_names(parts: list[tuple[str, str]]) -> list[str]:
@@ -151,27 +151,32 @@ def part_names(parts: list[tuple[str, str]]) -> list[str]:
     A name keeps its stem's letters in any script and its extension, or takes the extension of its MIME type
     when it has none. It is NFC-normalised, at most 255 bytes, never starts with a dot and is unique within the
     item's folder without regard to case, as a volume that folds case would see it. A part with no usable name
-    is called `part-<number>`.
+    is called `part-<number>`. The work is linear in the names' length and in the number of parts.
     """
     taken: set[str] = set()
+    used: dict[str, int] = {}  # the last counter that each name handed out, so that a repeated name does not recount from 1
     names = []
     for number, (raw, media_type) in enumerate(parts, 1):
-        base = unicodedata.normalize("NFC", raw).replace("\\", "/").rsplit("/", 1)[-1]
+        base = raw.replace("\\", "/").rsplit("/", 1)[-1]
         stem, dot, extension = base.rpartition(".")
         if not dot or not stem.strip(". "):  # no extension, or only a leading dot: the whole name is the stem
             stem, extension = base, ""
-        extension = "".join(char for char in extension if char.isascii() and char.isalnum())[:_MAX_EXTENSION_CHARS]
+        # A name is untrusted and may be megabytes long: cut it before any work per character, well past what a name keeps.
+        extension = "".join(char for char in unicodedata.normalize("NFC", extension[:_MAX_SCANNED_CHARS]) if char.isascii() and char.isalnum())
+        extension = extension[:_MAX_EXTENSION_CHARS]
         if not extension:
             extension = (_MIME.guess_extension(media_type.split(";")[0].strip().lower()) or "").lstrip(".")
         suffix = f".{extension}" if extension else ""
-        stem = _clean_stem(stem) or f"part-{number}"
-        count = 1
+        stem = _clean_stem(stem[:_MAX_SCANNED_CHARS]) or f"part-{number}"
+        first = _fit(stem, suffix) + suffix
+        count = used.get(first.casefold(), 0) + 1
         while True:
             tag = f" ({count})" if count > 1 else ""
-            name = _fit(stem, tag + suffix) + tag + suffix
+            name = first if count == 1 else _fit(stem, tag + suffix) + tag + suffix
             if name.casefold() not in taken:
                 break
             count += 1
+        used[first.casefold()] = count
         taken.add(name.casefold())
         names.append(name)
     return names

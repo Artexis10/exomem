@@ -15,6 +15,8 @@ from typing import NamedTuple
 
 #: Characters of markup that one conversion reads; longer input is cut there and reported as cut.
 MAX_INPUT_CHARS = 4 * 1024 * 1024
+#: Whitespace around a link's text that still reads as the text; a link whose text is longer than its address by more is not compared, and keeps its address.
+_LINK_PADDING = 64
 #: One list of an outer list leads the nested one; each nesting level indents two spaces.
 _INDENT = "  "
 
@@ -54,7 +56,8 @@ class _Text(HTMLParser):
         self._dropped = 0
         self._pre = 0
         self._lists: list[list] = []  # [ordered?, items so far]
-        self._links: list[tuple[str, int]] = []  # each open link: its address and where its text starts
+        self._written = 0  # the characters in `_out`, so a link's text is measured without joining the output
+        self._links: list[tuple[str, int, int]] = []  # each open link: its address, and where its text starts as a piece and as a character
         self._cells = 0
 
     def _add(self, text: str) -> None:
@@ -62,8 +65,10 @@ class _Text(HTMLParser):
             return
         if self._owed and self._out:
             self._out.append("\n" * self._owed)
+            self._written += self._owed
         self._owed = 0
         self._out.append(text)
+        self._written += len(text)
         self._last = text[-1]
 
     def _break(self, *, blank: bool = False) -> None:
@@ -83,7 +88,7 @@ class _Text(HTMLParser):
         elif tag == "br":
             self._break()
         elif tag == "a":
-            self._links.append((dict(attrs).get("href") or "", len(self._out)))
+            self._links.append((dict(attrs).get("href") or "", len(self._out), self._written))
         elif tag in _LISTS:
             self._lists.append([tag == "ol", 0])
             self._break(blank=not self._lists[:-1])
@@ -117,9 +122,10 @@ class _Text(HTMLParser):
                 self._dropped -= 1
             return
         if tag == "a" and self._links:
-            address, start = self._links.pop()
+            address, start, written = self._links.pop()
             address = "".join(address.split())
-            shown = "".join(self._out[start:]).strip()
+            # The text is read back only when it is about as long as the address, so that closing nested links stays linear.
+            shown = "".join(self._out[start:]).strip() if self._written - written <= len(address) + _LINK_PADDING else None
             if address and not address.startswith("#") and address != shown:
                 self._add(f" ({address})")
         elif tag in _LISTS:
