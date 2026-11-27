@@ -1152,7 +1152,7 @@ def _check_path_variants(vault_root: Path) -> list[AuditFinding]:
         prefix = f"{parent}/" if parent else ""
         request_budget.checkpoint()
         folders = set(subdirs)
-        defects = path_variants.sibling_groups(names, lambda name, folders=folders: name in folders)
+        defects = path_variants.sibling_groups(names, lambda name, folders=folders: name in folders, parent=parent)
         loose: dict[str, list[str]] = {}
         for name in names:
             # Letters and digits only: punctuation is not identity.
@@ -1164,7 +1164,7 @@ def _check_path_variants(vault_root: Path) -> list[AuditFinding]:
         in_defect = {name for group in defects for name in group}
         for group in defects:
             request_budget.checkpoint()
-            collides = len({vault_module.vault_name_key(name) for name in group}) == 1
+            case_keys = len({vault_module.vault_name_key(name) for name in group})
             findings.append(
                 AuditFinding(
                     category="path_variants",
@@ -1172,7 +1172,13 @@ def _check_path_variants(vault_root: Path) -> list[AuditFinding]:
                     path=f"{prefix}{group[0]}",
                     detail=(
                         f"{len(group)} sibling names "
-                        + ("collide after NFC and casefold: " if collides else "differ only by separators: ")
+                        # Any two names with one case key block an export, also inside a separator group.
+                        + (
+                            "collide after NFC and casefold: " if case_keys == 1
+                            else "differ by separators and include names that collide after NFC and casefold: "
+                            if case_keys < len(group)
+                            else "differ only by separators: "
+                        )
                         + ", ".join(repr(name) for name in group)
                     ),
                     proposed_fix=(

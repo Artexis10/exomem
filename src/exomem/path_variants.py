@@ -104,11 +104,11 @@ def sibling_names(root: Path, view: Any = None) -> Iterator[tuple[str, list[str]
         yield parent, subdirs, sorted(names)
 
 
-def sibling_groups(names: Iterable[str], is_folder: Callable[[str], bool]) -> list[list[str]]:
-    """The sibling names that are one name, in groups of two or more.
+def sibling_groups(names: Iterable[str], is_folder: Callable[[str], bool], *, parent: str) -> list[list[str]]:
+    """The sibling names under the vault-relative folder `parent` that are one name, in groups of two or more.
 
     Names with one `vault_name_key` group. Groups of folders only that share a
-    `vault.folder_lookalike_key` join into one. A file never joins by separators, because `a-b.md`
+    `vault.folder_lookalike_key` join into one where `vault.separator_rule_applies(parent)`. A file never joins by separators, because `a-b.md`
     and `ab.md` can be different pages. The audit and the merge both group siblings by this rule.
     """
     by_case: dict[str, list[str]] = {}
@@ -118,12 +118,13 @@ def sibling_groups(names: Iterable[str], is_folder: Callable[[str], bool]) -> li
     for spellings in by_case.values():
         # Names with one case key have one folder key, so the first stands for the group.
         by_folder.setdefault(vault.folder_lookalike_key(spellings[0]), []).append(spellings)
+    separators = vault.separator_rule_applies(parent)
     groups: list[list[str]] = []
     for folder_key, case_groups in by_folder.items():
         joined: list[str] = []
         for spellings in case_groups:
             # Only a group that another could join needs its names read as folders or files.
-            if folder_key and len(case_groups) > 1 and all(is_folder(name) for name in spellings):
+            if separators and folder_key and len(case_groups) > 1 and all(is_folder(name) for name in spellings):
                 joined.extend(spellings)
             elif len(spellings) > 1:
                 groups.append(spellings)
@@ -137,7 +138,7 @@ def _splits(root: Path, view: Any) -> list[_Split]:
     found: list[_Split] = []
     for parent, _subdirs, names in sibling_names(root, view):
         entries = _entries_reader(root, view, parent)
-        for spellings in sibling_groups(names, lambda name, entries=entries: entries(name) is not None):
+        for spellings in sibling_groups(names, lambda name, entries=entries: entries(name) is not None, parent=parent):
             folders = [name for name in spellings if entries(name) is not None]
             canonical = (
                 vault.canonical_variant(root, parent, spellings, entries)
@@ -411,6 +412,7 @@ def _remove_emptied(
                 for group in sibling_groups(
                     vault._listed(directory),  # noqa: SLF001
                     lambda sibling, directory=directory: (directory / sibling).is_dir(),
+                    parent=parent,
                 )
             ):
                 kept.append({"path": folder, "reason": "it is no longer a split"})

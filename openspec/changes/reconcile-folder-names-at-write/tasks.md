@@ -6,6 +6,7 @@
 - [x] 1.4 Compute Evidence family tags, the activity line and the log entry from the landed segments.
 - [x] 1.5 Match project-key folder planning by the folder key.
 - [x] 1.6 Steer a write into an existing separator pair's canonical spelling, and name the pair in `folder_split_warnings`.
+- [x] 1.7 Keep a separator between two digits in the key, and leave the Sources tree out of the separator rule (`vault.separator_rule_applies`).
 
 ## 2. Merge and audit
 

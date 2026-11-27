@@ -165,7 +165,7 @@ def _plan_project_registrations(
         close = project_keys_module._closest_existing_key(candidate, list(folders))
         if close is not None:
             raise project_keys_module.ProjectKeyTypoError(candidate, close[0], close[1])
-        research_dir = kb_root(vault_root) / "Notes" / "Research"
+        research_dir = kb_root(vault_root).joinpath(*project_keys_module.RESEARCH_PARENT)
         folder = project_keys_module._title_case_slug(
             candidate, [*folders.values(), *project_keys_module.child_folder_names(research_dir)]
         )
@@ -179,7 +179,7 @@ def _plan_project_registrations(
         )
         folders[candidate] = folder
         categories[candidate] = category
-        required_project_dirs.append(kb_root(vault_root) / "Notes" / "Research" / folder)
+        required_project_dirs.append(kb_root(vault_root).joinpath(*project_keys_module.RESEARCH_PARENT, folder))
         changed = True
         warnings.append(
             f"Auto-registered project key {candidate!r} (folder: {folder!r}"

@@ -96,6 +96,35 @@ def test_other_punctuation_keeps_two_folder_names_apart(vault: Path) -> None:
     assert result.path == f"{KB}/Notes/C++/intro.md"
 
 
+def test_a_separator_between_two_numbers_keeps_numbered_folders_apart(vault: Path) -> None:
+    """Defect: `Week 12` lands in `Week 1-2` and a date folder in another date, with no warning."""
+    notes = vault / KB / "Notes"
+    _page(notes / "Course" / "Week 1-2" / "old.md")
+    _page(notes / "Journal" / "2026-1-12" / "old.md")
+
+    week = create_file(vault, path=f"{KB}/Notes/Course/Week 12/notes.md", content="Notes.\n")
+    day = create_file(vault, path=f"{KB}/Notes/Journal/2026-11-2/meeting.md", content="Meeting.\n")
+
+    assert week.path == f"{KB}/Notes/Course/Week 12/notes.md"
+    assert day.path == f"{KB}/Notes/Journal/2026-11-2/meeting.md"
+
+
+def test_a_sources_folder_keeps_the_spelling_its_taxonomy_commits_to(vault: Path) -> None:
+    """Defect: a stray `Field-Notes` takes a Source's `Field Notes` folder, and adoption then refuses the move."""
+    sources = vault / KB / "Sources"
+    for name in ("a", "b", "c"):
+        _page(sources / "Field-Notes" / f"{name}.md")
+    _page(sources / "Field Notes" / "d.md")
+
+    assert vault_module.respell_new_path(vault, f"{KB}/Sources/Field Notes/new.md") == (
+        f"{KB}/Sources/Field Notes/new.md"
+    )
+    assert vault_module.respell_new_path(vault, f"{KB}/Sources/Field Notes", leaf_is_folder=True) == (
+        f"{KB}/Sources/Field Notes"
+    )
+    assert "Field" not in str(op_maintain_memory(vault, mode="path-variants"))
+
+
 def test_a_leading_underscore_keeps_a_system_folder_apart(vault: Path) -> None:
     """Defect: a page for `Drafts` lands in the system folder `_Drafts` because their separators match."""
     _page(vault / KB / "Notes" / "_Drafts" / "old.md")

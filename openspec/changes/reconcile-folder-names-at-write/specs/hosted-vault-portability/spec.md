@@ -1,8 +1,27 @@
 ## ADDED Requirements
 
+### Requirement: Folder identity is the folder key
+
+The folder key SHALL be the name after NFC and casefold, with every Unicode space separator, dash and connector punctuation character removed. A leading run of connector punctuation SHALL stay, and a run between two digits SHALL become one `-`. The separator rule SHALL join sibling folders with one folder key below the vault top and the managed root, outside the Sources tree.
+
+#### Scenario: Other punctuation keeps two names apart
+
+- **WHEN** `Notes/C/` exists and a write names `Notes/C++/intro.md`
+- **THEN** the page lands at `Notes/C++/intro.md`
+
+#### Scenario: A leading underscore keeps two names apart
+
+- **WHEN** `Notes/_Drafts/` exists and a write names `Notes/Drafts/plan.md`
+- **THEN** the page lands at `Notes/Drafts/plan.md`
+
+#### Scenario: A separator between two numbers keeps two folders apart
+
+- **WHEN** `Notes/Course/Week 1-2/` exists and a write names `Notes/Course/Week 12/notes.md`
+- **THEN** the page lands at `Notes/Course/Week 12/notes.md`
+
 ### Requirement: A new folder that differs from an existing one only by separators lands in it
 
-Folder identity for writes and merges SHALL be the folder key: the name after NFC and casefold, with every Unicode space separator, dash and connector punctuation character removed, except a leading run of connector punctuation. When a governed write would create a folder and a sibling folder with the same folder key exists, the write SHALL land in that folder, or in the canonical spelling of the group when several exist. File mode and store mode SHALL apply the same rule.
+When a governed write would create a folder where the separator rule applies, and a sibling folder with the same folder key exists, the write SHALL land in that folder, or in the canonical spelling of the group when several exist. File mode and store mode SHALL apply the same rule.
 
 #### Scenario: A capture names a scope without its hyphen
 
@@ -26,16 +45,6 @@ Folder identity for writes and merges SHALL be the folder key: the name after NF
 - **WHEN** `Notes/garden-tools/` exists and a note's placement folder is `Notes/garden tools`
 - **THEN** the note lands in `Notes/garden-tools/`
 
-#### Scenario: Other punctuation keeps two names apart
-
-- **WHEN** `Notes/C/` exists and a write names `Notes/C++/intro.md`
-- **THEN** the page lands at `Notes/C++/intro.md`
-
-#### Scenario: A leading underscore keeps two names apart
-
-- **WHEN** `Notes/_Drafts/` exists and a write names `Notes/Drafts/plan.md`
-- **THEN** the page lands at `Notes/Drafts/plan.md`
-
 #### Scenario: A group never gains a third spelling
 
 - **WHEN** `Notes/garden_tools/` holds three entries, `Notes/Garden-Tools/` holds one, and a write names `Notes/gardentools/plan.md`
@@ -43,7 +52,7 @@ Folder identity for writes and merges SHALL be the folder key: the name after NF
 
 ### Requirement: The separator rule keeps the caller's spelling where code reads a folder by its exact spelling
 
-The separator rule SHALL NOT change a file name, a folder at the top of the vault or of the managed root, a folder that the layout declares, or a project folder that the registry names in the research folder. These exceptions SHALL apply only to the separator rule. Case and Unicode-form steering SHALL stay as "The vault holds no two siblings with one portable name" requires.
+The separator rule SHALL NOT change a file name, a folder that the layout declares, or a project folder that the registry names in the research folder. These exceptions SHALL apply only to the separator rule. Case and Unicode-form steering SHALL stay as "The vault holds no two siblings with one portable name" requires.
 
 #### Scenario: A file name is not steered
 
@@ -55,6 +64,12 @@ The separator rule SHALL NOT change a file name, a folder at the top of the vaul
 - **WHEN** the vault top holds `Shared-Docs/` and a write names `SharedDocs/plan.md`
 - **THEN** the page lands at `SharedDocs/plan.md`
 
+#### Scenario: A Sources folder keeps its taxonomy spelling
+
+- **WHEN** `Sources/Field-Notes/` holds three pages, `Sources/Field Notes/` holds one, and a write names `Sources/Field Notes/new.md`
+- **THEN** the page lands at `Sources/Field Notes/new.md`
+- **AND** the preview lists no split for them
+
 #### Scenario: A registered project folder keeps its spelling
 
 - **WHEN** the project registry names the folder `Garden Tools`, the research folder holds `Garden-Tools/`, and a write names `Notes/Research/Garden Tools/plan.md`
@@ -62,7 +77,7 @@ The separator rule SHALL NOT change a file name, a folder at the top of the vaul
 
 ### Requirement: The preview merges separator variants like case splits
 
-A split SHALL be a group of sibling names equal after NFC and casefold, or a group of sibling folders equal under the folder key. The `path-variants` preview SHALL list both kinds, each with one canonical spelling. Export SHALL keep refusing only on names equal after NFC and casefold.
+A split SHALL be a group of sibling names equal after NFC and casefold, or, where the separator rule applies, a group of sibling folders equal under the folder key. The `path-variants` preview SHALL list both kinds, each with one canonical spelling. Export SHALL keep refusing only on names equal after NFC and casefold.
 
 #### Scenario: The preview lists a separator pair
 
@@ -79,7 +94,7 @@ A split SHALL be a group of sibling names equal after NFC and casefold, or a gro
 
 ### Requirement: A read-only audit lists path variants
 
-`maintain_memory(mode="audit")` SHALL run the category `path_variants` by default, over the names an export keeps. It SHALL report as defects the sibling groups equal after NFC and casefold, and the sibling folder groups equal under the folder key. Groups equal only after NFKC folding and keeping only letters and digits SHALL be candidates. A defect finding for a folder group SHALL name the `path-variants` preview as its fix. The audit SHALL NOT change the vault.
+`maintain_memory(mode="audit")` SHALL run the category `path_variants` by default, over the names an export keeps. Its defects SHALL be the sibling groups equal after NFC and casefold, and the folder groups that the separator rule joins. Its candidates SHALL be the groups equal only after NFKC folding with only letters and digits kept. A defect for a folder group SHALL name the `path-variants` preview as its fix. The audit SHALL NOT change the vault.
 
 #### Scenario: The audit finds a case group and an NFC group
 
@@ -106,7 +121,7 @@ A split SHALL be a group of sibling names equal after NFC and casefold, or a gro
 
 ### Requirement: A write into a split folder lands under its canonical spelling
 
-When a destination passes through, or ends at, a folder that has a variant sibling (a split), the write SHALL land under the split's canonical spelling, whichever spelling the caller named. A variant sibling is a name equal after NFC and casefold, or, below the vault top and the managed root, a folder equal under the folder key. A destination whose path already exists as a file at the requested spelling SHALL keep it. The write SHALL still warn about the split and name the `path_variants` audit.
+When a destination passes through, or ends at, a folder that has a variant sibling (a split), the write SHALL land under the split's canonical spelling, whichever spelling the caller named. A variant sibling is a name equal after NFC and casefold, or, where the separator rule applies, a folder equal under the folder key. A destination whose path already exists as a file at the requested spelling SHALL keep it. The write SHALL still warn about the split and name the `path_variants` audit.
 
 #### Scenario: A capture names the smaller side of a split
 

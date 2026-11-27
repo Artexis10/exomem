@@ -322,9 +322,13 @@ def reuse_folder_spelling(folder: str, existing: Iterable[str]) -> str:
     return next(iter(folder_variants(names, folder)), folder)
 
 
+# The managed-root path of the folder that holds each registered project's research folder.
+RESEARCH_PARENT = ("Notes", "Research")
+
+
 def research_parent_rel() -> str:
     """The vault-relative folder that holds each registered project's research folder."""
-    return f"{managed_root_rel()}/Notes/Research"
+    return "/".join((managed_root_rel(), *RESEARCH_PARENT))
 
 
 def child_folder_names(directory: Path) -> list[str]:
@@ -481,7 +485,7 @@ def plan_project_keys(
     introductions: list[ProjectKeyIntroduction] = []
     replay_by_key = {item.key: item for item in replay_introductions}
     seen: set[str] = set()
-    known_folders = sorted(set(proposed_folders.values()) | set(child_folder_names(kb_root(root) / "Notes" / "Research")))
+    known_folders = sorted(set(proposed_folders.values()) | set(child_folder_names(kb_root(root).joinpath(*RESEARCH_PARENT))))
     for raw in keys:
         if type(raw) is not str or not _SLUG_RE.fullmatch(raw):
             raise ValueError(
@@ -540,7 +544,7 @@ def plan_project_keys(
             f"    category: {item.category}\n"
         )
     project_directories = tuple(
-        kb_root(root) / "Notes" / "Research" / item.folder
+        kb_root(root).joinpath(*RESEARCH_PARENT, item.folder)
         for item in introductions
     )
     write = PlannedWrite(
@@ -585,6 +589,6 @@ def register_project_key(
         return key, plan.registry.folder_for(key) or folder or _title_case_slug(key), False
     batch_atomic_write(plan.writes, vault_root=vault_root)
     introduction = plan.introductions[0]
-    folder_path = kb_root(vault_root) / "Notes" / "Research" / introduction.folder
+    folder_path = kb_root(vault_root).joinpath(*RESEARCH_PARENT, introduction.folder)
     folder_path.mkdir(parents=True, exist_ok=True)
     return key, introduction.folder, True

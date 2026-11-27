@@ -6085,8 +6085,7 @@ def folder_split_warnings(vault_root: Path, directory: Path) -> list[str]:
                 listed = {entry.name: entry.is_dir() for entry in entries}
         except OSError:
             listed = {}
-        # As in `_split_spelling`, a separator pair at the vault top or the managed root is no split.
-        separated = "/".join(relative.parts[:index]) not in {"", managed_root_rel()}
+        separated = separator_rule_applies("/".join(relative.parts[:index]))
         variants = sorted(
             set(held_fs.name_variants(listed, part))
             | {name for name in folder_variants(listed, part) if separated and listed[name]}
@@ -7792,15 +7791,39 @@ def folder_lookalike_key(name: str) -> str:
     The key drops every Unicode space separator, dash and connector (such as `_`), so `Garden Tools`,
     `garden-tools` and `garden_tools` share it. A leading run of connectors stays, because a leading
     underscore marks a system folder (`_Schema`) and `Schema` is another name. Letters, digits and
-    every other character stay, so `C++` and `C` differ. Keys apply to folders: a file name keeps
+    every other character stay, so `C++` and `C` differ. A separator between two digits stays as one
+    `-`, so `Week 1-2` and `Week 12` differ. Keys apply to folders: a file name keeps
     `vault_name_key`, because `a-b.md` and `ab.md` can be different pages.
     """
     key = vault_name_key(name)
-    # The categories are fixed by the Unicode standard (Zs spaces, Pd dashes, Pc connectors), not a word list of ours.
     leading = next((i for i, char in enumerate(key) if unicodedata.category(char) != "Pc"), len(key))
-    return key[:leading] + "".join(
-        char for char in key[leading:] if unicodedata.category(char) not in ("Zs", "Pd", "Pc")
-    )
+    kept = list(key[:leading])
+    separated = False
+    for char in key[leading:]:
+        # The categories are fixed by the Unicode standard (Zs spaces, Pd dashes, Pc connectors), not a word list of ours.
+        if not char.isalnum() and unicodedata.category(char) in ("Zs", "Pd", "Pc"):
+            separated = True
+            continue
+        if separated and kept and kept[-1].isdigit() and char.isdigit():
+            # A separator between two digits divides two numbers: `Week 1-2` is not `Week 12`.
+            kept.append("-")
+        separated = False
+        kept.append(char)
+    return "".join(kept)
+
+
+def separator_rule_applies(parent: str) -> bool:
+    """Whether sibling folders under the vault-relative folder `parent` join by `folder_lookalike_key`.
+
+    Not at the vault top or the managed root, where code reads folders by exact spelling, and not in
+    the Sources tree, whose kind and domain folders the source taxonomy names and a Source commits
+    to by their exact label.
+    """
+    from .source_taxonomy import SOURCES_ROOT
+
+    root = managed_root_rel()
+    sources = f"{root}/{SOURCES_ROOT}"
+    return parent not in {"", root} and parent != sources and not parent.startswith(f"{sources}/")
 
 
 def folder_variants(names: Iterable[str], name: str) -> list[str]:
@@ -7960,8 +7983,7 @@ def _split_spelling(
     if part not in listed:
         # A folding volume answered for a spelling it does not list: no split here.
         return part
-    # The separator rule stays off at the vault top and the managed root, as for a new folder there.
-    lookalikes = set() if prefix in {"", managed_root_rel()} else set(folder_variants(listed, part))
+    lookalikes = set(folder_variants(listed, part)) if separator_rule_applies(prefix) else set()
     variants = [
         name
         for name in sorted(set(held_fs.name_variants(listed, part)) | lookalikes)
@@ -8011,11 +8033,11 @@ def _steered_folder(
     The siblings are `names` under `prefix`. A target is an existing folder (`entries` is not None)
     with the same `folder_lookalike_key`; the path that a move vacates is no target. One target gives
     its spelling. Several give their canonical spelling (`canonical_variant`), so the write adds no
-    third spelling. None keeps the caller's spelling: no target, the top of the vault or of the managed
-    root (code reads those folders by exact spelling), a folder the layout declares, or a project
+    third spelling. None keeps the caller's spelling: no target, a parent where the rule does not apply
+    (`separator_rule_applies`), a folder the layout declares, or a project
     folder the registry names in the research folder, the one place code reads it by exact spelling.
     """
-    if prefix in {"", managed_root_rel()}:
+    if not separator_rule_applies(prefix):
         return None
     targets = [
         name
