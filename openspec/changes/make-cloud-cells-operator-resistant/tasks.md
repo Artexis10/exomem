@@ -40,6 +40,14 @@ These tasks stay open until their named live evidence exists.
   - deny volume, command, service-account, RBAC, admission and Secret changes.
 - [ ] 4.2 Early check: find the FIDO2 path from the operator's workstation, including under WSL, for OpenSSH `-sk` keys that need a touch on every login. Evidence: a login that succeeds with a touch and fails without the authenticator, and a second login that needs a second touch.
 - [ ] 4.3 Move the everyday identity's kubeconfig to the operator's machine, and rewrite the routine procedures to use it with no node login. Evidence: every runbook step marked routine runs from the operator machine. A search of the runbooks finds no node login in a routine step.
+  - [ ] 4.3.1 Issue the standing routine reader of the D6 amendment (2026-11-27):
+    - the ServiceAccount and its binding as their own chart template, and the `exomem:operators` binding removed, with the chart tests and the live suite moved to the new subject;
+    - the issue, revoke and restore steps in the operator-access runbook, and the node-side kubeconfig reads in other runbooks replaced;
+    - the UFW rule on `wt0` in the K3s role;
+    - the NetBird group and policy for TCP 6443 in the substrate-infra administration root;
+    - the workstation registry row and its loopback proxy, in the dotfiles' reader tooling.
+
+    Evidence: on the pinned K3s, the rehearsed issue block yields a token that reads pods and logs through `tls-server-name: kubernetes`, and is denied Secrets, exec and writes; after its Secret is deleted, new requests fail within 15 seconds. Live, from each administrator workstation: the installed reader lists pods in every namespace, and is denied Secrets and a server-side dry-run delete. A TCP probe of the node's public address on 6443 does not connect, and the applied NetBird policy names only the administrator group as its source.
 - [ ] 4.4 Make node SSH accept only presence-checked `-sk` keys, or certificates that certify one. Issue break-glass only inside such a session. Evidence: a login without the authenticator is refused, and a break-glass issue from a non-admin session fails.
 - [ ] 4.5 Inventory every admin-tier credential with its permissions and its side of the D6 boundary:
   - operator and recovery credentials (SSH keys, the operator's provider API token, Terraform state and backend credentials, snapshot restore credentials, escrowed server token and CA material, the escrow identity);
