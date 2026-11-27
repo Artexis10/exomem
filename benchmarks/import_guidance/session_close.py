@@ -419,8 +419,10 @@ def stage_agent_files(arm: Arm, work: Path, env: dict[str, str], client_mode: st
     """Stage the same real MCP server, with plugin guidance or an explicit request to disable hooks."""
     mcp = work / "mcp.json"
     server = ["-c", INSTRUCTIONLESS_SERVER] if client_mode in SKILL_CLIENT_MODES else ["-m", "exomem"]
+    # A skills-only mode stands in for claude.ai, so the server serves that surface, not the claude-code actor.
+    served = env | {"EXOMEM_SURFACE": "claude-ai"} if client_mode in SKILL_CLIENT_MODES else env
     mcp.write_text(json.dumps({"mcpServers": {checks.SERVER: {
-        "command": sys.executable, "args": [*server, "--transport", "stdio"], "env": env,
+        "command": sys.executable, "args": [*server, "--transport", "stdio"], "env": served,
     }}}), encoding="utf-8")
     files = {"mcp": mcp, "settings": work / "settings.json"}
     settings = {"disableAllHooks": True}

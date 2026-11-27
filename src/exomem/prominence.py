@@ -109,6 +109,17 @@ def _saved_preference() -> dict:
 
 
 CANON = ("off", "light", "balanced", "maximal")
+
+
+def engages_any_subject(level: str | None) -> bool:
+    """Whether a level engages on any subject of the user's life or work without being asked.
+
+    `off` waits for the user's request and `light` for clear relevance; `balanced` and
+    `maximal` engage on any subject. The set ranges over the closed `CANON` enum.
+    """
+    # nosemgrep: ep-word-membership -- a closed subset of the CANON level enum.
+    return level in {"balanced", "maximal"}
+
 _ALIASES = {
     "none": "off",
     "silent": "off",

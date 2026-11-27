@@ -37,6 +37,19 @@ def names_a_manifest(selector: str) -> bool:
     )
 
 
+def selected_collection_id(vault_root: Path, selector: str | None) -> str | None:
+    """The id of the existing collection `selector` names, or None when it names none this caller can read."""
+    if selector is None:
+        return None
+    named = memory_refs.normalize_id(selector.strip())
+    if named is not None:
+        return named
+    try:
+        return record_governance.resolve_collection(vault_root, selector).collection_id
+    except Exception:  # noqa: BLE001 - an unresolved selector gets the leaf's own refusal
+        return None
+
+
 def resolve_collection(
     vault_root: Path, selector: str | None, *, profile: str, unserved: Callable[[], str | None] | None = None,
     certain: bool = False,

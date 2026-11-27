@@ -1271,6 +1271,8 @@ def summary_create(root, arguments):
     path, text = arguments.get("manifest_path"), arguments.get("manifest_text")
     if not isinstance(path, str) or not isinstance(text, str):
         return False
+    # A manifest that names no id gets one at create, so classify it as create will see it.
+    text = collections.assign_missing_id(text)[0]
     try:
         return collections.parse_manifest_bytes(Path(root), path, text.encode()).view_mode == "summary"
     except Exception:  # noqa: BLE001 - classification only

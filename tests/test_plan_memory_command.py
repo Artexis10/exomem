@@ -130,6 +130,23 @@ def test_plan_memory_create_uses_shared_preflight_for_planning(tmp_path: Path) -
     assert created["operation"] == "create"
 
 
+def test_a_planning_manifest_without_an_id_creates_with_an_assigned_id(tmp_path: Path) -> None:
+    """A client with no shell cannot mint a UUID, so create assigns the Planning collection's id."""
+    from exomem import vault
+    from exomem.plan_memory import plan_memory
+
+    (tmp_path / "Knowledge Base").mkdir()
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Log\n", encoding="utf-8")
+    manifest_path = "Knowledge Base/Planning/Work/_collection.md"
+    manifest_text = _manifest().replace("exomem_id: 2db90f18-70df-4e41-986e-2d7d7db1caca\n", "")
+
+    created = plan_memory(tmp_path, "create", manifest_path=manifest_path, manifest_text=manifest_text, why="new plan")
+
+    written, _body, _raw = vault.parse_frontmatter((tmp_path / manifest_path).read_text(encoding="utf-8"))
+    assert written["exomem_id"] not in (None, "2db90f18-70df-4e41-986e-2d7d7db1caca")
+    assert created["collection_id"] == written["exomem_id"]
+
+
 @pytest.mark.parametrize(
     ("item", "expected_message"),
     (
