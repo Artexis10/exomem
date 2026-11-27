@@ -1546,6 +1546,20 @@ def test_the_source_erasure_selection_is_validated_and_delivered_to_cellctl() ->
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_face_search_cell_list_is_validated_and_delivered_to_cellctl() -> None:
+    """Catches a chart value that never reaches cellctl, or a malformed one that enables no cell silently."""
+    selection = ["aaaaaaaaaaaaaaaa"]
+    deployment = _find(_helm_template("--set-json", "cellctl.facesHostedCellIds=" + json.dumps(selection)),
+                       "Deployment", "cellctl")
+    env = {entry["name"]: entry.get("value")
+           for entry in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert json.loads(env["CELLCTL_FACES_HOSTED_CELL_IDS"]) == selection
+    for bad in (["not-a-cell"], {"records": ["aaaaaaaaaaaaaaaa"]}):
+        result = _helm_render("--set-json", "cellctl.facesHostedCellIds=" + json.dumps(bad))
+        assert result.returncode != 0 and "facesHostedCellIds" in result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
 def test_a_misspelt_engine_name_is_refused_in_the_per_cell_selection() -> None:
     selection = {"documnets": ["aaaaaaaaaaaaaaaa"]}
     result = _helm_render("--set-json", "cellctl.mediaEngineCellIds=" + json.dumps(selection))

@@ -60,3 +60,19 @@ def test_rewritten_cache_manifest_cannot_admit_other_bytes_for_a_media_pin(tmp_p
 
     with pytest.raises(backend.ModelFilesUnavailable, match="pinned published artifact"):
         backend.ensure_artifact("example/query", served)
+
+
+def test_a_face_model_entry_that_drops_its_licence_sources_is_refused():
+    """A model swap that loses its licence evidence must fail where the manifest is read and built."""
+    import copy
+    from importlib.resources import files
+
+    from exomem import media_models
+
+    shipped = json.loads(files("exomem").joinpath("media_models.json").read_text(encoding="utf-8"))
+    entry = copy.deepcopy(shipped["face-embed"])
+    media_models.check_entry("face-embed", entry)
+    del entry["source"]["license_sources"]
+
+    with pytest.raises(ValueError, match="names no licence source"):
+        media_models.check_entry("face-embed", entry)

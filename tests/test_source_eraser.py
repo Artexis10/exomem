@@ -976,3 +976,26 @@ def test_a_refused_journal_restart_advances_the_retirement_generation_once(vault
         monkeypatch.setattr(lexstore, "restart_change_journal", lambda root: True)
         assert eraser._caches(progress, derived) == {"state": "acknowledged"}
     assert source_custody.retirement_generation(vault) == before + 1
+
+
+def test_an_erasure_waits_for_the_face_store_to_drop_the_pages_rows(vault, attempts, erasable, monkeypatch):
+    """Catches an erasure reported complete while the face store's cleanup failed."""
+    from exomem import face_groups
+
+    _manager, call = attempts
+    _path, reference, source_hash = capture(vault, call)
+    real = face_groups.forget_pages
+    failures = []
+
+    def locked_once(vault_root, pages):
+        if not failures:
+            failures.append(pages)
+            raise OSError("the face store is locked")
+        return real(vault_root, pages)
+
+    monkeypatch.setattr(face_groups, "forget_pages", locked_once)
+    first = erase(call, reference, source_hash)
+
+    assert failures, "the erasure never asked the face store"
+    assert "clip" in first["components"]["derived"]["pending"], json.dumps(first)
+    assert drive(call, reference, source_hash)["status"] == "complete"

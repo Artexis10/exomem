@@ -599,19 +599,37 @@ def stage_state(vault: Path, stage: Path, stop: threading.Event | None = None) -
     """
     shutil.rmtree(stage, ignore_errors=True)
     stage.mkdir(mode=0o700)
-    kept = {descriptor.id for descriptor in reserved_paths.non_rebuildable_state_descriptors()}
+    descriptors = reserved_paths.non_rebuildable_state_descriptors()
+    kept = {descriptor.id for descriptor in descriptors}
+    # A family may sit inside a directory that it shares with a rebuildable one (the face store keeps its
+    # people store beside its face index). Staging enters such a directory and stages only the kept entries.
+    shared = {
+        "/".join(path.split("/")[:depth])
+        for descriptor in descriptors for path in (*descriptor.exact, *descriptor.trees)
+        for depth in range(1, path.count("/") + 1)
+    }
     findings: list[dict[str, str]] = []
-    try:
-        names = sorted(os.listdir(state_paths.vault_state_dir(vault)))
-    except FileNotFoundError:
-        return 0, findings
-    staged = 0
+    state_dir = state_paths.vault_state_dir(vault)
     plain: list[tuple[Path, Path, str]] = []
-    for name in names:
-        if reserved_paths.classify_logical(name).descriptor_id in kept:
-            staged += _stage_tree(state_paths.vault_state_dir(vault) / name, stage / name, findings,
-                                  stop or threading.Event(), plain)
-    return staged + _copy_plain(plain, findings, stop or threading.Event()), findings
+    stopping = stop or threading.Event()
+
+    def visit(relative: str) -> int:
+        try:
+            names = sorted(os.listdir(state_dir / relative))
+        except FileNotFoundError:
+            return 0
+        staged = 0
+        for name in names:
+            path = f"{relative}/{name}" if relative else name
+            if reserved_paths.classify_logical(path).descriptor_id in kept:
+                staged += _stage_tree(state_dir / path, stage / path, findings, stopping, plain)
+            elif path in shared and (state_dir / path).is_dir() and not (state_dir / path).is_symlink():
+                (stage / path).mkdir(mode=0o700)
+                staged += visit(path)
+        return staged
+
+    staged = visit("")
+    return staged + _copy_plain(plain, findings, stopping), findings
 
 
 # --- originals --------------------------------------------------------------------------------

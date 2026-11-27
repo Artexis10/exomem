@@ -18,9 +18,22 @@ class MediaModel:
     digest: str
 
 
+def check_entry(kind: str, spec: dict[str, Any]) -> None:
+    """Refuse a manifest entry that names no licence source for its weights.
+
+    A model swap that drops its licence evidence then fails where the manifest is read and where the
+    artifact is built, before any host acquires the bytes.
+    """
+    sources = spec.get("source", {}).get("license_sources")
+    # A source is a URL a reviewer can open; the scheme prefix checks the field's format, not its meaning.
+    if not sources or not all(isinstance(source, str) and source.startswith("https://") for source in sources):
+        raise ValueError(f"{kind}: the media model manifest entry names no licence source")
+
+
 def model_spec(kind: str) -> dict[str, Any]:
     """Read deployment choices from data without importing a model runtime."""
     spec = json.loads(files("exomem").joinpath("media_models.json").read_text(encoding="utf-8"))[kind]
+    check_entry(kind, spec)
     return {**spec, "revision": spec["artifact"]["revision"]}
 
 

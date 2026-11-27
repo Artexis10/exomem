@@ -17,11 +17,11 @@ from cellctl import main, reconcile
 from cellctl.catalogue_build import BuildConfig, BuildJob
 from cellctl.k8s_client import ClusterClient
 from cellctl.manifests import (
-    CATALOGUE_BACKUP_EXCLUDES,
     CATALOGUE_BUILD_NODE_ANNOTATION,
     HOLD_ANNOTATION,
     JOB_KIND_CATALOGUE_BUILD,
     JOB_KIND_LABEL,
+    STATE_BACKUP_EXCLUDES,
     CellManifestSpec,
     ResourceSettings,
     catalogue_build_name,
@@ -161,7 +161,7 @@ def test_every_backup_excludes_only_state_catalogue_families_and_sidecars(read_o
     script = job["spec"]["template"]["spec"]["containers"][0]["command"][2]
     args = shlex.split(script)
     excludes = [args[i + 1] for i, arg in enumerate(args) if arg == "--exclude"]
-    assert excludes == list(CATALOGUE_BACKUP_EXCLUDES)
+    assert excludes == list(STATE_BACKUP_EXCLUDES)
     for name in (".lexical-staged-" + "a" * 16 + ".sqlite", ".lexical.sqlite.rebuild-" + "b" * 32 + ".tmp"):
         for suffix in ("", "-wal", "-shm", "-journal"):
             assert any(fnmatch.fnmatchcase("/data/host/.local/state/exomem/state/vault-key/" + name + suffix, p)

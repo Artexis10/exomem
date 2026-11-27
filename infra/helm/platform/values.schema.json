@@ -233,6 +233,10 @@
           "type": "array", "uniqueItems": true,
           "items": {"$ref": "#/$defs/mediaEngineName"}
         },
+        "facesHostedCellIds": {
+          "type": "array", "maxItems": 1024, "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[a-z2-7]{16}$"}
+        },
         "sourceErasureCellIds": {
           "type": "object",
           "propertyNames": {"minLength": 1},

@@ -4,10 +4,13 @@
 # use each one and what to record.
 #
 #   cloud_restore.sh drill CELL_ID SNAPSHOT REFERENCE
-#     Restore SNAPSHOT into a scratch namespace, hash each backup root
-#     and compare with REFERENCE: "live" (the running cell's roots) or
-#     "prior:<8 hex>" (the roots an earlier restore kept). The cell is never
-#     stopped, mounted by a new pod or written. The cell must run on this node.
+#     Restore SNAPSHOT into a scratch namespace, hash each backup root and
+#     judge it against REFERENCE: "live" (the running cell's roots) or
+#     "prior:<8 hex>" (the roots an earlier restore kept). Each reference entry
+#     unchanged since the snapshot's time must be restored with the same
+#     content; later changes are reported, not judged. The verdict is pass,
+#     fail or inconclusive. The cell is never stopped, mounted by a new pod or
+#     written. The cell must run on this node.
 #   cloud_restore.sh restore CELL_ID SNAPSHOT
 #     Replace the cell's backed-up paths (/data/vault and /data/host) with
 #     SNAPSHOT. The prior contents stay in /data/.restore-prior-<run ID>. The
@@ -19,8 +22,9 @@
 # /var/lib/exomem-restore/<run ID>, start them there as a transient systemd
 # unit, so a dropped SSH session cannot interrupt a run, and print the run ID.
 # The run's last log line gives its verdict; rc=0 means it passed and its
-# cleanup was verified. The log holds counts only. The hash lists name private
-# files, so they stay in the private run directory, removed after a pass.
+# cleanup was verified. A drill that judged no vault entry ends inconclusive,
+# rc=1. The log holds counts only. The hash lists name private files, so they
+# stay in the private run directory, removed after a pass.
 set -euo pipefail
 umask 077
 
@@ -253,6 +257,49 @@ hash_pod_roots() {
   done
 }
 
+# judge_verdict ROOT CODE: one root's verdict from the exit code of `cloud_vault_digest.py judge`.
+# A code that judge is not known to return fails the root, so a judge that did not run never passes.
+judge_verdict() {
+  case "$2" in
+    0) echo pass ;;
+    # Judging nothing proves nothing about a vault. The host root may hold only state the cell rewrote since.
+    4) if [ "$1" = /data/host ]; then echo pass; else echo inconclusive; fi ;;
+    *) echo fail ;;
+  esac
+}
+
+# The snapshot's own time is the cutoff for judge (design D2). The Job's TTL deletes it 300 s after
+# it finishes, so the log is read at once. A missing or unparsable line fails the drill.
+read_snapshot_cutoff() {
+  local log
+  log=$(k -n "$SCRATCH" logs "job/$1" --limit-bytes=65536) || die "could not read the restore Job's log"
+  CUTOFF_NS=$(printf '%s\n' "$log" | py "$DIGEST" cutoff) || die "the restore Job's log has no snapshot time"
+  echo "snapshot time $(date -u -d "@$((CUTOFF_NS / 1000000000))" +%FT%TZ)"
+}
+
+# Judges each restored root against the reference capture, then sets VERDICT to the worst root's.
+judge_roots() {
+  local path name code root_verdict patterns pattern
+  local excludes=()
+  patterns=$(py "$MANIFESTS" exclude-patterns) || die 'cellctl names no readable backup excludes'
+  while IFS= read -r pattern; do excludes+=(--exclude "$pattern"); done <<< "$patterns"
+  VERDICT=pass
+  for path in "${BACKUP_PATHS[@]}"; do
+    name=${path##*/}
+    mkdir -m 700 "$HASH_DIR/judge-$name"
+    echo "== judge $path"
+    code=0
+    py "$DIGEST" judge "$HASH_DIR/snapshot-$name.hashes" "$HASH_DIR/reference-$name.hashes" \
+      "$CUTOFF_NS" "$HASH_DIR/judge-$name" --root "$path" "${excludes[@]}" || code=$?
+    root_verdict=$(judge_verdict "$path" "$code")
+    echo "$path verdict=$root_verdict judge_exit=$code"
+    case "$root_verdict" in
+      fail) VERDICT=fail ;;
+      inconclusive) [ "$VERDICT" = fail ] || VERDICT=inconclusive ;;
+    esac
+  done
+}
+
 compare_roots() {
   local restored=$1 reference=$2 path name
   local allow_empty=()
@@ -279,6 +326,7 @@ scratch_restore() {
   k -n "$SCRATCH" wait --for=jsonpath='{.status.phase}'=Bound pvc/cell-data --timeout=300s >/dev/null
   SCRATCH_PV=$(k -n "$SCRATCH" get pvc cell-data -o jsonpath='{.spec.volumeName}')
   wait_job "$SCRATCH" "$job"
+  [ "$MODE" != drill ] || read_snapshot_cutoff "$job"
   echo "restore completed in $(($(date -u +%s) - started)) s (job deadline 900 s)"
 
   echo "== hash the restored backup roots"
@@ -339,20 +387,20 @@ run_drill() {
   mint_break_glass
   check_window
   # The reference is read through the live runtime's root, never through a
-  # new pod on the cell's volume. File reads avoid atime updates.
+  # new pod on the cell's volume. File reads avoid atime updates. Its ctimes
+  # tell judge which entries the cell changed after the snapshot.
   root=$(runtime_root) || die 'reference not found through the live runtime'
   echo "reference=$reference capture started at $(date -u +%FT%TZ)"
   for path in "${BACKUP_PATHS[@]}"; do
     name=${path##*/}
-    py "$DIGEST" hash "$root$ref_path/$name" > "$HASH_DIR/reference-$name.hashes" \
+    py "$DIGEST" hash --ctime "$root$ref_path/$name" > "$HASH_DIR/reference-$name.hashes" \
       || die "hashing the reference $path failed"
     echo "reference $name entries=$(wc -l < "$HASH_DIR/reference-$name.hashes")"
   done
   echo "reference capture finished at $(date -u +%FT%TZ)"
   scratch_restore
-  compare_roots snapshot reference
-  VERDICT=pass
-  echo "drill PASS"
+  judge_roots
+  echo "drill ${VERDICT^^}"
 }
 
 # --- in-place restore ------------------------------------------------------
@@ -539,7 +587,7 @@ run() {
   CELL_ID=$1 SNAPSHOT=$2
   NS="exo-cell-$CELL_ID"
   SCRATCH="exo-scratch-$CELL_ID-$RUN_ID"
-  SCRATCH_PV="" SCRATCH_CLEAN=no PHASE=checks VERDICT=fail BG_EXPIRES=0 RESTORED_BYTES=0
+  SCRATCH_PV="" SCRATCH_CLEAN=no PHASE=checks VERDICT=fail BG_EXPIRES=0 RESTORED_BYTES=0 CUTOFF_NS=""
   CELLCTL_REPLICAS="" BACKUP_PATHS=() IN_PLACE_JOB="" RESTORE_JOBS=""
   HASH_DIR="$STATE/$RUN_ID/hashes"
   BG_DIR="/dev/shm/exomem-break-glass-$RUN_ID"
@@ -561,9 +609,12 @@ run() {
   fi
 }
 
-case "${1:-}" in
-  drill | restore) launch "$@" ;;
-  follow) follow "${2:-}" ;;
-  run) shift && run "$@" ;;
-  *) die 'usage: cloud_restore.sh drill CELL_ID SNAPSHOT REFERENCE | restore CELL_ID SNAPSHOT | follow RUN_ID' ;;
-esac
+# Sourcing the file only defines the functions, so a test can drive one of them.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  case "${1:-}" in
+    drill | restore) launch "$@" ;;
+    follow) follow "${2:-}" ;;
+    run) shift && run "$@" ;;
+    *) die 'usage: cloud_restore.sh drill CELL_ID SNAPSHOT REFERENCE | restore CELL_ID SNAPSHOT | follow RUN_ID' ;;
+  esac
+fi
