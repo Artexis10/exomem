@@ -9,6 +9,9 @@ would report one cadence while the hooks ran another.
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -234,6 +237,26 @@ def test_hook_env_beats_config(config, hook, monkeypatch):
     prominence.write_prominence("off")
     monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
     assert hook._prominence() == "maximal"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or os.name == "nt", reason="the printed lines are bash")
+def test_hook_env_lines_leave_each_tunable_under_one_name(config, capsys):
+    """The failure: `eval "$(exomem prominence --hook-env)"` exported EXOMEM_X, which outranks an EVERMATTER_X."""
+    from exomem.__main__ import _prominence_main
+
+    prominence.write_prominence("light")
+    assert _prominence_main(["--hook-env"]) == 0
+    printed = capsys.readouterr().out
+    earlier = {"EXOMEM_RETRIEVE_NUDGE_MIN_CHARS": "1", "EVERMATTER_RETRIEVE_NUDGE_DISABLE": "1", "KB_MCP_CAPTURE_NUDGE_DISABLE": "1"}
+
+    shell = subprocess.run(
+        ["bash", "-c", printed + "\nenv"], env={"PATH": os.environ["PATH"], **earlier},
+        capture_output=True, text=True, timeout=30, check=True,
+    ).stdout
+
+    held = dict(line.split("=", 1) for line in shell.splitlines() if line.startswith(("EXOMEM_", "EVERMATTER_", "KB_MCP_")))
+    expected = {"EVERMATTER_" + k[len("EXOMEM_"):]: v for k, v in prominence.hook_env("light").items() if v != ""}
+    assert held == expected
 
 
 def test_off_disables_both_hooks():

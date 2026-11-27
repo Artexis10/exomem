@@ -13,7 +13,7 @@ The service checks the repository, restores a sample to prove that the backup wo
 1. Install restic 0.17.1 or later and put it on the `PATH` of the service.
 2. Write the repository password to a file outside the vault. Allow only your own account to read it. Keep a second copy away from this machine: nobody can read the repository without it.
 3. Write a config file outside the vault (example below). Allow only your own account to read it.
-4. Set `EXOMEM_VAULT_BACKUP_CONFIG` to the config file in the service environment. Restart the service.
+4. Set `EVERMATTER_VAULT_BACKUP_CONFIG` to the config file in the service environment. Restart the service.
 5. Run `exomem backup run --init-repository`. The command creates the repository and takes the first backup.
 6. Run `exomem backup status`. Each line shows a state, and `findings` is empty.
 

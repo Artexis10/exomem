@@ -66,7 +66,7 @@ Evermatter before a task and save what it learns. Re-running is safe: completed
 steps report `[skipped]`.
 
 Setup prefers one already-running authenticated service when `--mcp-url` or
-`EXOMEM_BASE_URL` is configured, including cwd `.env`; Claude Code and Codex
+`EVERMATTER_BASE_URL` is configured, including cwd `.env`; Claude Code and Codex
 then use the same `/mcp` core. With no service it registers stdio. Force that
 local fallback with `--stdio`. Existing registrations are preserved unless you
 confirm replacement or pass `--replace-client-registration`.
@@ -151,7 +151,7 @@ That's the normal case, and it's safe:
   existing ones. Everything else in the vault is read-only input; `init`
   refuses to run if `Knowledge Base/` already exists, so re-running can't
   clobber anything. *(The governed folder is named `Knowledge Base/` by default;
-  set `EXOMEM_KB_DIRNAME` to govern a differently-named folder — e.g. to adopt one
+  set `EVERMATTER_KB_DIRNAME` to govern a differently-named folder — e.g. to adopt one
   your vault already uses.)*
 - **Your notes stay searchable.** `search_memory` reaches sibling folders when you
   use `scope="vault"`; `browse_memory` gives Claude a bounded structural report
@@ -228,7 +228,7 @@ uv sync                         # lean: keyword/BM25 search, no heavy deps
 > embeddings` — a ~1-2 GB torch download. It's **GPU-accelerated on both NVIDIA
 > (CUDA) and Apple Silicon (Metal/MPS)**, auto-detected; CPU-only boxes work too,
 > just slower. Start lean; upgrade anytime by installing the extra and unsetting
-> `EXOMEM_DISABLE_EMBEDDINGS`. **On a Mac, see "Apple Silicon" in step 4 below.**
+> `EVERMATTER_DISABLE_EMBEDDINGS`. **On a Mac, see "Apple Silicon" in step 4 below.**
 
 If you already manage Python environments yourself, `pip install -e .` still
 works as a fallback; the `uv` path is preferred because it honors `uv.lock` and
@@ -269,7 +269,7 @@ The server finds your vault via one env var — the folder that *contains*
 `Knowledge Base/`:
 
 ```bash
-export EXOMEM_VAULT_PATH="/path/to/your/Obsidian"   # the vault root, not the KB folder
+export EVERMATTER_VAULT_PATH="/path/to/your/Obsidian"   # the vault root, not the KB folder
 ```
 
 ---
@@ -277,12 +277,12 @@ export EXOMEM_VAULT_PATH="/path/to/your/Obsidian"   # the vault root, not the KB
 ## 4. (Choose) hybrid vs lean
 
 - **Lean / keyword-only (default install)** — `uv sync` + set
-  `EXOMEM_DISABLE_EMBEDDINGS=1`. `find` uses BM25 (stemmed substring + ranking).
+  `EVERMATTER_DISABLE_EMBEDDINGS=1`. `find` uses BM25 (stemmed substring + ranking).
   Instant, no model load, no GPU, works everywhere. The easiest start. Note it's
   **silent about it** — there's no error when embeddings are off, so "search
   works" on a lean install means keyword/BM25, *not* semantic.
 - **Hybrid** — install the extra (`uv sync --extra embeddings`) and leave
-  `EXOMEM_DISABLE_EMBEDDINGS` unset. Adds local vector embeddings + graph on top
+  `EVERMATTER_DISABLE_EMBEDDINGS` unset. Adds local vector embeddings + graph on top
   of BM25 — best recall on natural-language queries. GPU-accelerated on NVIDIA
   (CUDA) or Apple Silicon (Metal/MPS), auto-detected; CPU works but embeds
   slowly. The vector index builds as you write (each note is embedded on save);
@@ -307,9 +307,9 @@ uv run python scripts/verify-mlx.py     # expect: GATE: PASS
 uv run exomem doctor --profile media    # torch.device: mps, asr.backend: mlx-whisper
 ```
 
-Optional knobs: `EXOMEM_MPS_FP16=0` keeps embeddings in fp32; `EXOMEM_TORCH_DEVICE=cpu`
+Optional knobs: `EVERMATTER_MPS_FP16=0` keeps embeddings in fp32; `EVERMATTER_TORCH_DEVICE=cpu`
 forces CPU (e.g. to avoid thermal throttling on a fanless Air during a big backfill);
-`EXOMEM_MLX_WHISPER_MODEL=mlx-community/whisper-large-v3-turbo` picks a lighter ASR model.
+`EVERMATTER_MLX_WHISPER_MODEL=mlx-community/whisper-large-v3-turbo` picks a lighter ASR model.
 
 Preflight the selected path before wiring Claude:
 
@@ -371,12 +371,12 @@ manual equivalent is:
 
 ```bash
 claude mcp add evermatter \
-  --env EXOMEM_VAULT_PATH="/path/to/your/Obsidian" \
-  --env EXOMEM_DISABLE_EMBEDDINGS=1 \
+  --env EVERMATTER_VAULT_PATH="/path/to/your/Obsidian" \
+  --env EVERMATTER_DISABLE_EMBEDDINGS=1 \
   -- uv --directory "$PWD" run python -m exomem --transport stdio
 ```
 
-(Drop the `EXOMEM_DISABLE_EMBEDDINGS` line for hybrid. If you use the pip
+(Drop the `EVERMATTER_DISABLE_EMBEDDINGS` line for hybrid. If you use the pip
 fallback instead of uv, use the **full path to your venv's `python`**.)
 
 Each stdio client/session owns this process. Several active sessions can
@@ -392,8 +392,8 @@ Or by hand in `.mcp.json` (project) / your Claude Code settings:
       "command": "uv",
       "args": ["--directory", "/path/to/evermatter", "run", "python", "-m", "exomem", "--transport", "stdio"],
       "env": {
-        "EXOMEM_VAULT_PATH": "/path/to/your/Obsidian",
-        "EXOMEM_DISABLE_EMBEDDINGS": "1"
+        "EVERMATTER_VAULT_PATH": "/path/to/your/Obsidian",
+        "EVERMATTER_DISABLE_EMBEDDINGS": "1"
       }
     }
   }
@@ -544,11 +544,11 @@ activity should land. Before the first lifecycle event, missing checkpoint state
 is a healthy warning. Continuation state and metadata-only event logs live under
 `~/.claude/.cache/exomem-continuation/` or
 `~/.codex/.cache/exomem-continuation/`; `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and
-the test/isolation override `EXOMEM_HOOK_HOME` move scripts, config, state, and
+the test/isolation override `EVERMATTER_HOOK_HOME` move scripts, config, state, and
 logs together. Checkpoints are fresh for 30 days; expired non-current sessions
 are pruned without following symlinks or deleting a live writer's state.
 
-Set `EXOMEM_CONTINUATION_DISABLE=1` before launching the client to bypass all
+Set `EVERMATTER_CONTINUATION_DISABLE=1` before launching the client to bypass all
 continuation writes and reinjection without deleting existing state. After
 installation or migration, restart/reload that client and approve/trust the
 hook if it asks. Re-running `install-hook` migrates only exact legacy
@@ -585,45 +585,45 @@ template) is named in the report and exits non-zero rather than being rewritten
 blind.
 
 Below `maximal` the capture reminder fires only on turns that land work (a
-commit, push, merge, tag, or PR/release create or merge); `EXOMEM_CAPTURE_NUDGE_MIN_CHARS`
+commit, push, merge, tag, or PR/release create or merge); `EVERMATTER_CAPTURE_NUDGE_MIN_CHARS`
 then sets the `maximal` length gate and what counts as a substantive turn for the episode ask.
 The episode ask also needs a landing since the last ask or record: a session that never
 lands work is never asked, and an ask answered without a record waits for the next landing.
 
-Tune with `EXOMEM_CAPTURE_NUDGE_MIN_CHARS` / `EXOMEM_RETRIEVE_NUDGE_MIN_CHARS` (and the
-matching `_COOLDOWN_SEC`), `EXOMEM_RETRIEVE_NUDGE_CONTROL_MAX_CHARS` for the read
-hook's control-prompt skip ceiling, or disable either with `EXOMEM_CAPTURE_NUDGE_DISABLE=1` /
-`EXOMEM_RETRIEVE_NUDGE_DISABLE=1`. **Writing in a dense script (Japanese, Chinese)?**
+Tune with `EVERMATTER_CAPTURE_NUDGE_MIN_CHARS` / `EVERMATTER_RETRIEVE_NUDGE_MIN_CHARS` (and the
+matching `_COOLDOWN_SEC`), `EVERMATTER_RETRIEVE_NUDGE_CONTROL_MAX_CHARS` for the read
+hook's control-prompt skip ceiling, or disable either with `EVERMATTER_CAPTURE_NUDGE_DISABLE=1` /
+`EVERMATTER_RETRIEVE_NUDGE_DISABLE=1`. **Writing in a dense script (Japanese, Chinese)?**
 Lower the `MIN_CHARS` values — those scripts pack more meaning per character, so
 the defaults (tuned for English) can under-fire. (These tunables were renamed from
-`KB_*` to `EXOMEM_*`; the old `KB_*` names are still accepted for back-compat.)
+`KB_*` to `EVERMATTER_*`; the old `KB_*` names are still accepted for back-compat.)
 
 By default the capture reminder blocks the stop, which costs one extra model turn. To
-deliver it on the session's next prompt instead, set `EXOMEM_CAPTURE_NUDGE_DELIVERY=next-turn`
+deliver it on the session's next prompt instead, set `EVERMATTER_CAPTURE_NUDGE_DELIVERY=next-turn`
 or add `"capture_nudge_delivery": "next-turn"` to `~/.exomem/config.json`. The episode ask
 still blocks the stop, and any other value means `stop`.
 
 **Opt-in: upgrade the read-side reminder to real retrieved content.** By default
 the `UserPromptSubmit` hook only reminds Claude to run `search_memory` — set
-`EXOMEM_RETRIEVE_INJECT=1` and it instead fetches the top 3 compact routing stubs
+`EVERMATTER_RETRIEVE_INJECT=1` and it instead fetches the top 3 compact routing stubs
 (hybrid mode, so a pasted ticket or a sentence with punctuation still finds its
 pages; keyword mode is an all-tokens gate that real prompts never pass) for the
 same gated prompt and appends them to the reminder, so relevant prior KB pages
 are already in context before Claude decides whether to search. It tries a short
 transport ladder and never blocks on a slow path: REST first (one
-`POST /api/search_memory`, 4s timeout) — attempted when `EXOMEM_REST_API_KEY` is set
+`POST /api/search_memory`, 4s timeout) — attempted when `EVERMATTER_REST_API_KEY` is set
 in the client's environment **or** persisted in the managed install's
 `service.env` (`~/.config/exomem/service.env` on Linux,
 `~/Library/Application Support/Exomem/service.env` on macOS; override the location
-with `EXOMEM_SERVICE_ENV`). A key read from that file is only ever sent to a
-loopback host: point `EXOMEM_HOST` elsewhere and the REST rung is skipped for it.
-Then, only if you also set `EXOMEM_RETRIEVE_INJECT_CLI=1`, an
+with `EVERMATTER_SERVICE_ENV`). A key read from that file is only ever sent to a
+loopback host: point `EVERMATTER_HOST` elsewhere and the REST rung is skipped for it.
+Then, only if you also set `EVERMATTER_RETRIEVE_INJECT_CLI=1`, an
 `exomem search_memory --json` subprocess call (~5s timeout, slower — cold Python
 start). The two rungs share one 8s budget under the hook's 10s timeout, measured
 on elapsed time: a REST call that dribbles bytes past the budget is abandoned and
 the CLI rung gets what is left. If
 neither is configured or reachable, it falls straight back to the plain reminder
-— no network call is ever attempted unless `EXOMEM_RETRIEVE_INJECT` is on. The
+— no network call is ever attempted unless `EVERMATTER_RETRIEVE_INJECT` is on. The
 stub block is cut by whole lines (600 characters), never inside a path, with a
 `… N more not shown` marker when a hit was dropped. Each fired nudge writes one line to
 `~/.claude/exomem-retrieve-nudge.log` (or `~/.codex/...`) naming the lane that
@@ -632,13 +632,13 @@ to the plain reminder is visible. (The legacy `KB_RETRIEVE_INJECT` /
 `KB_RETRIEVE_INJECT_CLI` names still work too.)
 
 **Opt-in: a compiled working set instead of routing stubs.** Set
-`EXOMEM_RETRIEVE_INJECT=working_set` and the same gated prompt goes to
+`EVERMATTER_RETRIEVE_INJECT=working_set` and the same gated prompt goes to
 `recall_context` instead of `search_memory`: one `POST /api/recall_context` over
 the same ladder and the same 8s budget, and the returned working-memory packet
 *replaces* the reminder under a fixed header that names it as retrieved memory
 rather than instructions. It carries current state first, then units, then
 pointers, each with the provenance ref you can `read_memory`, keeping whole items
-only under `EXOMEM_RETRIEVE_INJECT_MAX_CHARS` (default 4,000 characters) and
+only under `EVERMATTER_RETRIEVE_INJECT_MAX_CHARS` (default 4,000 characters) and
 dropping trailing ones rather than cutting one in half. A packet that abstains as
 `ambiguous` injects the competing anchors and asks the agent to call again with
 `anchor` set — it is the only decider of which sense a turn meant; every other

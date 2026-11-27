@@ -1510,8 +1510,13 @@ def _prominence_main(argv: list[str]) -> int:
         if args.json:
             print(json.dumps(policy))
         elif args.hook_env:
+            # Each tunable is exported once, under its EVERMATTER_ name, and its other
+            # spellings are unset, so an earlier export cannot outrank or contradict it.
             for key, value in prom_mod.hook_env().items():
-                print(f"unset {key}" if value == "" else f"export {key}={value}")
+                exported = env_compat.emitted_name(key) if value != "" else None
+                print("unset " + " ".join(n for n in env_compat.names_for(key) if n != exported))
+                if exported is not None:
+                    print(f"export {exported}={value}")
         else:
             contract = policy["contract"]
             print(f"prominence: {policy['level']}  (source: {policy['source']})")

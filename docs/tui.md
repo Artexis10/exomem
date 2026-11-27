@@ -32,7 +32,7 @@ with status 2.
 
 ## Launch
 
-    exomem tui                       # uses $EXOMEM_VAULT_PATH
+    exomem tui                       # uses $EVERMATTER_VAULT_PATH
     exomem tui --vault /path/to/vault
 
 With no resolvable vault, first run opens.

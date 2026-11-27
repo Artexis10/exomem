@@ -603,7 +603,7 @@ The file name is a stable machine address. `title:` and the canonical H1 are the
 identity, and a title can use any Unicode. By default a new note or entity takes its title as its file
 name, keeping case, diacritics and spaces and dropping only what a file system or a link cannot carry.
 A captured source keeps its dated lowercase slug name. A vault chooses a style with `filename_style`
-or `EXOMEM_FILENAME_STYLE`. The server does no language-aware transliteration, and it never renames an
+or `EVERMATTER_FILENAME_STYLE`. The server does no language-aware transliteration, and it never renames an
 existing page on upgrade or reconcile.
 
 Sources, experiments and production-logs carry a date because their value is partly temporal. Notes

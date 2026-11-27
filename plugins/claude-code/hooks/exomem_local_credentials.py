@@ -128,7 +128,7 @@ def service_env_path() -> Path | None:
 
 
 def service_env_value(name: str, path: Path | None) -> str:
-    """Read the first dotenv value, preserving the managed install's quoting.
+    """Read the last dotenv value of each name, as python-dotenv does, keeping the install's quoting.
 
     The file's EVERMATTER_ and KB_MCP_ names fill an unset EXOMEM_ name. When the file sets
     EVERMATTER_X and EXOMEM_X to different values it returns nothing: it never picks one.
@@ -154,7 +154,6 @@ def service_env_value(name: str, path: Path | None) -> str:
             elif len(value) >= 2 and value[0] == value[-1] == "'":
                 value = value[1:-1]
             found[candidate] = value.strip()
-            break
     if _rename_aliases(found):
         return ""
     return found.get(name, "")

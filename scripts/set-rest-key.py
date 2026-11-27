@@ -1,4 +1,4 @@
-"""Generate EXOMEM_REST_API_KEY and write it into .env (idempotent).
+"""Generate EVERMATTER_REST_API_KEY and write it into .env (idempotent).
 
 The personal REST facade (`/api/<tool>` POST endpoints) returns 503 until this
 key is set — it's the single bearer credential for your own multi-client use
@@ -7,7 +7,8 @@ key is set — it's the single bearer credential for your own multi-client use
     uv run --no-sync python scripts/set-rest-key.py
 
 Re-run with --force to rotate the key (replaces the existing line). After
-setting/rotating, restart the service to load it.
+setting/rotating, restart the service to load it. The line is written as
+`EVERMATTER_REST_API_KEY`; an `EXOMEM_REST_API_KEY` line is replaced by it.
 """
 
 from __future__ import annotations
@@ -16,15 +17,15 @@ import argparse
 import secrets
 from pathlib import Path
 
+from exomem import env_compat
+from exomem.remote_setup_wizard import parse_env, patch_env
+
 ENV = Path(__file__).resolve().parents[1] / ".env"
-KEY = "EXOMEM_REST_API_KEY"
+KEY = "EXOMEM_REST_API_KEY"  # the internal name; patch_env writes it as EVERMATTER_REST_API_KEY
 
 
 def _is_set(text: str) -> bool:
-    for line in text.splitlines():
-        if line.strip().startswith(f"{KEY}=") and line.split("=", 1)[1].strip():
-            return True
-    return False
+    return bool(env_compat.rename_settings(parse_env(text))[0].get(KEY, "").strip())
 
 
 def main() -> None:
@@ -33,22 +34,13 @@ def main() -> None:
     args = ap.parse_args()
 
     text = ENV.read_text(encoding="utf-8") if ENV.exists() else ""
+    written = env_compat.emitted_name(KEY)
     if _is_set(text) and not args.force:
-        print(f"{KEY} already set; pass --force to rotate. No change made.")
+        print(f"{written} already set; pass --force to rotate. No change made.")
         return
 
     token = secrets.token_hex(32)  # 256-bit, hex
-    if _is_set(text):  # --force: replace in place
-        lines = [
-            f"{KEY}={token}" if line.strip().startswith(f"{KEY}=") else line
-            for line in text.splitlines()
-        ]
-        ENV.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    else:  # append on a clean line
-        with ENV.open("a", encoding="utf-8") as fh:
-            if text and not text.endswith("\n"):
-                fh.write("\n")
-            fh.write(f"{KEY}={token}\n")
+    ENV.write_text(patch_env(text, {KEY: token}), encoding="utf-8")
 
     # .env holds credentials — keep it owner-only. Real protection on POSIX;
     # a harmless near-no-op on single-user Windows.
@@ -57,7 +49,7 @@ def main() -> None:
     except OSError:
         pass
 
-    print(f"set {KEY}={token[:6]}...{token[-4:]}  (restart the service to load it)")
+    print(f"set {written}={token[:6]}...{token[-4:]}  (restart the service to load it)")
 
 
 if __name__ == "__main__":
