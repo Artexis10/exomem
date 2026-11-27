@@ -304,7 +304,9 @@ print(items, resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, len(fault) > 0)
 @pytest.mark.parametrize("crafted", [
     b"<a>" * 1_000 + b"</a>" * 1_000,  # deep nesting: the parser keeps a stack entry per open element
     b"".join(b"<e%d/>" % number for number in range(10_000)),  # ever-new names: the parser keeps a table entry per name
-], ids=["deep nesting", "distinct names"])
+    b"".join(b'<p%d:a xmlns:p%d="u"/>' % (number, number) for number in range(10_000)),  # prefixed names hide from a name count
+    b"<a " + b"".join(b'x%d="%s" ' % (number, b"v" * 2_000) for number in range(3_000)) + b"/>",  # one 6 MB start tag
+], ids=["deep nesting", "distinct names", "namespace prefixes", "one huge tag"])
 def test_an_enex_of_a_crafted_shape_ends_as_partial_and_keeps_the_notes_before_it(vault: Path, crafted: bytes) -> None:
     """Catches a reader whose parser memory grows with the document's shape: 20 MiB of such tags held over 1 GB."""
     data = enex([enex_note(0), enex_note(1)])
