@@ -211,6 +211,7 @@ def _clip(value: object) -> str:
 #: the people a search by person names: recorded by presence and byte length
 #: only, never hashed, in every mode. A hash of a short, guessable conversation
 #: or name is a confirmation oracle, and it would outlive a delete of faces.
+# nosemgrep: ep-word-set -- argument names that the tool schemas fix, not vocabulary.
 _LENGTH_ONLY_ARG_NAMES = frozenset({"conversation", "people"})
 
 
