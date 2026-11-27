@@ -83,7 +83,9 @@ def releases() -> tuple[Release, ...] | None:
 def payload() -> dict[str, Any]:
     """`{"whats_new": {version, releases, notes_available}}`: the running version and the notes of each recent release.
 
-    Each release lists its notes as `{"title", "text"}`; `title` is null for a note written without one.
+    Each release lists `notes`, the sentences as on every earlier version, and `items`, the same notes in the
+    same order as `{"title", "text"}`; `title` is null for a note written without one. The payload only adds
+    `items`, so a reader that knows `notes` alone keeps working.
     `releases` is empty both when the image has no notes and when it has none to give; `notes_available`
     tells the two apart, so Home never reads an unknown list as an empty one.
     """
@@ -92,7 +94,12 @@ def payload() -> dict[str, Any]:
         "whats_new": {
             "version": running_version(),
             "releases": [
-                {"version": release.version, "released_on": release.released_on, "notes": [note_object(note) for note in release.notes]}
+                {
+                    "version": release.version,
+                    "released_on": release.released_on,
+                    "notes": [note.text for note in release.notes],
+                    "items": [note_object(note) for note in release.notes],
+                }
                 for release in known or ()
             ],
             "notes_available": known is not None,

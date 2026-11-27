@@ -197,6 +197,9 @@ def test_a_note_that_breaks_the_shape_rule_fails_whatever_the_pull_request_type(
         # YAML would turn these into a comment, a boolean and a syntax error: each must say to quote the title.
         (f"---\ntitle: Search tags #work again\n---\n{SENTENCE}\n", "not as written; put the title in double quotes"),
         (f"---\ntitle: Yes\n---\n{SENTENCE}\n", "not as text; put the title in double quotes"),
+        # The key may be indented or quoted; the parser still finds it, so the title is still read back.
+        (f"---\n  title: Search tags #work again\n---\n{SENTENCE}\n", "not as written; put the title in double quotes"),
+        (f'---\n"title": Search tags #work again\n---\n{SENTENCE}\n', "not as written; put the title in double quotes"),
         (f"---\ntitle: @mentions work\n---\n{SENTENCE}\n", "put the title in double quotes"),
         (note_file("A" * 49, SENTENCE), "the title has 49 characters; the limit is 48"),
         (note_file("Photos keep their date.", SENTENCE), "remove the full stop at the end of the title"),
@@ -212,6 +215,11 @@ def test_a_note_whose_title_breaks_the_rules_fails_and_says_what_to_change(notes
     errors = verdict(notes, "feat: x", "", changed(notes, text))
 
     assert any(message in error for error in errors)
+
+
+def test_a_note_that_starts_with_a_byte_order_mark_is_read_with_its_front_matter(notes):
+    assert verdict(notes, "feat: x", "", changed(notes, "\ufeff" + GOOD)) == []
+    assert notes.note_problems("\ufeff" + GOOD, require_title=False)[1:] == ("Photos keep their date", SENTENCE)
 
 
 def test_a_quoted_title_may_hold_a_colon_a_hash_or_a_word_yaml_would_read_as_a_boolean(notes):

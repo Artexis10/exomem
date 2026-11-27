@@ -125,42 +125,56 @@ class ParsedNote:
     fields: dict | None
     body: str
     problems: tuple[str, ...] = ()
-    raw: dict[str, str] | None = None  # each top-level key's text as written after its colon
+    raw_title: str | None = None  # an unquoted title's source text to the end of its line, for the read-back check
 
 
 def parse_note(text: str) -> ParsedNote:
     """Split a note file into its front matter and its body. A fence that opens and never closes is a problem."""
-    lines = text.strip().splitlines()
+    lines = text.removeprefix("\ufeff").strip().splitlines()  # an editor may add a byte order mark
     if not lines or lines[0].strip() != FRONT_MATTER_FENCE:
-        return ParsedNote(None, text.strip())
+        return ParsedNote(None, "\n".join(lines))
     closing = next((i for i, line in enumerate(lines[1:], 1) if line.strip() == FRONT_MATTER_FENCE), None)
     if closing is None:
         return ParsedNote(None, "", (f"the front matter opens with `{FRONT_MATTER_FENCE}` and never closes; add a closing `{FRONT_MATTER_FENCE}` line",))
     import yaml  # the release build installs it beside markdown-it-py (see .github/workflows)
 
     body = "\n".join(lines[closing + 1 :]).strip()
+    source = "\n".join(lines[1:closing])
     try:
-        fields = yaml.safe_load("\n".join(lines[1:closing]))
+        fields = yaml.safe_load(source)
+        tree = yaml.compose(source, Loader=yaml.SafeLoader)
     except yaml.YAMLError:
         return ParsedNote(None, body, (f"the front matter is not valid YAML; {QUOTE_ADVICE}",))
     if fields is None:
         fields = {}
     if not isinstance(fields, dict):
         return ParsedNote(None, body, ("the front matter is not a list of `key: value` lines; write `title: Your title`",))
-    # The text as written, so a title that YAML reads differently from what the author typed can be caught.
-    raw = {}
-    for line in lines[1:closing]:
-        key, colon, value = line.partition(":")
-        if colon and key == key.lstrip() and key.strip():
-            raw.setdefault(key.strip(), value.strip())
-    return ParsedNote(fields, body, raw=raw)
+    return ParsedNote(fields, body, raw_title=_plain_title_source(tree, source))
+
+
+def _plain_title_source(tree: object, source: str) -> str | None:
+    """The source text of an unquoted `title` value, from where the parser says it starts to the end of that line.
+
+    The parser's positions find the key, so an indented or quoted `title` key is found as well. A quoted or
+    block value is decoded exactly by YAML and needs no read-back, so it gives None.
+    """
+    from yaml.nodes import MappingNode, ScalarNode
+
+    if not isinstance(tree, MappingNode):
+        return None
+    for key, value in tree.value:
+        if isinstance(key, ScalarNode) and key.value == "title" and isinstance(value, ScalarNode):
+            if value.style is not None or not value.value:
+                return None
+            return source[value.start_mark.index :].split("\n", 1)[0].strip()
+    return None
 
 
 def title_problems(title: object, raw: str | None = None) -> list[str]:
     """What is wrong with a note's title, in the words an author reads.
 
-    `raw` is the title as written after `title:`. YAML cuts a plain value at ` #`, reads `Yes`, `On` and
-    numbers as other types, and a quoted value is decoded exactly, so only an unquoted value must read back as written.
+    `raw` is the title's source text from its value to the end of its line. YAML cuts a plain value at ` #`, reads `Yes`, `On` and
+    numbers as other types, and a quoted value is decoded exactly, so only an unquoted value (the only one with a `raw`) must read back as written.
     """
     if title is None:
         return ['the title is empty; write `title: "Your title"`']
@@ -170,8 +184,7 @@ def title_problems(title: object, raw: str | None = None) -> list[str]:
     if not title:
         return ['the title is empty; write `title: "Your title"`']
     problems = []
-    quoted = raw is not None and len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'"
-    if raw is not None and not quoted and "\n" not in title and title != raw:
+    if raw is not None and "\n" not in title and title != raw:
         problems.append(f"YAML reads the title as {title!r}, not as written; {QUOTE_ADVICE}")
     if len(title) > TITLE_MAX_CHARS:
         problems.append(f"the title has {len(title)} characters; the limit is {TITLE_MAX_CHARS}")
@@ -214,7 +227,7 @@ def note_problems(text: str, *, require_title: bool = True) -> tuple[list[str], 
             allowed = ", ".join(sorted(FRONT_MATTER_KEYS))
             problems.append(f"the front matter has unknown key(s) {', '.join(unknown)}; remove them (allowed: {allowed})")
         if "title" in parsed.fields:
-            problems.extend(title_problems(parsed.fields["title"], (parsed.raw or {}).get("title")))
+            problems.extend(title_problems(parsed.fields["title"], parsed.raw_title))
             if isinstance(parsed.fields["title"], str):
                 title = parsed.fields["title"].strip()
         elif require_title:

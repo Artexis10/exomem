@@ -30,4 +30,4 @@ Out of scope: email, a notice on a self-hosted server, and rewriting notes with 
 - Code: the bootstrap section, the tool-result relay beside `with_service_notice`, and per-app state in the cell's state store.
 - Public surface: one bootstrap section and one optional tool-result field on cloud cells. No new tool and no new argument.
 - Data: one small row per connected app in cell state.
-- Dependency: Home reads `whats_new` across a wire contract. Its reader on Substrate main accepts bare sentence strings only, and a parse failure hides What's new. The reader that accepts `{title, text}` and bare sentences is Substrate PR #371. Cloud cells upgrade automatically, so this change must not merge before that reader is in production.
+- Wire: the served `whats_new` payload only adds `items` to each release and keeps `notes` as sentences, so any Home version keeps working.

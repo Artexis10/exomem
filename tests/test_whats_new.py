@@ -34,6 +34,18 @@ RELEASES = [
     {"version": "1.2.0", "released_on": "2026-11-01", "notes": [note("Old change.")]},  # a note merged without the check: no title
 ]
 
+#: What Home receives for RELEASES: `notes` stays the list of sentences that every earlier Home reads, `items` adds the titles.
+SERVED = [
+    {
+        "version": "1.3.0",
+        "released_on": "2026-11-20",
+        "notes": ["Newest change.", "Second change."],
+        "items": [note("Newest change.", "Newest"), note("Second change.", "Second")],
+    },
+    {"version": "1.2.1", "released_on": "2026-11-10", "notes": ["Third change."], "items": [note("Third change.", "Third")]},
+    {"version": "1.2.0", "released_on": "2026-11-01", "notes": ["Old change."], "items": [note("Old change.")]},
+]
+
 
 @pytest.fixture
 def run_cell(vault, monkeypatch, tmp_path):
@@ -225,7 +237,7 @@ def test_the_whats_new_section_gives_the_running_version_and_the_releases_newest
     first = commands.op_bootstrap(vault, section="whats_new")
     second = commands.op_bootstrap(vault, section="whats_new")
 
-    assert first == {"whats_new": {"version": "1.3.0", "releases": RELEASES, "notes_available": True}}
+    assert first == {"whats_new": {"version": "1.3.0", "releases": SERVED, "notes_available": True}}
     assert second == first
     assert image.reads == 1
 
@@ -237,7 +249,7 @@ def test_the_whats_new_section_is_served_to_home_through_the_cell(run_cell, imag
         # Home's call exactly as Home sends it; the cell refuses the command name `bootstrap`.
         return await call(client, "read_instructions", {"profile": "compact", "section": "whats_new"})
 
-    assert run_cell(scenario) == {"whats_new": {"version": "1.3.0", "releases": RELEASES, "notes_available": True}}
+    assert run_cell(scenario) == {"whats_new": {"version": "1.3.0", "releases": SERVED, "notes_available": True}}
 
 
 @pytest.mark.parametrize(

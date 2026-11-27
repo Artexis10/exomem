@@ -2,7 +2,7 @@
 
 ### Requirement: The cell serves its release notes
 
-`bootstrap(profile="compact", section="whats_new")` SHALL return `whats_new` with the running `version`, `releases` from the image's notes file, newest first, each with `notes` as `{title, text}` objects (`title` is null for a note without one), and `notes_available`, which is `false` when the notes file is missing or unusable and `true` otherwise. It SHALL read no vault content and SHALL answer from memory after the first read.
+`bootstrap(profile="compact", section="whats_new")` SHALL return `whats_new` with the running `version`, `releases` from the image's notes file, newest first, each with `notes`, the note sentences, and `items`, the same notes in the same order as `{title, text}` objects (`title` is null for a note without one), and `notes_available`, which is `false` when the notes file is missing or unusable and `true` otherwise. It SHALL read no vault content and SHALL answer from memory after the first read.
 
 #### Scenario: Home reads the notes
 
