@@ -42,7 +42,8 @@ These tasks stay open until their named live evidence exists.
 - [ ] 4.3 Move the everyday identity's kubeconfig to the operator's machine, and rewrite the routine procedures to use it with no node login. Evidence: every runbook step marked routine runs from the operator machine. A search of the runbooks finds no node login in a routine step.
   - [ ] 4.3.1 Issue the standing routine reader of the D6 amendment (2026-11-27):
     - the ServiceAccount and its binding as their own chart template, and the `exomem:operators` binding removed, with the chart tests and the live suite moved to the new subject;
-    - the issue, revoke and restore steps in the operator-access runbook, and the node-side kubeconfig reads in other runbooks replaced;
+    - the issue and revoke steps in the operator-access runbook, a re-issue step after every datastore restore (`cloud-node-loss.md`, `cloud-dedicated-host.md`), and the node-side kubeconfig reads in other runbooks replaced;
+    - a contract test that every rule admitting 6443 names an interface or a source;
     - the UFW rule on `wt0` in the K3s role;
     - the NetBird group and policy for TCP 6443 in the substrate-infra administration root;
     - the workstation registry row and its loopback proxy, in the dotfiles' reader tooling.

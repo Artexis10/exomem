@@ -1236,9 +1236,14 @@ def test_inter_node_firewall_names_peer_addresses_never_the_subnet() -> None:
     assert "k3s_firewall_stale" in firewall
     assert "delete: true" in firewall
     assert "comment: \"{{ k3s_firewall_comment }}\"" in firewall
-    # 6443 is admitted only on the server.
-    api_task = next(task for task in firewall.split("- name:") if 'port: "6443"' in task)
-    assert "k3s_node_role == 'server'" in api_task
+    # 6443 is admitted only on the server, and every rule for it names its
+    # interface: UFW is the only filter on the private network, so a rule
+    # without one admits the API from the whole subnet.
+    inter_node, netbird = (task for task in firewall.split("- name:") if 'port: "6443"' in task)
+    assert "k3s_node_role == 'server'" in inter_node
+    assert "interface:" in inter_node
+    assert "interface: wt0" in netbird
+    assert "delete: \"{{ k3s_node_role != 'server' }}\"" in netbird
 
 
 # --- Ansible: removal --------------------------------------------------------

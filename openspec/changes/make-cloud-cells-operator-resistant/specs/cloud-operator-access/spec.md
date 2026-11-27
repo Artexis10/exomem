@@ -8,7 +8,7 @@ The operator's everyday cluster identity SHALL be able to read:
 - resource use;
 - the content-free logs that cells and controllers emit.
 
-It SHALL NOT be able to read Secrets, or to exec, attach, port-forward, proxy or add ephemeral containers in any cell namespace. The documented operator procedures SHALL use this identity by default. The identity SHALL work from the operator's own machine over the private network, and no file on any node SHALL hold its credential. No routine procedure SHALL require a login to a node. The admin SHALL be able to revoke the routine credential without waiting for it to expire. From outside the cluster's pods, the cluster API port SHALL be reachable only from cluster nodes and from administrator machines over the private network.
+It SHALL NOT be able to read Secrets, or to exec, attach, port-forward, proxy or add ephemeral containers in any cell namespace. The documented operator procedures SHALL use this identity by default. The identity SHALL work from the operator's own machine over the private network, and no file on any node SHALL hold its credential outside the cluster datastore. No routine procedure SHALL require a login to a node. The admin SHALL be able to revoke the routine credential without waiting for it to expire. From outside the cluster's pods, the cluster API port SHALL be reachable only from cluster nodes and from administrator machines over the private network.
 
 #### Scenario: Operator inspects a failing cell
 
