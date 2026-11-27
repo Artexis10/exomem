@@ -7,6 +7,7 @@ import functools
 import hashlib
 import itertools
 import json
+import logging
 import math
 import os
 import re
@@ -27,6 +28,8 @@ from .planning_values import PlanningValues, Unavailable
 
 if TYPE_CHECKING:
     from .governance.artifact_census import VaultListing
+
+log = logging.getLogger(__name__)
 
 COLLECTION_VERSION = 1
 #: The file that defines a Records collection: structure, not a saved record.
@@ -95,9 +98,6 @@ _CAPTURE_KEYS = ("method",)
 MAX_CAPTURE_METHOD_CHARS = 512
 #: The manifest key that declares how the rows that cite one page add up (`parse_subject`).
 SUBJECT_KEY = "subject"
-#: `subject` keys: the link field whose rows a named page's ledger summary covers, and how to sum them.
-# nosemgrep: ep-word-set -- the declaration's own closed key names, which `_subject_json_schema` publishes.
-_SUBJECT_KEYS = ("field", "measure", "state", "order", "show", "recent")
 MAX_SUBJECT_SHOW = 4
 MAX_SUBJECT_RECENT = 10
 DEFAULT_SUBJECT_RECENT = 3
@@ -851,6 +851,11 @@ def _subject_json_schema() -> dict[str, Any]:
     }
 
 
+#: `subject` keys: the link field whose rows a named page's ledger summary covers, and how to sum them. The
+#: published schema holds them, so the parser and the schema cannot disagree.
+_SUBJECT_KEYS = tuple(_subject_json_schema()["properties"])
+
+
 def _record_presentation_json_schema() -> dict[str, Any]:
     """Expose the parser's closed, bounded v1 authoring shape."""
     descriptor = {
@@ -1231,6 +1236,8 @@ class CollectionManifest:
     capture_method: str | None = None
     #: `subject`: how the rows citing one page add up for that page, as declared; None when undeclared.
     subject: SubjectDeclaration | None = None
+    #: Why the manifest's `subject` value was ignored, for a create or revise to refuse (`require_valid_subject`).
+    subject_refusal: CollectionError | None = field(default=None, compare=False, repr=False)
     #: `items` (default) renders a view per row; `summary` keeps rows store-only.
     view_mode: str = "items"
     #: A derived summary collection takes rows only from imports and rebuilds them from its import log.
@@ -2238,7 +2245,14 @@ def _manifest_from_frontmatter(
     claim_match = _parse_claim_match(frontmatter.get("claims"))
     capture_method = parse_capture(frontmatter.get("capture"))
     derived = _parse_derived(frontmatter.get("derived", False), view_mode)
-    subject = parse_subject(frontmatter.get(SUBJECT_KEY), schema, derived=derived, profile=profile)
+    try:
+        subject, subject_refusal = parse_subject(frontmatter.get(SUBJECT_KEY), schema, derived=derived,
+                                                 profile=profile), None
+    except CollectionError as error:
+        # A manifest that used the key before it declared a ledger stays readable: a reader ignores the value,
+        # and only a create or a revise refuses it.
+        log.debug("collection %s: subject ignored: %s", collection_id, error.reason)
+        subject, subject_refusal = None, error
     if derived and (found := declared_references(schema)):
         raise CollectionError(
             "INVALID_FIELD_REFERENCE",
@@ -2272,6 +2286,7 @@ def _manifest_from_frontmatter(
         claim_match=claim_match,
         capture_method=capture_method,
         subject=subject,
+        subject_refusal=subject_refusal,
         view_mode=view_mode,
         derived=derived,
         ignored_recipes=ignored_recipes,
@@ -3700,6 +3715,13 @@ def _subject_field(value: object, key: str, schema: ItemSchema, kinds: tuple[str
             expected += f", one of: {', '.join(candidates)}"
         raise _subject_error(key, f"{problem}; it must name {expected}", value, expected, example)
     return value
+
+
+def require_valid_subject(manifest: CollectionManifest) -> None:
+    """Refuse a manifest being created or revised whose `subject` every reader ignores, naming what to change."""
+    refused = manifest.subject_refusal
+    if refused is not None:
+        raise CollectionError(refused.code, refused.reason, refused.details)
 
 
 def parse_subject(value: object, schema: ItemSchema, *, derived: bool = False,

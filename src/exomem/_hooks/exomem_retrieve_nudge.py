@@ -2097,6 +2097,9 @@ def _packet_lines(packet: dict) -> list[str]:
             lines.append(
                 _packet_line("state", statement, str(entry.get("anchor") or ""))
             )
+    # The sums for the pages this turn names come next, as `_format_map_with_slice` shows them after the slice.
+    tally, unlisted = _subject_records_lines(packet.get("subject_records"))
+    lines.extend([*tally, *([f"- … {unlisted} more not shown."] if tally and unlisted else [])])
     for unit in packet.get("units") or ():
         if not isinstance(unit, dict):
             continue
@@ -2446,6 +2449,51 @@ def _format_slice_block(block: object, max_chars: int) -> str:
     unseen = len(lines) - len(kept) + (block["overflow"] if type(block.get("overflow")) is int else 0)
     tail = [f"- … {unseen} more not shown."] if unseen else []
     return "\n".join([leading, *kept, *tail])
+
+
+def _subject_records_lines(block: object) -> tuple[list[str], int]:
+    """The packet's sums for the pages this turn names, one whole line each, and the pairs no line names.
+
+    Each entry renders its `summary`, or the `reason` it carries no numbers, named by its page and collection. The
+    block's own state leads when part of the read failed. `omitted` counts the stubs too, so only the pairs with
+    no entry at all are returned as a count.
+    """
+    if not isinstance(block, dict):
+        return [], 0
+    lines = []
+    if block.get("state"):
+        lines.append(_packet_line(f"tally ({block['state']})", str(block.get("reason") or ""), ""))
+    entries = [entry for entry in block.get("entries") or () if isinstance(entry, dict)]
+    for entry in entries:
+        anchor = entry["anchor"] if isinstance(entry.get("anchor"), dict) else {}
+        collection = entry["collection"] if isinstance(entry.get("collection"), dict) else {}
+        text = str(entry.get("summary") or "") or (
+            f"{anchor.get('title') or anchor.get('ref') or ''} in {collection.get('title') or ''}: "
+            f"{entry.get('reason') or ''}")
+        state = str(entry.get("state") or "")
+        lines.append(_packet_line("tally" if state == "ready" else f"tally ({state})", text,
+                                  str(collection.get("ref") or "")))
+    omitted = block["omitted"] if type(block.get("omitted")) is int else 0
+    return lines, max(0, omitted - sum(entry.get("state") == "omitted" for entry in entries))
+
+
+def _format_subject_records_block(block: object, max_chars: int) -> str:
+    """`_subject_records_lines` cut to whole lines under ``max_chars``, with a last line counting what none shows.
+
+    The server has already cut the block to its share of the packet; this cut is the hook's own render ceiling.
+    """
+    lines, unlisted = _subject_records_lines(block)
+    marker_room = len(f"- … {len(lines) + unlisted} more not shown.") + 1
+    kept, used = [], 0
+    for line in lines:
+        if used + len(line) + (1 if kept else 0) + marker_room > max_chars:
+            break
+        used += len(line) + (1 if kept else 0)
+        kept.append(line)
+    if not kept:
+        return ""
+    unseen = len(lines) - len(kept) + unlisted
+    return "\n".join([*kept, *([f"- … {unseen} more not shown."] if unseen else [])])
 
 
 # Fixed protocol advice, separate from retrieved source text.
@@ -2875,6 +2923,9 @@ def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, l
     routes_cost = len(routes) + (1 if routes else 0)
     turn = _format_slice_block(packet.get("turn_slice"), room - routes_cost)
     spare = max(0, room - routes_cost - len(turn) - (1 if turn else 0))
+    # The sums hang off the slice's named pages, and the server charges them before the leads' citations.
+    tally = _format_subject_records_block(packet.get("subject_records"), spare)
+    spare = max(0, spare - len(tally) - (1 if tally else 0))
     task = _format_task_context(packet.get("task_context"), routes_cost + spare, packet.get("turn_slice"))
     skills_text = _format_skills_block(packet.get("skills"))
     profiles_text = _format_domain_profiles_block(packet.get("domain_profiles"))
@@ -2882,7 +2933,7 @@ def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, l
     # The positions lead, after the fixed protocol reset, as they lead the service's response. Replays of that response
     # on a leading yes/no question opened every first answer with the person's position when its block came first,
     # and in 1 of 8 when it came last. Do not move it back.
-    parts = (reset, positions_text, stance_text, upkeep, skills_text, profiles_text, text, task, turn, action)
+    parts = (reset, positions_text, stance_text, upkeep, skills_text, profiles_text, text, task, turn, tally, action)
     return "\n".join(part for part in parts if part), complete, stance_complete, shown
 
 

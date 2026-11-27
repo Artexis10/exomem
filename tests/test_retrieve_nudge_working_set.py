@@ -3130,3 +3130,44 @@ def test_an_undelivered_method_reset_does_not_advance_hook_continuity(
     assert hook._METHOD_RESET_LINE in second
     _run(monkeypatch, capsys, _event(), tmp_path)
     assert [request["continuity"] for request in seen] == ["", "", "refreshed-token"]
+
+
+_TALLY = {
+    "state": "unavailable", "reason": "One collection could not be read; its sums are missing.",
+    "entries": [
+        {"summary": "Rowan Pell in Loans: amount sums to 80 over 4 rows (settled 55 over 3 rows); positive: they owe me",
+         "anchor": {"ref": "exomem://memory/rowan", "title": "Rowan Pell"},
+         "collection": {"ref": "exomem://memory/loans", "title": "Loans"}, "state": "ready",
+         "total": {"sum": 80, "rows": 4}},
+        {"reason": "The packet had no room for these sums; read the collection.", "state": "omitted",
+         "anchor": {"ref": "exomem://memory/rowan", "title": "Rowan Pell"},
+         "collection": {"ref": "exomem://memory/visits", "title": "Visits"}},
+    ],
+    "omitted": 3,
+}
+
+
+@pytest.mark.parametrize("layout", ["map", "rollback"])
+def test_the_hook_shows_each_named_pages_tally_or_why_it_has_none(layout: str) -> None:
+    """A hook-served agent gets the packet only through this block: the sums the tool result carries must reach it."""
+    lead = {"kind": "anchor", "title": "Rowan Pell", "ref": "Knowledge Base/People/Rowan Pell.md",
+            "match": "named", "evidence": ["retrieval"]}
+    if layout == "map":
+        packet = {"map": {"ref": "exomem://map", "generation": "map-1", "reason": "empty", "items": []},
+                  "turn_slice": {"state": "ready", "description": "What this turn reached.", "items": [lead]}}
+    else:
+        packet = {"abstained": False, "anchors": [lead]}
+    lines = hook._format_working_set_block({**packet, "subject_records": _TALLY}, 4000).splitlines()
+    assert "- tally (unavailable): One collection could not be read; its sums are missing." in lines
+    assert ("- tally: Rowan Pell in Loans: amount sums to 80 over 4 rows (settled 55 over 3 rows); positive: they owe me"
+            " [exomem://memory/loans]") in lines
+    assert ("- tally (omitted): Rowan Pell in Visits: The packet had no room for these sums; read the collection."
+            " [exomem://memory/visits]") in lines
+    assert "- … 2 more not shown." in lines  # three pairs had no numbers, and one of them is the stub above
+
+
+def test_a_cap_that_cannot_hold_every_tally_line_counts_the_ones_it_cut() -> None:
+    block = hook._format_subject_records_block(_TALLY, 200)
+    assert block.splitlines() == ["- tally (unavailable): One collection could not be read; its sums are missing.",
+                                  "- … 4 more not shown."]
+    assert len(block) <= 200 and hook._format_subject_records_block(_TALLY, 40) == ""

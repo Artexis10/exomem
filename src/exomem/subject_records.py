@@ -76,6 +76,9 @@ _PROOF_ROWS = 64
 #: The resolver's closed evidence kind (`working_set_resolve.EVIDENCE_KINDS`) for a turn that spells the page's
 #: own title or alias: a tally is served for a page the turn names, never for one it only resembles.
 _NAMED = "exact_alias"
+#: A field's description is free text with no length bound, and every entry repeats it: a longer one is cut
+#: here, so it can never crowd an entry's sums out of the packet.
+MAX_DESCRIPTION_CHARS = 200
 
 # The reasons an entry gives instead of numbers. Each says what the agent can tell the person.
 _FIELD_WITHHELD = "A field these sums need is not readable by you, so no total is shown."
@@ -413,6 +416,8 @@ class _Reader:
             log.debug("subject records: %s unreadable for this request: %s", lookup.collection_id, error)
             return _without_numbers(_UNREADABLE, head, "unavailable")
         description = fields[subject.measure].description
+        if description and len(description) > MAX_DESCRIPTION_CHARS:
+            description = description[:MAX_DESCRIPTION_CHARS - 1].rstrip() + "…"
         # The sentence leads the entry; it is written once the values it repeats are known.
         entry = {"summary": "", **head,
                  "measure": {"field": subject.measure, **({"description": description} if description else {})},
@@ -421,7 +426,8 @@ class _Reader:
             entry["by_state"] = [{"state": group["state"], "sum": group["sum"], "rows": group["rows"]}
                                  for group in sorted(groups, key=_state_order)]
         known = [group["sum"] for group in groups if group["sum"] is not None]
-        entry["total"] = {"sum": sum(known) if known else None, "rows": rows}
+        entry["total"] = {"sum": _exact(sum(known), max(group["places"] for group in groups)) if known else None,
+                          "rows": rows}
         entry["unknown"] = {"measure": sum(group["unknown_measure"] for group in groups),
                             **({"order": sum(group["unknown_order"] for group in groups)}
                                if subject.order is not None else {})}
@@ -434,13 +440,16 @@ class _Reader:
         """Each state's rows, measure sum and unknowns, from one grouped statement; None when a measure cannot be summed.
 
         The rows group by the state as stored, and each group's state is read from one of its rows, so a state that
-        needs decoding costs one decode per group, never one per row.
+        needs decoding costs one decode per group, never one per row. The same statement reads the most decimal
+        places any summed value has, so a sum of decimals is rounded to them (`_exact`).
         """
         rows_from, keep, parameters = citing
         grouped = f" GROUP BY {cells.state_group}" if cells.state_group else ""
-        sql = (f"SELECT {cells.state_select},g.n,g.total,g.summed,g.unknown_measure,g.unknown_order FROM ("  # noqa: S608
-               f"SELECT min(r.row_id) AS rep,{cells.state_inner}count(*) AS n,"
+        sql = (f"SELECT {cells.state_select},g.n,g.total,g.places,g.summed,g.unknown_measure,g.unknown_order "  # noqa: S608
+               f"FROM (SELECT min(r.row_id) AS rep,{cells.state_inner}count(*) AS n,"
                f"sum(CASE WHEN {cells.summable} THEN {cells.measure} END) AS total,"
+               f"max(CASE WHEN {cells.summable} AND typeof({cells.measure})='real' "
+               f"THEN {_decimal_places(cells.measure)} END) AS places,"
                f"count(CASE WHEN {cells.summable} THEN 1 END) AS summed,"
                f"count(CASE WHEN {cells.measure_unknown} THEN 1 END) AS unknown_measure,"
                f"count(CASE WHEN {cells.order_unknown} THEN 1 END) AS unknown_order "
@@ -452,17 +461,18 @@ class _Reader:
         width = cells.state_width
         for row in found:
             state = cells.state_value(row[:width])
-            rows, total, summed, unknown_measure, unknown_order = row[width:]
+            rows, total, places, summed, unknown_measure, unknown_order = row[width:]
             if rows - summed - unknown_measure:
                 return None  # a present measure that no SQL sum holds exactly
             # A null state and a missing one are one group; a boolean never merges with its number.
             group = merged.setdefault((type(state).__name__, state), {
-                "state": state, "rows": 0, "sum": None, "unknown_measure": 0, "unknown_order": 0})
+                "state": state, "rows": 0, "sum": None, "places": 0, "unknown_measure": 0, "unknown_order": 0})
             group["rows"] += rows
             group["unknown_measure"] += unknown_measure
             group["unknown_order"] += unknown_order
+            group["places"] = max(group["places"], places or 0)
             if total is not None:
-                group["sum"] = total if group["sum"] is None else group["sum"] + total
+                group["sum"] = _exact(total if group["sum"] is None else group["sum"] + total, group["places"])
         return list(merged.values())
 
     def _newest(self, lookup, subject, cells: _Cells, citing: tuple[str, str, dict[str, Any]]) -> list[dict[str, Any]]:
@@ -484,6 +494,28 @@ class _Reader:
             rows.append({"ref": structured_collections.record_ref(lookup.collection_id, item_key),
                          "values": {name: values.get(name) for name in names}})
         return rows
+
+
+def _decimal_places(value: str) -> str:
+    """SQL for the decimal places of the real ``value`` as it was written.
+
+    `%!.15g` keeps the 15 significant digits that every double reads back as (DBL_DIG), so 12.35 reads '12.35' on
+    every SQLite the store supports, whose own text form of a real differs between versions. An exponent form, such
+    as '1.0e-20', moves the places by its exponent.
+    """
+    text = f"printf('%!.15g',{value})"
+    mark = f"instr({text},'e')"
+    return (f"CASE WHEN {mark} THEN max(0,{mark}-1-instr({text},'.')-CAST(substr({text},{mark}+1) AS INTEGER)) "
+            f"ELSE length({text})-instr({text},'.') END")
+
+
+def _exact(total: Any, places: int) -> Any:
+    """A sum of reals rounded to the most decimal places of its own values; an integer sum is already exact.
+
+    Binary floats carry noise past those places (0.1 + 0.2 is 0.30000000000000004), and the exact decimal sum
+    of the values never has more places than they do.
+    """
+    return round(total, places) if isinstance(total, float) else total
 
 
 def _without_numbers(reason: str, head: Mapping[str, Any], state: str) -> dict[str, Any]:
@@ -604,7 +636,8 @@ class _Cells:
             parameters["order_path"] = path(subject.order)
             order_unknown = "coalesce(json_type(i.values_json,:order_path),'null')='null'"
             # A stored date sorts as its text; a stored datetime keeps its offset, so it sorts as its instant.
-            key = ("unixepoch(json_extract(i.values_json,:order_path),'subsec')"
+            # `julianday` reads the offset on every SQLite the store supports (`connection.MINIMUM_SQLITE_VERSION`).
+            key = ("julianday(json_extract(i.values_json,:order_path))"
                    if fields[subject.order].type == "datetime" else "json_extract(i.values_json,:order_path)")
             newest = f"({order_unknown}),{key} DESC,r.row_id DESC"
         else:

@@ -2407,6 +2407,7 @@ class CollectionWriter:
         if declared.kind == "intended":
             planning.require_planning_profile(manifest)
         records._refuse_excluded_manifest_fields(manifest)
+        collections.require_valid_subject(manifest)
         record_formats.validate_storage_contract(manifest)
         if manifest.storage.strategy == "dataset":
             raise collections.CollectionError("READ_ONLY_COLLECTION", "datasets remain file-canonical")
@@ -3486,6 +3487,7 @@ class CollectionWriter:
         proposed = collections.parse_manifest_bytes(
             self.root, current.path, manifest_text.encode()
         )
+        collections.require_valid_subject(proposed)
         if (
             proposed.collection_id,
             proposed.semantic_profile,

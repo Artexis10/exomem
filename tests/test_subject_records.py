@@ -89,7 +89,7 @@ def add(store, label, person_ref, amount, status, day, note, who=None):
         return store.append_record(LEDGER, item=item, item_key=key(label), why="record")
 
 
-def build(store, monkeypatch, layout="sqlite", rows=ROWS, subject=SUBJECT, ready=True):
+def build(store, monkeypatch, layout="sqlite", rows=ROWS, subject=SUBJECT, ready=True, fields=FIELDS):
     monkeypatch.setattr(connection, "store_path", lambda root: store.handle.path)
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     _seed_structure(store.root)
@@ -102,7 +102,8 @@ def build(store, monkeypatch, layout="sqlite", rows=ROWS, subject=SUBJECT, ready
     method.write_text(f"---\nexomem_id: {METHOD}\ntitle: Keeping the tab\n---\n# Keeping the tab\n\nOne row per IOU.\n")
     _built(store.root).close()
     lexstore.ensure_fresh(store.root)
-    store.create_collection(path("Tab"), ledger_text(layout=layout, subject=subject), why="declare", scaffold=False)
+    store.create_collection(path("Tab"), ledger_text(layout=layout, fields=fields, subject=subject), why="declare",
+                            scaffold=False)
     for row in rows:
         add(store, *row)
     if ready:
@@ -164,6 +165,41 @@ def test_a_turn_naming_a_person_and_the_ledger_gets_their_sums_unknowns_and_newe
     assert lead(packet, MARA_REF)["cited_by_count"] == 4 and "cited_by" not in lead(packet, MARA_REF)
     assert "subject_records" not in packet.get("task_context", {})
     assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
+
+
+@pytest.mark.parametrize("layout", ["sqlite", "markdown-items"], ids=["typed rows", "json rows"])
+def test_decimal_amounts_sum_to_the_places_they_were_written_with(store, monkeypatch, corpus_cache_on, layout):
+    """Binary floats read 0.1 + 0.2 - 4.15 as -3.8500000000000005; a sum keeps the decimal places of its values."""
+    rows = (("r1", MARA_REF, 0.1, "settled", "2026-11-01", "coffee"),
+            ("r2", MARA_REF, 12.35, "provisional", "2026-11-03", "taxi"),
+            ("r3", MARA_REF, 0.2, "settled", "2026-11-05", "stamps"),
+            ("r4", MARA_REF, -4.15, "settled", "2026-11-07", "change back"))
+    build(store, monkeypatch, layout, rows=rows, fields=FIELDS.replace("type: integer", "type: number"))
+    [entry] = blocks(_activate(store.root, turn=TURN))
+    assert sorted(entry["by_state"], key=lambda group: group["state"]) == [
+        {"state": "provisional", "sum": 12.35, "rows": 1}, {"state": "settled", "sum": -3.85, "rows": 3}]
+    assert entry["total"] == {"sum": 8.5, "rows": 4}
+    assert "amount sums to 8.5 over 4 rows (provisional 12.35 over 1 row, settled -3.85 over 3 rows)" in entry["summary"]
+
+
+@pytest.mark.parametrize("layout", ["sqlite", "markdown-items"], ids=["typed rows", "json rows"])
+def test_the_newest_rows_by_datetime_follow_the_instant_not_the_text(store, monkeypatch, corpus_cache_on, layout):
+    """A datetime keeps its offset, so the row written earlier in the day can be the later instant."""
+    rows = (("r1", MARA_REF, 10, "settled", "2026-11-01T23:30:00-05:00", "late call"),
+            ("r2", MARA_REF, 20, "settled", "2026-11-02T01:00:00+00:00", "early train"))
+    build(store, monkeypatch, layout, rows=rows, fields=FIELDS.replace("day: {type: date}", "day: {type: datetime}"))
+    [entry] = blocks(_activate(store.root, turn=TURN))
+    assert [row["ref"] for row in entry["newest"]] == [collections.record_ref(LEDGER, key(label)) for label in ("r1", "r2")]
+
+
+def test_a_long_measure_description_is_cut_so_the_sums_still_fit(store, monkeypatch, corpus_cache_on):
+    long = "Positive: they owe me. Negative: I owe them. " * 120
+    build(store, monkeypatch, fields=FIELDS.replace(AMOUNT_MEANS, long))
+    [entry] = blocks(_activate(store.root, turn=TURN))
+    assert entry["state"] == "ready" and entry["total"] == {"sum": 80, "rows": 4}
+    description = entry["measure"]["description"]
+    assert len(description) <= subject_records.MAX_DESCRIPTION_CHARS and description.endswith("…")
+    assert long.startswith(description[:-1])
 
 
 def add_visits(store, identity=VISITS, subject="", typed=False):
@@ -502,23 +538,37 @@ def test_a_subject_declaration_parses_with_its_defaults(tmp_path):
 ], ids=["not-a-mapping", "unknown-key", "no-field", "field-not-a-link", "measure-not-a-number", "state-a-date",
         "order-not-a-date", "show-undeclared", "show-twice", "show-a-link", "show-too-many", "recent-too-large"])
 def test_a_malformed_subject_is_refused_naming_what_to_change(tmp_path, subject, fragment):
+    parsed = collections.parse_manifest_bytes(tmp_path, tmp_path / path("Tab"), manifest(subject))
     with pytest.raises(collections.CollectionError) as refused:
-        collections.parse_manifest_bytes(tmp_path, tmp_path / path("Tab"), manifest(subject))
+        collections.require_valid_subject(parsed)
     assert refused.value.code == "INVALID_COLLECTION_SUBJECT"
     assert fragment in str(refused.value)
 
 
 def test_only_a_records_collection_declares_a_subject(tmp_path):
+    parsed = collections.parse_manifest_bytes(tmp_path, tmp_path / "Knowledge Base/Planning/Tab/_collection.md",
+                                              manifest(SUBJECT, profile="planning"))
     with pytest.raises(collections.CollectionError) as refused:
-        collections.parse_manifest_bytes(tmp_path, tmp_path / "Knowledge Base/Planning/Tab/_collection.md",
-                                         manifest(SUBJECT, profile="planning"))
+        collections.require_valid_subject(parsed)
     assert refused.value.code == "INVALID_COLLECTION_SUBJECT"
 
 
-def test_validating_or_revising_a_ledger_refuses_a_malformed_subject(world):
+@pytest.mark.parametrize("profile", ["records", "planning"])
+def test_a_manifest_that_used_subject_for_something_else_stays_readable(tmp_path, profile):
+    """A manifest written before `subject` declared a ledger keeps working after an upgrade; it just has no ledger."""
+    parsed = collections.parse_manifest_bytes(tmp_path, tmp_path / f"Knowledge Base/{profile.title()}/Tab/_collection.md",
+                                              manifest("subject: Biology\n", profile=profile))
+    assert parsed.subject is None and parsed.collection_id == LEDGER
+
+
+def test_creating_validating_or_revising_a_ledger_refuses_a_malformed_subject(world):
     bad = ledger_text(subject="subject: {field: label, measure: amount}\n")
     with request_scope(owner_principal()), pytest.raises(collections.CollectionError) as validated:
         world.validate_revision(LEDGER, manifest_text=bad)
     with request_scope(owner_principal()), pytest.raises(collections.CollectionError) as revised:
         revise(world, LEDGER, bad)
-    assert validated.value.code == revised.value.code == "INVALID_COLLECTION_SUBJECT"
+    with request_scope(owner_principal()), pytest.raises(collections.CollectionError) as created:
+        world.create_collection(path("Tab two"), bad.replace(LEDGER, "a2a2a2a2-0000-4000-8000-00000000a2a2"),
+                                why="declare", scaffold=False)
+    assert validated.value.code == revised.value.code == created.value.code == "INVALID_COLLECTION_SUBJECT"
+    assert "subject.field names the string field label" in str(revised.value)
