@@ -10,7 +10,7 @@ The fastest way to try exomem with Claude Code: no `uv`, no Python, no clone.
 > lines and compose files to keep upgrading.
 
 ```bash
-claude mcp add evermatter -- docker run -i --rm -v "/path/to/vault:/vault" -e EXOMEM_VAULT_PATH=/vault ghcr.io/substrate-systems/evermatter:latest --transport stdio
+claude mcp add evermatter -- docker run -i --rm -v "/path/to/vault:/vault" -e EVERMATTER_VAULT_PATH=/vault ghcr.io/substrate-systems/evermatter:latest --transport stdio
 ```
 
 Replace `/path/to/vault` with your Obsidian/markdown vault's absolute path.
@@ -42,7 +42,7 @@ For NVIDIA Linux hosts, use the CUDA-capable image:
 docker run --gpus all -i --rm \
   -v "/path/to/vault:/vault" \
   -v exomem-data:/data \
-  -e EXOMEM_VAULT_PATH=/vault \
+  -e EVERMATTER_VAULT_PATH=/vault \
   ghcr.io/substrate-systems/evermatter:cuda --transport stdio
 ```
 
@@ -54,8 +54,8 @@ does not grab VRAM at idle. Opt into GPU use explicitly when you want it:
 docker run --gpus all -i --rm \
   -v "/path/to/vault:/vault" \
   -v exomem-data:/data \
-  -e EXOMEM_VAULT_PATH=/vault \
-  -e EXOMEM_MODE=performance \
+  -e EVERMATTER_VAULT_PATH=/vault \
+  -e EVERMATTER_MODE=performance \
   ghcr.io/substrate-systems/evermatter:cuda --transport stdio
 ```
 
@@ -67,11 +67,11 @@ Apple Silicon MPS/MLX.
 ## Volume contract
 
 - **`/vault`** — your notes. Bind-mount your vault root here
-  (`-v "/path/to/vault:/vault"`) and set `EXOMEM_VAULT_PATH=/vault`. All file
+  (`-v "/path/to/vault:/vault"`) and set `EVERMATTER_VAULT_PATH=/vault`. All file
   reads and writes stay confined to this mount, matching the server's
   existing vault-containment guarantee.
 - **`/data`** — server-local state, declared as a `VOLUME` in the image:
-  - `EXOMEM_LOG_DIR=/data/logs` — the rotating `exomem.log`. The
+  - `EVERMATTER_LOG_DIR=/data/logs` — the rotating `exomem.log`. The
     `queries.jsonl` / `writes.jsonl` / `reads.jsonl` audit logs land here too,
     but only in the `ml` image (the lean image runs with embeddings disabled,
     which also turns the query log off).
@@ -82,6 +82,11 @@ Apple Silicon MPS/MLX.
   deliberately a *separate* volume from `/vault`: you can wipe server state
   (`docker volume rm`) without touching your vault, since they have distinct
   lifecycles.
+
+The image sets its defaults under `EVERMATTER_` names, such as `EVERMATTER_LOG_DIR`.
+To override one with `-e` or in `.env`, use the same `EVERMATTER_` name: an
+`EXOMEM_` override gives the setting two names, so the server warns at every start
+and the credential commands, such as `exomem auth revoke`, refuse to run.
 
 ## Remote compose deployment
 
@@ -100,12 +105,12 @@ documented in [deployment.md](deployment.md).
 
 2. Fill in `.env` (`env.example` documents every key, including the
    compose-only ones below — uncomment the ones you need):
-   - The OAuth vars from [deployment.md](deployment.md): `EXOMEM_BASE_URL`,
-     `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `EXOMEM_GITHUB_USERNAME`,
-     `EXOMEM_GITHUB_USER_ID`, and `EXOMEM_JWT_SIGNING_KEY`. HA deployments also
-     require matching non-empty `EXOMEM_LEASE_COORDINATOR_TOKEN`,
-     `EXOMEM_WRITER_LEASE_TOKEN`, and `EXOMEM_OAUTH_STORAGE_TOKEN` values.
-   - `EXOMEM_VAULT_HOST_PATH` is the **host** path bind-mounted to `/vault`
+   - The OAuth vars from [deployment.md](deployment.md): `EVERMATTER_BASE_URL`,
+     `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `EVERMATTER_GITHUB_USERNAME`,
+     `EVERMATTER_GITHUB_USER_ID`, and `EVERMATTER_JWT_SIGNING_KEY`. HA deployments also
+     require matching non-empty `EVERMATTER_LEASE_COORDINATOR_TOKEN`,
+     `EVERMATTER_WRITER_LEASE_TOKEN`, and `EVERMATTER_OAUTH_STORAGE_TOKEN` values.
+   - `EVERMATTER_VAULT_HOST_PATH` is the **host** path bind-mounted to `/vault`
      (`compose.yaml` maps it in; the container always sees `/vault`). Compose
      fails fast with `set in .env` if it is missing.
    - Whichever tunnel credential you're using: `CLOUDFLARE_TUNNEL_TOKEN`, or
@@ -126,7 +131,7 @@ documented in [deployment.md](deployment.md).
 
    The CUDA override declares `gpus: all`, so it requires Docker with the NVIDIA
    container runtime. It still boots normal/CPU-default unless `.env` sets
-   `EXOMEM_MODE=performance`.
+   `EVERMATTER_MODE=performance`.
 
 4. Add the tunnel profile you have an account for when you need public ingress:
 
@@ -167,7 +172,7 @@ docker run --user "$(id -u):$(id -g)" ...
 ```
 
 This works out of the box because both persistence paths point at `/data`
-(`EXOMEM_LOG_DIR`, and on `ml`, `HF_HOME`) — as long as your user has write
+(`EVERMATTER_LOG_DIR`, and on `ml`, `HF_HOME`) — as long as your user has write
 access to the mounted `/data` volume, nothing in the image requires root. With
 a **bind mount** at `/data` that's automatic (you own the host directory); a
 Docker **named volume** (what `compose.yaml` uses) is initialized root-owned,

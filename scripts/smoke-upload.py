@@ -18,17 +18,20 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from exomem import env_compat
+from exomem.remote_setup_wizard import parse_env
+
 URL = "http://127.0.0.1:8765/upload"
 ENV = Path(__file__).resolve().parents[1] / ".env"
 
 
 def _token() -> str:
-    for line in ENV.read_text(encoding="utf-8").splitlines():
-        if line.strip().startswith("EXOMEM_UPLOAD_TOKEN="):
-            tok = line.split("=", 1)[1].strip()
-            if tok:
-                return tok
-    raise SystemExit("EXOMEM_UPLOAD_TOKEN not set in .env — run scripts/set-upload-token.py first")
+    token = env_compat.rename_settings(parse_env(ENV.read_text(encoding="utf-8")))[0].get(
+        "EXOMEM_UPLOAD_TOKEN", ""  # the internal name; the .env may set it under any of its names
+    )
+    if token.strip():
+        return token.strip()
+    raise SystemExit("EVERMATTER_UPLOAD_TOKEN not set in .env — run scripts/set-upload-token.py first")
 
 
 def _post(headers: dict) -> int:

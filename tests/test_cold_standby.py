@@ -1210,3 +1210,47 @@ def test_desktop_laptop_round_trip_commits_with_at_most_one_active_service(tmp_p
     desktop_activate = _run(desktop_path, desktop_adapter, "Activate", "-IfUnserved")
     assert desktop_activate.returncode == 0, (desktop_activate.stdout, desktop_activate.stderr)
     assert_active("desktop")
+
+
+def _renamed_base_url_config(tmp_path: Path, *, dotenv_name: str, service_name: str, service_value: str):
+    """A host whose dotenv names the base URL `dotenv_name` while its service environment names it `service_name`."""
+    config_path, config = _config(tmp_path)
+    identity = config["identity_environment"]
+    assert isinstance(identity, dict)
+    identity["base_url"] = dotenv_name
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    dotenv = Path(str(identity["dotenv_path"]))
+    dotenv.write_text(
+        dotenv.read_text(encoding="utf-8").replace("TEST_BASE_URL=", f"{dotenv_name}="), encoding="utf-8"
+    )
+    _write_matching_manifests(config)
+    state = _default_state(config)
+    values = state["service_environments"]["laptop"]["values"]
+    del values["TEST_BASE_URL"]
+    values[service_name] = service_value
+    adapter, state_path = _adapter(tmp_path, config, state)
+    return config_path, adapter, state_path
+
+
+def test_one_setting_under_two_spellings_is_not_identity_drift(tmp_path: Path) -> None:
+    """The failure: the installer publishes EVERMATTER_X, an operator's dotenv says EXOMEM_X, and Activate saw drift."""
+    config_path, adapter, _ = _renamed_base_url_config(
+        tmp_path, dotenv_name="EXOMEM_BASE_URL", service_name="EVERMATTER_BASE_URL",
+        service_value="https://exomem.example.test/",
+    )
+
+    result = _run(config_path, adapter, "Status")
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "effective shared configuration is unavailable" not in _terminal(result)["reasons"]
+
+
+def test_a_differing_value_under_another_spelling_is_still_identity_drift(tmp_path: Path) -> None:
+    config_path, adapter, _ = _renamed_base_url_config(
+        tmp_path, dotenv_name="EXOMEM_BASE_URL", service_name="EVERMATTER_BASE_URL",
+        service_value="https://other.example.test/",
+    )
+
+    result = _run(config_path, adapter, "Status")
+
+    assert "effective shared configuration is unavailable" in _terminal(result)["reasons"]

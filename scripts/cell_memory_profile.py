@@ -419,14 +419,15 @@ def cell_environment(
     """The cloud image's and cellctl's cell environment, with all state in `scratch`.
 
     Keep the selected Cloud resource policy. Drop inherited state, credentials
-    and other ``EXOMEM_*`` overrides, including legacy ``KB_MCP_*`` aliases.
+    and other ``EXOMEM_*`` overrides, including their ``EVERMATTER_*`` and ``KB_MCP_*`` aliases.
     """
     from exomem.cloud_cell import RESOURCE_POLICY_ENV
+    from exomem.env_compat import SETTING_PREFIXES
 
     env = {
         k: v
         for k, v in base.items()
-        if not k.startswith(("EXOMEM_", "KB_MCP_")) and k != "MALLOC_ARENA_MAX"
+        if not k.startswith(SETTING_PREFIXES) and k != "MALLOC_ARENA_MAX"
     }
     # The policy selects the measured runtime profile, not personal state.
     if RESOURCE_POLICY_ENV in base:

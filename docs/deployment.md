@@ -118,7 +118,7 @@ Media extraction needs two **system** tools (not pip-installable):
 
 - **Tesseract OCR** (images): `winget install --id UB-Mannheim.TesseractOCR -e`.
   The installer doesn't add it to PATH; the server auto-discovers it at
-  `%ProgramFiles%\Tesseract-OCR\`, or set `EXOMEM_TESSERACT_CMD`.
+  `%ProgramFiles%\Tesseract-OCR\`, or set `EVERMATTER_TESSERACT_CMD`.
 - **ffmpeg** is bundled by PyAV (pulled via faster-whisper), so audio/video decode
   works without a separate install.
 
@@ -131,26 +131,26 @@ files need no extra.
 OCR detects each image's script with Tesseract's OSD model first. It then reads the
 image with the installed script models for that script and the installed language
 packs written in it. A page with too little text for detection reads with
-`EXOMEM_OCR_DEFAULT_LANGS` (for example `eng+jpn`), or with Tesseract's default
+`EVERMATTER_OCR_DEFAULT_LANGS` (for example `eng+jpn`), or with Tesseract's default
 English when the variable is unset. Tesseract 4.x does not name its model
 directory, so on it OCR skips script detection and reads each image once in
 Tesseract's default language. To read Japanese, install the `jpn` and
 `jpn_vert` packs and the Japanese script models (Debian: `tesseract-ocr-jpn`,
 `tesseract-ocr-jpn-vert`, `tesseract-ocr-script-jpan`, `tesseract-ocr-script-jpan-vert`).
 
-OCR leaves each word with a confidence under `EXOMEM_OCR_WORD_CONFIDENCE_FLOOR`
+OCR leaves each word with a confidence under `EVERMATTER_OCR_WORD_CONFIDENCE_FLOOR`
 (default `70`, scale 0 to 100) out of search. The sidecar keeps those words in a
 `## Low-confidence OCR` section. Set the variable to `0` to keep every word searchable in each image that OCR reads from then on.
 
-`EXOMEM_MEDIA_ENGINES` limits which engines run, for example `documents,ocr`.
+`EVERMATTER_MEDIA_ENGINES` limits which engines run, for example `documents,ocr`.
 Unset, a personal install runs every engine and a Cloud cell runs none. cellctl
 renders the variable into a Cloud cell, for one cell or as the fleet default.
 HEIC photos are not decoded; see `docs/runbooks/cloud-media.md`.
 
 Lean / CPU-only boxes can skip all of this — set
-`EXOMEM_DISABLE_MEDIA_EXTRACTION`; uploads still work, just without server-side
+`EVERMATTER_DISABLE_MEDIA_EXTRACTION`; uploads still work, just without server-side
 searchable-text extraction. CPU also works (no GPU needed), just slower — pick a
-smaller Whisper model with `EXOMEM_WHISPER_MODEL=base`. The CUDA-12 wheels above
+smaller Whisper model with `EVERMATTER_WHISPER_MODEL=base`. The CUDA-12 wheels above
 are Windows + GPU only, unused on CPU.
 
 To make **existing** Evidence/media files searchable (one-shot back-fill; new
@@ -233,23 +233,23 @@ Save the generated **Client ID** and **Client Secret**.
 Create `.env` in the repo root:
 
 ```
-EXOMEM_BASE_URL=https://kb.example.com
-EXOMEM_GITHUB_USERNAME=<your-github-login>
-EXOMEM_GITHUB_USER_ID=<positive-numeric-id-from-GitHub>
+EVERMATTER_BASE_URL=https://kb.example.com
+EVERMATTER_GITHUB_USERNAME=<your-github-login>
+EVERMATTER_GITHUB_USER_ID=<positive-numeric-id-from-GitHub>
 GITHUB_CLIENT_ID=<from step 3>
 GITHUB_CLIENT_SECRET=<from step 3>
 # Required root for durable opaque sessions. Rotation revokes every session.
 # Generate: python -c "import secrets;print(secrets.token_urlsafe(48))"
-EXOMEM_JWT_SIGNING_KEY=<long-random-string>
+EVERMATTER_JWT_SIGNING_KEY=<long-random-string>
 # Required: vault root — the folder that contains Knowledge Base/
-EXOMEM_VAULT_PATH=<your-Obsidian-vault-root>
+EVERMATTER_VAULT_PATH=<your-Obsidian-vault-root>
 ```
 
-`EXOMEM_BASE_URL` must match your public hostname (from step 2) exactly — no
-trailing slash, no `/mcp` suffix. `EXOMEM_GITHUB_USERNAME` is case-insensitive but
-must be the *login*, not the display name. `EXOMEM_GITHUB_USER_ID` is the positive
+`EVERMATTER_BASE_URL` must match your public hostname (from step 2) exactly — no
+trailing slash, no `/mcp` suffix. `EVERMATTER_GITHUB_USERNAME` is case-insensitive but
+must be the *login*, not the display name. `EVERMATTER_GITHUB_USER_ID` is the positive
 numeric `id` returned by `GET https://api.github.com/users/<login>`; authorization
-must match both values. `EXOMEM_VAULT_PATH` is **required**:
+must match both values. `EVERMATTER_VAULT_PATH` is **required**:
 claude.ai connects over HTTP and passes no environment, so the service resolves the
 vault solely from this line in `.env` at startup.
 
@@ -297,7 +297,7 @@ verify that local `/mcp` returns the expected OAuth `401`.
 
 The default `standard` profile is multimodal but not permanently model-resident.
 Evidence work is durable and serialized through one disposable child; after
-`EXOMEM_MEDIA_IDLE_SECONDS` (default 300) without work, that child exits and returns
+`EVERMATTER_MEDIA_IDLE_SECONDS` (default 300) without work, that child exits and returns
 its RAM plus MPS/MLX/CUDA state. After the deadline, maintainers can verify the
 persistent-core envelope with `python scripts/verify-resource-envelope.py` (targets:
 one service, zero media children, <=512 MiB pre-cache RSS, and <1% idle CPU). GPU
@@ -433,7 +433,7 @@ diagnostic under the identity that owns the runtime.
 
 The trustee set is exact. LocalSystem state permits only LocalSystem and
 Administrators; normal-user state permits that user's SID plus LocalSystem and
-Administrators. One `EXOMEM_WRITER_LEASE_STATE_DIR` therefore cannot serve both an
+Administrators. One `EVERMATTER_WRITER_LEASE_STATE_DIR` therefore cannot serve both an
 NSSM LocalSystem service and a direct user process. More importantly, that directory
 also anchors the process-safe mutation lock. Do not point the two identities at
 separate state roots and then mutate the same vault concurrently. Route ordinary
@@ -456,7 +456,7 @@ Upgrading by hand is the trap this replaces: `uv pip install --upgrade exomem[..
 ignores `[tool.uv.sources]` (only `uv sync` reads it), so it silently pulls the PyPI
 **CPU** torch wheel over the CUDA build and moves embeddings/media onto the CPU with
 no other symptom. `doctor` now fails on that state when an NVIDIA driver is present
-(set `EXOMEM_ALLOW_CPU_TORCH=1` to accept CPU deliberately).
+(set `EVERMATTER_ALLOW_CPU_TORCH=1` to accept CPU deliberately).
 
 ### Renaming an existing `kb-mcp` service
 
@@ -488,7 +488,7 @@ To install everything in one upload, open `https://kb.example.com/claude-plugin.
 4. Leave **OAuth Client ID** and **OAuth Client Secret** blank — claude.ai uses
    Dynamic Client Registration against your `/register` endpoint.
 5. Save. claude.ai opens a GitHub login window → log in (only the user in
-   `EXOMEM_GITHUB_USERNAME` is allowed) → approve consent → redirects back to
+   `EVERMATTER_GITHUB_USERNAME` is allowed) → approve consent → redirects back to
    claude.ai. The tools appear in the palette.
 
 ## Machine-local state placement (and file-sync agents)
@@ -498,7 +498,7 @@ epoch and receipt records, the deferred-index queue, media-job and governance
 sidecars, due/review projections, and their rebuild scratch files — lives
 **outside the vault**, in a per-user, per-vault state root:
 
-1. `EXOMEM_STATE_ROOT` environment override (absolute path, used verbatim), else
+1. `EVERMATTER_STATE_ROOT` environment override (absolute path, used verbatim), else
 2. `%LOCALAPPDATA%\exomem\state` on Windows, else
 3. `$XDG_STATE_HOME/exomem/state` (default `~/.local/state/exomem/state`) on POSIX,
 
@@ -523,7 +523,7 @@ No plugin toggle or declaration grants custody.
 If your sync client is not in the shipped pack, add it with
 `schema_memory(subject="sync-providers", operation="save")` or in
 `_Schema/sync-providers.yaml`. You can also list sync roots as absolute paths
-in `EXOMEM_COLLECTION_STORE_SYNC_ROOTS`. A vault entry can only add evidence;
+in `EVERMATTER_COLLECTION_STORE_SYNC_ROOTS`. A vault entry can only add evidence;
 it cannot change or remove a shipped entry.
 
 Ordinary service and stateful CLI startup is read-only at this boundary. It
@@ -614,7 +614,7 @@ If the second machine is an independent deployment rather than manual cold stand
 or automatic HA, give it its own public hostname, OAuth app, `.env`, and connector.
 A GitHub OAuth App accepts one callback URL, so create a separate app whose callback
 is `https://<second-host>/auth/callback`; put that app's client ID and secret in the
-second host's `.env`. Set its own `EXOMEM_BASE_URL` and `EXOMEM_VAULT_PATH`, and add
+second host's `.env`. Set its own `EVERMATTER_BASE_URL` and `EVERMATTER_VAULT_PATH`, and add
 a second connector pointing at that host's `/mcp` URL.
 
 Hybrid `find` also needs the embeddings stack on each host independently. Run
@@ -630,23 +630,23 @@ store admission. Set the explicit single-host topology in that service's
 environment:
 
 ```dotenv
-EXOMEM_WRITER_LEASE_TOPOLOGY=single-host
-EXOMEM_WRITER_LEASE_URL=http://127.0.0.1:8770
-EXOMEM_WRITER_LEASE_VAULT_ID=main
-EXOMEM_WRITER_LEASE_REPLICA_ID=local
-EXOMEM_WRITER_LEASE_TOKEN=<coordinator-writer-secret>
+EVERMATTER_WRITER_LEASE_TOPOLOGY=single-host
+EVERMATTER_WRITER_LEASE_URL=http://127.0.0.1:8770
+EVERMATTER_WRITER_LEASE_VAULT_ID=main
+EVERMATTER_WRITER_LEASE_REPLICA_ID=local
+EVERMATTER_WRITER_LEASE_TOKEN=<coordinator-writer-secret>
 ```
 
 Under this topology the service keeps the writer lease while it is idle: no other
 replica can reach a loopback coordinator, so an idle release would hand authority
-to nobody. Set `EXOMEM_WRITER_LEASE_IDLE_SECONDS` to a value of at least the TTL
+to nobody. Set `EVERMATTER_WRITER_LEASE_IDLE_SECONDS` to a value of at least the TTL
 to release an idle lease anyway. Owner offline steps still need the service
 stopped first.
 
 Run the coordinator under the service manager on the same host, bound to
 `127.0.0.1`, with its database outside the vault. Give the coordinator the same
-writer credential through `EXOMEM_LEASE_COORDINATOR_TOKEN`. Keep its distinct
-operator credential in `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN` in the protected
+writer credential through `EVERMATTER_LEASE_COORDINATOR_TOKEN`. Keep its distinct
+operator credential in `EVERMATTER_LEASE_COORDINATOR_OPERATOR_TOKEN` in the protected
 coordinator environment and offline operator storage. Ordinary service requests
 receive only the writer credential. A managed service that moves file collections
 into the store at an upgrade reads the operator credential from `operator.env`
@@ -673,7 +673,7 @@ This restriction prevents a shared remote coordinator from silently using local
 session identities. A false refusal delays setup for the deployment owner.
 
 The service keeps its existing durable sessions and FastMCP OAuth storage when
-`EXOMEM_OAUTH_STORAGE_URL` is absent. Supplying that URL still selects shared
+`EVERMATTER_OAUTH_STORAGE_URL` is absent. Supplying that URL still selects shared
 storage and requires its existing credentials and namespace. Omitting the
 topology retains multi-host behavior and its shared OAuth requirement.
 `exomem doctor --profile ha --probe` checks the local coordinator and lease
@@ -712,7 +712,7 @@ Run one strongly consistent coordinator. The included reference service uses a
 transactional SQLite database on one always-on node:
 
 ```powershell
-$env:EXOMEM_LEASE_COORDINATOR_TOKEN = '<long-random-secret>'
+$env:EVERMATTER_LEASE_COORDINATOR_TOKEN = '<long-random-secret>'
 uv run python -m exomem.lease_coordinator --host 0.0.0.0 --port 8770 `
   --database C:\path\to\writer-leases.sqlite
 ```
@@ -738,27 +738,27 @@ Configure both Evermatter hosts with the same vault ID and coordinator, but uniq
 replica IDs. Desktop example:
 
 ```dotenv
-EXOMEM_WRITER_LEASE_URL=https://lease.example.com
-EXOMEM_WRITER_LEASE_VAULT_ID=personal-main
-EXOMEM_WRITER_LEASE_REPLICA_ID=desktop
-EXOMEM_WRITER_LEASE_TOKEN=<long-random-secret>
-EXOMEM_WRITER_LEASE_TTL=30
-EXOMEM_WRITER_LEASE_PREFERRED=1
+EVERMATTER_WRITER_LEASE_URL=https://lease.example.com
+EVERMATTER_WRITER_LEASE_VAULT_ID=personal-main
+EVERMATTER_WRITER_LEASE_REPLICA_ID=desktop
+EVERMATTER_WRITER_LEASE_TOKEN=<long-random-secret>
+EVERMATTER_WRITER_LEASE_TTL=30
+EVERMATTER_WRITER_LEASE_PREFERRED=1
 
 # Required when both replicas serve one stable OAuth/MCP hostname.
-EXOMEM_OAUTH_STORAGE_URL=https://exomem.example.com
-EXOMEM_OAUTH_STORAGE_NAMESPACE=personal-main
-EXOMEM_OAUTH_STORAGE_TOKEN=<same-edge-secret>
+EVERMATTER_OAUTH_STORAGE_URL=https://exomem.example.com
+EVERMATTER_OAUTH_STORAGE_NAMESPACE=personal-main
+EVERMATTER_OAUTH_STORAGE_TOKEN=<same-edge-secret>
 ```
 
-The coordinator's `EXOMEM_LEASE_COORDINATOR_TOKEN`, each replica's
-`EXOMEM_WRITER_LEASE_TOKEN`, and `EXOMEM_OAUTH_STORAGE_TOKEN` must be the same
+The coordinator's `EVERMATTER_LEASE_COORDINATOR_TOKEN`, each replica's
+`EVERMATTER_WRITER_LEASE_TOKEN`, and `EVERMATTER_OAUTH_STORAGE_TOKEN` must be the same
 non-empty value. `exomem doctor --profile ha --probe` proves that anonymous
 state reads receive `401` and an authenticated absent-key read succeeds; a
 coordinator that accepts anonymous state access is not safe for session authority.
 
 Laptop uses the same values except
-`EXOMEM_WRITER_LEASE_REPLICA_ID=laptop` and omits the preferred flag. Both remain
+`EVERMATTER_WRITER_LEASE_REPLICA_ID=laptop` and omits the preferred flag. Both remain
 readable. The first write acquires the lease; the server renews it while alive.
 After a crash or sleep, another host can take over after the TTL. Writes fail closed
 with `WRITER_COORDINATOR_UNAVAILABLE` if authority cannot be confirmed, but reads
@@ -778,7 +778,7 @@ service and worker processes on one host; it does not replace the remote writer
 lease between replicas.
 
 REST callers should attach one stable `Idempotency-Key` to every mutation attempt;
-CLI callers can set `EXOMEM_IDEMPOTENCY_KEY`. Exact same-key/same-payload retries
+CLI callers can set `EVERMATTER_IDEMPOTENCY_KEY`. Exact same-key/same-payload retries
 return the stored canonical terminal, including its original request and receipt
 identity; reusing a key with different input is rejected. Explicit completed and
 recognized committed-failure receipts are retained locally for 24 hours. The
@@ -837,11 +837,11 @@ coordination, and takeover eligibility. Admission is cached in the Durable Objec
 against the active lease holder and fencing token, so steady-state tool calls do
 not pay another origin probe. The active origin
 renews its lease independently while a long tool runs; correctness does not rely
-on ordering `MCP_TOOL_TIMEOUT_MS` against `EXOMEM_WRITER_LEASE_TTL`.
+on ordering `MCP_TOOL_TIMEOUT_MS` against `EVERMATTER_WRITER_LEASE_TTL`.
 
-Both replicas must also use the same stable `EXOMEM_BASE_URL`, GitHub OAuth client
-ID/secret, `EXOMEM_GITHUB_USERNAME`, `EXOMEM_GITHUB_USER_ID`, and
-`EXOMEM_JWT_SIGNING_KEY`. Durable session records are Fernet-encrypted on the
+Both replicas must also use the same stable `EVERMATTER_BASE_URL`, GitHub OAuth client
+ID/secret, `EVERMATTER_GITHUB_USERNAME`, `EVERMATTER_GITHUB_USER_ID`, and
+`EVERMATTER_JWT_SIGNING_KEY`. Durable session records are Fernet-encrypted on the
 replica before leaving it. Session and auth-generation reads are always direct to
 the coordinator: there is no read-through mirror or stale local fallback that
 could resurrect a revoked session.
@@ -867,7 +867,7 @@ admit the published store, because admitting it would lose that change:
 To finish the migration:
 
 1. Keep the Evermatter service stopped on every host that serves the vault.
-2. Run `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> exomem collections migrate --vault <vault> --apply`.
+2. Run `EVERMATTER_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> exomem collections migrate --vault <vault> --apply`.
 3. If the apply reports `status: restored`, wait until the writer lease expires, then run step 2 again.
 4. If the apply reports `COLLECTION_STORE_SYNC_PENDING`, wait for the vault replica, start and stop the service once, then repeat step 2.
 5. If the apply reports `COLLECTION_STORE_DIVERGED`, run `exomem collections adopt-local --vault <vault> --why "<reason>" --dry-run`, apply that preview with `--preview-id`, then run step 2 again.
@@ -915,7 +915,7 @@ The rebuild gives way to requests between batches.
 The owner creates a vault's first summary collection offline, which enrols the
 vault's store with the coordinator: stop the service, then run
 `exomem collections create --manifest-path <path> --manifest-file <file> --why "<reason>"`
-with the service's lease environment and `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN`
+with the service's lease environment and `EVERMATTER_LEASE_COORDINATOR_OPERATOR_TOKEN`
 set. Later summary collections are created through `manage_memory` with `records.create` on the
 running service.
 
@@ -934,11 +934,11 @@ projects the stored pages back to Markdown. Migration has been tested on
 Linux. Windows migration awaits NTFS acceptance.
 
 Use an existing collection store and a loopback lease coordinator with
-`EXOMEM_WRITER_LEASE_TOPOLOGY=single-host`. Upgrade every host that can open the
+`EVERMATTER_WRITER_LEASE_TOPOLOGY=single-host`. Upgrade every host that can open the
 vault to a build that checks the vault's store-mode marker before migration.
 Keep the service's vault, state root, and lease environment in your shell.
 Start the service once to build the indexes, then stop it and set
-`EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN`.
+`EVERMATTER_LEASE_COORDINATOR_OPERATOR_TOKEN`.
 
 1. Run `exomem store-mode migrate --dry-run` to check the store, lease, and indexes.
 2. Run `exomem store-mode migrate --apply --why 'Enable store mode'` to move the vault.
@@ -1065,13 +1065,13 @@ A release from before the collection store cannot open a vault whose collections
 live in the store. Before a downgrade, the owner exports the vault: the export
 turns every store collection back into its file layout and then retires the
 store. Only the owner can export, with the service stopped on every host and the
-operator credential, `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN`, set.
+operator credential, `EVERMATTER_LEASE_COORDINATOR_OPERATOR_TOKEN`, set.
 
 1. Stop the Evermatter service on every host that serves the vault.
 2. Preview the export: `exomem collections export --vault <vault> --dry-run`
 3. If the verdict is `blocked`, resolve each collection that the preview names, then preview again.
 4. Note the `plan_id` value in the preview.
-5. Apply it: `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> exomem collections export --vault <vault> --plan-id <plan_id> --why "<reason>"`
+5. Apply it: `EVERMATTER_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> exomem collections export --vault <vault> --plan-id <plan_id> --why "<reason>"`
 6. If the apply stops before it reports `exported`, run step 5 again with the same `plan_id`.
 7. If the apply reports `COLLECTION_STORE_EXPORT_STALE`, start again at step 2.
 8. If the apply reports `COLLECTION_STORE_COORDINATOR_UPGRADE_REQUIRED`, upgrade the coordinator, then start again at step 2.
@@ -1188,7 +1188,7 @@ abandons it, on this host and on every host that adopts the replica.
 To abandon an export:
 
 1. Keep the Evermatter service stopped on every host that serves the vault.
-2. Run `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> exomem collections export --vault <vault> --abandon --plan-id <plan_id> --why "<reason>"`.
+2. Run `EVERMATTER_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> exomem collections export --vault <vault> --abandon --plan-id <plan_id> --why "<reason>"`.
 3. Start the Evermatter services. The services serve every store collection again.
 
 The command reports `abandoned`. The vault stays routed to the store, and the
@@ -1230,7 +1230,7 @@ Treat the upgrade from FastMCP reference tokens as a coordinated HA cutover, not
 a rolling mixed-provider deployment:
 
 1. Back up `.env`, the coordinator database/shared OAuth state, and both service
-   installations. Preserve the existing `EXOMEM_JWT_SIGNING_KEY`; add the
+   installations. Preserve the existing `EVERMATTER_JWT_SIGNING_KEY`; add the
    immutable GitHub ID and matching coordinator/storage credentials.
 2. Quiesce connector traffic. Upgrade active and passive replicas together so no
    request can alternate between the legacy and durable token formats.
@@ -1361,7 +1361,7 @@ instance (about 0.65 GB resident). The first load fetches the published
 artefact, or builds it from the pinned export: a 2.2 GB download and a
 quantisation that peaks near 9 GB in a child process. The cloud image carries
 the artefact, since a cell can fetch nothing. A hosted cell (the helm cell
-chart) keeps `BAAI/bge-base-en-v1.5`. `EXOMEM_RECALL_MODEL` names the model
+chart) keeps `BAAI/bge-base-en-v1.5`. `EVERMATTER_RECALL_MODEL` names the model
 explicitly.
 
 Every recall sidecar records the model, fingerprint and width of the vectors it
@@ -1377,11 +1377,11 @@ resident.
 
 - Progress: `exomem doctor` (`embeddings.reembed`, read from disk) and
   `exomem status` (`recall_reembed`: pages done, seconds per 1,000 chunks, ETA).
-- `EXOMEM_RECALL_REEMBED=off` builds nothing and keeps the old sidecar serving
+- `EVERMATTER_RECALL_REEMBED=off` builds nothing and keeps the old sidecar serving
   on a personal server.
 - On a personal server both models are resident while the build runs, in every
   mode, quiet included: warm-up loads the old model before writes are admitted
-  so a write never finds it cold. `EXOMEM_RECALL_REEMBED=off` is the way to
+  so a write never finds it cold. `EVERMATTER_RECALL_REEMBED=off` is the way to
   keep one model there.
 - Rolling back to `BAAI/bge-base-en-v1.5` after a later start has retired the
   old sidecar re-embeds the whole vault into the English space, the same way.
@@ -1389,7 +1389,7 @@ resident.
   refused, the vector lane reports `vector_space_mismatch` and the lexical
   lanes answer until the cutover, and doctor warns that dense recall is off.
   Writes meanwhile are built by the job's catch-up. With
-  `EXOMEM_RECALL_REEMBED=off` a cell's dense recall stays off.
+  `EVERMATTER_RECALL_REEMBED=off` a cell's dense recall stays off.
 - `exomem index` maintains whichever sidecar is serving, with its own model.
 - The sidecar for bge-m3 is about a third larger: 1,024 dimensions against 768.
 
@@ -1406,7 +1406,7 @@ To go back to `anchors`, add one line to the service environment and restart
 the service:
 
 ```bash
-EXOMEM_ACTIVATION_PACKET=anchors
+EVERMATTER_ACTIVATION_PACKET=anchors
 ```
 
 1. If the install is managed (`--seamless`), add the line to `service.env`, usually `~/.config/exomem/service.env`, and run `bash scripts/upgrade.sh --package-version <the serving version>`. The next worker re-reads `service.env`. Without `--package-version`, the command also stages a newer release when one exists.
@@ -1414,7 +1414,7 @@ EXOMEM_ACTIVATION_PACKET=anchors
 3. If the service runs from a source checkout, add the line to the checkout's `.env` and run `bash scripts/restart.sh`.
 4. Call `recall_context` once. The packet has no `map` block.
 
-To return to `maps`, change the line to `EXOMEM_ACTIVATION_PACKET=maps` and
+To return to `maps`, change the line to `EVERMATTER_ACTIVATION_PACKET=maps` and
 restart in the same way, then call `recall_context` once: the packet has a
 `map` block. Do not only remove the line. A managed supervisor that started
 while the line was present keeps the value in its own environment, and each
@@ -1425,7 +1425,7 @@ environment that `cellctl` renders (`CELLCTL_CELL_MODEL_ENV`), then roll the
 cell.
 
 A value other
-than `anchors` or `maps` logs one warning, `invalid EXOMEM_ACTIVATION_PACKET;
+than `anchors` or `maps` logs one warning, `invalid EVERMATTER_ACTIVATION_PACKET;
 using maps`, and serves `maps`. The working-set kill switch disables both modes.
 
 ### The turn slice
@@ -1454,7 +1454,7 @@ To disable the turn slice, add one line to the service environment and restart
 the service:
 
 ```bash
-EXOMEM_ACTIVATION_TURN_SLICE=off
+EVERMATTER_ACTIVATION_TURN_SLICE=off
 ```
 
 1. If the install is managed (`--seamless`), add the line to `service.env`, usually `~/.config/exomem/service.env`, and run `bash scripts/upgrade.sh --package-version <the serving version>`. The next worker re-reads `service.env`. Without `--package-version`, the command also stages a newer release when one exists.
@@ -1462,7 +1462,7 @@ EXOMEM_ACTIVATION_TURN_SLICE=off
 3. If the service runs from a source checkout, add the line to the checkout's `.env` and run `bash scripts/restart.sh`.
 4. Call `recall_context` once. The packet has no `turn_slice` block; task context keeps its independent behavior.
 
-To return to the slice, change the line to `EXOMEM_ACTIVATION_TURN_SLICE=on` and
+To return to the slice, change the line to `EVERMATTER_ACTIVATION_TURN_SLICE=on` and
 restart in the same way, then call `recall_context` once with a turn that names a
 known page: the packet has a `turn_slice` block with `state` of `ready`. Do not
 only remove the line. A managed supervisor that started while the line was
@@ -1473,13 +1473,13 @@ environment that `cellctl` renders (`CELLCTL_CELL_MODEL_ENV`), then roll the
 cell.
 
 Any value other than `off` serves the slice. A value other than `on` or `off`
-also logs one warning, `invalid EXOMEM_ACTIVATION_TURN_SLICE; using on`. The
+also logs one warning, `invalid EVERMATTER_ACTIVATION_TURN_SLICE; using on`. The
 setting has no effect in the `anchors` mode.
 
 ### Activation time limit
 
 An MCP `recall_context` call (the `activate_context` command) runs until the MCP
-request budget is one second from its end. Set `EXOMEM_ACTIVATION_BUDGET_SECONDS`
+request budget is one second from its end. Set `EVERMATTER_ACTIVATION_BUDGET_SECONDS`
 to make it stop looking for more context sooner. When the limit arrives while
 the call looks for task leads, the packet serves what the call already found:
 the map, and any leads that the call reached. The `task_context` block is
@@ -1494,7 +1494,7 @@ limit returns the packet it always returned.
 
 To change the limit, set the variable to a positive number of seconds in the
 service environment and restart the service in the same way as for
-`EXOMEM_ACTIVATION_TURN_SLICE`. A value that is not a positive number logs one
+`EVERMATTER_ACTIVATION_TURN_SLICE`. A value that is not a positive number logs one
 warning and the call runs without its own limit. The setting has no effect in the
 `anchors` mode, which still abstains when the request budget ends. It does not
 change the REST and CLI doors, which keep their own shorter limit.
@@ -1545,21 +1545,21 @@ To serve that discovery anyway, add this line to the service environment and
 restart the service as described for the turn slice:
 
 ```bash
-EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS=on
+EVERMATTER_ACTIVATION_RELEASED_CORPUS_TASKS=on
 ```
 
 Then call `recall_context` once with a turn that names a known page:
 `task_context.state` is `ready` or `partial`, not `unavailable`. Expect that call
 to take longer on a large vault. To turn it off again, change the line to
-`EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS=off` and restart in the same way. Do not
+`EVERMATTER_ACTIVATION_RELEASED_CORPUS_TASKS=off` and restart in the same way. Do not
 only remove the line, for the reason given for the turn slice. A value other than
 `on` or `off` logs one warning,
-`invalid EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS; using off`.
+`invalid EVERMATTER_ACTIVATION_RELEASED_CORPUS_TASKS; using off`.
 
 ### Optional context-fit interpretation
 
 Interpretation is disabled unless the process environment names an operator-owned
-JSON file through `EXOMEM_CONTEXT_FIT_CONFIG`. Keep that file outside the vault.
+JSON file through `EVERMATTER_CONTEXT_FIT_CONFIG`. Keep that file outside the vault.
 It selects exactly one placement and supplies these deployment values:
 
 - `placement`: `local` or `api`.
@@ -1584,7 +1584,7 @@ discovery. Turn text, prompts and fit judgments remain request-local.
 Reported resource allowance comes from configuration; it is not measured resource use.
 
 Keep interpretation disabled until a paired real-model check establishes benefit
-for that deployment. Remove `EXOMEM_CONTEXT_FIT_CONFIG` from the process environment
+for that deployment. Remove `EVERMATTER_CONTEXT_FIT_CONFIG` from the process environment
 to restore the agent-only path. This rollback leaves canonical methods intact.
 
 ### The map while the vault changes
@@ -1616,11 +1616,11 @@ held map, and it can be `true` while `generation.continuity` is `stale`.
 
 The cross-encoder reranker reorders a query's top candidates. It runs on explicit
 `rerank=True`, or automatically in performance mode on an accelerated device; CPU
-services leave it off by default. `EXOMEM_DISABLE_RANKING` turns it off entirely.
+services leave it off by default. `EVERMATTER_DISABLE_RANKING` turns it off entirely.
 
 The default CrossEncoder backend is PyTorch. To use ONNX, install
 `uv sync --extra embeddings --extra reranker-onnx` and set
-`EXOMEM_RERANKER_BACKEND=onnx` before starting the service. This uses the
+`EVERMATTER_RERANKER_BACKEND=onnx` before starting the service. This uses the
 model's published ONNX export; Evermatter does not export the model during a request.
 The first load may download that export if it is not already in the model cache.
 The ONNX provider follows Evermatter's device policy: CPU is the default, CUDA is
@@ -1635,7 +1635,7 @@ Governed projected recall applies the same gate.
 | Reranker | Scripts | Across languages | Notes |
 |---|---|---|---|
 | `BAAI/bge-reranker-base` (default) | Latin, Han | no | Trained on English and Chinese. Skipped for a query written mostly in another script (`query_script_not_covered`). Also skipped when the best dense match shares no content word with the query and either the query's words matched pages in another script than that match (`cross_language_not_covered`) or matched nothing while the query itself is in another script than that match (`cross_script_lead_not_covered`). |
-| `BAAI/bge-reranker-v2-m3` (opt-in) | all (assumed) | yes (assumed) | Select it with `EXOMEM_RANKING_MODEL=BAAI/bge-reranker-v2-m3`. Its model card says only that it is multilingual. The all-scripts, cross-language declaration is an assumption that has not been measured here. Its cost is a design estimate, not a measurement: about 1.3-1.8 GB more memory and roughly 45 s per 30-pair rerank on 2 CPU cores. So it is meant for accelerated hosts. |
+| `BAAI/bge-reranker-v2-m3` (opt-in) | all (assumed) | yes (assumed) | Select it with `EVERMATTER_RANKING_MODEL=BAAI/bge-reranker-v2-m3`. Its model card says only that it is multilingual. The all-scripts, cross-language declaration is an assumption that has not been measured here. Its cost is a design estimate, not a measurement: about 1.3-1.8 GB more memory and roughly 45 s per 30-pair rerank on 2 CPU cores. So it is meant for accelerated hosts. |
 
 A reranker without a declaration is not gated: the owner configured it and is
 trusted with it. The declaration is looked up by the exact model name, so a local
@@ -1673,24 +1673,24 @@ backend, but ASR runs behind a `TranscriptionBackend` seam (`extract.get_transcr
 with two implementations: `FasterWhisperBackend` (CUDA/CPU) and `MlxWhisperBackend`
 (**mlx-whisper**, Metal GPU). Install the extra — `uv sync --extra media --extra
 media-mlx` — and `get_transcriber()` **auto-selects MLX on Apple Silicon**, putting
-transcription on the GPU too. `EXOMEM_ASR_BACKEND=mlx|faster-whisper` forces the choice;
-`EXOMEM_MLX_WHISPER_MODEL` picks the HF repo (default `mlx-community/whisper-large-v3-mlx`;
+transcription on the GPU too. `EVERMATTER_ASR_BACKEND=mlx|faster-whisper` forces the choice;
+`EVERMATTER_MLX_WHISPER_MODEL` picks the HF repo (default `mlx-community/whisper-large-v3-mlx`;
 use `mlx-community/whisper-large-v3-turbo` for a lighter, faster run on a fanless Air).
 Without the extra, transcription falls back to CPU faster-whisper — pick a smaller
-`EXOMEM_WHISPER_MODEL` (e.g. `base`) there to cut cost. Audio is decoded via PyAV (the
+`EVERMATTER_WHISPER_MODEL` (e.g. `base`) there to cut cost. Audio is decoded via PyAV (the
 shared 16 kHz whisper timebase) when the `media` extra is present, else mlx-whisper
 decodes the file itself (needs `ffmpeg` on PATH).
 
-On MPS, bge/CLIP also run in **fp16** by default (`EXOMEM_MPS_FP16`, set `0` to keep
+On MPS, bge/CLIP also run in **fp16** by default (`EVERMATTER_MPS_FP16`, set `0` to keep
 fp32) — roughly half the memory and faster encodes, which these retrieval models
 tolerate well. Storage is unchanged (vectors are upcast to float32 before the sqlite
 blob); existing fp32 vectors differ from new fp16 ones by ~1e-3, harmless for ranking,
 and `audit_fix(rebuild_embeddings=True)` re-embeds for exact consistency if wanted.
 
 Two more notes: **Voiceprints** (ECAPA) and **diarization** stay on CPU by default for
-cross-machine numeric parity — opt in per model with `EXOMEM_VOICE_DEVICE=mps` /
-`EXOMEM_DIARIZE_DEVICE=mps`. And you can force every torch model to a device with
-`EXOMEM_TORCH_DEVICE=cpu|mps|cuda` (handy to dodge thermal throttling on a fanless
+cross-machine numeric parity — opt in per model with `EVERMATTER_VOICE_DEVICE=mps` /
+`EVERMATTER_DIARIZE_DEVICE=mps`. And you can force every torch model to a device with
+`EVERMATTER_TORCH_DEVICE=cpu|mps|cuda` (handy to dodge thermal throttling on a fanless
 MacBook Air during a large `backfill-media`).
 
 The `media` extra adds a wrinkle: `faster-whisper` runs on **ctranslate2**, which
@@ -1705,19 +1705,19 @@ resolves CUDA via the wheels' RPATH.
 CLIP visual search runs CLIP on **CPU when ASR is active on CUDA** (whisper's cu12
 cuDNN PATH-prepend otherwise shadows torch's cuDNN and breaks CLIP's Conv2d). This
 clash is CUDA-only, so on Apple Silicon CLIP keeps the **MPS** GPU even with ASR
-running. Override with `EXOMEM_CLIP_DEVICE=cuda`/`mps`/`cpu` if needed.
+running. Override with `EVERMATTER_CLIP_DEVICE=cuda`/`mps`/`cpu` if needed.
 
-Zero-shot **image tags** (`EXOMEM_IMAGE_TAGS`, default off) reuse that same loaded
+Zero-shot **image tags** (`EVERMATTER_IMAGE_TAGS`, default off) reuse that same loaded
 CLIP model — no extra dependency. When set, each extracted image is cosine-scored
 against a fixed generic tag vocabulary and the top matches are appended to its
 indexed text as a `Tags: invoice, table, screenshot` line, so a photo is findable
 by what it depicts (not just its OCR text). It is a frozen cosine measurement (no
 LLM), inherits the CLIP device logic above, and soft-fails to no tags when CLIP is
-absent. Tune with `EXOMEM_IMAGE_TAGS_TOPK` (default 5) and
-`EXOMEM_IMAGE_TAGS_THRESHOLD` (raw cosine, default 0.22); only newly-extracted
+absent. Tune with `EVERMATTER_IMAGE_TAGS_TOPK` (default 5) and
+`EVERMATTER_IMAGE_TAGS_THRESHOLD` (raw cosine, default 0.22); only newly-extracted
 images are tagged.
 
-**Video scene frames** (`EXOMEM_VIDEO_SCENE_FRAMES`, default off) upgrade video
+**Video scene frames** (`EVERMATTER_VIDEO_SCENE_FRAMES`, default off) upgrade video
 indexing from uniform-interval keyframes to visual-change scene detection, and
 persist one representative JPEG per scene in a `<video>.frames/` directory next to
 the video (each with a sidecar pointing back at the parent + timestamp). Frames
@@ -1727,13 +1727,13 @@ video's hit and surfaces `scene_frame` + `scene_match_at`. Detection is a cheap
 I-frame-only metrics pass (PyAV `skip_frame NONKEY`, 64×64 grayscale hash +
 histogram) — no new dependency, and it soft-fails back to the uniform sampler.
 The worker budget stays modest: decoding I-frames of an hour-long 1080p video
-takes seconds, plus at most `EXOMEM_MAX_VIDEO_KEYFRAMES` (40) full-res seeks.
-Tune boundaries with `EXOMEM_VIDEO_SCENE_THRESHOLD` (hash bits of 64, default 10)
-and `EXOMEM_VIDEO_SCENE_MIN_SECS` (default 4). To upgrade already-indexed videos,
+takes seconds, plus at most `EVERMATTER_MAX_VIDEO_KEYFRAMES` (40) full-res seeks.
+Tune boundaries with `EVERMATTER_VIDEO_SCENE_THRESHOLD` (hash bits of 64, default 10)
+and `EVERMATTER_VIDEO_SCENE_MIN_SECS` (default 4). To upgrade already-indexed videos,
 run `exomem backfill-media` with the flag set — idempotent, and it replaces the
 old uniform CLIP rows with scene-aware ones.
 
-**Semantic video segments** (`EXOMEM_SEMANTIC_SEGMENTS`, default off) make the
+**Semantic video segments** (`EVERMATTER_SEMANTIC_SEGMENTS`, default off) make the
 moment the retrieval unit for audio/video. Transcripts render as one timed line
 per ASR segment (`[51:20] …`, diarized `[51:20] [Alice]: …`), and the embedding
 chunker segments them at fused topic boundaries — bge similarity valleys plus
@@ -1749,15 +1749,15 @@ re-runs ASR; combine with `--rediarize` to gain both markers in one pass).
 sidecar with `pwsh -File scripts/setup-diarizer.ps1 -Prewarm` on Windows or
 `sh scripts/setup-diarizer.sh --prewarm` on Linux/macOS. On a managed service, run
 `<active release python> -m exomem.diarizer_sidecar --prewarm` once, with the
-service's `EXOMEM_STATE_ROOT` when its unit sets one. The sidecar
+service's `EVERMATTER_STATE_ROOT` when its unit sets one. The sidecar
 venv lives under the machine-local state root, keyed by the sidecar's lock, so a
 release switch keeps it. `scripts/upgrade.sh` builds a new one after a switch to a
-release that changes the lock, while `EXOMEM_DIARIZE` is on.
+release that changes the lock, while `EVERMATTER_DIARIZE` is on.
 
 Named-speaker diarization's ECAPA voice embedder (`diarization` extra) runs on
 torch and follows the same precedent: it defaults to **CPU when ASR is active** (and
 to CPU on Apple Silicon for cross-machine voiceprint parity), with a
-`EXOMEM_VOICE_DEVICE=cuda`/`mps`/`cpu` override. Enroll voices with
+`EVERMATTER_VOICE_DEVICE=cuda`/`mps`/`cpu` override. Enroll voices with
 `exomem enroll-speaker --name <name> [--self] <sample.wav>` (profiles live in a local
 `.voice_profiles.json` beside the embedding sidecar; `list-speakers` / `remove-speaker`
 manage them). To keep a voice from a recording that is already a Source, run
@@ -1766,12 +1766,12 @@ the label's lines, asks, and only then reads the audio; `--cloud --page-file <pa
 original through the signed-in Cloud download and deletes the copy, and reads the part pages of a
 long transcript from beside the saved page. The terminal Home does the
 same from its `v` key. An extraction of merged turns has no times: process the recording again
-with speaker labels first. With ≥1 profile enrolled and `EXOMEM_DIARIZE` set, matched clusters render
+with speaker labels first. With ≥1 profile enrolled and `EVERMATTER_DIARIZE` set, matched clusters render
 as `[<name>]: …`; unknown voices stay anonymous. The ECAPA checkpoint
-(`speechbrain/spkrec-ecapa-voxceleb`, override `EXOMEM_VOICE_EMBED_MODEL`) is gated like
+(`speechbrain/spkrec-ecapa-voxceleb`, override `EVERMATTER_VOICE_EMBED_MODEL`) is gated like
 pyannote's — set `HUGGINGFACE_TOKEN`. Attribution thresholds are tunable via
-`EXOMEM_VOICE_MARGIN`, `EXOMEM_VOICE_MERGE_THRESHOLD`, `EXOMEM_VOICE_CONFIDENT_DELTA`, and
-`EXOMEM_VOICE_REL_GAP` (defaults match the shipped evidence-based values). The whole path is
+`EVERMATTER_VOICE_MARGIN`, `EVERMATTER_VOICE_MERGE_THRESHOLD`, `EVERMATTER_VOICE_CONFIDENT_DELTA`, and
+`EVERMATTER_VOICE_REL_GAP` (defaults match the shipped evidence-based values). The whole path is
 default-off + soft-fail: with no profiles or the dep absent it degrades to today's anonymous
 `[Speaker A]: …` output.
 
@@ -1790,11 +1790,11 @@ Pick the strongest option that fits the situation:
 
 ### The remote owner binding
 
-`EXOMEM_OWNER_OAUTH_SUBJECT=github:<numeric id>` in the service environment
+`EVERMATTER_OWNER_OAUTH_SUBJECT=github:<numeric id>` in the service environment
 makes remote sign-ins by that GitHub account act as the owner, labelled remote
 (`principal_kind: owner-oauth` in the call ledger, with the remote caller hash).
 Unset, the remote sign-in is a separate non-owner principal, as before. The
-value must equal `EXOMEM_GITHUB_USER_ID`: `github:` then ASCII digits, no
+value must equal `EVERMATTER_GITHUB_USER_ID`: `github:` then ASCII digits, no
 leading zero. Anything else is treated as unset, and
 `exomem doctor --profile remote` reports it as `malformed` or `mismatch`. It is
 read only from the process environment (`service.env`, or the working
@@ -1815,8 +1815,8 @@ with the replica that answers.
 
 | Situation | Action |
 |---|---|
-| A remote token may be stolen | `exomem auth revoke -- SESSION_ID` for one session (`exomem auth sessions` lists them, marking the owner-equivalent ones), or `exomem auth revoke --all`. Put any options before `--`: an opaque session ID can begin with a hyphen. To drop owner power only, without signing anyone out, remove `EXOMEM_OWNER_OAUTH_SUBJECT` and restart; this works even while an HA coordinator is down. |
-| The GitHub account is taken over, or you move to another account | Set `EXOMEM_GITHUB_USER_ID` and `EXOMEM_GITHUB_USERNAME` to the new account, and set `EXOMEM_OWNER_OAUTH_SUBJECT` to its id (or remove it), restart, and **always** run `exomem auth revoke --all`. Changing the allowed account only suspends the former account's sessions: they would come back, with owner power if the binding names that account again, the moment it is re-allowed. `revoke --all` ends them for good; every client then signs in once more. |
+| A remote token may be stolen | `exomem auth revoke -- SESSION_ID` for one session (`exomem auth sessions` lists them, marking the owner-equivalent ones), or `exomem auth revoke --all`. Put any options before `--`: an opaque session ID can begin with a hyphen. To drop owner power only, without signing anyone out, remove `EVERMATTER_OWNER_OAUTH_SUBJECT` and restart; this works even while an HA coordinator is down. |
+| The GitHub account is taken over, or you move to another account | Set `EVERMATTER_GITHUB_USER_ID` and `EVERMATTER_GITHUB_USERNAME` to the new account, and set `EVERMATTER_OWNER_OAUTH_SUBJECT` to its id (or remove it), restart, and **always** run `exomem auth revoke --all`. Changing the allowed account only suspends the former account's sessions: they would come back, with owner power if the binding names that account again, the moment it is re-allowed. `revoke --all` ends them for good; every client then signs in once more. |
 
 ### Same-machine clients: the local listener
 
@@ -1829,7 +1829,7 @@ It is off by default. Turn it on with one line in `service.env` and a restart of
 the service unit (the supervisor itself, not just an upgrade handoff):
 
 ```bash
-EXOMEM_LOCAL_PORT=8764
+EVERMATTER_LOCAL_PORT=8764
 ```
 
 `python -m exomem.service_upgrade --runtime-dir <runtime dir> --status` then
@@ -1853,7 +1853,7 @@ exomem auth issue-local --client home --output ~/.config/exomem/home.token
 ```
 
 The command needs the same environment as `exomem auth sessions`
-(`EXOMEM_JWT_SIGNING_KEY`, `EXOMEM_GITHUB_USER_ID` and `EXOMEM_GITHUB_USERNAME`)
+(`EVERMATTER_JWT_SIGNING_KEY`, `EVERMATTER_GITHUB_USER_ID` and `EVERMATTER_GITHUB_USERNAME`)
 and prints only the session id. Local tokens do not expire. `exomem auth
 sessions` lists them with `ingress: local`; `exomem auth revoke -- SESSION_ID`
 ends one, and `exomem auth revoke --all` ends them with every other session.
@@ -1866,7 +1866,7 @@ not check who runs it: any process that runs as your user and can read the
 service configuration can issue, list and revoke local tokens.
 
 An agent that needs a token, for `exomem attach` or to redeem a held upload,
-needs the same command. Issuing needs `EXOMEM_JWT_SIGNING_KEY`, which can
+needs the same command. Issuing needs `EVERMATTER_JWT_SIGNING_KEY`, which can
 forge any owner session, so give the agent a wrapper instead of the key. The
 wrapper:
 
@@ -1891,12 +1891,12 @@ A client then points at `http://127.0.0.1:8764/mcp` with
 `Authorization: Bearer <token file contents>`. Two helpers use the token file:
 
 - The retrieve hook's REST rung tries the local listener first when
-  `EXOMEM_LOCAL_TOKEN_FILE` names the file and `EXOMEM_LOCAL_PORT` is set (in the
+  `EVERMATTER_LOCAL_TOKEN_FILE` names the file and `EVERMATTER_LOCAL_PORT` is set (in the
   hook's environment or `service.env`). For one release it still falls back to
   the key it lifts from `service.env` when the local request fails.
 - `exomem attach <file> --scope <scope> --category <category>` sends a file's
   bytes to the local `/upload` and prints the handle the service returns. It
-  reads `EXOMEM_LOCAL_TOKEN_FILE` and `EXOMEM_LOCAL_PORT`, or `--token-file` and
+  reads `EVERMATTER_LOCAL_TOKEN_FILE` and `EVERMATTER_LOCAL_PORT`, or `--token-file` and
   `--port`. Without `--scope` and `--category` the service holds the bytes
   outside the vault and prints a `file` handle for `save_evidence` (or,
   with `--lane source`, `save_source`). A held handle is redeemable once,
@@ -1905,8 +1905,8 @@ A client then points at `http://127.0.0.1:8764/mcp` with
   `--raw-protection` keeps a directly preserved original owner-only until you
   release the whole artifact; a held file takes that choice when its command
   redeems it. A direct preserve on the local listener never crosses the proxy
-  edge, so its cap is `EXOMEM_LOCAL_UPLOAD_MAX_BYTES` (default 1 GiB), not the
-  public `EXOMEM_UPLOAD_MAX_BYTES` (default 100 MB, Cloudflare's edge cap). A held
+  edge, so its cap is `EVERMATTER_LOCAL_UPLOAD_MAX_BYTES` (default 1 GiB), not the
+  public `EVERMATTER_UPLOAD_MAX_BYTES` (default 100 MB, Cloudflare's edge cap). A held
   file stays within what `save_evidence` can fetch, which on this server is
   the session maximum below. The held files of one local session together stay
   within that same cap, so one file of the largest size always fits. The
@@ -1926,10 +1926,10 @@ A client then points at `http://127.0.0.1:8764/mcp` with
   `upload` token unpacks it into `_Imports/<id>/` and files it. Evermatter Cloud
   refuses that lane. The unpack streams, refuses links, devices,
   absolute and `..` paths, encrypted entries and more than 65,536 entries, and
-  leaves nothing behind when it refuses. `EXOMEM_IMPORT_MAX_EXPANDED_BYTES`
+  leaves nothing behind when it refuses. `EVERMATTER_IMPORT_MAX_EXPANDED_BYTES`
   (default 512 MiB) caps the bytes that one archive may unpack to; the unpack
   runs inside one MCP request, so lower it on a slow volume, and
-  `EXOMEM_IMPORT_RESERVE_BYTES` (default 256 MiB) is the free space that an
+  `EVERMATTER_IMPORT_RESERVE_BYTES` (default 256 MiB) is the free space that an
   unpack keeps back. The archive is held for at most an hour and released once
   it is unpacked or refused.
 - A file over 64 MiB, a file that the listener refuses as too large, or any
@@ -1962,7 +1962,7 @@ Both lanes accept `diarize` as `true` or `false` for audio and video.
 Source uses the canonical Source writer and stores its original beside the
 Source page. It does not accept `archive=members`. Evidence also accepts
 `raw_protection` and `archive`. One request carries at most 64 MiB, and one session holds at most
-`EXOMEM_UPLOAD_SESSION_MAX_BYTES` (default 2 GiB). A session expires 24 hours
+`EVERMATTER_UPLOAD_SESSION_MAX_BYTES` (default 2 GiB). A session expires 24 hours
 after its last part.
 
 For a large original on the personal HTTP listener, call `upload_files` with
@@ -2441,7 +2441,7 @@ $logDir = ((exomem doctor --json | ConvertFrom-Json).checks | Where-Object { $_.
 Get-Content "$logDir\exomem.log" -Tail 6
 ```
 
-(`install-service.ps1` pins `EXOMEM_LOG_DIR` — `%ProgramData%\exomem\logs` by
+(`install-service.ps1` pins `EVERMATTER_LOG_DIR` — `%ProgramData%\exomem\logs` by
 default — into the service's environment for a `-Release` install, so its
 `exomem.log` is NOT under the repo checkout's `logs\` folder. `exomem doctor`
 reports the resolved path directly, which the command above reads rather than
@@ -2477,7 +2477,7 @@ sc.exe start exomem
   — read it from there rather than assuming `logs/exomem.log`.
 - `logs/service.out.log`, `logs/service.err.log` — service stdout/stderr,
   always under the checkout's own `logs/` folder regardless of profile or
-  `EXOMEM_LOG_DIR` (NSSM's `AppStdout`/`AppStderr` redirect targets, set by
+  `EVERMATTER_LOG_DIR` (NSSM's `AppStdout`/`AppStderr` redirect targets, set by
   `install-service.ps1` relative to the checkout it was run from — a separate
   concern from the app's own structured logging). On Windows NSSM writes and
   rotates these; launchd/systemd write them but do **not** rotate them (the
@@ -2488,16 +2488,16 @@ sc.exe start exomem
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| claude.ai "Couldn't reach the MCP server" during connector add | OAuth discovery failed | `curl.exe -i https://<your-host>/.well-known/oauth-authorization-server` should return JSON (or run `exomem doctor --profile remote --probe`, which checks this plus the bare well-known path). If 404, the OAuthProxy isn't mounted — most likely `EXOMEM_BASE_URL` has a trailing slash or includes `/mcp`. |
+| claude.ai "Couldn't reach the MCP server" during connector add | OAuth discovery failed | `curl.exe -i https://<your-host>/.well-known/oauth-authorization-server` should return JSON (or run `exomem doctor --profile remote --probe`, which checks this plus the bare well-known path). If 404, the OAuthProxy isn't mounted — most likely `EVERMATTER_BASE_URL` has a trailing slash or includes `/mcp`. |
 | GitHub redirects to "The redirect_uri MUST match…" error | OAuth App callback URL mismatch | At github.com/settings/developers → exomem, set the callback to exactly `https://<your-host>/auth/callback` (no trailing slash). |
 | GitHub: "The redirect_uri is not associated with this application" on a *second* machine | Reused another host's OAuth App client ID/secret (the app's one callback points at the other host) | Create a per-host OAuth App with callback `https://<this-host>.example.com/auth/callback`, put its client ID/secret in this `.env`, restart the service. See § Deploying on a second machine. |
-| claude.ai connector connects but every tool call returns 401 | Wrong GitHub user | `EXOMEM_GITHUB_USERNAME` must equal the login of the GitHub account you authorized with. Check the exomem log for `rejecting token for github login=...`. |
+| claude.ai connector connects but every tool call returns 401 | Wrong GitHub user | `EVERMATTER_GITHUB_USERNAME` must equal the login of the GitHub account you authorized with. Check the exomem log for `rejecting token for github login=...`. |
 | Existing client receives one `401 invalid_token` after the durable-session cutover | Legacy FastMCP reference JWT is intentionally not dual-read | Complete one final login without deleting or changing the connector URL. If a durable session later gets 401, inspect it with `exomem auth sessions`. |
 | Authenticated tools return `503` without `WWW-Authenticate` | Authoritative session storage is unavailable or corrupt | Repair the coordinator/network/storage path. Do not reauthorize: a fresh login uses the same unavailable authority. |
 | claude.ai shows "connector failed" | service down (host asleep, service stopped, crash loop) | Check the service status; tail `logs/service.err.log` and `exomem.log` (see § Logs for its resolved path — not always under `logs/`). Multiple startup banners within seconds = orphan python processes — kill them and force-restart. |
 | Edits to `.env` not picked up | service didn't restart | Restart the service (elevated on Windows). Confirm the python process restarted. |
 | 404 / Funnel "no service" | Tunnel disabled or pointing at the wrong port | `tailscale funnel status` (or check `cloudflared`); re-run the tunnel command from step 2. |
-| `KB vault not found` on startup | vault path moved or `EXOMEM_VAULT_PATH` wrong | set `EXOMEM_VAULT_PATH` to the absolute vault root in `.env`. |
+| `KB vault not found` on startup | vault path moved or `EVERMATTER_VAULT_PATH` wrong | set `EVERMATTER_VAULT_PATH` to the absolute vault root in `.env`. |
 | Schema parse error on startup | `_Schema/references/page-types.md` source section shape changed | diff against the version that was working; the parser is conservative on purpose. |
 | Connector setup stalls mid-burst behind ngrok | Free-tier rate limit (120 req/min) | Check the ngrok agent console for `429`s. Wait and retry, or upgrade / switch to Cloudflare Tunnel. |
 | OAuth redirect hangs the first time behind ngrok free | The one-time browser interstitial | Open the public URL once in a browser and click through the interstitial; it does not recur. |

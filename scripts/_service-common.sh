@@ -45,7 +45,7 @@ exomem_resolve_setting() {
             # The closed set of settings that choose where data lives, defined by the package itself.
             case "$suffix" in
                 VAULT_PATH|STATE_ROOT|HOSTED_STATE_ROOT)
-                    echo "EVERMATTER_$suffix and EXOMEM_$suffix are set to different values in $source, so it is unclear which to use. Delete one name of each pair, then run it again." >&2
+                    echo "EVERMATTER_$suffix and EXOMEM_$suffix are set to different values in $source, so it is unclear which to use. Set each value once, under its EVERMATTER_ name, and remove or unset the other name, then run it again." >&2
                     return 2
                     ;;
             esac
@@ -553,8 +553,9 @@ def atomic_write(path: Path, data: bytes) -> None:
 # The binding may be named under any of the state root's names. The rule is
 # exomem_resolve_setting's (read EXOMEM_, else EVERMATTER_, else KB_MCP_; refuse
 # EXOMEM_ against EVERMATTER_ with different values), kept in step by
-# tests/test_setting_names_in_step.py. The writer below adds EXOMEM_STATE_ROOT only when none is set.
+# tests/test_setting_names_in_step.py. The writer below persists the binding as EVERMATTER_STATE_ROOT.
 NAMES = ("EXOMEM_STATE_ROOT", "EVERMATTER_STATE_ROOT", "KB_MCP_STATE_ROOT")
+EMITTED = NAMES[1]
 
 def resolve_existing(found: dict[str, str], source: str) -> str:
     found = {name: value.strip() for name, value in found.items()}
@@ -562,7 +563,8 @@ def resolve_existing(found: dict[str, str], source: str) -> str:
     if explicit is not None and NAMES[1] in found and found[NAMES[1]] != explicit:
         raise SystemExit(
             f"{NAMES[1]} and {NAMES[0]} are set to different values in {source}, "
-            "so it is unclear which to use. Delete one name of each pair, then run it again."
+            "so it is unclear which to use. Set each value once, under its EVERMATTER_ name, "
+            "and remove or unset the other name, then run it again."
         )
     return next((found[name] for name in NAMES if name in found), "")
 
@@ -611,24 +613,31 @@ if mode == "select":
 if mode != "bind":
     raise SystemExit("invalid state-root binding mode")
 
-# An empty binding is filled under the name the file already uses; EXOMEM_STATE_ROOT is
-# appended only when the file names the state root under no name, never beside an
-# EVERMATTER_ line that would then differ from it.
+# A binding that this writes is persisted as EVERMATTER_STATE_ROOT. An empty binding under
+# any name is filled in that name's place and the file's other names for it are removed, so
+# the file never holds two names for the state root. A binding that is already set is left
+# as the file wrote it.
 if platform == "Darwin":
     if not existing:
-        for name in [n for n in NAMES if n in environment] or [NAMES[0]]:
-            environment[name] = selected
+        for name in NAMES:
+            environment.pop(name, None)
+        environment[EMITTED] = selected
         atomic_write(unit, plistlib.dumps(payload, sort_keys=False))
 else:
     if not existing:
         rendered = selected.replace("\\", "\\\\").replace('"', r'\"')
-        named = [i for i, line in enumerate(lines) if line.partition("=")[0] in NAMES]
-        for i in named:
-            lines[i] = f'{lines[i].partition("=")[0]}="{rendered}"'
-        if not named:
-            lines.append(f'EXOMEM_STATE_ROOT="{rendered}"')
+        written = False
+        kept = []
+        for line in lines:
+            if line.partition("=")[0] not in NAMES:
+                kept.append(line)
+            elif not written:
+                kept.append(f'{EMITTED}="{rendered}"')
+                written = True
+        if not written:
+            kept.append(f'{EMITTED}="{rendered}"')
         env_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write(env_path, ("\n".join(lines) + "\n").encode())
+        atomic_write(env_path, ("\n".join(kept) + "\n").encode())
 print(selected)
 PY
 }
@@ -723,14 +732,28 @@ exomem_dotenv_file_lookup() {
     local name="$1" env_file="$2"
     [[ -f "$env_file" ]] || return 1
     grep -Eq "^[[:space:]]*${name}[[:space:]]*=" "$env_file" || return 1
+    # A name set twice takes its last value, as python-dotenv (the service's own reader) does.
     sed -n "s|^[[:space:]]*${name}[[:space:]]*=[[:space:]]*||p" "$env_file" \
-        | head -n1 | sed 's|^"\(.*\)"$|\1|; s|^'"'"'\(.*\)'"'"'$|\1|'
+        | tail -n1 | sed 's|^"\(.*\)"$|\1|; s|^'"'"'\(.*\)'"'"'$|\1|'
 }
 
 # Read one setting out of an exact dotenv file under any of its names, or nothing.
 exomem_dotenv_file_value() {
     local env_file="$1" name="$2"
     exomem_resolve_setting exomem_dotenv_file_lookup "$env_file" "$name" "$env_file"
+}
+
+# Refuse an EXOMEM_/EVERMATTER_ conflict on the hosted state root in the process environment
+# or in any dotenv file named here. Call it with the vault and state-root reads, before the
+# service stops or anything is published: the first process that reads the hosted state root
+# refuses a conflict, and by then the service is down. Prints the resolver's message (both
+# variables, no value) and returns its status.
+exomem_refuse_hosted_state_root_conflicts() {
+    local dotenv_file
+    for dotenv_file in "$@"; do
+        exomem_dotenv_file_value "$dotenv_file" EXOMEM_HOSTED_STATE_ROOT > /dev/null || return $?
+    done
+    exomem_process_setting EXOMEM_HOSTED_STATE_ROOT > /dev/null
 }
 
 # Read one setting out of <repo>/.env, or nothing.

@@ -23,12 +23,13 @@ The spike also built the alternative: one SQLite store, canonical for page bytes
 - **What store mode retires.** For writes that Exomem commits, store mode needs no lexical freshness witnesses and catalogue repair, no graph sync checkpoints and drains, no derived receipts, no deferred full-refresh receipts and no self-write echo suppression. File mode keeps them until it is retired.
 - **Root layout and readable names (D12).** Moved to the change `adopt-root-vault-layout`. It never gates the switch.
 - **File mode stays** until the switch. Both modes share the derivation code and the readers.
+- **Store mode becomes the default, then the only canonical mode (D15, owner, 2026-11-27).** After the owner's switch and named gates, new vaults start in store mode and managed upgrades migrate file-mode vaults. File mode retires after Windows acceptance, the Cloud cells' migration, the removal of multi-host writer-lease support (owner, 2026-11-27: one machine per vault) and two minor releases of notice. An outside edit keeps D5's rules and gets name advice as a review item, never a hold.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `canonical-vault-store`: the per-vault canonical store, its one-transaction write contract, byte-exact Markdown projection, outside-edit import with base-revision checks, semantic units as first-class rows, canonicity of originals, and verified, reversible migration.
+- `canonical-vault-store`: the per-vault canonical store, its one-transaction write contract, byte-exact Markdown projection, outside-edit import with base-revision checks, semantic units as first-class rows, canonicity of originals, and verified migration, reversible until file mode retires (D15).
 
 ### Modified Capabilities
 

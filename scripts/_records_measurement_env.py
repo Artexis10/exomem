@@ -12,7 +12,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-INHERITED_PREFIXES = ("EXOMEM_", "KB_MCP_")
+# The single definition of the setting prefixes; importing the package renames inherited aliases, which this then removes.
+from exomem.env_compat import SETTING_PREFIXES as INHERITED_PREFIXES
 
 
 def clear_inherited() -> None:
