@@ -3101,6 +3101,7 @@ def _validate_revision_manifest(
         root, root / current.path, manifest_text.encode("utf-8")
     )
     _refuse_excluded_manifest_fields(proposed)
+    collections.require_valid_subject(proposed)
     if proposed.view_diagnostics:
         diagnostic = proposed.view_diagnostics[0]
         raise collections.CollectionError(diagnostic.code, diagnostic.reason)
@@ -3514,6 +3515,7 @@ def _preflight_collection_create(
         )
     manifest = collections.parse_manifest_bytes(root, path, manifest_text.encode("utf-8"))
     _refuse_excluded_manifest_fields(manifest)
+    collections.require_valid_subject(manifest)
     if manifest.view_diagnostics:
         diagnostic = manifest.view_diagnostics[0]
         raise collections.CollectionError(diagnostic.code, diagnostic.reason)
