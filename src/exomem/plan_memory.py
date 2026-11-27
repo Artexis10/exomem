@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, Never
 
-from . import collection_refs, operation_entries, planning
+from . import collection_refs, operation_entries, planning, structured_collections
 from .cli_ops import OpError, action_argument_contract
 from .query_compat import public_filter_annotation
 from .structured_collections import CollectionError, collection_remediation
@@ -113,6 +113,14 @@ def plan_memory(
     absent = [name for name in ("plan_id", "expected_container_hash", "expected_item_version") if values[name] is None]
     if action in {"update", "triage"} and absent:
         _invalid_arguments("update and triage need item_id, or plan_id with both guards; missing: " + ", ".join(absent))
+    assigned_id = None
+    if action in {"create", "validate"} and collection is None and isinstance(manifest_text, str):
+        manifest_text, assigned_id = structured_collections.assign_missing_id(manifest_text)
+        values["manifest_text"] = manifest_text
+    elif action in {"validate", "revise"} and isinstance(manifest_text, str):
+        selected = collection_refs.selected_collection_id(vault_root, collection)
+        manifest_text = structured_collections.fill_collection_id(manifest_text, selected)
+        values["manifest_text"] = manifest_text
     try:
         # nosemgrep: ep-word-membership -- plan_memory's closed write actions (see ACTIONS).
         if action in {"add", "update", "triage"}:
@@ -125,18 +133,22 @@ def plan_memory(
 
         selected, result = preview.dispatch(vault_root, "planning", action, values)
         if selected:
-            return result
+            return structured_collections.note_assigned_id(result, action, assigned_id)
         if action == "inspect":
             assert collection is not None
             return planning.inspect(vault_root, collection)
         if action == "validate":
             assert manifest_text is not None
-            return planning.validate(
-                vault_root,
-                mode="revision" if collection is not None else "create",
-                manifest_text=manifest_text,
-                manifest_path=manifest_path,
-                collection=collection,
+            return structured_collections.note_assigned_id(
+                planning.validate(
+                    vault_root,
+                    mode="revision" if collection is not None else "create",
+                    manifest_text=manifest_text,
+                    manifest_path=manifest_path,
+                    collection=collection,
+                ),
+                action,
+                assigned_id,
             )
         if action == "create":
             assert manifest_path is not None and manifest_text is not None and why is not None
