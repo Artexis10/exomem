@@ -216,6 +216,7 @@ def prepare(writer, manifest, rows, source, settlement=None, links=None) -> list
                       if settlement is not None else None)
             if values is None:
                 values = records._bulk_row_values(manifest, raw["item"], resolved.path)
+            values = records._registered_classes(writer.root, manifest, values)
         except collections.CollectionError as error:
             candidate.error = records._bulk_error_row(index, error)
             continue

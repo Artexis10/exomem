@@ -2340,3 +2340,19 @@ def test_a_session_store_that_stays_unreadable_is_retried_on_a_bounded_backoff(s
         lookups.append(waits())
     assert lookups[0] == importer().UNREADABLE_RETRY_SECONDS
     assert lookups == sorted(lookups) and lookups[-1] == importer().UNREADABLE_RETRY_MAX_SECONDS
+
+
+def test_an_import_rejects_a_row_with_an_unregistered_sensitivity_class_and_canonicalises_a_registered_one(store):
+    """An import that stores a free-text class on a row, which a row-by-row write refuses."""
+    fields = WORKOUT_FIELDS + "    sensitivity: {type: array, items: {type: string}}\n"
+    setup(store, ndjson([{"id": "a", "cls": ["passport-ish"]}, {"id": "b", "cls": ["Health"]}]), fields=fields)
+    job = start(store, mapping={"fields": {"exercise_id": "id", "sensitivity": "cls"},
+                                "coverage": {"id": {"classification": None}, "cls": {"classification": None}},
+                                "on_invalid": "skip"})
+    run(store)
+    result = status(store, job)
+
+    assert result["state"] == "complete" and result["rows"]["imported"] == 1, result
+    stored = [json.loads(row[0]).get("sensitivity") for row in store.connection.execute(
+        "SELECT governance_json FROM items WHERE collection_id=?", (CID,))]
+    assert stored == [["health"]], stored

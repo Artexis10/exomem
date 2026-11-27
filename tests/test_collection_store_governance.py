@@ -1375,6 +1375,22 @@ def test_an_unregistered_class_refuses_a_collection_floor_and_a_row_and_writes_n
     assert store.connection.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0
 
 
+def test_a_bulk_upsert_rejects_a_row_with_an_unregistered_class_and_canonicalises_a_registered_one(store):
+    """A bulk write (a table import goes through it) that stores a free-text class the row-by-row path refuses."""
+    from test_records_bulk_upsert import EVIDENCE, _evidence
+
+    store.create_collection(manifest_path(), _floored_manifest(), why="create")
+    _evidence(store.root)
+    receipt = store.bulk_upsert_records(
+        CID, rows=[{"item": {"title": "X", "sensitivity": ["passport-ish"]}},
+                   {"item": {"title": "Y", "sensitivity": ["Financial"]}}],
+        expected_container_hash=store.current_guards(CID)[0], source=EVIDENCE, why="capture", on_reject="skip")
+
+    assert receipt["counts"]["inserted"] == 1, receipt
+    stored = [json.loads(row[0]) for row in store.connection.execute("SELECT governance_json FROM items")]
+    assert [sorted(entry["sensitivity"]) for entry in stored] == [["financial", "health"]], stored
+
+
 def test_a_text_column_named_sensitivity_stays_an_ordinary_column(store):
     """A collection that already has a free-text `sensitivity` column, whose words would become classes or
     whose rows would refuse."""
