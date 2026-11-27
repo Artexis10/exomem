@@ -7,6 +7,7 @@ window, and waits or stops as the design says. The series record lives in the ch
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
 import re
@@ -14,7 +15,7 @@ import shutil
 import stat
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path, PurePosixPath
 
@@ -24,11 +25,14 @@ from fastmcp.exceptions import ToolError
 
 from . import (
     adoption_run,
+    export_pairing,
+    export_sidecars,
     extraction_parts,
     import_selection,
     import_stage,
     media_capacity,
     operation_entries,
+    source_formats,
 )
 from .cell_init import _ensure_private_directory
 from .cli_progress import Progress, human_bytes
@@ -1102,16 +1106,46 @@ def _page_of(path: str) -> str:
     return page.as_posix() if page is not None else path
 
 
+@functools.cache
+def _sidecar_format() -> source_formats.SourceFormat | None:
+    """The shipped entry that names a photo's sidecar. The planner reads no vault and opens no file, so it knows no overlay."""
+    return next(iter(export_sidecars.photo_formats(None)), None)
+
+
+def _owners(paths: Iterable[str]) -> dict[str, str]:
+    """Each path that is named like a photo's sidecar, with the photo that its name likely belongs to, by name alone."""
+    fmt = _sidecar_format()
+    return export_pairing.likely_photos(paths, fmt) if fmt is not None else {}
+
+
 def _sorted(members: list[Member]) -> list[Member]:
-    """Artifacts first and text last, each in path order; a page's part pages follow the page (OpenSpec `keep-speech-results-in-cloud`, D4)."""
-    return sorted(members, key=lambda member: (_CLASS_ORDER[member.klass], _page_of(member.path), member.path != _page_of(member.path), member.path))
+    """Artifacts first and text last, each in path order; a page's part pages follow the page (OpenSpec `keep-speech-results-in-cloud`, D4).
+
+    A likely sidecar follows its photo and takes its photo's class, so a Takeout folder's captions travel with its photos.
+    """
+    owner, klass = _owners(member.path for member in members), {member.path: member.klass for member in members}
+
+    def key(member: Member) -> tuple[int, str, bool, str]:
+        root = owner.get(member.path, member.path)
+        page = _page_of(root)
+        return (_CLASS_ORDER[klass[root]], page, member.path != page, member.path)
+
+    return sorted(members, key=key)
+
+
+def _travels_with(path: str, first: str) -> bool:
+    """Whether `path` goes in the window of `first`, the first member of its unit: a part page of its page, or a likely sidecar of its photo."""
+    return _page_of(path) == _page_of(first) or _owners((first, path)).get(path) == first
 
 
 def _groups(pool: list[Member]) -> Iterator[list[Member]]:
-    """The pool as the units a window takes whole: a page with its part pages, or one member."""
+    """The pool as the units a window takes whole: a page with its part pages, a photo with its likely sidecars, or one member.
+
+    A wrong guess about a sidecar costs only its caption: it files as unpaired, as it did before a window kept it with its photo.
+    """
     group: list[Member] = []
     for member in pool:
-        if group and _page_of(member.path) != _page_of(group[0].path):
+        if group and not _travels_with(member.path, group[0].path):
             yield group
             group = []
         group.append(member)

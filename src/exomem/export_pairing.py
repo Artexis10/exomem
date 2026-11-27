@@ -59,6 +59,15 @@ class _Entry:
     stem: str
 
 
+@dataclass(frozen=True, slots=True)
+class _Index:
+    """The photos of a stage by what a sidecar looks them up with: exact name, and name prefix within a folder and copy number."""
+
+    exact: Mapping[tuple[str, str, int | None, str], list[_Entry]]
+    names: Mapping[tuple[str, int | None], list[str]]
+    entries: Mapping[tuple[str, int | None], list[_Entry]]
+
+
 def key_of(file_name: str, title: object, fmt: SourceFormat) -> Key | None:
     """The key of a sidecar file name and its `title`, or None when the name is not a sidecar's (it does not end in `.json`)."""
     name = unicodedata.normalize("NFC", file_name)
@@ -130,6 +139,27 @@ def decide(sidecars: Mapping[str, Key], photos: Iterable[str], fmt: SourceFormat
     `photos` are the staged files that may be photos; only the images and videos count. A sidecar pairs only when
     exactly one photo fits it by name and by title, in the sidecar's own folder, and that photo fits no other sidecar.
     """
+    index = _index(photos)
+    fitting: dict[str, list[str]] = {}
+    claims: dict[str, int] = {}
+    for path, key in sidecars.items():
+        fits = _fits(path.rpartition("/")[0], key, index) if key.title is not None else []
+        fitting[path] = fits
+        for photo in fits:
+            claims[photo] = claims.get(photo, 0) + 1
+    decided: dict[str, tuple[str | None, str | None]] = {}
+    for path, fits in fitting.items():
+        if not fits:
+            decided[path] = (None, NO_PHOTO)
+        elif len(fits) == 1 and claims[fits[0]] == 1:
+            decided[path] = (fits[0], None)
+        else:
+            decided[path] = (None, AMBIGUOUS)
+    return decided
+
+
+def _index(photos: Iterable[str]) -> _Index:
+    """The staged files that are images or videos, indexed for a sidecar to look up its few candidates."""
     exact: dict[tuple[str, str, int | None, str], list[_Entry]] = {}
     by_copy: dict[tuple[str, int | None], list[tuple[str, _Entry]]] = {}
     for path in photos:
@@ -147,46 +177,43 @@ def decide(sidecars: Mapping[str, Key], photos: Iterable[str], fmt: SourceFormat
     for key, pairs in by_copy.items():
         pairs.sort(key=lambda pair: pair[0])
         names[key], entries[key] = [name for name, _entry in pairs], [entry for _name, entry in pairs]
-
-    fitting: dict[str, list[str]] = {}
-    claims: dict[str, int] = {}
-    for path, key in sidecars.items():
-        fits = _fits(path.rpartition("/")[0], key, exact, names, entries)
-        fitting[path] = fits
-        for photo in fits:
-            claims[photo] = claims.get(photo, 0) + 1
-    decided: dict[str, tuple[str | None, str | None]] = {}
-    for path, fits in fitting.items():
-        if not fits:
-            decided[path] = (None, NO_PHOTO)
-        elif len(fits) == 1 and claims[fits[0]] == 1:
-            decided[path] = (fits[0], None)
-        else:
-            decided[path] = (None, AMBIGUOUS)
-    return decided
+    return _Index(exact, names, entries)
 
 
-def _fits(
-    folder: str, key: Key, exact: Mapping[tuple[str, str, int | None, str], list[_Entry]],
-    names: Mapping[tuple[str, int | None], list[str]], entries: Mapping[tuple[str, int | None], list[_Entry]],
-) -> list[str]:
-    """The photos of `folder` that the sidecar's name and its title both fit."""
-    if key.title is None:
-        return []
-    title_stem, title_mime = key.title.rpartition(".")[0], mime_of(key.title)
+def _fits(folder: str, key: Key, index: _Index, *, by_title: bool = True) -> list[str]:
+    """The photos of `folder` that the sidecar's name fits and, when `by_title`, its title too."""
+    title_stem, title_mime = (key.title.rpartition(".")[0], mime_of(key.title)) if by_title and key.title is not None else (None, None)
     base_mime, base_is_media = mime_of(key.base), media_type_for(key.base) in KINDS
     fits: dict[str, None] = {}
     for reading in _readings(key.base, key.copy):
         if base_is_media:
-            for entry in exact.get((folder, reading.stem, reading.copy, base_mime), ()):
-                if entry.stem == title_stem and entry.mime == title_mime:
+            for entry in index.exact.get((folder, reading.stem, reading.copy, base_mime), ()):
+                if title_stem is None or (entry.stem == title_stem and entry.mime == title_mime):
                     fits[entry.path] = None
         if key.at_limit and reading.full:
-            held = names.get((folder, reading.copy), ())
+            held = index.names.get((folder, reading.copy), ())
             at = bisect.bisect_left(held, reading.full)
             while at < len(held) and held[at].startswith(reading.full):
-                entry = entries[(folder, reading.copy)][at]
-                if entry.stem == title_stem and entry.mime == title_mime:
+                entry = index.entries[(folder, reading.copy)][at]
+                if title_stem is None or (entry.stem == title_stem and entry.mime == title_mime):
                     fits[entry.path] = None
                 at += 1
     return list(fits)
+
+
+def likely_photos(paths: Iterable[str], fmt: SourceFormat) -> dict[str, str]:
+    """Each path of `paths` that is named like a sidecar, with the photo of `paths` that its name fits.
+
+    A guess from names alone, for a planner that must keep a sidecar with its photo and opens no file: no title is
+    read, so nothing is paired, and a wrong guess only costs the sidecar its caption (`decide` decides). A name that fits
+    several photos (a cut name) goes with the first of them in path order.
+    """
+    paths = list(paths)
+    index = _index(paths)
+    likely: dict[str, str] = {}
+    for path in paths:
+        folder, _slash, name = path.rpartition("/")
+        key = key_of(name, None, fmt)
+        if key is not None and (fits := _fits(folder, key, index, by_title=False)):
+            likely[path] = min(fits)
+    return likely

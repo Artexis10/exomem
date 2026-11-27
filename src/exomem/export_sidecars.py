@@ -3,13 +3,13 @@
 `export_expansion.expand` runs this pass first, with the same call budget as an export's read. It derives no files. For
 each recognised sidecar (see `source_formats`, the `photo-sidecar` parser) it appends one row to the stage's expansion
 rows and moves the pass's cursor past it. A row holds the sidecar's path, its name key (`export_pairing.Key`) and the
-time and caption that it carries. The time is recorded and applied to no page: dating a photo from it is held until a
-measurement shows where Google's `photoTakenTime` comes from (OpenSpec `carry-takeout-sidecar-captions`, task 3.2). A row
-never holds a position. When the last sidecar is read, the pass decides every
-pair in one step and appends one `pair` row for each sidecar, then an `end` row:
+caption that it carries. The sidecar's time is not read: it dates no page, and the staged sidecar stays for the
+measurement that decides where Google's `photoTakenTime` comes from (OpenSpec `carry-takeout-sidecar-captions`, task 3.2).
+A row never holds a position. When the last sidecar is read, the pass decides every pair in one step and appends one
+`pair` row for each sidecar, then an `end` row:
 
-- `{"sidecar": path, "base", "copy", "limit", "title", "time", "skip", "caption"}`: one sidecar that was read. Its caption
-  is redacted before the row is written, as an upload's description is, so no row keeps a card number or a credential.
+- `{"sidecar": path, "base", "copy", "limit", "title", "caption"}`: one sidecar that was read. Its caption is redacted
+  before the row is written, as an upload's description is, so no row keeps a card number or a credential.
 - `{"unreadable": path}`: a file that could be a sidecar and could not be read. The pass reads on past it.
 - `{"pair": path, "photo": photo path or None, "why": None | "no-photo" | "ambiguous"}`: the decision about it.
 - `{"sidecars_end": "done" | "partial", "code", "fault"}`: the pass ended; it is `partial` when a file could not be
@@ -18,14 +18,17 @@ pair in one step and appends one `pair` row for each sidecar, then an `end` row:
 The record's state caches the pass as `{"format", "state", "code", "cursor", "fault"}`; a read replays the rows that
 came after the state. While the pass is `working`, the stage's images and videos, and the JSON files that it has not yet
 examined, stay out of selection (`Hold`), so that no photo files before its sidecar is read. A recognised sidecar never
-files as a Source, and neither does a file that could not be read. A stage with no sidecar has no row of the pass, and a
-stage with no record at all has no state of it either. A stage that grows after the pass ended is not read again.
+files as a Source, and neither does a file that could not be read. A stage with JSON files and no sidecar has no row of
+the pass and a state that says it ended, so no later call opens its files again; a stage with no JSON file has no state
+of the pass. A stage that grows after the pass ended is not read again.
 The sidecars are untrusted content: a value is kept as data, and nothing in a sidecar is followed, run or sent to a model.
 """
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -124,8 +127,42 @@ def apply(entry: dict, row: dict) -> None:
         entry["fault"] = row.get("fault") if isinstance(row.get("fault"), str) else None
 
 
+#: The rows that one `file` call has read, by stage and the size of the rows file, while `reading_once` holds the call. Callers
+#: never change what they read, so a repeated read of unchanged rows may return the same object.
+_CALL_READS: ContextVar[dict[tuple[str, str, int], Rows] | None] = ContextVar("sidecar_rows_of_one_call", default=None)
+
+
+def reading_once(call: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap a call so that it reads a stage's rows once while the rows are unchanged: 100,000 sidecars are about 120 MB a read."""
+
+    @functools.wraps(call)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        token = _CALL_READS.set({})
+        try:
+            return call(*args, **kwargs)
+        finally:
+            _CALL_READS.reset(token)
+
+    return wrapper
+
+
 def read_rows(root: Path, import_id: str) -> Rows:
-    """One pass over the expansion rows for the pass's own rows; when a sidecar or a pair has two rows, the last one counts."""
+    """One pass over the expansion rows for the pass's own rows; when a sidecar or a pair has two rows, the last one counts.
+
+    Within `reading_once`, a read of rows that have not grown since the last read of that stage returns it. The rows are
+    only appended, so their size says whether they changed.
+    """
+    reads = _CALL_READS.get()
+    if reads is None:
+        return _read_rows(root, import_id)
+    key = (str(root), import_id, import_stage.expansion_rows_size(root, import_id))
+    if key not in reads:
+        reads.clear()  # the call holds one read, and drops the old one before the new read
+        reads[key] = _read_rows(root, import_id)
+    return reads[key]
+
+
+def _read_rows(root: Path, import_id: str) -> Rows:
     sidecars: dict[str, dict] = {}
     pairs: dict[str, tuple[str | None, str | None]] = {}
     unreadable: set[str] = set()
@@ -219,8 +256,8 @@ def waiting(root: Path, import_id: str) -> int:
     return sum(1 for path, size in import_stage.staged_files(root, import_id) if held.code(path, size) == CODE_WAITING)
 
 
-def photo_formats(root: Path) -> tuple[source_formats.SourceFormat, ...]:
-    """The active entries whose parser derives no items: the sidecar formats."""
+def photo_formats(root: Path | None) -> tuple[source_formats.SourceFormat, ...]:
+    """The active entries whose parser derives no items: the sidecar formats (the shipped ones when `root` is None)."""
     return tuple(fmt for fmt in source_formats.formats(root) if not export_parsers.derives(fmt))
 
 
@@ -241,7 +278,7 @@ def settle(reading: Reading, photo_filing: Callable[[str], str]) -> tuple[dict[s
     was `STORED`, was `ALREADY_IMPORTED` or did not file): a file that could not be read is `UNREADABLE`; an unpaired
     sidecar is `UNPAIRED`; one whose photo did not file is `PHOTO_NOT_FILED`; one whose photo an earlier Source already holds is `PHOTO_ALREADY_IMPORTED`; any other is `APPLIED`
     when it carried a caption, else `EMPTY`. `APPLIED` says that the sidecar was paired with a photo that filed now and gave it
-    its caption. A time gives no reason of its own: no sidecar time is applied.
+    its caption.
 
     The count is over the sidecars whose photo filed now: those that carry a caption (`captioned`). A stage with no sidecar has no counts, never zero ones.
     """
@@ -315,7 +352,7 @@ def advance(
         key = export_pairing.key_of(PurePosixPath(path).name, document.get("title"), fmt)
         if key is None:  # the entry's glob matched a name that is no `.json` file: not a sidecar
             continue
-        buffered.append(_row(path, key, export_photos.facts_of(document)))
+        buffered.append(_row(path, key, export_photos.caption_of(document)))
         if len(buffered) >= _BATCH:
             record.append(root, buffered)
             buffered = []
@@ -341,12 +378,10 @@ def _examine(path: Path, known: tuple[source_formats.SourceFormat, ...]) -> tupl
     return next(((fmt, document) for fmt in known if fmt.names(name) and all(key in document for key in fmt.item_keys)), None)
 
 
-def _row(path: str, key: export_pairing.Key, facts: export_photos.Facts) -> dict:
+def _row(path: str, key: export_pairing.Key, caption: str | None) -> dict:
     """One sidecar's row. The caption is redacted as an upload's description is (`preserve`), before it reaches disk."""
-    _text, caption, _extracted, _warnings = preserve.redact_capture_text(description=facts.caption)
-    return {
-        "sidecar": path, "base": key.base, "copy": key.copy, "limit": key.at_limit, "title": key.title,
-        "time": facts.time, "skip": facts.time_skipped, "caption": caption}
+    _text, redacted, _extracted, _warnings = preserve.redact_capture_text(description=caption)
+    return {"sidecar": path, "base": key.base, "copy": key.copy, "limit": key.at_limit, "title": key.title, "caption": redacted}
 
 
 def _end(root: Path, record: Record, photos: list[str], known: tuple[source_formats.SourceFormat, ...]) -> None:
@@ -355,13 +390,9 @@ def _end(root: Path, record: Record, photos: list[str], known: tuple[source_form
     rows = read_rows(root, record.import_id)
     fault = min(rows.unreadable, default=None)  # the first file that could not be read, over every call of the pass
     if not rows.sidecars and fault is None:
-        # No sidecar was found: the pass has no row to write. The state remembers it, so no call opens these files again,
-        # but a stage that has no record (no export either) is left with none.
-        if import_stage.read_expansion_state(root, record.import_id) is None:
-            record.sidecars = None
-        else:
-            entry["state"] = DONE
-            record.save(root)
+        # No sidecar was found: the pass has no row to write. The state remembers it, so that no later call opens these files again.
+        entry["state"] = DONE
+        record.save(root)
         return
     code = CODE_PARTIAL if fault is not None else None
     fmt = next((candidate for candidate in known if candidate.key == entry["format"]), None)

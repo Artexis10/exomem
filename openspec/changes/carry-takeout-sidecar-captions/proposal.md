@@ -8,7 +8,8 @@ Google Takeout exports Google Photos as the media files plus one JSON sidecar pe
 
 - **Sidecars are read, never filed.** The cell reads every recognised sidecar in a stage before any photo in it files, then pairs a recognised Takeout sidecar with the one photo or video in its folder that it describes, and only on a one-to-one match. No recognised sidecar files as a Source, paired or not. The filing view counts each sidecar by its outcome: applied (the photo's page carries its caption), nothing to apply (no caption), photo already imported (the sidecar's caption not applied, because the vault already held the photo), photo not filed, unpaired, or unreadable. A JSON file that cannot be read stays staged and never files, and the pass reads on past it.
 - **The owner's caption is kept.** A non-empty sidecar description goes into the photo Source's description section, through the same redaction as an upload's description, so search finds it. The redaction runs before the sidecar's row is written to the stage's state folder, so no row holds a card number or a credential.
-- **Dating from a sidecar is held.** The sidecar's `photoTakenTime` is read into its row and applied to no page. The `media-capture-metadata` spec bars a file's modification time as a date source, and no source says that Google's `photoTakenTime` is not that time for a file that states none. An owner's own Takeout is measured first (task 3.2), and a follow-up change decides dating on that result.
+- **Dating from a sidecar is held.** The sidecar's `photoTakenTime` is not read and dates no page. The `media-capture-metadata` spec bars a file's modification time as a date source, and no source says that Google's `photoTakenTime` is not that time for a file that states none. An owner's own Takeout is measured first (task 3.2, on the staged sidecars), and a follow-up change decides dating on that result.
+- **A window keeps a sidecar with its photo.** When the CLI sends a folder in windows, a file whose name reads as a sidecar goes in the window of the photo that its name fits. Without it, a folder larger than one window would send its photos first and its sidecars in the last window, and no photo would get its caption.
 - **A file-name date reads the name the owner gave.** The filer stores an original under a name of its own. The media worker and the owner backfill now read the original's recorded file name, so a photo named for its day takes that date.
 
 ## Capabilities
@@ -23,14 +24,15 @@ Google Takeout exports Google Photos as the media files plus one JSON sidecar pe
 - **Code:**
   - `source_formats.py` and `export_expansion.py`: a `photo-sidecar` parser that pairs instead of expanding, with one budgeted pass per stage.
   - `adoption_run.py` and `adopt.py`: the description.
-  - `capture_dates.py`: survival by a pack attribute, with no change in behaviour.
   - `capture_metadata.py`, `media_worker.py` and `capture_backfill.py`: a file-name date reads the name the owner gave.
   - `import_filing.py`: the counts.
-  - Vocabulary packs: `source-formats.yaml`, and `capture-date-sources.yaml` for the survival attribute.
+  - `cloud_import_windows.py` and `export_pairing.py`: a likely sidecar travels in its photo's window, decided from names alone.
+  - Vocabulary packs: `source-formats.yaml`.
 - **Order:** this change builds on `import-notes-and-mail-exports` (parser-owned containers and the append-only expansion record). It archives after that change and after `recover-media-capture-dates`.
 - **Not included:**
   - Dating a photo from a sidecar's time. It is held until task 3.2 reports.
-  - Pairing across stages. A sidecar whose photo arrives in another archive part stays unpaired, and the filing view counts and lists it. Owner guidance: in Takeout's export form, choose the largest part size that the form offers, so that fewer pairs straddle a part boundary (the design names a community source for the sizes). Each uploaded archive is its own stage, and a larger part cannot rule out a split pair.
+  - Pairing across stages. A sidecar whose photo is in another stage stays unpaired, and the filing view counts and lists it. The window planner keeps a likely sidecar with its photo, so a window cut splits a pair only when the name guess is wrong.
+  - A vault that already imported a Takeout keeps its old JSON Sources. This change removes none of them. Importing the same Takeout again skips its photos as already imported, so their captions are not applied, and the view says so.
   - Applying a sidecar to a photo that the vault already holds.
   - `geoData`, which is Google's inference, not the file's.
   - Album `metadata.json` files, people tags and Google links.

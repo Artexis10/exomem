@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -22,13 +23,14 @@ from test_app_export_import import (  # noqa: F401 -- `_private_journal_folder` 
     source_pages,
     vault,
 )
+from test_cloud_import_windows import Rig, rig  # noqa: F401 -- `rig` is a fixture that the window test needs
 from test_notes_mail_exports import JPEG
 
 from exomem import (
     adoption_consume,
     client_artifacts,
     export_expansion,
-    export_photos,
+    export_sidecars,
     import_stage,
     lexstore,
 )
@@ -125,7 +127,7 @@ def test_an_album_files_each_photo_with_its_sidecars_caption_and_no_json_source(
 
 def test_a_photo_with_no_exif_and_a_sidecar_with_a_photo_taken_time_files_with_no_capture_time_from_the_sidecar(vault: Path) -> None:
     """Catches a sidecar time written to a page: nothing yet says where Google's `photoTakenTime` comes from for a file that states none."""
-    import_id, pages, view = one_photo_albums(vault, {
+    _import_id, pages, view = one_photo_albums(vault, {
         f"{ALBUM}/IMG_1.jpg": photo("IMG_1.jpg"),
         f"{ALBUM}/IMG_1.jpg.json": sidecar("IMG_1.jpg", caption="Dusk", taken=taken_at(3)),
     })
@@ -133,8 +135,6 @@ def test_a_photo_with_no_exif_and_a_sidecar_with_a_photo_taken_time_files_with_n
     assert not any(key.startswith("capture_") for key in pages[f"{ALBUM}/IMG_1.jpg"][0])
     assert caption_of(pages, f"{ALBUM}/IMG_1.jpg") == "Dusk"
     assert view["left_out"]["by_reason"] == {APPLIED: 1}
-    # The sidecar's row still holds the time, which the measurement of task 3.2 reads.
-    assert [row["time"] for row in expansion_rows(vault, import_id) if "sidecar" in row] == ["2022-07-07T12:03:00Z"]
 
 
 def test_a_sidecar_whose_name_suffix_is_cut_pairs_with_its_photo(vault: Path) -> None:
@@ -449,11 +449,17 @@ def test_no_photo_files_before_every_sidecar_is_read_when_the_pass_outlasts_a_ca
     assert view["left_out"]["by_reason"] == {APPLIED: 12}
 
 
-def test_a_sidecar_time_at_or_before_1970_is_recorded_as_no_time() -> None:
-    """Catches a zero or negative stamp recorded as a time: task 3.2 would count 1970-01-01 as a time that Google gave."""
-    for value in ("0", "-86400"):
-        facts = export_photos.facts_of({"title": "OLD_1.jpg", "photoTakenTime": {"timestamp": value}, "creationTime": stamp(UPLOADED)})
-        assert facts.time is None and not facts.time_skipped
+def test_an_ordinary_import_with_json_files_opens_each_of_them_once_however_often_it_is_filed_again(vault: Path, monkeypatch) -> None:
+    """Catches a stage with no sidecar that is read again at every call: each call would reopen every JSON file, up to a mebibyte each."""
+    opened: list[Path] = []
+    examine = export_sidecars._examine
+    monkeypatch.setattr(export_sidecars, "_examine", lambda path, known: opened.append(path) or examine(path, known))
+    import_id = stage_takeout(vault, {f"project/part{number}.json": json.dumps({"name": f"part {number}"}).encode() for number in range(3)})
+
+    for _call in range(3):
+        export_expansion.expand(vault, import_id, keep_going=lambda: True)
+
+    assert len(opened) == 3
 
 
 def test_a_sidecar_that_cannot_be_read_is_listed_alone_while_the_pass_reads_on_and_no_json_files(vault: Path) -> None:
@@ -605,3 +611,28 @@ def test_the_owner_backfill_dates_a_filed_photo_from_the_name_its_owner_gave_it(
 
     named = next(fields for fields, _text in source_pages(vault).values() if fields.get("original_filename"))
     assert (named["capture_time"], named["capture_date_source"]) == ("2020-03-14T10:11:12", "file-name")
+
+
+@pytest.mark.skipif(not (shutil.which("age") and shutil.which("age-keygen")), reason="real age executables required")
+def test_a_takeout_folder_that_spans_two_windows_files_every_photo_with_its_caption(vault: Path, rig: Rig) -> None:
+    """Catches a window cut that sends a folder's photos in one window and their sidecars in the last: every caption would be lost."""
+    album = rig.source / ALBUM
+    album.mkdir(parents=True)
+    for number in range(8):
+        name = f"IMG_{number:02d}.jpg"
+        (album / name).write_bytes(photo(name).ljust(800, b"\0"))  # an artifact that the synthetic cell offloads, as the real cell does a photo
+        (album / f"{name}.supplemental-metadata.json").write_bytes(sidecar(name, caption=f"day {number} at the lake"))
+    text = sum(path.stat().st_size for path in album.glob("*.json"))
+    # The cell must hold all the text at once (2 x its bytes) and has room for about four photos with their sidecars besides.
+    rig.cell.budget = rig.cell.reachable = rig.cell.refill = 2 * text + 4 * 800 + 4000
+
+    rig.run()
+
+    windows = [rig.cloud.sent(import_id) for import_id in rig.cloud.completed]
+    assert len(windows) > 1
+    for window in windows:
+        file_to_done(vault, stage_takeout(vault, {path: (rig.source / path).read_bytes() for path in window}), calls=200)
+    pages = {page[0]["imported_from"].split("/", 2)[2]: page for page in source_pages(vault).values()}  # `_Imports/<window>/<path>`
+    assert len(pages) == 8
+    for number in range(8):
+        assert caption_of(pages, f"{ALBUM}/IMG_{number:02d}.jpg") == f"day {number} at the lake"

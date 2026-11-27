@@ -488,14 +488,26 @@ def test_a_stage_with_no_member_manifest_still_expands_its_export(vault: Path) -
     assert len(sessions) == 4
 
 
-def test_a_stage_with_no_recognised_export_leaves_no_expansion_record(vault: Path) -> None:
+def test_a_stage_with_no_json_file_leaves_no_expansion_record(vault: Path) -> None:
     """Catches a record written for every ordinary import, which no export asked for."""
-    import_id = stage_export(vault, json.dumps([{"id": 1}]).encode())  # a conversations.json of some other app
+    import_id = stage_export(vault, b"# notes", name="notes.md")
 
     export_expansion.expand(vault, import_id, keep_going=lambda: True)
     export_expansion.expand(vault, import_id, keep_going=lambda: True, rewalk=True)
 
     assert not import_stage.expansion_dir(vault, import_id).exists()
+
+
+def test_a_stage_whose_json_is_no_export_records_no_export_and_only_that_its_sidecars_were_looked_for(vault: Path) -> None:
+    """Catches an export or rows recorded for a conversations.json of another app: the stage keeps one entry, so no call reads its JSON again."""
+    import_id = stage_export(vault, json.dumps([{"id": 1}]).encode())  # a conversations.json of some other app
+
+    export_expansion.expand(vault, import_id, keep_going=lambda: True)
+    export_expansion.expand(vault, import_id, keep_going=lambda: True, rewalk=True)
+
+    state = import_stage.read_expansion_state(vault, import_id)
+    assert state["exports"] == {} and state["sidecars"]["state"] == "done"
+    assert import_stage.expansion_rows_size(vault, import_id) == 0
 
 
 def test_a_chatgpt_export_split_into_shards_files_every_conversation_and_each_shard_once(vault: Path) -> None:

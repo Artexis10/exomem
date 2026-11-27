@@ -1,21 +1,19 @@
-"""A Google Photos Takeout sidecar: the JSON object beside a photo that holds its capture time and its caption.
+"""A Google Photos Takeout sidecar: the JSON object beside a photo that holds its caption.
 
 Which sidecar is which, and how Takeout names it, is registry data (`source_formats`, `export_pairing`). This module
-holds the container (one JSON object of at most 1 MiB, read whole) and the facts that a sidecar carries. A sidecar
-derives no files: filing reads it once (`export_sidecars`), then gives its photo the caption. The time is read into the
-sidecar's row and applied to no page: dating a photo from it is held until a measurement says where Google's time comes from.
+holds the container (one JSON object of at most 1 MiB, read whole) and the caption that a sidecar carries. A sidecar
+derives no files: filing reads it once (`export_sidecars`), then gives its photo the caption. The sidecar's time dates
+no page and is not read: dating a photo from it is held until a measurement says where Google's time comes from.
 
 The sidecar is untrusted content: a reader keeps its values as data, never opens the `url` it carries, and never sends
 it to a model. No vendor documents the format. The reader follows what Takeout wrote in 2026 and treats every field but
-the entry's `item_keys` as optional, so a missing or odd field degrades the facts and never fails the sidecar.
+the entry's `item_keys` as optional, so a missing or odd field degrades the caption and never fails the sidecar.
 """
 
 from __future__ import annotations
 
-import datetime as dt
 import json
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, BinaryIO
+from typing import TYPE_CHECKING, BinaryIO
 
 if TYPE_CHECKING:
     from .source_formats import SourceFormat
@@ -24,23 +22,8 @@ if TYPE_CHECKING:
 MAX_BYTES = 1024 * 1024
 #: The caption kept on a photo's page; a longer one is cut, so a sidecar of a megabyte cannot make a page of that size.
 MAX_CAPTION_CHARS = 4096
-#: A file name never passes this many characters, so a longer title names no file.
-_MAX_TITLE_CHARS = 255
-_MAX_DIGITS = 12
-#: The last second that a four-digit year holds (9999-12-31T23:59:59Z).
-_LAST_SECOND = 253_402_300_799
 #: The C0 controls but tab and newline, and the C1 controls: a caption keeps its text and no control character.
 _NO_CONTROLS = {code: None for code in (*range(0x20), *range(0x7F, 0xA0)) if code not in (0x09, 0x0A)}
-
-
-@dataclass(frozen=True, slots=True)
-class Facts:
-    """What one sidecar states: the name of its photo, the time and the caption."""
-
-    title: str | None
-    time: str | None  # `photoTakenTime` in UTC as `YYYY-MM-DDTHH:MM:SSZ`; None when it is missing, unusable or equal to `creationTime`
-    time_skipped: bool  # `photoTakenTime` equals `creationTime` to the second, which the design takes to be an upload time (unconfirmed)
-    caption: str | None  # the owner's `description`, trimmed; None when it holds no text
 
 
 def read_object(stream: BinaryIO) -> dict | None:
@@ -61,35 +44,9 @@ def recognise(stream: BinaryIO, fmt: SourceFormat) -> bool:
     return found is not None and all(key in found for key in fmt.item_keys)
 
 
-def facts_of(document: dict) -> Facts:
-    """The facts of a recognised sidecar."""
-    title = document.get("title")
-    taken, created = _epoch(document.get("photoTakenTime")), _epoch(document.get("creationTime"))
-    skipped = taken is not None and taken == created
-    return Facts(
-        title=title if isinstance(title, str) and 0 < len(title) <= _MAX_TITLE_CHARS else None,
-        time=None if taken is None or skipped else _utc(taken), time_skipped=skipped, caption=_caption(document.get("description")))
-
-
-def _epoch(stamp: Any) -> int | None:
-    """The whole seconds of a `{"timestamp": "<epoch seconds>"}` object, or None.
-
-    A time at or before the epoch (1970-01-01) or after year 9999 is None, so such a sidecar gives no time. The reader takes no
-    negative stamp: a photo from before 1970 stays undated, which this change does not cover.
-    """
-    value = stamp.get("timestamp") if isinstance(stamp, dict) else None
-    if isinstance(value, str) and value.isascii() and value.isdigit() and len(value) <= _MAX_DIGITS:
-        value = int(value)
-    if isinstance(value, bool) or not isinstance(value, int) or not 0 < value <= _LAST_SECOND:
-        return None
-    return value
-
-
-def _utc(seconds: int) -> str:
-    return dt.datetime.fromtimestamp(seconds, dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _caption(value: Any) -> str | None:
+def caption_of(document: dict) -> str | None:
+    """The owner's `description` of a recognised sidecar, trimmed and cut to `MAX_CAPTION_CHARS`; None when it holds no text."""
+    value = document.get("description")
     if not isinstance(value, str):
         return None
     return value.translate(_NO_CONTROLS).strip()[:MAX_CAPTION_CHARS].strip() or None

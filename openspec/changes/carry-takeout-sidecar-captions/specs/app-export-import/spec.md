@@ -140,7 +140,7 @@ Over the sidecars whose photo filed now, the filing view SHALL count those that 
 
 ### Requirement: Photos wait for their sidecars
 
-The images and videos of a stage that holds recognised sidecars SHALL stay out of selection until the pass over the stage's sidecars ends: when every JSON file is examined and the pairs are decided. A JSON file that cannot be read SHALL get its own record, and the pass SHALL read on past it and end in part. Each paired photo SHALL then file with its sidecar's caption. The pass SHALL run once per stage: a sidecar that reaches the stage after the pass ended SHALL file as an ordinary file.
+The images and videos of a stage that holds recognised sidecars SHALL stay out of selection until the pass over the stage's sidecars ends: when every JSON file is examined and the pairs are decided. A JSON file that cannot be read SHALL get its own record, and the pass SHALL read on past it and end in part. Each paired photo SHALL then file with its sidecar's caption.
 
 #### Scenario: A Takeout larger than one call's budget
 
@@ -151,6 +151,15 @@ The images and videos of a stage that holds recognised sidecars SHALL stay out o
 
 - **WHEN** a sidecar of the stage cannot be read
 - **THEN** the pass reads on, ends in part, and the photos are released
+
+### Requirement: The sidecar pass runs once per stage
+
+The pass over a stage's sidecars SHALL run once, also for a stage that holds JSON files and no sidecar, so that a later call opens none of those files again. A sidecar that reaches the stage after the pass ended SHALL file as an ordinary file.
+
+#### Scenario: An ordinary import with JSON files
+
+- **WHEN** a stage holds JSON files that are no sidecars and is filed in three calls
+- **THEN** each JSON file is opened once
 - **AND** the sidecars before it and after it keep their pairs, and no JSON file of the stage files as a Source
 - **AND** the filing view counts the unreadable file as `IMPORT_SIDECAR_UNREADABLE`, lists it by path as needing review, and lists the partial read with `IMPORT_EXPORT_PARTIAL`
 
@@ -171,10 +180,18 @@ A paired sidecar's non-empty `description` SHALL go into the photo Source's desc
 
 ### Requirement: A Takeout sidecar's time dates no page
 
-A paired sidecar's `photoTakenTime` SHALL NOT be written to any page's capture record. The sidecar's row in the stage's state folder SHALL still hold the time, so that a later change can measure where Google takes it from.
+A paired sidecar's `photoTakenTime` SHALL NOT be written to any page's capture record. The pass SHALL NOT read the time: the staged sidecar stays, so that a later change can measure where Google takes it from.
 
 #### Scenario: A received photo
 
 - **WHEN** a JPEG with no EXIF capture time files with a paired sidecar whose `photoTakenTime` is 2019-05-04 10:00:00 UTC
 - **THEN** the photo's page records no capture date
-- **AND** the sidecar's row holds the time `2019-05-04T10:00:00Z`
+
+### Requirement: A window keeps a likely sidecar with its photo
+
+When the CLI sends a folder in windows, a file whose name reads as a Takeout sidecar's SHALL go in the window of the photo or video that its name fits, as a page's part pages go with their page. The planner SHALL decide this from names and the shipped `source-formats` entry alone and SHALL open no file. A name that fits no file, or a wrong guess, SHALL leave the sidecar in the window that the order gives it, and the sidecar counts as unpaired.
+
+#### Scenario: A Takeout folder that spans two windows
+
+- **WHEN** a folder holds 8 photos with their sidecars and the cell's budget carries about half of it in a window
+- **THEN** every sidecar is in the window of its photo, and every photo files with its caption

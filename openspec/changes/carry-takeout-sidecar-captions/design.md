@@ -32,11 +32,11 @@ The `recover-media-capture-dates` change added the file-name date, which Decisio
 
 ## Held: no sidecar time dates a page
 
-A paired sidecar gives its photo the owner's caption and nothing else. Its `photoTakenTime` is read into the sidecar's row and applied to no page.
+A paired sidecar gives its photo the owner's caption and nothing else. Its `photoTakenTime` is not read and dates no page: the sidecar stays staged.
 
 The `media-capture-metadata` spec bars a file's modification time as a date source: scanners and editors set it. No source above says that `photoTakenTime` is not that time for a file that states none. A screenshot, a scan or a chat image carries no capture time, so a date that Google derived from the file's modification time would enter the vault as evidence, which the spec forbids.
 
-Task 3.2 measures this on an owner's own Takeout: it compares `photoTakenTime` with the file's modification time inside the archive and with its EXIF. A follow-up change decides dating on that result. That change would also need a rank among the evidence sources, a name for the source and a rule for an owner's edit in Google Photos. None of them is decided here.
+Task 3.2 measures this on an owner's own Takeout, reading each sidecar's time from its staged JSON: it compares `photoTakenTime` with the file's modification time inside the archive and with its EXIF. A follow-up change decides dating on that result. That change would also need a rank among the evidence sources, a name for the source and a rule for an owner's edit in Google Photos. None of them is decided here.
 
 ## Decision 1: a sidecar parser that pairs in one pass per stage
 
@@ -50,7 +50,7 @@ These are vendor facts that change as Google changes, so they live in the regist
 
 The container is one JSON object of at most 1 MiB, read whole. A larger file is not opened. An album's `metadata.json` has no `photoTakenTime`, so it is not recognised.
 
-The parser derives no files. At the start of `file`, it runs one pass over the stage's recognised sidecars. The pass has one state entry, uses the expansion slice budget and resumes from its last row. It appends one row per sidecar, holding the sidecar's path, its name key (Decision 2, steps 1 and 3), and the time and the caption it carries. The row records the time for task 3.2 and nothing applies it. A row never holds a position.
+The parser derives no files. At the start of `file`, it runs one pass over the stage's recognised sidecars. The pass has one state entry, uses the expansion slice budget and resumes from its last row. It appends one row per sidecar, holding the sidecar's path, its name key (Decision 2, steps 1 and 3) and the caption it carries. A row holds no time and never a position.
 
 **The row's caption is redacted first.** The rows live in the stage's state folder (`import-expansion/<id>/rows.jsonl`), which is not the Source page. The pass therefore passes each caption through the same redaction as an upload's description (`preserve.redact_capture_text`) before it writes the row. No row, plan, page or log holds a card number or a credential that the owner typed. The plan redacts the caption again, which changes nothing in a caption that is already redacted.
 
@@ -60,7 +60,7 @@ The parser derives no files. At the start of `file`, it runs one pass over the s
 
 When the pass ends, it decides every pair in the stage in one step from its rows (Decision 2, step 4) and records the pairs. Only then do the photos file, each carrying its pair's caption on its planned item. The cost is a delay: photos start filing after the pass, which reads about a kilobyte per sidecar.
 
-The pass runs once per stage. A sidecar that reaches the stage after the pass ended is not read. It files as an ordinary JSON file, with its position data as plain text, and its photo files without its caption. This change builds no second reading, because the pass keeps no list of the JSON files that it found not to be sidecars: telling a new file from an old one would mean opening every JSON file again at each call. The proposal lists the case under "Not included".
+The pass runs once per stage, also for a stage that holds JSON files and no sidecar: it records that it ended, so no later call opens those files again. A sidecar that reaches the stage after the pass ended is not read. It files as an ordinary JSON file, with its position data as plain text, and its photo files without its caption. This change builds no second reading, because the pass keeps no list of the JSON files that it found not to be sidecars: telling a new file from an old one would mean opening every JSON file again at each call. The proposal lists the case under "Not included".
 
 A sidecar row is not a derived file and adds nothing to the stage total. Each sidecar counts once, as a staged member that is left out. Its reason is worked out when filing reaches done, from its photo's filing result (Decision 5).
 
@@ -87,13 +87,12 @@ A live photo's video is not one of these cases: it has no sidecar of its own (is
 ## Decision 3: what a paired sidecar carries
 
 - **Caption.** A non-empty `description` goes into the photo Source's description section. It passes through the same redaction as an upload's description (`preserve`, `capture_redaction`), so one caption has one home and search finds it.
-- **Time, recorded and not applied.** The row holds `photoTakenTime` in UTC as `time`. The reader drops a time at or before 1970-01-01 and one after year 9999 as unusable, so such a sidecar has no `time`. The row's `skip` flag marks a time that equals `creationTime` to the second, which the design takes for an upload time. No source above documents `creationTime`, so this is an assumption. No page, count or reason reads either field. Task 3.2 does.
+- **Time, not read.** The pass reads neither `photoTakenTime` nor `creationTime`. Task 3.2 reads them from the staged sidecars.
 - **Nothing else.** `geoDataExif` is the file's own position, which the camera read already records. `geoData` is not used: it may be Google's inference, not the file's.
 
-## Decision 4: a file-name date reads the name its owner gave, and survival reads the pack
+## Decision 4: a file-name date reads the name its owner gave
 
-- **File-name date.** The filer stores an original under a name of its own, which states no date. The media worker and the owner backfill therefore read the name recorded as the page's `original_filename`, and fall back to the stored name when none is recorded (`capture_metadata.given_name`). A photo named for its day files with no date and takes it from its name on the media worker's first read. This holds whether or not a sidecar sits beside it.
-- **Survival.** `capture_dates.survives_extraction` stops naming `perceptual-match`. It reads a closed pack attribute, `reread: false`, that marks the sources that no re-read can reproduce. Only `matched-original` carries it, so behaviour is unchanged. Every writer (the media worker, the owner backfill and recovery) already goes through it.
+The filer stores an original under a name of its own, which states no date. The media worker and the owner backfill therefore read the name recorded as the page's `original_filename`, and fall back to the stored name when none is recorded (`capture_metadata.given_name`). A photo named for its day files with no date and takes it from its name on the media worker's first read. This holds whether or not a sidecar sits beside it.
 
 ## Decision 5: honest counts
 
@@ -107,20 +106,29 @@ When filing reaches done, the filing view counts each recognised sidecar in `lef
 
 The view names what it measures. Over the sidecars of `APPLIED` and `EMPTY`, it counts those that carry a caption (`captioned`). It counts no time, because no time is applied.
 
+## Decision 6: a window keeps a likely sidecar with its photo
+
+The CLI sends a folder larger than one window as a series. `cloud_import_windows` orders the members with artifacts first and text last, and a JSON file is text. Without a rule, a folder that exceeds one window would send its photos in the early windows and its sidecars in the last. Every photo would file with no caption, and every sidecar would count as unpaired. Each window is its own stage, and a sidecar pairs only inside its stage.
+
+A sidecar therefore travels in the window of its photo, as a page's part pages travel with their page: it sorts directly after its photo, takes its photo's class for the order, and forms one unit with it for the window's budget. `export_pairing.likely_photos` decides this from file names and the shipped `google-photos-sidecar` entry (the same name rules as Decision 2, steps 1 and 2, without the title). The planner opens no file and reads no vault, so it knows no overlay. A name that fits several photos (a cut name) goes with the first in path order. A wrong guess costs only that sidecar its caption: it lands in another window and counts as unpaired, which is what every sidecar of a folder over one window would otherwise do. The cost is one name index over the series when it is ordered, and a two-name check for each member that a window takes.
+
 ## Scale
 
 The load target is 10,000 tenants, and pairing runs per cell.
 - **Pairing.** It builds one name index per folder in a single pass over the stage listing. It reads each sidecar once, at most 1 MiB, inside the slice budget, so a 100,000-photo Takeout pairs in O(n) with one state entry.
 - **Record.** Each sidecar adds one appended row.
-- **Counting.** Each `file` call reads the rows again, because the rows are the record and the state entry only caches the pass. Measured on 2026-11-27 on a laptop, with the stage built in a temporary vault:
-  - The pass over 3,000 sidecars and 3,000 photos (3,000 pairs) took 0.93 to 1.01 s in one call, in three runs.
-  - A `file` call after the pass ended made 2 reads that returned 6,001 rows in all, so about one full read of 3,000 sidecar rows, 3,000 pair rows and the end row. The first call, which runs the pass, made 13 reads that returned 39,006 rows, or 6.5 full reads.
-  - A full read of 25,000 sidecars with 25,000 pairs (11.6 MB) took 0.10 to 0.21 s, in two runs of five reads. A full read of 100,000 of each (46.6 MB) took 0.47 to 0.65 s.
-  - A `file` call after the pass ended therefore spends about 0.5 to 0.65 s on the rows at 100,000 sidecars. The first call spends about 6.5 times that if its read count grows with the rows as it did at 3,000, which was not measured at 100,000. Both stay far inside the call's 50 s budget (`request_budget.MCP_REQUEST_BUDGET_SECONDS`). Each cost multiplies two measurements and was not measured at that size.
+- **The largest stage.** A window is one import, and the CLI sends at most 500,000 members to one import (`cloud_import.DEFAULT_MAX_MEMBERS`). The window budget also bounds it: a photo counts its bytes, a sidecar twice its bytes (`cloud_import_windows.Member.cost`), and the budget is 80% of the cell volume less what it holds (`import_windows._budget_section`). At the default 4 GiB volume, photos of 3 MB give about 1,100 pairs a window, and a 20 GiB volume gives about 5,700. The ceiling is photos so small that the member count binds: 250,000 sidecars with 250,000 pairs, which needs photos under about 12 KB each at 4 GiB. The measurements below use that ceiling.
+- **Counting.** Each `file` call that reaches the filing steps reads the rows, because the rows are the record and the state entry only caches the pass. One read of the rows costs, measured on 2026-11-27 on a laptop, in a process that held 78 MB before the read:
+  - 100,000 sidecars with 100,000 pairs (46.6 MB of rows): 0.50 s, and 120 MB more memory, a peak of 198 MB.
+  - 250,000 sidecars with 250,000 pairs: 1.31 s, and 295 MB more memory, a peak of 373 MB. The cell's memory limit is 3 GiB (`cellctl` `memory_limit`).
+  - Both stay far inside the call's 50 s budget (`request_budget.MCP_REQUEST_BUDGET_SECONDS`). The memory of a read is the same before and after the change below: it is one set of dictionaries per read, and a leaner shape was not built.
+- **Reads per call.** `file` reads the rows once for each size that the rows file has during the call (`export_sidecars.reading_once`). The rows only grow, so the size says whether they changed. Measured on 2026-11-27 with 3,000 sidecars and 3,000 photos, by counting the reads that return rows in `adoption_run.file`'s first call, which ends the pass and starts filing:
+  - Before: 3 reads, which returned 9,000 sidecar rows. After: 2 reads, which returned 6,000. The pass appends its pair rows once, so the call reads the rows before and after that append and no more. A call that does not append reads them once.
+  - A later call in that run, which applies a page, made no read, before and after.
+  - A call holds one read at a time and drops it before a read of changed rows, so the call's peak is the figure above, not twice it. The call keeps that one read until it ends, where an earlier read was freed with its caller.
 
 ## Risks
 
 - **Undocumented format.** The pairing rule follows community tools. Task 3.2 counts each sidecar reason on a real Takeout, including duplicates and long names.
 - **The time's meaning for files without camera time** is unconfirmed. It is the reason that no time is applied (see "Held"). Task 3.2 compares `photoTakenTime` with the file's modification time inside the archive and with its EXIF, for screenshots, scans and chat images.
-- **Split archives.** Each uploaded archive is its own stage, and a sidecar pairs only inside its stage. A photo whose sidecar is in another part files without its caption, and that sidecar counts as unpaired. Owner guidance: in Takeout's export form, choose the largest part size that the form offers, so that fewer pairs straddle a part boundary. GPTH Neo's README names two sizes in that form, 2 GB and 50 GB, and tells the owner to choose 50 GB (README.md, line 139, at commit `ab1e56d`). Google's own page could not be fetched, so the sizes are not confirmed against Google. A larger part cannot rule out a split pair, and the cell cannot join parts. Task 3.2 measures that share on the parts of the owner's own Takeout.
-- **`creationTime` as the upload time.** No source above documents it. The design uses it only to flag, in the row, a `photoTakenTime` that equals it to the second. Nothing is applied from either. Task 3.2 counts the flagged rows.
+- **Split archives.** The archive door takes an archive of at most 100 MiB, so a Takeout of many parts does not come through it. The owner extracts the parts into one folder, and the CLI sends that folder in windows. Each window is its own stage, and a sidecar pairs only inside its stage, so the window cut is the boundary where a pair can split. Decision 6 keeps a likely sidecar with its photo across that cut, and the two-window test proves it. A sidecar whose photo the owner did not extract into the folder, or whose name the planner does not read as a sidecar's, still files unpaired, and the view counts and lists it. Task 3.2 measures the share of unpaired sidecars on the owner's own Takeout.

@@ -209,8 +209,8 @@ class SourceFormat:
         return fnmatchcase(member.lower(), self.file_glob.lower())
 
 
-def formats(vault_root: Path) -> tuple[SourceFormat, ...]:
-    """The active formats in pack order: the shipped ones, then the vault's.
+def formats(vault_root: Path | None) -> tuple[SourceFormat, ...]:
+    """The active formats in pack order: the shipped ones, then the vault's; the shipped ones alone for a caller with no vault.
 
     An overlay row that the registry refuses leaves the rest in force, and the owner reads its finding from
     `schema_memory validate`, so a malformed overlay never stops a filing.
