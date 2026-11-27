@@ -27,6 +27,7 @@ from . import (
     pointer_write,
     project_keys,
     semantic_writes,
+    sensitivity_classes,
     temporal,
     vocabulary_resolution,
 )
@@ -155,6 +156,14 @@ def set_frontmatter_field(
             if route := source_corrections.correction_route(vault_root, rel_path):
                 reason += " " + route
         raise SetFrontmatterError(code="APPEND_ONLY", reason=reason)
+
+    if field == sensitivity_classes.FIELD and value is not None:
+        # The same registered keys that a capture and `files.classify` accept, so a plain edit
+        # never leaves a class that a policy would read as unclassified.
+        try:
+            value = list(sensitivity_classes.validated(vault_root, value))
+        except sensitivity_classes.SensitivityError as e:
+            raise SetFrontmatterError(code=e.code, reason=e.reason) from e
 
     curated = in_curated_tree(rel_path)
     if curated and not allow_curated:

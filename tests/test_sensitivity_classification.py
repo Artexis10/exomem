@@ -24,6 +24,7 @@ from exomem import (
     writer_lease,
 )
 from exomem import server as server_module
+from exomem.vault import parse_frontmatter
 from exomem.vocabulary import registry
 
 SOURCE = "Knowledge Base/Sources/Articles/2026-05-04-best-egcg-supplements.md"
@@ -34,24 +35,40 @@ def _overlay(vault: Path, text: str) -> None:
     registry.invalidate(vault)
 
 
-def test_an_overlay_class_is_one_a_capture_may_declare_and_a_class_without_its_attribute_is_not(
+def test_an_overlay_adds_a_class_a_capture_may_declare_and_never_replaces_a_shipped_one(
     vault: Path,
 ) -> None:
-    """A vault class that the registry never reads, or an entry without `default_disclosure`
-    that a page may still carry."""
-    _overlay(vault, "schema_version: 1\nentries:\n  legal:\n    label: Legal\n"
-                    "    attributes: {default_disclosure: owner-only}\n")
+    """A vault class that the registry never reads, or an overlay that rewrites a shipped class
+    and so changes what every policy naming that class selects."""
+    _overlay(vault, "schema_version: 1\nentries:\n  legal:\n    label: Legal\n")
     assert sensitivity_classes.validated(vault, ["legal", "Identity"]) == ("legal", "identity")
 
-    _overlay(vault, "schema_version: 1\nentries:\n  legal:\n    label: Legal\n"
-                    "    attributes: {default_disclosure: everyone}\n")
+    _overlay(vault, "schema_version: 1\nentries:\n  financial:\n    label: Money\n    status: deprecated\n")
     snapshot = registry.load(sensitivity_classes.SPEC, vault)
 
     assert [finding["code"] for finding in snapshot.findings] == ["invalid_registry_overlay"]
-    with pytest.raises(sensitivity_classes.SensitivityError) as unknown:
-        sensitivity_classes.validated(vault, ["legal"])
-    assert str(unknown.value).startswith(sensitivity_classes.UNKNOWN_CODE)
-    assert "identity, health, financial" in str(unknown.value)
+    assert sensitivity_classes.active_keys(vault) == ("identity", "health", "financial")
+
+
+def test_a_plain_edit_of_a_note_takes_only_registered_classes_as_a_list(vault: Path) -> None:
+    """A class written by an ordinary edit as a string or an unknown key, which every reader of
+    the field then takes for an unclassified page."""
+    note = "Knowledge Base/Notes/card-notes.md"
+    (vault / note).parent.mkdir(parents=True, exist_ok=True)
+    (vault / note).write_text("---\ntype: insight\ntitle: Card notes\n---\n\n# Card notes\n", encoding="utf-8")
+
+    before = (vault / note).read_bytes()
+
+    with pytest.raises(set_frontmatter_field.SetFrontmatterError) as unknown:
+        set_frontmatter_field.set_frontmatter_field(
+            vault, path=note, field="sensitivity", value=["not-a-class"], why="tag it")
+    with pytest.raises(set_frontmatter_field.SetFrontmatterError) as bare:
+        set_frontmatter_field.set_frontmatter_field(vault, path=note, field="sensitivity", value="identity", why="tag it")
+    assert (vault / note).read_bytes() == before
+    set_frontmatter_field.set_frontmatter_field(vault, path=note, field="sensitivity", value=["Identity"], why="tag it")
+
+    assert unknown.value.code == sensitivity_classes.UNKNOWN_CODE and bare.value.code == "INVALID_SENSITIVITY"
+    assert sensitivity_classes.classes_of(parse_frontmatter((vault / note).read_text(encoding="utf-8"))[0]) == ("identity",)
 
 
 @pytest.fixture

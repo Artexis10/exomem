@@ -188,8 +188,8 @@ class Definition:
     builtin: bool = False
     requires_url: bool = False
     #: Sensitivity class keys (kinds only) that a Source or Evidence capture of this kind takes when
-    #: it declares none. A vault declares them; the shipped kinds declare none, and the keys are
-    #: checked against the `sensitivity-classes` registry when a capture uses them.
+    #: it declares none. A vault declares them; the shipped kinds declare none. A capture applies only
+    #: the keys that the `sensitivity-classes` registry holds, and skips the rest.
     sensitivity: tuple[str, ...] = ()
     #: The domain this one sits under (domains only): its profile is served after this domain's own.
     parent: str | None = None

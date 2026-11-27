@@ -111,6 +111,21 @@ def test_a_kind_default_applies_only_when_the_capture_declares_nothing(vault: Pa
     assert declared_other["sensitivity"]["basis"] == "declared"
 
 
+@pytest.mark.usefixtures("owner_scope")
+def test_a_kind_default_naming_no_registered_class_never_stops_the_capture(vault: Path, source_schema: Any) -> None:
+    """A stale or mistyped class in a vault's kind default that refuses every capture of that kind,
+    so the material is not kept because of a label."""
+    commands.op_schema_memory(
+        vault, subject="source-kinds", operation="save", expected_hash="none", why="id scans",
+        proposal={"upsert": {"id-scan": {"label": "ID scan", "attributes": {"sensitivity": ["identity", "idenity"]}}}},
+    )
+
+    kept = commands.op_capture_source(vault, source_schema, title="Card front", source_kind="id-scan", content=CARD)
+
+    assert kept["sensitivity"]["classes"] == ["identity"] and kept["sensitivity"]["basis"] == "kind-default"
+    assert _page(vault, kept["source"]["path"])[0]["sensitivity"] == ["identity"]
+
+
 def test_a_photo_is_kept_byte_for_byte_and_its_page_carries_the_class(
     vault: Path, source_schema: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

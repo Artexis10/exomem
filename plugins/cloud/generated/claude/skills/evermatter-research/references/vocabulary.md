@@ -32,8 +32,8 @@ adds the generic relation is refused.
 its receipt, and do not require a separate promotion save before you preserve a source. A valid unseen semantic
 category needs no registry write to author it.
 
-`sensitivity-classes` uses `propose-save` promotion, because an entry bears behaviour: each entry declares
-`default_disclosure` as `owner-only` or `vault-default`. Propose a class there before a capture names it.
+`sensitivity-classes` uses `propose-save` promotion, because a governance policy names classes: save a new
+class there before a capture names it. The shipped classes are fixed; a vault overlay only adds.
 
 Counts describe the returned projection and its source. `counts="unavailable"` or an omitted count is unknown,
 not zero. A `read_instructions` summary is not the complete registry. Page through the inspection before you

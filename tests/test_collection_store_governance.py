@@ -1348,7 +1348,7 @@ def test_a_collection_floor_reaches_every_row_and_a_row_adds_classes_but_never_r
         CID, item={"title": "Extended", "sensitivity": ["financial"]}, item_key=OTHER, why="capture")
 
     assert _sensitivity_of(store, KEY) == ["health"]
-    assert plain["sensitivity"]["classes"] == ["health"] and plain["sensitivity"]["basis"] == "kind-default"
+    assert plain["sensitivity"]["classes"] == ["health"] and plain["sensitivity"]["basis"] == "collection-floor"
     assert _sensitivity_of(store, OTHER) == ["financial", "health"]
     assert extended["sensitivity"]["classes"] == ["financial", "health"]
     assert extended["sensitivity"]["basis"] == "declared"

@@ -123,7 +123,7 @@ def classification(
     if not classes:
         return sensitivity_classes.Classification()
     return sensitivity_classes.Classification(
-        classes, sensitivity_classes.BASIS_DECLARED if own else sensitivity_classes.BASIS_KIND_DEFAULT
+        classes, sensitivity_classes.BASIS_DECLARED if own else sensitivity_classes.BASIS_COLLECTION_FLOOR
     )
 
 

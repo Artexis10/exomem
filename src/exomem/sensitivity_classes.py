@@ -6,8 +6,8 @@ field. The agent that captures the material decides them, because only reading t
 what it is; the server validates the keys and never infers one from content. A captured page is
 kept in full whatever its class.
 
-Code holds no class key. It branches only on the closed `default_disclosure` value, which a later
-change turns into a disclosure ceiling; here the value is recorded and reported.
+Code holds no class key and no class carries behaviour here: a class is a label. Who may read a
+page of a class is a governance policy decision, which a later change lets a policy scope select.
 """
 
 from __future__ import annotations
@@ -24,11 +24,9 @@ PACK = "sensitivity-classes.yaml"
 #: The `sensitivity` frontmatter field, which the `page-fields` pack declares a classify-only pointer.
 FIELD = "sensitivity"
 UNKNOWN_CODE = "SENSITIVITY_CLASS_UNKNOWN"
-#: The closed `default_disclosure` values this registry declares; a later change implements them.
-# nosemgrep: ep-word-set -- A closed attribute value that the registry schema fixes, not vocabulary.
-DISCLOSURES = frozenset({"owner-only", "vault-default"})
 #: How a result says where a page's classes came from.
-BASIS_DECLARED, BASIS_KIND_DEFAULT, BASIS_NONE = "declared", "kind-default", "none"
+BASIS_DECLARED, BASIS_KIND_DEFAULT, BASIS_COLLECTION_FLOOR, BASIS_NONE = (
+    "declared", "kind-default", "collection-floor", "none")
 
 
 class SensitivityError(ValueError):
@@ -45,9 +43,7 @@ def registry_path(root: Path) -> Path:
 
 
 def _check(entry: registry.Entry, entries: Mapping[str, registry.Entry]) -> None:
-    if entry.attributes.get("default_disclosure") not in DISCLOSURES:
-        raise registry.RegistryError(
-            "INVALID_SENSITIVITY_CLASS: default_disclosure must be one of " + ", ".join(sorted(DISCLOSURES)))
+    """An entry has no attribute to check: a class is a label."""
 
 
 SPEC = registry.RegistrySpec(
@@ -56,9 +52,8 @@ SPEC = registry.RegistrySpec(
     overlay=registry_path,
     adapter=registry.FixedPackAdapter(PACK, lambda: SPEC, _check),
     fields=frozenset({"label", "description", "status", "attributes"}),
-    # The sensitivity-classes schema fixes this attribute name.
-    attributes=frozenset({"default_disclosure"}),
-    # An entry bears behaviour once a rule reads `default_disclosure`, so a new key is a proposal.
+    attributes=frozenset(),
+    # A policy scope will name classes, so a new key is a deliberate save, never a typo that a capture registers.
     promotion="propose-save",
 )
 
@@ -91,7 +86,8 @@ def validated(vault_root: Path | None, supplied: object) -> tuple[str, ...]:
             raise SensitivityError(
                 UNKNOWN_CODE,
                 f"{raw!r} is not a registered sensitivity class. The registered classes are "
-                f"{', '.join(known)}; save a new one with schema_memory(subject='sensitivity-classes') first")
+                f"{', '.join(known)}. Save a new one with schema_memory(subject='sensitivity-classes') first, "
+                "or capture without it")
         if key not in classes:
             classes.append(key)
     return tuple(classes)
@@ -119,12 +115,15 @@ def classify_capture(
     """The classes of a capture: the caller's own judgement, else its Source kind's default, else none.
 
     An empty declaration is a decision of its own: the caller read the material and found it
-    unclassified, so the kind default does not apply.
+    unclassified, so the kind default does not apply. A kind default that names no registered class
+    applies only its registered keys and never refuses the capture: a label must not stop the material
+    from being kept.
     """
     if declared is not None:
         classes = validated(vault_root, declared)
         return Classification(classes, BASIS_DECLARED if classes else BASIS_NONE)
-    defaults = validated(vault_root, list(kind_default))
+    known = active_keys(vault_root)
+    defaults = tuple(dict.fromkeys(key for key in map(registry.token, kind_default) if key in known))
     return Classification(defaults, BASIS_KIND_DEFAULT if defaults else BASIS_NONE)
 
 

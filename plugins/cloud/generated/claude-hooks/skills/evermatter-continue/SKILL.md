@@ -2,7 +2,7 @@
 name: evermatter-continue
 description: 'Resume earlier work from Evermatter: what was being done, what was decided and what comes next. Use when the user says continue, pick this back up, where were we, or asks what they were doing on a project or topic.'
 metadata:
-  skill_contract: 588a65533efec7fe16f5df3f5f56127da74ce6ec37c15e58264045295cc11c50
+  skill_contract: fa8d5f106b815ca65d1232e8c4eee9f8231c3c69285a82e8159897ef98b1330c
   version: "0.2.0"
 ---
 

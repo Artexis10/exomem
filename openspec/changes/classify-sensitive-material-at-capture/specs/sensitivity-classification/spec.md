@@ -3,20 +3,20 @@
 ### Requirement: Sensitivity classes are registry data
 
 The `sensitivity-classes` vocabulary registry SHALL hold every sensitivity class: a shipped pack and a vault overlay.
-- Each entry SHALL declare `default_disclosure`, a closed attribute whose values are `owner-only` and `vault-default`.
-- The shipped pack SHALL declare `identity`, `health` and `financial` with `default_disclosure: owner-only`.
+- A class SHALL be a label with no behaviour attribute. Who reads a page of a class SHALL be decided by governance policy, not by the registry.
+- The shipped pack SHALL declare `identity`, `health` and `financial`. The shipped entries SHALL be fixed; the overlay SHALL only add entries.
 - Promotion SHALL be `propose-save`.
-- Code SHALL branch only on `default_disclosure`. Code SHALL NOT hold a list of class keys or branch on one.
+- Code SHALL NOT hold a list of class keys or branch on one.
 
 #### Scenario: An overlay adds a class
 
-- **WHEN** the owner saves a `sensitivity-classes` entry `legal` with `default_disclosure: owner-only` through `schema_memory`
+- **WHEN** the owner saves a `sensitivity-classes` entry `legal` through `schema_memory`
 - **THEN** a capture may declare `sensitivity: [legal]`, and its result reports the class
 
-#### Scenario: A class without its attribute
+#### Scenario: An overlay names a shipped class
 
-- **WHEN** an overlay entry omits `default_disclosure` or gives another value
-- **THEN** the registry reports a finding, and the entry is not a class a page may carry
+- **WHEN** an overlay row names `financial`
+- **THEN** the registry reports a finding, and the shipped `identity`, `health` and `financial` stay in force
 
 ### Requirement: A page's class is metadata that never rewrites captured bytes
 
@@ -25,7 +25,7 @@ A page SHALL carry its classes in the `sensitivity` frontmatter field, as a list
 - the file keeps its path;
 - one reason record allows a revert.
 
-A page without the field SHALL read as unclassified.
+A page without the field SHALL read as unclassified. On a compiled page, a plain edit of the field SHALL accept only a list of registered keys.
 
 #### Scenario: Classifying a captured Source
 
@@ -35,7 +35,7 @@ A page without the field SHALL read as unclassified.
 
 #### Scenario: An unknown class
 
-- **WHEN** a capture or classify call names a class the registry does not hold
+- **WHEN** a capture, classify or plain edit call names a class the registry does not hold
 - **THEN** it refuses with `SENSITIVITY_CLASS_UNKNOWN`, names the registered keys, and writes nothing
 
 #### Scenario: A plain edit cannot change the class of a Source
@@ -45,7 +45,7 @@ A page without the field SHALL read as unclassified.
 
 ### Requirement: Capture records the agent's classification
 
-`save_source`, `save_evidence`, `create_note`, `save_episode` and `add_record` SHALL accept an optional `sensitivity` list, which the calling agent decides. When a Source or Evidence capture gives none, the capture SHALL apply its Source kind's `sensitivity` attribute when the kind declares one. The server SHALL NOT infer a class from content by any word list, pattern or model call.
+`save_source`, `save_evidence`, `create_note`, `save_episode` and `add_record` SHALL accept an optional `sensitivity` list, which the calling agent decides. When a Source or Evidence capture gives none, the capture SHALL apply its Source kind's `sensitivity` attribute when the kind declares one. A kind default SHALL apply only its registered keys and SHALL NOT refuse the capture. The server SHALL NOT infer a class from content by any word list, pattern or model call.
 
 #### Scenario: An agent captures an identity document photo
 
@@ -58,11 +58,16 @@ A page without the field SHALL read as unclassified.
 - **WHEN** the vault overlay gives a Source kind `sensitivity: identity` and a capture of that kind declares no class
 - **THEN** the Source carries `sensitivity: [identity]` and the result reports `basis: kind-default`
 
+#### Scenario: A kind default names an unregistered class
+
+- **WHEN** a Source kind's default lists `identity` and a key the registry does not hold
+- **THEN** the capture keeps the material, applies `identity`, and reports `basis: kind-default`
+
 ### Requirement: Results report the class and the disclosure in force
 
 Each capture and classify result SHALL report `sensitivity` with:
 - `classes`
-- `basis`: `declared`, `kind-default` or `none`
+- `basis`: `declared`, `kind-default`, `collection-floor` or `none`
 - `disclosure`, taken from live governance state
 
 It SHALL NOT report a restriction that nothing enforces.
@@ -74,7 +79,7 @@ It SHALL NOT report a restriction that nothing enforces.
 
 ### Requirement: Collections carry a class floor
 
-A collection definition MAY declare `sensitivity`, and every row SHALL take it. A row MAY add classes. A row SHALL NOT remove a class that its collection declares. A row's classes SHALL be stored with its governance metadata.
+A collection definition MAY declare `sensitivity`, and every row SHALL take it, reported with basis `collection-floor`. A row MAY add classes through its own `sensitivity` field when its schema declares one. A row SHALL NOT remove a class that its collection declares. A row's classes SHALL be stored with its governance metadata.
 
 #### Scenario: A health collection
 
@@ -89,7 +94,7 @@ The shipped instructions and workflow skills SHALL tell agents to:
 - never skip, cover or reduce one to a pointer to protect it;
 - ask the owner only when a disclosure decision is genuinely unclear.
 
-They SHALL keep the exclusion of authenticators: a payment card number, a security code, a password or a live credential.
+They SHALL keep the exclusion of authenticators by default: a payment card number, a security code, a password or a live credential. They SHALL name an authenticator as such, so that the exclusion never reads as a rule about identity numbers.
 
 #### Scenario: An owner hands an agent their ID-card photos
 

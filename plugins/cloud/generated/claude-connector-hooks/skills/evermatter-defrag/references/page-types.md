@@ -80,11 +80,12 @@ code, a password or a live credential. Ask for a copy with it covered, and say w
 content. `save_source`, `save_evidence`, `create_note`, `save_episode` and `add_record` take it.
 An unknown key refuses with `SENSITIVITY_CLASS_UNKNOWN`, names the registered keys and writes
 nothing. A Source kind may declare a default class for a Source or Evidence capture that gives
-none. A page without the field is unclassified.
+none; a default that names no registered class is skipped, never a refusal. A page without the field is unclassified.
 
 The class is metadata: it never changes the captured bytes. Each capture result reports
 `sensitivity: {classes, basis, disclosure}`. `basis` is `declared`, `kind-default` or `none`.
-`disclosure` says what governs the page now. With no governance policy, every client signed in as
+`basis` `collection-floor` marks a row that takes its collection's floor. `disclosure` says what
+governs the page now. With no governance policy, every client signed in as
 the owner reads the page, so never tell the person it is protected unless `disclosure` names a
 policy.
 
