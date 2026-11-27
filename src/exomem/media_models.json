@@ -223,5 +223,290 @@
       "onnx/encoder_model_int8.data": "27723bcf27c9c56197fde4e8495bd1ce09ed0ae95fb6c9a4695471a9101c2965",
       "onnx/encoder_model_int8.onnx": "d0878abfe4a5e338eb62f5bc79d306bdcb6dae2de9f404cc32a5bc913fb7ec39"
     }
+  },
+  "face-detect": {
+    "model": "opencv/face_detection_yunet",
+    "precision": "fp32",
+    "graph_file": "model.onnx",
+    "input_name": "input",
+    "outputs": {
+      "cls": [
+        "cls_8",
+        "cls_16",
+        "cls_32"
+      ],
+      "obj": [
+        "obj_8",
+        "obj_16",
+        "obj_32"
+      ],
+      "bbox": [
+        "bbox_8",
+        "bbox_16",
+        "bbox_32"
+      ],
+      "kps": [
+        "kps_8",
+        "kps_16",
+        "kps_32"
+      ]
+    },
+    "strides": [
+      8,
+      16,
+      32
+    ],
+    "input_divisor": 32,
+    "working_long_side": 640,
+    "shapes": {
+      "input": [
+        1,
+        3,
+        "height",
+        "width"
+      ],
+      "cls_8": [
+        1,
+        "anchors",
+        1
+      ],
+      "cls_16": [
+        1,
+        "anchors",
+        1
+      ],
+      "cls_32": [
+        1,
+        "anchors",
+        1
+      ],
+      "obj_8": [
+        1,
+        "anchors",
+        1
+      ],
+      "obj_16": [
+        1,
+        "anchors",
+        1
+      ],
+      "obj_32": [
+        1,
+        "anchors",
+        1
+      ],
+      "bbox_8": [
+        1,
+        "anchors",
+        4
+      ],
+      "bbox_16": [
+        1,
+        "anchors",
+        4
+      ],
+      "bbox_32": [
+        1,
+        "anchors",
+        4
+      ],
+      "kps_8": [
+        1,
+        "anchors",
+        10
+      ],
+      "kps_16": [
+        1,
+        "anchors",
+        10
+      ],
+      "kps_32": [
+        1,
+        "anchors",
+        10
+      ]
+    },
+    "calibration": {
+      "score_threshold": {
+        "value": 0.9,
+        "source": "https://huggingface.co/opencv/face_detection_yunet/resolve/3cc26e7f1014a5ee5d74a42acee58bafc9d0a310/demo.py"
+      },
+      "nms_threshold": {
+        "value": 0.3,
+        "source": "https://huggingface.co/opencv/face_detection_yunet/resolve/3cc26e7f1014a5ee5d74a42acee58bafc9d0a310/demo.py"
+      },
+      "decode": {
+        "source": "https://github.com/opencv/opencv/blob/4.10.0/modules/objdetect/src/face_detect.cpp"
+      }
+    },
+    "metadata_files": [],
+    "source": {
+      "graph_file": "face_detection_yunet_2023mar.onnx",
+      "license": "MIT",
+      "license_file": "LICENSE",
+      "license_sources": [
+        "https://huggingface.co/opencv/face_detection_yunet/resolve/3cc26e7f1014a5ee5d74a42acee58bafc9d0a310/LICENSE",
+        "https://huggingface.co/opencv/face_detection_yunet/resolve/3cc26e7f1014a5ee5d74a42acee58bafc9d0a310/README.md"
+      ]
+    },
+    "recipe": {
+      "version": 1,
+      "script": "scripts/build-media-artifacts.py",
+      "pipeline": "upstream fp32 weights unchanged; initializers removed from the graph inputs; input height and width and output anchor counts made symbolic and the fixed intermediate shapes dropped; external data with 1024-byte threshold; numpy decode and NMS compared with OpenCV FaceDetectorYN on fixture images",
+      "symbolic_dimensions": {
+        "input": {
+          "2": "height",
+          "3": "width"
+        },
+        "cls_8": {
+          "1": "anchors"
+        },
+        "cls_16": {
+          "1": "anchors"
+        },
+        "cls_32": {
+          "1": "anchors"
+        },
+        "obj_8": {
+          "1": "anchors"
+        },
+        "obj_16": {
+          "1": "anchors"
+        },
+        "obj_32": {
+          "1": "anchors"
+        },
+        "bbox_8": {
+          "1": "anchors"
+        },
+        "bbox_16": {
+          "1": "anchors"
+        },
+        "bbox_32": {
+          "1": "anchors"
+        },
+        "kps_8": {
+          "1": "anchors"
+        },
+        "kps_16": {
+          "1": "anchors"
+        },
+        "kps_32": {
+          "1": "anchors"
+        }
+      },
+      "comparison_limits": {
+        "box": 0.01,
+        "landmark": 0.01,
+        "score": 0.0001
+      }
+    },
+    "artifact": {
+      "revision": "3cc26e7f1014a5ee5d74a42acee58bafc9d0a310",
+      "source": [],
+      "quantization": "fp32",
+      "file_format": "onnx-external-data",
+      "digest": "6a855dab08ccf0ba7578fdde65c5042fe4a42d1f6e9c434f8491c2924071f20a",
+      "asset_digest": "5082e7378e30d766f21c586d7ea1742a33b89e5ae0b2d3446e6b2e36729d5174",
+      "files": [
+        "model.onnx",
+        "model.onnx.data",
+        "source.json",
+        "LICENSES.txt"
+      ]
+    },
+    "source_files": {
+      "face_detection_yunet_2023mar.onnx": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
+      "LICENSE": "c83b8120c50ccbd4c4f96edf53141bdd566ebb8f8e9227e415326aa1b1aba958"
+    }
+  },
+  "face-embed": {
+    "model": "opencv/face_recognition_sface",
+    "precision": "fp32",
+    "graph_file": "model.onnx",
+    "input_name": "data",
+    "output_name": "fc1",
+    "dimensions": 128,
+    "crop_size": 112,
+    "shapes": {
+      "data": [
+        1,
+        3,
+        112,
+        112
+      ],
+      "fc1": [
+        1,
+        128
+      ]
+    },
+    "calibration": {
+      "same_identity_cosine": {
+        "value": 0.363,
+        "source": "https://huggingface.co/opencv/face_recognition_sface/resolve/3d7082438a6e4551e840c9b2bb60b71e8da4b524/sface.py"
+      },
+      "alignment_template": {
+        "value": [
+          [
+            38.2946,
+            51.6963
+          ],
+          [
+            73.5318,
+            51.5014
+          ],
+          [
+            56.0252,
+            71.7366
+          ],
+          [
+            41.5493,
+            92.3655
+          ],
+          [
+            70.7299,
+            92.2041
+          ]
+        ],
+        "source": "https://github.com/opencv/opencv/blob/4.10.0/modules/objdetect/src/face_recognize.cpp"
+      }
+    },
+    "metadata_files": [],
+    "source": {
+      "graph_file": "face_recognition_sface_2021dec.onnx",
+      "license": "Apache-2.0",
+      "license_file": "LICENSE",
+      "license_sources": [
+        "https://huggingface.co/opencv/face_recognition_sface/resolve/3d7082438a6e4551e840c9b2bb60b71e8da4b524/LICENSE",
+        "https://huggingface.co/opencv/face_recognition_sface/resolve/3d7082438a6e4551e840c9b2bb60b71e8da4b524/README.md"
+      ]
+    },
+    "recipe": {
+      "version": 1,
+      "script": "scripts/build-media-artifacts.py",
+      "pipeline": "upstream fp32 weights unchanged, stored as raw bytes; initializers removed from the graph inputs; external data with 1024-byte threshold; numpy alignment and bilinear warp compared with OpenCV FaceRecognizerSF on fixture images",
+      "comparison_limits": {
+        "crop_mean": 0.01,
+        "cosine_gap": 0.0001
+      }
+    },
+    "artifact": {
+      "revision": "3d7082438a6e4551e840c9b2bb60b71e8da4b524",
+      "source": [],
+      "quantization": "fp32",
+      "file_format": "onnx-external-data",
+      "digest": "542650b4bf302a6e27e18e2c2f5aa91fbdaf6c60006469fc2e325929f4cd2917",
+      "asset_digest": "8378c6f85bd399ef418bb57b8839781b588903374fd2616c3d5f4c31e12dd893",
+      "files": [
+        "model.onnx",
+        "model.onnx.data",
+        "source.json",
+        "LICENSES.txt"
+      ]
+    },
+    "source_files": {
+      "face_recognition_sface_2021dec.onnx": "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
+      "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    }
   }
 }

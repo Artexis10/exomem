@@ -30,16 +30,16 @@ CAPTURE_SKILL_PLUGIN = (
     REPO_ROOT / "plugins" / "claude-code" / "skills" / "evermatter-capture" / "SKILL.md"
 )
 
-OPERATIONS_SOURCE = SRC_ROOT / "_scaffold" / "_Schema" / "references" / "operations.md"
-OPERATIONS_PLUGIN = (
-    REPO_ROOT / "plugins" / "claude-code" / "skills" / "evermatter" / "references" / "operations.md"
+WRITING_SOURCE = SRC_ROOT / "_scaffold" / "_Schema" / "references" / "writing.md"
+WRITING_PLUGIN = (
+    REPO_ROOT / "plugins" / "claude-code" / "skills" / "evermatter" / "references" / "writing.md"
 )
 
 #: The Stop-hook capture check is not a carrier: it names the incident rules and points
 #: here (`tests/test_nudge_diet.py`), so the doctrine lives in exactly these texts.
 CAPTURE_TEXT_PAIRS = (
     (CAPTURE_SKILL_SOURCE, CAPTURE_SKILL_PLUGIN),
-    (OPERATIONS_SOURCE, OPERATIONS_PLUGIN),
+    (WRITING_SOURCE, WRITING_PLUGIN),
 )
 
 #: The two phrases the capture texts forbade the first-mention case with.
@@ -124,8 +124,8 @@ def _rendered_prose(path: pathlib.Path) -> str:
     [
         CAPTURE_SKILL_SOURCE,
         CAPTURE_SKILL_PLUGIN,
-        OPERATIONS_SOURCE,
-        OPERATIONS_PLUGIN,
+        WRITING_SOURCE,
+        WRITING_PLUGIN,
     ],
 )
 def test_each_capture_text_now_permits_a_first_mention_entity(path: pathlib.Path) -> None:

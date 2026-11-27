@@ -32,10 +32,10 @@ def test_name_resolution_preserves_filtered_command_identity() -> None:
         assert resolve_command(command.name, (command,)) is command
         assert resolve_command(command.public_name, ()) is None
         assert resolve_command(command.name, ()) is None
-    # 39 MCP commands (five of them the Source capture protocol, erasure and inventory reads), two
-    # Cloud-only commands and one owner CLI/REST readout.
-    assert len(commands.PRODUCT_COMMANDS) == len(set(commands.PRODUCT_PUBLIC_NAMES)) == 43
-    assert len(commands.product_commands_for("mcp")) == 40
+    # 40 MCP commands (five of them the Source capture protocol, erasure and inventory reads, one the
+    # owner's face control), two Cloud-only commands and one owner CLI/REST readout.
+    assert len(commands.PRODUCT_COMMANDS) == len(set(commands.PRODUCT_PUBLIC_NAMES)) == 44
+    assert len(commands.product_commands_for("mcp")) == 41
     assert any(command.name == "served_context" for command in commands.product_commands_for("rest"))
     assert all(command.name != "served_context" for command in commands.product_commands_for("mcp"))
     assert sum(command.public_name != command.name for command in commands.PRODUCT_COMMANDS) == 7

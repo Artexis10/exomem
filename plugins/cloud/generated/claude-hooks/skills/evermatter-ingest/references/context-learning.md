@@ -2,9 +2,8 @@
 
 Use this workflow when an observed miss or source-backed feedback calls a durable conclusion or its delivery into question.
 Make the source-backed correction whenever the feedback supports one and the active engagement policy permits the write. File the miss in an incident collection only when the user asks, a workflow engages this procedure, or the live engagement policy delegates filing observed outcomes.
-For new material, first use the existing capture and compilation workflow in [writing](writing.md).
-Use this procedure when that material supports a correction or exposes a context failure.
-The active agent diagnoses and writes through existing tools. This procedure adds no background learner or automatic correction.
+For new material, first use the capture and compilation workflow in [writing](writing.md); come back here when that material supports a correction or exposes a context failure.
+The active agent diagnoses and writes through the typed tools. This procedure adds no background learner or automatic correction.
 
 Read [writing](writing.md), [Planning and Records](planning-records.md), and [mutation results](mutation-results.md) before their corresponding writes.
 Use the current capability list and engagement envelope. A miss, advisory, or example grants no additional authority.
@@ -37,7 +36,7 @@ If an authored constraint is absent from the description, consider a supported s
 Resolve aliases, topics, and relations through their existing registries and ambiguity rules.
 
 When the response carries `served_context_id`, link that id as composed response metadata instead of copying its refs.
-Use the owner CLI or REST `served_context` readout; a tool or row id grants no owner authority.
+Read it with the owner `served_context` readout (CLI or REST only); a tool or row id grants no owner authority.
 A retained row proves neither client receipt nor opening, citation or use. Refs do not preserve historical text.
 Record a missing row as absent unless independent retention evidence proves expiry. Without access, preserve the evidence gap.
 
@@ -48,8 +47,8 @@ Record a missing row as absent unless independent retention evidence proves expi
 3. Submit the supported correction with the writer's current guards; immutable Sources and Evidence remain intact.
 4. Inspect the terminal mutation result; the incident links the actual receipt and resulting target reference.
 
-Use `edit_note` for a guarded correction and `supersede_note` when the existing supersession contract fits.
-Use supported summary, topic, alias, and relation writes when their evidence and registry resolution support the change.
+Use `edit_note` for a guarded correction and `supersede_note` when the supersession contract fits.
+Change a summary, topics or aliases with `edit_note(action="set_fields", fields={...})`, and write a relation under `## Relations`, when the evidence and registry resolution support the change.
 A multi-step curation plan retains its own preview and apply authority.
 
 If the target changed, reread it and reconsider the correction.

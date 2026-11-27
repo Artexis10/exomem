@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from exomem import embedding_backend, privacy_log
+from exomem import accel, embedding_backend, privacy_log
 
 RUN_EQUIVALENCE = os.environ.get("RUN_EMBED_EQUIVALENCE_TEST") == "1"
 
@@ -132,7 +132,7 @@ def test_providers_always_end_in_cpu() -> None:
     """An unavailable accelerator must degrade, never raise."""
     pytest.importorskip("onnxruntime")
     for device in ("cpu", "cuda", "cuda:1", "mps"):
-        assert embedding_backend._providers(device)[-1] == "CPUExecutionProvider"
+        assert accel.onnx_providers(device)[-1] == "CPUExecutionProvider"
 
 
 @pytest.mark.parametrize("specials", [False, True])

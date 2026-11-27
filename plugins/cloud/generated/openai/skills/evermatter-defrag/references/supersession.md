@@ -1,149 +1,66 @@
-# Supersession Protocol
+# Supersession
 
-Use supersession when a new page should replace another page as the current answer.
-The active engagement policy supplies the authority for that replacement.
-Ordinary corrections can update an existing unit or page through guarded writers.
-The semantic writer keeps the prior interpretation in the same atomic transition.
+Use supersession when a new page should replace an old page as the current answer. The active
+engagement policy supplies the authority for that replacement; supersession is a restructure.
 
-## Corrections and replacement
+## Correct, supersede or archive
 
-Inspect the affected claims and evidence before choosing the writer.
-Keep the existing home when its subject and retrieval question still fit.
-Use `add_observation` for an exact unit on a registered compiled page, or the existing authorized edit owner elsewhere.
-Preserve a false historical proposition and author its verdict when its history matters.
-Add a distinct corrective unit and exact links when that makes the evidence clearer.
-Refutation and contradiction do not imply supersession or reduce a unit's rank.
+Read the affected claims and their evidence before you choose the writer.
 
-Use `supersede_note` when the agent judges that another page should become the current answer.
-Honor the active engagement policy for that operation.
-Do not create a replacement only to retain old wording: guarded edits already retain prior Markdown.
-Read those revisions with `read_page(part="history")`; the `revision_history` envelope remains separate from the page log.
+- **Correct in place** when the page's subject and retrieval question still fit. Fix one claim with
+  `edit_note` on its unit, or add a corrective unit with `add_observation`
+  ([writing](writing.md#correcting-existing-knowledge)). Guarded edits keep the earlier text:
+  `read_page(page="<page>", part="history")` shows it. Never write a replacement page only to keep
+  old wording.
+- **Supersede one claim** when a single claim is stale and the page still fits (see below).
+- **Supersede the page** when another page should become the current answer.
+- **Archive** when the page is no longer relevant and nothing replaces it: the topic was dropped or
+  the project pivoted.
 
-## How supersession works
+Refutation and contradiction do not imply supersession, and they do not lower a claim's rank. When
+the history of a false claim matters, keep the claim and record its verdict.
 
-1. **The new page is authored** under the same path and naming convention. Choose
-   a slightly different filename to avoid collision: append `-v2`, `-revised`, or
-   a more descriptive variant.
-   - `agentic-rag-retrieval-budget.md` → `agentic-rag-retrieval-budget-v2.md`
+## Supersede a page
 
-2. **The new page's frontmatter sets `supersedes`** to the old page's wikilink:
+Call `supersede_note(note="<old page>", title="<new title>", content="<body>", why="<why>", sources=["<source>"])`.
+Pass `preview=true` first to see the draft without writing either page. One call writes the new
+page, marks the old one superseded and links the two. The old page stays in place, unchanged in its
+body, and links to it still resolve. Readers follow the chain to the new answer. A superseded page
+takes no further edit: change the current page instead.
 
-   ```yaml
-   ---
-   type: research-note
-   project: project-alpha
-   status: active
-   created: 2026-05-09
-   updated: 2026-05-09
-   sources: [...]
-   supersedes: "[[Knowledge Base/Notes/Research/Project Alpha/agentic-rag-retrieval-budget]]"
-   tags: [...]
-   ---
-   ```
+- Every entry in `sources` must resolve to a governed Source or Evidence page, even when the old page
+  cited something unresolved. Capture the original first, or pass an honest empty list. Never
+  promote a derivative into the missing original.
+- Sources and Evidence cannot be superseded. Correct a Source through its correction route
+  ([mutation results](mutation-results.md#files)).
+- Never delete a page that a newer page replaces. The old page keeps the causal history and keeps
+  citations from other pages working.
 
-3. **The old page's frontmatter is updated:**
-   - `status` → `superseded`
-   - `superseded_by` → wikilink to the new page
-   - `updated` → today's date
+## Supersede one claim
 
-4. **The old page's body gets a header banner** (above any other content):
+A stale claim inside a page, an entity page included, supersedes at unit level without a new page.
 
-   ```markdown
-   > [!warning] Superseded
-   > This page has been replaced by [[Knowledge Base/Notes/Research/Project Alpha/agentic-rag-retrieval-budget-v2]] on 2026-05-09.
-   > Reason: <one-line reason>
-   ```
+1. Read the unit ids with `read_page(page="<page>", part="units")`.
+2. Call `edit_note(note="<page>", action="supersede_observation", unit="<unit id>", text="<replacement>", why="<why>")`.
+   For a claim that is still plain list text, pass its exact text as `span` instead of `unit`.
+3. Expect one new unit that supersedes the old one. The old unit's text stays, and recall, search
+   and the graph follow the link.
 
-   Obsidian (and other callout-aware viewers) render `> [!warning]` as a callout; in
-   plain markdown it is an ordinary blockquote, which is fine — the callout is an
-   optional nicety. The explicit "Superseded" header is
-   required.
+Two actions on the same claim keep its text. `action="assess_observation"` records a `verdict`, with
+an optional `check_by` date and evidence `links`. `action="link_observation"` adds typed `links`;
+it never removes one.
 
-5. **The old page is NOT moved or deleted.** It stays in place. Backlinks to it
-   still work; they now lead readers to a clearly-marked superseded page that
-   points forward.
+## Downstream pages
 
-6. **Both index.md files are updated** — the new page is added; the old page's
-   entry is annotated `(superseded)`.
+After a supersession, the pages that cited the old answer may need attention. List them with
+`inspect_memory(operation="connections.inbound_links", arguments={"target": "<old page>"})`.
+Propose updates to the ones whose claims depend on the old answer, and let the user decide whether
+to supersede them too. Never cascade a supersession on your own.
 
-## Reasons to keep superseded pages
+## Archive a page
 
-- **Causal history.** Future-you reading the new page may want to know why it's
-  different. The old page tells you.
-- **Quoted elsewhere.** If a third page cited the old page's claim, that citation
-  should still resolve to something — even if that something is "this was the old
-  answer; here's the new one."
-- **Audit trail.** Git preserves old versions, but doesn't make the supersession
-  relationship discoverable from inside your vault viewer (e.g. Obsidian). The link does.
+1. Move the page into an `_archive` folder beside it with `files.move` ([tools](tools.md)).
+2. Set its status to archived with `edit_note(note="<page>", action="set_fields", fields={"status": "archived"}, why="<why>")`.
 
-## Cascading supersession
-
-When a research note is superseded, the insights and patterns it fed may also
-need attention:
-
-- The skill checks `ingested_into` on the new page's sources to see what else
-  cites them.
-- The skill flags downstream pages whose `sources` include the now-superseded
-  page, and proposes (does not perform) updates to those pages.
-- You decide whether to also supersede the downstream pages.
-
-The skill never cascades automatically. It only flags.
-
-## Superseding one claim inside a page
-
-A single stale claim inside a note — including an entity page — supersedes at
-unit level, without a new page. `edit_note(action="supersede_observation")`
-targets the unit by its unit id or `anchor` from `read_page(part="units")`, or
-by `span` (the item's exact text) when the claim is still plain list prose; a
-span target converts to a compact unit in place under its `##` section's
-category. One call appends a replacement unit that carries
-`supersedes: [[#<anchor>]]`; the target's bytes stay untouched and
-`read_page(part="units")` derives `superseded_by` for it. Recall, search and
-the graph read the edge, and history records `why`.
-
-Two leaf actions finish the claim-level family on the same target resolver:
-
-- `edit_note(action="assess_observation")` records a `verdict` (and optional
-  `check_by` and evidence `links`) on the claim itself.
-- `edit_note(action="link_observation")` adds typed `links` to the claim's
-  relations; links are added, never removed.
-
-Both keep the claim's text. A compact target gains a rich block appended at the
-body end under its same anchor when the assessment needs rich metadata; every
-other unit's id and text are unchanged.
-
-## Archival vs. supersession
-
-Sometimes a page is no longer relevant but isn't being replaced — the topic has
-been dropped, the project has pivoted, the question is no longer interesting.
-That's archival, not supersession.
-
-To archive:
-
-- Move the page to an `_archive/` subfolder of its current location:
-  `Notes/Research/Project Alpha/_archive/dropped-rag-experiment.md`
-- Set `status: archived`
-- No `superseded_by` field
-- Update the relevant `index.md` — archived pages are listed in a separate
-  "Archived" section at the bottom
-
-Archived pages remain searchable by **find** but are excluded from default audit
-checks (orphan detection, etc.).
-
-## What never happens
-
-- Deleting a page (use archival instead)
-- Editing a superseded page's body content (only the supersession banner and frontmatter are added)
-- Creating a `superseded` page without a `superseded_by` pointer
-- Creating a page with `supersedes` pointing to a page that hasn't been marked `superseded`
-
-These conditions are checked by audit. Violations are reported.
-
-## Tool: `supersede_note`
-
-`supersede_note` performs the steps above in one call. Replacement is a new
-source claim: every non-empty `sources` entry must resolve to authorized
-governed Source or Evidence material even when the old page carried an
-unresolved citation (`UNRESOLVED_SOURCE_CITATION`). Capture the original first
-or pass an honest empty list; a derivative is never promoted into the missing
-original. `preview` previews the draft without writing either page.
+An archived page carries no `superseded_by` and stays searchable. Audit checks such as orphan
+detection skip it.

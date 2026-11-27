@@ -807,22 +807,17 @@ def test_a_minor_refinement_stays_on_its_existing_page(vault: Path, owner, enabl
 def test_the_capture_guidance_carries_the_precommit_review_and_final_pass() -> None:
     """Wired into 3.4: the scaffold and its lifecycle-capable adapter copy."""
     root = Path(__file__).resolve().parents[1]
-    for engagement in (
-        root / "src/exomem/_scaffold/_Schema/references/engagement.md",
-        root / "plugins/claude-code/skills/evermatter/references/engagement.md",
+    for tools in (
+        root / "src/exomem/_scaffold/_Schema/references/tools.md",
+        root / "plugins/claude-code/skills/evermatter/references/tools.md",
     ):
-        text = engagement.read_text(encoding="utf-8")
-        section = text[text.index("**Episode candidates") :]
-        section = section[: section.index("\n\n")]
-        for phrase in (
-            "execution: enabled",
-            "content_hash",
-            "before `resume`",
-            'action="coverage"',
-            "postcommit=true",
-            "never claims",
-        ):
-            assert phrase in section, (engagement, phrase)
+        text = tools.read_text(encoding="utf-8")
+        section = text.split("## Turn an episode into typed candidates", 1)[1].split("\n## ", 1)[0]
+        for phrase in ("execution as enabled", "content_hash", '"postcommit": true', "never claims"):
+            assert phrase in section, (tools, phrase)
+        # The plan is reviewed before it runs, and the coverage pass comes after it.
+        review = section.index("Check the plan against the recap")
+        assert review < section.index('operation="episodes.resume"') < section.index('operation="episodes.coverage"')
 
 
 # --------------------------------------------------------------------------- #

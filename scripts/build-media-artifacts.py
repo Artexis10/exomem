@@ -48,6 +48,110 @@ def optimize_offline(graph: Path) -> None:
     staging.rmdir()
 
 
+FACE_KINDS = ("face-detect", "face-embed")
+
+
+def build_face_graph(source: Path, spec: dict, root: Path) -> None:
+    """Rewrite the pinned OpenCV Zoo graph with its weights unchanged and check the shapes the manifest records.
+
+    The initializers leave the graph inputs, so ONNX Runtime folds them as constants. The published detector
+    has a fixed 640 × 640 input; its height, width and anchor counts become symbolic, so it runs at each
+    picture's own size, as OpenCV's `FaceDetectorYN` runs it.
+    """
+    import onnx
+    import onnxruntime as ort
+
+    model = onnx.load(source / spec["source"]["graph_file"])
+    for index, tensor in enumerate(model.graph.initializer):
+        # The embedder stores its weights as typed fields; ONNX externalizes only raw bytes, of the same values.
+        if not tensor.raw_data:
+            model.graph.initializer[index].CopyFrom(onnx.numpy_helper.from_array(onnx.numpy_helper.to_array(tensor), tensor.name))
+    initializers = {tensor.name for tensor in model.graph.initializer}
+    kept = [value for value in model.graph.input if value.name not in initializers]
+    del model.graph.input[:]
+    model.graph.input.extend(kept)
+    if spec["recipe"].get("symbolic_dimensions"):
+        # The export's intermediate shapes are fixed at 640 × 640; ONNX Runtime infers them again.
+        del model.graph.value_info[:]
+        for value in (*model.graph.input, *model.graph.output):
+            for index, name in spec["recipe"]["symbolic_dimensions"].get(value.name, {}).items():
+                value.type.tensor_type.shape.dim[int(index)].dim_param = name
+    onnx.checker.check_model(model)
+    onnx.save_model(model, root / spec["graph_file"], save_as_external_data=True, all_tensors_to_one_file=True,
+                    location=spec["graph_file"] + ".data", size_threshold=1024)
+    shutil.copyfile(source / spec["source"]["license_file"], root / "LICENSES.txt")
+    session = ort.InferenceSession(str(root / spec["graph_file"]), providers=["CPUExecutionProvider"])
+    shapes = {value.name: list(value.shape) for value in (*session.get_inputs(), *session.get_outputs())}
+    if shapes != spec["shapes"]:
+        raise ValueError(f"the built graph's shapes differ from the manifest: {json.dumps(shapes)}")
+
+
+def compare_faces(kind: str, spec: dict, built: Path, source: Path, fixtures: Path, detector_source: Path | None) -> dict:
+    """Build-time only: compare the run-time numpy pipeline with OpenCV's face classes on fixture images.
+
+    The detector must find the faces OpenCV finds, with the same boxes, landmarks and scores. The embedder
+    must align the same crops from OpenCV's detections and give the same vectors. OpenCV runs here only.
+    """
+    import cv2
+    import numpy as np
+    import onnxruntime as ort
+    from PIL import Image
+
+    from exomem import face_models, media_models
+
+    def session(graph: Path):
+        return ort.InferenceSession(str(graph), providers=["CPUExecutionProvider"])
+
+    detecting = kind == "face-detect"
+    detect_spec = spec if detecting else media_models.model_spec("face-detect")
+    detector_folder = source if detecting else detector_source
+    if detector_folder is None:
+        raise SystemExit("comparing the embedder needs --detector-source, the pinned detector's source folder")
+    upstream_detector = str(detector_folder / detect_spec["source"]["graph_file"])
+    calibration = detect_spec["calibration"]
+    if detecting:
+        detector = face_models.FaceDetector(session(built / spec["graph_file"]), spec)
+    else:
+        embedder = face_models.FaceEmbedder(session(built / spec["graph_file"]), spec)
+        recognizer = cv2.FaceRecognizerSF.create(str(source / spec["source"]["graph_file"]), "")
+    limits = spec["recipe"]["comparison_limits"]
+    worst = dict.fromkeys(limits, 0.0)
+    images = []
+    for path in sorted(item for item in fixtures.iterdir() if item.is_file()):
+        with Image.open(path) as image:
+            pixels = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        bgr = np.ascontiguousarray(pixels[:, :, ::-1])
+        reference = cv2.FaceDetectorYN.create(
+            upstream_detector, "", (pixels.shape[1], pixels.shape[0]),
+            calibration["score_threshold"]["value"], calibration["nms_threshold"]["value"],
+        )
+        expected = reference.detect(bgr)[1]
+        expected = np.zeros((0, 15), dtype=np.float32) if expected is None else expected
+        images.append({"image": path.name, "faces": len(expected)})
+        if detecting:
+            found = detector.detect_pixels(pixels)
+            if len(found) != len(expected):
+                raise ValueError(f"{path.name}: {len(found)} faces against OpenCV's {len(expected)}")
+            for face, row in zip(found, expected, strict=True):
+                worst["box"] = max(worst["box"], float(np.abs(np.array(face.box) - row[:4]).max()))
+                landmarks = np.array(face.landmarks).reshape(-1)
+                worst["landmark"] = max(worst["landmark"], float(np.abs(landmarks - row[4:14]).max()))
+                worst["score"] = max(worst["score"], abs(face.score - float(row[14])))
+            continue
+        for row in expected:
+            detection = face_models.Detection(tuple(row[:4]), tuple(map(tuple, row[4:14].reshape(5, 2))), float(row[14]))
+            crop = embedder.crop(pixels, detection)
+            aligned = recognizer.alignCrop(bgr, row)
+            worst["crop_mean"] = max(worst["crop_mean"], float(np.abs(crop.astype(np.float32) - aligned[:, :, ::-1]).mean()))
+            theirs = recognizer.feature(aligned).reshape(-1)
+            cosine = float(embedder.embed_crop(crop) @ (theirs / np.linalg.norm(theirs)))
+            worst["cosine_gap"] = max(worst["cosine_gap"], 1.0 - cosine)
+    report = {"opencv": cv2.__version__, "onnxruntime": ort.__version__, "images": images, "worst": worst}
+    if any(worst[name] > limit for name, limit in limits.items()) or not any(entry["faces"] for entry in images):
+        raise ValueError(f"the numpy pipeline differs from OpenCV beyond the recipe's limits: {json.dumps(report)}")
+    return report
+
+
 def pack(root: Path, spec: dict, destination: Path) -> dict:
     from exomem.embedding_backend import artifact_sha256, write_artifact_asset
     from exomem.media_models import artifact_spec
@@ -60,16 +164,21 @@ def pack(root: Path, spec: dict, destination: Path) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("kind", choices=["image", "image-query", "speech"])
+    parser.add_argument("kind", choices=["image", "image-query", "speech", *FACE_KINDS])
     parser.add_argument("--registry", type=Path, required=True)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--externalized", action="store_true", help="Reuse a previously qualified external-data build")
     parser.add_argument("--vad-source", type=Path)
+    parser.add_argument("--compare", type=Path, help="Face kinds: fixture images to compare with OpenCV (build time only)")
+    parser.add_argument("--detector-source", type=Path, help="face-embed --compare: the pinned detector's source folder")
     args = parser.parse_args()
     import onnx
 
+    from exomem.media_models import check_entry
+
     spec = json.loads(args.registry.read_text())[args.kind]
+    check_entry(args.kind, spec)
     inputs = (
         {name: spec["source_files"][name] for name in spec["metadata_files"]} | spec["external_files"]
         if args.externalized else spec["source_files"]
@@ -158,6 +267,10 @@ def main() -> None:
             del model.graph.output[:]
             model.graph.output.extend([helper.make_tensor_value_info(spec["output_name"], TensorProto.FLOAT, ["batch_size", spec["dimensions"]])])
             onnx.save_model(model, root / "model.onnx", save_as_external_data=True, all_tensors_to_one_file=True, location="model.onnx.data", size_threshold=1024)
+    elif args.kind in FACE_KINDS:
+        build_face_graph(args.source, spec, root)
+        if args.compare is not None:
+            comparison = compare_faces(args.kind, spec, root, args.source, args.compare, args.detector_source)
     else:
         for name in spec["graphs"]:
             target = root / name
@@ -189,6 +302,8 @@ def main() -> None:
     }
     (root / "source.json").write_text(json.dumps(provenance, sort_keys=True, indent=2) + "\n")
     result = pack(root, spec, args.output)
+    if args.compare is not None and args.kind in FACE_KINDS:
+        result["comparison"] = comparison
     (args.output / f"{args.kind}-identity.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result))
 

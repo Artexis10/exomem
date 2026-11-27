@@ -1871,7 +1871,7 @@ def _render_source(
     ingested_into: Sequence[str] = (),
     custody_only: bool | None = None,
 ) -> str:
-    """Emit the source page markdown matching frontmatter.md's example shape.
+    """Emit the source page markdown matching the source page shape that page-types.md describes.
 
     When the source *is* an artifact, the page also points at the bytes and
     records their identity. The field names are the ones the media pipeline

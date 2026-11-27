@@ -72,7 +72,7 @@ def _source_schema(vault: Path):
     if not references.exists():
         shipped = Path(commands.__file__).parent / "_scaffold" / "_Schema" / "references"
         references.mkdir(parents=True)
-        for name in ("frontmatter.md", "page-types.md"):
+        for name in ("page-types.md",):
             shutil.copyfile(shipped / name, references / name)
         fixture = Path(__file__).parent / "fixtures" / fx.KB
         for rel in ("Sources/index.md", "index.md", "log.md"):

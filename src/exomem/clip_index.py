@@ -12,12 +12,14 @@ import sqlite3
 import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, TypeVar
 
 import numpy as np
 
 from . import chance_band, index_paths, reserved_paths, sidecar_store, vecstore
 from .vector_index_common import vec_gate
+
+_T = TypeVar("_T")
 
 log = logging.getLogger(__name__)
 
@@ -285,60 +287,57 @@ class ClipIndex:
             own_instance,
         )
 
+    def _read_held(self, read: Callable[[sqlite3.Connection], _T]) -> _T:
+        """Run `read` on a read-only connection to held storage; never creates or migrates the index.
+
+        Raises FileNotFoundError when the index does not exist.
+        """
+        with reserved_paths._subsystem_authority_scope("clip_index"):
+            with reserved_paths._identity_coordination_scope(
+                self.vault_root,
+                descriptor_ids=("clip-store",),
+                identity_may_change=False,
+            ):
+                with reserved_paths._sqlite_owner_target_scope(
+                    self.vault_root, self.path, "clip-store", create=False,
+                ) as target:
+                    connection = _sqlite_connect_owned(f"{target.resolve().as_uri()}?mode=ro", uri=True)
+                    try:
+                        connection.execute("PRAGMA query_only=ON")
+                        return read(connection)
+                    finally:
+                        connection.close()
+
     def has_vectors(self) -> bool:
         """Probe held read-only storage without creating or loading a matrix."""
         try:
-            with reserved_paths._subsystem_authority_scope("clip_index"):
-                with reserved_paths._identity_coordination_scope(
-                    self.vault_root,
-                    descriptor_ids=("clip-store",),
-                    identity_may_change=False,
-                ):
-                    with reserved_paths._sqlite_owner_target_scope(
-                        self.vault_root, self.path, "clip-store", create=False,
-                    ) as target:
-                        connection = _sqlite_connect_owned(
-                            f"{target.resolve().as_uri()}?mode=ro", uri=True
-                        )
-                        try:
-                            connection.execute("PRAGMA query_only=ON")
-                            return connection.execute("SELECT 1 FROM images LIMIT 1").fetchone() is not None
-                        finally:
-                            connection.close()
+            return self._read_held(lambda connection: connection.execute("SELECT 1 FROM images LIMIT 1").fetchone() is not None)
         except FileNotFoundError:
             return False
 
     def frame_timestamps(self, rel_path: str) -> list[float]:
         """Read existing keyframe timestamps without creating or migrating the index."""
-
         try:
-            with reserved_paths._subsystem_authority_scope("clip_index"):
-                with reserved_paths._identity_coordination_scope(
-                    self.vault_root,
-                    descriptor_ids=("clip-store",),
-                    identity_may_change=False,
-                ):
-                    with reserved_paths._sqlite_owner_target_scope(
-                        self.vault_root,
-                        self.path,
-                        "clip-store",
-                        create=False,
-                    ) as target:
-                        connection = _sqlite_connect_owned(
-                            f"{target.resolve().as_uri()}?mode=ro", uri=True
-                        )
-                        try:
-                            connection.execute("PRAGMA query_only=ON")
-                            rows = connection.execute(
-                                "SELECT frame_ts FROM images WHERE file_path=? "
-                                "AND frame_ts IS NOT NULL ORDER BY frame_ts, rowid",
-                                (rel_path,),
-                            ).fetchall()
-                        finally:
-                            connection.close()
+            rows = self._read_held(lambda connection: connection.execute(
+                "SELECT frame_ts FROM images WHERE file_path=? "
+                "AND frame_ts IS NOT NULL ORDER BY frame_ts, rowid",
+                (rel_path,),
+            ).fetchall())
         except (FileNotFoundError, sqlite3.DatabaseError, RuntimeError):
             return []
         return [float(row[0]) for row in rows]
+
+    def picture_paths(self, after: str, limit: int) -> list[str]:
+        """The next `limit` distinct indexed paths after `after`, in path order."""
+        return self._read_held(lambda connection: [row[0] for row in connection.execute(
+            "SELECT DISTINCT file_path FROM images WHERE file_path > ? ORDER BY file_path LIMIT ?", (after, limit),
+        )])
+
+    def picture_count(self) -> int:
+        """How many distinct paths the index holds: images and videos, each counted once."""
+        return int(self._read_held(
+            lambda connection: connection.execute("SELECT COUNT(DISTINCT file_path) FROM images").fetchone()[0]
+        ))
 
     def delete(self, rel_path: str) -> None:
         """Delete one visual key if the sidecar exists."""
@@ -425,6 +424,10 @@ class ClipIndex:
 
         ``photo.jpg.md`` is the canonical artifact exposed to ordinary recall;
         CLIP stores it as ``photo.jpg``.  Only a terminal ``.md`` is stripped.
+
+        The picture's faces stay. Every caller drops a picture from recall, not from the vault, and a
+        person restriction only narrows the pages that recall admits. A picture whose file is gone
+        reaches `embeddings.delete_clip_after_remove` through reconcile's CLIP orphan pass, which drops them.
         """
         return self.purge_paths_if_present(
             [path.removesuffix(".md") for path in markdown_paths]
