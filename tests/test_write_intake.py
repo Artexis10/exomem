@@ -430,6 +430,54 @@ def test_a_compact_save_with_governed_metadata_behind_the_queue_is_refused_at_on
     assert "as_of" in str(refused.value) and "`kind`" in str(refused.value)
 
 
+def test_an_oversized_recap_behind_the_queue_is_refused_at_once_and_never_queued(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect: a recap whose item broke a size cap came back queued and failed only at the replay."""
+    _writer, holder = managers
+    observe = _command("observe_memory")
+    plain = {
+        "path": "Knowledge Base/Notes/Insights/percentage-based-feature-flag-rollout.md",
+        "operation": "add", "category": "operating_constraint", "content": "A busy vault must not lose a save",
+    }
+    paused = threading.Event()
+    real_claim = write_intake._claim_head
+    monkeypatch.setattr(write_intake, "_claim_head", lambda root: 0.05 if not paused.is_set() else real_claim(root))
+    with _Hold(holder, vault):
+        first = _send(observe, vault, plain)
+    with pytest.raises(ValueError, match="EPISODE_TOO_LARGE"):
+        _send(_command("episode_memory"), vault, {
+            "action": "record", "subject": "Rollout review", "summary": "Reviewed the rollout steps.",
+            "decided": ["Keep the cohort steps " + "x" * 300],
+        }, scope="principal:session-b")
+    assert [item["ref"] for item in write_intake.read(vault)["items"]] == [first["queued_write"]["ref"]]
+    paused.set()
+    _wait_for_state(vault, first["queued_write"]["ref"], "applied")
+
+
+def test_a_record_call_with_arguments_its_action_refuses_behind_the_queue_is_never_queued(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A command that owns its argument rules is refused by them before queueing, not at the replay."""
+    _writer, holder = managers
+    observe = _command("observe_memory")
+    plain = {
+        "path": "Knowledge Base/Notes/Insights/percentage-based-feature-flag-rollout.md",
+        "operation": "add", "category": "operating_constraint", "content": "A busy vault must not lose a save",
+    }
+    paused = threading.Event()
+    real_claim = write_intake._claim_head
+    monkeypatch.setattr(write_intake, "_claim_head", lambda root: 0.05 if not paused.is_set() else real_claim(root))
+    with _Hold(holder, vault):
+        first = _send(observe, vault, plain)
+    with pytest.raises(Exception, match="arguments do not match the selected record action"):
+        _send(_command("record_memory"), vault, {"action": "append", "collection": "Reading list"},
+              scope="principal:session-b")
+    assert [item["ref"] for item in write_intake.read(vault)["items"]] == [first["queued_write"]["ref"]]
+    paused.set()
+    _wait_for_state(vault, first["queued_write"]["ref"], "applied")
+
+
 def test_a_dated_save_with_relations_behind_a_backlog_is_told_only_the_exit_that_lands(
     vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
