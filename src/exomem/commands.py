@@ -97,6 +97,7 @@ from . import (
     vocabulary_resolution,
 )
 from . import find as find_module
+from . import foreground_priority as foreground_priority_module
 from . import freshness as freshness_module
 from . import get_page as get_page_module
 from . import held_operation as held_operation_module
@@ -8112,6 +8113,28 @@ def _op_activate_context_body(
     managed_runtime = readiness_module.runtime_managed()
     event_indexes_on = freshness_module.event_indexes_enabled()
     recall_live = freshness_module.recall_is_live(vault_root, "kb")
+    # One warm-up deadline for this turn, shared by the seed wait here and the identity wait in
+    # readiness below, so the two waits never add up to more than it. It is set by the first wait
+    # that needs it, so a warm process reads nothing more of its budget than before.
+    warm_deadline: list[float] = []
+
+    def warm_left() -> float:
+        if not warm_deadline:
+            warm_deadline.append(time.monotonic() + working_set_runtime_module.first_turn_warm_wait_seconds())
+        return max(0.0, warm_deadline[0] - time.monotonic())
+
+    if (
+        managed_runtime
+        and event_indexes_on
+        and not recall_live
+        and freshness_module.recall_seed_pending(vault_root, "kb")
+    ):
+        # A fresh process seeds its recall registry at boot; a small vault finishes in seconds,
+        # so the turn waits for that seed until the warm-up deadline before it abstains on it.
+        # The seed runs on the watcher's thread, and this thread holds no boundary.
+        with find_types.timing_span(timings, "working_set.seed_wait"), foreground_priority_module.outside_foreground():
+            freshness_module.wait_seed_settled(vault_root, "kb", warm_left())
+        recall_live = freshness_module.recall_is_live(vault_root, "kb")
     managed_cold = (
         managed_runtime
         and event_indexes_on
@@ -8172,6 +8195,8 @@ def _op_activate_context_body(
                 vault_root,
                 freshness_stamp=working_set_runtime_module._key_text(freshness_key),
                 recall_checkpoint=snapshot.recall_checkpoint("kb") if snapshot else None,
+                # A turn that abstains on its seed anyway gains nothing from waiting on identity.
+                warm_wait=None if managed_cold else warm_left,
             )
             # The stamp first: it can then only be older than the token's catalogue,
             # so the lag counted from it covers everything the token moved by.

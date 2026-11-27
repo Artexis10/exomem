@@ -1829,6 +1829,7 @@ def test_owner_journey_through_preserve_and_record_memory(store, monkeypatch):
         "members",
         "reimport",
         "mapping",
+        "check_sum",
         "continuation",
     }
     malformed = refused(agent, mode=["preview"])
