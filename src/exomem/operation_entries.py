@@ -754,6 +754,8 @@ _REMAINING = {
         _row("recover", "change_files", ("trash_path", "path", "restore_path"), (), verb="restored"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("reclassify", "change_files", ("path", "old_path", "source_kind", "domain", "artifact_path", "reason", "preview_digest"), ("reason",), destructive=True, verb="moved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("revert-reclassification", "change_files", ("path", "reason"), ("path",), destructive=True, verb="moved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("classify", "change_files", ("path", "sensitivity", "reason", "revert_record", "expected_hash", "validate_only"), ("path", "reason"), constraints=(_literal("validate_only", False, True),), destructive=True, verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("classify", "browse_memory", ("path", "sensitivity", "reason", "revert_record", "expected_hash", "validate_only"), ("path", "reason"), kind="validate-classify", constraints=(_literal("validate_only", True, implied=True),)),
     ), True),
     "approve_procedure": ("action", (
         _row("approve", "approve_procedure", ("ref", "expected_version"), ("ref", "expected_version"), verb="saved", idempotent=True),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation.
@@ -767,7 +769,7 @@ _REMAINING = {
         _row("delete", "change_faces", (), destructive=True, verb="deleted", idempotent=True, queues_when_busy=False),
     )),
     "episode_memory": ("action", (
-        _row("record", "record_episode", ("episode", "subject", "summary", "worked_on", "decided", "open", "said", "about", "client"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("record", "record_episode", ("episode", "subject", "summary", "worked_on", "decided", "open", "said", "about", "client", "sensitivity"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("input", "record_episode", ("episode", "input_revision", "journal_digest", "materials"), ("episode", "input_revision", "journal_digest", "materials"), verb="saved", queues_when_busy=False),  # nosemgrep: ep-word-set -- closed v1 input-binding wire fields.
         _row("material", "read_episode", ("episode", "input_revision", "material_key"), ("episode", "input_revision", "material_key")),  # nosemgrep: ep-word-set -- closed v1 keyed-read wire fields.
         _row("inspect", "read_episode", ("episode", "subject")),

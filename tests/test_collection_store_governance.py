@@ -1325,3 +1325,78 @@ def test_hidden_row_allocation_cannot_change_limited_collection_observations(tmp
     query, inspection = observations[0]
     assert [row["title"] for row in query["rows"]] == ["Allowed"]
     assert inspection["coverage"]["committed"] == 1
+
+
+def _sensitivity_of(store, key):
+    """The `sensitivity` classes the row's stored governance metadata carries."""
+    raw = store.connection.execute("SELECT governance_json FROM items WHERE item_key=?", (key,)).fetchone()[0]
+    return json.loads(raw).get("sensitivity", [])
+
+
+def _floored_manifest(floor="[health]"):
+    text = manifest_text().replace("title: Work", f"title: Work\nsensitivity: {floor}")
+    return text.replace("    count:", "    sensitivity: {type: array, items: {type: string}}\n    count:")
+
+
+def test_a_collection_floor_reaches_every_row_and_a_row_adds_classes_but_never_removes_one(store):
+    """A row that misses the collection's class, a row edit that drops the floor, an added class that is lost
+    when the row changes, or a floor change that leaves a stored row on the old floor."""
+    store.create_collection(manifest_path(), _floored_manifest(), why="create")
+
+    plain = store.append_record(CID, item={"title": "Plain"}, item_key=KEY, why="capture")
+    extended = store.append_record(
+        CID, item={"title": "Extended", "sensitivity": ["financial"]}, item_key=OTHER, why="capture")
+
+    assert _sensitivity_of(store, KEY) == ["health"]
+    assert plain["sensitivity"]["classes"] == ["health"] and plain["sensitivity"]["basis"] == "collection-floor"
+    assert _sensitivity_of(store, OTHER) == ["financial", "health"]
+    assert extended["sensitivity"]["classes"] == ["financial", "health"]
+    assert extended["sensitivity"]["basis"] == "declared"
+
+    store.update_record(CID, item_key=OTHER, changes={"sensitivity": []}, why="drop the class",
+                        expected_container_hash=extended["after_container_hash"],
+                        expected_item_version=extended["after_item_hash"])
+    assert _sensitivity_of(store, OTHER) == ["health"]
+
+    guards = store.inspect_collection(CID)["lifecycle_guards"]
+    store.revise_collection(CID, manifest_text=_floored_manifest("[health, identity]"), why="widen", **guards)
+    assert _sensitivity_of(store, KEY) == ["health", "identity"]
+
+
+def test_an_unregistered_class_refuses_a_collection_floor_and_a_row_and_writes_nothing(store):
+    """A free-text class stored as a floor or on a row, which later governance could never resolve."""
+    with pytest.raises(collections.CollectionError, match="SENSITIVITY_CLASS_UNKNOWN"):
+        store.create_collection(manifest_path(), _floored_manifest("[passport-ish]"), why="create")
+    assert store.connection.execute("SELECT COUNT(*) FROM collection_manifests").fetchone()[0] == 0
+
+    store.create_collection(manifest_path(), _floored_manifest(), why="create")
+    with pytest.raises(collections.CollectionError, match="SENSITIVITY_CLASS_UNKNOWN"):
+        store.append_record(CID, item={"title": "One", "sensitivity": ["passport-ish"]}, item_key=KEY, why="capture")
+    assert store.connection.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0
+
+
+def test_a_bulk_upsert_rejects_a_row_with_an_unregistered_class_and_canonicalises_a_registered_one(store):
+    """A bulk write (a table import goes through it) that stores a free-text class the row-by-row path refuses."""
+    from test_records_bulk_upsert import EVIDENCE, _evidence
+
+    store.create_collection(manifest_path(), _floored_manifest(), why="create")
+    _evidence(store.root)
+    receipt = store.bulk_upsert_records(
+        CID, rows=[{"item": {"title": "X", "sensitivity": ["passport-ish"]}},
+                   {"item": {"title": "Y", "sensitivity": ["Financial"]}}],
+        expected_container_hash=store.current_guards(CID)[0], source=EVIDENCE, why="capture", on_reject="skip")
+
+    assert receipt["counts"]["inserted"] == 1, receipt
+    stored = [json.loads(row[0]) for row in store.connection.execute("SELECT governance_json FROM items")]
+    assert [sorted(entry["sensitivity"]) for entry in stored] == [["financial", "health"]], stored
+
+
+def test_a_text_column_named_sensitivity_stays_an_ordinary_column(store):
+    """A collection that already has a free-text `sensitivity` column, whose words would become classes or
+    whose rows would refuse."""
+    text = manifest_text().replace("    count:", "    sensitivity: {type: string}\n    count:")
+    store.create_collection(manifest_path(), text, why="create")
+
+    store.append_record(CID, item={"title": "One", "sensitivity": "high"}, item_key=KEY, why="capture")
+
+    assert _sensitivity_of(store, KEY) == []
