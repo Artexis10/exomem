@@ -144,6 +144,11 @@ class NewerStore(sqlite3.DatabaseError):
     """A face store that a newer release wrote: it may hold rows this one would misread or drop."""
 
 
+def is_busy(error: sqlite3.Error) -> bool:
+    """Whether `error` means another connection holds the store: it is readable, and a retry can succeed."""
+    return getattr(error, "sqlite_errorcode", None) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+
+
 def _readable_version(connection: sqlite3.Connection, path: Path) -> int:
     version = connection.execute("PRAGMA user_version").fetchone()[0]
     if version > SCHEMA_VERSION:

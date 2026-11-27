@@ -384,12 +384,17 @@ def test_delete_erases_a_face_index_this_release_cannot_open(doors, vault, damag
     assert reply["counts"] == "unknown" or reply["counts"]["people"] == 2
 
 
-@pytest.mark.parametrize("damage", ["garbage bytes", "a newer schema"])
+@pytest.mark.parametrize("damage", ["garbage bytes", "a newer schema", "lost tables"])
 def test_status_on_a_face_index_this_release_cannot_open_names_it_and_points_to_delete(doors, vault, damage) -> None:
     """Catches a status that fails on a damaged face index, which leaves the owner no way to learn the fix."""
     seed_two_people_and_strangers(vault)
     index_file = face_store.index_path(vault)
-    if damage == "garbage bytes":
+    if damage == "lost tables":
+        with closing(sqlite3.connect(index_file)) as index:
+            for (table,) in index.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall():
+                index.execute(f"DROP TABLE {table}")
+            index.commit()
+    elif damage == "garbage bytes":
         index_file.write_bytes(b"not a database, just bytes" * 200)
         for suffix in ("-wal", "-shm"):
             Path(f"{index_file}{suffix}").unlink(missing_ok=True)
@@ -417,6 +422,11 @@ def test_naming_on_a_damaged_face_index_is_refused_and_points_to_delete(doors, v
     error = reply.get("error") or reply
     assert error.get("code") == "FACES_UNREADABLE", reply
     assert "faces.delete" in str(error), reply
+
+    off = doors("manage_memory", "faces.set", {"state": "off"})
+
+    assert off["state"] == "unreadable", off
+    assert "faces.delete" in off["next_action"]
 
 
 def test_the_delete_result_and_status_name_what_the_delete_cannot_reach_and_when_it_ends(doors, vault) -> None:

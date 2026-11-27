@@ -98,9 +98,9 @@ def admit(vault_root: Path, people: Sequence[str]) -> Restriction:
         raise faces_unavailable(refusal)
     try:
         setting = face_store.read_setting(vault_root)
-    except sqlite3.OperationalError:
-        raise  # Busy or locked: the store is readable, and the caller retries.
     except sqlite3.DatabaseError as error:
+        if face_store.is_busy(error):
+            raise  # Another connection holds the store: it is readable, and the caller retries.
         raise faces_unreadable(error) from error
     if setting is None or not setting.enabled:
         raise faces_off()
@@ -119,9 +119,9 @@ def pages(vault_root: Path, restriction: Restriction, people: Sequence[str]) -> 
     """
     try:
         found = face_groups.person_pages(vault_root, restriction.names)
-    except sqlite3.OperationalError:
-        raise
     except sqlite3.DatabaseError as error:
+        if face_store.is_busy(error):
+            raise  # Another connection holds the store: it is readable, and the caller retries.
         raise faces_unreadable(error) from error
     unknown = [name.strip() for name in people if face_store.fold_name(name.strip()) not in found]
     if unknown:

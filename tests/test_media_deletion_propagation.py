@@ -161,12 +161,14 @@ def test_a_face_store_that_cannot_drop_the_rows_is_retried_by_reconcile(
     assert not embeddings.ClipIndex(vault).has(rel)
 
 
-def test_an_unreadable_face_index_holds_back_no_text_page_removal(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Catches a damaged or newer face index stalling every removal and every text Source erasure."""
+@pytest.mark.parametrize("note", ["Knowledge Base/Notes/a-note.md", "Knowledge Base/Sources/a-report.pdf"])
+def test_an_unreadable_face_index_holds_back_no_removal_of_a_file_without_faces(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, note: str
+) -> None:
+    """Catches a damaged or newer face index stalling the removal or erasure of every non-picture file."""
     from exomem import face_store
 
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
-    note = "Knowledge Base/Notes/a-note.md"
     embeddings.ClipIndex(vault).upsert(note, _unit(0), 1.0)
     index = face_store.index_path(vault)
     index.parent.mkdir(parents=True, exist_ok=True)

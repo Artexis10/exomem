@@ -488,7 +488,7 @@ def erase(vault_root: Path) -> tuple[Counts | None, list[str]]:
                     connection.execute("BEGIN IMMEDIATE")
             found: Counts | None = counts(vault_root)
         except sqlite3.DatabaseError as error:
-            if getattr(error, "sqlite_errorcode", None) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+            if face_store.is_busy(error):
                 raise
             # A damaged store is still erased; its counts are unknown, never zero.
             log.warning("faces: the face store could not be counted before its delete", exc_info=True)
@@ -627,9 +627,9 @@ def forget_pages(vault_root: Path, pages: Sequence[str]) -> int:
     because they name a removed file. Returns the faces removed.
     """
     path = face_store.index_path(vault_root)
-    # Only a picture or video holds faces. A text page never opens the face store, so an unreadable index
+    # Only a picture or video holds faces. Any other removed file never opens the face store, so an unreadable index
     # holds back the cleanup of removed pictures alone, never every removal or a text Source's erasure.
-    keys = sorted({page for page in pages if page and media_types.media_type_for(page) is not None})
+    keys = sorted({page for page in pages if page and media_types.media_type_for(page) in media_types.VISUAL_KINDS})
     if not keys or not path.is_file():
         return 0
     wanted = json.dumps(keys)

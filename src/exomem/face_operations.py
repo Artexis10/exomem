@@ -104,9 +104,9 @@ def run(
         if action == "set":
             return change_setting(vault_root, state=state, thresholds=thresholds)
         return change_name(vault_root, group=group, person=person, face=face, name=name, clear=clear)
-    except sqlite3.OperationalError:
-        raise  # Busy or locked: the store is readable, and the caller retries.
     except sqlite3.DatabaseError as error:
+        if face_store.is_busy(error):
+            raise  # Another connection holds the store: it is readable, and the caller retries.
         raise face_search.faces_unreadable(error) from error
 
 
@@ -138,9 +138,9 @@ def status(vault_root: Path, *, page: str | None, limit: int | None, cursor: str
     """
     try:
         return _status(vault_root, page=page, limit=limit, cursor=cursor)
-    except sqlite3.OperationalError:
-        raise  # Busy or locked: the store is readable, and the caller retries.
     except sqlite3.DatabaseError as error:
+        if face_store.is_busy(error):
+            raise  # Another connection holds the store: it is readable, and the caller retries.
         return _unreadable(error)
 
 
@@ -316,7 +316,16 @@ def turn_off(vault_root: Path) -> dict[str, Any]:
 
     Stored faces, groups and names stay. A store that was never created stays uncreated.
     """
-    if not face_store.enabled(vault_root):
+    try:
+        enabled = face_store.enabled(vault_root)
+    except sqlite3.DatabaseError as error:
+        if face_store.is_busy(error):
+            raise  # Another connection holds the store: it is readable, and the caller retries.
+        # No face work runs on a store this release cannot read, so off is already in effect.
+        answer = _unreadable(error)
+        answer["outcome"] = "Faces are already off in effect: the face data cannot be read, so no picture is scanned."
+        return answer
+    if not enabled:
         return {"outcome": "Faces are already off.", "state": "off"}
     with closing(face_store.connect_index(vault_root)) as index:
         face_store.record_opt_out(index)
