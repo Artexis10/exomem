@@ -11,6 +11,7 @@ import base64
 import gzip
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -20,7 +21,8 @@ from types import SimpleNamespace
 import pytest
 from cellctl.imports import JOB_FAILED_LOG_PHRASE
 
-from cloud_rehearsal import large_import, platform
+from cloud_rehearsal import infra, large_import, large_import_fixture, platform, scenarios, shell
+from cloud_rehearsal.infra import K3s
 from cloud_rehearsal.mcp_client import ToolResult
 from cloud_rehearsal.report import StepFailure
 
@@ -449,12 +451,17 @@ def test_a_reply_without_counts_leaves_its_files_and_the_rate_unknown_not_zero()
 # --- the agent's calls across a restarting cell ---------------------------------------------
 
 
+HANGS = object()  # a call that the cell never answers
+
+
 class Session:
     def __init__(self, script):
         self.script = script
 
     async def call(self, name, arguments):
         step = self.script.pop(0)
+        if step is HANGS:
+            await asyncio.Event().wait()
         if isinstance(step, Exception):
             raise step
         return step
@@ -701,3 +708,117 @@ def test_the_app_log_is_kept_before_the_discard_replaces_the_pod(monkeypatch):
     asyncio.run(large_import.discard(Cell(), Refusing(), _plan(), _folder()))
 
     assert events.index("app log kept for notes") < events.index("transfer_memory")
+
+
+# --- a hung call ends at the deadline and leaves its evidence --------------------------------
+
+
+def _plan_with(seconds):
+    plan = _plan()
+    plan.deadline = time.monotonic() + seconds
+    return plan
+
+
+def test_a_call_the_cell_never_answers_is_ended_at_the_deadline_and_named():
+    """Catches the hang that the between-calls deadline check could not see: one call that never returned held the run
+    until the step's own timeout killed it, and the report and the cell's evidence went with it."""
+    agent = large_import.Agent(Client([HANGS]), _plan_with(0.2))
+    agent.where = "media folder, file call 7, 3 pages so far"
+    started = time.monotonic()
+
+    with pytest.raises(large_import.OutOfTime) as ended:
+        asyncio.run(asyncio.wait_for(agent.import_op("file", path="p"), timeout=5))
+
+    assert time.monotonic() - started < 3
+    message = str(ended.value)
+    assert "manage_memory.file" in message and "media folder, file call 7, 3 pages so far" in message
+    assert re.search(r"after \d+\.\d s", message)
+
+
+def test_a_call_that_the_boundary_keeps_refusing_names_the_cause_when_the_deadline_ends_it():
+    """Catches a retry chain that is its own hang: each refusal is retried after its pause, so no single request is slow."""
+    agent = large_import.Agent(Client([_busy("holder_overdue") for _ in range(5)]), _plan_with(0.3))
+
+    with pytest.raises(large_import.OutOfTime) as ended:
+        asyncio.run(asyncio.wait_for(agent.call("manage_memory", {}, kind="file"), timeout=5))
+
+    assert "holder_overdue" in str(ended.value) and len(agent.refusals) >= 1
+
+
+def test_a_call_made_after_the_deadline_is_not_sent():
+    agent = large_import.Agent(Client([_reply({"ok": True})]), _plan_with(-1))
+
+    with pytest.raises(large_import.OutOfTime, match="search_memory"):
+        asyncio.run(agent.call("search_memory", {"query": "q"}))
+
+
+def test_a_kubectl_call_that_outlives_the_scenarios_time_is_killed_and_named(monkeypatch):
+    """Catches a kubectl exec that waited out its 900-second default: the call's subprocess is ended at the limit."""
+    monkeypatch.setattr(infra, "run", lambda command, **kwargs: shell.run(["sleep", "5"], **kwargs))
+    ctx = SimpleNamespace(large_import=_plan_with(0.3), stack=SimpleNamespace(k3s=K3s(container="c", ip="10.0.0.1")))
+    started = time.monotonic()
+
+    with pytest.raises(large_import.OutOfTime, match="kubectl exec"):
+        scenarios.Context.kubectl(ctx, "exec", "--namespace", "cell-a", "pod", "--", "python3")
+
+    assert time.monotonic() - started < 3
+
+
+def test_a_hung_call_ends_the_stage_with_the_call_named_and_the_cells_state_collected(monkeypatch, tmp_path):
+    """The workflow's one proof: a call that never returns still yields a finding that names it, the evidence of what the
+    cell was held by, and the logs the run keeps, because the stage ends instead of waiting for the step's timeout."""
+    plan = _plan_with(0.3)
+    plan.sizing = large_import_fixture.Sizing(
+        notes_bytes=1, media_bytes=1, volume_gib=17, files_notes=1, files_media=1, scaled=False,
+        proves_one_copy_only=True, note="", fullest_volume_bytes=1, staged_copies_peak_bytes=1)
+    boundary = {"state": "held", "operation": "lexical_repair", "holder_kind": "background", "age_seconds": 1500.0}
+    kept = []
+
+    async def fetchrow(*_args):
+        return {"observed_state": "importing"}
+
+    ctx = SimpleNamespace(
+        report=SimpleNamespace(stages={"large_import": {}}, environment={}), a=SimpleNamespace(cell_id="c", session=None),
+        stack=SimpleNamespace(workdir=tmp_path), resolver=None, browser=None, substrate=SimpleNamespace(redirect_uri=""),
+        large_import=plan, fetchrow=fetchrow)
+
+    async def hangs(_ctx, agent, _plan, _out, sampler, _name, _space):
+        sampler.label = "notes.paging"
+        agent.where = "notes folder, file call 5, 2 pages so far"
+        await agent.import_op("file", path="p")
+
+    async def volume(_ctx):
+        return {"pvc_request": "17Gi", "pvc_request_bytes": 17 * large_import_fixture.GIB, "cell_row_storage_gib": 17}
+
+    async def first_session(*_args, **_kwargs):
+        return []
+
+    async def app_logs(_ctx, label):
+        kept.append(f"app log {label}")
+        return {}
+
+    def probe(_ctx, script, *_args, **_kwargs):
+        return {"boundary": boundary, "journal_tail": []} if script == large_import.HANG_SCRIPT else [plan.ceiling, plan.reserve]
+
+    monkeypatch.setattr(large_import, "TenantClient", lambda *_args: Client([HANGS]))
+    monkeypatch.setattr(large_import, "first_session", first_session)
+    monkeypatch.setattr(large_import, "exec_json", probe)
+    monkeypatch.setattr(large_import, "read_cell", lambda _ctx: {"ready": {"status": "starting", "repair": {"phase": "rebuilding"}}})
+    monkeypatch.setattr(large_import, "run_folder", hangs)
+    monkeypatch.setattr(large_import, "volume_state", volume)
+    monkeypatch.setattr(large_import, "measurements", lambda *_args: {})
+    monkeypatch.setattr(large_import, "save_import_failure_evidence", lambda _ctx: kept.append("failure evidence") or {})
+    monkeypatch.setattr(large_import, "save_cell_logs", lambda _ctx: kept.append("pod log"))
+    monkeypatch.setattr(large_import, "keep_cell_app_logs", app_logs)
+
+    asyncio.run(asyncio.wait_for(large_import.run_large_import(ctx, plan), timeout=20))
+
+    stage = ctx.report.stages["large_import"]
+    (finding,) = stage["findings"]
+    assert finding["deadline"] is True and finding["phase"] == "notes.paging"
+    assert "manage_memory.file" in finding["message"] and "notes folder, file call 5, 2 pages so far" in finding["message"]
+    assert finding["latest_import"] == {"observed_state": "importing"}
+    assert stage["hang_evidence"]["boundary"] == {"boundary": boundary, "journal_tail": []}
+    assert stage["hang_evidence"]["last_sample"]["ready"]["repair"] == {"phase": "rebuilding"}
+    assert {"failure evidence", "pod log", "app log end"} <= set(kept)
+    assert stage["verdict"] == "fail"

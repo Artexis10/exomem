@@ -19,6 +19,7 @@ import base64
 import datetime as dt
 import json
 import secrets
+import subprocess
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -337,7 +338,16 @@ class Context:
     # --- the cluster, read as the operator ---
 
     def kubectl(self, *args: str, check: bool = True, input_text: str | None = None):
-        return self.stack.k3s.kubectl(*args, check=check, input_text=input_text)
+        plan = self.large_import
+        what = f"kubectl {args[0]}"
+        # The large-import scenario ends each call at its own deadline; every other scenario keeps the default limit.
+        limit = plan.call_limit(what) if plan is not None else None
+        try:
+            return self.stack.k3s.kubectl(*args, check=check, input_text=input_text, timeout=limit)
+        except subprocess.TimeoutExpired:
+            if plan is None:
+                raise
+            raise plan.call_timed_out(what, limit) from None
 
     def kube_json(self, *args: str) -> dict[str, Any]:
         return json.loads(self.kubectl(*args, "--output=json").stdout)

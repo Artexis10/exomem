@@ -82,11 +82,14 @@ class K3s:
     ingress_host_port: int | None = None
     kubeconfig: Path | None = None
 
-    def kubectl(self, *args: str, input_text: str | None = None, check: bool = True):
+    def kubectl(self, *args: str, input_text: str | None = None, check: bool = True, timeout: float | None = None):
+        # `timeout` ends the docker client, which ends the exec; without it `run`'s own default applies.
+        limit = {} if timeout is None else {"timeout": timeout}
         return run(
             ["docker", "exec", "--interactive", self.container, "kubectl", *args],
             input_text=input_text,
             check=check,
+            **limit,
         )
 
 

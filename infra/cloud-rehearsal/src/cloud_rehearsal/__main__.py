@@ -23,6 +23,7 @@ import json
 import os
 import secrets
 import shutil
+import subprocess
 import sys
 import time
 from dataclasses import asdict
@@ -515,7 +516,11 @@ async def _run(args: argparse.Namespace) -> int:
         code = 2
     finally:
         # Each cleanup stands alone, so one failing never strands the stack
-        # or loses the report.
+        # or loses the report. The report is written first, before the cleanups that can run long, so
+        # that a step the workflow's timeout kills during one of them still uploads it; the write
+        # after them replaces it with the cleanup notes.
+        if not guarded(report, "report", lambda: report.write(args.report)):
+            code = 2
         if stack is not None and not args.keep:
             guarded(report, "diagnostics", lambda: _collect_diagnostics(stack, workdir))
         if not guarded(report, "teardown", lambda: infra.teardown(stack, keep=args.keep)):
@@ -590,9 +595,17 @@ def _wait_json(resolver: Resolver, url: str, what: str) -> None:
     wait_for(probe, timeout=300, interval=3, description=f"{what} to answer {url}")
 
 
+# One kubectl read of the cluster's state, at the most: a wedged API server costs five of these, not the diagnostics.
+DIAGNOSTIC_READ_SECONDS = 60
+
+
 def _collect_diagnostics(stack: infra.Stack, workdir: Path) -> None:
     out = workdir / "diagnostics"
     out.mkdir(exist_ok=True)
+    artifacts = os.environ.get("REHEARSAL_DIAGNOSTICS_DIR")
+    if artifacts:
+        # What the scenario kept (cell logs, samples) leaves first: the reads below can still run long.
+        shutil.copytree(out, Path(artifacts), dirs_exist_ok=True)
     for name, command in {
         "pods": ["get", "pods", "--all-namespaces", "-o", "wide"],
         "events": ["get", "events", "--all-namespaces", "--sort-by=.lastTimestamp"],
@@ -601,12 +614,15 @@ def _collect_diagnostics(stack: infra.Stack, workdir: Path) -> None:
         # The stand-in Traefik's warnings and errors, and its access log of every 5xx it returned.
         "traefik": ["logs", "--namespace", platform.EDGE_NAMESPACE, "deployment/rehearsal-traefik", "--tail=1000"],
     }.items():
-        result = stack.k3s.kubectl(*command, check=False)
+        try:
+            result = stack.k3s.kubectl(*command, check=False, timeout=DIAGNOSTIC_READ_SECONDS)
+        except subprocess.TimeoutExpired:
+            (out / f"{name}.txt").write_text(f"(kubectl {' '.join(command)} did not return in {DIAGNOSTIC_READ_SECONDS} s)\n", encoding="utf-8")
+            continue
         # The gateway logs only warnings and errors, so a healthy run leaves its log empty. An empty file reads
         # as a collection that failed, so the file says the command ran and printed nothing.
         text = result.stdout + result.stderr
         (out / f"{name}.txt").write_text(text or f"(kubectl {' '.join(command)} printed nothing)\n", encoding="utf-8")
-    artifacts = os.environ.get("REHEARSAL_DIAGNOSTICS_DIR")
     if artifacts:
         shutil.copytree(out, Path(artifacts), dirs_exist_ok=True)
 
