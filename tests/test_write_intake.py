@@ -22,7 +22,13 @@ import pytest
 from _public_call import public_call
 from conftest import _drain_background_threads
 from fastmcp import Client
-from record_fixtures import LEDGER_COLLECTION_PATH, ledger_item, setup_ledger_collection
+from record_fixtures import (
+    LEDGER_COLLECTION_PATH,
+    LEDGER_MANIFEST_TEXT,
+    ledger_item,
+    setup_ledger_collection,
+)
+from test_governance_egress import _receipt_records, write_scope
 
 from exomem import (
     auth_sessions,
@@ -38,6 +44,7 @@ from exomem import (
 )
 from exomem import schema as schema_module
 from exomem import server as server_module
+from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 from exomem.commands import op_remember
 from exomem.edit_operations import ReplaceStringOperation
@@ -622,24 +629,48 @@ def test_an_undeclared_record_value_behind_a_queued_manifest_revision_is_queued_
     _wait_for_state(vault, first, "applied")
 
 
+@pytest.mark.parametrize("named_by", ["path", "reference"])
 def test_an_undeclared_record_value_behind_a_queued_edit_of_the_manifest_is_queued_not_refused(
-    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch, named_by: str
 ) -> None:
-    """A queued edit of the manifest may change what the collection declares before this save replays."""
+    """A queued edit of the manifest may widen what the collection declares before this save replays, whether it
+    names the manifest by its path or by the collection's reference."""
     _writer, holder = managers
     collection = _ledger_declaring_a_status(vault)
+    widened = vault_module.parse_frontmatter((vault / collection).read_text(encoding="utf-8"))[0]["item_schema"]
+    widened["fields"]["status"]["enum"].append("resolved")
     first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
     with _Hold(holder, vault):
         edit = _send(_command("edit_memory"), vault, {
-            "path": collection, "why": "rename the ledger",
-            "operation": {"kind": "patch_frontmatter", "field": "title", "value": "Publications"},
+            "path": collection if named_by == "path" else "exomem://memory/5e9d1e2f-8f0a-4b6c-9d21-6f0f4a2b7c31",
+            "why": "declare a resolved status",
+            "operation": {"kind": "patch_frontmatter", "field": "item_schema", "value": widened},
         }, scope="principal:session-b")
     assert edit["state"] == "queued"
     receipt = _send(_command("record_memory"), vault, _status_call(collection, "update", "resolved"),
                     scope="principal:session-c")
     assert receipt["state"] == "queued"
     paused.set()
-    _wait_for_state(vault, first, "applied")
+    _wait_for_state(vault, edit["queued_write"]["ref"], "applied")
+    declared = vault_module.parse_frontmatter((vault / collection).read_text(encoding="utf-8"))[0]
+    assert declared["item_schema"]["fields"]["status"]["enum"] == ["draft", "published", "resolved"]
+
+
+def test_a_busy_record_check_by_a_title_two_collections_carry_records_no_release(vault: Path) -> None:
+    """Defect: the check's lookup of a title that two collections carry wrote a disclosure receipt releasing
+    both manifests, for an ambiguity refusal that reached no caller."""
+    setup_ledger_collection(vault)
+    archive = vault / "Knowledge Base/Records/Archive/_collection.md"
+    archive.parent.mkdir(parents=True)
+    archive.write_text(LEDGER_MANIFEST_TEXT.replace(
+        "5e9d1e2f-8f0a-4b6c-9d21-6f0f4a2b7c31", "0b6c7d2e-4f1a-4d3b-8e55-1a2b3c4d5e6f"), encoding="utf-8")
+    write_scope(vault)  # a policy that is not empty, so a release is decided and recorded
+    receipts_before = len(_receipt_records(vault))
+
+    with request_scope(local_owner_principal(surface="mcp")):
+        refusal = record_memory.value_refusal(vault, _status_call("Publications ledger", "update", "resolved"))
+    assert refusal is None
+    assert _receipt_records(vault)[receipts_before:] == []
 
 
 def test_the_busy_record_check_holds_none_of_the_queued_arguments_in_memory(

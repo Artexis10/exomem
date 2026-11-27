@@ -36,7 +36,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -1534,14 +1534,14 @@ def _summary_line(state_counts: Mapping[str, int]) -> str:
 
 
 def may_change_declaration(
-    vault_root: Path, *, command_name: str, argument: str, path: str, seconds: float
+    vault_root: Path, *, command_name: str, argument: str, names: Sequence[str], seconds: float
 ) -> bool | None:
     """Whether a save that still waits or applies may change a declaration before a later save replays.
 
     A save of `command_name` may when its `argument` holds a value other than null; a save of any other
-    command may when a string among its arguments contains `path`. One EXISTS query decides it inside
-    SQLite, so no queued arguments reach Python. A query that has not answered within `seconds` stops:
-    None, unknown, as for a queue that cannot be read.
+    command may when a string among its arguments contains one of `names`, such as the declaration's path
+    or id. One EXISTS query decides it inside SQLite, so no queued arguments reach Python. A query that
+    has not answered within `seconds` stops: None, unknown, as for a queue that cannot be read.
     """
     if seconds <= 0:
         return None
@@ -1553,9 +1553,9 @@ def may_change_declaration(
             (found,) = conn.execute(
                 "SELECT EXISTS (SELECT 1 FROM intake WHERE state IN (?, ?) AND arguments IS NOT NULL AND CASE "
                 "WHEN command = ? THEN json_extract(arguments, '$.' || ?) IS NOT NULL "
-                "ELSE EXISTS (SELECT 1 FROM json_tree(intake.arguments) AS node "
-                "WHERE node.type = 'text' AND instr(node.value, ?) > 0) END)",
-                (*_OPEN_STATES, command_name, argument, path),
+                "ELSE EXISTS (SELECT 1 FROM json_tree(intake.arguments) AS node, json_each(?) AS name "
+                "WHERE node.type = 'text' AND instr(node.value, name.value) > 0) END)",
+                (*_OPEN_STATES, command_name, argument, _json(list(names))),
             ).fetchone()
         return bool(found)
     except FileNotFoundError:

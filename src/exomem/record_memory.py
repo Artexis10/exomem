@@ -983,13 +983,14 @@ def _declared_manifest(
     and never reads the projected `_collection.md`, which can lag the store. The read stops at `budget` and
     answers None for any refusal, such as a busy or unserved store or a title that several collections carry.
     It records no release: a refusal it answers None for reaches no caller, and a mutation's own resolution
-    of its collection records none either.
+    of its collection records none either. Its decisions go to a collector that nothing emits, which a nested
+    read with its own receipt boundary joins instead of opening one that it would emit.
     """
     from .collection_store import runtime as store_runtime
     from .governance import egress
 
     def read() -> structured_collections.CollectionManifest:
-        with egress.decide_without_receipt():
+        with egress.disclosure_boundary(vault_root, "record_value_check", sink=True):
             path = collection_refs.resolve_collection(vault_root, collection, profile="records")
             return record_governance.require_records_profile(
                 record_governance.resolve_collection_without_receipt(vault_root, path)
@@ -1012,9 +1013,10 @@ def value_refusal(vault_root: Path, arguments: Mapping[str, Any]) -> OpError | N
     lock and no store writer. Whatever is not certain answers None and the save queues as before: a collection
     this thread cannot read now, a manifest that the caller may not see, and an open queued save that may change
     what the collection declares before this one replays. Such a save is a Records save that carries a manifest
-    text, or a save of another command whose arguments name the manifest's path, such as an edit of its
-    frontmatter. A direct revise that commits after this check, before the replay would have run, is not
-    seen: the check can refuse a value that the revised collection accepts, and the caller sends it again.
+    text, or a save of another command whose arguments name the manifest by its path or its collection id,
+    such as an edit of its frontmatter. A direct revise that commits after this check, before the replay would
+    have run, is not seen: the check can refuse a value that the revised collection accepts, and the caller sends
+    it again.
     """
     action = arguments.get("action")
     values = arguments.get("item") if action == "append" else arguments.get("changes") if action == "update" else None
@@ -1034,8 +1036,12 @@ def value_refusal(vault_root: Path, arguments: Mapping[str, Any]) -> OpError | N
         vault_root,
         command_name=operation_entries.RECORDS.command,
         argument=_MANIFEST_ARGUMENT,
-        # The path below the knowledge-base root: a caller may name the manifest with or without that root.
-        path=kbdir.managed_split(manifest.path, key=str.casefold) or manifest.path,
+        names=(
+            # The path below the knowledge-base root: a caller may name the manifest with or without that root.
+            kbdir.managed_split(manifest.path, key=str.casefold) or manifest.path,
+            # The id as every reply spells it, bare or in its memory reference.
+            manifest.collection_id,
+        ),
         seconds=budget.remaining(),
     )
     if changing is not False:
