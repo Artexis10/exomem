@@ -2454,7 +2454,8 @@ def _format_slice_block(block: object, max_chars: int) -> str:
 def _subject_records_lines(block: object) -> tuple[list[str], int]:
     """The packet's sums for the pages this turn names, one whole line each, and the pairs no line names.
 
-    Each entry renders its `summary`, or the `reason` it carries no numbers, named by its page and collection. The
+    Each entry renders its `summary` and its measure's `description`, which says what a sign means and which the
+    server has already cut to length, or the `reason` it carries no numbers, named by its page and collection. The
     block's own state leads when part of the read failed. `omitted` counts the stubs too, so only the pairs with
     no entry at all are returned as a count.
     """
@@ -2467,7 +2468,11 @@ def _subject_records_lines(block: object) -> tuple[list[str], int]:
     for entry in entries:
         anchor = entry["anchor"] if isinstance(entry.get("anchor"), dict) else {}
         collection = entry["collection"] if isinstance(entry.get("collection"), dict) else {}
-        text = str(entry.get("summary") or "") or (
+        measure = entry["measure"] if isinstance(entry.get("measure"), dict) else {}
+        text = str(entry.get("summary") or "")
+        if text and measure.get("description"):
+            text += f" {measure.get('field') or ''}: {measure['description']}"
+        text = text or (
             f"{anchor.get('title') or anchor.get('ref') or ''} in {collection.get('title') or ''}: "
             f"{entry.get('reason') or ''}")
         state = str(entry.get("state") or "")
@@ -2481,6 +2486,7 @@ def _format_subject_records_block(block: object, max_chars: int) -> str:
     """`_subject_records_lines` cut to whole lines under ``max_chars``, with a last line counting what none shows.
 
     The server has already cut the block to its share of the packet; this cut is the hook's own render ceiling.
+    When no whole line fits, one short line still says how many tallies the packet holds.
     """
     lines, unlisted = _subject_records_lines(block)
     marker_room = len(f"- … {len(lines) + unlisted} more not shown.") + 1
@@ -2491,7 +2497,9 @@ def _format_subject_records_block(block: object, max_chars: int) -> str:
         used += len(line) + (1 if kept else 0)
         kept.append(line)
     if not kept:
-        return ""
+        pairs = len(lines) - (1 if isinstance(block, dict) and block.get("state") else 0) + unlisted
+        count = f"- {pairs} ledger {'tally' if pairs == 1 else 'tallies'} not shown."
+        return count if pairs and len(count) <= max_chars else ""
     unseen = len(lines) - len(kept) + unlisted
     return "\n".join([*kept, *([f"- … {unseen} more not shown."] if unseen else [])])
 

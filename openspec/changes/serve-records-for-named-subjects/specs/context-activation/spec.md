@@ -52,12 +52,17 @@ A `ready` entry SHALL lead with `summary`, a sentence built at render time from 
 
 ### Requirement: The hook shows every ledger entry
 
-The Claude Code hook SHALL render the `subject_records` block in every layout that it renders a resolved packet in: the block's state and reason, and one line per entry with its `summary`, or its page, collection and `reason`. Lines that its ceiling cuts, and pairs without an entry, SHALL be counted on a last line.
+The Claude Code hook SHALL render the `subject_records` block in every layout that it renders a resolved packet in: the block's state and reason, and one line per entry with its `summary` and `measure.description`, or its page, collection and `reason`. Lines that its ceiling cuts, and pairs without an entry, SHALL be counted on a last line. When no whole line fits, one line SHALL count the entries.
 
-#### Scenario: A hook-served turn sees the tally
+#### Scenario: A hook-served turn sees the tally and what its sign means
 
 - **WHEN** a hook-delivered packet carries a `ready` entry and an `omitted` stub
-- **THEN** the injected block holds the entry's `summary` and the stub's `reason`, each with the collection's ref
+- **THEN** the injected block holds the entry's `summary` with its `measure.description`, and the stub's `reason`, each with the collection's ref
+
+#### Scenario: A ceiling too small for any tally line
+
+- **WHEN** the hook's ceiling holds no whole tally line
+- **THEN** the injected block still holds one line that counts the entries
 
 ### Requirement: A measure's description is bounded
 

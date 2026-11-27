@@ -6,7 +6,9 @@ gets the person's sums by state, the rows whose amount or date is unknown, and t
 """
 
 import contextlib
+import importlib.util
 import time
+from pathlib import Path
 
 import pytest
 from test_activate_context_maps import _activate
@@ -200,6 +202,54 @@ def test_a_long_measure_description_is_cut_so_the_sums_still_fit(store, monkeypa
     description = entry["measure"]["description"]
     assert len(description) <= subject_records.MAX_DESCRIPTION_CHARS and description.endswith("…")
     assert long.startswith(description[:-1])
+
+
+def _hook():
+    """The hook as Claude Code runs it: a standalone script, loaded from the file the plugin ships."""
+    spec = importlib.util.spec_from_file_location("exomem_retrieve_nudge_subject_records_under_test",
+                                                  Path(subject_records.__file__).parent / "_hooks/exomem_retrieve_nudge.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("layout", ["map", "rollback"])
+def test_a_hook_served_turn_sees_the_tally_and_what_its_sign_means(world, layout):
+    """A hook-served agent sees only the injected block: the sums alone do not say who owes whom."""
+    packet = _activate(world.root, turn=TURN)
+    [entry] = blocks(packet)
+    assert entry["measure"]["description"] == AMOUNT_MEANS and AMOUNT_MEANS not in entry["summary"]
+    if layout == "rollback":
+        packet = {"abstained": False, "anchors": packet["turn_slice"]["items"],
+                  "subject_records": packet["subject_records"]}
+    lines = _hook()._format_working_set_block(packet, 6000).splitlines()
+    assert f"- tally: {entry['summary']} amount: {AMOUNT_MEANS} [{entry['collection']['ref']}]" in lines
+
+
+def test_a_hook_served_turn_hears_that_a_ledger_is_still_warming(store, monkeypatch, corpus_cache_on):
+    build(store, monkeypatch, ready=False)
+    block = _activate(store.root, turn=TURN)["subject_records"]
+    assert _hook()._format_subject_records_block(block, 6000) == f"- tally (warming): {block['reason']}"
+
+
+def test_a_hook_ceiling_too_small_for_any_tally_line_still_says_the_tallies_exist(world):
+    for label, who in (("r6", PELL), ("r7", QUIN)):
+        add(world, label, f"exomem://memory/{who}", 5, "settled", "2026-11-02", "coffee")
+    _ready(world, LEDGER)
+    anchors = [(MARA_REF, "Mara Quillon"), (IVEL_REF, "Ivel Brask"), (f"exomem://memory/{PELL}", "Pell Arden"),
+               (f"exomem://memory/{QUIN}", "Quin Aldous")]
+    with request_scope(owner_principal()):
+        block = subject_records.summaries(world.root, anchors, TURN)
+    packet = {"budget": {"limit_chars": 6000, "used_chars": 0}}
+    subject_records._attach(packet, block)
+    served, hook = packet["subject_records"], _hook()
+    stub = served["entries"][3]
+    lines = hook._format_subject_records_block(served, 10_000).splitlines()
+    assert lines[3] == f"- tally (omitted): Quin Aldous in Tab: {stub['reason']} [{stub['collection']['ref']}]"
+    assert hook._format_subject_records_block(served, len(lines[0]) + 40).splitlines() == [
+        lines[0], "- … 3 more not shown."]
+    assert hook._format_subject_records_block(served, len(lines[0]) - 1) == "- 4 ledger tallies not shown."
+    assert hook._format_subject_records_block(served, 10) == ""
 
 
 def add_visits(store, identity=VISITS, subject="", typed=False):
