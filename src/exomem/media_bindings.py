@@ -169,6 +169,12 @@ def _record(conn: sqlite3.Connection, state: Checkpoint) -> None:
                  (_STATE, json.dumps(asdict(state), separators=(",", ":"))))
 
 
+def _created(conn: sqlite3.Connection) -> bool:
+    # The ledger file exists before its creator commits the schema; until then it holds no bindings.
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'media_bindings'").fetchone() is not None
+
+
 def _ledger(vault: Path, *, create: bool = True):
     from .media_jobs import MediaJobStore
 
@@ -184,6 +190,8 @@ def withdraw(vault: Path) -> Checkpoint | None:
         conn.execute("PRAGMA synchronous=FULL")
         with conn:
             conn.execute("BEGIN IMMEDIATE")
+            if not _created(conn):
+                return None  # A ledger still being created holds no complete projection to withdraw.
             before = checkpoint(conn)
             _record(conn, replace(before, generation=before.generation + 1, complete=False))
         return before
@@ -489,7 +497,7 @@ def prepare_delta(vault: Path, paths: Iterable[str], *, images: Mapping[str, byt
     if ledger.path.exists():
         with closing(ledger._connect(readonly=True)) as conn:
             # Parameter batches bound SQL size; none enumerates the archive.
-            for start in range(0, len(paths), 256):
+            for start in range(0, len(paths), 256) if _created(conn) else ():
                 batch = paths[start:start + 256]
                 placeholders = ",".join("?" for _ in batch)
                 companions.update(row[0] for row in conn.execute(
