@@ -6,6 +6,7 @@ import pytest
 from test_activate_context_maps import _activate, _without_response_id
 from test_activation_log import _rows
 from test_activation_log import activation_log as activation_log  # noqa: F401  (the pytest fixture)
+from test_approved_procedure_serving import _approve
 from test_collection_store_service import service as service  # noqa: F401  (the pytest fixture)
 from test_collection_store_writer import manifest_path
 from test_command_path_spans import token as token  # noqa: F401 (the pytest fixture)
@@ -34,21 +35,36 @@ def test_public_reads_already_carry_methods_in_distinct_domains(vault: Path) -> 
         assert content.strip() in str(result)
 
 
+PROCEDURE_ID = "5d3b7a90-2c4e-4f61-8b0a-9e1d2c3b4a5f"
+
+
+def _approve_procedure(vault: Path, rel: str) -> None:
+    """The owner approves the page as it stands, so activation serves its method units as method items."""
+    _approve(vault, rel, f"exomem://memory/{PROCEDURE_ID}")
+
+
 def test_task_discovery_does_not_require_an_anchor(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A fresh client finds an ordinary note and a reusable method without an anchor."""
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     monkeypatch.setattr(context_catalogue, "_managed", lambda: True)
     note = _page(vault, "alignment-visit", body="Optical alignment workshop: the calibration appointment remains undecided.\n")
-    method = _page(vault, "reference-comparison", body="- [technique] Inspect optical alignment against the reference target ^alignment\n\nExclude handheld field checks.\n")
+    method = _page(vault, "reference-comparison", f"exomem_id: {PROCEDURE_ID}\n", body="- [technique] Inspect optical alignment against the reference target ^alignment\n\nExclude handheld field checks.\n")
     _built(vault).close()
     lexstore.ensure_fresh(vault)
-    packet = _activate(vault, turn="Inspect the optical alignment before the workshop", max_chars=8000)
+    turn = "Inspect the optical alignment before the workshop"
+    unapproved = _activate(vault, turn=turn, max_chars=8000)["task_context"]
+    # Retrieval finds the method page as a lead. Only the owner's approval makes its unit a method item.
+    assert {note, method} <= {item["source_ref"] for item in unapproved["candidates"]}
+    assert unapproved["methods"]["items"] == []
+    _approve_procedure(vault, method)
+    packet = _activate(vault, turn=turn, max_chars=8000)
     block = packet["task_context"]
     assert block["state"] in ("ready", "partial")
     assert {note, method} <= {item["source_ref"] for item in block["candidates"]}
     projected = next(item for item in block["methods"]["items"] if item["source_ref"] == method)
     assert projected["applicability"] == "read_required"
-    assert projected["read_ref"] == method
+    # An approved method is read by the page's stable ref, never its path.
+    assert projected["read_ref"] == f"exomem://memory/{PROCEDURE_ID}" and projected["approval"] == "approved"
     assert projected["source_version"]
     assert "anchors" not in packet
     token = working_set_runtime.decode_continuity(packet["continuity"])
@@ -79,6 +95,7 @@ def test_a_public_method_edit_invalidates_an_unchanged_unit_across_clients(
     _seed_live_scopes(vault)
     _built(vault).close()
     lexstore.ensure_fresh(vault)
+    _approve(vault, method, "exomem://memory/8902409d-2ee7-408f-8c39-4283125dc578")
     turn = "What method should I use to compare finishes for a temporary display that will stand in rain?"
     first = _activate(vault, turn=turn, max_chars=8000, client="fixture-a")
     before = next(item for item in first["task_context"]["methods"]["items"] if item["source_ref"] == method)
@@ -261,7 +278,7 @@ def test_current_methods_follow_admitted_unit_currency_before_reuse(vault: Path,
     from exomem import semantic_index
 
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
-    path = _page(vault, "alignment-methods", body=(
+    path = _page(vault, "alignment-methods", f"exomem_id: {PROCEDURE_ID}\n", body=(
         "## Procedure\n- id: before\n\nInspect optical alignment with the earlier target.\n"
         "## Procedure\n- id: current\n- relations: supersedes: [[#before]]\n\nInspect optical alignment with the current target.\n"
         "## Procedure\n- id: expired\n- until: 2020-01-01\n\nInspect optical alignment with the expired target.\n"
@@ -269,10 +286,11 @@ def test_current_methods_follow_admitted_unit_currency_before_reuse(vault: Path,
     ))
     _built(vault).close()
     lexstore.ensure_fresh(vault)
+    _approve_procedure(vault, path)
     first = _activate(vault, turn="Inspect optical alignment", max_chars=8000)
     methods = [item for item in first["task_context"]["methods"]["items"] if item["source_ref"] == path]
     assert {item["ref"].rpartition("#")[2] for item in methods} == {"current", "review"}
-    assert all(item["read_ref"] == path and item["applicability"] == "read_required" for item in methods)
+    assert all(item["read_ref"] == f"exomem://memory/{PROCEDURE_ID}" and item["applicability"] == "read_required" for item in methods)
     with principal.request_scope(principal.owner_principal(surface="library")):
         document = semantic_index.selected_parent_index_state(vault, path).document
     expired = next(unit.unit_ref for unit in document.units if unit.anchor == "expired")
@@ -290,7 +308,7 @@ def test_withheld_unit_cannot_retire_an_admitted_method(vault: Path, monkeypatch
     monkeypatch.setenv("EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS", "on")
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     hidden = _page(vault, "private-reference", body="Restricted inspection reference.\n")
-    path = _page(vault, "alignment-methods", body=(
+    path = _page(vault, "alignment-methods", f"exomem_id: {PROCEDURE_ID}\n", body=(
         "## Procedure\n- id: before\n\nInspect optical alignment with the earlier target.\n"
         "## Procedure\n- id: replacement\n- relations: supersedes: [[#before]]\n\n"
         f"Inspect optical alignment with [[{hidden}]].\n"
@@ -298,6 +316,7 @@ def test_withheld_unit_cannot_retire_an_admitted_method(vault: Path, monkeypatch
     _withhold(vault, hidden, ceiling=0)
     _built(vault).close()
     lexstore.ensure_fresh(vault)
+    _approve_procedure(vault, path)
     owner = _activate(vault, turn="Inspect optical alignment", max_chars=8000)
     guest = _activate(vault, _external(), turn="Inspect optical alignment", max_chars=8000)
     def identities(packet):
@@ -429,16 +448,19 @@ def test_restricted_method_version_covers_visible_exclusions_outside_the_unit(va
     monkeypatch.setenv("EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS", "on")
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     hidden = _page(vault, "restricted-target", body="Confidential reference material.\n")
-    path = _page(vault, "alignment-method", body="- [technique] Inspect optical alignment ^visible\n\nExclude handheld field checks.\n")
+    path = _page(vault, "alignment-method", f"exomem_id: {PROCEDURE_ID}\n", body="- [technique] Inspect optical alignment ^visible\n\nExclude handheld field checks.\n")
     _withhold(vault, hidden, ceiling=0)
     _built(vault).close()
     lexstore.ensure_fresh(vault)
+    _approve_procedure(vault, path)
     first = _activate(vault, _external(), turn="Inspect optical alignment", max_chars=8000)
     before = next(item for item in first["task_context"]["methods"]["items"] if item["source_ref"] == path)
     (vault / path).write_text((vault / path).read_text().replace("Exclude handheld field checks.", "Exclude workshop and handheld checks."))
     freshness.on_files_changed(vault, [vault / path])
     _built(vault).close()
     lexstore.ensure_fresh(vault)
+    # An edit makes the approval stale, which a restricted reader sees as unapproved, so the owner approves again.
+    _approve_procedure(vault, path)
     unrelated = _activate(vault, _external(), turn="Evaluate seed germination", continuity=first["continuity"], max_chars=8000)
     fresh = _activate(vault, _external(), turn="Inspect optical alignment", max_chars=8000)
     after = next(item for item in fresh["task_context"]["methods"]["items"] if item["source_ref"] == path)

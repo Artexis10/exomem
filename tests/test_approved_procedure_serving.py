@@ -72,9 +72,23 @@ def _method(packet: dict, rel: str) -> dict:
     return next(item for item in packet["task_context"]["methods"]["items"] if item["source_ref"] == rel)
 
 
+def _served_methods(packet: dict) -> list[str]:
+    return [item["source_ref"] for item in packet["task_context"]["methods"]["items"]]
+
+
+def _leads(packet: dict) -> list[str]:
+    return [item["source_ref"] for item in packet["task_context"]["candidates"]]
+
+
 def _approval(packet: dict, rel: str) -> str:
-    """The method's verdict; a method item carries `approval` only when it is approved or stale."""
-    return _method(packet, rel).get("approval", "unapproved")
+    """The page's verdict on the method surface: `approval` only when approved or stale.
+
+    The method surface serves only a procedure the owner approved, so a page it does not serve reads unapproved.
+    """
+    return next(
+        (item.get("approval", "unapproved") for item in packet["task_context"]["methods"]["items"] if item["source_ref"] == rel),
+        "unapproved",
+    )
 
 
 def test_an_approved_method_carries_one_title_line_and_none_of_the_steps(vault: Path) -> None:
@@ -125,7 +139,7 @@ def _hook():
 
 
 def test_the_hook_renders_an_approved_method_as_its_own_line_and_never_a_link(vault: Path) -> None:
-    """The hook tells the agent the owner endorsed a method, and an unapproved method keeps the plain wording."""
+    """The hook tells the agent the owner endorsed a method; the page nobody approved reaches it as a lead only."""
     rel = _procedure(vault)
     _index(vault)
     unapproved = _activate(vault, turn=TURN, max_chars=8000)
@@ -134,16 +148,15 @@ def test_the_hook_renders_an_approved_method_as_its_own_line_and_never_a_link(va
     hook = _hook()
     plain_text = hook._format_task_context(unapproved["task_context"], 4000)  # noqa: SLF001 - the render under test
     approved_text = hook._format_task_context(approved["task_context"], 4000)  # noqa: SLF001
-    assert '- approach: "alignment-method"; read the source for applicability and exclusions.' in plain_text
-    assert "approved procedure" not in plain_text
+    assert "approved procedure" not in plain_text and "- approach:" not in plain_text
+    assert "- task lead: alignment-method:" in plain_text
     assert '- approved procedure: "alignment-method". Read it, then follow it where it fits.' in approved_text
     assert "- approach:" not in approved_text
     assert STEP not in approved_text
-    # Approval swaps the method line for its own and changes nothing else: no page text, no other line.
+    # Approval adds the method line and changes nothing else: no page text, no other line.
     added = set(approved_text.splitlines()) - set(plain_text.splitlines())
-    removed = set(plain_text.splitlines()) - set(approved_text.splitlines())
     assert [line.split(":", 1)[0] for line in added] == ["- approved procedure"]
-    assert [line.split(":", 1)[0] for line in removed] == ["- approach"]
+    assert set(plain_text.splitlines()) <= set(approved_text.splitlines())
 
 
 def _read(vault: Path, rel: str, caller=None, **kwargs) -> dict:
@@ -160,14 +173,6 @@ def _edit_directly(vault: Path, rel: str) -> None:
     _index(vault)
 
 
-def _token_hints(token: str) -> list[dict]:
-    """The method hints as the token carries them on the wire, before any decoding default."""
-    import base64
-    import json
-
-    return json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))["method_versions"]
-
-
 def test_a_revoke_with_unchanged_bytes_resets_the_next_activation_of_a_held_method(vault: Path) -> None:
     """A client that holds an approved method must not keep it after the owner withdraws the approval."""
     rel = _procedure(vault)
@@ -182,18 +187,28 @@ def test_a_revoke_with_unchanged_bytes_resets_the_next_activation_of_a_held_meth
     _revoke(vault, rel)
     after = _activate(vault, turn=TURN, max_chars=8000, continuity=first["continuity"])
     assert after["task_context"]["methods"]["reset"] is True
-    # An unapproved method and its continuity hint carry no approval field; the absence reads unapproved.
-    assert "approval" not in _method(after, rel)
-    assert [sorted(hint) for hint in _token_hints(after["continuity"])] == [["ref", "source_ref", "source_version"]]
+    # A revoked procedure is served as no method and held as none; its page stays a lead.
+    assert rel not in _served_methods(after) and rel in _leads(after)
+    assert working_set_runtime.decode_continuity(after["continuity"])["method_versions"] == []
 
 
 def test_a_token_without_approval_hints_reads_unapproved(vault: Path) -> None:
-    """A token from before approvals has the shape an unapproved method's hint has now: no approval field.
-    It keeps an unapproved method and resets one that the owner has since approved."""
+    """A token minted before approvals, or while the method was unapproved, carries a hint with no approval field.
+    It keeps a method that is still unapproved and resets one that the owner has since approved."""
+    import base64
+    import json
+
     rel = _procedure(vault)
     _index(vault)
-    older = _activate(vault, turn=TURN, max_chars=8000)["continuity"]
+    _approve(vault, rel)
+    token = _activate(vault, turn=TURN, max_chars=8000)["continuity"]
+    payload = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))
+    for hint in payload["method_versions"]:
+        del hint["approval"]
+    older = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode().rstrip("=")
     assert ["approval" in hint for hint in working_set_runtime.decode_continuity(older)["method_versions"]] == [False]
+
+    _revoke(vault, rel)
     assert _activate(vault, turn=TURN, max_chars=8000, continuity=older)["task_context"]["methods"]["reset"] is False
 
     _approve(vault, rel)
@@ -217,7 +232,8 @@ def test_a_direct_edit_makes_the_approval_stale_for_the_owner_and_unapproved_for
     guest = _activate(vault, _external(), turn=TURN, max_chars=8000)
     assert _method(_activate(vault, turn=TURN, max_chars=8000), rel)["approval"] == "stale"
     assert _read(vault, rel)["approval"] == "stale"
-    assert "approval" not in _method(guest, rel)
+    # The guest sees `unapproved`, which the method surface serves as no method; the page stays a lead.
+    assert rel not in _served_methods(guest) and rel in _leads(guest)
     assert "approval" not in _read(vault, rel, _external())
     assert version not in str(guest) and "fixture client" not in str(guest)
 
@@ -257,7 +273,7 @@ def test_a_fenced_owner_connection_sees_two_states_and_no_finding(
     _edit_directly(vault, rel)
     assert _read(vault, rel)["approval"] == "stale"
     assert "approval" not in _read(vault, rel, limited)
-    assert "approval" not in _method(_activate(vault, limited, turn=TURN, max_chars=8000), rel)
+    assert _approval(_activate(vault, limited, turn=TURN, max_chars=8000), rel) == "unapproved"
     entry_file = next((vault / "Knowledge Base" / "_Approvals" / REF_ID).iterdir())
     entry_file.write_text("not json {")
     assert [finding["ref"] for finding in _read(vault, rel)["diagnostics"]["approval_findings"]] == [REF]
@@ -277,34 +293,31 @@ def test_a_reader_below_full_release_sees_no_endorsement(vault: Path) -> None:
     assert "approval" not in excerpt
 
 
-def test_approval_does_not_change_which_methods_are_served_or_their_order(vault: Path) -> None:
-    """The owner's endorsement is information for the reader, never a ranking signal."""
+def test_approval_alone_selects_the_procedure_methods_and_never_reorders_the_leads(vault: Path) -> None:
+    """Retrieval ranks both procedures as leads. The owner's approval, not the rank, makes one a method."""
     first = _procedure(vault, "alignment-method-a", ref_id="0c7d1a52-93be-4f1e-b2a6-7d5e8f9a0b1c")
     second = _procedure(vault, "alignment-method-b")
     _index(vault)
     plain = _activate(vault, turn=TURN, max_chars=8000)
+    assert {first, second} <= set(_leads(plain))
+    assert _served_methods(plain) == []
     _approve(vault, second)
     ranked = _activate(vault, turn=TURN, max_chars=8000)
-    served = [item["source_ref"] for item in plain["task_context"]["methods"]["items"]]
-    assert {first, second} <= set(served)
-    assert [item["source_ref"] for item in ranked["task_context"]["methods"]["items"]] == served
-    assert [item["source_ref"] for item in ranked["task_context"]["candidates"]] == [
-        item["source_ref"] for item in plain["task_context"]["candidates"]
-    ]
+    assert _served_methods(ranked) == [second]
+    assert _leads(ranked) == _leads(plain)
     assert {path: _approval(ranked, path) for path in (first, second)} == {first: "unapproved", second: "approved"}
 
 
 def test_the_shared_allowance_is_charged_for_the_approved_line(vault: Path) -> None:
-    """Approving a method changes the packet's charge by exactly the approved line against the plain one."""
+    """Approving a procedure adds its method line to the packet, and the shared allowance charges the line."""
     rel = _procedure(vault)
     _index(vault)
     before = _activate(vault, turn=TURN, max_chars=8000)
     _approve(vault, rel)
     after = _activate(vault, turn=TURN, max_chars=8000)
     item = _method(after, rel)
-    plain = context_task.item_line(_method(before, rel), method=True)
-    assert "approval" not in _method(before, rel) and item["approval"] == "approved"
-    assert after["budget"]["used_chars"] - before["budget"]["used_chars"] == len(context_task.item_line(item, method=True)) - len(plain)
+    assert rel not in _served_methods(before) and item["approval"] == "approved"
+    assert after["budget"]["used_chars"] - before["budget"]["used_chars"] >= len(context_task.item_line(item, method=True))
     assert after["budget"]["used_chars"] <= after["budget"]["limit_chars"]
 
 
@@ -394,7 +407,9 @@ def test_an_unreadable_approval_key_marks_the_activation_incomplete(vault: Path)
 
     task = _activate(vault, turn=TURN, max_chars=8000)["task_context"]
 
-    assert "approval" not in next(item for item in task["methods"]["items"] if item["source_ref"] == rel)
+    # The owner's endorsement cannot be checked, so the page reads unapproved: it stays a lead, never a method.
+    assert rel not in [item["source_ref"] for item in task["methods"]["items"]]
+    assert rel in [item["source_ref"] for item in task["candidates"]]
     assert {"role": "task_context", "reason": "lane_failed"} in task["missing"]
 
 
@@ -449,7 +464,7 @@ def test_an_activation_checks_the_owner_only_with_a_ledger_entry_and_a_failed_ch
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The owner check reads the egress policy. A packet with no ledger entry must not pay for it, and a check
-    that fails must still serve the methods, none endorsed, with the lane reported as failed."""
+    that fails must still serve the leads, no method endorsed, with the lane reported as failed."""
     rel = _procedure(vault)
     _index(vault)
     checks = []
@@ -460,13 +475,13 @@ def test_an_activation_checks_the_owner_only_with_a_ledger_entry_and_a_failed_ch
 
     monkeypatch.setattr(procedure_approval, "owner_view", failing_check)
     plain = _activate(vault, turn=TURN, max_chars=8000)["task_context"]
-    assert "approval" not in _method({"task_context": plain}, rel)
+    assert plain["methods"]["items"] == [] and rel in [item["source_ref"] for item in plain["candidates"]]
     assert {"role": "task_context", "reason": "lane_failed"} not in plain["missing"]
     assert checks == []
 
     _approve(vault, rel)
     task = _activate(vault, turn=TURN, max_chars=8000)["task_context"]
 
-    assert "approval" not in _method({"task_context": task}, rel)
+    assert task["methods"]["items"] == [] and rel in [item["source_ref"] for item in task["candidates"]]
     assert {"role": "task_context", "reason": "lane_failed"} in task["missing"]
     assert len(checks) == 1

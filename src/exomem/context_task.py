@@ -853,7 +853,8 @@ def compile_context(
             )
         with find_types.timing_span(timings, "working_set.approvals"):
             kept = {item["source_ref"] for item in candidates}
-            kept |= {declared_by_lead[path] for path in kept if path in declared_by_lead}
+            declared = {declared_by_lead[path] for path in kept if path in declared_by_lead}
+            kept |= declared
             verdicts, checked = approvals(
                 root, {path: sources[path] for path in methods_by_source if path in kept},
             )
@@ -872,6 +873,14 @@ def compile_context(
                     method["attribution"] = approved_title(sources[path])
                     # The read handle is the stable ref, never the path: a rename must not put words into the line.
                     method["read_ref"] = sources[path].ref
+        if block["method_fit"]["state"] == "disabled":
+            # Without the method-fit judgment, retrieval rank decides nothing the agent is told to read first. A
+            # lead's methods are served only when the owner approved them (an item carries `approval` only then,
+            # and a skill never does: the catalogue offers it), and a declared capture method is the collection's
+            # own declaration. A lead that serves no method stays a candidate.
+            for path, methods in methods_by_source.items():
+                if path not in declared:
+                    methods[:] = [method for method in methods if "approval" in method]
         target_paths: dict[str, str] = {}
         for reason in working_set.attach_task_links(
             root, candidates, link_targets=link_targets, caller=caller, timings=timings, target_paths=target_paths,

@@ -16,6 +16,32 @@ Maps packets SHALL carry a bounded `task_context` section beside the map and tur
 - **AND** it keeps each candidate's offered links as relation and target ref, with the count of omitted links and no title, so a later read can be credited to a link that was offered
 - **AND** earlier records without task metadata remain readable with an explicit unrecorded task state
 
+### Requirement: While the method judgment is disabled, retrieval rank makes no method item
+
+While the method judgment is disabled, `task_context.methods.items` SHALL hold only the method units of a page whose approval verdict for the caller is `approved` or `stale`, and the page that a collection manifest declares as its capture method. Every other retrieval lead, including a skill page, SHALL stay in `task_context.candidates` and project no method item. No lead SHALL leave `task_context.candidates` for that reason. `next_action` SHALL name only items that the packet carries.
+
+#### Scenario: A lead whose methods nobody approved is a candidate only
+- **WHEN** `method_fit.state` is `disabled` (no method-fit placement, a `method_fit_max_items` of 0, or a caller to whom the judgment is not offered) and discovery admits a page whose method units the owner never approved
+- **THEN** the page is a candidate with its read route and `task_context.methods.items` holds no item for it
+
+#### Scenario: An approved procedure is a method, and an edit makes it stale for the owner
+- **WHEN** the method judgment is disabled, the owner approved a page's exact version and discovery admits the page
+- **THEN** its method item carries `approval` set to `approved`
+- **AND** after an edit of the page the owner's item carries `stale`, and every other caller's packet carries the page as a candidate only
+
+#### Scenario: Approval selects the method items and never orders the leads
+- **WHEN** the method judgment is disabled, two procedures lead a task equally and the owner has approved only one of them
+- **THEN** only the approved procedure is a method item, and both stay candidates in the order they hold when neither is approved
+- **AND** this is the one case in which "Method items carry the approval verdict" lets approval change which methods the packet serves
+
+#### Scenario: A declared capture method is a method
+- **WHEN** the method judgment is disabled and a turn routes to a collection whose manifest declares a capture method
+- **THEN** the declared page is a method item, approved or not, as "A routed collection serves its declared capture method" requires
+
+#### Scenario: An enabled judgment keeps the retrieval projection
+- **WHEN** the method judgment is enabled and discovery admits a skill page or a page with method units
+- **THEN** each projects as a method item as it did before this requirement
+
 ### Requirement: Method continuation cannot certify stale behavior
 
 The existing activation token MAY carry optional `method_versions` entries with `ref`, `source_ref` and `source_version`. Combined anchor references and method entries SHALL fit the existing 32-entry ceiling and the token SHALL fit its existing 8,192-character ceiling. Entries SHALL be untrusted read hints, rechecked against the caller's current view, and SHALL NOT establish anchor evidence or authority. Existing thread binding and lifetime rules SHALL remain unchanged. Legacy tokens SHALL mean no carried methods; malformed method entries SHALL NOT invalidate independently valid map continuity.

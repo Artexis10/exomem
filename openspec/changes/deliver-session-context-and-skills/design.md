@@ -37,12 +37,13 @@ The `max_chars` allowance keeps its meaning: it bounds turn context.
 
 When task discovery admits a skill page, the response projects it as a method item of kind `skill` with the full description.
 This reuses method projection, continuity method versions and the existing read-before-applying rule.
+It holds only with a method-fit placement. Without one, a retrieval rank says nothing about which skill to read first: on a measured software turn, five of seven method items came from one unrelated note, and on 2026-11-23 skill pages that did not fit the turn were projected and then read. Without a placement the skill page stays a candidate and the catalogue offers the skill.
 
 ### Let clients omit native copies
 
 A client that already loads some skills natively names them in `native_skills`.
 The local hook can list its client's native skill directories without a model; an MCP-only client sends nothing and receives the whole catalogue.
-Omission applies only to the catalogue, so a native copy can still surface as a relevant method.
+Omission applies only to the catalogue, so a native copy can still lead the task as a candidate and, with a placement, as a method.
 
 ### Reach a skill's other files by the paths it names
 

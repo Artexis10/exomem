@@ -18,7 +18,7 @@ A measured replay settled the delivery: the hook pushes the cheap turn-independe
 - Recognize a skill page by the published Agent Skills format: a page named `SKILL.md` whose frontmatter carries string `name` and `description`. The product holds no list of skills.
 - Store a skill page's frontmatter `description` in the context catalogue as its description, so selection and presentation use the author's trigger text.
 - Serve a turn-independent `skills` block in maps responses: each visible skill's name, the first sentence of its description and its load reference. Serve it once per conversation and again only when it changes, using the existing continuity token.
-- Project a skill page that task discovery finds relevant as a method item that carries its full description and load reference.
+- With a method-fit placement, project a skill page that task discovery finds relevant as a method item that carries its full description and load reference. Without one, the page stays a candidate and the catalogue offers the skill.
 - Let a caller name the skills it already loads natively, so the catalogue omits them.
 
 ## Capabilities

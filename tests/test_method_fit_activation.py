@@ -91,6 +91,18 @@ def test_a_selected_skill_is_served_first_with_its_whole_contract(vault: Path, m
     assert SKILL not in [item["source_ref"] for item in packet["task_context"]["candidates"]]
 
 
+def test_with_a_placement_a_skill_that_retrieval_leads_to_still_projects_as_a_method(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retrieval stops projecting skills as methods only where no judgment runs; with a placement it is unchanged."""
+    _seed(vault)
+    _judge(monkeypatch, {"methods": []})
+    packet = _activate(vault, turn="Fire the bisque kiln and log the cone result", max_chars=6000)
+    (method,) = [item for item in packet["task_context"]["methods"]["items"] if item.get("kind") == "skill"]
+    assert method["read_ref"] == SKILL and "selection" not in method
+    assert packet["task_context"]["method_fit"]["state"] == "ready"
+
+
 def test_a_selected_collection_is_served_with_its_contract(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed(vault)
     _judge(monkeypatch, {"methods": ["Depot stock"]})
@@ -150,6 +162,23 @@ def test_a_tight_allowance_cuts_the_contract_before_it_drops_the_skill(
     _judge(monkeypatch, {"methods": ["kiln-firing"]})
     (method,) = _selected(_activate(vault, turn=TURN, max_chars=1200))
     assert method.get("contract", {}).get("complete") is not True
+
+
+def test_a_selected_skill_carries_its_whole_description_or_the_turn_reports_a_budget_miss(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The method counts against the turn allowance: it fits whole, or the turn reports a budget miss, never a cut text."""
+    description = "Fire bisque and glaze loads safely. " + "Check every gauge before and after. " * 12
+    _seed(vault)
+    _write(vault, SKILL, f"---\nname: kiln-firing\ndescription: {description}\n---\n\n{SKILL_BODY}")
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    _judge(monkeypatch, {"methods": ["kiln-firing"]})
+    roomy = _activate(vault, turn=TURN, max_chars=6000)
+    tight = _activate(vault, turn=TURN, max_chars=1000)
+    assert [item["description"] for item in _selected(roomy)] == [description.strip()]
+    assert _selected(tight) == []
+    assert {"role": "task_context", "reason": "budget"} in tight["task_context"]["missing"]
 
 
 @pytest.mark.parametrize("placement_file", ["missing.json", "broken.json"])
