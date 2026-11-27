@@ -249,14 +249,25 @@ class FaceModels:
         self.embedder = embedder
 
     def faces(self, image: Any) -> list[Face]:
-        """Every face in an upright PIL picture, with its box in that picture's pixels and its vector."""
-        pixels, scale = self.detector.working_pixels(image)
+        """Every face in an upright PIL picture, with its box in that picture's pixels and its vector.
+
+        The detector sees the picture at its working size; the embedder crops each face from the picture's
+        own pixels, so a large picture's face keeps the detail that the downscale dropped.
+        """
+        rgb = image.convert("RGB")
+        pixels, scale = self.detector.working_pixels(rgb)
+        full = pixels if scale == 1.0 else np.asarray(rgb, dtype=np.uint8)
         found = []
-        for detection in self.detector.detect_pixels(pixels):
-            crop = self.embedder.crop(pixels, detection)
+        for seen in self.detector.detect_pixels(pixels):
+            detection = Detection(
+                tuple(value / scale for value in seen.box),
+                tuple((x / scale, y / scale) for x, y in seen.landmarks),
+                seen.score,
+            )
+            crop = self.embedder.crop(full, detection)
             vector = None if crop is None else self.embedder.embed_crop(crop)
             if vector is not None:
-                found.append(Face(tuple(value / scale for value in detection.box), detection.score, vector))
+                found.append(Face(detection.box, detection.score, vector))
         return found
 
 

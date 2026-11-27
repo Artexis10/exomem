@@ -337,3 +337,38 @@ def test_a_changed_original_drops_the_faces_of_its_old_bytes(vault: Path, monkey
     worker._process(clip_job(vault, stored, "image"))
 
     assert face_rows(vault) == []
+
+
+def test_a_large_pictures_face_is_cropped_from_its_own_pixels_not_the_detectors_downscale() -> None:
+    """Catches the embedder seeing a blurred, downscaled face in a large photo, which splits its person."""
+    pytest.importorskip("PIL")  # The core tier has no image decoder; the face step decodes the picture.
+    from PIL import Image
+
+    detect_spec, embed_spec = media_models.model_spec("face-detect"), media_models.model_spec("face-embed")
+    long_side = int(detect_spec["working_long_side"])
+    full = np.random.default_rng(3).integers(0, 256, size=(long_side * 3 // 2, long_side * 2, 3), dtype=np.uint8)
+    # The detector, a model boundary, reports one face in the half-size pixels it sees.
+    seen = face_models.Detection(
+        (100.0, 100.0, 60.0, 60.0), ((115.0, 120.0), (145.0, 120.0), (130.0, 135.0), (118.0, 150.0), (142.0, 150.0)), 0.9
+    )
+    detector = face_models.FaceDetector(None, detect_spec)
+    detector.detect_pixels = lambda pixels: [seen]
+
+    class EmbeddingModel:
+        """The embedder's model boundary: keeps the crop it receives."""
+
+        crop = None
+
+        def run(self, outputs, feeds):
+            EmbeddingModel.crop = next(iter(feeds.values()))[0].transpose(1, 2, 0)
+            return [np.ones((1, WIDTH), dtype=np.float32)]
+
+    embedder = face_models.FaceEmbedder(EmbeddingModel(), embed_spec)
+
+    [found] = face_models.FaceModels(detector, embedder).faces(Image.fromarray(full))
+
+    at_full_size = face_models.Detection(
+        tuple(value * 2 for value in seen.box), tuple((x * 2, y * 2) for x, y in seen.landmarks), seen.score
+    )
+    np.testing.assert_array_equal(EmbeddingModel.crop, embedder.crop(full, at_full_size))
+    assert found.box == at_full_size.box
