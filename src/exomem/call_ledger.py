@@ -207,10 +207,11 @@ def _clip(value: object) -> str:
     return text if len(text) <= _MAX_FIELD_CHARS else text[:_MAX_FIELD_CHARS]
 
 
-#: Arguments that carry conversation text the caller never meant to persist:
-#: recorded by presence and byte length only, never hashed, in every mode. A
-#: hash of a short, guessable conversation is a confirmation oracle.
-_LENGTH_ONLY_ARG_NAMES = frozenset({"conversation"})
+#: Arguments that carry conversation text the caller never meant to persist, or
+#: the people a search by person names: recorded by presence and byte length
+#: only, never hashed, in every mode. A hash of a short, guessable conversation
+#: or name is a confirmation oracle, and it would outlive a delete of faces.
+_LENGTH_ONLY_ARG_NAMES = frozenset({"conversation", "people"})
 
 
 def _argument_shape(arguments: dict[str, Any]) -> tuple[list[str], dict[str, dict], bool]:

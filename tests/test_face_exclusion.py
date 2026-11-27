@@ -146,6 +146,17 @@ def test_the_query_log_of_a_restricted_search_holds_no_person(album, vault, monk
     assert "Ada Fixture" not in caplog.text
 
 
+def test_the_call_ledger_keeps_no_hash_of_the_people_a_search_named(wire, album, tmp_path) -> None:
+    """Catches a hash of a guessable name in the call ledger, which confirms a guess and outlives a delete."""
+    from exomem.call_ledger import canonical_json
+
+    wire({"query": "", "people": ["Ada Fixture"]})
+
+    ledger = "".join(path.read_text(encoding="utf-8") for path in (tmp_path / "ledger").rglob("*.jsonl"))
+    assert '"people"' in ledger  # The call was recorded, so the check below is not vacuous.
+    assert hashlib.sha256(canonical_json({"v": ["Ada Fixture"]})).hexdigest() not in ledger
+
+
 def test_projections_have_no_face_lane_and_a_projected_search_by_person_is_refused(album, vault, monkeypatch) -> None:
     """Catches face data in governed or projected retrieval for another principal."""
     from exomem.governance import projection_runtime
