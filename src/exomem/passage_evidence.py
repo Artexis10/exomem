@@ -266,6 +266,8 @@ def search_memory(vault_root: Path, request: Mapping[str, Any]) -> dict:
             relations=request["relations"],
             relation_of=request["relation_of"],
             relation_direction=request["relation_direction"],
+            # `find` refuses a person restriction on passages rather than drop it.
+            people=request.get("people"),
             **shortcuts,
         )
 

@@ -449,6 +449,16 @@ def sidecar_path(path: Path) -> Path:
     return _sidecar_path(path, protected=marked(path.as_posix()))
 
 
+def sidecar_key(path: str) -> str:
+    """`sidecar_path` for a vault-relative POSIX path, building no `Path`: a search by person maps thousands."""
+    from .governance.raw_protection import marked
+    from .preserve import _sidecar_name
+
+    folder, _, name = path.rpartition("/")
+    page = _sidecar_name(name, protected=marked(path))
+    return f"{folder}/{page}" if folder else page
+
+
 def available(vault: Path, path: str | Path) -> bool:
     """Whether the archive holds this original's bytes: an ordinary file, a shared pool object or a stored version.
 

@@ -57,7 +57,7 @@ _SESSION_ACTION_RULES: Mapping[str, CredentialRule] = {
 }
 #: Row 4 of the credential matrix, as a whole command: an owner-only operation that a session
 #: credential may accompany but never replaces owner authorization for.
-_OWNER_ONLY_COMMANDS = frozenset({"approve_procedure"})
+_OWNER_ONLY_COMMANDS = frozenset({"approve_procedure", "manage_faces"})  # nosemgrep: ep-word-set -- closed names of registered commands.
 _OPTIONAL_COMMANDS = frozenset(
     {
         "activate_context",

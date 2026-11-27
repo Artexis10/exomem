@@ -340,6 +340,9 @@ def build_cluster_config() -> ClusterConfig:
     erasure_raw = json.loads(os.environ.get("CELLCTL_SOURCE_ERASURE_CELL_IDS", "{}"))
     if not isinstance(erasure_raw, dict) or not all(isinstance(ids, list) for ids in erasure_raw.values()):
         raise ValueError("Source erasure cell IDs must be a JSON object of identity system to cell ID array")
+    faces_raw = json.loads(os.environ.get("CELLCTL_FACES_HOSTED_CELL_IDS", "[]"))
+    if not isinstance(faces_raw, list):
+        raise ValueError("face search cell IDs must be a JSON array of cell IDs")
     resources = ResourceSettings(
         cpu_request=os.environ.get("CELLCTL_CELL_CPU_REQUEST", DEFAULT_RESOURCES.cpu_request),
         cpu_limit=os.environ.get("CELLCTL_CELL_CPU_LIMIT", DEFAULT_RESOURCES.cpu_limit),
@@ -395,6 +398,7 @@ def build_cluster_config() -> ClusterConfig:
         media_engine_cell_ids=media_engine_cell_ids,
         media_engine_fleet_default=tuple(media_default_raw),
         source_erasure_cell_ids={system: tuple(ids) for system, ids in erasure_raw.items()},
+        faces_hosted_cell_ids=tuple(faces_raw),
         job_egress_except=tuple(job_egress_except_raw.split(",")) if job_egress_except_raw else (),
         storage=build_storage_config(),
         alert_delivery_secret=build_alert_delivery_secret(),

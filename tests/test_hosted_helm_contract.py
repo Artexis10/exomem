@@ -577,6 +577,21 @@ def test_cellctl_renders_the_media_engine_switch_under_the_name_the_runtime_read
     assert rendered == media_engines.ENGINES_ENV
 
 
+def test_cellctl_renders_the_face_switch_under_the_name_the_runtime_reads() -> None:
+    """cellctl names the per-cell face switch itself; renaming it on one side only would leave faces
+    unavailable in every listed cell, with no error anywhere."""
+    from exomem import face_store
+
+    manifests = ast.parse((ROOT / "infra/cellctl/src/cellctl/manifests.py").read_text(encoding="utf-8"))
+    [rendered] = [
+        ast.literal_eval(node.value)
+        for node in manifests.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "FACES_HOSTED_ENV" for target in node.targets)
+    ]
+    assert rendered == face_store.HOSTED_SETTING
+
+
 def test_cellctl_mounts_the_spool_where_the_cell_writes_it() -> None:
     """The upload mounts only the export's spool directory by its path on the staging claim. Renaming
     it on one side only would give the upload an empty directory, and every export would fail at its deadline."""

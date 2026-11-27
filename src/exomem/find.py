@@ -1652,6 +1652,7 @@ def find(
     relation_of: str | None = None,
     relation_direction: str = "any",
     filters: dict[str, Any] | None = None,
+    people: list[str] | None = None,
     result_level: str = "auto",
     limit: int = 15,
     scope: str = "kb",
@@ -1817,7 +1818,38 @@ def find(
     `admit_path`: the caller's content floors, applied before any candidate is
     ranked, classified or counted. Omitted, it is `caller_admission`, so a
     restricted caller's find can never run unadmitted.
+
+    `people`: keep only pictures and videos where a face of each named person
+    appears (`face_search`). Owner only, decided before the face store opens; a
+    refused restriction never falls back to a search without it. An empty list
+    names no person and restricts nothing.
     """
+    face_restriction = None
+    if people:
+        from . import face_search
+
+        face_restriction = face_search.admit(vault_root, people)
+        # The outside-KB reserve ranks pages that the eligible set does not gate; `scope="vault"` reaches them.
+        widen_outside_kb = False
+        if result_level == "passage":
+            raise cli_ops.OpError(
+                "INVALID_ARGUMENT",
+                "A search by person returns pictures and videos, not passages, so nothing ran.",
+                "Remove result_level passage when you set people.",
+            )
+    person_paths_memo: list[set[str]] = []
+
+    def _person_paths() -> set[str] | None:
+        """The pages the `people` restriction keeps, resolved once on a cache miss; None without one."""
+        if face_restriction is None:
+            return None
+        if not person_paths_memo:
+            from . import face_search
+
+            with _span(timings, "face_restriction"):
+                person_paths_memo.append(face_search.pages(vault_root, face_restriction, people or ()))
+        return person_paths_memo[0]
+
     if result_level == "passage":
         from . import passage_evidence
 
@@ -2273,6 +2305,7 @@ def find(
                 mode,
                 filter_key,
                 _relation_key(relations, relation_of, relation_direction),
+                face_restriction,
                 prefer_active,
                 resolved_config,
                 _origin_view(vault_root),
@@ -2355,6 +2388,9 @@ def find(
                 match = relation_provenance.get(unit.parent_path)
                 if match is not None:
                     unit.relation_match = _relation_match_dict(match, matched="parent")
+        if (person_paths := _person_paths()) is not None:
+            # A unit qualifies through its picture's page, as for a relation filter.
+            unit_hits = [u for u in unit_hits if u.parent_path in person_paths]
         if dimension_check is not None and dimension_lookups is not None:
             checked_count = len(unit_hits)
             unit_hits, group_edges, filter_dimensions = _check_dimensions_on_hits(
@@ -2462,6 +2498,7 @@ def find(
             recency_days,
             filter_key,
             _relation_key(relations, relation_of, relation_direction),
+            face_restriction,
             effective_result_level,
             prefer_source_passages,
             prefer_compiled,
@@ -2491,6 +2528,7 @@ def find(
             and query_norm
             and filter_plan.root is None
             and not relation_active
+            and face_restriction is None
             and types is None
             and projects is None
             and tags is None
@@ -2640,6 +2678,8 @@ def find(
                 match = relation_provenance.get(unit.parent_path)
                 if match is not None:
                     unit.relation_match = _relation_match_dict(match, matched="parent")
+        if (person_paths := _person_paths()) is not None:
+            mixed_unit_hits = [u for u in mixed_unit_hits if u.parent_path in person_paths]
 
     def select_outside(exclude_paths=None, *, defer_finish=False, stage_name="outside_kb"):
         return _find_outside_kb(
@@ -2804,14 +2844,19 @@ def find(
         eligible_paths = relation_set if eligible_paths is None else (eligible_paths & relation_set)
         if browse_window is not None:
             browse_window = replace(browse_window, keyed=True)
+    # The `people` restriction joins the eligible set the same way, so it composes AND with every filter.
+    if (person_paths := _person_paths()) is not None:
+        eligible_paths = person_paths if eligible_paths is None else (eligible_paths & person_paths)
+        if browse_window is not None:
+            browse_window = replace(browse_window, keyed=True)
 
     # Only the caller's own filters size the candidate pool. Admission narrows
     # what every lane ranks; it never deepens the pool (`collect_candidates`).
     filtered = eligible_paths is not None
-    # The caller asked for pictures only: its own filters require an image or video kind.
-    media_restricted = filtered and structured_filters.requires_one_of(
+    # The caller asked for pictures only: its own filters require an image or video kind, or it named people.
+    media_restricted = filtered and (face_restriction is not None or structured_filters.requires_one_of(
         filter_plan, "page.file_type", media_types.VISUAL_KINDS
-    )
+    ))
     if admitted_paths is not None:
         eligible_paths = admitted_paths if eligible_paths is None else eligible_paths & admitted_paths
 
