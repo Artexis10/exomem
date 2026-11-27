@@ -15991,17 +15991,41 @@ def refusal_before_queueing(command: Command, arguments: Mapping[str, Any]) -> E
     return None
 
 
+#: How long a busy save's declared check may read: the declaration, then the queue. It only buys an earlier
+#: refusal, so a slow read gives the save up to the queue it would have joined, which is what its caller was
+#: already going to wait on.
+_DECLARED_REFUSAL_SECONDS = 0.5
+
+
 def declared_refusal_before_queueing(
     command: Command, arguments: Mapping[str, Any], vault_root: Path
 ) -> Exception | None:
     """The refusal that a save's values get from what the vault declares, or None.
 
     `refusal_before_queueing` reads nothing. This one reads a declaration (a collection's manifest),
-    so the intake runs it only for a save that is about to queue.
+    so the intake runs it only for a save that is about to queue. The refusal holds only while no open
+    queued save can change that declaration before this one replays: a save of a command that can
+    rewrite a page's frontmatter (`Command.rewrites_frontmatter`), whichever page it names, or a Records
+    save that carries a manifest's text. A direct revise that commits after this check, before the
+    replay would have run, is not seen: the check can refuse a value that the revised collection
+    accepts, and the caller sends it again.
     """
-    if command.name == "record_memory":
-        return record_memory_module.value_refusal(vault_root, arguments)
-    return None
+    if command.name != operation_entries.RECORDS.command:
+        return None
+    from . import request_budget, write_intake
+
+    budget = request_budget.RequestBudget(seconds=_DECLARED_REFUSAL_SECONDS)
+    refusal = record_memory_module.value_refusal(vault_root, arguments, budget)
+    if refusal is None:
+        return None
+    changing = write_intake.may_change_declaration(
+        vault_root,
+        rewriting=tuple(item.name for item in PRODUCT_COMMANDS if item.rewrites_frontmatter),
+        manifest_command=operation_entries.RECORDS.command,
+        manifest_field=operation_entries.MANIFEST_TEXT_FIELD,
+        seconds=budget.remaining(),
+    )
+    return refusal if changing is False else None
 
 
 _MCRC = frozenset({"mcp", "rest", "cli"})
@@ -16243,7 +16267,8 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "path",
         _MCRC,
         ("edit",),
-        {"public_title": "Edit a knowledge note", "preferred_name": "edit_note", "surface": "primary", "actions": ("update",), "first_run_safe": False},
+        {"public_title": "Edit a knowledge note", "preferred_name": "edit_note", "surface": "primary", "actions": ("update",), "first_run_safe": False,
+         "rewrites_frontmatter": True},
     ),
     (
         "observe_memory",
@@ -16265,7 +16290,8 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "old_path",
         _MCRC,
         ("replace",),
-        {"public_title": "Supersede a knowledge note", "preferred_name": "supersede_note", "surface": "primary", "actions": ("update",), "first_run_safe": False},
+        {"public_title": "Supersede a knowledge note", "preferred_name": "supersede_note", "surface": "primary", "actions": ("update",), "first_run_safe": False,
+         "rewrites_frontmatter": True},
     ),
     (
         "reserve_source_capture",
@@ -16866,6 +16892,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 outcome_verb=_COMMAND_OUTCOME_VERBS.get(name),
                 names_pages=name in _PAGE_NAMING_COMMANDS,
                 busy_intake=name in _BUSY_INTAKE_COMMANDS,
+                rewrites_frontmatter=bool(meta.get("rewrites_frontmatter", False)),
                 prepare_arguments=meta.get("prepare_arguments"),
             )
         )

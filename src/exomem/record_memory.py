@@ -963,11 +963,6 @@ def _require_one_history_selector(given: Mapping[str, Any]) -> None:
         )
 
 
-#: The argument that carries a manifest's text. A save that sends it can change what a collection declares.
-_MANIFEST_ARGUMENT = "manifest_text"
-#: How long the check may read: the declaration, then the queue. It only buys an earlier refusal, so a slow
-#: read gives the save up to the queue it would have joined, which is what its caller was already going to wait on.
-_DECLARATION_READ_SECONDS = 0.5
 _RESEND_WITH_A_DECLARED_VALUE = (
     "Nothing was saved and nothing is held. Send the call again with a value the collection declares."
 )
@@ -1006,45 +1001,26 @@ def _declared_manifest(
         return None
 
 
-def value_refusal(vault_root: Path, arguments: Mapping[str, Any]) -> OpError | None:
+def value_refusal(
+    vault_root: Path, arguments: Mapping[str, Any], budget: request_budget.RequestBudget
+) -> OpError | None:
     """The refusal that the collection's declared fields give an append's `item` or an update's `changes`, or None.
 
-    The busy intake raises it instead of queueing a save whose replay would refuse the same value. It takes no
-    lock and no store writer. Whatever is not certain answers None and the save queues as before: a collection
-    this thread cannot read now, a manifest that the caller may not see, and an open queued save that may change
-    what the collection declares before this one replays. Such a save is a Records save that carries a manifest
-    text, or a save of another command whose arguments name the manifest by its path or its collection id,
-    such as an edit of its frontmatter. A direct revise that commits after this check, before the replay would
-    have run, is not seen: the check can refuse a value that the revised collection accepts, and the caller sends
-    it again.
+    The busy intake raises it instead of queueing a save whose replay would refuse the same value
+    (`commands.declared_refusal_before_queueing`, which also decides whether a queued save may change the
+    declaration first). It takes no lock and no store writer, and reads within `budget`. Whatever is not
+    certain answers None: a collection this thread cannot read now, or a manifest that the caller may not see.
     """
     action = arguments.get("action")
     values = arguments.get("item") if action == "append" else arguments.get("changes") if action == "update" else None
     collection = arguments.get("collection")
     if not isinstance(values, Mapping) or not values or type(collection) is not str:
         return None
-    budget = request_budget.RequestBudget(seconds=_DECLARATION_READ_SECONDS)
     manifest = _declared_manifest(Path(vault_root), collection, budget)
     if manifest is None:
         return None
     refusal = records.supplied_value_refusal(manifest, values)
     if refusal is None:
-        return None
-    from . import write_intake
-
-    changing = write_intake.may_change_declaration(
-        vault_root,
-        command_name=operation_entries.RECORDS.command,
-        argument=_MANIFEST_ARGUMENT,
-        names=(
-            # The path below the knowledge-base root: a caller may name the manifest with or without that root.
-            kbdir.managed_split(manifest.path, key=str.casefold) or manifest.path,
-            # The id as every reply spells it, bare or in its memory reference.
-            manifest.collection_id,
-        ),
-        seconds=budget.remaining(),
-    )
-    if changing is not False:
         return None
     return OpError(
         refusal.code, refusal.reason, _RESEND_WITH_A_DECLARED_VALUE, details=_json_safe_details(refusal.details)

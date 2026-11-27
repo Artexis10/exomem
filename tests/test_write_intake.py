@@ -37,7 +37,6 @@ from exomem import (
     cloud_cell,
     commands,
     mutation_journal,
-    record_memory,
     request_budget,
     write_intake,
     writer_lease,
@@ -629,12 +628,12 @@ def test_an_undeclared_record_value_behind_a_queued_manifest_revision_is_queued_
     _wait_for_state(vault, first, "applied")
 
 
-@pytest.mark.parametrize("named_by", ["path", "reference"])
+@pytest.mark.parametrize("named_as", ["Publications ledger", "exomem://memory/5E9D1E2F-8F0A-4B6C-9D21-6F0F4A2B7C31"])
 def test_an_undeclared_record_value_behind_a_queued_edit_of_the_manifest_is_queued_not_refused(
-    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch, named_by: str
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch, named_as: str
 ) -> None:
-    """A queued edit of the manifest may widen what the collection declares before this save replays, whether it
-    names the manifest by its path or by the collection's reference."""
+    """Defect: a queued edit that named the manifest by its title, or by its reference in capitals, left the value
+    refused. The edit widens what the collection declares before this save replays, so only the replay can tell."""
     _writer, holder = managers
     collection = _ledger_declaring_a_status(vault)
     widened = vault_module.parse_frontmatter((vault / collection).read_text(encoding="utf-8"))[0]["item_schema"]
@@ -642,7 +641,7 @@ def test_an_undeclared_record_value_behind_a_queued_edit_of_the_manifest_is_queu
     first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
     with _Hold(holder, vault):
         edit = _send(_command("edit_memory"), vault, {
-            "path": collection if named_by == "path" else "exomem://memory/5e9d1e2f-8f0a-4b6c-9d21-6f0f4a2b7c31",
+            "path": named_as,
             "why": "declare a resolved status",
             "operation": {"kind": "patch_frontmatter", "field": "item_schema", "value": widened},
         }, scope="principal:session-b")
@@ -668,7 +667,8 @@ def test_a_busy_record_check_by_a_title_two_collections_carry_records_no_release
     receipts_before = len(_receipt_records(vault))
 
     with request_scope(local_owner_principal(surface="mcp")):
-        refusal = record_memory.value_refusal(vault, _status_call("Publications ledger", "update", "resolved"))
+        refusal = commands.declared_refusal_before_queueing(
+            _command("record_memory"), _status_call("Publications ledger", "update", "resolved"), vault)
     assert refusal is None
     assert _receipt_records(vault)[receipts_before:] == []
 
@@ -691,7 +691,8 @@ def test_the_busy_record_check_holds_none_of_the_queued_arguments_in_memory(
             assert receipt["state"] == "queued"
     tracemalloc.start()
     try:
-        refusal = record_memory.value_refusal(vault, _status_call(collection, "update", "resolved"))
+        refusal = commands.declared_refusal_before_queueing(
+            _command("record_memory"), _status_call(collection, "update", "resolved"), vault)
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()

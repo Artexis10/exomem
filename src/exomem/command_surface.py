@@ -394,6 +394,10 @@ class Command:
     #: step or a credential must not run later than its caller expects. Within a declaring command,
     #: `commands.busy_intake_applies` decides per operation (`OperationEntry.queues_when_busy`).
     busy_intake: bool = False
+    #: A save that can rewrite the frontmatter of an existing page it names: an edit in place, or a
+    #: supersession that rewrites the old page. Queued, it can change what a collection declares before a
+    #: later save replays, so `commands.declared_refusal_before_queueing` refuses nothing behind it.
+    rewrites_frontmatter: bool = False
     #: Resolve read-only handles before writer admission; the leaf revalidates the bound guards.
     prepare_arguments: Callable[..., dict[str, typing.Any]] | None = field(
         default=None, compare=False, hash=False
