@@ -121,6 +121,9 @@ def test_a_save_published_during_the_request_leaves_its_positions_and_leads_as_t
     from exomem import freshness, readiness, working_set_runtime
 
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    # The save runs on the request's clock. On a loaded runner the request outran the 6 s activation budget, and
+    # the block read partial for the deadline, not for the save. The request-path tests cover budget expiry.
+    monkeypatch.setattr(request_budget, "ACTIVATION_DOOR_BUDGET_SECONDS", 120)
     position = "I prefer a slow candle before the glaze firing ramps this week"
     lead = _page(
         vault, "glaze-firing-schedule",
