@@ -24,6 +24,9 @@ arm's own writer, sends one user turn to Claude Code in print mode (or to the Op
 - ``write_receipt``: the tool results the session saw. Every receipt of a ``tools`` call that came before the
   session's first ``before`` call contains ``contains`` (true when the session made no such call), so a note
   written before the row has to carry the product's pointer to the Record that is still owed.
+- ``file_kept``: a list; for each entry, the named case file's bytes are kept by a Source or an Evidence page (``arm_side.py sources``
+  reads both), and every ``where`` condition holds on each such page; ``equals`` instead counts those pages, so
+  ``0`` says the file was not kept anywhere.
 - ``sources_added``: the Sources the session added on top of ``sources_before`` number exactly ``equals``,
   whatever their bytes — an edited copy of a case file counts too.
 - ``new_collection``: the collections that the seed did not leave (read by the arm's own discovery, ``arm_side.py
@@ -159,7 +162,7 @@ SESSION_TIMEOUT_SECONDS = 900
 #: A handed-file custody turn costs 5-6 tool calls and a 2026-11-17 unit hit the 12-turn cap.
 INCIDENT_MAX_TURNS = 20
 JUDGE_TIMEOUT_SECONDS = 300
-SOURCE_CHECKS = ("source_saved", "source_count", "current_source", "compiled_with_backlinks")
+SOURCE_CHECKS = ("source_saved", "source_count", "current_source", "compiled_with_backlinks", "file_kept")
 #: The checks this runner implements; a case's `pass` names a subset.
 CHECKS = (
     "seed_corrected",
@@ -206,6 +209,7 @@ def named_files(rule: dict) -> list[str]:
         *rule.get("source_saved", ()),
         *rule.get("compiled_with_backlinks", ()),
         *(rule[key]["file"] for key in ("source_count", "current_source") if key in rule),
+        *(kept["file"] for kept in rule.get("file_kept", ())),
     ]
 
 
@@ -275,6 +279,13 @@ def validate_case(case: dict) -> None:
         if not conditions or any(c["op"] not in CONDITIONS for c in conditions):
             raise SystemExit(
                 f"case {case['id']}: current_source needs conditions with ops among {sorted(CONDITIONS)}"
+            )
+    for kept in rule.get("file_kept", ()):
+        if ("equals" in kept) == ("where" in kept) or (
+            "equals" in kept and type(kept["equals"]) is not int
+        ) or any(c["op"] not in CONDITIONS for c in kept.get("where", ())):
+            raise SystemExit(
+                f"case {case['id']}: each file_kept entry needs an integer `equals` or `where` conditions, not both"
             )
     if "source_count" in rule and type(rule["source_count"].get("equals")) is not int:
         raise SystemExit(f"case {case['id']}: source_count needs an integer `equals`")
@@ -566,6 +577,24 @@ def current_source(facts: dict, fixtures: dict[str, str], spec: dict) -> bool | 
     if not current:
         return spec.get("if_none", False)
     return all(condition_holds(row["frontmatter"], c) for row in current for c in spec["where"])
+
+
+def file_kept(facts: dict, fixtures: dict[str, str], specs: list[dict]) -> bool:
+    """For each spec, the named file's bytes are kept by a Source or an Evidence page, and every ``where``
+    condition holds on each such page. With ``equals``, exactly that many pages keep the bytes (0: not kept).
+    """
+    def holds(spec: dict) -> bool:
+        digest = fixtures[spec["file"]]
+        held = holding(facts, digest) + [
+            row for row in facts.get("evidence", ()) if row["original_sha256"] == digest
+        ]
+        if "equals" in spec:
+            return len(held) == spec["equals"]
+        return bool(held) and all(
+            condition_holds(row["frontmatter"], c) for row in held for c in spec["where"]
+        )
+
+    return all(holds(spec) for spec in specs)
 
 
 def sources_added(facts: dict, before: list[str], spec: dict) -> bool:
@@ -874,6 +903,7 @@ SOURCE_CHECK_FUNCTIONS = {
     "source_count": source_count,
     "current_source": current_source,
     "compiled_with_backlinks": compiled_with_backlinks,
+    "file_kept": file_kept,
 }
 UNKNOWN_REASONS = {
     "current_source": "the arm could not say whether a Source of the file was corrected",

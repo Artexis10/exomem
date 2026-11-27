@@ -71,7 +71,7 @@ _KIND_NAMES: dict[tuple[str, str], str] = {  # nosemgrep: ep-word-dict -- the cl
     ("manage_memory_file", "files"): "list", ("manage_memory_file", "trash-list"): "trash",
     ("manage_memory_file", "propose-reclassification"): "reclassify",
     ("manage_memory_file", "validate-create"): "create", ("manage_memory_file", "validate-append"): "append",
-    ("manage_memory_file", "validate-move"): "move",
+    ("manage_memory_file", "validate-move"): "move", ("manage_memory_file", "validate-classify"): "classify",
     ("adopt_vault", "scan-only"): "scan",
     ("maintain_memory", "collections-store"): "collections", ("maintain_memory", "collections-cutover"): "cutover",
     ("maintain_memory", "maintenance-job"): "job", ("maintain_memory", "maintenance-job-cancel"): "cancel_job",

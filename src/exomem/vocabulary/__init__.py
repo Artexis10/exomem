@@ -46,6 +46,7 @@ def registry_specs() -> Mapping[str, RegistrySpec]:
         planning_values,
         relation_registry,
         semantic_language_registry,
+        sensitivity_classes,
         source_formats,
         source_taxonomy,
         sync_providers,
@@ -70,6 +71,7 @@ def registry_specs() -> Mapping[str, RegistrySpec]:
             capture_dates.SPEC,
             page_fields.SPEC,
             source_formats.SPEC,
+            sensitivity_classes.SPEC,
         )
     }
 

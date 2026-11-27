@@ -142,6 +142,7 @@ _KB_WRITES = (
     "manage_memory:episodes.prepare",
     "manage_memory:episodes.resume",
     "manage_memory:files.append",
+    "manage_memory:files.classify",
     "manage_memory:files.create",
     "manage_memory:files.delete",
     "manage_memory:files.move",

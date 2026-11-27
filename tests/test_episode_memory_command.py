@@ -65,6 +65,7 @@ RESULT_KEYS = {
     "recovery",
     "ledger",
     "about_skipped",
+    "sensitivity",
 }
 
 

@@ -251,6 +251,10 @@ SAMPLES = {
         "new_path": "Knowledge Base/Notes/Archive/Lantern Claim.md",
     },
     "manage_memory_file:trash-list": {"operation": "trash-list"},
+    "manage_memory_file:classify": {
+        "operation": "classify", "validate_only": True, "path": SOURCE, "sensitivity": ["identity"],
+        "reason": "The survey names the keeper",
+    },
     "manage_memory_file:propose-reclassification": {
         "operation": "propose-reclassification", "path": SOURCE, "source_kind": "article",
     },
