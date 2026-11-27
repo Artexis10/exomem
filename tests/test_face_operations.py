@@ -85,6 +85,13 @@ def test_an_agent_asking_to_turn_faces_on_gets_the_disclosure_and_faces_stay_off
     assert not face_scan.backfill_running(vault)
 
 
+class Terminal(io.StringIO):
+    """Standard input that reports a terminal, holding what the person types."""
+
+    def isatty(self) -> bool:
+        return True
+
+
 def test_the_cli_turns_faces_on_only_with_the_typed_confirmation_and_records_the_cli(vault, monkeypatch, capsys) -> None:
     """Catches biometric processing enabled by one call that no disclosure preceded."""
     monkeypatch.setattr("sys.stdin", io.StringIO(""))  # no terminal
@@ -93,11 +100,13 @@ def test_the_cli_turns_faces_on_only_with_the_typed_confirmation_and_records_the
     assert refused == 2
     assert not face_store.enabled(vault)
 
-    wrong = cli.main(["faces", "on", "--vault", str(vault), "--confirm", "yes"])
+    monkeypatch.setattr("sys.stdin", Terminal("yes\n"))
+    wrong = cli.main(["faces", "on", "--vault", str(vault)])
     assert wrong == 1
     assert not face_store.enabled(vault)
 
-    cli.main(["faces", "on", "--vault", str(vault), "--confirm", "turn faces on"])
+    monkeypatch.setattr("sys.stdin", Terminal("turn faces on\n"))
+    cli.main(["faces", "on", "--vault", str(vault)])
     face_scan.stop_backfill(vault, timeout=30)
 
     printed = capsys.readouterr().out
@@ -197,7 +206,8 @@ def test_a_hosted_deployment_refuses_turn_on_without_its_operator_setting(vault,
     monkeypatch.setenv("EXOMEM_HOSTED_CELL", "1")
     monkeypatch.delenv(face_store.HOSTED_SETTING, raising=False)
 
-    code = cli.main(["faces", "on", "--vault", str(vault), "--confirm", "turn faces on"])
+    monkeypatch.setattr("sys.stdin", Terminal("turn faces on\n"))
+    code = cli.main(["faces", "on", "--vault", str(vault)])
 
     assert code == 1
     assert "FACES_UNAVAILABLE" in capsys.readouterr().err

@@ -396,6 +396,8 @@ class CellManifestSpec:
     media_engines: str = ""
     # erase-captured-source: the cell's Source erasure policy JSON, or "" to keep erasure off.
     source_erasure_policy: str = ""
+    # add-face-search D9a: whether the operator enabled face search for this cell.
+    faces_hosted: bool = False
     # add-cloud-media-store D4-D6: a cell the media edge serves. The URL selects the
     # cell; the rest is its standard-mode key bundle and edge credential, all or none.
     media_edge_url: str = ""
@@ -842,6 +844,8 @@ def _container_security_context() -> dict:
 MEDIA_ENGINES_ENV = "EXOMEM_MEDIA_ENGINES"
 # The per-cell Source erasure policy, the variable the runtime's source_erasure module reads.
 SOURCE_ERASURE_POLICY_ENV = "EXOMEM_SOURCE_ERASURE_POLICY"
+# The per-cell face search switch, the variable the runtime's face_store module reads.
+FACES_HOSTED_ENV = "EXOMEM_FACES_HOSTED"
 # The resident passage matrix ceiling, the variable the runtime's passage_matrix module
 # reads. The platform chart sets it for every cell in cellctl.cellResources.passageMatrixBudget,
 # next to the cell memory limit. The runtime still admits it against the pod's memory headroom
@@ -872,6 +876,8 @@ MODEL_ENV_FORBIDDEN_KEYS = frozenset(
         MEDIA_ENGINES_ENV,
         # Rendered per cell from the erasure selection: a chart-wide value would enable every owner's cell.
         SOURCE_ERASURE_POLICY_ENV,
+        # Rendered per cell from the face selection: a chart-wide value would enable faces in every cell.
+        FACES_HOSTED_ENV,
         # Names the cell's media store and holds its key paths; cellctl renders it per cell.
         MEDIA_STORE_CONFIG_ENV,
         # `inline` would run media extraction inside the serving process, which a
@@ -1039,6 +1045,8 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
         env.append({"name": MEDIA_ENGINES_ENV, "value": spec.media_engines})
     if spec.source_erasure_policy:
         env.append({"name": SOURCE_ERASURE_POLICY_ENV, "value": spec.source_erasure_policy})
+    if spec.faces_hosted:
+        env.append({"name": FACES_HOSTED_ENV, "value": "1"})
     return env
 
 

@@ -28,7 +28,7 @@ DISCLOSURE = (
     "never leaves this account. Only you, the owner, can read it or search by person. "
     "`exomem faces off` stops it and keeps what is stored; `exomem faces delete` erases it."
 )
-#: The text a person types, or passes with `--confirm`, to turn faces on.
+#: The text a person types at a terminal to turn faces on.
 CONFIRMATION = "turn faces on"
 TURN_ON_COMMAND = "exomem faces on"
 #: What a delete cannot reach, and when each ends (design D11). The delete result and status show them.

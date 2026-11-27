@@ -4017,10 +4017,6 @@ def _faces_on_main(argv: list[str]) -> int:
             "the service resumes it at its next start."
         ),
     )
-    parser.add_argument(
-        "--confirm", metavar="TEXT",
-        help=f'without a terminal: the confirmation, exactly "{face_operations.CONFIRMATION}", after reading the disclosure',
-    )
     parser.add_argument("--vault", default=None, help="vault root (default: $EXOMEM_VAULT_PATH)")
     args = parser.parse_args(argv)
     root = Path(args.vault).expanduser() if args.vault else resolve_vault()
@@ -4033,17 +4029,15 @@ def _faces_on_main(argv: list[str]) -> int:
         print("Faces are already on.")
         return 0
     print(face_operations.DISCLOSURE)
-    if args.confirm is not None:
-        typed = args.confirm
-    elif sys.stdin.isatty():
-        typed = input(f'\nType "{face_operations.CONFIRMATION}" to turn faces on: ')
-    else:
+    # No flag takes the confirmation: a one-line shell call by an agent would then turn faces on.
+    if not sys.stdin.isatty():
         print(
             "Error [CONFIRMATION_REQUIRED]: faces stay off, because no terminal can take the confirmation. "
-            f'Run `exomem faces on` in a terminal, or pass --confirm "{face_operations.CONFIRMATION}".',
+            "The owner runs `exomem faces on` in a terminal and types the confirmation.",
             file=sys.stderr,
         )
         return 2
+    typed = input(f'\nType "{face_operations.CONFIRMATION}" to turn faces on: ')
     if typed.strip() != face_operations.CONFIRMATION:
         print("Faces stay off: the confirmation did not match.", file=sys.stderr)
         return 1
