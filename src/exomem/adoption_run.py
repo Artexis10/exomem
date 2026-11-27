@@ -2150,8 +2150,12 @@ def _earlier_pages(store: AdoptionRunStore, run: dict) -> tuple[dict, ...]:
 
 
 def unfiled_members(root: Path, import_id: str, runs: tuple[dict, ...] | None = None) -> list[dict]:
-    """The members of an import that adoption did not file or `finish` did not verify, as `unfiled_report` lists them."""
-    return unfiled_report(root, import_id, runs)[0]
+    """The members of an import that adoption did not file or `finish` did not verify, as `unfiled_report` lists them.
+
+    A Takeout sidecar that counts as filed (its photo is in the vault) is left out: it is no member that the person must
+    keep the source for, and a resend would send it back without its photo. The filing view counts it (`unfiled_report`).
+    """
+    return [member for member in unfiled_report(root, import_id, runs)[0] if not adoption_consume.is_filed(member["code"])]
 
 
 def unfiled_report(root: Path, import_id: str, runs: tuple[dict, ...] | None = None) -> tuple[list[dict], dict | None]:

@@ -144,6 +144,20 @@ An unpaired sidecar whose name and `title` are those of a sidecar that paired wi
 - **WHEN** an album folder holds a sidecar whose name is the same cut name as a paired sidecar's, and whose `title` is another file's
 - **THEN** it stays `IMPORT_SIDECAR_UNPAIRED` and the report lists it for review
 
+### Requirement: A filed sidecar leaves nothing to keep or resend
+
+The window status and a discarded window's residual record SHALL list a sidecar only when its reason is not filed. A Takeout whose sidecars all count as filed SHALL leave `keep_source` false and an empty residual, and a resend SHALL send no sidecar of it.
+
+#### Scenario: A Takeout that is filed
+
+- **WHEN** every photo of a stage filed, and its sidecars count as `IMPORT_SIDECAR_APPLIED`, `IMPORT_SIDECAR_EMPTY` or `IMPORT_SIDECAR_ALBUM_ENTRY`
+- **THEN** the window status says that the source folder need not be kept, and discarding the window records no residual member, while the filing view still counts each sidecar
+
+#### Scenario: A sidecar that needs a look
+
+- **WHEN** one sidecar of the stage counts as `IMPORT_SIDECAR_UNPAIRED`
+- **THEN** the window status says to keep the source folder for 1 unfiled member, and the residual lists that sidecar alone
+
 ### Requirement: The view counts the captions that sidecars gave
 
 Over the sidecars whose photo filed now, the filing view SHALL count those that carry a caption (`captioned`). It SHALL count no time, because no sidecar time is applied.
@@ -211,9 +225,18 @@ A paired sidecar's `photoTakenTime` SHALL NOT be written to any page's capture r
 
 ### Requirement: A window keeps a likely sidecar with its photo
 
-When the CLI sends a folder in windows, a file whose name reads as a Takeout sidecar's SHALL go in the window of the photo or video that its name fits, as a page's part pages go with their page. The planner SHALL decide this from names and the shipped `source-formats` entry alone and SHALL open no file. A name that fits no file, or a wrong guess, SHALL leave the sidecar in the window that the order gives it, and the sidecar counts as unpaired.
+When the CLI sends a folder in windows, a file whose name reads as a Takeout sidecar's SHALL go in the window of the photo or video that its name fits, as a page's part pages go with their page. The planner SHALL decide this from names and the shipped `source-formats` entry alone and SHALL open no file. A name that fits no file of the series, or a wrong guess, SHALL leave the sidecar in the window that the order gives it, and the sidecar counts as unpaired.
 
 #### Scenario: A Takeout folder that spans two windows
 
 - **WHEN** a folder holds 8 photos with their sidecars and the cell's budget carries about half of it in a window
 - **THEN** every sidecar is in the window of its photo, and every photo files with its caption
+
+### Requirement: An album's sidecar with no photo beside it travels with its photo
+
+A sidecar that no file of its own folder fits SHALL go in the window of the first file in path order that its name fits in any folder of the series. The planner SHALL decide this from names alone, as it does for any likely sidecar.
+
+#### Scenario: An album that holds only sidecars across windows
+
+- **WHEN** a folder holds photos with their sidecars in a year folder and each sidecar again alone in an album folder, and the cell's budget carries about half of it in a window
+- **THEN** each album sidecar is in the window of its photo, and the filing views count every album sidecar as `IMPORT_SIDECAR_ALBUM_ENTRY` and none as unpaired

@@ -29,9 +29,11 @@ from test_notes_mail_exports import JPEG
 from exomem import (
     adoption_consume,
     client_artifacts,
+    cloud_import_job,
     export_expansion,
     export_sidecars,
     import_stage,
+    import_windows,
     lexstore,
 )
 from exomem import find as find_module
@@ -430,6 +432,39 @@ def test_an_album_sidecar_whose_title_is_another_photos_stays_unpaired_although_
     assert view["left_out"]["by_reason"] == {APPLIED: 1, UNPAIRED: 1}
 
 
+def test_a_filed_takeout_leaves_no_member_to_keep_the_source_for_and_no_residual_to_resend(vault: Path) -> None:
+    """Catches a finished Takeout that never clears "keep the source folder": a filed sidecar is listed as unfiled, and a resend sends it back alone."""
+    year = "Takeout/Google Photos/Photos from 2022"
+    import_id = stage_takeout(vault, {
+        f"{year}/IMG_1.jpg": photo("IMG_1.jpg"), f"{year}/IMG_1.jpg.supplemental-metadata.json": sidecar("IMG_1.jpg", caption="Dusk"),
+        f"{year}/IMG_2.jpg": photo("IMG_2.jpg"), f"{year}/IMG_2.jpg.supplemental-metadata.json": sidecar("IMG_2.jpg"),
+        f"{ALBUM}/IMG_1.jpg.supplemental-metadata.json": sidecar("IMG_1.jpg", caption="Dusk"),
+    })
+    view = file_to_done(vault, import_id, calls=200)
+    assert view["left_out"]["by_reason"] == {APPLIED: 1, EMPTY: 1, ALBUM_ENTRY: 1}  # the view still counts each sidecar
+
+    assert import_windows.report(vault)["import_windows"]["keep_source"] == {"keep": False, "message": None}
+    cloud_import_job.discard(vault, import_id)
+    record = import_stage.window_record(vault, import_id)
+    assert (record.kind, record.members) == (import_stage.WINDOW_DISCARDED, ())
+
+
+def test_a_takeout_sidecar_that_needs_a_look_keeps_the_source_and_is_the_only_residual(vault: Path) -> None:
+    """Catches a fix that clears the source for a Takeout that still holds a sidecar whose photo was never staged."""
+    year = "Takeout/Google Photos/Photos from 2022"
+    import_id = stage_takeout(vault, {
+        f"{year}/IMG_1.jpg": photo("IMG_1.jpg"), f"{year}/IMG_1.jpg.supplemental-metadata.json": sidecar("IMG_1.jpg", caption="Dusk"),
+        f"{ALBUM}/IMG_9.jpg.supplemental-metadata.json": sidecar("IMG_9.jpg", caption="the photo of another archive part"),
+    })
+    file_to_done(vault, import_id, calls=200)
+
+    keep = import_windows.report(vault)["import_windows"]["keep_source"]
+    assert keep == {"keep": True, "message": "Keep the source folder: 1 unfiled member(s) in landed windows."}
+    cloud_import_job.discard(vault, import_id)
+    record = import_stage.window_record(vault, import_id)
+    assert [(member["path"], member["code"]) for member in record.members] == [(f"{ALBUM}/IMG_9.jpg.supplemental-metadata.json", UNPAIRED)]
+
+
 def test_a_sidecar_whose_photo_did_not_file_is_counted_as_such_and_left_for_review(
     vault: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -664,3 +699,29 @@ def test_a_takeout_folder_that_spans_two_windows_files_every_photo_with_its_capt
     assert len(pages) == 8
     for number in range(8):
         assert caption_of(pages, f"{ALBUM}/IMG_{number:02d}.jpg") == f"day {number} at the lake"
+
+
+@pytest.mark.skipif(not (shutil.which("age") and shutil.which("age-keygen")), reason="real age executables required")
+def test_an_album_that_holds_only_sidecars_files_in_the_window_of_its_photo_and_counts_each_as_an_album_entry(vault: Path, rig: Rig) -> None:
+    """Catches an album folder with no photo whose sidecars travel last, as text: in a later window they would count as unpaired."""
+    year, album = rig.source / "Takeout/Google Photos/Photos from 2022", rig.source / ALBUM
+    year.mkdir(parents=True)
+    album.mkdir(parents=True)
+    for number in range(8):
+        name = f"IMG_{number:02d}.jpg"
+        (year / name).write_bytes(photo(name).ljust(800, b"\0"))
+        (year / f"{name}.supplemental-metadata.json").write_bytes(sidecar(name, caption=f"day {number} at the lake"))
+        (album / f"{name}.supplemental-metadata.json").write_bytes(sidecar(name, caption=f"day {number} at the lake"))
+    text = sum(path.stat().st_size for folder in (year, album) for path in folder.glob("*.json"))
+    rig.cell.budget = rig.cell.reachable = rig.cell.refill = 2 * text + 4 * 800 + 4000
+
+    rig.run()
+
+    windows = [rig.cloud.sent(import_id) for import_id in rig.cloud.completed]
+    assert len(windows) > 1
+    reasons: dict[str, int] = {}
+    for window in windows:
+        view = file_to_done(vault, stage_takeout(vault, {path: (rig.source / path).read_bytes() for path in window}), calls=200)
+        for reason, count in view["left_out"]["by_reason"].items():
+            reasons[reason] = reasons.get(reason, 0) + count
+    assert reasons == {APPLIED: 8, ALBUM_ENTRY: 8}

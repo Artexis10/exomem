@@ -158,12 +158,17 @@ def decide(sidecars: Mapping[str, Key], photos: Iterable[str], fmt: SourceFormat
     return decided
 
 
-def _index(photos: Iterable[str]) -> _Index:
-    """The staged files that are images or videos, indexed for a sidecar to look up its few candidates."""
+def _index(photos: Iterable[str], *, across_folders: bool = False) -> _Index:
+    """The staged files that are images or videos, indexed for a sidecar to look up its few candidates.
+
+    With `across_folders` every file is indexed under the one folder `""`, so that a lookup there finds a photo of any folder.
+    """
     exact: dict[tuple[str, str, int | None, str], list[_Entry]] = {}
     by_copy: dict[tuple[str, int | None], list[tuple[str, _Entry]]] = {}
     for path in photos:
         folder, _slash, raw = path.rpartition("/")
+        if across_folders:
+            folder = ""
         name = unicodedata.normalize("NFC", raw)
         if media_type_for(name) not in KINDS:
             continue
@@ -206,14 +211,24 @@ def likely_photos(paths: Iterable[str], fmt: SourceFormat) -> dict[str, str]:
 
     A guess from names alone, for a planner that must keep a sidecar with its photo and opens no file: no title is
     read, so nothing is paired, and a wrong guess only costs the sidecar its caption (`decide` decides). A name that fits
-    several photos (a cut name) goes with the first of them in path order.
+    several photos (a cut name) goes with the first of them in path order. A sidecar that no photo of its own folder fits
+    is an album's entry, which Takeout lists beside no photo (GPTH Neo issue 133): it goes with the first photo in path
+    order that its name fits in any folder, which is usually the photo that its twin in the year folder goes with.
     """
     paths = list(paths)
     index = _index(paths)
+    anywhere: _Index | None = None  # built when a sidecar has no photo in its own folder
     likely: dict[str, str] = {}
     for path in paths:
         folder, _slash, name = path.rpartition("/")
         key = key_of(name, None, fmt)
-        if key is not None and (fits := _fits(folder, key, index, by_title=False)):
+        if key is None:
+            continue
+        fits = _fits(folder, key, index, by_title=False)
+        if not fits:
+            if anywhere is None:
+                anywhere = _index(paths, across_folders=True)
+            fits = _fits("", key, anywhere, by_title=False)
+        if fits:
             likely[path] = min(fits)
     return likely
