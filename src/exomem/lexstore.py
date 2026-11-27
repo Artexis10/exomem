@@ -6476,7 +6476,7 @@ def page_rows(
     destination file itself.
     """
     from . import bm25 as bm25_module
-    from . import recall_policy, semantic_units
+    from . import recall_policy
     from . import unit_rows as unit_rows_module
     from .semantic_index import structural_metadata
 
@@ -6530,11 +6530,8 @@ def page_rows(
     units: list[SemanticUnitRow] = []
     built: tuple[unit_rows_module.UnitRow, ...] = ()
     if page is not None and state is not None and state.candidates is not None:
-        # One identity-facts pass serves the structural summary and the unit rows.
-        candidates = semantic_units.candidate_units(state.candidates)
-        facts = semantic_units.identity_facts(list(candidates))
-        structure_json = json.dumps(structural_metadata(state, facts), sort_keys=True)
-        built = unit_rows_module.build(rel, state, units=candidates, identity=facts)
+        structure_json = json.dumps(structural_metadata(state), sort_keys=True)
+        built = unit_rows_module.build(rel, state)
         units = [
             SemanticUnitRow(
                 unit_rows_module.lexical_columns(row, columns),

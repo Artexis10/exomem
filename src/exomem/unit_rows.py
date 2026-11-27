@@ -7,16 +7,15 @@ that decides a field lives here or in the projection that names it: `lexical_col
 `epistemic_graph._candidate_node`. No table stores the rows yet; task 5.2 adds it with its first
 reader.
 
-A row holds the identity facts of its unit and no bound public `unit_ref`. Which candidates emit,
-and so which anonymous unit binds occurrence 1 or 2, depends on the selected registries, and an
-overlay or a vocabulary pack change would leave a stored reference stale. The facts derive from the
-bytes alone.
+A row holds no bound public `unit_ref`. Which candidates emit, and so which anonymous unit binds
+occurrence 1 or 2, depends on the selected registries, so a reader binds the reference when it
+selects a page's units. The row's own facts derive from the bytes alone.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -29,9 +28,7 @@ class UnitRow:
     """One structural occurrence of a page, with every fact that its projections read.
 
     The page's own flags (`in_kb`, `in_vault`, `updated`) are not here: they come with the page's
-    row. The span (`start_offset`, `end_offset`) and the identity facts are read by no projection
-    yet: they are the stored row's own facts (D10), held here so that 5.2 adds no second builder.
-    The attribute names that the graph shares with `SemanticUnit` (`form`, `anchor`, `title`,
+    row. The attribute names that the graph shares with `SemanticUnit` (`form`, `anchor`, `title`,
     `level`, `line`, `tags`, `context`, `metadata`) mean the same there, so one graph rule reads
     either.
     """
@@ -40,8 +37,6 @@ class UnitRow:
     occurrence_key: str
     ordinal: int
     form: str
-    start_offset: int
-    end_offset: int
     line: int
     end_line: int
     node_key: str
@@ -65,8 +60,6 @@ class UnitRow:
     check_by_day: str | None
     check_by_json: str | None
     tags_canonical_json: str | None
-    identity_signature: str
-    identity_fingerprints: tuple[str, ...]
 
     @property
     def tags_json(self) -> str:
@@ -82,32 +75,21 @@ class UnitRow:
         )
 
 
-def build(
-    rel: str,
-    state: SemanticParentIndexState,
-    *,
-    units: Sequence[Any] | None = None,
-    identity: Mapping[str, Mapping[str, Any]] | None = None,
-) -> tuple[UnitRow, ...]:
+def build(rel: str, state: SemanticParentIndexState) -> tuple[UnitRow, ...]:
     """The unit rows of one page's parent state, in source order.
 
-    ``units`` is `semantic_units.candidate_units(state.candidates)` and ``identity`` is
-    `semantic_units.identity_facts` of them; a caller that already has either passes it. The state
-    must hold structural candidates.
+    The state must hold structural candidates.
     """
     from . import epistemic_graph, lexstore, semantic_language_registry, semantic_units
 
-    candidates = semantic_units.candidate_units(state.candidates) if units is None else units
-    facts = semantic_units.identity_facts(list(candidates)) if identity is None else identity
     rows = []
-    for ordinal, unit in enumerate(candidates):
+    for ordinal, unit in enumerate(semantic_units.candidate_units(state.candidates)):
         key = semantic_units.occurrence_key(unit.form, unit.span, unit.source_hash)
         verdict, check_by_day, check_by_json, tags_canonical_json = (
             lexstore.unit_eligibility_columns(unit)
         )
         rows.append(UnitRow(
             path=rel, occurrence_key=key, ordinal=ordinal, form=unit.form,
-            start_offset=unit.span.start_offset, end_offset=unit.span.end_offset,
             line=unit.line, end_line=unit.end_line,
             node_key=epistemic_graph.unit_node_key(rel, key, unit.form),
             unit_source_hash=unit.source_hash, parent_ref=state.parent_ref,
@@ -120,8 +102,6 @@ def build(
             context=unit.context,
             metadata=dict(unit.metadata), verdict=verdict, check_by_day=check_by_day,
             check_by_json=check_by_json, tags_canonical_json=tags_canonical_json,
-            identity_signature=facts[key]["signature"],
-            identity_fingerprints=tuple(facts[key]["fingerprints"]),
         ))
     return tuple(rows)
 

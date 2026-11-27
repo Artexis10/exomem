@@ -2718,15 +2718,11 @@ def page_graph_rows(
     """
     if not _is_graph_page(rel) or not recall_policy.admits_markdown_content(vault_root, rel, raw):
         return None
-    facts = None
     if prepared_unit_rows is None:
-        # One identity-facts pass serves the page's unit rows and its structural summary.
-        units = semantic_units.candidate_units(state.candidates)
-        facts = semantic_units.identity_facts(list(units))
-        prepared_unit_rows = unit_rows.build(rel, state, units=units, identity=facts)
+        prepared_unit_rows = unit_rows.build(rel, state)
     file_node = _file_node(
         vault_root, page, raw.decode("utf-8"), state=state, type_basis=type_basis,
-        prepared_structure=prepared_structure, identity=facts,
+        prepared_structure=prepared_structure,
     )
     unit_nodes = [_candidate_node(page, row) for row in prepared_unit_rows]
     edges = _structural_edges_for_page(
@@ -14656,7 +14652,6 @@ def _file_node(
     state: semantic_index.SemanticParentIndexState,
     type_basis: note_types.Basis,
     prepared_structure: Mapping[str, Any] | None = None,
-    identity: dict[str, dict[str, Any]] | None = None,
 ) -> GraphNode:
     from . import activation
 
@@ -14665,7 +14660,7 @@ def _file_node(
     updated = frontmatter.get("updated")
     structure = prepared_structure
     if structure is None:
-        structure = semantic_index.structural_metadata(state, identity)
+        structure = semantic_index.structural_metadata(state)
     metadata: dict[str, Any] = {
         "page_type": page.page_type,
         "status": frontmatter.get("status") if isinstance(frontmatter.get("status"), str) else None,
