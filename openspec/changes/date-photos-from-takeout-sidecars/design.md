@@ -1,4 +1,4 @@
-# Design: date photos from Google Takeout sidecars
+# Design: read Google Takeout sidecars, keep their captions and hold their dates
 
 ## Context
 
@@ -26,9 +26,17 @@ Facts and their sources:
 - A live photo's video has no sidecar of its own: `IMG_1976.HEIC` and `IMG_1976.MP4` share `IMG_1976.HEIC.supplemental-metadata.json`. Source: issue 123.
 - A photo and its sidecar can land in different archive parts, and each uploaded archive becomes its own stage. No source above states the first part. Task 3.2 measures it.
 
-No source confirms what `photoTakenTime` holds for a file that states no time, or that `creationTime` is the upload time. Decision 3 treats the second as an assumption. The Matcher's comments tie issue 139 (cross-photo GPS and mis-dated videos) to a sidecar that matched a file of another extension (Matcher, lines 311-345). Pairing by MIME type, one to one, guards against that failure.
+No source says what `photoTakenTime` holds for a file that states no time, or that `creationTime` is the upload time. The Matcher's comments tie issue 139 (cross-photo GPS and mis-dated videos) to a sidecar that matched a file of another extension (Matcher, lines 311-345). Pairing by MIME type, one to one, guards against that failure.
 
-The `recover-media-capture-dates` change added `capture_date_source`, its precedence and `capture_date_matched_from`. `import-notes-and-mail-exports` gives each parser its own container and adds the append-only expansion record. No entry in the engineering source roster covers deterministic file-format parsing. No model reads this content.
+The `recover-media-capture-dates` change added the file-name date, which Decision 4 makes read the name that the owner gave. `import-notes-and-mail-exports` gives each parser its own container and adds the append-only expansion record. No entry in the engineering source roster covers deterministic file-format parsing. No model reads this content.
+
+## Held: no sidecar time dates a page
+
+A paired sidecar gives its photo the owner's caption and nothing else. Its `photoTakenTime` is read into the sidecar's row and applied to no page.
+
+The `media-capture-metadata` spec bars a file's modification time as a date source: scanners and editors set it. No source above says that `photoTakenTime` is not that time for a file that states none. A screenshot, a scan or a chat image carries no capture time, so a date that Google derived from the file's modification time would enter the vault as evidence, which the spec forbids.
+
+Task 3.2 measures this on an owner's own Takeout: it compares `photoTakenTime` with the file's modification time inside the archive and with its EXIF. A follow-up change decides dating on that result. That change would also need a rank among the evidence sources, a name for the source and a rule for an owner's edit in Google Photos. None of them is decided here.
 
 ## Decision 1: a sidecar parser that pairs in one pass per stage
 
@@ -42,17 +50,17 @@ These are vendor facts that change as Google changes, so they live in the regist
 
 The container is one JSON object of at most 1 MiB, read whole. A larger file is not opened. An album's `metadata.json` has no `photoTakenTime`, so it is not recognised.
 
-The parser derives no files. At the start of `file`, it runs one pass over the stage's recognised sidecars. The pass has one state entry, uses the expansion slice budget and resumes from its last row. It appends one row per sidecar, holding the sidecar's path, its name key (Decision 2, steps 1 and 3), and the time and the caption it carries. A row never holds a position.
+The parser derives no files. At the start of `file`, it runs one pass over the stage's recognised sidecars. The pass has one state entry, uses the expansion slice budget and resumes from its last row. It appends one row per sidecar, holding the sidecar's path, its name key (Decision 2, steps 1 and 3), and the time and the caption it carries. The row records the time for task 3.2 and nothing applies it. A row never holds a position.
 
 **The row's caption is redacted first.** The rows live in the stage's state folder (`import-expansion/<id>/rows.jsonl`), which is not the Source page. The pass therefore passes each caption through the same redaction as an upload's description (`preserve.redact_capture_text`) before it writes the row. No row, plan, page or log holds a card number or a credential that the owner typed. The plan redacts the caption again, which changes nothing in a caption that is already redacted.
 
 **Photos wait for the pass.** While the pass runs, the stage's images and videos stay out of selection by their media type, not as a list of paths, the same way an export that is still being read stays out today. The hold lifts when the pass ends in any state, done or partial, so a read fault never holds photos back.
 
-**A file that cannot be read.** A JSON file that is gone or that the file system refuses gets its own row, `{"unreadable": path}`, and the pass reads on past it. Every other JSON file of the stage is therefore examined, and none of them files unexamined as a JSON Source with its `geoData` as plain text. The unreadable file stays staged. It never files, and the filing view lists it under `IMPORT_SIDECAR_UNREADABLE` for the person to review: nothing is known of what it holds. A photo whose sidecar was unreadable files undated. The pass then ends as `partial`, and its fault names the first unreadable file.
+**A file that cannot be read.** A JSON file that is gone or that the file system refuses gets its own row, `{"unreadable": path}`, and the pass reads on past it. Every other JSON file of the stage is therefore examined, and none of them files unexamined as a JSON Source with its `geoData` as plain text. The unreadable file stays staged. It never files, and the filing view lists it under `IMPORT_SIDECAR_UNREADABLE` for the person to review: nothing is known of what it holds. A photo whose sidecar was unreadable files without a caption from it. The pass then ends as `partial`, and its fault names the first unreadable file.
 
-When the pass ends, it decides every pair in the stage in one step from its rows (Decision 2, step 4) and records the pairs. Only then do the photos file, each carrying its pair's time and caption on its planned item. The cost is a delay: photos start filing after the pass, which reads about a kilobyte per sidecar.
+When the pass ends, it decides every pair in the stage in one step from its rows (Decision 2, step 4) and records the pairs. Only then do the photos file, each carrying its pair's caption on its planned item. The cost is a delay: photos start filing after the pass, which reads about a kilobyte per sidecar.
 
-The pass runs once per stage. A sidecar that reaches the stage after the pass ended is not read. It files as an ordinary JSON file, with its position data as plain text, and its photo files undated. This change builds no second reading, because the pass keeps no list of the JSON files that it found not to be sidecars: telling a new file from an old one would mean opening every JSON file again at each call. The proposal lists the case under "Not included".
+The pass runs once per stage. A sidecar that reaches the stage after the pass ended is not read. It files as an ordinary JSON file, with its position data as plain text, and its photo files without its caption. This change builds no second reading, because the pass keeps no list of the JSON files that it found not to be sidecars: telling a new file from an old one would mean opening every JSON file again at each call. The proposal lists the case under "Not included".
 
 A sidecar row is not a derived file and adds nothing to the stage total. Each sidecar counts once, as a staged member that is left out. Its reason is worked out when filing reaches done, from its photo's filing result (Decision 5).
 
@@ -71,35 +79,33 @@ The copy-number and suffix-cut forms are read with string operations on the regi
 Four forms are not read. Each leaves its sidecar unpaired with the reason `no-photo`, so the view counts and lists it:
 - **An extension that Google added.** The title and the sidecar name carry none, and the file name carries one (`IMG_1` with `IMG_1.jpg`).
 - **A Pixel motion photo.** The title ends in `.MP` and the file in `.MP.jpg`.
-- **An `-edited` copy.** Its name carries `-edited` where no title does, so no sidecar fits it. It files with no sidecar and undated. Its original's sidecar still pairs with the original.
+- **An `-edited` copy.** Its name carries `-edited` where no title does, so no sidecar fits it. It files with no sidecar and no caption. Its original's sidecar still pairs with the original.
 - **A copy number between the media name and the suffix word** (`IMG.jpg(1).supplemental-metadata.json`). The Matcher tries this form (its second numbered pattern, lines 266-277), and no source shows Google writing it. The sidecar counts as unpaired; the numbered forms of the sources, after the suffix word or inside the media name, pair.
 
-A live photo's video is not one of these cases: it has no sidecar of its own (issue 123), so the one sidecar pairs with the HEIC or the JPG, and the video files undated.
+A live photo's video is not one of these cases: it has no sidecar of its own (issue 123), so the one sidecar pairs with the HEIC or the JPG, and the video files without a caption.
 
 ## Decision 3: what a paired sidecar carries
 
-- **Time.** The time is `photoTakenTime` in UTC, and the capture date is its UTC day (`capture_date_basis: utc`). A photo taken on an evening west of UTC therefore carries the next day's date, as a video's UTC container time does today, and a date-window search places it on that day. The reader drops a time at or before 1970-01-01 and one after year 9999 as unusable, so a sidecar that states one gives no time. A time is skipped when it equals `creationTime` to the second, the one shape that the design takes for an upload time. No source above documents `creationTime`, so this is an assumption. Other guesses may pass that check, which is why Decision 4 ranks this source low. Task 3.2 measures it.
 - **Caption.** A non-empty `description` goes into the photo Source's description section. It passes through the same redaction as an upload's description (`preserve`, `capture_redaction`), so one caption has one home and search finds it.
+- **Time, recorded and not applied.** The row holds `photoTakenTime` in UTC as `time`. The reader drops a time at or before 1970-01-01 and one after year 9999 as unusable, so such a sidecar has no `time`. The row's `skip` flag marks a time that equals `creationTime` to the second, which the design takes for an upload time. No source above documents `creationTime`, so this is an assumption. No page, count or reason reads either field. Task 3.2 does.
 - **Nothing else.** `geoDataExif` is the file's own position, which the camera read already records. `geoData` is not used: it may be Google's inference, not the file's.
 
-## Decision 4: rank below every read of the picture, and keep the date
+## Decision 4: a file-name date reads the name its owner gave, and survival reads the pack
 
-- **Rank.** `capture-date-sources.yaml` gains `export-sidecar`, with `class: evidence` and `producer: export-sidecar`, placed last among the evidence entries, after `file-name`. A camera time, a matched original or a file name therefore always wins. Recovery still tries to match these photos. An owner who changed a date in Google Photos loses that edit when the file states its own time. This is a decision: the file's own statement wins.
-- **What the source states.** `photoTakenTime` is the time that Google Photos showed the owner, and the owner could edit it. The source `export-sidecar` therefore says where the date came from, not that the camera took the photo then. It stays `class: evidence`, last among the evidence entries, because any time that the file itself states is a better witness. Task 3.2 measures how often the sidecar time agrees with known truth, and the rank stays until that evidence supports a change.
-- **Write.** Filing writes the photo's Source page, which is also its media sidecar, so it writes the time into that page's capture record. It sets `capture_date_source: export-sidecar`, `capture_date_basis: utc`, and `capture_date_matched_from` set to the sidecar's path in the export, so a wrong pair can be audited. The value is the path as a recorded string. The sidecar file stays only as long as the staged copy does, which the owner may discard, so a later audit rests on that string and the photo's own name. No separate page field holds the time. The owner backfill's list of matches (`matched_listed`) is chosen by `capture_date_source: matched-original`, not by the presence of `capture_date_matched_from`.
-- **Survival.** `capture_dates.survives_extraction` stops naming `perceptual-match`. It reads a closed pack attribute, `reread: false`, that marks the sources that no re-read can reproduce: `matched-original` and `export-sidecar`. Every writer (the media worker, the owner backfill and recovery) already goes through it, so each keeps the date unless it reads a source of higher precedence.
+- **File-name date.** The filer stores an original under a name of its own, which states no date. The media worker and the owner backfill therefore read the name recorded as the page's `original_filename`, and fall back to the stored name when none is recorded (`capture_metadata.given_name`). A photo named for its day files with no date and takes it from its name on the media worker's first read. This holds whether or not a sidecar sits beside it.
+- **Survival.** `capture_dates.survives_extraction` stops naming `perceptual-match`. It reads a closed pack attribute, `reread: false`, that marks the sources that no re-read can reproduce. Only `matched-original` carries it, so behaviour is unchanged. Every writer (the media worker, the owner backfill and recovery) already goes through it.
 
 ## Decision 5: honest counts
 
 When filing reaches done, the filing view counts each recognised sidecar in `left_out`, under one of these reasons, from its photo's filing result:
-- `IMPORT_SIDECAR_APPLIED`: the sidecar was paired with its photo, which filed now. The sidecar's time applies only where the photo states none, and its caption goes to the page;
-- `IMPORT_SIDECAR_EMPTY`: the sidecar was paired with its photo, which filed now, but the sidecar carried nothing (no usable time and no caption);
-- `IMPORT_SIDECAR_PHOTO_ALREADY_IMPORTED`: the photo was skipped as already imported, so a Source in the vault holds it. The sidecar's time and caption were not applied, and the reason says so ("{n} sidecar whose time and caption were not applied, because the vault already held its photo"). The sidecar counts as filed, and the person has nothing to review. The first copy's Source keeps the time and the caption that it received. A person who imports the same Takeout again reads this reason for every sidecar;
+- `IMPORT_SIDECAR_APPLIED`: the sidecar was paired with its photo, which filed now, and its caption goes to the page;
+- `IMPORT_SIDECAR_EMPTY`: the sidecar was paired with its photo, which filed now, but it has no caption to give;
+- `IMPORT_SIDECAR_PHOTO_ALREADY_IMPORTED`: the photo was skipped as already imported, so a Source in the vault holds it. The sidecar's caption was not applied, and the reason says so ("{n} sidecar whose caption was not applied, because the vault already held its photo"). The sidecar counts as filed, and the person has nothing to review. The first copy's Source keeps the caption that it received. A person who imports the same Takeout again reads this reason for every sidecar;
 - `IMPORT_SIDECAR_PHOTO_NOT_FILED`: the photo did not file (it failed, or adoption did not select it). The person reviews it;
 - `IMPORT_SIDECAR_UNPAIRED`: no file, or more than one, fits the sidecar. The view lists these by path;
 - `IMPORT_SIDECAR_UNREADABLE`: a JSON file that could be a sidecar and could not be read ("{n} possible sidecar that could not be read"). It stays staged and never files. The person reviews it. The count is of files, not of sidecars: nothing is known of what such a file holds.
 
-The view names what it measures. Over the sidecars of `APPLIED` and `EMPTY`, it counts those that carry a usable time (`with_time`), those that carry a caption (`captioned`) and those whose time was skipped as an upload time (`time_skipped`). `with_time` is not the number of photos that received a date: a photo that states its own time keeps it.
+The view names what it measures. Over the sidecars of `APPLIED` and `EMPTY`, it counts those that carry a caption (`captioned`). It counts no time, because no time is applied.
 
 ## Scale
 
@@ -114,11 +120,7 @@ The load target is 10,000 tenants, and pairing runs per cell.
 
 ## Risks
 
-- **Undocumented format.** The pairing rule follows community tools. Task 3.2 checks it on a real Takeout, including duplicates and long names.
-- **The time's meaning for files without camera time** is unconfirmed. Task 3.2 compares sidecar times with known truth on such files: file-name times on screenshots, and matched originals from the recovery preview. The rank stays last until that measurement supports a change.
-- **Split archives.** Each uploaded archive is its own stage, and a sidecar pairs only inside its stage. A photo whose sidecar is in another part stays undated, and that sidecar counts as unpaired. Owner guidance: in Takeout's export form, choose the largest part size that the form offers, so that fewer pairs straddle a part boundary. GPTH Neo's README names two sizes in that form, 2 GB and 50 GB, and tells the owner to choose 50 GB (README.md, line 139, at commit `ab1e56d`). Google's own page could not be fetched, so the sizes are not confirmed against Google. A larger part cannot rule out a split pair, and the cell cannot join parts. Task 3.2 measures that share on 2 GB parts.
-- **`creationTime` as the upload time.** No source above documents it. The design uses it only to skip a `photoTakenTime` that equals it to the second. A real capture time that equals the upload time to the second is skipped too, and the photo files undated. Task 3.2 counts the skipped times.
-
-## Spec layout
-
-The owner operation's requirement repeated the precedence order. This change moves its skip rules into their own requirement, which refers to the precedence that "A capture date records its source" states, so the order lives in one place. The operation's behaviour is unchanged.
+- **Undocumented format.** The pairing rule follows community tools. Task 3.2 counts each sidecar reason on a real Takeout, including duplicates and long names.
+- **The time's meaning for files without camera time** is unconfirmed. It is the reason that no time is applied (see "Held"). Task 3.2 compares `photoTakenTime` with the file's modification time inside the archive and with its EXIF, for screenshots, scans and chat images.
+- **Split archives.** Each uploaded archive is its own stage, and a sidecar pairs only inside its stage. A photo whose sidecar is in another part files without its caption, and that sidecar counts as unpaired. Owner guidance: in Takeout's export form, choose the largest part size that the form offers, so that fewer pairs straddle a part boundary. GPTH Neo's README names two sizes in that form, 2 GB and 50 GB, and tells the owner to choose 50 GB (README.md, line 139, at commit `ab1e56d`). Google's own page could not be fetched, so the sizes are not confirmed against Google. A larger part cannot rule out a split pair, and the cell cannot join parts. Task 3.2 measures that share on the parts of the owner's own Takeout.
+- **`creationTime` as the upload time.** No source above documents it. The design uses it only to flag, in the row, a `photoTakenTime` that equals it to the second. Nothing is applied from either. Task 3.2 counts the flagged rows.

@@ -9,8 +9,8 @@ registry: source-formats
 # titles an item that has no title and `attachment` heads a quoted attachment; `words` gives the other
 # display words of an XML or mbox parser, so a format brings the words of its own language. A mailbox
 # reads its messages' labels from `label_header` and leaves out those labelled with any of `skip_labels`.
-# A photo-sidecar entry derives no items: its JSON object (at most 1 MiB, with every key of `item_keys`) dates and
-# captions the photo beside it. Its naming facts say how Takeout names the pair: the `suffix_word` between a photo's
+# A photo-sidecar entry derives no items: its JSON object (at most 1 MiB, with every key of `item_keys`) captions
+# the photo beside it. Its naming facts say how Takeout names the pair: the `suffix_word` between a photo's
 # name and `.json`, the characters that Takeout keeps of a sidecar's name (`sidecar_name_limit`, before `.json`) and of a
 # photo's name (`media_name_limit`, before its extension), and the `replaced` characters in a title.
 # A vault may retire an entry or change its words (`roles`, `untitled`, `attachment`, `words`) and

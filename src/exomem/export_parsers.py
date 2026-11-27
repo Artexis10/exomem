@@ -30,7 +30,7 @@ class Parser:
     `read` yields each item from a position, as (position after it, item), and raises `ExportFault` when the container
     ends early or is not what it declared. `workdir` is a hidden folder in the stage where a reader may keep bytes that
     the expander then moves into place. A parser with no `read` derives no items: its files are read for what they say about
-    other staged files (a Takeout sidecar dates and captions the photo beside it), and `export_sidecars` runs that pass.
+    other staged files (a Takeout sidecar captions the photo beside it), and `export_sidecars` runs that pass.
     """
 
     needs: frozenset[str]

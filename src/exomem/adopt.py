@@ -537,30 +537,8 @@ def render_artifact_source(
         artifact_rel=planned["artifact_path"],
         artifact_digest=planned["original_sha256"],
         artifact_size=planned["original_bytes"],
-        extra_lines=[*_provenance_lines(planned, collection, provenance), *_sidecar_capture_lines(sidecar)],
+        extra_lines=_provenance_lines(planned, collection, provenance),
     )
-
-
-def _sidecar_capture_lines(sidecar: Mapping[str, Any]) -> list[str]:
-    """The capture record that a paired Takeout sidecar's time gives its photo's Source page, as the media worker writes one.
-
-    The time is UTC, and the source is the one the `capture-date-sources` pack gives the sidecar's producer, so a
-    wrong pair can be audited from the page. A sidecar with no time gives no line, and so does a time the record's bounds refuse.
-    """
-    from . import capture_dates, capture_metadata
-
-    time = sidecar.get("time")
-    if time is None:
-        return []
-    try:
-        facts = capture_metadata.CaptureFacts.from_payload({
-            capture_metadata.CAPTURE_TIME: time, capture_metadata.CAPTURE_DATE: time[:10],
-            capture_metadata.CAPTURE_DATE_BASIS: capture_metadata.BASIS_UTC,
-            capture_metadata.CAPTURE_DATE_SOURCE: capture_dates.source_for("export-sidecar"),
-            capture_metadata.CAPTURE_DATE_MATCHED_FROM: sidecar["path"]})
-    except ValueError:
-        return []
-    return [f"{name}: {value}" for name, value in facts.frontmatter().items()]
 
 
 def note_body(planned: Mapping[str, Any], text: str) -> str:

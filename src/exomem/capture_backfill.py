@@ -329,8 +329,7 @@ def _finish_page(root: Path, plan: _Plan, rel: str, text: str, facts: CaptureFac
         plan.gives[rel] = f"{capture_dates.recorded_source(dated.date_source)} {dated.time}" + (
             f" from {dated.date_matched_from}" if dated.date_matched_from else ""
         )
-        # The list is of matches; a date from an export's sidecar also names where it came from, and is no match.
-        if dated.date_source == capture_dates.source_for("perceptual-match") and len(plan.matches) < LISTED_SKIPS:
+        if dated.date_matched_from and len(plan.matches) < LISTED_SKIPS:
             plan.matches.append(
                 {"path": rel, "time": dated.time, "from": dated.date_matched_from}
             )

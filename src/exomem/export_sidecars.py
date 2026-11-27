@@ -3,7 +3,9 @@
 `export_expansion.expand` runs this pass first, with the same call budget as an export's read. It derives no files. For
 each recognised sidecar (see `source_formats`, the `photo-sidecar` parser) it appends one row to the stage's expansion
 rows and moves the pass's cursor past it. A row holds the sidecar's path, its name key (`export_pairing.Key`) and the
-time and caption that it carries. It never holds a position. When the last sidecar is read, the pass decides every
+time and caption that it carries. The time is recorded and applied to no page: dating a photo from it is held until a
+measurement shows where Google's `photoTakenTime` comes from (OpenSpec `date-photos-from-takeout-sidecars`, task 3.2). A row
+never holds a position. When the last sidecar is read, the pass decides every
 pair in one step and appends one `pair` row for each sidecar, then an `end` row:
 
 - `{"sidecar": path, "base", "copy", "limit", "title", "time", "skip", "caption"}`: one sidecar that was read. Its caption
@@ -54,9 +56,9 @@ STORED, ALREADY_IMPORTED, NOT_FILED = "stored", "already-imported", "not-filed" 
 #: because its photo is in the vault and nothing here needs the person; how a residual summary counts such files, with
 #: `{n}` as their number). `adoption_consume.STAYS` reads these rows.
 STAYS: Mapping[str, tuple[bool, str]] = MappingProxyType({  # nosemgrep: ep-word-set, ep-word-dict -- this module's own closed reason codes, a protocol of the residual report and not vocabulary.
-    CODE_APPLIED: (True, "{n} sidecar paired with its filed photo, whose time applies only where the photo states none"),
-    CODE_EMPTY: (True, "{n} sidecar paired with its filed photo, with no time or caption to give"),
-    CODE_PHOTO_ALREADY_IMPORTED: (True, "{n} sidecar whose time and caption were not applied, because the vault already held its photo"),
+    CODE_APPLIED: (True, "{n} sidecar paired with its filed photo, whose caption it gave"),
+    CODE_EMPTY: (True, "{n} sidecar paired with its filed photo, with no caption to give"),
+    CODE_PHOTO_ALREADY_IMPORTED: (True, "{n} sidecar whose caption was not applied, because the vault already held its photo"),
     CODE_PHOTO_NOT_FILED: (False, "{n} sidecar whose photo did not file"),
     CODE_UNPAIRED: (False, "{n} sidecar that no one photo fits"),
     CODE_UNREADABLE: (False, "{n} possible sidecar that could not be read"),
@@ -223,12 +225,12 @@ def photo_formats(root: Path) -> tuple[source_formats.SourceFormat, ...]:
 
 
 def photo_facts(reading: Reading) -> dict[str, dict]:
-    """Each paired photo, by its path in the stage, with what its sidecar carries: `sidecar`, `time`, `caption` and `skipped`."""
+    """Each paired photo, by its path in the stage, with what its sidecar gives it: the sidecar's path and the caption."""
     facts = {}
     for sidecar, (photo, _why) in reading.rows.pairs.items():
         row = reading.rows.sidecars.get(sidecar)
         if photo is not None and row is not None:
-            facts[photo] = {"sidecar": sidecar, "time": row.get("time"), "caption": row.get("caption"), "skipped": row.get("skip") is True}
+            facts[photo] = {"sidecar": sidecar, "caption": row.get("caption")}
     return facts
 
 
@@ -238,16 +240,15 @@ def settle(reading: Reading, photo_filing: Callable[[str], str]) -> tuple[dict[s
     The reason follows the photo's filing result (`photo_filing` says, for the photo at a path in the stage, whether it
     was `STORED`, was `ALREADY_IMPORTED` or did not file): a file that could not be read is `UNREADABLE`; an unpaired
     sidecar is `UNPAIRED`; one whose photo did not file is `PHOTO_NOT_FILED`; one whose photo an earlier Source already holds is `PHOTO_ALREADY_IMPORTED`; any other is `APPLIED`
-    when it carried a time or a caption, else `EMPTY`. `APPLIED` says that the sidecar was paired with a photo that filed
-    now: its time applies only where the photo states none.
+    when it carried a caption, else `EMPTY`. `APPLIED` says that the sidecar was paired with a photo that filed now and gave it
+    its caption. A time gives no reason of its own: no sidecar time is applied.
 
-    The counts are over the sidecars whose photo filed now: those that carry a usable time (`with_time`), those that carry a
-    caption, and those whose time was skipped as an upload time. A stage with no sidecar has no counts, never zero ones.
+    The count is over the sidecars whose photo filed now: those that carry a caption (`captioned`). A stage with no sidecar has no counts, never zero ones.
     """
     codes = dict.fromkeys(reading.rows.unreadable, CODE_UNREADABLE)
     if not reading.rows.sidecars:
         return codes, None
-    counts = {"with_time": 0, "captioned": 0, "time_skipped": 0}
+    counts = {"captioned": 0}
     for path, row in reading.rows.sidecars.items():
         photo = reading.rows.pairs.get(path, (None, None))[0]
         if photo is None:
@@ -259,11 +260,9 @@ def settle(reading: Reading, photo_filing: Callable[[str], str]) -> tuple[dict[s
         elif filing != STORED:
             codes[path] = CODE_PHOTO_NOT_FILED
         else:
-            with_time, captioned = row.get("time") is not None, row.get("caption") is not None
-            codes[path] = CODE_APPLIED if with_time or captioned else CODE_EMPTY
-            counts["with_time"] += with_time
+            captioned = row.get("caption") is not None
+            codes[path] = CODE_APPLIED if captioned else CODE_EMPTY
             counts["captioned"] += captioned
-            counts["time_skipped"] += row.get("skip") is True
     return codes, counts
 
 

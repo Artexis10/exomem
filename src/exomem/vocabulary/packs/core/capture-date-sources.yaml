@@ -21,10 +21,6 @@ entries:
     label: File name
     description: The file name states a date and time in a known tool format.
     attributes: {class: evidence, producer: file-name}
-  export-sidecar:
-    label: Export sidecar
-    description: The capture time that a Google Takeout sidecar records for a photo whose file states none.
-    attributes: {class: evidence, producer: export-sidecar, reread: false}
   source-date:
     label: Source date
     description: The day the source was captured into the vault, used only when no evidence date exists.

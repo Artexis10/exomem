@@ -4,7 +4,7 @@ An export from another app arrives as one file that holds many items. Which file
 reveal a vendor's export, and which words a transcript shows, change as vendors change, so they are
 registry data (`source-formats`). Code knows only how to read each closed `parser`, in `export_parsers`: each parser
 owns its container (a JSON array, an XML document, an mbox, a JSON object) and the facts it needs from its entry.
-A photo-sidecar parser derives no items: its entries name the sidecar files that date and caption the photos beside them.
+A photo-sidecar parser derives no items: its entries name the sidecar files that caption the photos beside them.
 """
 
 from __future__ import annotations

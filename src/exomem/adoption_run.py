@@ -1539,18 +1539,18 @@ def _carry_item_time(item: dict, derived: import_stage.Derived) -> None:
 
 
 def _carry_sidecar(item: dict, paired: Mapping) -> None:
-    """Put what a photo's paired Takeout sidecar states on its planned item: its path, the time and the caption.
+    """Put the caption of a photo's paired Takeout sidecar on its planned item. The sidecar's time goes nowhere: no page is dated from it.
 
     The caption passes through the redaction of an upload's description before the plan holds it, so no plan,
     page or log keeps a card number or a credential that the owner typed. The sidecar pass redacts it too, before it
     writes the row; a second pass changes nothing in that text, and covers a row that an earlier pass wrote. A sidecar
-    that states neither leaves the item as it is.
+    with no caption leaves the item as it is.
     """
     from . import preserve
 
     _text, caption, _extracted, _warnings = preserve.redact_capture_text(description=paired["caption"])
-    if item["form"] == "artifact" and (paired["time"] is not None or caption is not None):
-        item["sidecar"] = {"path": paired["sidecar"], "time": paired["time"], "caption": caption}
+    if item["form"] == "artifact" and caption is not None:
+        item["sidecar"] = {"caption": caption}
 
 
 def _recorded_stage(stage: import_stage.Stage | None) -> dict | None:
@@ -2041,7 +2041,7 @@ def unfiled_members(root: Path, import_id: str, runs: tuple[dict, ...] | None = 
 def unfiled_report(root: Path, import_id: str, runs: tuple[dict, ...] | None = None) -> tuple[list[dict], dict | None]:
     """The members of an import that adoption did not file or `finish` did not verify, as a residual record lists them, and the counts of its sidecars.
 
-    The counts are None for a stage with no recognised Takeout sidecar, else `{"with_time", "captioned", "time_skipped"}`.
+    The counts are None for a stage with no recognised Takeout sidecar, else `{"captioned"}`.
 
     Each entry has the path relative to the stage, its bytes and why it stays (see `adoption_consume.residual`).
     The members are the stage manifest's, plus any staged file that the manifest does not list, plus the items and
@@ -2384,7 +2384,7 @@ def plan(
             derived = import_stage.derived_files(root, stage_id) if stage_id is not None else {}
         # A recognised export files as an artifact, so its conversations are indexed once, as the transcripts derived from it.
         exports = set(export_expansion.read(root, stage_id).exports) if stage_id is not None else set()
-        # Each photo that a Takeout sidecar pairs with, by its path in the stage, with what that sidecar states.
+        # Each photo that a Takeout sidecar pairs with, by its path in the stage, with the caption that sidecar gives it.
         sidecar_facts = export_sidecars.photo_facts(export_sidecars.read(root, stage_id)) if stage_id is not None else {}
         stage_prefix = f"{IMPORT_STAGE_DIR}/{stage_id}/"
         index = adoption_plan.read_import_index(root)

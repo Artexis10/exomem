@@ -2,7 +2,8 @@
 
 Which sidecar is which, and how Takeout names it, is registry data (`source_formats`, `export_pairing`). This module
 holds the container (one JSON object of at most 1 MiB, read whole) and the facts that a sidecar carries. A sidecar
-derives no files: filing reads it once (`export_sidecars`), then gives its photo the time and the caption.
+derives no files: filing reads it once (`export_sidecars`), then gives its photo the caption. The time is read into the
+sidecar's row and applied to no page: dating a photo from it is held until a measurement says where Google's time comes from.
 
 The sidecar is untrusted content: a reader keeps its values as data, never opens the `url` it carries, and never sends
 it to a model. No vendor documents the format. The reader follows what Takeout wrote in 2026 and treats every field but
@@ -37,8 +38,8 @@ class Facts:
     """What one sidecar states: the name of its photo, the time and the caption."""
 
     title: str | None
-    time: str | None  # `photoTakenTime` in UTC as `YYYY-MM-DDTHH:MM:SSZ`; None when it is missing, unusable or an upload time
-    time_skipped: bool  # `photoTakenTime` equals `creationTime` to the second: the one shape known to be an upload time
+    time: str | None  # `photoTakenTime` in UTC as `YYYY-MM-DDTHH:MM:SSZ`; None when it is missing, unusable or equal to `creationTime`
+    time_skipped: bool  # `photoTakenTime` equals `creationTime` to the second, which the design takes to be an upload time (unconfirmed)
     caption: str | None  # the owner's `description`, trimmed; None when it holds no text
 
 

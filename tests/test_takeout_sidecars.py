@@ -1,6 +1,6 @@
-"""A Google Photos Takeout is filed as photos that carry the time and caption of their sidecars, and no JSON Source.
+"""A Google Photos Takeout is filed as photos that carry the caption of their sidecars, and no JSON Source, and no sidecar time.
 
-OpenSpec date-photos-from-takeout-sidecars, groups 1 and 2.2. The vault is a temporary one with a real stage, and the
+OpenSpec date-photos-from-takeout-sidecars, groups 1 and 2.2. A sidecar's time dates no page: it is read into the sidecar's row only. The vault is a temporary one with a real stage, and the
 cell's filer drives `adoption_studio file` through the dispatcher, as for any import. The folders, names and sidecars are
 invented, in the name forms that community tools report for Takeout. Each test names the failure it catches.
 """
@@ -50,11 +50,14 @@ def stamp(moment: dt.datetime) -> dict:
     return {"timestamp": str(int(moment.timestamp())), "formatted": moment.strftime("%b %d, %Y, %I:%M:%S %p UTC")}
 
 
-def sidecar(title: str, *, taken: dt.datetime | None, caption: str = "", created: dt.datetime = UPLOADED) -> bytes:
-    """One sidecar as Takeout writes it: a title, an owner's description, the two times, a position and a link."""
+def sidecar(title: str, *, caption: str = "", taken: dt.datetime | None = None, created: dt.datetime = UPLOADED) -> bytes:
+    """One sidecar as Takeout writes it: a title, an owner's description, the two times, a position and a link.
+
+    `taken` defaults to a time that is not the upload time, which is what a sidecar usually states.
+    """
     document = {
         "title": title, "description": caption, "imageViews": "3", "creationTime": stamp(created),
-        "photoTakenTime": stamp(taken or created),
+        "photoTakenTime": stamp(taken or taken_at(0)),
         "geoData": {"latitude": 61.5, "longitude": 8.3, "altitude": 0.0, "latitudeSpan": 0.0, "longitudeSpan": 0.0},
         "url": "https://photos.example.invalid/photo/abc123",
         "googlePhotosOrigin": {"mobileUpload": {"deviceType": "ANDROID_PHONE"}},
@@ -82,8 +85,12 @@ def filed_files(vault: Path, import_id: str) -> dict[str, tuple[dict, str]]:
     return {page[0]["imported_from"].removeprefix(prefix): page for page in source_pages(vault).values()}
 
 
-def time_of(pages: dict[str, tuple[dict, str]], path: str) -> str | None:
-    return pages[path][0].get("capture_time")
+def caption_of(pages: dict[str, tuple[dict, str]], path: str) -> str | None:
+    """The text of the page's description section, or None when the page has none."""
+    text = pages[path][1]
+    if "\n## Description\n" not in text:
+        return None
+    return text.split("\n## Description\n", 1)[1].split("\n## ", 1)[0].strip()
 
 
 def one_photo_albums(vault: Path, members: dict[str, bytes]) -> tuple[str, dict[str, tuple[dict, str]], dict]:
@@ -92,17 +99,14 @@ def one_photo_albums(vault: Path, members: dict[str, bytes]) -> tuple[str, dict[
     return import_id, filed_files(vault, import_id), view
 
 
-def test_an_album_files_each_photo_with_its_sidecars_time_and_caption_and_no_json_source(vault: Path) -> None:
-    """Catches a Takeout that files its sidecars as 50 JSON Sources, or files 50 photos that all carry the upload day."""
+def test_an_album_files_each_photo_with_its_sidecars_caption_and_no_json_source(vault: Path) -> None:
+    """Catches a Takeout that files its sidecars as 50 JSON Sources, or files its photos without the caption the owner typed."""
     members: dict[str, bytes] = {}
     for number in range(50):
         name = f"IMG_{number:04d}.jpg"
         members[f"{ALBUM}/{name}"] = photo(name)
-        if number < 48:  # a photo whose sidecar states a time that is not the upload time, and a caption on every other one
-            caption = f"day {number} at the lake" if number % 2 == 0 else ""
-            members[f"{ALBUM}/{name}.supplemental-metadata.json"] = sidecar(name, taken=taken_at(number), caption=caption)
-        else:  # an upload time and no caption: the sidecar carries nothing
-            members[f"{ALBUM}/{name}.supplemental-metadata.json"] = sidecar(name, taken=UPLOADED)
+        caption = f"day {number} at the lake" if number % 2 == 0 and number < 48 else ""  # a caption on every other photo
+        members[f"{ALBUM}/{name}.supplemental-metadata.json"] = sidecar(name, caption=caption, taken=taken_at(number))
     import_id = stage_takeout(vault, members)
 
     view = file_to_done(vault, import_id, calls=200)
@@ -110,33 +114,40 @@ def test_an_album_files_each_photo_with_its_sidecars_time_and_caption_and_no_jso
     pages = filed_files(vault, import_id)
     assert len(pages) == 50 and not any(path.endswith(".json") for path in pages)  # no JSON Source
     assert not list((vault / "Knowledge Base" / "Sources").rglob("*.json"))
-    for number in range(48):
-        frontmatter, text = pages[f"{ALBUM}/IMG_{number:04d}.jpg"]
-        assert frontmatter["capture_time"] == taken_at(number).strftime("%Y-%m-%dT%H:%M:%SZ")
-        assert frontmatter["capture_date"] == taken_at(number).strftime("%Y-%m-%d")
-        assert frontmatter["capture_date_basis"] == "utc"
-        assert frontmatter["capture_date_source"] == "export-sidecar"
-        assert frontmatter["capture_date_matched_from"] == f"{ALBUM}/IMG_{number:04d}.jpg.supplemental-metadata.json"
-        assert ("## Description" in text and f"day {number} at the lake" in text) == (number % 2 == 0)
-    for number in (48, 49):
-        assert not any(key.startswith("capture_") for key in pages[f"{ALBUM}/IMG_{number:04d}.jpg"][0])
+    for number in range(50):
+        expected = f"day {number} at the lake" if number % 2 == 0 and number < 48 else None
+        assert caption_of(pages, f"{ALBUM}/IMG_{number:04d}.jpg") == expected
     assert view["state"] == "done"
-    assert view["left_out"]["by_reason"] == {APPLIED: 48, EMPTY: 2}
-    assert view["left_out"]["sidecars"] == {"with_time": 48, "captioned": 24, "time_skipped": 2}
+    assert view["left_out"]["by_reason"] == {APPLIED: 24, EMPTY: 26}
+    assert view["left_out"]["sidecars"] == {"captioned": 24}
     assert view["progress"] == {"total": 100, "filed": 50, "skipped_duplicates": 0, "failed": 0, "left_out": 50, "remaining": 0}
 
 
-def test_a_sidecar_whose_name_suffix_is_cut_pairs_with_its_photo(vault: Path) -> None:
-    """Catches a pairing that expects the full suffix word: Takeout cuts it, and every such photo would stay undated."""
-    _id, pages, view = one_photo_albums(vault, {
-        f"{ALBUM}/IMG_100.jpg": photo("IMG_100.jpg"),
-        f"{ALBUM}/IMG_100.jpg.supplemental-me.json": sidecar("IMG_100.jpg", taken=taken_at(1)),
-        f"{ALBUM}/IMG_200.jpg": photo("IMG_200.jpg"),
-        f"{ALBUM}/IMG_200.jpg.json": sidecar("IMG_200.jpg", taken=taken_at(2)),
+def test_a_photo_with_no_exif_and_a_sidecar_with_a_photo_taken_time_files_with_no_capture_time_from_the_sidecar(vault: Path) -> None:
+    """Catches a sidecar time written to a page: nothing yet says where Google's `photoTakenTime` comes from for a file that states none."""
+    import_id, pages, view = one_photo_albums(vault, {
+        f"{ALBUM}/IMG_1.jpg": photo("IMG_1.jpg"),
+        f"{ALBUM}/IMG_1.jpg.json": sidecar("IMG_1.jpg", caption="Dusk", taken=taken_at(3)),
     })
 
-    assert time_of(pages, f"{ALBUM}/IMG_100.jpg") == "2022-07-05T12:01:00Z"
-    assert time_of(pages, f"{ALBUM}/IMG_200.jpg") == "2022-07-06T12:02:00Z"
+    assert not any(key.startswith("capture_") for key in pages[f"{ALBUM}/IMG_1.jpg"][0])
+    assert caption_of(pages, f"{ALBUM}/IMG_1.jpg") == "Dusk"
+    assert view["left_out"]["by_reason"] == {APPLIED: 1}
+    # The sidecar's row still holds the time, which the measurement of task 3.2 reads.
+    assert [row["time"] for row in expansion_rows(vault, import_id) if "sidecar" in row] == ["2022-07-07T12:03:00Z"]
+
+
+def test_a_sidecar_whose_name_suffix_is_cut_pairs_with_its_photo(vault: Path) -> None:
+    """Catches a pairing that expects the full suffix word: Takeout cuts it, and every such photo would lose its caption."""
+    _id, pages, view = one_photo_albums(vault, {
+        f"{ALBUM}/IMG_100.jpg": photo("IMG_100.jpg"),
+        f"{ALBUM}/IMG_100.jpg.supplemental-me.json": sidecar("IMG_100.jpg", caption="caption 100"),
+        f"{ALBUM}/IMG_200.jpg": photo("IMG_200.jpg"),
+        f"{ALBUM}/IMG_200.jpg.json": sidecar("IMG_200.jpg", caption="caption 200"),
+    })
+
+    assert caption_of(pages, f"{ALBUM}/IMG_100.jpg") == "caption 100"
+    assert caption_of(pages, f"{ALBUM}/IMG_200.jpg") == "caption 200"
     assert view["left_out"]["by_reason"] == {APPLIED: 2}
 
 
@@ -146,10 +157,10 @@ def test_a_name_cut_by_takeout_pairs_through_the_title_on_both_sides_of_the_cut(
     # Takeout keeps 47 characters of a photo's stem and 46 of its sidecar's name, so each is a prefix of the title.
     _id, pages, view = one_photo_albums(vault, {
         f"{ALBUM}/birthday_party_with_all_the_cousins_and_the_who.jpg": photo(full),
-        f"{ALBUM}/birthday_party_with_all_the_cousins_and_the_wh.json": sidecar(full, taken=taken_at(3)),
+        f"{ALBUM}/birthday_party_with_all_the_cousins_and_the_wh.json": sidecar(full, caption="the cousins"),
     })
 
-    assert time_of(pages, f"{ALBUM}/birthday_party_with_all_the_cousins_and_the_who.jpg") == "2022-07-07T12:03:00Z"
+    assert caption_of(pages, f"{ALBUM}/birthday_party_with_all_the_cousins_and_the_who.jpg") == "the cousins"
     assert view["left_out"]["by_reason"] == {APPLIED: 1}
 
 
@@ -160,42 +171,42 @@ def test_one_cut_sidecar_name_that_fits_two_photos_is_settled_by_the_title(vault
     _id, pages, view = one_photo_albums(vault, {
         f"{ALBUM}/{cut}o.jpg": photo("whole"),
         f"{ALBUM}/{cut}a.jpg": photo("whale"),
-        f"{ALBUM}/{cut}.json": sidecar(whole, taken=taken_at(4)),
+        f"{ALBUM}/{cut}.json": sidecar(whole, caption="the whole family"),
     })
 
-    assert time_of(pages, f"{ALBUM}/{cut}o.jpg") == "2022-07-08T12:04:00Z"
-    assert "capture_time" not in pages[f"{ALBUM}/{cut}a.jpg"][0]
+    assert caption_of(pages, f"{ALBUM}/{cut}o.jpg") == "the whole family"
+    assert caption_of(pages, f"{ALBUM}/{cut}a.jpg") is None
     assert view["left_out"]["by_reason"] == {APPLIED: 1}
 
 
 def test_a_title_with_a_replaced_character_pairs_with_the_file_that_takeout_named(vault: Path) -> None:
-    """Catches a title compared as typed: Takeout writes `&` and `?` as `_` in the file name, so those photos stay undated."""
+    """Catches a title compared as typed: Takeout writes `&` and `?` as `_` in the file name, so those photos lose their caption."""
     _id, pages, view = one_photo_albums(vault, {
         f"{ALBUM}/Q_A night.jpg": photo("Q_A night.jpg"),
-        f"{ALBUM}/Q_A night.jpg.supplemental-metadata.json": sidecar("Q&A night.jpg", taken=taken_at(5)),
+        f"{ALBUM}/Q_A night.jpg.supplemental-metadata.json": sidecar("Q&A night.jpg", caption="quiz night"),
         f"{ALBUM}/Why_.jpg": photo("Why_.jpg"),
-        f"{ALBUM}/Why_.jpg.supplemental-metadata.json": sidecar("Why?.jpg", taken=taken_at(6)),
+        f"{ALBUM}/Why_.jpg.supplemental-metadata.json": sidecar("Why?.jpg", caption="why not"),
     })
 
-    assert time_of(pages, f"{ALBUM}/Q_A night.jpg") == "2022-07-09T12:05:00Z"
-    assert time_of(pages, f"{ALBUM}/Why_.jpg") == "2022-07-10T12:06:00Z"
+    assert caption_of(pages, f"{ALBUM}/Q_A night.jpg") == "quiz night"
+    assert caption_of(pages, f"{ALBUM}/Why_.jpg") == "why not"
     assert view["left_out"]["by_reason"] == {APPLIED: 2}
 
 
-def test_duplicates_with_the_copy_number_in_either_place_each_take_their_own_sidecars_time(vault: Path) -> None:
-    """Catches a copy that takes the first sidecar's time: Takeout puts the number before `.json` or in the photo's name."""
+def test_duplicates_with_the_copy_number_in_either_place_each_take_their_own_sidecars_caption(vault: Path) -> None:
+    """Catches a copy that takes the first sidecar's caption: Takeout puts the number before `.json` or in the photo's name."""
     _id, pages, view = one_photo_albums(vault, {
         f"{ALBUM}/IMG.jpg": photo("IMG.jpg"),
         f"{ALBUM}/IMG(1).jpg": photo("IMG(1).jpg"),
         f"{ALBUM}/IMG(2).jpg": photo("IMG(2).jpg"),
-        f"{ALBUM}/IMG.jpg.json": sidecar("IMG.jpg", taken=taken_at(10)),
-        f"{ALBUM}/IMG.jpg(1).json": sidecar("IMG.jpg", taken=taken_at(11)),
-        f"{ALBUM}/IMG(2).jpg.supplemental-metadata.json": sidecar("IMG.jpg", taken=taken_at(12)),
+        f"{ALBUM}/IMG.jpg.json": sidecar("IMG.jpg", caption="first copy"),
+        f"{ALBUM}/IMG.jpg(1).json": sidecar("IMG.jpg", caption="second copy"),
+        f"{ALBUM}/IMG(2).jpg.supplemental-metadata.json": sidecar("IMG.jpg", caption="third copy"),
     })
 
-    assert time_of(pages, f"{ALBUM}/IMG.jpg") == "2022-07-14T12:10:00Z"
-    assert time_of(pages, f"{ALBUM}/IMG(1).jpg") == "2022-07-15T12:11:00Z"
-    assert time_of(pages, f"{ALBUM}/IMG(2).jpg") == "2022-07-16T12:12:00Z"
+    assert caption_of(pages, f"{ALBUM}/IMG.jpg") == "first copy"
+    assert caption_of(pages, f"{ALBUM}/IMG(1).jpg") == "second copy"
+    assert caption_of(pages, f"{ALBUM}/IMG(2).jpg") == "third copy"
     assert view["left_out"]["by_reason"] == {APPLIED: 3}
 
 
@@ -204,12 +215,12 @@ def test_a_numbered_copy_of_a_cut_suffix_pairs_with_the_numbered_photo(vault: Pa
     _id, pages, view = one_photo_albums(vault, {
         f"{ALBUM}/IMG_7.jpg": photo("IMG_7.jpg"),
         f"{ALBUM}/IMG_7(1).jpg": photo("IMG_7(1).jpg"),
-        f"{ALBUM}/IMG_7.jpg.suppl.json": sidecar("IMG_7.jpg", taken=taken_at(7)),
-        f"{ALBUM}/IMG_7.jpg.suppl(1).json": sidecar("IMG_7.jpg", taken=taken_at(8)),
+        f"{ALBUM}/IMG_7.jpg.suppl.json": sidecar("IMG_7.jpg", caption="original"),
+        f"{ALBUM}/IMG_7.jpg.suppl(1).json": sidecar("IMG_7.jpg", caption="copy"),
     })
 
-    assert time_of(pages, f"{ALBUM}/IMG_7.jpg") == "2022-07-11T12:07:00Z"
-    assert time_of(pages, f"{ALBUM}/IMG_7(1).jpg") == "2022-07-12T12:08:00Z"
+    assert caption_of(pages, f"{ALBUM}/IMG_7.jpg") == "original"
+    assert caption_of(pages, f"{ALBUM}/IMG_7(1).jpg") == "copy"
     assert view["left_out"]["by_reason"] == {APPLIED: 2}
 
 
@@ -217,10 +228,10 @@ def test_a_photo_whose_own_name_ends_in_a_number_pairs_with_its_sidecar(vault: P
     """Catches a name read as a copy number: the owner called the file `Trip(1).jpg`, and its title says so."""
     _id, pages, view = one_photo_albums(vault, {
         f"{ALBUM}/Trip(1).jpg": photo("Trip(1).jpg"),
-        f"{ALBUM}/Trip(1).jpg.supplemental-metadata.json": sidecar("Trip(1).jpg", taken=taken_at(9)),
+        f"{ALBUM}/Trip(1).jpg.supplemental-metadata.json": sidecar("Trip(1).jpg", caption="the trip"),
     })
 
-    assert time_of(pages, f"{ALBUM}/Trip(1).jpg") == "2022-07-13T12:09:00Z"
+    assert caption_of(pages, f"{ALBUM}/Trip(1).jpg") == "the trip"
     assert view["left_out"]["by_reason"] == {APPLIED: 1}
 
 
@@ -228,13 +239,13 @@ def test_a_jpeg_title_pairs_with_a_jpg_file_and_a_video_never_takes_a_photos_sid
     """Catches an extension compared as a string, which drops `.jpeg` against `.jpg`, and a media type that is ignored."""
     _id, pages, view = one_photo_albums(vault, {
         f"{ALBUM}/IMG_9.jpg": photo("IMG_9.jpg"),
-        f"{ALBUM}/IMG_9.jpg.supplemental-metadata.json": sidecar("IMG_9.jpeg", taken=taken_at(13)),
+        f"{ALBUM}/IMG_9.jpg.supplemental-metadata.json": sidecar("IMG_9.jpeg", caption="a still"),
         f"{ALBUM}/CLIP_1.mp4": b"\x00\x00\x00\x18ftypmp42" + b"clip one",
-        f"{ALBUM}/CLIP_1.jpg.supplemental-metadata.json": sidecar("CLIP_1.jpg", taken=taken_at(14)),
+        f"{ALBUM}/CLIP_1.jpg.supplemental-metadata.json": sidecar("CLIP_1.jpg", caption="not a still"),
     })
 
-    assert time_of(pages, f"{ALBUM}/IMG_9.jpg") == "2022-07-17T12:13:00Z"
-    assert "capture_time" not in pages[f"{ALBUM}/CLIP_1.mp4"][0]
+    assert caption_of(pages, f"{ALBUM}/IMG_9.jpg") == "a still"
+    assert caption_of(pages, f"{ALBUM}/CLIP_1.mp4") is None
     assert view["left_out"]["by_reason"] == {APPLIED: 1, UNPAIRED: 1}
 
 
@@ -243,12 +254,12 @@ def test_a_heic_and_a_jpg_of_one_shot_each_pair_with_their_own_sidecar(vault: Pa
     _id, pages, view = one_photo_albums(vault, {
         f"{ALBUM}/IMG_60.heic": b"\x00\x00\x00\x18ftypheic" + b"shot 60",
         f"{ALBUM}/IMG_60.jpg": photo("IMG_60.jpg"),
-        f"{ALBUM}/IMG_60.heic.supplemental-metadata.json": sidecar("IMG_60.heic", taken=taken_at(50)),
-        f"{ALBUM}/IMG_60.jpg.supplemental-metadata.json": sidecar("IMG_60.jpg", taken=taken_at(51)),
+        f"{ALBUM}/IMG_60.heic.supplemental-metadata.json": sidecar("IMG_60.heic", caption="the heic"),
+        f"{ALBUM}/IMG_60.jpg.supplemental-metadata.json": sidecar("IMG_60.jpg", caption="the jpg"),
     })
 
-    assert time_of(pages, f"{ALBUM}/IMG_60.heic") == "2022-08-23T12:50:00Z"
-    assert time_of(pages, f"{ALBUM}/IMG_60.jpg") == "2022-08-24T12:51:00Z"
+    assert caption_of(pages, f"{ALBUM}/IMG_60.heic") == "the heic"
+    assert caption_of(pages, f"{ALBUM}/IMG_60.jpg") == "the jpg"
     assert view["left_out"]["by_reason"] == {APPLIED: 2}
 
 
@@ -257,35 +268,35 @@ def test_a_raw_file_and_a_jpg_of_one_shot_each_pair_with_their_own_sidecar(vault
     _id, pages, view = one_photo_albums(vault, {
         f"{ALBUM}/DSC_61.dng": b"II*\x00" + b"raw 61",
         f"{ALBUM}/DSC_61.jpg": photo("DSC_61.jpg"),
-        f"{ALBUM}/DSC_61.dng.json": sidecar("DSC_61.dng", taken=taken_at(52)),
-        f"{ALBUM}/DSC_61.jpg.json": sidecar("DSC_61.jpg", taken=taken_at(53)),
+        f"{ALBUM}/DSC_61.dng.json": sidecar("DSC_61.dng", caption="the raw file"),
+        f"{ALBUM}/DSC_61.jpg.json": sidecar("DSC_61.jpg", caption="the jpg"),
     })
 
-    assert time_of(pages, f"{ALBUM}/DSC_61.dng") == "2022-08-25T12:52:00Z"
-    assert time_of(pages, f"{ALBUM}/DSC_61.jpg") == "2022-08-26T12:53:00Z"
+    assert caption_of(pages, f"{ALBUM}/DSC_61.dng") == "the raw file"
+    assert caption_of(pages, f"{ALBUM}/DSC_61.jpg") == "the jpg"
     assert view["left_out"]["by_reason"] == {APPLIED: 2}
 
 
 def test_a_jpg_sidecar_never_pairs_with_a_png_of_the_same_stem(vault: Path) -> None:
-    """Catches a title whose extension names another format taking the time: the PNG would carry a JPG's date."""
+    """Catches a title whose extension names another format giving its caption: the PNG would carry a JPG's caption."""
     _id, pages, view = one_photo_albums(vault, {
         f"{ALBUM}/Scan_62.png": b"\x89PNG\r\n\x1a\n" + b"scan 62",
-        f"{ALBUM}/Scan_62.jpg.json": sidecar("Scan_62.jpg", taken=taken_at(54)),
+        f"{ALBUM}/Scan_62.jpg.json": sidecar("Scan_62.jpg", caption="a jpg"),
     })
 
-    assert "capture_time" not in pages[f"{ALBUM}/Scan_62.png"][0]
+    assert caption_of(pages, f"{ALBUM}/Scan_62.png") is None
     assert view["left_out"]["by_reason"] == {UNPAIRED: 1}
 
 
-def test_two_sidecars_that_fit_one_photo_leave_both_unpaired_and_the_photo_undated(vault: Path) -> None:
-    """Catches a pairing that picks one: the wrong sidecar would date a photo and nothing would show it."""
+def test_two_sidecars_that_fit_one_photo_leave_both_unpaired_and_the_photo_without_a_caption(vault: Path) -> None:
+    """Catches a pairing that picks one: the wrong sidecar would caption a photo and nothing would show it."""
     _id, pages, view = one_photo_albums(vault, {
         f"{ALBUM}/IMG_30.jpg": photo("IMG_30.jpg"),
-        f"{ALBUM}/IMG_30.jpg.json": sidecar("IMG_30.jpg", taken=taken_at(20)),
-        f"{ALBUM}/IMG_30.jpg.supplemental-metadata.json": sidecar("IMG_30.jpg", taken=taken_at(21)),
+        f"{ALBUM}/IMG_30.jpg.json": sidecar("IMG_30.jpg", caption="one"),
+        f"{ALBUM}/IMG_30.jpg.supplemental-metadata.json": sidecar("IMG_30.jpg", caption="two"),
     })
 
-    assert "capture_time" not in pages[f"{ALBUM}/IMG_30.jpg"][0]
+    assert caption_of(pages, f"{ALBUM}/IMG_30.jpg") is None
     assert view["left_out"]["by_reason"] == {UNPAIRED: 2}
     assert {item["path"] for item in view["left_out"]["items"]} == {
         f"{ALBUM}/IMG_30.jpg.json", f"{ALBUM}/IMG_30.jpg.supplemental-metadata.json"}
@@ -295,8 +306,8 @@ def test_a_sidecar_without_its_photo_files_nothing_and_is_listed_by_path(vault: 
     """Catches a sidecar of a photo in another archive part that is dropped without a trace or filed as JSON."""
     _id, pages, view = one_photo_albums(vault, {
         f"{ALBUM}/IMG_40.jpg": photo("IMG_40.jpg"),
-        f"{ALBUM}/IMG_40.jpg.json": sidecar("IMG_40.jpg", taken=taken_at(22)),
-        f"{ALBUM}/IMG_41.jpg.json": sidecar("IMG_41.jpg", taken=taken_at(23)),
+        f"{ALBUM}/IMG_40.jpg.json": sidecar("IMG_40.jpg", caption="here"),
+        f"{ALBUM}/IMG_41.jpg.json": sidecar("IMG_41.jpg", caption="elsewhere"),
     })
 
     assert list(pages) == [f"{ALBUM}/IMG_40.jpg"]
@@ -305,19 +316,19 @@ def test_a_sidecar_without_its_photo_files_nothing_and_is_listed_by_path(vault: 
     assert {"path": f"{ALBUM}/IMG_41.jpg.json", "code": UNPAIRED} in view["left_out"]["items"]
 
 
-def test_a_photo_without_a_sidecar_files_undated_and_a_folder_keeps_its_own_pairs(vault: Path) -> None:
-    """Catches a name matched across folders: the same file name in two albums must take each album's own time."""
+def test_a_photo_without_a_sidecar_files_without_a_caption_and_a_folder_keeps_its_own_pairs(vault: Path) -> None:
+    """Catches a name matched across folders: the same file name in two albums must take each album's own caption."""
     _id, pages, view = one_photo_albums(vault, {
         "Takeout/Google Photos/One/IMG_5.jpg": photo("one/IMG_5.jpg"),
-        "Takeout/Google Photos/One/IMG_5.jpg.json": sidecar("IMG_5.jpg", taken=taken_at(30)),
+        "Takeout/Google Photos/One/IMG_5.jpg.json": sidecar("IMG_5.jpg", caption="album one"),
         "Takeout/Google Photos/Two/IMG_5.jpg": photo("two/IMG_5.jpg"),
-        "Takeout/Google Photos/Two/IMG_5.jpg.json": sidecar("IMG_5.jpg", taken=taken_at(31)),
+        "Takeout/Google Photos/Two/IMG_5.jpg.json": sidecar("IMG_5.jpg", caption="album two"),
         "Takeout/Google Photos/Two/IMG_6.jpg": photo("two/IMG_6.jpg"),
     })
 
-    assert time_of(pages, "Takeout/Google Photos/One/IMG_5.jpg") == "2022-08-03T12:30:00Z"
-    assert time_of(pages, "Takeout/Google Photos/Two/IMG_5.jpg") == "2022-08-04T12:31:00Z"
-    assert "capture_time" not in pages["Takeout/Google Photos/Two/IMG_6.jpg"][0]
+    assert caption_of(pages, "Takeout/Google Photos/One/IMG_5.jpg") == "album one"
+    assert caption_of(pages, "Takeout/Google Photos/Two/IMG_5.jpg") == "album two"
+    assert caption_of(pages, "Takeout/Google Photos/Two/IMG_6.jpg") is None
     assert view["left_out"]["by_reason"] == {APPLIED: 2}
 
 
@@ -333,17 +344,17 @@ def test_an_album_metadata_file_and_a_sidecar_over_a_mebibyte_file_as_ordinary_f
     })
 
     assert set(pages) == {f"{ALBUM}/metadata.json", f"{ALBUM}/IMG_50.jpg", f"{ALBUM}/IMG_50.jpg.json"}
-    assert "capture_time" not in pages[f"{ALBUM}/IMG_50.jpg"][0]
+    assert caption_of(pages, f"{ALBUM}/IMG_50.jpg") is None
     assert view["left_out"]["by_reason"] == {}
 
 
 def test_the_same_takeout_imported_again_files_nothing_and_counts_every_sidecar_as_its_photo_already_imported(vault: Path) -> None:
-    """Catches a re-import that files the JSON files it skipped before, or one that counts an unchanged photo as dated again."""
+    """Catches a re-import that files the JSON files it skipped before, or one that counts an unchanged photo as captioned again."""
     members = {}
     for number in range(6):
         name = f"IMG_{number}.jpg"
         members[f"{ALBUM}/{name}"] = photo(name)
-        members[f"{ALBUM}/{name}.json"] = sidecar(name, taken=taken_at(number), caption=f"photo {number}")
+        members[f"{ALBUM}/{name}.json"] = sidecar(name, caption=f"photo {number}")
     first = stage_takeout(vault, members)
     file_to_done(vault, first, calls=200)
     before = source_pages(vault)
@@ -353,14 +364,14 @@ def test_the_same_takeout_imported_again_files_nothing_and_counts_every_sidecar_
     assert source_pages(vault) == before and len(before) == 6
     assert view["progress"]["skipped_duplicates"] == 6 and view["progress"]["filed"] == 0
     assert view["left_out"]["by_reason"] == {ALREADY: 6}
-    assert view["left_out"]["sidecars"] == {"with_time": 0, "captioned": 0, "time_skipped": 0}
+    assert view["left_out"]["sidecars"] == {"captioned": 0}
 
 
-def test_the_reply_to_a_second_import_says_the_sidecars_were_not_applied_because_the_vault_held_the_photos(vault: Path) -> None:
-    """Catches a reply that reads as if the new sidecars dated the photos, when the vault already held them and kept its own dates."""
+def test_the_reply_to_a_second_import_says_the_sidecars_captions_were_not_applied_because_the_vault_held_the_photos(vault: Path) -> None:
+    """Catches a reply that reads as if the new sidecars captioned the photos, when the vault already held them and kept its own pages."""
     from exomem import adoption_run
 
-    members = {f"{ALBUM}/IMG_80.jpg": photo("IMG_80.jpg"), f"{ALBUM}/IMG_80.jpg.json": sidecar("IMG_80.jpg", taken=taken_at(80), caption="Kept")}
+    members = {f"{ALBUM}/IMG_80.jpg": photo("IMG_80.jpg"), f"{ALBUM}/IMG_80.jpg.json": sidecar("IMG_80.jpg", caption="Kept")}
     file_to_done(vault, stage_takeout(vault, members), calls=200)
     stage = f"_Imports/{stage_takeout(vault, members)}"
 
@@ -372,7 +383,7 @@ def test_the_reply_to_a_second_import_says_the_sidecars_were_not_applied_because
 
     residual = reply["filed"]["residual"]
     assert residual["unfiled"]["files"] == 0  # the photo is in the vault, so nothing needs the person
-    assert "time and caption were not applied, because the vault already held its photo" in residual["summary"]
+    assert "caption was not applied, because the vault already held its photo" in residual["summary"]
 
 
 def test_an_album_copy_of_a_photo_already_filed_counts_its_sidecar_as_already_imported_and_not_for_review(vault: Path) -> None:
@@ -380,9 +391,9 @@ def test_an_album_copy_of_a_photo_already_filed_counts_its_sidecar_as_already_im
     shared = JPEG + b"in two albums"
     import_id, pages, view = one_photo_albums(vault, {
         f"{ALBUM}/IMG_70.jpg": shared,
-        f"{ALBUM}/IMG_70.jpg.json": sidecar("IMG_70.jpg", taken=taken_at(60), caption="first album"),
+        f"{ALBUM}/IMG_70.jpg.json": sidecar("IMG_70.jpg", caption="first album"),
         "Takeout/Google Photos/Photos from 2022/IMG_70.jpg": shared,
-        "Takeout/Google Photos/Photos from 2022/IMG_70.jpg.json": sidecar("IMG_70.jpg", taken=taken_at(60), caption="second album"),
+        "Takeout/Google Photos/Photos from 2022/IMG_70.jpg.json": sidecar("IMG_70.jpg", caption="second album"),
     })
 
     assert list(pages) == [f"{ALBUM}/IMG_70.jpg"]
@@ -394,13 +405,13 @@ def test_an_album_copy_of_a_photo_already_filed_counts_its_sidecar_as_already_im
 def test_a_sidecar_whose_photo_did_not_file_is_counted_as_such_and_left_for_review(
     vault: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Catches a photo that failed to file reported as in the vault: its time and caption would be lost without a trace."""
+    """Catches a photo that failed to file reported as in the vault: its caption would be lost without a trace."""
     monkeypatch.setenv(client_artifacts.ADOPTION_CEILING_ENV, str(len(JPEG) + 5))
     _id, pages, view = one_photo_albums(vault, {
         f"{ALBUM}/small.jpg": JPEG + b"s",
-        f"{ALBUM}/small.jpg.json": sidecar("small.jpg", taken=taken_at(61)),
+        f"{ALBUM}/small.jpg.json": sidecar("small.jpg", caption="small"),
         f"{ALBUM}/large.jpg": JPEG + b"l" * 100,  # over the ceiling: adoption does not copy it
-        f"{ALBUM}/large.jpg.json": sidecar("large.jpg", taken=taken_at(62)),
+        f"{ALBUM}/large.jpg.json": sidecar("large.jpg", caption="large"),
     })
 
     assert f"{ALBUM}/large.jpg" not in pages
@@ -409,7 +420,7 @@ def test_a_sidecar_whose_photo_did_not_file_is_counted_as_such_and_left_for_revi
 
 
 def test_no_photo_files_before_every_sidecar_is_read_when_the_pass_outlasts_a_call(vault: Path, monkeypatch) -> None:
-    """Catches photos that file while the sidecars are still being read, and so file undated for good."""
+    """Catches photos that file while the sidecars are still being read, and so file without their caption for good."""
     expand = export_expansion.expand
     filed_while_reading: list[int] = []
     calls: list[int] = []
@@ -426,7 +437,7 @@ def test_no_photo_files_before_every_sidecar_is_read_when_the_pass_outlasts_a_ca
     for number in range(12):
         name = f"IMG_{number:02d}.jpg"
         members[f"{ALBUM}/{name}"] = photo(name)
-        members[f"{ALBUM}/{name}.json"] = sidecar(name, taken=taken_at(number), caption=f"photo {number}")
+        members[f"{ALBUM}/{name}.json"] = sidecar(name, caption=f"photo {number}")
     import_id = stage_takeout(vault, members)
 
     view = file_to_done(vault, import_id, calls=600)
@@ -434,12 +445,12 @@ def test_no_photo_files_before_every_sidecar_is_read_when_the_pass_outlasts_a_ca
     pages = filed_files(vault, import_id)
     assert len(calls) >= 12 and set(filed_while_reading) == {0}  # a call per sidecar, and no Source until the last was read
     for number in range(12):
-        assert time_of(pages, f"{ALBUM}/IMG_{number:02d}.jpg") == taken_at(number).strftime("%Y-%m-%dT%H:%M:%SZ")
+        assert caption_of(pages, f"{ALBUM}/IMG_{number:02d}.jpg") == f"photo {number}"
     assert view["left_out"]["by_reason"] == {APPLIED: 12}
 
 
-def test_a_sidecar_time_at_or_before_1970_gives_no_time() -> None:
-    """Catches a zero or negative stamp read as a time: the photo would carry 1970-01-01 as its capture date."""
+def test_a_sidecar_time_at_or_before_1970_is_recorded_as_no_time() -> None:
+    """Catches a zero or negative stamp recorded as a time: task 3.2 would count 1970-01-01 as a time that Google gave."""
     for value in ("0", "-86400"):
         facts = export_photos.facts_of({"title": "OLD_1.jpg", "photoTakenTime": {"timestamp": value}, "creationTime": stamp(UPLOADED)})
         assert facts.time is None and not facts.time_skipped
@@ -451,7 +462,7 @@ def test_a_sidecar_that_cannot_be_read_is_listed_alone_while_the_pass_reads_on_a
     for number in range(4):
         name = f"IMG_{number}.jpg"
         members[f"{ALBUM}/{name}"] = photo(name)
-        members[f"{ALBUM}/{name}.json"] = sidecar(name, taken=taken_at(number), caption=f"Shot {number}")
+        members[f"{ALBUM}/{name}.json"] = sidecar(name, caption=f"Shot {number}")
     import_id = stage_takeout(vault, members)
     unreadable = vault / "_Imports" / import_id / ALBUM / "IMG_1.jpg.json"
     unreadable.unlink()
@@ -462,7 +473,7 @@ def test_a_sidecar_that_cannot_be_read_is_listed_alone_while_the_pass_reads_on_a
     pages = filed_files(vault, import_id)
     assert {path for path in pages if path.endswith(".jpg")} == {f"{ALBUM}/IMG_{number}.jpg" for number in range(4)}
     assert not {path for path in pages if path.endswith(".json")}  # no sidecar files as a Source, read or not
-    assert [time_of(pages, f"{ALBUM}/IMG_{number}.jpg") is not None for number in range(4)] == [True, False, True, True]  # read on after the fault
+    assert [caption_of(pages, f"{ALBUM}/IMG_{number}.jpg") for number in range(4)] == ["Shot 0", None, "Shot 2", "Shot 3"]  # read on after the fault
     assert view["state"] == "done"
     assert view["left_out"]["by_reason"] == {APPLIED: 3, UNREADABLE: 1, "IMPORT_EXPORT_PARTIAL": 1}
     assert [row["unreadable"] for row in expansion_rows(vault, import_id) if "unreadable" in row] == [f"{ALBUM}/IMG_1.jpg.json"]
@@ -475,8 +486,7 @@ def test_a_caption_files_in_the_description_section_with_a_card_number_removed_a
 
     import_id, pages, _view = one_photo_albums(vault, {
         f"{ALBUM}/IMG_60.jpg": photo("IMG_60.jpg"),
-        f"{ALBUM}/IMG_60.jpg.json": sidecar(
-            "IMG_60.jpg", taken=taken_at(60), caption="Regatta dinner, paid with card 4111 1111 1111 1111"),
+        f"{ALBUM}/IMG_60.jpg.json": sidecar("IMG_60.jpg", caption="Regatta dinner, paid with card 4111 1111 1111 1111"),
     })
 
     text = pages[f"{ALBUM}/IMG_60.jpg"][1]
@@ -499,10 +509,10 @@ def test_the_file_reply_names_each_sidecar_by_what_became_of_its_photo_and_none_
 
     import_id = stage_takeout(vault, {
         f"{ALBUM}/IMG_50.jpg": photo("IMG_50.jpg"),
-        f"{ALBUM}/IMG_50.jpg.json": sidecar("IMG_50.jpg", taken=taken_at(30), caption="Dusk"),
+        f"{ALBUM}/IMG_50.jpg.json": sidecar("IMG_50.jpg", caption="Dusk"),
         f"{ALBUM}/IMG_51.jpg": photo("IMG_51.jpg"),
-        f"{ALBUM}/IMG_51.jpg.json": sidecar("IMG_51.jpg", taken=None),
-        f"{ALBUM}/IMG_52.jpg.json": sidecar("IMG_52.jpg", taken=taken_at(31)),
+        f"{ALBUM}/IMG_51.jpg.json": sidecar("IMG_51.jpg"),  # no caption: it gives its photo nothing
+        f"{ALBUM}/IMG_52.jpg.json": sidecar("IMG_52.jpg", caption="Elsewhere"),
     })
     stage = f"_Imports/{import_id}"
     reply = adoption_run.file(vault, path=stage)
@@ -547,8 +557,8 @@ def _read_again_by_the_media_worker(vault: Path, import_id: str, monkeypatch) ->
 
 
 @pytest.mark.frame_codecs
-def test_the_media_worker_keeps_a_sidecar_date_only_where_the_picture_states_none(vault: Path, monkeypatch) -> None:
-    """Catches a worker that lets the sidecar override a time the picture states, drops the date of a picture that states none, or the caption."""
+def test_the_media_worker_keeps_the_caption_and_dates_a_photo_from_its_picture_alone_whatever_its_sidecar_states(vault: Path, monkeypatch) -> None:
+    """Catches a worker that reads a sidecar's time into a picture that states none, or drops the caption filing put on the page."""
     members = {
         f"{ALBUM}/received.jpg": _jpeg_file(taken=None, seed=1),
         f"{ALBUM}/camera.jpg": _jpeg_file(taken="2021:03:02 10:00:00", seed=2),
@@ -556,30 +566,14 @@ def test_the_media_worker_keeps_a_sidecar_date_only_where_the_picture_states_non
     for name in list(members):
         members[f"{name}.json"] = sidecar(name.rpartition("/")[2], taken=taken_at(70), caption="Sunday regatta")
     import_id, pages, _view = one_photo_albums(vault, members)
-    assert {pages[path][0]["capture_date_source"] for path in pages if path.endswith(".jpg")} == {"export-sidecar"}
+    assert not any(key.startswith("capture_") for path in pages for key in pages[path][0])  # filing dates no photo
 
     texts = _read_again_by_the_media_worker(vault, import_id, monkeypatch)
 
     assert all("\n## Description\n\nSunday regatta\n" in text for text in texts.values())  # the caption stays where filing put it
     received, camera = (parse_frontmatter(texts[f"{ALBUM}/{name}.jpg"])[0] for name in ("received", "camera"))
-    assert (received["capture_date"], received["capture_date_source"]) == ("2022-09-12", "export-sidecar")
+    assert not any(key.startswith("capture_") for key in received)  # nothing dates the picture that states no time
     assert (camera["capture_date"], camera["capture_date_source"]) == ("2021-03-02", "camera-exif")
-
-
-@pytest.mark.frame_codecs
-def test_a_date_in_the_name_the_owner_gave_a_filed_photo_outranks_its_sidecar_date(vault: Path, monkeypatch) -> None:
-    """Catches a worker that reads the name the filer stored the photo under, which states no date, so a photo named for its day keeps the later sidecar date."""
-    members = {
-        f"{ALBUM}/20200314_101112.jpg": _jpeg_file(taken=None, seed=3),
-        f"{ALBUM}/20200314_101112.jpg.json": sidecar("20200314_101112.jpg", taken=taken_at(70), caption=""),
-    }
-    import_id, pages, _view = one_photo_albums(vault, members)
-    assert pages[f"{ALBUM}/20200314_101112.jpg"][0]["capture_date_source"] == "export-sidecar"
-
-    texts = _read_again_by_the_media_worker(vault, import_id, monkeypatch)
-
-    named = parse_frontmatter(texts[f"{ALBUM}/20200314_101112.jpg"])[0]
-    assert (named["capture_time"], named["capture_date_source"]) == ("2020-03-14T10:11:12", "file-name")
 
 
 @pytest.mark.frame_codecs

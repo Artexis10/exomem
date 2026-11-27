@@ -24,7 +24,7 @@ FORMATS_PACK = "capture-date-name-formats.yaml"
 
 #: The code paths that can produce a date. A source entry names one, so the key stays data.
 # nosemgrep: ep-word-set -- closed set of code paths implemented in this module's callers, not vocabulary.
-PRODUCERS = frozenset({"file-metadata", "perceptual-match", "file-name", "export-sidecar", "captured-field"})
+PRODUCERS = frozenset({"file-metadata", "perceptual-match", "file-name", "captured-field"})
 #: `evidence` is a time that a file states. A `fallback` is derived from another fact and never stored.
 # nosemgrep: ep-word-set -- the closed trust classes this module and its callers implement.
 CLASSES = frozenset({"evidence", "fallback"})
@@ -118,7 +118,7 @@ def survives_extraction(recorded: object, extracted: object) -> bool:
 
     Reading the file again reproduces its camera date and its file-name date, so those follow the
     file. A source that the pack marks `reread: false` is a fact from outside the file, such as a matched
-    original or an export's sidecar, that no re-read can reproduce, so it stays unless the read now
+    original, that no re-read can reproduce, so it stays unless the read now
     states a source of higher precedence.
     """
     source = sources().get(recorded) if isinstance(recorded, str) else None

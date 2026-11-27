@@ -66,7 +66,7 @@ A recognised Takeout sidecar SHALL pair with an image or video in its own staged
 #### Scenario: Duplicates with the copy number in either place
 
 - **WHEN** a folder holds `IMG.jpg`, `IMG(1).jpg`, `IMG(2).jpg`, `IMG.jpg.json`, `IMG.jpg(1).json` and `IMG(2).jpg.supplemental-metadata.json`, every sidecar titled `IMG.jpg`
-- **THEN** each sidecar pairs with its own photo, and no photo receives another's time or caption
+- **THEN** each sidecar pairs with its own photo, and no photo receives another's caption
 
 #### Scenario: A long name cut by Takeout
 
@@ -82,7 +82,7 @@ A recognised Takeout sidecar SHALL pair with an image or video in its own staged
 #### Scenario: A sidecar for another format
 
 - **WHEN** a folder holds `Scan_62.png` and a sidecar titled `Scan_62.jpg`
-- **THEN** the sidecar stays unpaired, and the PNG files without its time
+- **THEN** the sidecar stays unpaired, and the PNG files without its caption
 
 #### Scenario: A name form that is not read
 
@@ -100,8 +100,8 @@ A recognised sidecar SHALL never file as a Source. When filing reaches done, the
 
 #### Scenario: A Takeout album
 
-- **WHEN** a staged folder holds 50 photos and their 50 sidecars, 48 of which carry a time or caption
-- **THEN** 50 photo Sources file and no JSON Source does, and the filing view counts 48 `IMPORT_SIDECAR_APPLIED` and 2 `IMPORT_SIDECAR_EMPTY`, and reads done
+- **WHEN** a staged folder holds 50 photos and their 50 sidecars, 24 of which carry a caption
+- **THEN** 50 photo Sources file and no JSON Source does, and the filing view counts 24 `IMPORT_SIDECAR_APPLIED` and 26 `IMPORT_SIDECAR_EMPTY`, and reads done
 
 #### Scenario: A sidecar without its photo
 
@@ -110,18 +110,18 @@ A recognised sidecar SHALL never file as a Source. When filing reaches done, the
 
 ### Requirement: A sidecar's reason says what became of its photo
 
-`IMPORT_SIDECAR_APPLIED` and `IMPORT_SIDECAR_EMPTY` SHALL mean that the sidecar was paired with a photo that filed now, and `EMPTY` that it carried nothing. `IMPORT_SIDECAR_PHOTO_ALREADY_IMPORTED` SHALL mean that the vault already held the photo, so the sidecar's time and caption were not applied: its reason text SHALL say so, and it counts as filed. `IMPORT_SIDECAR_PHOTO_NOT_FILED` SHALL mean that the photo did not file, which the person reviews.
+`IMPORT_SIDECAR_APPLIED` and `IMPORT_SIDECAR_EMPTY` SHALL mean that the sidecar was paired with a photo that filed now: `APPLIED` that its caption went to the photo, and `EMPTY` that it had no caption to give. `IMPORT_SIDECAR_PHOTO_ALREADY_IMPORTED` SHALL mean that the vault already held the photo, so the sidecar's caption was not applied: its reason text SHALL say so, and it counts as filed. `IMPORT_SIDECAR_PHOTO_NOT_FILED` SHALL mean that the photo did not file, which the person reviews.
 
 #### Scenario: The same Takeout imported again
 
 - **WHEN** the same Takeout is imported again unchanged
-- **THEN** every photo is skipped as already imported, no JSON Source files, and every sidecar counts as `IMPORT_SIDECAR_PHOTO_ALREADY_IMPORTED`, with `with_time`, `captioned` and `time_skipped` at 0
-- **AND** the reply says that the sidecars' time and caption were not applied, because the vault already held the photos
+- **THEN** every photo is skipped as already imported, no JSON Source files, and every sidecar counts as `IMPORT_SIDECAR_PHOTO_ALREADY_IMPORTED`, with `captioned` at 0
+- **AND** the reply says that the sidecars' captions were not applied, because the vault already held the photos
 
 #### Scenario: A photo in two albums
 
 - **WHEN** a Takeout holds the same photo in two albums, each with its own sidecar
-- **THEN** one photo Source files, with the time and caption of its own sidecar, and the other album's sidecar counts as `IMPORT_SIDECAR_PHOTO_ALREADY_IMPORTED`
+- **THEN** one photo Source files, with the caption of its own sidecar, and the other album's sidecar counts as `IMPORT_SIDECAR_PHOTO_ALREADY_IMPORTED`
 - **AND** nothing in the stage's report needs the person's review
 
 #### Scenario: A photo that did not file
@@ -129,23 +129,23 @@ A recognised sidecar SHALL never file as a Source. When filing reaches done, the
 - **WHEN** a paired photo is larger than the adoption ceiling and does not file
 - **THEN** its sidecar counts as `IMPORT_SIDECAR_PHOTO_NOT_FILED`, which the report lists as needing review
 
-### Requirement: The view counts what the sidecars carried
+### Requirement: The view counts the captions that sidecars gave
 
-Over the sidecars whose photo filed now, the filing view SHALL count those that carry a usable time (`with_time`), those that carry a caption (`captioned`) and those whose time was skipped as an upload time (`time_skipped`). A photo that states its own time keeps it, so `with_time` is not the number of photos that received a date.
+Over the sidecars whose photo filed now, the filing view SHALL count those that carry a caption (`captioned`). It SHALL count no time, because no sidecar time is applied.
 
 #### Scenario: Counts over an album
 
-- **WHEN** a staged folder holds 50 photos, of which 48 have a sidecar with a time, 24 of those a caption, and 2 a time equal to the upload time
-- **THEN** the filing view counts `with_time` 48, `captioned` 24 and `time_skipped` 2
+- **WHEN** a staged folder holds 50 photos that each have a sidecar, 24 of them with a caption
+- **THEN** the filing view counts `captioned` 24
 
 ### Requirement: Photos wait for their sidecars
 
-The images and videos of a stage that holds recognised sidecars SHALL stay out of selection until the pass over the stage's sidecars ends: when every JSON file is examined and the pairs are decided. A JSON file that cannot be read SHALL get its own record, and the pass SHALL read on past it and end in part. Each paired photo SHALL then file with its sidecar's time and caption. The pass SHALL run once per stage: a sidecar that reaches the stage after the pass ended SHALL file as an ordinary file.
+The images and videos of a stage that holds recognised sidecars SHALL stay out of selection until the pass over the stage's sidecars ends: when every JSON file is examined and the pairs are decided. A JSON file that cannot be read SHALL get its own record, and the pass SHALL read on past it and end in part. Each paired photo SHALL then file with its sidecar's caption. The pass SHALL run once per stage: a sidecar that reaches the stage after the pass ended SHALL file as an ordinary file.
 
 #### Scenario: A Takeout larger than one call's budget
 
 - **WHEN** a stage holds more sidecars than one `file` call reads
-- **THEN** no photo files before every sidecar is read, and every paired photo carries its sidecar's time and caption
+- **THEN** no photo files before every sidecar is read, and every paired photo carries its sidecar's caption
 
 #### Scenario: A sidecar that cannot be read
 
@@ -168,3 +168,13 @@ A paired sidecar's non-empty `description` SHALL go into the photo Source's desc
 - **WHEN** a paired sidecar's description holds a card number
 - **THEN** the photo's Source holds the description with the number removed
 - **AND** the stage's sidecar record holds it removed too
+
+### Requirement: A Takeout sidecar's time dates no page
+
+A paired sidecar's `photoTakenTime` SHALL NOT be written to any page's capture record. The sidecar's row in the stage's state folder SHALL still hold the time, so that a later change can measure where Google takes it from.
+
+#### Scenario: A received photo
+
+- **WHEN** a JPEG with no EXIF capture time files with a paired sidecar whose `photoTakenTime` is 2019-05-04 10:00:00 UTC
+- **THEN** the photo's page records no capture date
+- **AND** the sidecar's row holds the time `2019-05-04T10:00:00Z`
