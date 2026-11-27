@@ -93,28 +93,17 @@ def log_client_version(value: object, *, env: Mapping[str, str] | None = None) -
     return text if _CLIENT_VERSION.fullmatch(text) else None
 
 
-#: The prefix of a census entry that names a declared elicitation mode.
-ELICITATION_ENTRY_PREFIX = "elicitation:"
-#: Named in the specification's own client-capabilities text; the SDK exports no constant for it.
-_OAUTH_CLIENT_CREDENTIALS_ID = "io.modelcontextprotocol/oauth-client-credentials"
-
-
 @functools.cache
-def _official_extension_entries() -> frozenset[str]:
-    """The extension entries a census row may carry in content-private mode.
+def _official_extension_ids() -> frozenset[str]:
+    """The extension identifiers the installed MCP packages name.
 
-    A closed set that the specification and the SDK fix: the official extension
-    identifiers the installed packages export, the one the specification's own
-    client-capabilities text names (the SDK exports no constant for it), and the
-    elicitation modes of the SDK's own model. Any other id is text the client chose.
+    Imported, never retyped. A closed set that the specification and its SDK fix, so a
+    row may carry these in content-private mode. Any other id is text the client chose.
     """
     from fastmcp.utilities.tasks import TASKS_EXTENSION_ID
     from mcp.server.apps import EXTENSION_ID as APPS_EXTENSION_ID
-    from mcp_types import ElicitationCapability
 
-    modes = {f"{ELICITATION_ENTRY_PREFIX}{mode}" for mode in ElicitationCapability.model_fields}
-    # nosemgrep: ep-word-set -- the specification's published extension identifiers, a closed set the spec fixes
-    return frozenset({TASKS_EXTENSION_ID, APPS_EXTENSION_ID, _OAUTH_CLIENT_CREDENTIALS_ID, *modes})
+    return frozenset({TASKS_EXTENSION_ID, APPS_EXTENSION_ID})
 
 
 def log_client_extensions(
@@ -122,17 +111,38 @@ def log_client_extensions(
 ) -> tuple[list[str], int]:
     """The declared extension ids a log row may carry, and how many it withheld.
 
-    Kept verbatim outside content-private mode. Inside it, an id is caller-chosen text
-    and rows are hash-chained, so only the official identifiers survive and the rest
-    is counted, the way `client_family` reduces a client name to a family.
+    The official ids come first, so a later cut of a long list never drops one for a
+    vendor id. Outside content-private mode every id is kept. Inside it, an id is
+    caller-chosen text and rows are hash-chained, so only the official ids survive and
+    the rest is counted, the way `client_family` reduces a client name to a family.
     """
 
-    kept = sorted(set(names))
+    official = _official_extension_ids()
+    ordered = sorted(set(names), key=lambda name: (name not in official, name))
     if not content_private_logging_enabled(env):
-        return kept, 0
-    official = _official_extension_entries()
-    safe = [name for name in kept if name in official]
-    return safe, len(kept) - len(safe)
+        return ordered, 0
+    safe = [name for name in ordered if name in official]
+    return safe, len(ordered) - len(safe)
+
+
+# The shape of an MCP protocol revision (a date), which is a format check, not a vocabulary.
+_PROTOCOL_REVISION = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+def log_protocol_version(value: object, *, env: Mapping[str, str] | None = None) -> str | None:
+    """A protocol revision: verbatim, or under content-private logging only a date.
+
+    A revision is the specification's own identifier, but the client states it, so
+    anything that is not a plain date is dropped in the mode that keeps rows free of
+    caller-chosen text.
+    """
+
+    if value is None or not str(value):
+        return None
+    text = str(value)
+    if not content_private_logging_enabled(env):
+        return text
+    return text if _PROTOCOL_REVISION.fullmatch(text) else None
 
 
 _HTTP_METHODS = frozenset(

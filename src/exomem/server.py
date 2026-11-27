@@ -759,7 +759,9 @@ def _record_ledger_row(
         try:
             features = mcp_protocol_features()
         except Exception:  # noqa: BLE001 - a missing census must not lose the row
-            features = {"protocol_version": None, "client_extensions": None}
+            features = {
+                "protocol_version": None, "client_capabilities": None, "client_extensions": None,
+            }
         try:
             principal_kind: str | None = resolve_mcp_principal().principal_kind
         except Exception:  # noqa: BLE001 - a missing label must not lose the row
@@ -785,6 +787,7 @@ def _record_ledger_row(
             transport=identity.get("transport"),
             session_id=identity.get("session_id"),
             protocol_version=features["protocol_version"],
+            client_capabilities=features["client_capabilities"],
             client_extensions=features["client_extensions"],
             spans=spans,
             activation_result=activation_result,

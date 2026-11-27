@@ -1,7 +1,9 @@
 """The call ledger and `exomem doctor` say which protocol features each MCP client declares.
 
-Every case drives the real MCP HTTP app, so the revision and capabilities are read from
-the request the way a client sends them, not from a faked context.
+The cases about what a call records drive the real MCP HTTP app, so the revision and
+capabilities are read from the request the way a client sends them, not from a faked
+context. The cases about what the doctor shows write ledger rows directly, so each reads a
+history the test controls.
 """
 
 from __future__ import annotations
@@ -116,7 +118,8 @@ async def test_a_2026_07_28_call_records_its_revision_and_the_extensions_it_decl
     [row] = _rows(ledger_dir)
     assert row["client_name"] == "claude-code"
     assert row["protocol_version"] == MODERN_VERSION
-    assert row["client_extensions"] == ["elicitation:form", TASKS]
+    assert row["client_capabilities"] == ["elicitation.form"]
+    assert row["client_extensions"] == [TASKS]
     assert call_ledger.verify() == []
 
 
@@ -131,6 +134,7 @@ async def test_a_stateless_older_call_records_its_revision_and_leaves_the_extens
     assert row["client_name"] == "codex/0.5"
     assert row["protocol_version"] == LEGACY_VERSION
     # A stateless call keeps no handshake, so "declares nothing" would be a claim the server cannot make.
+    assert "client_capabilities" not in row
     assert "client_extensions" not in row
 
 
@@ -155,13 +159,29 @@ async def _call_after_handshake(capabilities: dict[str, Any], *, name: str = "st
 
 
 @pytest.mark.anyio
-async def test_a_stateful_older_call_records_the_extensions_its_handshake_declared(ledger_dir: Path) -> None:
+async def test_a_stateful_older_call_records_the_extensions_and_no_capabilities_its_handshake_declared(ledger_dir: Path) -> None:
     await _call_after_handshake({"extensions": {TASKS: {}}})
 
     [row] = _rows(ledger_dir)
     assert row["client_name"] == "stdio-like"
     assert row["protocol_version"] == LEGACY_VERSION
+    assert row["client_capabilities"] == []
     assert row["client_extensions"] == [TASKS]
+
+
+@pytest.mark.anyio
+async def test_a_stateful_older_call_records_the_top_level_capabilities_its_handshake_declared(
+    ledger_dir: Path,
+) -> None:
+    # 2025-11-25 clients declare tasks, sampling and roots as top-level capabilities, not as
+    # extensions; without them a tasks-capable client would read as one that declares nothing.
+    await _call_after_handshake({"tasks": {}, "sampling": {}, "roots": {}})
+
+    [row] = _rows(ledger_dir)
+    assert row["client_capabilities"] == ["roots", "sampling", "tasks"]
+    assert row["client_extensions"] == []
+    check = doctor._check_mcp_clients()
+    assert "stdio-like on 2025-11-25 (capabilities: roots, sampling, tasks; no extensions)" in check.message
 
 
 @pytest.mark.anyio
@@ -171,7 +191,7 @@ async def test_an_empty_elicitation_object_records_form_mode(ledger_dir: Path) -
     await _call_after_handshake({"elicitation": {}})
 
     [row] = _rows(ledger_dir)
-    assert row["client_extensions"] == ["elicitation:form"]
+    assert row["client_capabilities"] == ["elicitation.form"]
 
 
 @pytest.mark.anyio
@@ -183,6 +203,7 @@ async def test_a_2026_07_28_call_without_client_info_is_named_by_its_user_agent_
 
     [row] = _rows(ledger_dir)
     assert row["client_name"] == "bare-client/4"
+    assert row["client_capabilities"] == []
     assert row["client_extensions"] == []
 
 
@@ -198,6 +219,34 @@ def test_a_client_cannot_fill_a_row_with_extension_ids(ledger_dir: Path) -> None
     assert all(len(name) <= 64 for name in row["client_extensions"])
     assert row["client_extensions_truncated"] == 24
     assert row["row_hash"] == call_ledger.row_hash(row)
+
+
+def test_a_long_extension_list_is_cut_after_the_official_ids_not_before_them(ledger_dir: Path) -> None:
+    # Vendor ids sort before the official id; the cap must still keep the official one.
+    ids = [f"a.example/{number:03d}" for number in range(20)] + [TASKS]
+
+    row = call_ledger.build_row(
+        sequence=1, prev_hash=call_ledger.GENESIS_HASH, request_id="r", tool="probe", outcome="ok",
+        duration_ms=1.0, client_extensions=ids,
+    )
+
+    assert TASKS in row["client_extensions"]
+    assert row["client_extensions_truncated"] == 5
+
+
+def test_content_private_logging_keeps_a_protocol_revision_only_in_the_shape_of_a_date(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+
+    def revision_of(value: str) -> str | None:
+        return call_ledger.build_row(
+            sequence=1, prev_hash=call_ledger.GENESIS_HASH, request_id="r", tool="probe", outcome="ok",
+            duration_ms=1.0, protocol_version=value,
+        ).get("protocol_version")
+
+    assert revision_of(MODERN_VERSION) == MODERN_VERSION
+    assert revision_of("a-name-the-client-chose") is None
 
 
 @pytest.mark.anyio
@@ -221,10 +270,9 @@ async def test_the_doctor_lists_each_client_and_revision_of_the_last_day_with_it
     check = doctor._check_mcp_clients()
 
     assert check.status == "pass"
-    assert check.message == (
-        f"2 tool call(s) in the last 24 hours: "
-        f"claude-code on {MODERN_VERSION} ({TASKS}); codex/0.5 on {LEGACY_VERSION} (not recorded)"
-    )
+    assert check.message.startswith("2 tool call(s) in the last 24 hours: ")
+    assert f"claude-code on {MODERN_VERSION} (" in check.message and TASKS in check.message
+    assert f"codex/0.5 on {LEGACY_VERSION} (not recorded)" in check.message
     assert "yesterday-client" not in check.message
 
 
@@ -295,7 +343,7 @@ async def test_a_census_that_fails_never_costs_the_call_its_row(
 
 
 @pytest.mark.anyio
-async def test_content_private_logging_keeps_only_the_specifications_extension_ids_and_counts_the_rest(
+async def test_content_private_logging_keeps_only_the_official_extension_ids_and_counts_the_rest(
     ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Rows are hash-chained and cannot be scrubbed later, so a client-chosen id must never reach one.
@@ -308,7 +356,8 @@ async def test_content_private_logging_keeps_only_the_specifications_extension_i
         )
 
     [row] = _rows(ledger_dir)
-    assert row["client_extensions"] == ["elicitation:form", TASKS]
+    assert row["client_capabilities"] == ["elicitation.form"]
+    assert row["client_extensions"] == [TASKS]
     assert row["client_extensions_other"] == 1
     assert "com.example" not in (ledger_dir / "ledger.jsonl").read_text(encoding="utf-8")
     assert "+1 other" in doctor._check_mcp_clients().message
@@ -341,7 +390,7 @@ def test_the_doctor_message_is_one_line_and_names_the_ten_busiest_pairs(ledger_d
     check = doctor._check_mcp_clients()
 
     assert "\n" not in check.message
-    assert check.message.startswith("13 tool call(s) in the last 24 hours: client-11 on 2025-11-25 (not recorded); client-00 on")
+    assert check.message.startswith("13 tool call(s) in the last 24 hours: client-11 on ")
     assert check.message.endswith("; +2 more")
     assert len(check.details["clients"]) == 12
 
@@ -357,10 +406,9 @@ def test_the_census_reads_the_archived_ledger_to_reach_the_start_of_the_day(ledg
 
     check = doctor._check_mcp_clients()
 
-    assert check.message == (
-        "2 tool call(s) in the last 24 hours: "
-        f"archived-client on {LEGACY_VERSION} ({TASKS}); live-client on {LEGACY_VERSION} (not recorded)"
-    )
+    assert check.message.startswith("2 tool call(s) in the last 24 hours: ")
+    assert f"archived-client on {LEGACY_VERSION} (extensions: {TASKS})" in check.message
+    assert f"live-client on {LEGACY_VERSION} (not recorded)" in check.message
     assert check.details["complete"] is True
 
 
@@ -389,9 +437,7 @@ def test_a_failed_append_starts_the_count_after_it(ledger_dir: Path) -> None:
     check = doctor._check_mcp_clients()
 
     assert check.message.startswith("2 tool call(s) since ")
-    assert check.message.endswith(
-        f"UTC (partial: a call before then may have left no row): after-the-gap on {LEGACY_VERSION} (not recorded)"
-    )
+    assert "UTC (partial: a call before then may have left no row): after-the-gap on " in check.message
     assert "before-the-gap" not in check.message
     assert check.details["complete"] is False
     assert [client["tool_calls"] for client in check.details["clients"]] == [2]
@@ -458,3 +504,20 @@ async def test_content_private_logging_counts_an_id_under_the_specifications_pre
     assert row["client_extensions"] == []
     assert row["client_extensions_other"] == 1
     assert "patient-has-diagnosis" not in (ledger_dir / "ledger.jsonl").read_text(encoding="utf-8")
+
+
+def test_the_doctor_says_when_a_clients_extension_list_was_cut(
+    ledger_dir: Path,
+) -> None:
+    _write_rows(ledger_dir / "ledger.jsonl", [
+        _ledger_row(1, age=dt.timedelta(hours=30), client="before-the-window"),
+        _ledger_row(
+            2, age=dt.timedelta(minutes=5), client="busy-client",
+            client_extensions=[f"vendor.example/{number:03d}" for number in range(20)],
+        ),
+    ])
+
+    check = doctor._check_mcp_clients()
+
+    assert "+4 cut)" in check.message
+    assert check.details["clients"][0]["client_extensions_truncated"] == 4

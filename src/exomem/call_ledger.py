@@ -455,6 +455,7 @@ def build_row(
     released_items: int | None = None,
     rendering: str | None = None,
     protocol_version: str | None = None,
+    client_capabilities: Sequence[str] | None = None,
     client_extensions: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Assemble one complete, self-hashing ledger row."""
@@ -463,6 +464,7 @@ def build_row(
         log_client_extensions,
         log_client_label,
         log_client_version,
+        log_protocol_version,
         log_session_ref,
     )
 
@@ -547,17 +549,22 @@ def build_row(
         # is always the command's execution identity. Absent on every direct call, so
         # a row from before renderings existed keeps the shape it was hashed with.
         row["rendering"] = _clip(rendering)
-    if protocol_version:
-        # Protocol identifiers, not content, so content-private logging keeps them.
+    revision = log_protocol_version(protocol_version)
+    if revision:
+        # The revision's own date, so content-private logging keeps it when it has that shape.
         # Absent when the request does not say, as on every row from before the census.
-        row["protocol_version"] = _clip(protocol_version)
+        row["protocol_version"] = _clip(revision)
+    if client_capabilities is not None:
+        # The top-level capability names the client set, and `elicitation.<mode>` for each
+        # elicitation mode: all of them fields of the SDK's own model, so a closed set that
+        # content-private logging keeps. `[]` is a client that declares nothing; absent is a
+        # request that does not say (a pre-2026-07-28 call over stateless HTTP keeps no handshake).
+        row["client_capabilities"] = sorted({str(name) for name in client_capabilities})
     if client_extensions is not None:
-        # Sorted extension ids and `elicitation:<mode>` entries the client declared.
-        # `[]` is a client that declares nothing; absent is a request that does not say
-        # (a pre-2026-07-28 call over stateless HTTP keeps no handshake). The client chooses
-        # these strings, so count and length are capped like every other caller-chosen field,
-        # and content-private logging keeps only the specification's own ids (see
-        # `log_client_extensions`) and counts the rest.
+        # Sorted extension ids the client declared, official ids first. The client chooses these
+        # strings, so count and length are capped like every other caller-chosen field, and
+        # content-private logging keeps only the official ids (see `log_client_extensions`)
+        # and counts the rest.
         declared, withheld = log_client_extensions(
             str(name)[:_MAX_EXTENSION_CHARS] for name in client_extensions
         )
@@ -805,6 +812,7 @@ def record_call(
     activation_result: Mapping[str, Any] | None = None,
     rendering: str | None = None,
     protocol_version: str | None = None,
+    client_capabilities: Sequence[str] | None = None,
     client_extensions: Sequence[str] | None = None,
 ) -> dict[str, Any] | None:
     """Append exactly one ledger row. Never raises into the call path.
@@ -853,6 +861,7 @@ def record_call(
                 released_items=facts["released"],
                 rendering=rendering,
                 protocol_version=protocol_version,
+                client_capabilities=client_capabilities,
                 client_extensions=client_extensions,
             )
             append_row(row, path=path)

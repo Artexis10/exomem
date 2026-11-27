@@ -73,7 +73,8 @@ def _known_from() -> dt.datetime | None:
     may have lost a call with neither a row nor a marker: on a full or read-only
     volume, or when it was killed between a commit and its append. So a cell
     claims nothing before this writer started; replacing the pod discards the
-    older history anyway.
+    older history anyway. The writer-start bound means something only inside the
+    writer process: another process, such as the doctor, has its own start.
     """
     from . import cloud_cell
 

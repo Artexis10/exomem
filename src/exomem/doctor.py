@@ -3934,15 +3934,20 @@ def _check_mcp_clients() -> DoctorCheck:
                 _printable(row.get("client_name") or "unknown client"),
                 _printable(row.get("protocol_version") or "unknown revision"),
             )
-            declared = row.get("client_extensions")
-            entry = calls.setdefault(key, {"calls": 0, "extensions": set(), "known": False, "other": 0})
+            entry = calls.setdefault(key, {
+                "calls": 0, "capabilities": None, "extensions": None, "other": 0, "cut": 0,
+            })
             entry["calls"] += 1
-            if isinstance(declared, list):
-                entry["known"] = True
-                entry["extensions"].update(_printable(name) for name in declared)
-                withheld = row.get("client_extensions_other")
-                if isinstance(withheld, int):
-                    entry["other"] = max(entry["other"], withheld)
+            # None is "no row said": a list, even an empty one, is what a client declared.
+            for field, name in (("capabilities", "client_capabilities"), ("extensions", "client_extensions")):
+                declared = row.get(name)
+                if isinstance(declared, list):
+                    entry[field] = (entry[field] or set()) | {_printable(item) for item in declared}
+            if isinstance(row.get("client_extensions"), list):
+                for field, name in (("other", "client_extensions_other"), ("cut", "client_extensions_truncated")):
+                    count = row.get(name)
+                    if isinstance(count, int):
+                        entry[field] = max(entry[field], count)
     except OSError as error:
         return _check(
             "mcp_clients", "warn", f"The call ledger could not be read: {type(error).__name__}.",
@@ -3981,17 +3986,21 @@ def _check_mcp_clients() -> DoctorCheck:
     clients = []
     listed = []
     for (client, revision), entry in sorted(calls.items(), key=lambda item: (-item[1]["calls"], item[0])):
-        extensions = sorted(entry["extensions"])
-        if not entry["known"]:
-            said = "not recorded"
-        else:
-            named = [*extensions, *([f"+{entry['other']} other"] if entry["other"] else [])]
-            said = ", ".join(named) or "no extensions"
-        listed.append(f"{client} on {revision} ({said})")
+        capabilities = None if entry["capabilities"] is None else sorted(entry["capabilities"])
+        extensions = None if entry["extensions"] is None else sorted(entry["extensions"])
+        said = []
+        if capabilities is not None:
+            said.append(f"capabilities: {', '.join(capabilities)}" if capabilities else "no capabilities")
+        if extensions is not None:
+            named = [*extensions, *([f"+{entry['other']} other"] if entry["other"] else []),
+                     *([f"+{entry['cut']} cut"] if entry["cut"] else [])]
+            said.append(f"extensions: {', '.join(named)}" if named else "no extensions")
+        listed.append(f"{client} on {revision} ({'; '.join(said) or 'not recorded'})")
         clients.append({
             "client": client, "protocol_version": revision, "tool_calls": entry["calls"],
-            "client_extensions": extensions if entry["known"] else None,
-            "client_extensions_other": entry["other"] if entry["known"] else None,
+            "client_capabilities": capabilities, "client_extensions": extensions,
+            "client_extensions_other": entry["other"] if extensions is not None else None,
+            "client_extensions_truncated": entry["cut"] if extensions is not None else None,
         })
     shown = listed[:_CLIENT_CENSUS_LISTED_PAIRS]
     if len(listed) > len(shown):

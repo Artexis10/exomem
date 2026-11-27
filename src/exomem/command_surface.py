@@ -1347,20 +1347,22 @@ def mcp_caller_identity() -> dict[str, str | None]:
 
 
 def mcp_protocol_features() -> dict[str, typing.Any]:
-    """The protocol revision and the declared extensions of the active MCP call.
+    """The protocol revision, declared capabilities and declared extensions of the active MCP call.
 
-    `client_extensions` is the sorted identifiers of the declared extensions plus one
-    `elicitation:<mode>` entry for each declared elicitation mode. `None` means the
-    request does not say, which is not the same as `[]`, a client that declares nothing:
-    stateless HTTP on a revision before 2026-07-28 keeps no handshake. The SDK fills
-    `client_capabilities` from the initialize exchange, or on 2026-07-28 from each
-    request's own envelope. Protocol identifiers only: no request content.
+    `client_capabilities` names the capabilities the client set (`roots`, `sampling`, `tasks`,
+    and `elicitation.<mode>` for each elicitation mode). Every name is a field of the SDK's own
+    typed model, so the set is closed. `client_extensions` is the sorted identifiers of the
+    extensions the client declared, which the client chooses. `None` means the request does
+    not say, which is not the same as `[]`, a client that declares nothing: stateless HTTP on
+    a revision before 2026-07-28 keeps no handshake. The SDK fills `client_capabilities` from
+    the initialize exchange, or on 2026-07-28 from each request's own envelope. Protocol
+    identifiers only: no request content.
 
-    Never raises. Outside an MCP call both values are `None`.
+    Never raises. Outside an MCP call every value is `None`.
     """
-    from .privacy_log import ELICITATION_ENTRY_PREFIX
-
-    features: dict[str, typing.Any] = {"protocol_version": None, "client_extensions": None}
+    features: dict[str, typing.Any] = {
+        "protocol_version": None, "client_capabilities": None, "client_extensions": None,
+    }
     dependencies = _request_dependencies()
     if dependencies is None:
         return features
@@ -1378,14 +1380,20 @@ def mcp_protocol_features() -> dict[str, typing.Any]:
         features["protocol_version"] = version
     if capabilities is None:
         return features
-    names = set(capabilities.extensions or ())
-    elicitation = capabilities.elicitation
-    if elicitation is not None:
-        # The modes are the typed model's own fields, which drops any mode the client invented.
-        # An empty object is the 2025-06-18 spelling of form mode, which 2025-11-25 keeps.
-        modes = [mode for mode in type(elicitation).model_fields if getattr(elicitation, mode) is not None]
-        names.update(f"{ELICITATION_ENTRY_PREFIX}{mode}" for mode in modes or ["form"])
-    features["client_extensions"] = sorted(names)
+    names: list[str] = []
+    for capability in type(capabilities).model_fields:
+        value = getattr(capabilities, capability)
+        if value is None or capability == "extensions":
+            continue
+        if capability == "elicitation":
+            # The modes are the typed model's own fields, which drops any mode the client invented.
+            # An empty object is the 2025-06-18 spelling of form mode, which 2025-11-25 keeps.
+            modes = [mode for mode in type(value).model_fields if getattr(value, mode) is not None]
+            names.extend(f"elicitation.{mode}" for mode in modes or ["form"])
+        else:
+            names.append(capability)
+    features["client_capabilities"] = sorted(names)
+    features["client_extensions"] = sorted(capabilities.extensions or ())
     return features
 
 
