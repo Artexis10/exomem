@@ -427,3 +427,41 @@ def test_a_large_pictures_face_is_cropped_from_its_own_pixels_not_the_detectors_
     )
     np.testing.assert_array_equal(EmbeddingModel.crop, embedder.crop(full, at_full_size))
     assert found.box == at_full_size.box
+
+
+def test_a_face_much_larger_than_the_crop_reaches_the_embedder_smoothed_not_aliased() -> None:
+    """Catches a large face's fine detail (hair, fabric) sampled into moire that moves its vector between photos."""
+    pytest.importorskip("PIL")  # The core tier has no image decoder; the face step decodes the picture.
+    from PIL import Image
+
+    detect_spec, embed_spec = media_models.model_spec("face-detect"), media_models.model_spec("face-embed")
+    side = int(detect_spec["working_long_side"]) * 4
+    # A one-pixel checkerboard: its true average at any size above a pixel is mid-grey.
+    rows, columns = np.indices((side, side))
+    full = np.repeat((((rows + columns) % 2) * 255).astype(np.uint8)[..., None], 3, axis=2)
+    scale = int(detect_spec["working_long_side"]) / side
+    # A large face in the middle of the picture: about 300 picture pixels between the eyes, 35 in the crop.
+    at_full = ((side * 0.44, side * 0.45), (side * 0.56, side * 0.45), (side * 0.5, side * 0.52),
+               (side * 0.455, side * 0.59), (side * 0.545, side * 0.59))
+    detector = face_models.FaceDetector(None, detect_spec)
+    detector.detect_pixels = lambda pixels: [face_models.Detection(
+        (side * 0.2 * scale, side * 0.2 * scale, side * 0.6 * scale, side * 0.6 * scale),
+        tuple((x * scale, y * scale) for x, y in at_full), 0.9,
+    )]
+
+    class EmbeddingModel:
+        """The embedder's model boundary: keeps the crop it receives."""
+
+        crop = None
+
+        def run(self, outputs, feeds):
+            EmbeddingModel.crop = next(iter(feeds.values()))[0].transpose(1, 2, 0)
+            return [np.ones((1, WIDTH), dtype=np.float32)]
+
+    embedder = face_models.FaceEmbedder(EmbeddingModel(), embed_spec)
+
+    face_models.FaceModels(detector, embedder).faces(Image.fromarray(full))
+
+    assert abs(float(EmbeddingModel.crop.mean()) - 127.5) < 8
+    assert float(EmbeddingModel.crop.std()) < 16
+

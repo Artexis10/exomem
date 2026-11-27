@@ -24,6 +24,8 @@ EMBED = "face-embed"
 #: The smallest positive float32. OpenCV's similarity transform counts a singular value as nonzero above
 #: twice this times the largest one.
 _FLT_MIN = float(np.finfo(np.float32).tiny)
+#: The fewest crop pixels per picture pixel at which the bilinear warp still reads every picture pixel.
+_MIN_REACH = 0.5
 
 
 class FacesUnavailable(RuntimeError):
@@ -231,6 +233,37 @@ class FaceEmbedder:
         transform = similarity_transform(np.asarray(detection.landmarks), self._template)
         return None if transform is None else aligned_crop(pixels, transform, self._size)
 
+    def smoothed_crop(self, picture: Any, detection: Detection) -> np.ndarray | None:
+        """`crop` from a PIL picture, shrinking a large face's region first so the bilinear warp cannot alias.
+
+        The warp reads 4 pixels per crop pixel; a face more than twice the crop's size would skip the others,
+        so its region is first reduced, with Pillow's area-weighted filter, to twice the crop's size.
+        """
+        from PIL import Image
+
+        transform = similarity_transform(np.asarray(detection.landmarks), self._template)
+        if transform is None:
+            return None
+        reach = math.sqrt(abs(np.linalg.det(transform[:, :2])))  # Crop pixels per picture pixel.
+        if reach >= _MIN_REACH:
+            return aligned_crop(np.asarray(picture, dtype=np.uint8), transform, self._size)
+        # The picture area the crop reads: its corners mapped back, with room for the filter's support.
+        inverse = np.linalg.inv(transform[:, :2])
+        corners = (np.array([[0, 0], [self._size, 0], [0, self._size], [self._size, self._size]], dtype=np.float64)
+                   - transform[:, 2]) @ inverse.T
+        margin = math.ceil(1 / reach)
+        left, top = (max(0, math.floor(value) - margin) for value in corners.min(axis=0))
+        right = min(picture.width, math.ceil(corners[:, 0].max()) + margin)
+        bottom = min(picture.height, math.ceil(corners[:, 1].max()) + margin)
+        if right <= left or bottom <= top:
+            return aligned_crop(np.asarray(picture, dtype=np.uint8), transform, self._size)
+        factor = reach / _MIN_REACH
+        size = (max(1, round((right - left) * factor)), max(1, round((bottom - top) * factor)))
+        region = picture.crop((left, top, right, bottom)).resize(size, resample=Image.Resampling.BOX)
+        across, down = size[0] / (right - left), size[1] / (bottom - top)
+        landmarks = [((x - left) * across, (y - top) * down) for x, y in detection.landmarks]
+        return self.crop(np.asarray(region, dtype=np.uint8), Detection(detection.box, tuple(landmarks), detection.score))
+
     def embed_crop(self, crop: np.ndarray) -> np.ndarray | None:
         """The unit vector of an aligned RGB crop, or None when the model returns no usable vector."""
         # OpenCV feeds the aligned crop as RGB values 0..255 (`blobFromImage` with swapRB).
@@ -258,7 +291,6 @@ class FaceModels:
         """
         rgb = image.convert("RGB")
         pixels, scale = self.detector.working_pixels(rgb)
-        full = pixels if scale == 1.0 else np.asarray(rgb, dtype=np.uint8)
         found = []
         for seen in self.detector.detect_pixels(pixels):
             detection = Detection(
@@ -266,7 +298,7 @@ class FaceModels:
                 tuple((x / scale, y / scale) for x, y in seen.landmarks),
                 seen.score,
             )
-            crop = self.embedder.crop(full, detection)
+            crop = self.embedder.smoothed_crop(rgb, detection)
             vector = None if crop is None else self.embedder.embed_crop(crop)
             if vector is not None:
                 found.append(Face(detection.box, detection.score, vector))
