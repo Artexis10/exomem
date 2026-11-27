@@ -208,3 +208,22 @@ async def test_the_doctor_lists_each_client_and_revision_of_the_last_day_with_it
     assert f"  claude-code on {MODERN_VERSION}: {TASKS} (1 tool call(s))" in lines
     assert f"  codex/0.5 on {LEGACY_VERSION}: declared extensions not recorded (1 tool call(s))" in lines
     assert "yesterday-client" not in check.message
+
+
+@pytest.mark.anyio
+async def test_the_doctor_says_its_census_is_partial_when_the_live_ledger_starts_inside_the_day(
+    ledger_dir: Path,
+) -> None:
+    # A rotation leaves the live ledger starting a few minutes ago: the census must not
+    # present those minutes as the whole day.
+    async with _client(stateless=True) as client:
+        await _call_legacy(client, user_agent="codex/0.5")
+
+    check = doctor._check_mcp_clients()
+
+    assert check.status == "pass"
+    first = check.message.splitlines()[0]
+    assert first.startswith("1 tool call(s) since ")
+    assert first.endswith("UTC (partial: the live ledger starts there):")
+    assert check.details["complete"] is False
+    assert check.details["covered_since"] is not None

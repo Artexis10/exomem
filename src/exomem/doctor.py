@@ -3883,20 +3883,25 @@ def _check_mcp_clients() -> DoctorCheck:
     cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=_CLIENT_CENSUS_WINDOW_SECONDS)
     calls: dict[tuple[str, str], dict[str, object]] = {}
     read = 0
+    oldest: dt.datetime | None = None
+    reached_window_start = False
     try:
         for line in activity.lines_newest_first(call_ledger.ledger_path()):
             if not line.strip():
                 continue
             if read >= _CLIENT_CENSUS_MAX_ROWS:
-                break
+                break  # the row bound: the result covers only back to `oldest`
             read += 1
             try:
                 row = json.loads(line)
                 at = dt.datetime.fromisoformat(row["ts_utc"])
             except (ValueError, KeyError, TypeError):
                 continue  # a damaged row names no time; the chain check reports it, not this census
-            if (at if at.tzinfo else at.replace(tzinfo=dt.UTC)) < cutoff:
+            at = at if at.tzinfo else at.replace(tzinfo=dt.UTC)
+            if at < cutoff:
+                reached_window_start = True
                 break
+            oldest = at
             client = row.get("client_name") or "unknown client"
             revision = row.get("protocol_version") or "unknown revision"
             declared = row.get("client_extensions")
@@ -3912,10 +3917,28 @@ def _check_mcp_clients() -> DoctorCheck:
             "mcp_clients", "warn", f"The call ledger could not be read: {type(error).__name__}.",
             "Check the call ledger directory and its permissions.",
         )
+    # Complete only when the read reached the window's start. Otherwise the live file starts
+    # inside the window (a rotation or a new install) or the row bound stopped the read, and
+    # the census says from when it counts instead of claiming 24 hours.
+    complete = reached_window_start or oldest is None
+    if complete:
+        window = "in the last 24 hours"
+    else:
+        reason = (
+            f"stopped at {_CLIENT_CENSUS_MAX_ROWS} rows" if read >= _CLIENT_CENSUS_MAX_ROWS
+            else "the live ledger starts there"
+        )
+        window = f"since {oldest.strftime('%Y-%m-%d %H:%M')} UTC (partial: {reason})"
+    details_window = {
+        "window_hours": 24, "complete": complete,
+        "covered_since": None if complete else oldest.isoformat(),
+    }
     if not calls:
-        return _check("mcp_clients", "pass", "No tool calls in the last 24 hours.", details={"clients": []})
+        return _check(
+            "mcp_clients", "pass", f"No tool calls {window}.", details={"clients": [], **details_window}
+        )
     clients = []
-    lines = [f"{sum(int(e['calls']) for e in calls.values())} tool call(s) in the last 24 hours:"]
+    lines = [f"{sum(int(e['calls']) for e in calls.values())} tool call(s) {window}:"]
     for (client, revision), entry in sorted(calls.items()):
         extensions = sorted(entry["extensions"])
         if not entry["known"]:
@@ -3929,7 +3952,7 @@ def _check_mcp_clients() -> DoctorCheck:
         })
     return _check(
         "mcp_clients", "pass", "\n".join(lines),
-        details={"clients": clients, "rows_read": read, "window_hours": 24},
+        details={"clients": clients, "rows_read": read, **details_window},
     )
 
 
