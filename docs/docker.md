@@ -83,6 +83,11 @@ Apple Silicon MPS/MLX.
   (`docker volume rm`) without touching your vault, since they have distinct
   lifecycles.
 
+The image sets its defaults under `EVERMATTER_` names, such as `EVERMATTER_LOG_DIR`.
+To override one with `-e` or in `.env`, use the same `EVERMATTER_` name: an
+`EXOMEM_` override gives the setting two names, so the server warns at every start
+and the credential commands, such as `exomem auth revoke`, refuse to run.
+
 ## Remote compose deployment
 
 The root [`compose.yaml`](../compose.yaml) runs exomem as an always-on HTTP

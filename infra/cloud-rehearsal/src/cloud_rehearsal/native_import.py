@@ -191,7 +191,7 @@ async def run_cli_import(ctx: Context, image: str, source: Path, *, label: str =
          "--mount", f"type=bind,source={fixture},target=/fixture",
          "--mount", f"type=bind,source={ctx.resolver.ca_path},target=/ca.pem,readonly",
          # This process is a tenant CLI; the image's service profile requires Cloud cell mode.
-         "--env", "EXOMEM_CLOUD_RESOURCE_POLICY=legacy",
+         "--env", "EVERMATTER_CLOUD_RESOURCE_POLICY=legacy",
          "--env", "SSL_CERT_FILE=/ca.pem", "--env", "BROWSER=python3 /fixture/browser.py %s",
          image, "cloud", "import", "/input", "--checkpoint", "/fixture/checkpoint",
          *(["--include-hidden"] if include_hidden else []), *cli_args,

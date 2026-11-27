@@ -318,9 +318,9 @@ This changes neither completed OCR text nor the existing explicit retry and reso
 
 OCR first detects each image's script with Tesseract's OSD model. It then reads the image with the installed script models for that script and the installed language packs written in it. Each pack's script comes from the pack's own unicharset, so no code lists languages. A Japanese page reads with both a horizontal and a vertical pass, and OCR keeps the pass with the higher word confidence.
 
-Reading each pack's script means reading every model file, 353 MB in the Cloud image. The image build writes the result to `EXOMEM_OCR_INVENTORY` (`/opt/exomem-ocr/inventory.json`), so a fresh media child reads one small file instead. A personal install keeps the same inventory in `~/.cache/exomem/ocr-inventory.json` and reads the models again when their names, sizes or dates change. Tesseract 4.x does not name its model directory; there OCR reads each image once in Tesseract's default language.
+Reading each pack's script means reading every model file, 353 MB in the Cloud image. The image build writes the result to `EVERMATTER_OCR_INVENTORY` (`/opt/exomem-ocr/inventory.json`), so a fresh media child reads one small file instead. A personal install keeps the same inventory in `~/.cache/exomem/ocr-inventory.json` and reads the models again when their names, sizes or dates change. Tesseract 4.x does not name its model directory; there OCR reads each image once in Tesseract's default language.
 
-The Cloud image installs every Tesseract script model and the language packs that the `EXOMEM_OCR_LANGS` build argument names. The default is `eng+jpn+jpn_vert+est`. The image sets `EXOMEM_OCR_DEFAULT_LANGS` from the same argument; OCR uses it for an image with too little text to detect a script.
+The Cloud image installs every Tesseract script model and the language packs that the `EXOMEM_OCR_LANGS` build argument names. The default is `eng+jpn+jpn_vert+est`. The image sets `EVERMATTER_OCR_DEFAULT_LANGS` from the same argument; OCR uses it for an image with too little text to detect a script.
 
 To add a language:
 
@@ -330,7 +330,7 @@ To add a language:
 
 Expect the new pack to read pages whose script its unicharset names.
 
-A script that OSD names differently from every script model has no route, and its pages read with `EXOMEM_OCR_DEFAULT_LANGS`. Korean is one: OSD reports `Korean`, and the script model is `Hangul`.
+A script that OSD names differently from every script model has no route, and its pages read with `EVERMATTER_OCR_DEFAULT_LANGS`. Korean is one: OSD reports `Korean`, and the script model is `Hangul`.
 
 ## OCR word confidence
 

@@ -24,6 +24,7 @@ import os
 import shutil
 import stat
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,7 +37,13 @@ from . import install_skill as install_module
 from . import knowledge_packs as knowledge_packs_module
 from . import overview as overview_module
 from . import personalize as personalize_module
-from .env_compat import canonical_settings, emitted_name, rename_settings
+from .env_compat import (
+    canonical_settings,
+    emitted_name,
+    inherited_environment,
+    names_for,
+    rename_settings,
+)
 from .governance.principal import library_scope
 from .kbdir import managed_join, managed_root_rel
 from .vault_store import cli_fence
@@ -137,19 +144,35 @@ def _server_command(which_fn) -> list[str]:
     return ["uvx", "exomem", "--transport", "stdio"]
 
 
-def _registration_matches(route: client_config.McpRoute, server: dict) -> bool:
+def _registration_matches(
+    route: client_config.McpRoute, server: dict, inherited: Mapping[str, str]
+) -> bool:
     if route.transport == "http":
         return server.get("url") == route.url and server.get("type", "http") == "http"
     for key, value in route.as_claude_config().items():
         if key == "env":
-            # A route that setup wrote before the settings rename names the same settings as
-            # EXOMEM_X: that is the route the user has, so setup leaves it alone (a replace rewrites it).
             held = server.get(key)
-            if not isinstance(held, dict) or rename_settings(held)[0] != rename_settings(value)[0]:
+            if not isinstance(held, dict) or not _held_env_matches(held, value, inherited):
                 return False
         elif server.get(key) != value:
             return False
     return True
+
+
+def _held_env_matches(
+    held: dict, desired: dict[str, str], inherited: Mapping[str, str]
+) -> bool:
+    """Whether a registration env that the client holds gives the server what `desired` gives it.
+
+    A registration that an earlier release wrote names the same settings as EXOMEM_X; that is
+    the route the user has, so it matches. The client starts the server with its own
+    environment (`inherited`) and the registration env on top, by literal name. So a held env
+    whose names leave an exported spelling outranking or contradicting it, or that holds two
+    spellings with different values, does not match: that server reads another value or exits.
+    """
+    return rename_settings(held)[0] == rename_settings(desired)[0] and rename_settings(
+        {**inherited, **held}
+    ) == rename_settings({**inherited, **desired})
 
 
 @dataclass(frozen=True)
@@ -256,6 +279,27 @@ def _configured_mcp_url(
     return client_config.normalize_mcp_url(configured) if configured is not None else None
 
 
+def _registration_env(
+    vault_path: Path, profile: str, environ: Mapping[str, str]
+) -> dict[str, str]:
+    """The settings a stdio registration gives the server, each under the names it must replace.
+
+    The client starts a stdio server with its own environment and the registration env on
+    top, by literal name. A registered EVERMATTER_X beside an exported EXOMEM_X would give one
+    setting two names: the server refuses a vault path set two ways, and the export wins any
+    other setting. So a setting takes every spelling that `environ`, the environment setup
+    started with, already holds; else EVERMATTER_X.
+    """
+    settings = {"EXOMEM_VAULT_PATH": str(vault_path)}
+    if profile == "lean":
+        settings["EXOMEM_DISABLE_EMBEDDINGS"] = "1"
+    env: dict[str, str] = {}
+    for name, value in settings.items():
+        for spelling in [n for n in names_for(name) if n in environ] or [emitted_name(name)]:
+            env[spelling] = value
+    return env
+
+
 def _resolve_client_route(
     *,
     mcp_url: str | None,
@@ -266,9 +310,7 @@ def _resolve_client_route(
     vault_path: Path,
     profile: str,
 ) -> client_config.McpRoute:
-    env = {emitted_name("EXOMEM_VAULT_PATH"): str(vault_path)}
-    if profile == "lean":
-        env[emitted_name("EXOMEM_DISABLE_EMBEDDINGS")] = "1"
+    env = _registration_env(vault_path, profile, environ)
     if force_stdio:
         return client_config.McpRoute.stdio(_server_command(which_fn), env)
 
@@ -300,6 +342,7 @@ def _register_claude(
     run_fn,
     run_kwargs: dict,
     report,
+    inherited: Mapping[str, str],
 ) -> None:
     try:
         registrations = client_config.claude_registrations(
@@ -314,7 +357,7 @@ def _register_claude(
     scope_text = _format_scopes(existing_scopes)
     desired_is_active = (
         existing_scopes == [scope]
-        and _registration_matches(route, registrations[scope][1])
+        and _registration_matches(route, registrations[scope][1], inherited)
     )
     if desired_is_active:
         report("register", f"[skipped: already registered in {scope}]")
@@ -642,7 +685,9 @@ def run_setup(
     persist_profile_fn=None,
     print_fn=print,
 ) -> int:
-    environ = dict(os.environ if environ is None else environ)
+    # The environment by literal name, before the settings rename: the client that starts a
+    # registered server inherits these names, so the registration env must replace them.
+    environ = dict(inherited_environment() if environ is None else environ)
     project_dir = Path.cwd() if project_dir is None else Path(project_dir)
     claude_config_path = (
         client_config.default_claude_config_path(environ)
@@ -682,7 +727,7 @@ def run_setup(
         if yes:
             print_fn("setup: --yes requires --vault.")
             return 2
-        env_default = environ.get("EXOMEM_VAULT_PATH", "")
+        env_default = rename_settings(environ)[0].get("EXOMEM_VAULT_PATH", "")
         raw = input_fn(f"Vault folder [{env_default}]: ").strip()
         vault = raw or env_default
         if not vault:
@@ -862,7 +907,7 @@ def run_setup(
             mcp_url=configured_mcp_url,
             force_stdio=force_stdio,
             cwd=project_dir,
-            environ={},
+            environ=environ,
             which_fn=which_fn,
             vault_path=vault_path,
             profile=profile,
@@ -880,6 +925,12 @@ def run_setup(
                 "  Note: exomem is not durably installed, so the server will be "
                 "registered as `uvx exomem`. For a registration that never "
                 "re-resolves, run `uv tool install exomem` first."
+            )
+        exported = [name for name in route.env or {} if name != emitted_name(name)]
+        if exported:
+            print_fn(
+                f"  Note: your environment exports {', '.join(exported)}, so the registration "
+                "sets the same names and the server uses the values setup chose."
             )
         claude = which_fn("claude")
         if not claude:
@@ -923,6 +974,7 @@ def run_setup(
                     run_fn=run_fn,
                     run_kwargs=run_kwargs,
                     report=report,
+                    inherited=environ,
                 )
 
     # 6b. Codex registration — symmetric with Claude Code above. Codex reads

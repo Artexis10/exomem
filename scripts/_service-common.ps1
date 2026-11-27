@@ -114,7 +114,7 @@ function Resolve-ExomemSetting {
         # The closed set of settings that choose where data lives, defined by the package itself.
         if (($null -ne $evermatter) -and ($evermatter -cne $explicit) -and
             (@("VAULT_PATH", "STATE_ROOT", "HOSTED_STATE_ROOT") -contains $suffix)) {
-            throw "EVERMATTER_$suffix and EXOMEM_$suffix are set to different values in $Source, so it is unclear which to use. Delete one name of each pair, then run it again."
+            throw "EVERMATTER_$suffix and EXOMEM_$suffix are set to different values in $Source, so it is unclear which to use. Set each value once, under its EVERMATTER_ name, and remove or unset the other name, then run it again."
         }
         return $explicit
     }

@@ -45,7 +45,7 @@ exomem_resolve_setting() {
             # The closed set of settings that choose where data lives, defined by the package itself.
             case "$suffix" in
                 VAULT_PATH|STATE_ROOT|HOSTED_STATE_ROOT)
-                    echo "EVERMATTER_$suffix and EXOMEM_$suffix are set to different values in $source, so it is unclear which to use. Delete one name of each pair, then run it again." >&2
+                    echo "EVERMATTER_$suffix and EXOMEM_$suffix are set to different values in $source, so it is unclear which to use. Set each value once, under its EVERMATTER_ name, and remove or unset the other name, then run it again." >&2
                     return 2
                     ;;
             esac
@@ -563,7 +563,8 @@ def resolve_existing(found: dict[str, str], source: str) -> str:
     if explicit is not None and NAMES[1] in found and found[NAMES[1]] != explicit:
         raise SystemExit(
             f"{NAMES[1]} and {NAMES[0]} are set to different values in {source}, "
-            "so it is unclear which to use. Delete one name of each pair, then run it again."
+            "so it is unclear which to use. Set each value once, under its EVERMATTER_ name, "
+            "and remove or unset the other name, then run it again."
         )
     return next((found[name] for name in NAMES if name in found), "")
 

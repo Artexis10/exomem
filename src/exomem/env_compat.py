@@ -70,7 +70,10 @@ class SettingsConflict(ValueError):
         self,
         conflicts: Iterable[Conflict],
         source: str,
-        remedy: str = "Delete one name of each pair, then run it again.",
+        remedy: str = (
+            "Set each value once, under its EVERMATTER_ name, and remove or unset the other "
+            "name, then run it again."
+        ),
     ) -> None:
         self.conflicts = tuple(conflicts)
         self.source = source
@@ -173,9 +176,12 @@ def _warn(conflict: Conflict) -> None:
         return
     _reported.add(conflict)
     log.warning(
-        "%s and %s are both set to different values; using %s",
+        "%s and %s are both set to different values; using %s. Set the value once, "
+        "under %s, and remove or unset %s.",
         conflict.alias,
         conflict.canonical,
+        conflict.canonical,
+        conflict.alias,
         conflict.canonical,
     )
 

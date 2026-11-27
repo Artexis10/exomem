@@ -617,10 +617,12 @@ substitute. What "absent" means, per tier:
 Every setting takes the `EVERMATTER_` prefix. The earlier `EXOMEM_` and `KB_MCP_`
 prefixes still work as aliases, so an existing `.env` or service file needs no
 change. When one setting holds different values under two names, `EXOMEM_` wins
-over `EVERMATTER_`, `EVERMATTER_` wins over `KB_MCP_`, and the service logs a
-warning. For `VAULT_PATH`, `STATE_ROOT` and `HOSTED_STATE_ROOT` the service
-refuses to start instead: delete one of the two names. `import exomem` and
-`python -m exomem` likewise keep working as deprecated aliases.
+over `EVERMATTER_`, and `EVERMATTER_` wins over `KB_MCP_`. The service logs a
+warning only when an `EVERMATTER_` and an `EXOMEM_` name differ; a `KB_MCP_` name
+that loses is ignored silently. For `VAULT_PATH`, `STATE_ROOT` and
+`HOSTED_STATE_ROOT`, that difference stops the service instead. To settle it, set
+the value once, under its `EVERMATTER_` name, and remove the other name.
+`import exomem` and `python -m exomem` likewise keep working as deprecated aliases.
 
 Remote-only variables and full deployment notes are in
 [docs/deployment.md](docs/deployment.md).

@@ -7,8 +7,10 @@ print_fn): no test touches the real `~/.claude` or spawns a real `claude`.
 from __future__ import annotations
 
 import json
+import os
 import stat
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -143,6 +145,81 @@ def test_interactive_setup_can_select_multiple_packs(tmp_path: Path) -> None:
     assert selected["selected_pack_ids"] == ["technical", "creative"]
     assert "Choose starter knowledge packs" in "\n".join(lines)
     assert "Selected packs: Technical, Creative" in "\n".join(lines)
+
+
+def _start_registered_server(registration_env: dict[str, str], shell: dict[str, str]):
+    """Start an Evermatter module as Claude Code starts a stdio server: its own environment, the registration env on top.
+
+    `exomem.catalogue_prewarm` exits 2 on its missing --vault once it runs, or 2 with "not run" on a refusal.
+    """
+    base = {k: v for k, v in os.environ.items() if not k.startswith(("EXOMEM_", "EVERMATTER_", "KB_MCP_"))}
+    base["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    return subprocess.run(
+        [sys.executable, "-m", "exomem.catalogue_prewarm"],
+        env={**base, **shell, **registration_env}, capture_output=True, text=True, timeout=120, check=False,
+    )
+
+
+def test_a_registration_replaces_the_vault_path_that_the_shell_exports(tmp_path: Path) -> None:
+    """The failure: setup registered EVERMATTER_VAULT_PATH beside an exported EXOMEM_VAULT_PATH, and the server exited 2."""
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    shell = {"EXOMEM_VAULT_PATH": str(tmp_path / "older-vault")}
+    recorder = Recorder()
+
+    code, out = _setup(vault, home, recorder, environ=shell)
+
+    assert code == 0
+    (reg,) = [c for c in recorder.calls if c[1:3] == ["mcp", "add-json"] and "claude" in c[0]]
+    registered = json.loads(reg[6])["env"]
+    assert registered == {"EXOMEM_VAULT_PATH": str(vault), "EVERMATTER_DISABLE_EMBEDDINGS": "1"}
+    assert "your environment exports EXOMEM_VAULT_PATH" in out
+    before = _start_registered_server({"EVERMATTER_VAULT_PATH": str(vault)}, shell)  # what setup registered before
+    after = _start_registered_server(registered, shell)
+    assert "not run" in before.stderr  # the failure this guards against
+    assert "the following arguments are required: --vault" in after.stderr and "not run" not in after.stderr
+
+
+@pytest.mark.parametrize(
+    ("held_env", "shell", "outcome"),
+    [
+        pytest.param(
+            {"EXOMEM_VAULT_PATH": "{vault}", "EXOMEM_DISABLE_EMBEDDINGS": "1"}, {},
+            "[skipped: already registered in user]", id="an-earlier-release-wrote-exomem-names",
+        ),
+        pytest.param(
+            {"EXOMEM_VAULT_PATH": "{vault}", "EVERMATTER_VAULT_PATH": "{other}", "EXOMEM_DISABLE_EMBEDDINGS": "1"}, {},
+            "[done] replaced user", id="two-spellings-with-different-values",
+        ),
+        pytest.param(
+            {"EVERMATTER_VAULT_PATH": "{vault}", "EVERMATTER_DISABLE_EMBEDDINGS": "1"}, {"EXOMEM_VAULT_PATH": "{other}"},
+            "[done] replaced user", id="an-exported-name-outranks-the-held-one",
+        ),
+    ],
+)
+def test_a_held_registration_matches_only_when_the_server_it_starts_reads_the_same_vault(
+    tmp_path: Path, held_env: dict[str, str], shell: dict[str, str], outcome: str
+) -> None:
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    paths = {"vault": str(vault), "other": str(tmp_path / "other-vault")}
+    which = lambda name: f"C:/fake/{name}.CMD"  # noqa: E731 - the fake `which` that `_setup` also uses
+    (tmp_path / ".claude.json").write_text(
+        json.dumps({"mcpServers": {"evermatter": {
+            "type": "stdio",
+            "command": setup_wizard._server_command(which)[0],
+            "args": setup_wizard._server_command(which)[1:],
+            "env": {name: value.format(**paths) for name, value in held_env.items()},
+        }}}),
+        encoding="utf-8",
+    )
+
+    code, out = _setup(
+        vault, home, Recorder(), replace_client_registration=True,
+        environ={name: value.format(**paths) for name, value in shell.items()},
+    )
+
+    assert code == 0
+    assert f"register: {outcome}" in out
+
 
 def test_rerun_converges_to_skips(tmp_path: Path) -> None:
     vault, home = _messy_vault(tmp_path), tmp_path / "home"

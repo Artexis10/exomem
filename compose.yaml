@@ -30,8 +30,9 @@ services:
       EXOMEM_VAULT_PATH: /vault
       KB_MCP_VAULT_PATH: /vault
     volumes:
-      # EXOMEM_VAULT_HOST_PATH is the earlier name of the host path; .env may still use it.
-      - "${EVERMATTER_VAULT_HOST_PATH:-${EXOMEM_VAULT_HOST_PATH:?set EVERMATTER_VAULT_HOST_PATH in .env}}:/vault"
+      # EXOMEM_VAULT_HOST_PATH is the earlier name of the host path; .env may still use it, and it
+      # wins over EVERMATTER_VAULT_HOST_PATH as EXOMEM_X wins over EVERMATTER_X in the service.
+      - "${EXOMEM_VAULT_HOST_PATH:-${EVERMATTER_VAULT_HOST_PATH:?set EVERMATTER_VAULT_HOST_PATH in .env}}:/vault"
       - exomem-data:/data
     # Uncomment for local/debug access at 127.0.0.1:8765. No host port is
     # published by default — a tunnel profile (below) or this line are the

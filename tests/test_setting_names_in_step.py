@@ -194,9 +194,10 @@ out="$(env -i {process} "{BASH}" -c '. "{COMMON_SH}"; exomem_process_setting EXO
 echo "process|{index}|$rc|$out"
 """
         )
-    out = subprocess.run(
-        [BASH, "-c", "\n".join(lines)], capture_output=True, text=True, timeout=300, check=False
-    )
+    # A file, not one `bash -c` argument: the matrix outgrows the kernel's per-argument limit (E2BIG).
+    script = tmp_path / "matrix.sh"
+    script.write_text("\n".join(lines), encoding="utf-8")
+    out = subprocess.run([BASH, str(script)], capture_output=True, text=True, timeout=300, check=False)
 
     answers = {}
     for line in out.stdout.splitlines():
@@ -514,6 +515,20 @@ def test_the_shell_dotenv_reader_takes_the_last_duplicate_like_python_dotenv(tmp
     read = _bash(tmp_path, f'exomem_dotenv_file_lookup EXOMEM_PORT "{dotenv}"')
 
     assert read.stdout.strip() == dotenv_values(dotenv)["EXOMEM_PORT"] == "2"
+
+
+def test_the_hook_reads_the_last_duplicate_like_python_dotenv(tmp_path) -> None:
+    """The failure: the hook sent the first REST key in service.env while the service read the last one."""
+    from dotenv import dotenv_values
+
+    from exomem._hooks import exomem_local_credentials
+
+    service_env = tmp_path / "service.env"
+    service_env.write_text("EVERMATTER_REST_API_KEY=old\nOTHER=x\nEVERMATTER_REST_API_KEY=new\n", encoding="utf-8")
+
+    read = exomem_local_credentials.service_env_value("EXOMEM_REST_API_KEY", service_env)
+
+    assert read == dotenv_values(service_env)["EVERMATTER_REST_API_KEY"] == "new"
 
 
 @needs_pwsh

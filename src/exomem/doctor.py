@@ -2972,7 +2972,11 @@ def _check_remote_env() -> list[DoctorCheck]:
     return checks
 
 
-_REMOTE_OWNER_LINE = "EXOMEM_OWNER_OAUTH_SUBJECT=github:<the value of EXOMEM_GITHUB_USER_ID>"
+_REMOTE_OWNER_LINE = (
+    "EVERMATTER_OWNER_OAUTH_SUBJECT=github:<the value of EVERMATTER_GITHUB_USER_ID>, replacing "
+    "any EXOMEM_ or KB_MCP_ line for it (in a clone, `uv run --no-sync python "
+    "scripts/set-env.py EVERMATTER_OWNER_OAUTH_SUBJECT <value>` does that)"
+)
 
 
 def _check_remote_owner_binding() -> DoctorCheck:

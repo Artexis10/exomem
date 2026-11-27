@@ -111,7 +111,7 @@ On a local install, where the setting reaches both the server and the CLI:
 ```
 exomem prominence              # show the active level and its full contract
 exomem prominence maximal      # set it
-exomem prominence --hook-env   # print the nudge tunables this level implies
+exomem prominence --hook-env   # print shell lines that set this level's nudge tunables
 ```
 
 Precedence is `EVERMATTER_PROMINENCE` (env) → the saved value for this request's
