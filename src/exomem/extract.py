@@ -270,8 +270,9 @@ def extract_text(
     choice uses the deployment default.
 
     `tracks` declares the recording's separate microphones, a list of `{name, stream, channel,
-    single_voice}` (`speech_tracks.declaration`). Without it the file's published track fields
-    decide, and a file that publishes none is read as one mix from its first audio stream.
+    single_voice}` (`speech_tracks.declaration`). Without it, published fields that the speech
+    data maps to a microphone decide; the shipped data maps none, so the file is read as one mix
+    from its first audio stream.
     """
     p = Path(path)
     mt = media_type or media_type_for(p)
@@ -873,13 +874,17 @@ def _transcribe(
         return ExtractResult(text="", media_type=media_type, engine="no-audio")
     forced, source = _resolve_language(language, multilingual)
     declared = speech_tracks.resolve(path, tracks).tracks
+    skipped: list[str] = []
     if declared:
-        return _transcribe_tracks(
+        result = _transcribe_tracks(
             path, media_type, declared, vault_root=vault_root, timestamps=timestamps, forced=forced,
             source=source, multilingual=multilingual,
-            diarize=_diarize_enabled() if diarize is None else diarize,
+            diarize=_diarize_enabled() if diarize is None else diarize, skipped=skipped,
         )
-    report = AsrFacts()
+        if result is not None:
+            return result
+        log.warning("no declared track of %s is in the file; reading its first audio stream", path.name)
+    report = AsrFacts(tracks_skipped="; ".join(skipped) or None)
     segments, engine = get_transcriber().transcribe(
         path, vault_root=vault_root, language=forced, multilingual=multilingual, report=report
     )
@@ -1002,23 +1007,21 @@ class _Heard:
     track: str
 
 
-def _release_track_progress(path: Path, vault_root: Path | None) -> None:
-    """Forget the finished tracks' progress records once every track has been read.
-
-    A finished track keeps its record until then, so that a stop never transcribes it again.
-    """
-    from . import onnx_asr_runtime
-
-    if vault_root is not None and (rel := onnx_asr_runtime.binary_rel(vault_root, path)) is not None:
-        onnx_asr_runtime.discard_progress(vault_root, rel)
-
-
 def _diarize_track(path: Path, track: Track, sample_rate: int) -> list[tuple[float, float, str]] | None:
-    """Diarise one track's own audio, or None where diarisation cannot run."""
-    with tempfile.TemporaryDirectory(prefix="exomem-track-") as scratch:
-        audio = Path(scratch) / "track.wav"
-        speech_tracks.export_wav(path, track, audio, sample_rate)
-        return _run_diarization(audio)
+    """Diarise one track's own audio, or None where diarisation cannot run.
+
+    Writing a track out decodes all of it, so nothing is written where no diarizer is installed.
+    """
+    if _diarizer_sidecar_python() is None:
+        return None
+    try:
+        with tempfile.TemporaryDirectory(prefix="exomem-track-") as scratch:
+            audio = Path(scratch) / "track.wav"
+            speech_tracks.export_wav(path, track, audio, sample_rate)
+            return _run_diarization(audio)
+    except Exception:  # noqa: BLE001 - diarisation must never break extraction (Soft-Fail Degradation)
+        log.warning("diarization failed for track %s of %s; its turns keep the track name", track.key, path.name, exc_info=True)
+        return None
 
 
 def _transcribe_tracks(
@@ -1032,12 +1035,18 @@ def _transcribe_tracks(
     source: str,
     multilingual: bool,
     diarize: bool,
-) -> ExtractResult:
+    skipped: list[str],
+) -> ExtractResult | None:
     """Transcribe each declared track on its own and merge the segments by start, named by track.
 
     A track keeps a segment only where it is the dominant source (`track_dominance`). Labels, where
     requested, come from diarising each track that is not declared single-voice within itself; where
     diarisation cannot run the turns still read their track names, and the result says that labels are unavailable.
+
+    A declared track that the file does not have is skipped, and `skipped` and the result's facts say
+    why. None when the file has no declared track, so that the caller reads the recording as one mix.
+    Each track's progress record stays until the worker publishes the transcript: a stop before then
+    transcribes no finished track again.
     """
     from . import media_models, track_dominance
     from .speaker_assignment import Turn, label_transcript
@@ -1045,22 +1054,32 @@ def _transcribe_tracks(
     data = speech_tracks.policy()
     rate = media_models.model_spec("speech")["sample_rate"]
     backend = get_transcriber()
+    # Keyed by the audio each track reads: two tracks never read the same audio, whatever their names.
     heard: dict[str, list[_Heard]] = {}
     reports: list[AsrFacts] = []
     engine = ""
+    read: list[Track] = []
     for track in tracks:
         report = AsrFacts()
-        segments, engine = backend.transcribe(
-            path, vault_root=vault_root, language=forced, multilingual=multilingual, report=report, track=track
-        )
-        heard[track.name] = [_Heard(seg.text, float(seg.start), float(seg.end), track.name) for seg in segments]
+        try:
+            segments, engine = backend.transcribe(
+                path, vault_root=vault_root, language=forced, multilingual=multilingual, report=report, track=track
+            )
+            heard[track.key] = [_Heard(seg.text, float(seg.start), float(seg.end), track.name) for seg in segments]
+        except speech_tracks.TrackUnavailable as missing:
+            log.warning("track %s of %s skipped: %s", track.key, path.name, missing)
+            skipped.append(f"{track.name}: {missing}")
+            continue
+        read.append(track)
         reports.append(report)
-    _release_track_progress(path, vault_root)
+    if not read:
+        return None
+    tracks = tuple(read)
     kept = heard
     if len(tracks) > 1:
         try:
             envelopes = {
-                track.name: track_dominance.envelope(
+                track.key: track_dominance.envelope(
                     speech_tracks.audio(path, track, rate, rate * 30), rate, data["energy_hop_seconds"]
                 )
                 for track in tracks
@@ -1071,7 +1090,7 @@ def _transcribe_tracks(
         except Exception:  # noqa: BLE001 - a measurement that fails must keep every segment, never drop a speaker's words
             log.warning("track energy unreadable for %s; keeping every track's segments", path.name, exc_info=True)
     # The sort is stable, so segments that start together keep the order in which the tracks were declared.
-    merged = sorted((segment for track in tracks for segment in kept[track.name]), key=lambda s: (s.start, s.end))
+    merged = sorted((segment for track in tracks for segment in kept[track.key]), key=lambda s: (s.start, s.end))
     turns: list[Turn] = []
     diarised = unavailable = False
     for track in tracks if diarize else ():
@@ -1085,6 +1104,7 @@ def _transcribe_tracks(
             unavailable = True
     facts = _merged_facts(reports)
     facts.tracks_policy = data["revision"]
+    facts.tracks_skipped = "; ".join(skipped) or None
     asr = _asr_facts(facts, forced, source, multilingual)
     engine_label = f"{engine}+tracks"
     labelled = label_transcript(

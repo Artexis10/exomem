@@ -2627,6 +2627,7 @@ def test_the_tracks_an_owner_declared_on_a_sidecar_reach_the_engine_and_outlive_
     saved = _preserve_media_stub(vault, filename="panel.wav")
     sidecar = vault / saved.sidecar_path
     declared = [{"name": "Host", "channel": 0, "single_voice": True}, {"name": "Guest", "channel": 1}]
+    # A unit fixture: no door writes `speech_tracks` yet, so the test sets the field with the private setter.
     sidecar.write_text(
         preserve._set_frontmatter_field(sidecar.read_text(encoding="utf-8"), "speech_tracks", json.dumps(declared)),
         encoding="utf-8",
@@ -2637,7 +2638,10 @@ def test_the_tracks_an_owner_declared_on_a_sidecar_reach_the_engine_and_outlive_
         asked.append(tracks)
         return extract.ExtractResult(
             text="[0:00] [Host]: hello", media_type=media_type, engine="test+tracks+timed",
-            asr=AsrFacts(language="en", tracks_policy="tracks-policy-test"),
+            asr=AsrFacts(
+                language="en", tracks_policy="tracks-policy-test",
+                tracks_skipped="Ghost: the file has 1 audio streams; stream 3 does not exist",
+            ),
         )
 
     monkeypatch.setattr(extract, "extract_text", transcribe)
@@ -2649,6 +2653,7 @@ def test_the_tracks_an_owner_declared_on_a_sidecar_reach_the_engine_and_outlive_
     assert asked == [declared]
     assert published["speech_tracks"] == declared, "a new extraction keeps what the owner declared"
     assert published["asr_tracks_policy"] == "tracks-policy-test"
+    assert published["asr_tracks_skipped"] == "Ghost: the file has 1 audio streams; stream 3 does not exist"
 
 
 @pytest.mark.parametrize("awaiting_dependency", [False, True])

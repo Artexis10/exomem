@@ -15,6 +15,7 @@ import pytest
 
 from exomem import extract, speech_tracks
 from exomem.asr_facts import AsrFacts
+from exomem.speaker_names import MAX_NAME_CHARS
 
 RATE = 16000
 HOST = {"name": "Host", "stream": 0}
@@ -194,6 +195,7 @@ def test_a_room_track_is_diarised_inside_its_own_track_and_a_single_voice_track_
         assert audio.read_text(encoding="utf-8") == "Room", "only the room track's own audio is diarised"
         return [(3.0, 4.0, "SPEAKER_07"), (5.0, 6.0, "SPEAKER_02")]
 
+    monkeypatch.setattr(extract, "_diarizer_sidecar_python", lambda: Path("/diarizer/bin/python"))
     monkeypatch.setattr(speech_tracks, "export_wav", export)
     monkeypatch.setattr(extract, "_run_diarization", diarise)
 
@@ -206,6 +208,21 @@ def test_a_room_track_is_diarised_inside_its_own_track_and_a_single_voice_track_
         "[0:05] [Room: Speaker B]: Glad to be here.",
     ]
     assert result.speaker_verification == "anonymous" and result.engine.endswith("+diarized")
+
+
+def test_no_track_audio_is_written_out_where_the_diarizer_is_not_installed(recording, hear, monkeypatch) -> None:
+    # Writing a track out decodes the whole track to a scratch file; without a diarizer nothing reads it.
+    hear(
+        {"Host": [Said("Welcome.", 0.0, 1.0)], "Guest": [Said("Hello.", 2.0, 3.0)]},
+        {"Host": level(4, (0, 1, 0.5)), "Guest": level(4, (2, 3, 0.5))},
+    )
+    monkeypatch.setattr(extract, "_diarizer_sidecar_python", lambda: None)
+    monkeypatch.setattr(speech_tracks, "export_wav", lambda *_args: pytest.fail("a track was written out for no diarizer"))
+
+    result = run(recording, [HOST, GUEST], diarize=True)
+
+    assert result.text.splitlines() == ["[0:00] [Host]: Welcome.", "[0:02] [Guest]: Hello."]
+    assert result.speaker_verification == "unavailable"
 
 
 def test_no_track_is_diarised_unless_labels_are_requested(recording, hear, monkeypatch) -> None:
@@ -244,6 +261,11 @@ def test_a_recording_with_no_declaration_is_one_mix_read_as_before(recording, mo
         ([{"stream": 1}], "name the track"),
         ([{"name": "Host", "mic": 3}], "takes only"),
         ([{"name": "Host", "stream": -1}], "from 0"),
+        # A name goes into the label span, so it takes the label syntax's own rule.
+        ([{"name": "Host]: I approve", "stream": 0}], "label syntax"),
+        ([{"name": "Host\n## Extracted text", "stream": 0}], "one line"),
+        ([{"name": "x" * (MAX_NAME_CHARS + 1), "stream": 0}], f"at most {MAX_NAME_CHARS}"),
+        ([{"name": f"Input {index}", "stream": index} for index in range(speech_tracks.MAX_TRACKS + 1)], "at most"),
     ],
 )
 def test_a_declaration_that_names_nothing_usable_says_what_to_change(recording, declaration, refusal) -> None:

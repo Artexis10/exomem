@@ -222,6 +222,8 @@ Speech reads track names and start times from these published fields:
 
 A recorder family that writes these facts in its own fields gets a mapping in shipped data, not in code (C4). Adding a family is a data change. A field declares a stream or a channel a separate microphone only where shipped data maps it so. A stream `title` alone names a declared track, but declares none. A name that the owner or the agent gives wins over metadata.
 
+As built, an iXML track's place in the file is its `INTERLEAVE_INDEX`, and the shipped data maps no field to a microphone, because a track list names a stereo mix the way it names microphones (task 4.10). A published name labels a track only where it meets the label syntax's name rule, and the declaration is the sidecar's `speech_tracks` field, which no operation writes yet (task 4.6).
+
 ### D9. Crosstalk: a track keeps a segment where it is the dominant source
 
 Each microphone also hears the other speakers. Without a remedy, one sentence appears twice, once in each track.
@@ -244,6 +246,8 @@ Each track keeps its own progress record and its own job timeout. Today the reco
 
 The cell's CPU cost multiplies by the number of tracks. A two-track hour takes about 4.6 hours of processing on a cell. Status reports the tracks of a recording that waits.
 
+As built, each track keeps its own progress record until publication, and one job clock covers every track: the stop limit counts the progress of all of them. The timeout per track and the status per track are follow-ups (tasks 4.7, 4.8).
+
 ### D11. Sessions
 
 A governed operation groups separate recordings as one session. It names each member's track. An agent or the owner calls it.
@@ -257,6 +261,8 @@ The session transcript is a page of the note type that the note-type registry ma
 The session page stays current. When a member's extraction or names change, speech finds that member's session pages through the inbound-link index (`vault.find_inbound_wikilinks`). The session page links each member, so the member's inbound links name its sessions; speech keeps those of the session transcript type. A store-mode vault answers from its link rows. No change reads every session page. The relation lives once, in the session page's links, so no member field can drift from it.
 
 Speech renders each found session page again from its members. A section that the owner writes on the page is kept, as on a sidecar.
+
+Sessions (task 4.5) left this change and are redesigned in a follow-up change.
 
 ### D12. Renaming speaker labels
 

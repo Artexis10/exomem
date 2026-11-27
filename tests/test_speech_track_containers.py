@@ -139,3 +139,24 @@ def test_a_declared_stream_the_file_does_not_have_says_how_many_it_has(tmp_path:
 
     with pytest.raises(speech_tracks.TrackUnavailable, match="the file has 1 audio streams; stream 3 does not exist"):
         list(speech_tracks.audio(path, speech_tracks.Track("Ghost", stream=3), RATE, RATE))
+
+
+def test_a_declared_track_the_file_does_not_have_is_skipped_and_the_reason_is_kept(tmp_path: Path, listener: Listener) -> None:
+    path = container(tmp_path / "pair.mkv", ("", (0.25,)), ("", (0.5,)))
+    declared = [{"name": "Host", "stream": 0}, {"name": "Guest", "stream": 1}, {"name": "Ghost", "stream": 3}]
+
+    result = extract.extract_text(path, media_type="audio", timestamps=True, diarize=False, tracks=declared)
+
+    assert result.text.splitlines() == ["[0:00] [Host]: level 0.25", "[0:00] [Guest]: level 0.50"]
+    assert "Ghost" in result.asr.tracks_skipped and "stream 3 does not exist" in result.asr.tracks_skipped
+
+
+def test_a_recording_that_has_none_of_its_declared_tracks_is_read_as_its_first_stream(tmp_path: Path, listener: Listener) -> None:
+    path = container(tmp_path / "one.mkv", ("", (0.25,)))
+    declared = [{"name": "Ghost", "stream": 3}, {"name": "Phantom", "channel": 1}]
+
+    result = extract.extract_text(path, media_type="audio", timestamps=True, diarize=False, tracks=declared)
+
+    assert result.text.splitlines() == ["[0:00] level 0.25"]
+    assert listener.asked[-1] is None
+    assert "Ghost" in result.asr.tracks_skipped and "Phantom" in result.asr.tracks_skipped

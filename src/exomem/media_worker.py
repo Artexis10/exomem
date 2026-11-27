@@ -1629,6 +1629,8 @@ class MediaWorker:
         handoff, receipts, surplus, epoch_published = committed
         self._complete_deferred_graph_completion(handoff, receipts, epoch_published=epoch_published)
         self._retire_surplus_parts(surplus)
+        # The transcript is published: a multitrack recording's track records are no longer needed to resume.
+        self._discard_speech_progress(job)
         return True
 
     def _extraction_writes(
@@ -3002,6 +3004,8 @@ class MediaWorker:
             self._store.finalize_result(
                 item.result, requeue_remaining=item.result.kind in {"extraction", "pending"}
             )
+            if item.result.kind == "extraction":
+                self._discard_speech_progress(item.result.job)
             ended.append(item.result)
         return ended
 

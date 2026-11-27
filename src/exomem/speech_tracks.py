@@ -2,10 +2,14 @@
 
 A track is one audio stream or one channel of a stream that is declared a separate microphone.
 The audio never declares one (a full mix would pass for a speaker's track), so a recording with
-no declaration is one mixed track, read from its first audio stream. Declarations come from the
-owner or an agent, or from published fields that the shipped speech data maps to a microphone
-(`media_models.json`, `speech.tracks`). A recorder family that writes its facts in its own fields
-is one more entry in that data, and no code changes.
+no declaration is one mixed track, read from its first audio stream. A declaration is the
+sidecar's `speech_tracks` field, or published fields that the speech data maps to a microphone
+(`media_models.json`, `speech.tracks`). The shipped data maps none: iXML and stream titles name
+tracks, and a stereo mix is named the same way. A recorder family that writes its facts in its own
+fields is one more entry in that data, and no code changes.
+
+A published name comes from the upload, so it labels a track only where it can stand in a label span
+(`speaker_names.name_problem`); a track whose name cannot is read in the mix.
 """
 
 from __future__ import annotations
@@ -13,9 +17,11 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+
+from .speaker_names import MAX_NAME_CHARS, name_problem
 
 log = logging.getLogger(__name__)
 
@@ -55,7 +61,8 @@ class Track:
 
 @dataclass(frozen=True)
 class PublishedTrack:
-    name: str
+    #: None where the file publishes a name that cannot stand in a label span.
+    name: str | None
     stream: int
     channel: int | None
     declares_microphone: bool
@@ -117,8 +124,14 @@ def _riff_chunks(path: Path) -> dict[bytes, bytes]:
     return found
 
 
-def _ixml_tracks(ixml: bytes, family: Mapping[str, Any]) -> list[PublishedTrack]:
-    """The tracks that one iXML family lists; an unreadable packet or an entry with no name lists none."""
+def _published_name(text: str) -> str | None:
+    """A published name that can label a track, or None."""
+    name = text.strip()
+    return name if name_problem(name) is None else None
+
+
+def _ixml_tracks(ixml: bytes, family: Mapping[str, Any], channels: int | None) -> list[PublishedTrack]:
+    """The tracks that one iXML family lists at a place the file has; an unreadable packet lists none."""
     try:
         # An iXML chunk comes from an upload, so a parser that refuses entity expansion reads it.
         from defusedxml import ElementTree
@@ -128,13 +141,13 @@ def _ixml_tracks(ixml: bytes, family: Mapping[str, Any]) -> list[PublishedTrack]
         return []
     found: list[PublishedTrack] = []
     for entry in root.findall(family["track"]):
-        name = (entry.findtext(family["name"]) or "").strip()
         index = (entry.findtext(family["channel"]) or "").strip()
-        if not name or not index.isdigit() or int(index) < 1:
+        if not index.isdigit() or int(index) < 1 or (channels is not None and int(index) > channels):
             continue
-        # iXML counts channels from one; a track names a channel from zero, as the decoder does.
+        # iXML counts from one; a track names a channel from zero, as the decoder does.
         found.append(PublishedTrack(
-            name, 0, int(index) - 1, bool(family["declares_microphone"]), bool(family["single_voice"]),
+            _published_name(entry.findtext(family["name"]) or ""), 0, int(index) - 1,
+            bool(family["declares_microphone"]), bool(family["single_voice"]),
         ))
     return found
 
@@ -171,16 +184,25 @@ def read_published(path: Path, data: Mapping[str, Any] | None = None) -> Publish
     data = policy() if data is None else data
     chunks = _riff_chunks(path)
     streams, container_tags, frame_rate = _container_facts(path)
-    tracks: list[PublishedTrack] = []
+    fmt = chunks.get(b"fmt ", b"")
+    channels = int.from_bytes(fmt[2:4], "little") if len(fmt) >= 4 else None
+    listed: list[PublishedTrack] = []
     for family in data["families"]:
         if family["kind"] == "ixml" and b"iXML" in chunks:
-            tracks.extend(_ixml_tracks(chunks[b"iXML"], family))
+            listed.extend(_ixml_tracks(chunks[b"iXML"], family, channels))
         elif family["kind"] == "stream_tag":
             for index, tags in enumerate(streams):
-                if name := _tag(tags, family["tag"]):
-                    tracks.append(PublishedTrack(
-                        name, index, None, bool(family["declares_microphone"]), bool(family["single_voice"]),
+                if text := _tag(tags, family["tag"]):
+                    listed.append(PublishedTrack(
+                        _published_name(text), index, None,
+                        bool(family["declares_microphone"]), bool(family["single_voice"]),
                     ))
+    # One entry per audio, the first to list it; one past the bound is enough to say the list is too long.
+    tracks: dict[tuple[int, int | None], PublishedTrack] = {}
+    for track in listed:
+        if len(tracks) > MAX_TRACKS:
+            break
+        tracks.setdefault((track.stream, track.channel), track)
     start: Start | None = None
     for source in data["start_sources"]:
         seconds: float | None = None
@@ -196,34 +218,52 @@ def read_published(path: Path, data: Mapping[str, Any] | None = None) -> Publish
         if seconds is not None:
             start = Start(source["key"], seconds)
             break
-    return Published(_unique(tracks), start)
+    return Published(_unique(list(tracks.values())), start)
 
 
 def _unique(tracks: Sequence[PublishedTrack]) -> tuple[PublishedTrack, ...]:
-    """Published names are not unique by contract; a repeat takes its count, so that two tracks never share a label."""
-    seen: dict[str, int] = {}
+    """Published names are not unique by contract; a repeat takes the first count that no track holds."""
+    held = {track.name for track in tracks if track.name is not None}
+    seen: set[str] = set()
     out: list[PublishedTrack] = []
     for track in tracks:
-        seen[track.name] = seen.get(track.name, 0) + 1
-        name = track.name if seen[track.name] == 1 else f"{track.name} {seen[track.name]}"
-        out.append(PublishedTrack(name, track.stream, track.channel, track.declares_microphone, track.single_voice))
+        name = track.name
+        if name is not None and name in seen:
+            base, count = name, 2
+            while (name := _numbered(base, count)) in held:
+                count += 1
+            held.add(name)
+        if name is not None:
+            seen.add(name)
+        out.append(replace(track, name=name))
     return tuple(out)
+
+
+def _numbered(name: str, count: int) -> str:
+    """`name` with a count, cut so that the label stays within the label length."""
+    suffix = f" {count}"
+    return f"{name[:MAX_NAME_CHARS - len(suffix)].rstrip()}{suffix}"
 
 
 # The keys of a declaration are this module's own schema (the `Track` fields), a closed set that code implements.
 _DECLARATION_KEYS = {"name", "stream", "channel", "single_voice"}
+#: Each track is one full transcription of the recording, so this bounds what one recording costs.
+MAX_TRACKS = 16
 
 
 def declaration(value: object, published: Published | None = None) -> tuple[Track, ...]:
-    """Tracks from a declaration of an owner or an agent, a list of `{name, stream, channel, single_voice}`.
+    """Tracks from a declaration, a list of `{name, stream, channel, single_voice}`.
 
-    A track that names no `name` takes the one the file publishes for its stream and channel.
+    A track that names no `name` takes the one the file publishes for its stream and channel. A name
+    goes into the label span, so a name that the label syntax refuses refuses the declaration.
     """
     if value is None:
         return ()
     if not isinstance(value, Sequence) or isinstance(value, str | bytes):
         raise TrackDeclarationError("`speech_tracks` is a list of tracks, each with a name, a stream and a channel")
-    named = {(t.stream, t.channel): t.name for t in (published.tracks if published else ())}
+    if len(value) > MAX_TRACKS:
+        raise TrackDeclarationError(f"declare at most {MAX_TRACKS} tracks; each track is one full transcription")
+    named = {(t.stream, t.channel): t.name for t in (published.tracks if published else ()) if t.name is not None}
     tracks: list[Track] = []
     for entry in value:
         if isinstance(entry, Track):
@@ -244,6 +284,8 @@ def declaration(value: object, published: Published | None = None) -> tuple[Trac
         name = entry.get("name") or named.get((stream, channel))
         if not isinstance(name, str) or not name.strip():
             raise TrackDeclarationError(f"name the track on stream {stream} channel {channel}; the file publishes no name for it")
+        if problem := name_problem(name.strip(), "a track's name"):
+            raise TrackDeclarationError(f"{problem}; change the name of the track on stream {stream} channel {channel}")
         tracks.append(Track(name.strip(), stream, channel, single))
     names = [t.name for t in tracks]
     audio = [(t.stream, t.channel) for t in tracks]
@@ -259,17 +301,18 @@ class Resolved:
 
 
 def resolve(path: Path, declared: object = None, data: Mapping[str, Any] | None = None) -> Resolved:
-    """The tracks of a recording: a person's declaration, else the tracks that the file's published fields declare.
+    """The tracks of a recording: its declaration, else the tracks that the file's published fields declare.
 
     A declaration replaces the published list whole and takes names from it only where it names none.
-    No declaration and no published microphone leaves no tracks: the first audio stream is read as one mix.
+    No declaration and no published microphones leave no tracks: the first audio stream is read as one mix.
     """
     published = read_published(path, data)
     tracks = declaration(declared, published)
-    if not tracks:
-        tracks = tuple(
-            Track(t.name, t.stream, t.channel, t.single_voice) for t in published.tracks if t.declares_microphone
-        )
+    microphones = [t for t in published.tracks if t.declares_microphone]
+    # One published microphone is the recording itself, and a track with no usable name cannot be labelled.
+    # Either way the mix is read, which loses no track's words.
+    if not tracks and 2 <= len(microphones) <= MAX_TRACKS and all(t.name is not None for t in microphones):
+        tracks = tuple(Track(t.name, t.stream, t.channel, t.single_voice) for t in microphones if t.name is not None)
     return Resolved(tracks, published.start)
 
 

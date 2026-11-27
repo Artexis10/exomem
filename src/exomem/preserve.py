@@ -2375,6 +2375,8 @@ def _set_asr_facts(content: str, asr: AsrFacts | None) -> str:
     ]
     if asr.tracks_policy is not None:
         fields.append(("asr_tracks_policy", text(asr.tracks_policy)))
+    if asr.tracks_skipped is not None:
+        fields.append(("asr_tracks_skipped", text(asr.tracks_skipped)))
     if asr.language_requested is not None:
         fields.append((_ASR_PIN_FIELD, yaml_scalar(asr.language_requested)))
     for field, value in fields:

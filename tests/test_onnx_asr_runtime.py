@@ -326,6 +326,39 @@ def test_a_stop_resumes_the_track_it_stopped_and_never_transcribes_a_finished_tr
     assert onnx_asr_runtime.progress_offset(vault, RECORDING) == 0
 
 
+def test_a_crash_after_every_track_is_transcribed_keeps_each_tracks_progress_until_publication(monkeypatch, vault, tmp_path):
+    from exomem import extract, onnx_asr_runtime, speech_tracks
+
+    class Killed(BaseException):
+        """The worker process dies between the last track and publication, as a hard memory limit kills it."""
+
+    def killed(*_args):
+        raise Killed
+
+    audio = _recording(vault)
+    tracks = [{"name": "Host", "stream": 0}, {"name": "Guest", "stream": 1}]
+    first = []
+    backend, window = _resumable_backend(monkeypatch, first)
+    _knows_languages(backend)
+    monkeypatch.setattr(extract, "get_transcriber", lambda: backend)
+    monkeypatch.setattr(extract, "_diarizer_sidecar_python", lambda: tmp_path / "python")
+    monkeypatch.setattr(speech_tracks, "export_wav", killed)
+
+    with pytest.raises(Killed):
+        extract.extract_text(audio, media_type="audio", vault_root=vault, timestamps=True, diarize=True, tracks=tracks)
+
+    assert onnx_asr_runtime.progress_offset(vault, RECORDING) == 6 * window
+
+    again = []
+    backend, _window = _resumable_backend(monkeypatch, again)
+    _knows_languages(backend)
+    monkeypatch.setattr(extract, "get_transcriber", lambda: backend)
+    result = extract.extract_text(audio, media_type="audio", vault_root=vault, timestamps=True, diarize=False, tracks=tracks)
+
+    assert again == [], "no window of either track is transcribed again"
+    assert result.text.splitlines()[0] == "[0:00] [Host]: window 0"
+
+
 def test_the_language_probability_is_a_softmax_over_the_models_language_tokens(monkeypatch):
     from exomem import onnx_asr_runtime
 
