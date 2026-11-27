@@ -626,6 +626,9 @@ class SemanticUnitHit:
     vector_rank: int | None = None
     vector_score: float | None = None
     mixed_units_truncated: int = 0
+    # Set when keyword ranking with `prefer_active` placed this unit after every active unit because
+    # its page is superseded. Private, like `snapshot_hash`: no serializer emits it.
+    demoted: bool = False
     # The requested dimension group that shows this unit in full, and its marks there
     # (`dimension_display.group_hits`). Both stay None outside a request for groups.
     dimension: str | None = None

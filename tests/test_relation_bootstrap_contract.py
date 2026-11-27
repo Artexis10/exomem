@@ -160,14 +160,14 @@ def test_generic_scaffold_and_workflow_skills_teach_relation_governance() -> Non
     root = Path("src/exomem/_scaffold/_Schema")
     paths = [
         root / "SKILL.md",
-        root / "references/operations.md",
+        *sorted((root / "references").glob("*.md")),
         *sorted((root / "workflow-skills").glob("*/SKILL.md")),
     ]
     combined = "\n".join(path.read_text(encoding="utf-8") for path in paths)
 
-    assert "resolve-relation" in combined
-    assert "propose-relation" in combined
-    assert "save-relations" in combined
+    assert "connections.resolve_relation" in combined
+    assert "schema.propose_relation" in combined
+    assert "schema.save_relations" in combined
     assert "plain link" in combined
     assert "last resort" in combined
     assert "relates_to" not in combined

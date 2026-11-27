@@ -15,7 +15,7 @@ Subcommands:
 - `tui` — launch the interactive terminal UI over the same product commands
   (requires the optional `tui` extra; needs an interactive terminal)
 - `doctor` — read-only local install/setup preflight
-- `auth sessions|revoke` — operator-only durable MCP session administration
+- `auth sessions|revoke` — durable MCP session administration
 - `governance-schema status|plan-migration|stage-migration|commit-migration|restore-migration-backup|downmigrate` — offline schema control
 - `cell-init` — idempotent Evermatter Cloud cell init-container entrypoint: vault
   init when absent, then offline state migration; no governance schema
@@ -468,7 +468,7 @@ def _issue_local_main(args: argparse.Namespace) -> int:
 def _auth_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem auth",
-        description="Inspect and revoke durable MCP sessions (operator-only).",
+        description="Inspect and revoke durable MCP sessions.",
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
     sessions = subcommands.add_parser("sessions", help="list non-secret session metadata")

@@ -1554,7 +1554,7 @@ _PLUGIN = (
 )
 
 
-@pytest.mark.parametrize("name", ["frontmatter.md", "page-types.md"])
+@pytest.mark.parametrize("name", ["page-types.md"])
 def test_scaffold_and_plugin_references_stay_byte_identical(name: str) -> None:
     scaffold = (_SCAFFOLD / "_Schema" / "references" / name).read_bytes()
     plugin = (_PLUGIN / "references" / name).read_bytes()
@@ -1562,8 +1562,8 @@ def test_scaffold_and_plugin_references_stay_byte_identical(name: str) -> None:
     assert scaffold == plugin
 
 
-def test_shipped_frontmatter_reference_teaches_the_loop_contract() -> None:
-    text = (_SCAFFOLD / "_Schema" / "references" / "frontmatter.md").read_text(
+def test_shipped_field_reference_teaches_the_loop_contract() -> None:
+    text = (_SCAFFOLD / "_Schema" / "references" / "page-types.md").read_text(
         encoding="utf-8"
     )
 

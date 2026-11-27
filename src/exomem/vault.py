@@ -150,7 +150,7 @@ APPEND_ONLY_KB_SUBPATHS: tuple[str, ...] = (
 )
 
 # Frontmatter keys the schema deliberately excludes (see _scaffold's
-# references/frontmatter.md), each with the remedy its refusal states: a claim carries no
+# references/page-types.md), each with the remedy its refusal states: a claim carries no
 # confidence score (trust is citations + link count, and a degree of belief is its own belief
 # unit), and knowledge does not expire on a schedule. Governed write paths refuse them so the
 # documented "no confidence floats / no retention decay" stance is actually enforced, not just

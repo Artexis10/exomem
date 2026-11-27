@@ -656,7 +656,11 @@ def test_a_failed_batch_is_not_taken_whole_again_on_each_turn_of_the_store_threa
             )
 
     turns = 0
-    while turns < 2 * len(good) and store_rows(served, "SELECT 1 FROM store_derivation_queue WHERE path != ?", bad):
+    # Drain until every good page is derived and the bad page has failed on its own too: a slice can
+    # end after the last good page, before the bad page's own attempt records its code.
+    while turns < 2 * (len(good) + 1) and store_rows(
+        served, "SELECT 1 FROM store_derivation_queue WHERE path != ? OR failed_code IS NULL", bad
+    ):
         derivation.drain(served.resolve(), writer, deadline=time.monotonic() + derivation.SLICE_SECONDS)
         turns += 1
 

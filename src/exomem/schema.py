@@ -2,8 +2,9 @@
 
 The schema lives at `<vault>/Knowledge Base/_Schema/`. Two docs matter for the
 MCP's scope:
-- `references/frontmatter.md` — required source-page fields.
-- `references/page-types.md` — source location + naming convention.
+- `references/page-types.md` — required source-page fields, source location and naming convention.
+- `references/frontmatter.md` — where a vault whose shipped schema predates the merge keeps the
+  required fields.
 
 Both are markdown with embedded tables. Parsing is conservative: we extract the
 narrow facts we need; if either doc changes shape and parsing fails, we raise
@@ -58,33 +59,26 @@ def load_source_schema(vault_path: Path) -> SourceSchema:
 
     Raises SchemaParseError if anything looks wrong.
     """
-    from .vault import read_bytes_without_pinning, shipped_schema_root
+    from .vault import shipped_schema_root
 
     schema_dir = shipped_schema_root(vault_path) / "references"
-    frontmatter_doc = schema_dir / "frontmatter.md"
     page_types_doc = schema_dir / "page-types.md"
+    pt_text = _read_doc(page_types_doc, vault_path)
 
-    texts = []
-    for doc in (frontmatter_doc, page_types_doc):
-        try:
-            # A store-mode vault keeps a legacy schema document in its store; the file is only a
-            # projection.
-            raw = read_bytes_without_pinning(doc, vault_path).decode("utf-8")
-            texts.append(raw.replace("\r\n", "\n").replace("\r", "\n"))  # as read_text read it
-        except FileNotFoundError:
-            raise SchemaParseError(f"Schema doc missing: {doc}") from None
-    fm_text, pt_text = texts
-
-    source_section = _slice_section(fm_text, "### source", next_heading_prefix="###")
-    if not source_section:
-        raise SchemaParseError(
-            f"Couldn't find '### source' section in {frontmatter_doc}"
-        )
-
-    required = tuple(REQUIRED_FIELD_ROW_PATTERN.findall(source_section))
+    page_section = _slice_section(pt_text, "## source", next_heading_prefix="##") or ""
+    required = tuple(REQUIRED_FIELD_ROW_PATTERN.findall(page_section))
+    required_doc = page_types_doc
+    if not required:
+        # Vaults refresh their shipped schema at different times; one that has not refreshed since the
+        # field table moved into page-types.md still holds it in frontmatter.md, so read it there.
+        required_doc = schema_dir / "frontmatter.md"
+        fm_section = _slice_section(_read_doc(required_doc, vault_path), "### source", next_heading_prefix="###")
+        if not fm_section:
+            raise SchemaParseError(f"Couldn't find the source fields in {page_types_doc} or {required_doc}")
+        required = tuple(REQUIRED_FIELD_ROW_PATTERN.findall(fm_section))
     if "source_type" not in required:
         raise SchemaParseError(
-            f"source_type not marked required in {frontmatter_doc}"
+            f"source_type not marked required in {required_doc}"
         )
 
     page_section = _slice_section(pt_text, "## source", next_heading_prefix="##")
@@ -110,6 +104,17 @@ def load_source_schema(vault_path: Path) -> SourceSchema:
         naming_pattern=naming,
         source_types=_default_kind_sample(),
     )
+
+
+def _read_doc(doc: Path, vault_path: Path) -> str:
+    from .vault import read_bytes_without_pinning
+
+    try:
+        # A store-mode vault keeps a legacy schema document in its store; the file is only a projection.
+        raw = read_bytes_without_pinning(doc, vault_path).decode("utf-8")
+    except FileNotFoundError:
+        raise SchemaParseError(f"Schema doc missing: {doc}") from None
+    return raw.replace("\r\n", "\n").replace("\r", "\n")  # as read_text read it
 
 
 def _default_kind_sample() -> tuple[str, ...]:

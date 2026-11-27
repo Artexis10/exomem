@@ -26,3 +26,15 @@
 - [x] 4.1 On a real Cloud cell after a rollout that carries a note: Home shows the note and one tool reply carries the line; the next reply does not.
   - Evidence: on 2026-11-26 a Cloud cell rolled from v0.201.0 to v0.207.0 in its upgrade window (pod restarted 22:28Z; the v0.207.0 image build logged "Wrote 4 release(s) with notes"). The owner reloaded Home: the footer read v0.207.0 and the What's new section listed the notes. In a chat app already connected to that cell, the first reply mentioned what's new once and the next reply did not.
 - [ ] 4.2 A release with no note shows nothing new on Home and adds no line.
+
+## 5. Note titles
+
+- [x] 5.1 A note carries a short title in YAML front matter; the check requires it and the notes file carries it as schema 2.
+  - Evidence: `scripts/user_notes.py` (`parse_note`, `title_problems`, `note_problems`) reads the front matter with PyYAML `safe_load`, and both workflows that run it install `pyyaml` at the exact version in `uv.lock`; an unquoted title that YAML reads differently from what was typed (`#`, `Yes`, a colon, a leading `@`) fails with the advice to use double quotes. `tests/test_user_notes.py` covers a missing, empty, non-text, 49-character, full-stopped, Markdown and multi-line title, an unknown key, invalid YAML, the `#`, `Yes`, colon and `@` cases (also under an indented or a quoted `title` key, found from the YAML parser's positions), a leading byte order mark, quoted titles that pass, and an unclosed fence (each fails with the change to make), and `generate` emitting titles and null for a file without front matter. `src/exomem/release_notes_format.py` is `SCHEMA = 2` with `Note`; `tests/test_whats_new.py` covers the round trip and refuses schema 1, a bare-string note, an empty title and an extra key.
+- [x] 5.2 The cell serves `items` of `{title, text}` beside the unchanged `notes` sentences, and the assistant's line keeps the sentence.
+  - Evidence: `release_notes.payload()`; `tests/test_whats_new.py` compares the section with `notes` as strings and `items` with titles (null for a note without one), and the update-notice cases still pass with the sentence in `say`.
+- [x] 5.3 The authors' README and the check describe the title rule.
+  - Evidence: `user-notes/README.md` shows the example file, the title rules and how to quote a title.
+- [x] 5.4 Every existing note has a title. A follow-up pull request adds them, because the note check runs the base revision's checker: titled notes pass only once this checker is on main.
+  - Evidence: the 16 existing files under `user-notes/` start with front matter holding a title, and `user-notes/whats-new-titles.md` is this change's own note; all 17 pass `note_problems` with the checker that #3312 put on main.
+- [ ] 5.5 On a real Cloud cell after a rollout that carries titles, Home's What's new lists each title and opens its sentence.

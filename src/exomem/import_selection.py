@@ -70,6 +70,8 @@ class Selection:
     kept: list[Kept] = field(default_factory=list)
     skipped: list[Skipped] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    #: Hidden folders taken only because they hold the further parts of a selected page's transcript.
+    part_folders: int = 0
 
     @property
     def kept_bytes(self) -> int:
@@ -86,17 +88,23 @@ class Selection:
         return {reason: (totals[reason][0], totals[reason][1]) for reason in Reason if reason in totals}
 
     def summary(self) -> dict:
-        return {
+        summary = {
             "selected": {"files": len(self.kept), "bytes": self.kept_bytes},
             "left_out": {
                 reason.name: {"files": files, "bytes": size}
                 for reason, (files, size) in self.tally().items()
             },
         }
+        if self.part_folders:
+            summary["part_folders"] = self.part_folders
+        return summary
 
     def report_lines(self) -> list[str]:
         """What the import takes and what it leaves behind, for a person to read before it starts."""
         lines = [f"Selected {files_phrase(len(self.kept))}, {human_bytes(self.kept_bytes)}."]
+        if self.part_folders:
+            noun = "folder" if self.part_folders == 1 else "folders"
+            lines.append(f"Taken with their transcript pages: {self.part_folders} hidden part {noun}.")
         tally = self.tally()
         if tally:
             lines.append("Left behind (each entry counts under the first reason that applies):")
@@ -232,8 +240,24 @@ def _is_ignored(rules: tuple[_Rules, ...], rel: str, is_dir: bool) -> bool:
     return False
 
 
+def _leave_reason(
+    entry: os.DirEntry, rel: str, rules: tuple[_Rules, ...], *, include_hidden: bool, junction: bool = False,
+) -> Reason | None:
+    """Why an entry stays behind, or None when it is taken; the first reason that applies."""
+    if not include_hidden and _is_hidden(entry):
+        return Reason.HIDDEN
+    if rules and _is_ignored(rules, rel, entry.is_dir(follow_symlinks=False)):
+        return Reason.GITIGNORE
+    if entry.is_symlink() or junction:
+        return Reason.SYMLINK
+    return None
+
+
 def select(folder: Path, *, include_hidden: bool = False, use_gitignore: bool = True) -> Selection:
     """Walk `folder` once and sort every entry into the files to take or the reason to leave it."""
+    # `extraction_parts` loads the media stack, which a command that only lists files need not pay for.
+    from . import extraction_parts
+
     result = Selection()
     # Each pending folder carries the .gitignore files above it; a file's `base` is its folder's path
     # from the root, with a closing slash, so a rule reads relative to its file.
@@ -255,17 +279,22 @@ def select(folder: Path, *, include_hidden: bool = False, use_gitignore: bool = 
                 if found is not None:
                     rules = (*rules, found)
         descend = []
+        # The folder that holds a page's further transcript parts is hidden by name; it goes with a page that is taken.
+        part_folders = (
+            {} if include_hidden else {
+                extraction_parts.folder_for(Path(item.name)).name: item
+                for item in entries if item.name.endswith(".md") and item.is_file(follow_symlinks=False)
+            }
+        )
         for entry in entries:
             rel = prefix + entry.name
             is_dir = entry.is_dir(follow_symlinks=False)
             junction = is_dir and _is_junction(entry.path)
-            reason: Reason | None = None
-            if not include_hidden and _is_hidden(entry):
-                reason = Reason.HIDDEN
-            elif rules and _is_ignored(rules, rel, is_dir):
-                reason = Reason.GITIGNORE
-            elif entry.is_symlink() or junction:
-                reason = Reason.SYMLINK
+            reason = _leave_reason(entry, rel, rules, include_hidden=include_hidden, junction=junction)
+            page = part_folders.get(entry.name) if is_dir and reason is Reason.HIDDEN else None
+            if page is not None and _leave_reason(page, prefix + page.name, rules, include_hidden=False) is None:
+                reason = _leave_reason(entry, rel, rules, include_hidden=True, junction=junction)
+                result.part_folders += int(reason is None)
             if reason is not None:
                 if is_dir and not junction:
                     files, size = _tally_tree(entry.path, result.notes, rel)

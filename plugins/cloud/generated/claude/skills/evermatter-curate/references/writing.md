@@ -1,431 +1,306 @@
 # Writing and connecting compiled knowledge
 
-Apply the live engagement envelope from SKILL.md before these workflows.
-A batch or capture waiver never raises an action-class ceiling: entity merge,
-supersession, and restructure execution still require the applicable confirmation;
-a new entity after resolve-before-create follows `proactive_capture`.
+Apply the live engagement envelope from SKILL.md before these workflows. A batch or capture waiver
+never raises an action-class ceiling: entity merge, supersession and restructure execution still
+need the applicable confirmation. A new entity after resolve-before-create follows
+`proactive_capture`. Each typed tool lists its fields: `read_instructions(topic="create_note")`.
 
 ## Entity resolution
 
-Resolve entity candidates against the active entity registry and selected knowledge packs.
-  Call `inspect_memory(operation="connections.resolve_entity", arguments={'name': ...})` first. If one active page
-  matches, use `edit_note` for a small stable-fact correction or the canonical
-  relation workflow for a new connection. If none matches, use
-  `manage_memory(operation="connections.create_entity")` only when the identity is stable,
-  recurring, central to the conclusion, and useful beyond the current source.
-  Pass known meaning as `relations=[{"kind": ..., "target": ...}]`;
-  `connections` writes plain links and states no meaning: use a `relations` item to
-  name a specific relation. A write that adds the generic relation is refused.
-  An unregistered-type finding supplies `proposal` and a hash; save
-  those exact values through the governed
-  `manage_memory(operation="schema.save_entity_types")` leaf with `why`, never by
-  editing frontmatter around the registry rule.
-  Apply the entity eligibility rule in [engagement](engagement.md).
+Resolve entity candidates against the active entity registry and the selected knowledge packs.
+
+1. Call `inspect_memory(operation="connections.resolve_entity", arguments={"name": ...})` first.
+2. If one active page matches, use `edit_note` for a small stable-fact correction, or write the
+   relation that connects it.
+3. If none matches, call `manage_memory(operation="connections.create_entity", arguments={"name": ...})`
+   only when the identity is stable, and central or recurring, and useful beyond the current
+   source. [Engagement](engagement.md) holds the eligibility rule.
+4. Pass known meaning as `relations=[{"kind": ..., "target": ...}]`. `connections` writes plain links
+   and states no meaning, so use a `relations` item to name a specific relation.
+5. If the reply says the entity type is unregistered, save the type through [vocabulary](vocabulary.md).
+   Never edit frontmatter around the registry rule.
 
 ### Names in another script
 
-A turn written in one script reaches a page only through a name in that script:
-a user who writes in Japanese says the katakana or kanji name, not the Latin
-title. So when you write an entity's name in a script other than the one the
-user used for it (a Latin title for a name they wrote in Japanese, or the
-reverse), add a native-script alias: the user's own spelling.
+A turn written in one script reaches a page only through a name in that script. A user who writes in
+Japanese says the katakana or kanji name, not the Latin title. So when you write an entity's name in a
+script other than the one the user used for it, add a native-script alias: the user's own spelling.
 
-- At capture: `manage_memory(operation="connections.create_entity", arguments={'aliases': [...]})`.
-- On an existing page: `edit_note(action="set_fields", fields={"aliases": [...current, "<the user's spelling>"]}, why=...)`;
-  the list replaces the field, so keep the current aliases.
+- At capture: `manage_memory(operation="connections.create_entity", arguments={'aliases': [...], 'name': ...})`.
+- On an existing page: `edit_note(action="set_fields", fields={"aliases": [...current, "<the user's spelling>"]}, why=...)`.
+  The list replaces the field, so keep the current aliases.
 
-Use only a spelling the user wrote or the source states; never a
-transliteration or translation you made up. An alias is a name the page
-answers to, so one any other page already answers to (a note's title included)
-is refused, at capture and on edit.
+Use only a spelling the user wrote or the source states. Never invent a transliteration or a
+translation. An alias is a name the page answers to, so a name that any other page already answers to
+(a note's title included) is refused, at capture and on edit.
 
 ## Vocabulary consideration
 
-Before saving durable knowledge, consider reuse, enrich, propose-new, generic, no-edge, or defer from the material and bounded review evidence. Resolve candidate entity
-types and relation meanings before proposing a new one. Generic and no-edge are
-truthful outcomes when no useful distinction is supported; there is no quota for
-types or edges. A resolver returns definitions and evidence; its null selection
-or proposal fields leave the judgment to the active agent. When a useful recurring
-identity has no fitting type, author its definition and rationale, preserve the
-existing extension definitions, and use `manage_memory(operation="schema.save_entity_types")`
-with the reviewed registry document and current extension hash. An empty match
-does not require squeezing the identity into a core type or abandoning the type
-proposal. Record the reviewed fingerprint, family, registry hashes, target
-versions, outcome, rationale, and canonical choice through vocabulary triage.
-That record is consideration, not execution or permission: v1 canonical writers
-retain their existing confirmation rules. Do not treat a proposal, review decision,
-or generic connection as authority to create an entity, type, or edge.
+Before saving durable knowledge, consider reuse, enrich, propose-new, generic, no-edge, or defer from
+the material and the bounded review evidence. Resolve the candidate entity types and relation meanings
+before you propose a new one. Generic and no-edge are truthful outcomes when no useful distinction is
+supported; there is no quota for types or edges. A resolver returns definitions and evidence, and its
+null selection leaves the judgment to you. When a useful recurring identity has no fitting type, author
+its definition and rationale and propose it ([vocabulary](vocabulary.md)). Never squeeze it into a core
+type, and never abandon the proposal because the match came back empty.
+
+Record the outcome and rationale through vocabulary triage. That record is consideration, not execution
+or permission: canonical writers keep their existing confirmation rules. Do not treat a proposal, a
+review decision or a generic connection as authority to create an entity, a type or an edge.
 
 ## Agent write loop
 
-Use this loop whenever a durable conclusion should enter Evermatter:
+Use this loop whenever a durable conclusion should enter Evermatter.
 
-1. Partition durable candidates by retrieval question, subject/domain, episode,
-   and epistemic role before choosing destinations. Reuse current relevant
-   recall; call `search_memory` only for missing prior notes or sources.
-2. Assess scope/title fit for each candidate home. An open or similar page has
-   no automatic priority. Read selected exact units/pages only as needed; keep
-   coherent details together and route independently reusable clusters separately.
-   Preserve durable hypotheses with speaker/source attribution and uncertainty.
-3. Identify the provenance: which governed `Sources/` or `Evidence/` pages this
-   conclusion draws from. Those become `sources:` on the write call. Capture
-   external material first: a URL, connector/message ID, remote file ID, working
-   script, excerpt, or derivative summary is not itself a source citation. Use
-   `save_source` or the Evidence lane for the original, then cite the returned
-   path or stable ref. If the original cannot be recovered, remove the unsupported
-   claim explicitly; never recreate an "original" from the derivative. If the
-   conclusion came from live work with nothing external captured, `sources: []`
-   is honest and valid.
-4. Draft the typed page at the right layer: `save_source` for raw source, `create_note` for a compiled conclusion, `inspect_memory` and `manage_memory` for entity/link work, `add_observation` or `edit_note` for guarded corrections, `supersede_note` for supersession.
-5. Reuse meaningful links established by the current search/read context. When
-   connections remain unknown, use `inspect_memory(operation="connections.suggest_links")`
-   on the draft; use `suggest-relations` when direction remains unresolved. Accept only links
-   that genuinely clarify provenance or context, and write accepted note-level
-   edges under `## Relations` as `- relation_type [[Target]]`. Carry accepted
-   links into the *first* write; do not defer them to a follow-up `edit_note`.
-6. Write, then inspect the result. The default committed response carries
-   `warnings` (when the write warned) and an optional `structure_suggestion`.
-   The fuller structural checklist — `write_feedback` with `sources.cited`,
-   `links.body_wikilinks`, and `relations.relation_debt` — lives under
-   `diagnostics` and needs `detail="full"`. When the reply also lists
-   `diagnostics.derived_components`, it lives under `diagnostics.leaf_result`
-   instead. Ask for it when provenance
-   or connectivity is in doubt; if all three counts are zero and that is not
-   honest, fix it before reporting. Corpus-aware `suggestions` are **off by
-   default** because they cost a whole retrieval pass on the write path; pass
-   `suggest_links=true` (with `detail="full"`) when you want them.
-   `write_feedback.suggestions.computed` tells you whether they ran.
-7. If a near-duplicate warning fires, prefer `edit_note` or `supersede_note` over a parallel page. If suggestions are useful, add them with a follow-up `edit_note`.
-8. If the write returned a `structure_suggestion`, handle it as below.
+1. Partition the durable candidates by retrieval question, subject, domain, episode and epistemic role
+   before you choose destinations. Reuse current recall. Call `search_memory` only for missing prior
+   notes or sources.
+2. Assess scope and title fit for each candidate home. An open or similar page has no automatic
+   priority. Read exact units or pages only as needed. Keep coherent details together and route
+   independently reusable clusters separately. Keep durable hypotheses with their speaker, source and
+   uncertainty.
+3. Identify the provenance: which governed `Sources/` or `Evidence/` pages the conclusion draws from.
+   They become `sources` on the write. Capture external material first. A URL, a connector or message
+   id, a remote file id, a working script, an excerpt or a derivative summary is not a source citation.
+   Use `save_source` or `save_evidence` for the original, then cite the returned path or ref. If the
+   original cannot be recovered, remove the unsupported claim and say so; never recreate an
+   "original" from the derivative. A conclusion from live work with nothing external to capture takes
+   an honest empty `sources`.
+4. Draft the typed page at the right layer: `save_source` for raw source, `create_note` for a compiled
+   conclusion, `add_observation` or `edit_note` for a guarded correction, `supersede_note` for a
+   replacement. [Page types](page-types.md) says which type fits.
+5. Reuse the links that the current search or read context already established. When connections
+   remain unknown, call `inspect_memory(operation="connections.suggest_links", arguments={"draft_title": ..., "draft_body": ...})`
+   on the draft, or `connections.suggest_relations` when direction is unresolved. Accept only links
+   that clarify provenance or context, and write accepted note-level edges under `## Relations` as
+   `- relation_type [[Target]]`. Carry them in the first write, not in a follow-up `edit_note`.
+6. Write, then read the result. A reply carries `warnings` when the write warned, and a
+   `structure_suggestion` when the page needs a decision. Ask for `detail="full"` when provenance or
+   connectivity is in doubt: it adds the sources cited, the body links and the relation debt. If all
+   three are zero and that is not honest, fix it before you report. Link suggestions cost a retrieval
+   pass, so they stay off unless you pass `suggest_links=true` to `create_note`.
+7. If a near-duplicate warning fires, prefer `edit_note` or `supersede_note` over a parallel page.
+8. If the write returned a `structure_suggestion`, answer it as below.
 9. Report one line: `Saved -> <title>`.
 
 ## Closing a multi-step workflow
 
-Group work by dependencies, not by one tool call per reasoning turn. Read
-independent known pages together when the client supports parallel calls. Preserve
-several artifacts with one `save_evidence` call, then use the discovered
-`manage_memory(operation="media.process", arguments={'paths': [...]})` selector when available. Its ordered item results
-acknowledge durable work; extraction finishes asynchronously. Do not claim to have
-read extracted content before public status/read proves it exists.
+Group work by dependencies, not by one tool call per reasoning turn. Read independent known pages
+together when the client allows parallel calls. Save several artifacts with one `save_evidence` call,
+then queue extraction with `manage_memory(operation="media.process", arguments={"paths": [...]})`. The
+ordered item results acknowledge the durable work, and extraction finishes asynchronously. Do not claim to
+have read extracted content before a status or read call shows that it exists.
 
-Author related observations and accepted connections in the initial note where
-possible. On an existing page, `edit_note` with `action="replace_text"` and `edits=[...]`
-can combine known string changes into one guarded mutation. It is not an atomic
-multi-page transaction. Keep conflicting canonical edits ordered; run independent
-reads or artifact work concurrently only within the active client's capabilities.
-When a compiled note cites a media sidecar that extraction can still change,
-complete the relevant extraction before validating that dependent write. Do
-source-independent tracker, background-note or unrelated capture work while it
-runs. Never bypass a source-version guard or reuse a stale staged backlink.
+Author related observations and accepted connections in the initial note where possible. On an
+existing page, `edit_note(action="replace_text", edits=[...])` combines known string changes into one
+guarded mutation. It is not an atomic multi-page transaction, so keep conflicting edits ordered. When a
+compiled note cites a media sidecar that extraction can still change, finish the extraction before you
+validate the dependent write, and do source-independent work while it runs. Never bypass a
+source-version guard or reuse a stale staged back-reference.
 
-Inspect each terminal and handle actionable warnings, but do not reread the page
-after every committed edit or poll until every projection is current. Pass the
-returned page `id` as `note` only when the next `replace_body` must guard against a
-concurrent edit; use the returned unit id as `observation` for exact semantic edits. Finish with a bounded check of the requested
-state and citations. If the next operation explicitly needs current graph edges,
-honor its freshness refusal; optional graph lag does not invalidate a successful
-ordinary lookup.
+Read each terminal result and handle actionable warnings. Do not reread the page after every committed
+edit, and do not poll until every projection is current. Pass the returned page `id` as `note` only when
+the next `replace_body` must guard against a concurrent edit. Use the returned unit id as `observation`
+for exact semantic edits. Finish with one bounded check of the requested state and citations. If the next
+operation needs current graph edges, honor its freshness refusal; optional graph lag does not invalidate a
+successful ordinary lookup.
 
-**When a write asks whether the page answers one question.** A compiled write may
-return `structure_suggestion` of kind `note_cohesion`. It means the page has grown to
-a size step (the response gives `units` and `step_units`). It does not say the page
-is overloaded: the runtime counts size, and you judge meaning. You hold the page, so
-answer its one question now: does this page answer more than one independent
-question? Name them.
+### Answering a structure suggestion
+
+A write can return a `structure_suggestion`. The runtime decides when to ask and you judge meaning. You
+hold the page, so answer once, then carry on with the task. Do not recite field names to the user.
+
+**`note_cohesion`: does the page answer more than one independent question?** The page has grown to a
+size step. That does not say it is overloaded, because the runtime counts size and you judge meaning. Name
+the questions.
 
 - **One question.** Keep the page whole however long it is. Dismiss the item with
-  `decide_review_item(review_item=<id>, decision='dismiss', why='intentional: <the one question>')`. The page stays quiet until it reaches its
-  next size step.
-- **Several questions, each with its own material.** Propose a split through the
-  curation lane. Read the page's `inspect_memory(operation="curation.work_item")` first: its
-  `step_schemas` give each step kind's required and allowed args. Then submit the
-  plan with `manage_memory` operation `curation-propose`. Preview the plan and
-  ask the user for exact confirmation before applying it. After a split, a remainder
-  or a new child that still reaches a size step gets its own item. Answer those in
-  the same pass.
-- **A hub by design.** Add a breadth tag (`hub` or `snapshot`) with a governed edit.
-  The page is then never asked.
+  `decide_review_item(review_item=<id>, decision="dismiss", why="intentional: <the one question>")`. The page
+  stays quiet until its next size step.
+- **Several questions, each with its own material.** Propose a split through curation
+  ([vault care](vault-care.md)). Ask the user for exact confirmation of the previewed plan before you
+  apply it. A remainder or new child that still reaches a size step gets its own item; answer those in the
+  same pass.
+- **A hub by design.** Add a breadth tag (`hub` or `snapshot`) with `edit_note(action="set_tags", tags=[...])`,
+  resending the current tags. The page is then never asked. A page below the first step is not asked either.
 
-Answer once and carry on with the task. Do not recite the field names to the user,
-and do not split a coherent note to make the question go away. A page that drops
-below the first step is not asked either.
+Do not split a coherent note to make the question go away.
 
-**When a write asks whether the page belongs in its project.** A write may return
-`structure_suggestion` of kind `ownership`. It means the written page is being asked
-whether it belongs in its current project and home folder: the page was created in a
-project, its project key or title just changed, or the daily rotation reached it. It does
-not say the page is misfiled: the runtime decides when to ask and you judge meaning.
-The question carries the ownership test, and the served `routes` in the bootstrap carry
-the same wording. Apply it to the page in hand, answer before you reply to the user, and
-do not change the page when you answer.
+**`ownership`: does the page belong in its project?** The page was created in a project, its project key
+or title just changed, or the daily rotation reached it. It does not say the page is misfiled. Apply the
+ownership test that the question carries to the page in hand, answer before you reply to the user, and
+leave the page unchanged while you answer.
 
-- **It serves the project's goal.** Dismiss the item with
-  `decide_review_item(review_item=<id>, decision='dismiss', why='intentional: <the project goal this page serves>')`. The item stays quiet while the
-  page keeps its project key, folder and title, however much the page grows.
-- **It has its own goal, schedule or course of events.** Tell the user. On their yes,
-  propose the move or split through the curation lane. Register a new project through
-  the project-key route first, link the related projects' notes with a typed relation,
-  and get the user's exact confirmation of the previewed plan.
-- **You cannot tell.** If the user already decided this page's home and nothing since
-  bears on ownership, the earlier decision stands: dismiss with a reason that starts
-  `deferred:`, or make no call.
+- **It serves the project's goal.** Dismiss with `why="intentional: <the project goal this page serves>"`.
+  The item stays quiet while the page keeps its project key, folder and title, however much the page grows.
+- **It has its own goal, schedule or course of events.** Tell the user. On their yes, propose the move or
+  split through curation. A write with a new `project` slug registers the project. Link the related
+  projects' notes with a typed relation, and get the user's exact confirmation of the previewed plan.
+- **You cannot tell.** If the user already decided this page's home and nothing since bears on ownership,
+  the earlier decision stands: dismiss with a reason that starts `deferred:`, or make no call.
 
-Answer once and carry on with the task. Do not recite the field names to the user.
 A page that is asked and also at a size step carries the ownership question first.
 
-**When a write returns a rename.** A write that changed a page's title may return
-`structure_suggestion` of kind `rename`. The new title no longer matches the file name,
-and the suggestion holds the name that the title now gives, plus the spelled-out
-`curation_action='relocate'` call for that one page. The user's own retitle is the
-approval: do not ask again. Run the call as a preview, tell the user the new name in one
-line, and apply it. A rename keeps links working. When the suggestion is absent, the
-name still follows the title or the title did not change.
+**`rename`: the title no longer matches the file name.** The suggestion holds the name that the title now
+gives. The user's own retitle is the approval, so do not ask again. Preview the relocation with the arguments
+the suggestion carries (`curation.relocate`, [vault care](vault-care.md)), tell the user the new name in one
+line, and apply it. A rename keeps links working. When no suggestion comes back, the name still follows the
+title, or the title did not change.
 
-**When many pages carry stale names.** Pages made before titles named files, or retitled
-since, keep a name that no longer follows their title. The review queue holds one item for
-the whole vault (`name_drift`), and `inspect_name_drift` lists the pages with the name each
-would get. Never rename a page that has no usable title; the list marks those. Propose the
-next batch to the user as one preview with the call the item carries, and apply it only
-on their yes. Repeat per batch until the item closes.
+**`name_drift`: many pages carry stale names.** Pages made before titles named files, or retitled since,
+keep a name that no longer follows their title. The review queue holds one item for the whole vault, and
+`inspect_memory(operation="maintenance.name_drift")` lists the pages with the name each would get. Never
+rename a page that has no usable title; the list marks those. Propose the next batch to the user as one
+preview with the call the item carries, apply it only on their yes, and repeat per batch until the item
+closes.
 
-**Comprehensive coverage, minimal expression.** Capturing at the landing is about
-*timing*, not *volume* — it never means keep less. Minimality is a property of
-*expression* — distillation, signal-density, no redundancy — never of *coverage*.
-Don't drop context or detail because it "doesn't seem important": importance is
-usually only legible in hindsight, and nothing here forces the tradeoff (no
-retention decay, hybrid BM25+vector retrieval, append-only `Sources/`, no storage
-limit). Default coverage to comprehensive; reserve concision for *how* a note is
-written, not *what* it keeps. Torn between keeping a detail and dropping it? Keep
-it — preserving raw detail keeps it recoverable; compiled notes should avoid redundant restatement.
-Capture more, at the right layer: raw verbatim to `Sources/` liberally; compiled
-notes stay distilled in form but never context-pruned.
+**`source_classification_debt`: the vault holds sources nobody gave a kind.** Offer once, in the user's own
+words, to sort them, then reclassify each ([page types](page-types.md), source).
 
-## Descriptive vs analytical coverage
+## Comprehensive coverage, minimal expression
 
-The KB serves two complementary purposes:
+Capturing at the landing is about timing, not volume: it never means keep less. Minimality is a property of
+expression (distillation, signal density, no redundancy), never of coverage. Do not drop context or detail
+because it does not seem important. Importance is usually legible only in hindsight, and nothing here forces
+the tradeoff: there is no retention decay, retrieval is hybrid, `Sources/` is append-only, and storage has no
+limit. Default coverage to comprehensive, and reserve concision for how a note is written, not what it keeps.
+When you hesitate between keeping a detail and dropping it, keep it: raw detail stays recoverable. Put raw
+verbatim material in `Sources/` liberally. Keep compiled notes distilled in form but never context-pruned.
 
-- **Descriptive coverage** — *describe what is.* Architecture hubs
-  (`Notes/Research/<project>/<subsystem>-architecture`), point-in-time snapshots,
-  concept entities. These let a future planner orient quickly.
-- **Analytical coverage** — *extract reusable lessons.* Patterns, insights,
-  failure modes, decisions. These compound across projects.
+## Descriptive and analytical coverage
 
-Both are first-class. When orienting a new area, descriptive hubs typically come
-first; patterns and insights extract from the descriptive layer as second-order
-knowledge.
+The Knowledge Base serves two complementary purposes, and both are first-class.
 
-**Boundary with a code repo.** For a software project the repository is the
-source of truth for code, design, and decisions. KB coverage of it is the
-cross-session/cross-project layer the repo can't hold — strategy, roadmap,
-orientation, hard-won empirical findings — never a condensed changelog or a
-restatement of what specs/commits already capture.
+- **Descriptive coverage** describes what is: architecture hubs, point-in-time snapshots and concept
+  entities. They let a future planner orient quickly.
+- **Analytical coverage** extracts reusable lessons: patterns, insights, failure modes and decisions. They
+  compound across projects.
+
+When you orient in a new area, descriptive hubs usually come first. Patterns and insights then extract from
+the descriptive layer as second-order knowledge.
+
+**Boundary with a code repository.** For a software project the repository is the source of truth for code,
+design and decisions. Knowledge Base coverage is the cross-session, cross-project layer the repository cannot
+hold: strategy, roadmap, orientation and hard-won empirical findings. It is never a condensed changelog or a
+restatement of what specs and commits already capture.
 
 ## Write discipline
 
 These rules are non-negotiable.
 
-1. **Read-only paths.** Never write vault content outside `Knowledge Base/`. Any
-   sibling folders in the vault are inputs only. Compiled notes may **link to**
-   them but never modify them. Ordinary workspace files (the user's code,
-   documents and project files) are not the vault: write them with your own file
-   tools when asked.
+1. **Read-only paths.** Never write vault content outside `Knowledge Base/`. Sibling folders in the vault are
+   inputs only: compiled notes may link to them but never modify them. Ordinary workspace files (the user's
+   code, documents and project files) are not the vault. Write them with your own file tools when asked.
+   `write-scope.md` holds the full path map.
+2. **Sources and Evidence are append-only.** Once a file lands in `Sources/` or `Evidence/`, never edit its
+   content. Correct it by adding a new source and superseding the old one through a compiled note. Moving a
+   file within the same append-only tree is allowed through `manage_memory(operation="files.move", arguments={...})`.
+   Crossing the boundary is forbidden.
+3. **Use the active write authority.** Follow [engagement](engagement.md) and the current envelope for every
+   write, including raw capture and vocabulary effects. Draft internally. Present content and wait only when
+   the active authority or a named procedure requires it. An explicit request or approved batch keeps its
+   existing scope, and neither lifts an action-class ceiling or grant.
+4. **Compiled pages carry their connections.** A compiled note names in `sources` every `Sources/` or
+   `Evidence/` page it draws from, in the write call itself and not as a follow-up edit. Each entry makes the
+   server append this note's wikilink to that source's `ingested_into`, which maintains the source-to-note
+   graph. Skip it, and the source stays in the unprocessed backlog even though you compiled it. A conclusion
+   that builds on prior conclusions links them inline, and the links that carry direction go under
+   `## Relations` as typed edges (see Linking discipline).
 
-2. **Sources and Evidence are append-only.** Once a file lands in `Sources/` or
-   `Evidence/`, never edit its *content*. Corrections happen by adding a new
-   source and superseding the old via a compiled note. Relocating a file *within*
-   the same append-only tree (into a themed sub-folder) is allowed via
-   `move_file`; crossing the boundary is forbidden.
+   **Honest zero is legitimate.** There is no minimum edge count and no quota. A note with no source and no
+   prior art is a complete, valid note. This rule forbids omitting a link you know about, never failing to
+   find one. Manufacturing an edge to look connected is worse than none.
+5. **No `confidence` floats.** A claim carries no confidence score, and a degree of belief is never a
+   frontmatter field. Citations and link counts convey trust. A degree of belief that its holder stated is a
+   `## Belief` unit: see Recording a degree of belief in `page-types.md`.
+6. **Supersession over deletion.** When information is replaced, supersede the old page and never delete it.
+   `supersession.md` has the protocol.
 
-3. **Use the active write authority.** Follow [engagement](engagement.md) and
-   the current envelope for every write, including raw capture and vocabulary
-   effects. Draft internally; present content and wait only when the active
-   authority or a named procedure requires it. An explicit request or approved
-   batch keeps its existing scope; neither lifts an action-class ceiling or grant.
+The server writes the frontmatter, the canonical H1, `index.md`, `log.md` and the source back-references.
+Never write them by hand. [Page types](page-types.md) defines what each field means.
 
-4. **Frontmatter is mandatory.** Every file written under `Knowledge Base/` must
-   carry frontmatter conforming to `frontmatter.md`. Exceptions:
-   `index.md`, `log.md`, and sub-folder `index.md` files. Non-markdown binaries
-   carry frontmatter in a sidecar `.md` if one is needed.
+## Research scope keys
 
-5. **Compiled pages carry their connections.** A compiled note names in
-   `sources:` every `Sources/` or `Evidence/` page it draws from, in the write
-   call itself — not as a follow-up edit. Each entry makes the writer append this
-   note's wikilink to that source's `ingested_into:`, which is what maintains the
-   source→note graph; skip it and the source stays in the unprocessed backlog
-   permanently even though you compiled it. A conclusion that builds on prior
-   conclusions links them inline, and the ones carrying direction go under
-   `## Relations` as typed edges (see § Linking discipline).
+A research note's `project` is a slug-shaped key registered in `_Schema/project-keys.yaml`. The set is open,
+not a closed enum. Pick the most specific scope first. A typical starter set:
 
-    **Honest zero is legitimate.** There is no minimum edge count and no quota. A
-    note with no source and no prior art is a complete, valid note — write it and
-    move on. This rule forbids *omitting a link you know about*, never *failing to
-    find one*. Manufacturing an edge to look connected is worse than no edge.
+- Products and projects: `project-alpha`, `project-beta`, one key per project.
+- Domains: `work`, plus your own (`research`, `ops`).
+- Cross-cutting: `personal`, for anything not tied to a specific project or domain.
 
-6. **No `confidence` floats.** A claim carries no confidence score, and a
-   confidence or a degree of belief is never a frontmatter field. Trust is
-   conveyed through citations and link counts. A degree of belief that its holder
-   stated is a `## Belief` unit: see "Recording a degree of belief" in
-   `page-types.md`.
+A pattern that applies across several projects takes `projects` (a list) instead of `project`.
 
-7. **Supersession over deletion.** When information is replaced, mark the old page
-   `superseded`, link to the new one, and never delete. See
-   `supersession.md`.
-
-8. **Always update `index.md` and `log.md`.** Every write that creates or moves a
-   page updates the top-level `index.md` (counts + Recent activity, cap-50),
-   appends to `log.md`, refreshes the relevant sub-folder `index.md` counts, and
-   appends the new artifact's wikilink to the originating source's `ingested_into:`
-   frontmatter — the back-reference rule 5 depends on. Count tokens are
-   auto-refreshed by the writer; hand-curated descriptions are preserved.
-
-For the full read-only / writeable path map see `write-scope.md`.
-
-## Page types
-
-The page types under `Knowledge Base/`, each with a required frontmatter shape,
-naming rule, and location. **Full per-type spec: `page-types.md`;
-frontmatter: `frontmatter.md`.** The behaviorally-load-bearing
-distinctions:
-
-- **source** — raw input, `Sources/<Kind>/[<Domain>/]` projected from its
-  `source_type` and optional `domain`. Two flavors (same frontmatter):
-  *transcript* (content as-is) and *origination record* (a session-reasoning
-  capture, `ingested_into:` listing what it produced).
-- **research-note** — `Notes/Research/<scope>/`. Informal subtypes: *standard*;
-  *hub* (orients a subsystem, links out; refresh on major ships); *snapshot*
-  (point-in-time, drift OK, say "snapshot" in body).
-- **insight** — cross-cutting lesson, `Notes/Insights/`.
-- **failure** — failure mode, `Notes/Failures/`.
-- **pattern** — reusable pattern, `Notes/Patterns/`. Use `projects:` (plural) when
-  it spans projects.
-- **procedure** — reusable way of working, with when to use it and when not to, `Notes/Procedures/`.
-- **experiment** — hypothesis + protocol + primary data, `Notes/Experiments/<domain>/`.
-- **production-log** — creative artifact + production knowledge, `Notes/Productions/<medium>/`.
-- **entity** — typed node under the folder resolved by the stable entity registry
-  (People / Organizations / Concepts / Libraries / Decisions).
-
-### Research scope keys
-
-The `project` field on a research note is a slug-shaped key registered in
-`_Schema/project-keys.yaml`. It's an **open set**, not a closed enum — pick the
-most-specific scope first. A typical starter set:
-
-- Products / projects: `project-alpha`, `project-beta` — one key per project.
-- Domains: `work`, plus your own (`research`, `ops`, …).
-- Cross-cutting: `personal` — anything not tied to a specific project or domain.
-
-For **patterns** that apply across multiple projects, use `projects:` (plural
-list) instead of `project:` (singular), e.g. `projects: [project-alpha, project-beta]`.
-
-**Auto-registration of new project keys.** The `create_note`, `supersede_note`,
-`edit_note` (frontmatter-patch), and `inspect_memory` and `manage_memory` (decision-entity)
-writers auto-append unknown
-slug-shaped project keys to `_Schema/project-keys.yaml` and create the matching
-`Notes/Research/<Folder>/` directory on first use — no manual YAML edit needed.
-Pass `project_category` to bucket the new key (product / activity / domain /
-cross-cutting); omitted, it lands `uncategorized`. A **typo guard** rejects new
-keys within edit distance ≤2 of an existing key (`wrok` → "Did you mean
-'work'?") so the registry stays clean.
-
-### Experiment vs production-log
-
-Easy to confuse (both time-bounded, date-prefixed, with outcomes).
-**Experiment** = a hypothesis tested under a protocol with primary data
-(`Notes/Experiments/`); ends in confirm/refute/qualify. **Production-log** = a
-creative artifact + its production knowledge (`Notes/Productions/`); ends in
-engagement metrics + reflection, and the value is the thing made. Quick test: set
-out to *learn whether X is true* (experiment) or to *make a thing the world sees*
-(production)?
-
-## Workflow: typical add-then-compile session
-
-1. **You paste raw material or ask to log something.**
-2. **Skill calls `save_source` to create a source file.** Classify it on two
-   independent axes and let the location follow: `source_kind` is what the
-   artifact **is** (`article`, `session`, `research-report`, `invoice-receipt`,
-   `field-notebook`, …) and `domain` is what it is **about** (`travel`, `health`,
-   `software`, …). Both are **open vocabularies** — name the label you actually
-   mean even when Evermatter has not seen it, and it registers itself. Add `projects`
-   for the work the source serves; a source may serve several, and projects never
-   change where it is filed.
-   The path is a projection of that metadata, `Sources/<Kind>/[<Domain>/]` —
-   e.g. `Sources/Reports/Travel/`, `Sources/Invoices/Equipment/`,
-   `Sources/Articles/`. There is no catch-all kind: when no familiar label fits,
-   name a new one. Filename: ISO-date + slug. Updates `Sources/index.md`.
-   A capture may come back with a `structure_suggestion` of kind
-   `source_classification_debt` when the vault holds sources nobody has given a
-   kind. Offer once, in the user's own words, to sort them, then reclassify each.
-   The display title is stored losslessly as Unicode in frontmatter and the H1.
-   When a non-Latin title needs a readable portable filename, pass a separate
-   explicit lowercase ASCII `slug`; never treat a transliterated filename as
-   the page's title. Existing files are not renamed automatically.
-3. **Compile under the live request and engagement policy.** Follow the
-   [source compilation pass](#source-compilation-pass)
-   for inventory, prior knowledge, central identities and semantic coverage.
-   An optional `create_note` scaffold prepares one note; adjacent pages are
-   unreviewed candidates, and opening excerpts do not cover the full source.
-4. **Write reviewed outputs with `create_note`.** Carry original source references
-   and grounded accepted relations in the first write. Follow the live confirmation
-   ceiling and any existing batch authority.
-5. **Inspect results and close the source compilation pass.** Report custody,
-   extraction and citation linkage separately from semantic coverage. Counts do
-   not establish completeness; unread, unavailable and uncompiled portions remain explicit.
-
-When you approve a scope of multiple files upfront, the workflow collapses to a
-single batch write under the active authority (see Write discipline § 3).
+A write with a new `project` or `projects` slug registers the key and creates the matching
+`Notes/Research/<Folder>/` directory on first use, with no manual YAML edit. A typo guard refuses a new key
+within edit distance 2 of an existing key, and its message names the near key, so the registry stays clean.
 
 ## Source compilation pass
 
-The active conversation agent owns this judgment under the request and live engagement policy.
-Selected compilation needs no special user wording to trigger decomposition, central identity resolution or relation review.
-Raw capture remains valid without compilation.
+The active conversation agent owns this judgment under the request and the live engagement policy. Selected
+compilation needs no special user wording to trigger decomposition, central identity resolution or relation
+review. Raw capture stays valid without compilation.
 
-1. Read the available full source through its exposed routes; unread or unavailable portions remain explicit.
-2. Inventory reusable themes and central durable referents; the inventory reflects meaning, without output quotas.
-3. Retrieve prior conclusions, resolve central identities and inspect suitable filing homes; reuse and missing durable identities are distinguished.
-4. Compile independently useful outputs into suitable existing or new homes; attribution, observations, hypotheses and measurements remain distinct.
-   Keep coherent detail together and cite the preserved originals in the first write.
-   Handle durable entities through the live resolve-before-create and vocabulary routes.
-5. Review candidate relations against their meaning and evidence; author grounded specific relations, a proposed new relation type, a plain link as the last resort, or no edge.
-   Resolve registered meaning before authoring, and inspect relation feedback after each write.
-   Generic connectivity does not establish typed specificity. Suggestions never establish meaning by themselves.
-6. Check the whole inventory once against the committed outputs; report any unread, unavailable or uncompiled portion honestly.
-   Custody, extraction and valid citations are separate from semantic coverage.
-   One live citing derivative clears the citation backlog only; the server reports semantic compilation as `unassessed`.
-   Do not add notes or edges to reach a count or repeat the same source warning indefinitely.
+1. Read the available full source through its exposed routes. Unread or unavailable portions stay explicit.
+2. Inventory the reusable themes and the central durable referents. The inventory reflects meaning, with no
+   output quotas.
+3. Retrieve prior conclusions, resolve central identities and inspect suitable filing homes. Keep reuse and
+   missing durable identities distinct.
+4. Compile independently useful outputs into suitable existing or new homes. Keep attribution, observations,
+   hypotheses and measurements distinct, keep coherent detail together, and cite the preserved originals in
+   the first write. Handle durable entities through resolve-before-create and the vocabulary route.
+5. Review candidate relations against their meaning and evidence. Author a grounded specific relation, a
+   proposed new relation type, a plain link as the last resort, or no edge. Resolve registered meaning
+   before you author, and read the relation feedback after each write. Generic connectivity does not
+   establish typed specificity, and a suggestion never establishes meaning by itself.
+6. Check the whole inventory once against the committed outputs, and report any unread, unavailable or
+   uncompiled portion. Custody, extraction and valid citations are separate from semantic coverage. One live
+   citing derivative clears the citation backlog only, and the server reports semantic compilation as
+   `unassessed`. Do not add notes or edges to reach a count, and do not repeat the same source warning
+   indefinitely.
 
 ### Several recordings and documents
 
-When the sources are a set of recordings and documents, such as a seminar series or a case file, run the pass above with these additions:
+When the sources are a set of recordings and documents, such as a seminar series or a case file, run the pass
+above with these additions.
 
-1. Inventory every source and check its extraction before reading it: processing state, `asr_language`, `asr_language_probability`, `asr_language_source` and `asr_language_mode` in the sidecar, and faults such as a wrong language or one line repeated. A `multilingual` mode means the engine read the recording in several languages, so `asr_language` is not a wrong-language fault. Reprocess a faulty extraction with `manage_memory(operation="media.reprocess", arguments={'path': ..., 'language': <code>})` before relying on it.
-2. Build a timeline. Order recordings by capture time, and mark recorder splits (one session in several files), overlaps and duplicates, so each session counts once.
-3. Read transcripts by time range and documents by page. Cite `[m:ss]` ranges and `[page N]` markers, not whole files.
-4. Give each claim one attribution class. The open observation category names the class, such as `source_asserted`, `verified`, `user_position` or `question`, and the `(context)` slot holds the citation, as in `- [verified] <claim> (<primary source and section>)`.
+1. Inventory every source and check its extraction before you read it: the processing state, the language
+   fields in the sidecar (`asr_language`, `asr_language_probability`, `asr_language_source`,
+   `asr_language_mode`), and faults such as a wrong language or one line repeated. A `multilingual` mode
+   means the engine read the recording in several languages, so `asr_language` is then not a wrong-language
+   fault. Reprocess a faulty extraction with
+   `manage_memory(operation="media.reprocess", arguments={"path": ..., "language": <code>})` before you rely on it.
+2. Build a timeline. Order recordings by capture time, and mark recorder splits (one session in several
+   files), overlaps and duplicates, so each session counts once.
+3. Read transcripts by time range and documents by page. Cite `[m:ss]` ranges and `[page N]` markers, not
+   whole files.
+4. Give each claim one attribution class. The open observation category names the class, such as
+   `source_asserted`, `verified`, `user_position` or `question`. The `(context)` slot holds the citation, as in
+   `- [verified] <claim> (<primary source and section>)`.
    - Source-asserted: a speaker or document says it.
    - Independently verified: checked against a primary source, which the `(context)` cites.
-   - The user's own positions: record only what the user states. Where one is missing, leave a marked slot such as `(user position: to confirm)`; never infer it.
+   - The user's own positions: record only what the user states. Where one is missing, leave a marked slot
+     such as `(user position: to confirm)`. Never infer it.
    - Open questions: record what remains unresolved.
-5. Check legal, scientific and numeric claims against primary sources, such as the statute text, the paper or the dataset, before marking them verified. An unchecked claim stays source-asserted.
-6. Keep a coverage ledger with one row per source: the ranges or pages read, the outputs that cite it, and what stays unread or unavailable.
-7. Finish with an audit of the ledger against the committed outputs. Report sources with no output, unread ranges and unverified claims as gaps.
+5. Check legal, scientific and numeric claims against primary sources, such as the statute text, the paper or
+   the dataset, before you mark them verified. An unchecked claim stays source-asserted.
+6. Keep a coverage ledger with one row per source: the ranges or pages read, the outputs that cite it, and
+   what stays unread or unavailable.
+7. Finish with an audit of the ledger against the committed outputs. Report sources with no output, unread
+   ranges and unverified claims as gaps.
 
 ## Linking discipline
 
-Link every compiled page to what it actually connects to — this is Write
-discipline rule 5, restated with its mechanics. Linking is what turns the KB from
-a junk drawer into a graph. The obligation is to record the connections you know
-about, not to reach a count: a page with nothing to link to is finished, and a
-fabricated edge is worse than none.
+Link every compiled page to what it actually connects to. This is Write discipline rule 4 with its mechanics.
+Linking turns the Knowledge Base from a junk drawer into a graph. The obligation is to record the connections
+you know about, not to reach a count. A page with nothing to link to is finished, and a fabricated edge is
+worse than none.
 
-**Canonical wikilink form: full vault-rooted.** Every wikilink resolves cleanly
-under the vault root with no prefix guessing:
-`[[Knowledge Base/Entities/Concepts/Profile]]`. Link back to the originating
-`Sources/` file via the `sources:` frontmatter list (mirrors the source's
-`ingested_into:` list).
+**Wikilink form.** Write full vault-rooted links, such as `[[Knowledge Base/Entities/Concepts/Profile]]`. The
+server normalizes any other form, so write what you have. Link back to the originating `Sources/` file through
+the `sources` list.
 
-**Canonical note relation form: one directional edge per bullet under
-`## Relations`.** Use a governed lower-snake-case relation and one wikilink:
+**Relation form: one directional edge per bullet under `## Relations`.** Use a governed lower-snake-case
+relation and one wikilink:
 
 ```markdown
 ## Relations
@@ -433,153 +308,118 @@ under the vault root with no prefix guessing:
 - depends_on [[Knowledge Base/Entities/Decisions/Architecture Decision]]
 ```
 
-Use semantic-block metadata such as
-`- relations: evidenced_by: [[Source]], contradicts: [[Earlier Finding]]` when
-the edge belongs to a specific claim, finding, or piece of evidence. An inline
-wikilink is only a plain link. When the note uses the page it links — the evidence
-it rests on, the decision it backs, a person who took part, the plan it carries
-out — also write that relation under `## Relations`. Keep the inline link alone
-only when the two pages just share a subject. Never turn a semantic suggestion
-into a typed relation without reviewing its meaning.
+Use semantic-block metadata such as `- relations: evidenced_by: [[Source]], contradicts: [[Earlier Finding]]`
+when the edge belongs to a specific claim, finding or piece of evidence. An inline wikilink is only a plain
+link. When the note uses the page it links (the evidence it rests on, the decision it backs, a person who took
+part, the plan it carries out), also write that relation under `## Relations`. Keep the inline link alone only
+when the two pages just share a subject. Never turn a semantic suggestion into a typed relation without
+reviewing its meaning.
 
-**Relation labels are governed; categories and tags are not.** Categories are open
-vocabulary — invent one whenever it fits. Relation labels come from a registry, so
-an unregistered label (`- inspired_by [[X]]`) is *retained and surfaced* but does
-not yet count as a graph edge, and does not connect the page. That is deliberate:
-the label stays visible as review debt instead of being silently downgraded to a
-generic link.
+**Relation labels are governed; categories and tags are not.** Categories are open vocabulary, so invent one
+whenever it fits. Relation labels come from a registry. The server keeps an unregistered label
+(`- inspired_by [[X]]`) and surfaces it, but it does not count as a graph edge and does not connect the page.
+That is deliberate: the label stays visible as review debt instead of silently turning into a generic link.
 
-So the vocabulary is extensible, not fixed. Resolve before authoring with
-`inspect_memory(operation="connections.resolve_relation")`, and reuse a specific truthful
-registered relation when one fits. A write that adds the generic relation is refused:
-when no relation fits, propose a new relation type, write a plain link as the last
-resort, or write no edge. No edge is better than invented meaning. For a durable recurring
-distinction, use `inspect_memory(operation="schema.propose_relation", arguments={'subject': 'relations'})`,
-review the complete delta and duplicate evidence, then persist that exact delta
-with `operation="save-relations"`, its `expected_hash`, and `why`. Meaning is
-immutable: corrections create a new canonical key and deprecate the old one.
-Registered relations become traversable edges while clean aliases remain authoring
-labels. A registry-marked generic relation that an older page already holds establishes connectivity,
-not typed specificity; an all-generic advisory asks for meaning review without forcing an edge.
+The vocabulary is extensible, not fixed.
 
-**The writer normalizes on your behalf.** Evermatter's writers run every wikilink
-through `vault.normalize_wikilink()` before writing — bare names, KB-relative
-paths, `.md` suffixes, and stale paths get rewritten to canonical full form. You
-can write in any form; the on-disk file lands canonical.
+1. Resolve before you author: `inspect_memory(operation="connections.resolve_relation")`. Reuse a specific
+   truthful registered relation when one fits.
+2. A write that adds the generic relation is refused. When no relation fits, propose a new relation type,
+   write a plain link as the last resort, or write no edge. No edge beats invented meaning.
+3. For a durable recurring distinction, propose it through [vocabulary](vocabulary.md). Meaning is immutable:
+   a correction creates a new canonical key and deprecates the old one.
 
-If a wikilink target doesn't exist yet, prefer creating the entity stub via
-**inspect_memory** and **manage_memory** rather than leaving a dangling link. Dangling links accumulate
-and surface in `inspect_memory(operation="maintenance.audit")` as `broken_wikilink`.
+Registered relations become traversable edges, and clean aliases stay authoring labels. A registry-marked
+generic relation that an older page already holds establishes connectivity, not typed specificity. An
+all-generic advisory asks for a meaning review without forcing an edge.
 
-When creating an entity that points at a **currently-evolving external artifact**
-(a live spec, a code library, a service config), use **pointer-style** — summary
-+ canonical-source pointer + connective tissue — not **mirror-style** (versions,
-file inventories, command lines copied verbatim). Mirroring guarantees drift.
+If a wikilink target does not exist yet, create the entity page instead of leaving a dangling link. Dangling
+links accumulate and surface in `inspect_memory(operation="maintenance.audit")` as `broken_wikilink`.
 
-## When to ask vs. when to proceed
+When an entity points at a currently evolving external artifact (a live spec, a code library, a service
+config), write it pointer-style: a summary, the canonical-source pointer and connective tissue. Mirror-style
+copies (versions, file inventories, command lines) guarantee drift.
 
-Use the live [engagement](engagement.md), envelope class and disposition for the
-actual action and caller. Off or advisory permits no agent-initiated write.
-An explicit user request or approved batch follows its existing scope and required guards.
-A capture preference never lifts a ceiling, v2 grant, scope limit or named procedural hold.
+## When to ask and when to proceed
 
-Ask for confirmation when the active authority or named procedure requires it.
-Keep confirmation for restructure, including supersession, entity merge and
-substantial curation, and for accepting a queued relation. Permitted additive
-writes do not acquire another confirmation step because they create a note,
-entity or registry entry. Raw capture also follows the live authority: first-use
-labels can require registry writes.
+Use the live [engagement](engagement.md), envelope class and disposition for the actual action and caller.
+Off or advisory permits no agent-initiated write. An explicit user request or approved batch follows its
+existing scope and required guards. When the user approves a scope of several files up front, the work
+collapses into one batch write under that authority. A capture preference never lifts a ceiling, a grant, a
+scope limit or a named procedural hold.
 
-Ask about type, scope, domain, medium or page framing only when a material choice
-remains ambiguous after checking the source, current context and registries.
-An unspecified field alone does not require a question.
+Ask for confirmation when the active authority or a named procedure requires it. Keep confirmation for
+restructure (including supersession, entity merge and substantial curation) and for accepting a queued
+relation. A permitted additive write needs no extra confirmation because it creates a note, an entity or a
+registry entry. Raw capture also follows the live authority: first-use labels can require registry writes.
 
-Draft and commit through the normal governed writer when authorized; present
-content only when required. Reuse resolved identities and existing meaningful
-connections, inspect the mutation result, and report the committed paths.
-Read-only recall and review follow the live retrieval policy.
+Ask about type, scope, domain, medium or page framing only when a material choice remains ambiguous after you
+check the source, the current context and the registries. An unspecified field alone does not require a
+question.
 
-## Source citations and write-tool details
+Draft and commit through the normal governed writer when authorized, and present content only when required.
+Reuse resolved identities and existing meaningful connections, read the mutation result, and report the
+committed paths. Read-only recall and review follow the live retrieval policy.
 
-- **Citations.** Every non-empty `sources` entry must resolve to authorized
-  governed Source or Evidence material. A URL, connector or remote file ID,
-  working script or derivative summary is not the original: capture it first
-  (`save_source`, `save_evidence`, `save_evidence`) and cite its
-  governed path or stable ref. With no external source, pass an honest empty
-  list. An unresolved citation returns `UNRESOLVED_SOURCE_CITATION` and writes
-  nothing. Brackets and the leading `Knowledge Base/` are tolerated in paths.
-- **Back-references.** Each cited source gets the new note's wikilink appended
-  to its `ingested_into:` frontmatter, atomically with the citation. A live citing
-  derivative clears the citation backlog only; semantic compilation remains unassessed.
-  Omitting `sources` on a research-note,
-  insight, failure or pattern only warns.
-- **Edits.** A source-changing `edit_note` validates the complete final
-  `sources` list and updates back-references atomically. An unrelated edit may
-  leave a legacy unresolved citation; list that debt with
-  `inspect_memory(operation="maintenance.audit", arguments={'categories': ['unresolved_source_citation']})`.
-- **Frontmatterless pages.** Body and section edits work on ordinary Markdown
-  without synthesizing YAML. Frontmatter and take-row operations still require
-  frontmatter.
-- **Suggestions.** `create_note(suggest_links=true)` adds a `suggestions` block of
-  existing pages the note should probably link to (read it with
-  `detail="full"`). It costs one retrieval pass over the corpus, so it
-  is off by default; duplicate and overlap warnings run either way, and
-  `write_feedback.suggestions.computed` says which happened.
-- **Relation recovery.** When `RELATION_DISPOSITION_STALE` or
-  `RELATION_DISPOSITION_MISSING` blocks an `edit_note`, re-send the same
-  call with an `unlinked_reason`; that one call commits. A previewed edit
-  (`preview=true`) is committed by sending the same call again without `preview`; the
-  server binds the relation review itself. The decision then binds the page, not its bytes: later edits ask nothing
-  while the page stays unconnected, and an edit that removes its last connection
-  is still refused. The alternative is a typed `## Relations` entry
-  (`- supports [[...]]`), or a plain link (`- links_to [[...]]`) when the page only
-  shares its subject with another page; use `unlinked_reason` only when no page relates.
-  Dataview `supports:: [[...]]` is not relation syntax.
-  A `GENERIC_RELATION_REFUSED` refusal takes no disposition: repeat the call with one of
-  its listed specific relations, a proposed relation type, or a plain link
-  (see [mutation-results](mutation-results.md)).
+## Source citations and write details
 
-### Correcting existing knowledge
+- **Citations.** Every non-empty `sources` entry must resolve to authorized governed Source or Evidence
+  material. A URL, a connector or remote file id, a working script or a derivative summary is not the
+  original: capture it first (`save_source`, `save_evidence`) and cite its governed path or stable ref. With no
+  external source, pass an honest empty list. An unresolved citation writes nothing. Brackets and the leading
+  `Knowledge Base/` are tolerated in paths.
+- **Back-references.** Each cited source gets the new note's wikilink in its `ingested_into`, atomically with
+  the citation. Omitting `sources` on a research-note, insight, failure or pattern only warns.
+- **Edits.** A source-changing `edit_note` validates the complete final `sources` list and updates
+  back-references atomically. An unrelated edit may leave a legacy unresolved citation; list that debt with
+  `inspect_memory(operation="maintenance.audit", arguments={"categories": ["unresolved_source_citation"]})`.
+- **Frontmatterless pages.** Body and section edits work on ordinary Markdown without synthesizing YAML.
+  Frontmatter and take-row operations still require frontmatter.
+- **Relation recovery.** When an `edit_note` is blocked for a stale or missing relation decision, send the
+  same call again with an `unlinked_reason`, and that one call commits. A previewed edit (`preview=true`)
+  commits when you send the same call again without `preview`. The decision then binds the page, not its
+  bytes: later edits ask nothing while the page stays unconnected, and an edit that removes the last
+  connection is still refused. The alternative is a typed `## Relations` entry (`- supports [[...]]`), or a
+  plain link (`- links_to [[...]]`) when the page only shares its subject with another page. Use
+  `unlinked_reason` only when no page relates. Dataview `supports:: [[...]]` is not relation syntax. A refused
+  generic relation takes no disposition: repeat the call with a listed specific relation, a proposed relation
+  type or a plain link ([mutation-results](mutation-results.md)).
 
-When new evidence changes a durable conclusion, inspect each affected claim and its sources.
-Distinguish what someone attested from what the evidence establishes.
-Use the suitable existing home; a correction does not need another page by default.
-Reconcile each affected current proposition and its explanation with the revised scope.
-A later exception does not complete a correction while other current wording still overstates it.
+## Correcting existing knowledge
 
-1. Read the affected units and parent hashes; the exact propositions are visible.
-2. Judge each proposition against the evidence; its support and uncertainty are explicit.
-3. Update wording or author a verdict with guarded writers; anchored identities remain stable.
-4. Add distinct corrective units and justified exact relations; readers can follow the correction.
-5. Read the current units and bounded context; the requested state and citations are verified.
+When new evidence changes a durable conclusion, inspect each affected claim and its sources. Distinguish what
+someone attested from what the evidence establishes. Use the suitable existing home; a correction does not
+need another page by default. Reconcile each affected current proposition and its explanation with the
+revised scope. A later exception does not complete a correction while other current wording still overstates
+it.
 
-Preserve false historical propositions when their history matters, and mark their verdict.
-A refuted claim keeps active standing and full rank as negative knowledge.
-Contradiction and refutation do not imply supersession.
-Use replacement only when another page should become the current answer, under the active engagement policy.
+1. Read the affected units and their parent hashes, so the exact propositions are visible.
+2. Judge each proposition against the evidence, with its support and uncertainty explicit.
+3. Update the wording, or author a verdict, with the guarded writers. Anchored identities stay stable.
+4. Add distinct corrective units and justified exact relations, so readers can follow the correction.
+5. Read the current units and bounded context, and verify the requested state and citations.
 
-The semantic writer keeps prior Markdown in the correction's atomic transition.
-`read_page(part="history")` returns `revision_history` separately from the existing page operation log.
-Add the unit id in `options` to inspect one unit's revisions; use `history_limit` and `history_continuation` for bounded pages.
-A result with `lookup: stale` could not check linked names yet; repeat the same call shortly, not the continuation, before you treat history as absent.
-Entity and legacy corrections use their existing authorized edit owner.
-Records corrections use `edit_record(...)` and its retained row history.
-For observed-state corrections, follow the independent Records discovery route in
-`references/planning-records.md`; Note recall alone does not search structured items.
-A surface without the required edit owner reports that limit; it does not invent another home.
+Preserve false historical propositions when their history matters, and mark their verdict. A refuted claim
+keeps active standing and full rank as negative knowledge. Contradiction and refutation do not imply
+supersession. Use replacement only when another page should become the current answer, under the active
+engagement policy.
+
+The semantic writer keeps the prior Markdown in the correction's atomic transition.
+`read_page(page=..., part="history")` returns the revision history separately from the page operation log.
+Entity and legacy corrections use their existing authorized edit owner. Records corrections use `edit_record`
+and its retained row history. For observed-state corrections, follow the Records discovery route in
+[planning and records](planning-records.md): note recall alone does not search structured items. A surface
+without the required edit owner reports that limit and does not invent another home.
 
 ### Updating one unit with `edit_note`
 
-An update rebuilds the whole unit. `verdict`, `check_by` and `as_of` persist
-when you omit them, and an empty string clears one; the unit id always persists,
-and metadata rows the tool does not own are carried through. `tags`, `context` and `links` are replace-on-omit: omitting one
-clears it, so resend what should stay. A link in a body or in a unit reads and writes as
-`[[Title]]`; the vault stores the page's path form. `verdict` is a categorical epistemic outcome,
-a judgment in words and never a confidence score;
-`inspect_memory(operation="schema.infer", arguments={'subject': 'categories'})`
-lists the accepted verdicts under `verdicts`. `add_observation` sets it on a new
-unit. A belief unit's `links` are replace-on-omit too: an update that omits
-`assesses` drops the claim the belief assesses, so resend it; "Recording a degree
-of belief" in `page-types.md` gives the unit's form. `edit_note` with
-`action="edit_observation"` or `"remove_observation"` takes the unit id as `observation`;
-the server checks the unit version and refuses a stale id with the current one.
+An update rebuilds the whole unit. `verdict`, `check_by` and `as_of` persist when you omit them, and an empty
+string clears one. The unit id always persists, and metadata rows the tool does not own carry through.
+`tags`, `context` and `links` are replace-on-omit: omitting one clears it, so resend what should stay. A link in
+a body or in a unit reads and writes as `[[Title]]`, and the vault stores the page's path form. `verdict` is a
+categorical epistemic outcome, a judgment in words and never a confidence score. `inspect_memory(operation="schema.infer",
+arguments={"subject": "categories"})` lists the accepted verdicts under `verdicts`. `add_observation` sets it on
+a new unit. A belief unit's `links` are replace-on-omit too: an update that omits `assesses` drops the claim the
+belief assesses, so resend it. Recording a degree of belief in `page-types.md` gives the unit's form.
+`edit_note(action="edit_observation", observation=<unit id>)` and `action="remove_observation"` check the unit
+version and refuse a stale id with the current one.

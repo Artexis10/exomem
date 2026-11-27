@@ -1,14 +1,25 @@
-"""User notes: one plain sentence per user-visible change, assigned to releases from the version tags.
+"""User notes: one plain sentence and a short title per user-visible change, assigned to releases from the version tags.
 
 Two subcommands share one definition of a note (openspec change tell-users-whats-new):
 
   check     The pull-request check. A feat, fix or perf pull request adds a `user-notes/*.md`
             file or has the body line `User note: none`. A note that the pull request adds or
-            changes must have the right shape. It never judges a note's wording.
+            changes must have the right shape: a title in YAML front matter and one plain
+            sentence. It never judges a note's wording.
   generate  The release build. It gives each note to the earliest version tag whose history
             contains the commit that added the file, and a note in no tag to the version being
             built. It writes the notes file that the cell image carries, in the format that
             `src/exomem/release_notes_format.py` defines and the cell reads.
+
+A note file is front matter between two `---` lines, then the sentence:
+
+    ---
+    title: Batch moves and renames finish
+    ---
+    Asking your assistant to move or rename a batch of pages now finishes.
+
+PyYAML reads the front matter, so both jobs that run this script install it. `generate` accepts a file
+with no front matter (a note merged without the check) and gives it a null title.
 
 Run `check` from the trusted base revision and read the pull request only as data.
 `generate` needs the full history and the version tags: a shallow clone would date every
@@ -29,6 +40,11 @@ from pathlib import Path, PurePosixPath
 
 NOTES_DIR = "user-notes"
 NOTE_MAX_CHARS = 200
+TITLE_MAX_CHARS = 48
+FRONT_MATTER_FENCE = "---"
+QUOTE_ADVICE = 'put the title in double quotes: `title: "Your title"`'
+#: The front-matter keys a note may carry. A later key (a kind, new or fixed) joins this set.
+FRONT_MATTER_KEYS = frozenset({"title"})
 KEEP_RELEASES = 20
 NO_NOTE_LINE = "user note: none"
 ROOT = Path(__file__).resolve().parents[1]
@@ -87,23 +103,102 @@ def is_note_path(path: str) -> bool:
 # --------------------------------------------------------------------------
 
 
-def _is_plain_text(note: str) -> bool:
-    """Whether CommonMark reads `note` as one paragraph of text and gives back the same characters.
+def _is_plain_text(text: str) -> bool:
+    """Whether CommonMark reads `text` as one paragraph of text and gives back the same characters.
 
     A parser decides, not a pattern: emphasis, links, code, HTML, entities, lists and headings each
     change the token stream or the text, so none passes.
     """
     from markdown_it import MarkdownIt
 
-    tokens = MarkdownIt("commonmark").parse(note)
+    tokens = MarkdownIt("commonmark").parse(text)
     if [token.type for token in tokens] != ["paragraph_open", "inline", "paragraph_close"]:
         return False
     children = tokens[1].children or []
-    return all(child.type == "text" for child in children) and "".join(child.content for child in children) == note
+    return all(child.type == "text" for child in children) and "".join(child.content for child in children) == text
 
 
-def note_problems(text: str) -> list[str]:
-    """What is wrong with the shape of a note, in the words an author reads. Empty when the shape is right."""
+@dataclass(frozen=True)
+class ParsedNote:
+    """A note file read apart: `fields` is the front matter (None when the file has none), `body` the sentence."""
+
+    fields: dict | None
+    body: str
+    problems: tuple[str, ...] = ()
+    raw_title: str | None = None  # an unquoted title's source text to the end of its line, for the read-back check
+
+
+def parse_note(text: str) -> ParsedNote:
+    """Split a note file into its front matter and its body. A fence that opens and never closes is a problem."""
+    lines = text.removeprefix("\ufeff").strip().splitlines()  # an editor may add a byte order mark
+    if not lines or lines[0].strip() != FRONT_MATTER_FENCE:
+        return ParsedNote(None, "\n".join(lines))
+    closing = next((i for i, line in enumerate(lines[1:], 1) if line.strip() == FRONT_MATTER_FENCE), None)
+    if closing is None:
+        return ParsedNote(None, "", (f"the front matter opens with `{FRONT_MATTER_FENCE}` and never closes; add a closing `{FRONT_MATTER_FENCE}` line",))
+    import yaml  # the release build installs it beside markdown-it-py (see .github/workflows)
+
+    body = "\n".join(lines[closing + 1 :]).strip()
+    source = "\n".join(lines[1:closing])
+    try:
+        fields = yaml.safe_load(source)
+        tree = yaml.compose(source, Loader=yaml.SafeLoader)
+    except yaml.YAMLError:
+        return ParsedNote(None, body, (f"the front matter is not valid YAML; {QUOTE_ADVICE}",))
+    if fields is None:
+        fields = {}
+    if not isinstance(fields, dict):
+        return ParsedNote(None, body, ("the front matter is not a list of `key: value` lines; write `title: Your title`",))
+    return ParsedNote(fields, body, raw_title=_plain_title_source(tree, source))
+
+
+def _plain_title_source(tree: object, source: str) -> str | None:
+    """The source text of an unquoted `title` value, from where the parser says it starts to the end of that line.
+
+    The parser's positions find the key, so an indented or quoted `title` key is found as well. A quoted or
+    block value is decoded exactly by YAML and needs no read-back, so it gives None.
+    """
+    from yaml.nodes import MappingNode, ScalarNode
+
+    if not isinstance(tree, MappingNode):
+        return None
+    for key, value in tree.value:
+        if isinstance(key, ScalarNode) and key.value == "title" and isinstance(value, ScalarNode):
+            if value.style is not None or not value.value:
+                return None
+            return source[value.start_mark.index :].split("\n", 1)[0].strip()
+    return None
+
+
+def title_problems(title: object, raw: str | None = None) -> list[str]:
+    """What is wrong with a note's title, in the words an author reads.
+
+    `raw` is the title's source text from its value to the end of its line. YAML cuts a plain value at ` #`, reads `Yes`, `On` and
+    numbers as other types, and a quoted value is decoded exactly, so only an unquoted value (the only one with a `raw`) must read back as written.
+    """
+    if title is None:
+        return ['the title is empty; write `title: "Your title"`']
+    if not isinstance(title, str):
+        return [f"YAML reads the title as {title!r}, not as text; {QUOTE_ADVICE}"]
+    title = title.strip()
+    if not title:
+        return ['the title is empty; write `title: "Your title"`']
+    problems = []
+    if raw is not None and "\n" not in title and title != raw:
+        problems.append(f"YAML reads the title as {title!r}, not as written; {QUOTE_ADVICE}")
+    if len(title) > TITLE_MAX_CHARS:
+        problems.append(f"the title has {len(title)} characters; the limit is {TITLE_MAX_CHARS}")
+    if "\n" in title:
+        problems.append("write the title on one line")
+    elif not _is_plain_text(title):
+        problems.append("the title uses Markdown syntax; write plain words")
+    if title.endswith("."):
+        problems.append("remove the full stop at the end of the title")
+    return problems
+
+
+def body_problems(text: str) -> list[str]:
+    """What is wrong with the sentence of a note. Empty when the shape is right."""
     note = text.strip()
     if not note:
         return ["the note is empty"]
@@ -115,6 +210,33 @@ def note_problems(text: str) -> list[str]:
     elif not _is_plain_text(note):
         problems.append("the note uses Markdown syntax; write plain words")
     return problems
+
+
+def note_problems(text: str, *, require_title: bool = True) -> tuple[list[str], str | None, str]:
+    """`(problems, title, body)` for a note file, the problems in the words an author reads.
+
+    The check requires the title. `generate` passes `require_title=False`, so a note from an older
+    file that was merged without the check, and so has no front matter, still ships with a null title.
+    """
+    parsed = parse_note(text)
+    problems = list(parsed.problems)
+    title = None
+    if parsed.fields is not None:
+        unknown = sorted(str(key) for key in parsed.fields if key not in FRONT_MATTER_KEYS)
+        if unknown:
+            allowed = ", ".join(sorted(FRONT_MATTER_KEYS))
+            problems.append(f"the front matter has unknown key(s) {', '.join(unknown)}; remove them (allowed: {allowed})")
+        if "title" in parsed.fields:
+            problems.extend(title_problems(parsed.fields["title"], parsed.raw_title))
+            if isinstance(parsed.fields["title"], str):
+                title = parsed.fields["title"].strip()
+        elif require_title:
+            problems.append("the front matter has no title; add `title: Your title`")
+    elif require_title and not parsed.problems:
+        problems.append(f"the note has no title; start the file with `{FRONT_MATTER_FENCE}`, `title: Your title`, `{FRONT_MATTER_FENCE}`")
+    if not parsed.problems:
+        problems.extend(body_problems(parsed.body))
+    return problems, title, parsed.body
 
 
 # --------------------------------------------------------------------------
@@ -145,7 +267,7 @@ def check_pull_request(title: str, body: str, notes: Sequence[ChangedNote], deci
         if note.text is None:
             errors.append(f"{note.path}: the file is not UTF-8 text")
             continue
-        errors.extend(f"{note.path}: {problem}" for problem in note_problems(note.text))
+        errors.extend(f"{note.path}: {problem}" for problem in note_problems(note.text)[0])
     kind = conventional_type(title)
     if kind in deciding and not any(note.added for note in notes) and not has_no_note_line(body):
         errors.append(
@@ -193,6 +315,7 @@ def changed_notes(repo: Path, base: str, head: str) -> list[ChangedNote]:
 @dataclass(frozen=True)
 class _Note:
     path: str
+    title: str | None
     text: str
     added_at: int
 
@@ -265,14 +388,15 @@ def generate(repo: Path, version: str) -> dict:
         if path not in added or text is None or not text.strip():
             _warning(path, "left out of the release notes: no readable text, or no commit that added it")
             continue
-        if problems := note_problems(text):
+        problems, title, body = note_problems(text, require_title=False)
+        if problems:
             _warning(path, f"left out of the release notes: {'; '.join(problems)}")
             continue
         commit, stamp = added[path]
         if commit not in containing:
             containing[commit] = _earliest_release_containing(repo, commit)
         release = containing[commit] or building
-        releases.setdefault(release, []).append(_Note(path, text.strip(), stamp))
+        releases.setdefault(release, []).append(_Note(path, title, body, stamp))
     head_time = int(_git(repo, "log", "-1", "--format=%ct", "HEAD").strip())
     newest_first = sorted(releases, reverse=True)[:KEEP_RELEASES]
     document = fmt.document(
@@ -280,7 +404,10 @@ def generate(repo: Path, version: str) -> dict:
             fmt.version_text(release),
             release,
             _date(tags.get(release, head_time)),
-            tuple(note.text for note in sorted(releases[release], key=lambda n: (-n.added_at, n.path))),
+            tuple(
+                fmt.Note(note.title, note.text)
+                for note in sorted(releases[release], key=lambda n: (-n.added_at, n.path))
+            ),
         )
         for release in newest_first
     )

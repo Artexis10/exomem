@@ -689,7 +689,10 @@ def image_digest(reference: str) -> str | None:
         headers={"Authorization": f"Basic {credentials}"},
     )
     with urllib.request.urlopen(request, timeout=30) as response:
-        token = json.load(response)["token"]
+        answer = json.load(response)
+    token = answer.get("token") if isinstance(answer, dict) else None
+    if not isinstance(token, str) or not token:
+        raise ValueError("registry token answer has no token")
     # OCI and Docker define this closed set of manifest media types.
     media_types = (
         "application/vnd.oci.image.index.v1+json",

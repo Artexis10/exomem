@@ -1,7 +1,7 @@
 # local-client-ingress Specification
 
 ## Purpose
-Give same-machine clients of a managed service an attributed, revocable way in: an optional loopback listener that shares the public ingress, proves local ingress to the worker, and accepts only operator-issued local tokens, while the public path stays unchanged.
+Give same-machine clients of a managed service an attributed, revocable way in: an optional loopback listener that shares the public ingress, proves local ingress to the worker, and accepts only local tokens issued on the owner's machine, while the public path stays unchanged.
 
 ## Requirements
 
@@ -77,7 +77,7 @@ path a worker SHALL validate exactly as before, so it refuses a local session.
 - **WHEN** an OAuth session token arrives through the public listener
 - **THEN** it is accepted exactly as before this change
 
-### Requirement: Local tokens are issued, listed and revoked by the operator
+### Requirement: Local tokens are issued, listed and revoked on the owner's machine
 
 `exomem auth issue-local --client <name> --output <file>` SHALL mint a non-expiring local
 session for the configured owner identity, create the file exclusively with mode 0600 and
@@ -86,11 +86,11 @@ never print or log the token. A failure to write the file SHALL revoke the new s
 <id>` SHALL end one, and `exomem auth revoke --all` SHALL end them with every other session.
 
 #### Scenario: Issue a token
-- **WHEN** the operator issues a token for client `home`
-- **THEN** a 0600 file holds it, the command prints only its session id and client, and the next local request with it is accepted
+- **WHEN** a process running as the owner's user with the service configuration issues a token for client label `home`
+- **THEN** a 0600 file holds it, the command prints only its session id, client label and output path, and the next local request with it is accepted
 
 #### Scenario: Revoke a token
-- **WHEN** the operator revokes that session, or revokes all sessions
+- **WHEN** that session is revoked, or all sessions are revoked
 - **THEN** the next local request with the token receives a 401
 
 ### Requirement: A local token resolves to the owner, labelled local

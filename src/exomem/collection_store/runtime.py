@@ -1685,8 +1685,7 @@ class StoreServer:
             checkpoint()
         if not completed and read_only:
             # A read changes nothing, so a missed deadline is a retryable refusal, not an uncertain commit.
-            raise self._busy_refusal(
-                "the collection store did not finish this read within its completion deadline")
+            raise self.missed_read()
         if not completed:
             # Accepted work survives the wait deadline so its outcome and replay remain owned.
             raise refuse(OpError(
@@ -1781,6 +1780,10 @@ class StoreServer:
             finally:
                 if reader.in_transaction:
                     reader.execute("ROLLBACK")
+
+    def missed_read(self):
+        """The retryable refusal of a read that did not finish within its completion deadline."""
+        return self._busy_refusal("the collection store did not finish this read within its completion deadline")
 
     def _busy_refusal(self, message):
         """The retryable refusal for a request this store thread did not serve in time."""
