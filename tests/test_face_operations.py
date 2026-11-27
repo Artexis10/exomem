@@ -246,7 +246,10 @@ def test_a_cloud_account_that_never_turned_faces_on_is_told_the_deployment_does_
     assert "FACES_UNAVAILABLE" in str(turn_on_reply), turn_on_reply
     assert status["available"] is False
     assert face_operations.TURN_ON_COMMAND not in status["next_action"]
-    assert face_store.HOSTED_SETTING in status["next_action"]
+    assert "operator" in status["next_action"]
+    # The customer's agent cannot set the operator's switch, so no reply names it.
+    for reply in (str(search.value.as_public_dict()), str(turn_on_reply), str(status)):
+        assert face_store.HOSTED_SETTING not in reply
     assert not face_store.store_dir(vault).exists()
 
 

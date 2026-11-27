@@ -59,8 +59,7 @@ def faces_unavailable(reason: str) -> OpError:
     return OpError(
         "FACES_UNAVAILABLE",
         f"Face search cannot run here ({reason}), so no search by person ran.",
-        f"Search without people. To run faces on a Cloud or hosted deployment, its operator sets "
-        f"{face_store.HOSTED_SETTING}=1; otherwise faces.status names what failed.",
+        "Search without people. faces.status says why faces cannot run here and who can change it.",
     )
 
 

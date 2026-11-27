@@ -194,8 +194,9 @@ def _status(vault_root: Path, *, page: str | None, limit: int | None, cursor: st
         result["residues"] = residues()
     refusal = face_store.deployment_refusal()
     if refusal is not None:
-        result["next_action"] = (f"Faces cannot run here: {refusal}. Its operator sets "
-                                 f"{face_store.HOSTED_SETTING}=1 to allow them.")
+        # The setting's name is operator configuration, documented in design D9a; the customer's agent cannot set it.
+        result["next_action"] = (f"Faces cannot run here: {refusal}. Search without people; only the "
+                                 "deployment's operator can enable faces.")
     elif not on:
         result["next_action"] = f"To turn faces on, the owner runs `{TURN_ON_COMMAND}` in a terminal."
     if page is not None:
