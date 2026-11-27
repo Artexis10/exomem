@@ -2674,6 +2674,54 @@ def test_a_declared_value_for_a_store_collection_named_by_title_still_queues_whi
         write_intake.stop(service.root)
 
 
+RELEASE_PLAN = "Release Plan"
+RELEASE_PLAN_ID = "77777777-7777-4777-8777-777777777777"
+
+
+@pytest.mark.parametrize("status", ["resolved", "waiting"], ids=["undefined", "removed-but-stored"])
+def test_a_planning_status_for_a_store_collection_is_refused_while_the_store_is_busy_unless_its_item_stores_it(
+        service, monkeypatch, status):
+    """Defect: a Planning status outside the Planning values came back "Queued, not saved yet" and failed only at its
+    replay. The check reads the store-owned item beside the busy store thread, so an update that sends the status
+    the item stores, which the owner has since removed, still queues."""
+    from exomem import write_intake
+
+    root = service.root
+    text = sqlite_text(manifest_text("planning").replace(CID, RELEASE_PLAN_ID).replace("title: Work", f"title: {RELEASE_PLAN}"))
+    call(root, "plan_memory", action="create", manifest_path=manifest_path("planning").replace("Work", "Release"),
+         manifest_text=text, why="plan the releases")
+    values = call(root, "schema_memory", subject="planning-values", operation="inspect")
+    call(root, "schema_memory", subject="planning-values", operation="save", expected_hash=values["content_hash"],
+         proposal={"upsert": {"status.waiting": {"attributes": {"class": "open"}}}}, why="items that wait")
+    call(root, "plan_memory", action="add", collection=RELEASE_PLAN, why="plan it", item={
+        "title": "Wait on the vendor", "kind": "outcome", "status": "waiting", "commitment": "committed",
+        "horizon": "week"})
+    history = call(root, "schema_memory", subject="planning-values", operation="history")
+    call(root, "schema_memory", subject="planning-values", operation="restore", version=history["versions"][0]["version"],
+         expected_hash=history["content_hash"], why="keep the shipped statuses")
+    view = call(root, "plan_memory", action="query", collection=RELEASE_PLAN)
+    (row,) = view["rows"]
+    command = next(c for c in commands.product_commands_for("mcp") if c.name == "plan_memory")
+    try:
+        with _store_thread_held_with_intake_on(service, monkeypatch), request_scope(OWNER):
+            def save():
+                return writer_lease.invoke_command(
+                    command, root, implicit_idempotency_scope="principal:session-b", action="update",
+                    collection=RELEASE_PLAN, plan_id=row["plan_id"], changes={"status": status, "priority": "high"},
+                    expected_container_hash=view["snapshot"], expected_item_version=row["item_version"],
+                    why="settle the release")
+            if status == "resolved":
+                with pytest.raises(OpError) as refused:
+                    save()
+                assert refused.value.code == "INVALID_PLAN"
+                assert refused.value.message.startswith("status must be one of: candidate, planned")
+                assert write_intake.read(root)["items"] == []
+            else:
+                assert save()["state"] == "queued"
+    finally:
+        write_intake.stop(root)
+
+
 def counted_appends(monkeypatch):
     from exomem.collection_store.writer import CollectionWriter
 

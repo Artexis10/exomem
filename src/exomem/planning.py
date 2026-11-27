@@ -7,7 +7,7 @@ import json
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from functools import partial
+from functools import cache, partial
 from pathlib import Path
 from typing import Any, Never
 
@@ -156,7 +156,7 @@ def supplied_value_refusal(
     manifest: collections.CollectionManifest,
     values: Mapping[str, Any],
     *,
-    stored: Callable[[str, Any], bool | None] | None = None,
+    stored: Callable[[], Mapping[str, Any] | None] | None = None,
 ) -> CollectionError | None:
     """The refusal that a write of `values` gets from the Planning values and the manifest's per-field rules alone.
 
@@ -166,21 +166,36 @@ def supplied_value_refusal(
     another field or an earlier write can still change. A null is an update's deletion, which the commit judges.
     The Planning values that this caller cannot read leave their field unrefused.
 
-    A new item has no stored value. An update or triage keeps a stored value that is no longer active, so
-    for one `stored(name, value)` answers whether a row of the collection stores the value now: True, False,
-    or None where that is unknown. Such a value is refused only where no row stores it.
+    A new item has no stored value, so `stored` is None. An update or triage names one item, which keeps a value
+    that it stores even once that value is no longer active. For one, `stored()` reads the values that item
+    stores now, or None where the item is not known, and `_governed` decides with them as the commit does. It is
+    read only once a value is refused without them, and an item that is not known leaves the value unrefused.
     """
     supplied = {name: value for name, value in values.items() if value is not None}
     planning_values = PlanningValues(vault_root)
+    item = cache(stored) if stored is not None else None
     for name in planning_values.fields():
         if name not in supplied:
             continue
-        try:
-            _governed(planning_values, supplied, None, name)
-        except CollectionError as refusal:
-            if refusal.code != _VALUES_UNAVAILABLE and (stored is None or stored(name, supplied[name]) is False):
-                return refusal
+        refusal = _governed_refusal(planning_values, supplied, None, name)
+        if refusal is None or refusal.code == _VALUES_UNAVAILABLE:
+            continue
+        if item is None:
+            return refusal
+        if (target := item()) is not None and (refusal := _governed_refusal(
+                planning_values, supplied, target, name)) is not None:
+            return refusal
     return records.supplied_value_refusal(manifest, supplied)
+
+
+def _governed_refusal(
+    planning_values: PlanningValues, values: Mapping[str, Any], stored: Mapping[str, Any] | None, name: str
+) -> CollectionError | None:
+    try:
+        _governed(planning_values, values, stored, name)
+    except CollectionError as refusal:
+        return refusal
+    return None
 
 
 def _registered(planning_values: PlanningValues, name: str, value: Any) -> Any:
