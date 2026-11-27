@@ -1345,6 +1345,15 @@
               "diarize": {
                 "type": "boolean",
                 "description": "Request or skip speaker labels for this audio or video file."
+              },
+              "tracks": {
+                "items": {
+                  "type": "object"
+                },
+                "maxItems": 16,
+                "minItems": 1,
+                "type": "array",
+                "description": "Separate microphones, as media.process takes `tracks`: [{name, stream, channel}]."
               }
             },
             "required": [
@@ -1418,6 +1427,15 @@
               "diarize": {
                 "type": "boolean",
                 "description": "Request or skip speaker labels for this audio or video file."
+              },
+              "tracks": {
+                "items": {
+                  "type": "object"
+                },
+                "maxItems": 16,
+                "minItems": 1,
+                "type": "array",
+                "description": "Separate microphones, as media.process takes `tracks`: [{name, stream, channel}]."
               }
             },
             "required": [

@@ -683,9 +683,9 @@ _REMAINING = {
     )),
     "process_media": ("operation", (
         _row("status", "read_media", ("path", "paths")),
-        _row("process", "change_media", ("path", "paths", "language", "multilingual", "diarize"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation.
+        _row("process", "change_media", ("path", "paths", "language", "multilingual", "diarize", "tracks"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation.
         _row("retry", "change_media", ("path", "paths"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
-        _row("reprocess", "change_media", ("path", "paths", "language", "multilingual", "diarize"), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation.
+        _row("reprocess", "change_media", ("path", "paths", "language", "multilingual", "diarize", "tracks", "replace_labelled"), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation.
         _row("replicate", "change_media", ("store",), ("store",), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("attach-speech", "change_media", ("path", "binary_sha256", "binary_size", "segments", "turns", "engine", "asr", "names", "replace_labelled"), ("path", "binary_sha256", "binary_size", "segments", "engine"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation.
         _row("rename-speakers", "change_media", ("path", "renames"), ("path", "renames"), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation.

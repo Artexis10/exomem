@@ -23,6 +23,7 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from .held_uploads import HOLD_MAX_COUNT
 from .query_compat import public_filter_annotation
+from .speech_tracks import MAX_TRACKS
 
 
 class Wire(BaseModel):
@@ -201,6 +202,10 @@ class FileHandle(Wire):
     file_name: str | None = None
     diarize: Annotated[bool, Field(strict=True)] | None = Field(
         default=None, description="Request or skip speaker labels for this audio or video file."
+    )
+    # The shape lives once, on media.process (`speech_attach_schema.Tracks`); the server reads both with `speech_tracks.declaration`.
+    tracks: Annotated[list[dict[str, Any]], Field(min_length=1, max_length=MAX_TRACKS)] | None = Field(
+        default=None, description="Separate microphones, as media.process takes `tracks`: [{name, stream, channel}]."
     )
 
 

@@ -2,11 +2,11 @@
 
 ### Requirement: Each track of a recording is transcribed on its own
 
-Speech SHALL transcribe each track of a recording on its own. A track SHALL be an audio stream or a channel that the recording's declaration, or published track metadata that shipped data maps to a microphone, declares a separate microphone. Without a declaration, speech SHALL read the first audio stream as one mixed track, as today. The audio itself SHALL NOT declare tracks. The transcript SHALL merge the tracks' segments by start and label each turn with its track's name.
+Speech SHALL transcribe each track of a recording on its own. A track SHALL be an audio stream or a channel that the owner or an agent declares a separate microphone, or that published track metadata declares one where shipped data maps it so. Without a declaration, speech SHALL read the first audio stream as one mixed track, as today. The audio itself SHALL NOT declare tracks. The transcript SHALL merge the tracks' segments by start and label each turn with its track's name.
 
 #### Scenario: Two declared audio streams
 
-- **WHEN** a video's sidecar declares its two audio streams as the microphones "Host" and "Guest"
+- **WHEN** the owner declares a video's two audio streams as the microphones "Host" and "Guest"
 - **THEN** each stream is transcribed on its own, and the transcript's turns read `Host` and `Guest` in start order
 
 #### Scenario: An undeclared second stream is not transcribed
@@ -24,19 +24,44 @@ Speech SHALL transcribe each track of a recording on its own. A track SHALL be a
 - **WHEN** a recording's sidecar declares its two channels as separate microphones
 - **THEN** each channel is transcribed as its own track
 
-### Requirement: The sidecar declares a recording's tracks
+### Requirement: The owner or an agent declares a recording's tracks
 
-The declaration SHALL be the sidecar's `speech_tracks` field, and a new extraction SHALL keep it. This change adds no operation that writes that field. A declaration SHALL name at most a bounded number of tracks, because each track is one full transcription.
+The owner or an agent SHALL declare which audio streams or channels of one recording are separate microphones, with `tracks` on media process or reprocess or on an uploaded file's handle. The recording's Source SHALL record the declaration, and a new extraction SHALL keep it. A declaration SHALL be checked before anything is written. It SHALL name at most a bounded number of tracks, because each track is one full transcription.
+
+#### Scenario: An agent declares a video's two audio streams
+
+- **WHEN** an agent processes a video with `tracks` that name its two audio streams "Host" and "Guest"
+- **THEN** the next extraction reads each stream on its own, each line names its track, and the Source records the declaration
+
+#### Scenario: A declaration given at upload
+
+- **WHEN** an agent stores a recording whose file handle declares two tracks
+- **THEN** the recording's Source records the declaration before its first extraction
 
 #### Scenario: A new extraction keeps the declaration
 
 - **WHEN** a recording whose sidecar declares two tracks is extracted again
 - **THEN** the engine reads those two tracks, and the sidecar still holds the declaration
 
-#### Scenario: A declaration with too many tracks is refused
+#### Scenario: A declaration that cannot be read changes nothing
 
-- **WHEN** a declaration names more tracks than the bound
-- **THEN** speech refuses it and says how many tracks it takes
+- **WHEN** a declaration names more tracks than the bound, names two tracks alike, or gives a name with label syntax
+- **THEN** the request is refused with what to change, such as how many tracks a declaration takes, and the Source and the queue stay as they were
+
+#### Scenario: A repeat of the declaration writes nothing
+
+- **WHEN** an agent sends the declaration that the recording's Source already records
+- **THEN** nothing is written and nothing is queued
+
+#### Scenario: A transcribed recording takes a declaration when it is processed again
+
+- **WHEN** an agent declares tracks for a recording whose transcript is complete
+- **THEN** process refuses and names reprocess, and reprocess applies the declaration to the next extraction
+
+#### Scenario: A declaration replaces speaker labels only when asked
+
+- **WHEN** an agent reprocesses with tracks a recording whose transcript holds speaker labels or names
+- **THEN** the request is refused unless it sets `replace_labelled`, and with it the old transcript stays on a prior page
 
 ### Requirement: A declared track that the file lacks is skipped
 
@@ -66,9 +91,9 @@ Each track SHALL keep its own progress record until the worker publishes the tra
 - **WHEN** the worker stops after every track has finished and before the transcript is published
 - **THEN** the next run transcribes no track again, and publication discards every track's record
 
-### Requirement: Track names and start times come from published metadata or from the declaration
+### Requirement: Track names and start times come from published metadata or from people
 
-Speech SHALL read track names and start times from these published fields: iXML `TRACK_LIST`, BWF `TimeReference`, and the container's stream title and timecode. An iXML track's place in the file SHALL be its `INTERLEAVE_INDEX`, and its name SHALL be its `NAME`. A published or recorder-family field SHALL declare a stream or channel a separate microphone only where shipped data maps it so. Those mappings SHALL live in shipped data, not in code. A name in the declaration SHALL win over metadata.
+Speech SHALL read track names and start times from these published fields: iXML `TRACK_LIST`, BWF `TimeReference`, and the container's stream title and timecode. An iXML track's place in the file SHALL be its `INTERLEAVE_INDEX`, and its name SHALL be its `NAME`. A published or recorder-family field SHALL declare a stream or channel a separate microphone only where shipped data, not code, maps it so. A name that the owner or an agent declares SHALL win over metadata.
 
 #### Scenario: An iXML track list names the tracks
 

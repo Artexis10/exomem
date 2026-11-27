@@ -53,6 +53,7 @@ from .source_coverage import CAPTURE_HEADING
 
 if TYPE_CHECKING:
     from .deferred_index import DeferredReceipt
+    from .speech_tracks import Track
 from .vault import (
     MISSING_CONTENT_HASH,
     ContentHashMismatchError,
@@ -223,6 +224,8 @@ class SourceArtifact:
     #: boundary: `add` takes their identity from it, reads no byte to learn it, and installs the stage by rename.
     staged: Any | None = None
     diarize: bool | None = None
+    #: A declaration of the recording's separate microphones, read by `speech_tracks.declaration`.
+    tracks: tuple[Track, ...] | None = None
 
 
 def source_artifact_name(filename: str) -> str:
@@ -662,6 +665,14 @@ def add(
                     code="DIARIZE_NOT_APPLICABLE", missing=["diarize"],
                     reason="speaker labels apply to audio and video only",
                 )
+        if artifact.tracks is not None:
+            from . import media_engines, media_types
+
+            if media_engines.engine_for(media_types.media_type_for(safe_name)) != media_engines.SPEECH:
+                raise AddError(
+                    code="TRACKS_NOT_APPLICABLE", missing=["tracks"],
+                    reason="a declaration of tracks applies to audio and video only",
+                )
         if artifact.staged is not None:
             # Hashed as it was staged, before the boundary: reading the file again here is what the stage removes.
             artifact_digest, artifact_size = artifact.staged.sha256, artifact.staged.size
@@ -912,10 +923,10 @@ def add(
     supersede_writes = _supersede_writes(
         vault_root, supersede_targets, new_path=source_path, stamp_iso=stamp_iso
     )
-    if artifact is not None and artifact.diarize is not None:
-        from .preserve import set_diarize_pin
+    if artifact is not None:
+        from .preserve import set_diarize_pin, set_speech_tracks_pin
 
-        source_md = set_diarize_pin(source_md, artifact.diarize)
+        source_md = set_speech_tracks_pin(set_diarize_pin(source_md, artifact.diarize), artifact.tracks)
     if raw_protection:
         source_md = raw_guard.protect(
             source_md, artifact_path=artifact_path.relative_to(vault_root).as_posix(),

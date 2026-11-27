@@ -17,11 +17,9 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
-
-from .speaker_names import MAX_NAME_CHARS, name_problem
 
 log = logging.getLogger(__name__)
 
@@ -126,6 +124,9 @@ def _riff_chunks(path: Path) -> dict[bytes, bytes]:
 
 def _published_name(text: str) -> str | None:
     """A published name that can label a track, or None."""
+    # `extract` imports this module, so the label grammar loads only when a name is checked.
+    from .speaker_names import name_problem
+
     name = text.strip()
     return name if name_problem(name) is None else None
 
@@ -241,6 +242,8 @@ def _unique(tracks: Sequence[PublishedTrack]) -> tuple[PublishedTrack, ...]:
 
 def _numbered(name: str, count: int) -> str:
     """`name` with a count, cut so that the label stays within the label length."""
+    from .speaker_names import MAX_NAME_CHARS
+
     suffix = f" {count}"
     return f"{name[:MAX_NAME_CHARS - len(suffix)].rstrip()}{suffix}"
 
@@ -259,6 +262,8 @@ def declaration(value: object, published: Published | None = None) -> tuple[Trac
     """
     if value is None:
         return ()
+    from .speaker_names import name_problem
+
     if not isinstance(value, Sequence) or isinstance(value, str | bytes):
         raise TrackDeclarationError("`speech_tracks` is a list of tracks, each with a name, a stream and a channel")
     if len(value) > MAX_TRACKS:
@@ -283,7 +288,8 @@ def declaration(value: object, published: Published | None = None) -> tuple[Trac
             raise TrackDeclarationError("`single_voice` is true or false")
         name = entry.get("name") or named.get((stream, channel))
         if not isinstance(name, str) or not name.strip():
-            raise TrackDeclarationError(f"name the track on stream {stream} channel {channel}; the file publishes no name for it")
+            unnamed = "" if published is None else "; the file publishes no name for it"
+            raise TrackDeclarationError(f"name the track on stream {stream} channel {channel}{unnamed}")
         if problem := name_problem(name.strip(), "a track's name"):
             raise TrackDeclarationError(f"{problem}; change the name of the track on stream {stream} channel {channel}")
         tracks.append(Track(name.strip(), stream, channel, single))
@@ -292,6 +298,11 @@ def declaration(value: object, published: Published | None = None) -> tuple[Trac
     if len(set(names)) != len(names) or len(set(audio)) != len(audio):
         raise TrackDeclarationError("each declared track needs its own name and its own stream and channel")
     return tuple(tracks)
+
+
+def as_data(tracks: Sequence[Track]) -> list[dict[str, Any]]:
+    """A declaration as the sidecar and the job store keep it: every field of each track, so two compare by value."""
+    return [asdict(track) for track in tracks]
 
 
 @dataclass(frozen=True)

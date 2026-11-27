@@ -61,6 +61,7 @@ from . import (
     runtime_resources,
     scene_frames,
     semantic_segments,
+    speech_tracks,
 )
 from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, AsrFacts
 from .backfill import iter_kb_files
@@ -918,7 +919,9 @@ class MediaWorker:
                 kwargs["multilingual"] = True
             if diarize is not None:
                 kwargs["diarize"] = diarize
-            if (tracks := preserve.speech_tracks_pin(claimed_content)) is not None:
+            # A request's declaration wins over the one the sidecar records; the commit then records it.
+            tracks = speech_tracks.as_data(job.tracks) if job.tracks is not None else preserve.speech_tracks_pin(claimed_content)
+            if tracks is not None:
                 kwargs["tracks"] = tracks
             with media_store.logical_view(self._vault_root, job.binary_path) as view:
                 result = extract.extract_text(view, **kwargs)
@@ -1660,6 +1663,7 @@ class MediaWorker:
             speakers=speakers,
             speaker_verification=speaker_verification,
             diarize=job.diarize,
+            speech_tracks=job.tracks,
             attempts=max(1, job.attempts),
             asr=asr,
             ocr=ocr,

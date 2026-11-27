@@ -85,7 +85,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # compiled type take a link review, in `add_observation`, `create_note`, `edit_note` and `supersede_note`.
 # Together they added 315 B on 2026-11-27 (default-dated-observations-to-a-rich-kind): the wire measures 32,278 B, and
 # their four ceilings rise to 1,940 B, 1,900 B, 3,760 B and 1,410 B, and the total to 32,300 B.
-TOTAL_BUDGET = 32_300
+# The per-file `tracks` declaration of separate microphones on the `save_source` and `save_evidence` file handles added
+# 354 B on 2026-11-27 (keep-speech-results-in-cloud): the wire measures 32,632 B, and the two ceilings rise to 1,700 B
+# and 1,500 B, and the total to 32,650 B. The handle names the shape that `media.process` publishes, in 177 B each.
+TOTAL_BUDGET = 32_650
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
@@ -115,8 +118,8 @@ TOOL_CEILINGS: dict[str, int] = {
     "read_page": 700,
     "recall_context": 2800,
     "save_episode": 1100,
-    "save_evidence": 1320,
-    "save_source": 1550,
+    "save_evidence": 1500,
+    "save_source": 1700,
     # `people`, the restriction to pictures of named people, took it to 1,401 B on 2026-11-27 (add-face-search).
     "search_memory": 1450,
     # A pointer to edit_note's supersede_observation joined 2026-11-24

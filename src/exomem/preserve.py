@@ -86,6 +86,7 @@ from .vault import (
 
 if TYPE_CHECKING:
     from .extraction_parts import Layout, Plan
+    from .speech_tracks import Track
 
 log = logging.getLogger(__name__)
 
@@ -599,6 +600,7 @@ def preserve(
     raw_protection: bool = False,
     media_pending: bool = False,
     diarize: bool | None = None,
+    tracks: Sequence[Track] | None = None,
     defer_fanout_to_terminal: bool = False,
     _allocation: Mapping[str, str | None] | None = None,
     _prepare: Callable[[dict], None] | None = None,
@@ -614,7 +616,8 @@ def preserve(
     would give it. A caller that reconciles the original straight after sets it, so that
     reconcile only queues the job instead of committing the page a second time.
 
-    `diarize` records an explicit speaker-label choice on an audio or video sidecar.
+    `diarize` records an explicit speaker-label choice on an audio or video sidecar, and
+    `tracks` a declaration of its separate microphones that `speech_tracks.declaration` has read.
 
     `staged` is a binary that an upload door already copied, hashed and fsynced into a private stage
     (`upload_stage.StagedUpload`) before it took the mutation boundary. It stands in for
@@ -673,6 +676,11 @@ def preserve(
         if media_engines.engine_for(media_type) != media_engines.SPEECH:
             return _raise("DIARIZE_NOT_APPLICABLE", ["diarize"], "speaker labels apply to audio and video only")
         validate_diarize_text(diarize, text)
+    if tracks is not None:
+        from . import media_engines
+
+        if media_engines.engine_for(media_type) != media_engines.SPEECH:
+            return _raise("TRACKS_NOT_APPLICABLE", ["tracks"], "a declaration of tracks applies to audio and video only")
 
     now = today or temporal.now()
     date_iso = temporal.render_date(now)
@@ -930,6 +938,7 @@ def preserve(
                     size=artifact_size,
                 )
             sidecar_md = set_diarize_pin(sidecar_md, diarize)
+            sidecar_md = set_speech_tracks_pin(sidecar_md, tracks)
             sidecar_md = media_previews.stamp_intent(sidecar_md, rel_artifact, artifact_hash)
             if document_containers.is_container(filename_safe):
                 container_plan = container_stack.enter_context(document_containers.plan(
@@ -1171,6 +1180,7 @@ def preserve_stream(
     raw_protection: bool = False,
     media_pending: bool = False,
     diarize: bool | None = None,
+    tracks: Sequence[Track] | None = None,
     defer_fanout_to_terminal: bool = False,
 ) -> PreserveResult:
     """Capture a binary STREAM to Evidence/ — the entrypoint for HTTP /upload.
@@ -1204,6 +1214,7 @@ def preserve_stream(
         raw_protection=raw_protection,
         media_pending=media_pending,
         diarize=diarize,
+        tracks=tracks,
         defer_fanout_to_terminal=defer_fanout_to_terminal,
     )
 
@@ -2055,6 +2066,29 @@ def speech_tracks_pin(content: str) -> object | None:
     return parse_frontmatter(content)[0].get(_SPEECH_TRACKS_FIELD)
 
 
+def declared_speech_tracks(content: str) -> tuple[Track, ...] | None:
+    """The declaration of tracks this sidecar records, read (`speech_tracks.declaration`); None when it holds none it can read."""
+    from .speech_tracks import TrackDeclarationError, declaration
+
+    pinned = speech_tracks_pin(content)
+    try:
+        return None if pinned is None else declaration(pinned)
+    except TrackDeclarationError:  # a hand-edited pin: the next extraction says what is wrong with it
+        return None
+
+
+def set_speech_tracks_pin(content: str, tracks: Sequence[Track] | None) -> str:
+    """Record a declaration of tracks that `speech_tracks.declaration` has read; None keeps the one the sidecar holds.
+
+    Every path that writes the declaration writes it here. JSON is a YAML flow sequence, and quotes every name.
+    """
+    if tracks is None:
+        return content
+    from .speech_tracks import as_data
+
+    return _set_frontmatter_field(content, _SPEECH_TRACKS_FIELD, json.dumps(as_data(tracks), ensure_ascii=False))
+
+
 def set_diarize_pin(content: str, diarize: bool | None) -> str:
     """Save an explicit preference and keep an existing preference when omitted."""
     if diarize is None:
@@ -2062,11 +2096,15 @@ def set_diarize_pin(content: str, diarize: bool | None) -> str:
     return _set_frontmatter_field(content, _DIARIZE_REQUESTED_FIELD, "true" if diarize else "false")
 
 
-def disclose_retained_speaker_choice(receipt: dict, requested: bool | None) -> None:
-    """Tell a caller that reuse of stored bytes kept the existing choice."""
+def disclose_retained_speaker_choice(receipt: dict, requested: bool | None, tracks: object = None) -> None:
+    """Tell a caller that reuse of stored bytes kept the existing choice and declaration of tracks."""
     if requested is not None:
         receipt.setdefault("warnings", []).append(
             "The stored recording keeps its speaker-label choice. To change it, use process_media with reprocess."
+        )
+    if tracks is not None:
+        receipt.setdefault("warnings", []).append(
+            "The stored recording keeps its declaration of tracks. To change it, use process_media with reprocess and tracks."
         )
 
 
@@ -2090,6 +2128,7 @@ def render_sidecar_extraction(
     speaker_names: list[dict[str, str]] | None = None,
     names_not_carried: list[str] | None = None,
     attached_digest: str | None = None,
+    speech_tracks: Sequence[Track] | None = None,
 ) -> str:
     """Render an extraction sidecar without touching canonical or derived state.
 
@@ -2110,6 +2149,7 @@ def render_sidecar_extraction(
     `names_not_carried` the names of the replaced extraction that no new label took.
     `attached_digest` marks an extraction attached from the owner's machine: the cell did not run
     its engine, so the page says where it came from and never claims the engine was checked.
+    `speech_tracks` is the declaration of tracks that this extraction read; None keeps the page's own.
     """
     newline = document_newline(before)
     before = with_newline(before, "\n")
@@ -2125,6 +2165,7 @@ def render_sidecar_extraction(
     # An extraction states its own origin; a replaced one's origin never carries over.
     content = _remove_frontmatter_fields(content, lambda key: key in _ORIGIN_FIELDS)
     content = set_diarize_pin(content, diarize)
+    content = set_speech_tracks_pin(content, speech_tracks)
     if diarize is False or (diarize is None and diarize_pin(before) is False):
         speaker_verification = "not-requested"
     content = _set_frontmatter_field(content, "extracted_by", engine_with_ocr_text(engine, ocr))
