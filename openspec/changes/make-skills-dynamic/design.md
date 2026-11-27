@@ -135,7 +135,7 @@ A write that leaves a skill page without its fields succeeds and says so on its 
 
 ### D7. Shipped skills stay the base until the owner chooses
 
-This change keeps shipped skills product-owned. An owner skill names the shipped skill it builds on and adds steps. The proposal's first question asks the owner to choose between this, shadowing and seeded copies. Either of the other two needs a revision of this design before task 3.
+Shipped skills are a starter set, and stay product-owned. An owner skill names the shipped skill it builds on and adds steps. Every owner skill, whether a person or an agent wrote it, is equally dynamic. The owner chose this option on 2026-11-27, tentatively. Shadowing or seeded copies would need a revision of this design before task 3.
 
 ## Risks and trade-offs
 

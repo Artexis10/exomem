@@ -3,7 +3,7 @@
 ## 1. Prepare
 
 - [ ] 1.1 Write the six development cases and the frozen decision cases outside the repository, with keys from source truth by a lane that does not build the change.
-- [ ] 1.2 Record the owner's answers on shipped skills and on step lists in notes; if the first answer is shadowing or seeded copies, revise D7 and its requirements before task 3.
+- [ ] 1.2 After the development cases run, confirm with the owner that building on shipped skills still holds; if the owner moves to shadowing or seeded copies, revise D7 and its requirements before task 3.
 
 ## 2. Follow text
 

@@ -58,10 +58,27 @@ An example shows why this matters. A meeting tool's summary lists one person's s
 
   This change's requirements are new and contradict none of theirs.
 
-## Open questions for the owner
+## Decisions by the owner (2026-11-27)
 
-1. **How should an owner change a skill that Evermatter ships, such as the ingest workflow?**
-   - **(Recommended for this change) Build on it.** Matches "the foundation and baseline". The owner writes a vault skill that names the shipped skill and adds steps. Shipped skills stay checked against the tool surface and keep getting product fixes. An owner cannot remove or fix a shipped step at once; that waits for a release.
-   - **Shadow it.** A vault skill with a shipped skill's name replaces it for that owner. The owner can fix a flawed step at once. Inspection reports when the shipped version changes underneath. The owner's copy loses the automatic check against the tool surface. On a client that installs the shipped skill itself, the agent still sees the installed copy.
-   - **Seed editable copies.** The literal reading of "become the seed set". First use copies every shipped skill into the vault, so every skill is shadowed from the start, with the same base-change report. The owner can fix any step at once. Every copy loses the automatic call check, and product fixes reach a copy only when the owner accepts them. On a client that installs the shipped skills itself, the agent still sees the installed copies.
-2. **Should a note that a skill produces end with the list of its steps?** Recommended: only when the skill's own done check asks for it. A step list in every note gets indexed and recalled as knowledge, and a Records row cannot hold one.
+1. **Shipped skills are a starter set, and an owner builds on them.**
+   - The skills that Evermatter ships are only a starter set. They teach how Evermatter writes: the calls, their order and the governance.
+   - Every other skill is equally dynamic and editable, whether a person or an agent wrote it. It lives in the vault, changes in conversation and composes with other skills by link.
+   - An owner who wants a shipped skill to do more writes a vault skill that names the shipped skill and adds steps. Shipped skills stay checked against the tool surface and keep getting product fixes.
+   - An owner cannot remove or fix a shipped step at once; that waits for a release.
+   - Two alternatives are set aside for now: shadowing a shipped skill by name, and seeding editable copies. Each would lose the automatic check against the tool surface, and the agent would still see the installed copy on a client that installs shipped skills itself.
+
+   The owner took this option tentatively. Task 1.2 revisits it once the development cases have run.
+2. **A note that a skill produces lists its steps only when the skill's own done check asks for it.** A step list in every note gets indexed and recalled as knowledge, and a Records row cannot hold one.
+
+## Who makes sure a skill is followed
+
+**The server carries the adherence check, not a foundation skill.**
+
+A foundation skill reaches an agent only on a client that installs it or reads it. It is also text, so the agent can skip it, and that is the very failure the check guards against.
+
+The server reaches every skill read on every client it serves:
+
+- the follow text arrives with the skill's body, whichever client asked;
+- the owner findings run in inspection whether or not any skill was loaded.
+
+Shipped skills point to this behaviour and do not restate it, so the rule lives in one place.
