@@ -385,11 +385,12 @@ class _Derivation:
             raw, mtime_ns = found
             if prepared is None:
                 page, state = self.parse(rel, raw, mtime_ns)
-                structure = None
+                structure = unit_rows = None
             else:
                 page, state = prepared.page, prepared.state
                 summary = prepared.rows.structure_json if prepared.rows is not None else None
                 structure = json.loads(summary) if summary is not None else None
+                unit_rows = prepared.rows.unit_rows if prepared.rows is not None else None
             if page is not None and state is not None:
                 rows = epistemic_graph.page_graph_rows(
                     self.root,
@@ -402,6 +403,7 @@ class _Derivation:
                     target_exists=self.target_exists,
                     landing=graph.landing,
                     prepared_structure=structure,
+                    prepared_unit_rows=unit_rows,
                 )
         if rows is None:
             if charge and self.reserve_graph is not None:

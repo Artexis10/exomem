@@ -726,10 +726,7 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
     report.semantic_contract_omitted_counts = semantic["omitted_counts"]
     report.semantic_contract_truncation = semantic["truncation"]
     assert semantic_batch.corpus is not None
-    semantic_states = {
-        path: semantic_index.from_semantic_page_state(state)
-        for path, state in semantic_batch.corpus.pages.items()
-    }
+    corpus_pages = semantic_batch.corpus.pages
     from . import deferred_index, epistemic_graph, index_paths, lexstore
 
     maintenance_jobs.checkpoint("purging")
@@ -822,6 +819,15 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
         and epistemic_graph.sidecar_path(vault_root).exists()
         and not initial_graph_drift
     )
+    # An audit needs only occurrence keys. Read the retained source snapshot
+    # again only for the parents whose unit rows actually need repair.
+    semantic_states = (
+        {
+            path: semantic_index.from_semantic_page_state(state, restore_candidates=False)
+            for path, state in corpus_pages.items()
+        }
+        if include_unit_lexical or include_unit_vectors or include_unit_graph else {}
+    )
     unit_drift = semantic_index.audit_semantic_unit_sidecars(
         vault_root,
         semantic_states,
@@ -887,7 +893,10 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
                 index_sync.upsert_after_write(
                     vault_root,
                     [vault_root / path for path in kept],
-                    semantic_states={path: semantic_states[path] for path in kept},
+                    semantic_states={
+                        path: semantic_index.from_semantic_page_state(corpus_pages[path])
+                        for path in kept
+                    },
                 )
                 refreshed.extend(kept)
 
