@@ -2,7 +2,7 @@
   "name": "evermatter-self-hosted",
   "displayName": "Evermatter (self-hosted)",
   "description": "For your own Evermatter server, already connected to Claude as a connector: adds Evermatter's skills and automatic recall and capture to that connection.\n\nEvermatter is a living knowledge base for your AI assistants. It keeps decisions, sources, evidence and conclusions as organised knowledge, brings the relevant context forward as you work, and preserves what matters, with answers that point back to their evidence.",
-  "version": "0.208.0",
+  "version": "0.209.0",
   "author": {
     "name": "Substrate Systems OÜ",
     "url": "https://substratesystems.io"
