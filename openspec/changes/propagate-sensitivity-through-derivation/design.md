@@ -77,7 +77,7 @@ Rejected:
 - **Caches.** Every cache that holds a scope set or a decision keys each entry on its own page's generation and the generations of its scope parents (parts, frames): `admission_memo`, membership `_MEMO`, `_SNAPSHOT_MEMO` and `_PATH_MEMO`, the store-mode membership map (`make-vault-store-canonical` D13) and the collection view decisions (D14). Read the generations in the existing request batch. Keep the membership map header independent of page generations.
 - **Catalog.** Projected rows carry their page's generation. Before ranking or aggregation, projected retrieval checks the current sensitivity scopes and verifies that the exact representation they authorize exists. If that representation is absent, it withholds that item until republish and continues with the other items.
 - **Owner reads.** An unrestricted owner does not wait for sensitivity derivation. D5 reuses the existing caller test, including connector restrictions.
-- **Version.** `page_sensitivity` takes the next free owner version in `vault_store/rederive.py` at integration. Task 5.2 of `make-vault-store-canonical` targets version 6.
+- **Version.** Unit links use owner version 6. Check `vault_store/rederive.py` at integration and assign `page_sensitivity` the next free owner version.
 - **Pages outside the graph.** The graph indexes only Knowledge Base Markdown outside the scan-excluded folders (`epistemic_graph._is_graph_page`). A class on a page outside the graph would reach no dependent. Capture, classify and a plain edit refuse it with `SENSITIVITY_PAGE_UNTRACKED`. The release check lists already-classified pages outside the graph.
 
 Rejected: inheritance in `page_admission`. That row's currency proof is the page's own sha256, which a source's class change does not move.
@@ -103,6 +103,8 @@ A derivation publication verifies the output version and the canonical generatio
 Projected retrieval removes the pending set before ranking, so document frequency and ranks cannot reveal a withheld page.
 
 For restricted callers under a `sensitivity` policy, this is an exception to the ordinary wait and lag notice in "A read reflects the writes acknowledged before it, or says what lags" in `make-vault-store-canonical`. The read skips that wait and treats pending pages as absent in shape and timing. Reuse `egress.caller_restricted` so an owner using a fenced connector gets the same check. Unrestricted owner and other ordinary reads keep the existing waiting rules.
+
+"Store-mode graph and link reads answer at the request's snapshot" still governs graph readiness. A restricted graph or link read uses that same snapshot to prove lineage before it releases a page.
 
 ### D6. One egress decision, proved by behaviour
 

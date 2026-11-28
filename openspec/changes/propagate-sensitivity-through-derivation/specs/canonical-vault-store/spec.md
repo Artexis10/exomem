@@ -2,7 +2,7 @@
 
 ### Requirement: Restricted reads under a class policy skip the store wait
 
-A restricted read under a policy with a `sensitivity` scope SHALL skip the pending-intent wait and lag notice. This is an exception to "A read reflects the writes acknowledged before it, or says what lags". The read SHALL use the pinned lineage proof. The existing release test for caller restriction SHALL also cover a connector acting as the owner. Other reads SHALL keep the ordinary store read-door behaviour.
+A restricted read under a policy with a `sensitivity` scope SHALL skip the pending-intent wait and lag notice. This includes a fenced owner. The read SHALL prove current lineage from the request's one store snapshot. The ordinary graph readiness checks still apply. Other reads SHALL keep the ordinary store read-door behaviour.
 
 #### Scenario: A pending intent under a class policy
 

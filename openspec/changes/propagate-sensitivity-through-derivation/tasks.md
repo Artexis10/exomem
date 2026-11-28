@@ -3,7 +3,7 @@
 ## 0. Before building inheritance
 
 - [ ] 0.1 On a read-only copy of the owner's graph, measure how far each candidate class spreads under transitive inheritance: dependents per classified page, and classes per entity page. Record the numbers in the design. Reopen D1's transitive rule if the spread makes classes meaningless.
-- [ ] 0.2 Agree the class-policy read exception with the store owner and reconcile the active canonical store read contract.
+- [x] 0.2 Agree the class-policy read exception with the store owner and reconcile the active canonical store read contract.
 
 ## 1. Registry and fields
 
