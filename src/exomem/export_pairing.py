@@ -55,6 +55,7 @@ class _Reading:
 class _Entry:
     path: str
     name: str
+    ambiguous: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,7 +94,9 @@ def title_name(title: object, fmt: SourceFormat) -> str | None:
         return None
     name = "".join(fmt.replaced.get(char, char) for char in name)
     dot = name.rfind(".")
-    return None if dot <= 0 else name[:dot][: fmt.media_name_limit] + name[dot:]
+    if dot <= 0 or len(name) - dot > 255:
+        return None  # A suffix bigger than a filename cannot fit any staged photo.
+    return name[:dot][: fmt.media_name_limit] + name[dot:]
 
 
 def _split_copy(text: str) -> tuple[str, int | None]:
@@ -138,20 +141,21 @@ def decide(sidecars: Mapping[str, Key], photos: Iterable[str], fmt: SourceFormat
     exactly one photo fits it by name and by title, in the sidecar's own folder, and that photo fits no other sidecar.
     """
     index = _index(photos, prefixes=False)
-    fitting: dict[str, list[str]] = {}
+    decided: dict[str, tuple[str | None, str | None]] = {}
     claims: dict[str, int] = {}
     for path, key in sidecars.items():
         fits = _title_fits(path.rpartition("/")[0], key, index)
-        fitting[path] = fits
         for photo in fits:
-            claims[photo] = claims.get(photo, 0) + 1
-    decided: dict[str, tuple[str | None, str | None]] = {}
-    for path, fits in fitting.items():
+            if not photo.ambiguous:
+                claims[photo.path] = claims.get(photo.path, 0) + 1
         if not fits:
             decided[path] = (None, NO_PHOTO)
-        elif len(fits) == 1 and claims[fits[0]] == 1:
-            decided[path] = (fits[0], None)
+        elif len(fits) == 1 and not fits[0].ambiguous:
+            decided[path] = (fits[0].path, None)
         else:
+            decided[path] = (None, AMBIGUOUS)
+    for path, (photo, _reason) in decided.items():
+        if photo is not None and claims[photo] > 1:
             decided[path] = (None, AMBIGUOUS)
     return decided
 
@@ -163,6 +167,7 @@ def _index(photos: Iterable[str], *, across_folders: bool = False, prefixes: boo
     """
     exact: dict[tuple[str, str, int | None, str], list[_Entry]] = {}
     by_copy: dict[tuple[str, int | None], list[tuple[str, _Entry]]] = {}
+    filenames: dict[tuple[str, str], tuple[str, bool]] = {}
     for path in photos:
         folder, _slash, raw = path.rpartition("/")
         if across_folders:
@@ -170,9 +175,13 @@ def _index(photos: Iterable[str], *, across_folders: bool = False, prefixes: boo
         name = unicodedata.normalize("NFC", raw)
         if media_type_for(name) not in KINDS:
             continue
+        previous, ambiguous = filenames.get((folder, name), (path, False))
+        filenames[(folder, name)] = (min(path, previous), ambiguous or path != previous)
+    # Every sidecar treats equivalent Unicode spellings alike. Keep one entry per name and remember the ambiguity.
+    for (folder, name), (path, ambiguous) in filenames.items():
         mime = mime_of(name)
         for reading in _readings(name):
-            entry = _Entry(path, reading.full)
+            entry = _Entry(path, reading.full, ambiguous)
             exact.setdefault((folder, reading.stem, reading.copy, mime), []).append(entry)
             if prefixes:
                 by_copy.setdefault((folder, reading.copy), []).append((reading.full, entry))
@@ -184,19 +193,19 @@ def _index(photos: Iterable[str], *, across_folders: bool = False, prefixes: boo
     return _Index(exact, names, entries)
 
 
-def _title_fits(folder: str, key: Key, index: _Index) -> list[str]:
+def _title_fits(folder: str, key: Key, index: _Index) -> list[_Entry]:
     """Use the full title to narrow the candidates before checking a cut sidecar name."""
     if key.title is None:
         return []
     title_stem, title_mime = key.title.rpartition(".")[0], mime_of(key.title)
     base_matches_mime = mime_of(key.base) == title_mime and media_type_for(key.base) in KINDS
-    fits: dict[str, None] = {}
+    fits: dict[str, _Entry] = {}
     for reading in _readings(key.base, key.copy):
         exact = base_matches_mime and reading.stem == title_stem
         for entry in index.exact.get((folder, title_stem, reading.copy, title_mime), ()):
             if exact or (key.at_limit and reading.full and entry.name.startswith(reading.full)):
-                fits[entry.path] = None
-    return list(fits)
+                fits[entry.path] = entry
+    return list(fits.values())
 
 
 def _name_fits(folder: str, key: Key, index: _Index) -> Iterable[str]:

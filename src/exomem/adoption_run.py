@@ -1479,15 +1479,17 @@ def _residual_actions(residual: dict | None, where: str = "finish.residual") -> 
     # A run finished before paging existed has no `more_pages` key, and no later page.
     if not residual or not residual["files"] or residual.get("more_pages"):
         return []
-    # A run finished before the unfiled count existed has no summary.
-    summary = residual.get("summary") or f"{residual['files']} files stay staged."
-    return [
-        {"action": "review-residual", "status": "available",
-         "description": f"{summary} {residual['files']} files ({residual['bytes']} bytes) stay staged in {residual['folder']}; "
-                        f"{where}.by_reason says why. Review them with the person before anything is discarded."},
-        {"action": "discard", "status": "available",
-         "description": f"Only after the person agrees, and permanently: {residual['discard']}."},
-    ]
+    actions = []
+    reasons = residual.get("by_reason") or {}
+    if not reasons or any(not export_sidecars.counts_as_filed(code) for code in reasons):
+        # A run finished before the unfiled count existed has no summary.
+        summary = residual.get("summary") or f"{residual['files']} files stay staged."
+        actions.append({"action": "review-residual", "status": "available",
+                        "description": f"{summary} {residual['files']} files ({residual['bytes']} bytes) stay staged in {residual['folder']}; "
+                                       f"{where}.by_reason says why. Review members that still need attention before discarding."})
+    actions.append({"action": "discard", "status": "available",
+                    "description": f"Only after the person agrees, and permanently: {residual['discard']}."})
+    return actions
 
 
 def _handoff(run: dict) -> dict:
@@ -2506,9 +2508,10 @@ def plan(
             derived = import_stage.derived_files(root, stage_id) if stage_id is not None else {}
         # A recognised export files as an artifact, so its conversations are indexed once, as the transcripts derived from it.
         exports = set(export_expansion.read(root, stage_id).exports) if stage_id is not None else set()
-        # Each photo that a Takeout sidecar pairs with, by its path in the stage, with the caption that sidecar gives it.
-        sidecar_facts = export_sidecars.photo_facts(export_sidecars.read(root, stage_id)) if stage_id is not None else {}
         stage_prefix = f"{IMPORT_STAGE_DIR}/{stage_id}/"
+        sidecar_facts = export_sidecars.photo_facts(
+            root, stage_id, {rel.removeprefix(stage_prefix) for rel in selected[draft["next"]:]}
+        ) if stage_id is not None else {}
         budget = _call_budget()
         with call_spans.span("adoption.plan_index", {}) as measured:
             # The first read of a large vault is long, so it ends like an item loop does and the next call resumes it.
@@ -5543,6 +5546,10 @@ def file(
                 continuation=invocation.get("continuation"), today=today,
             )
             return _filing_reply(root, store, _chain_end(store, store.load(page_id)))
+        if run is not None and continuation is None and not reconciling and _next_filing_step(run) == "select":
+            if (stage_id := _stage_id_of(run["source_root"])) is not None:
+                # A saved preview can omit later members. Discover exports across the stage before selecting its first page.
+                export_expansion.find_exports(root, stage_id)
         while True:
             step = "start" if run is None else _filing_step(root, store, run)
             if step == "done":
@@ -5715,10 +5722,13 @@ def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict 
     if _next_filing_step(run) == "done":
         remaining += _unscanned(root, store, run)  # staged files that came after the scan, which a new scan files
         remaining += len(expansion.held) if expansion else 0  # an export still being read stays unfiled until its last item
-    if expansion is not None and expansion.sidecars == export_sidecars.WORKING:
-        remaining += export_sidecars.waiting(root, stage_id)  # a photo waits for the sidecars, so it is not filed and not left out
     pages_done = sum(1 for tally in scans if tally.phase in _FINISHED_PHASES)
     position = _page_position(run)
+    if expansion is not None and expansion.sidecars == export_sidecars.WORKING:
+        # Inventory already counts these files until selection sets them aside.
+        remaining += sum((page.get("selection") or {}).get("waiting_for_sidecars") or 0 for page in (run, *_earlier_pages(store, run)))
+        # Show movement without publishing the path last examined by the pass.
+        position["sidecar_progress"] = hashlib.sha256(expansion.sidecar_cursor.encode("utf-8", errors="surrogatepass")).hexdigest()
     if expansion is not None and expansion.held:
         # An item that the entry's rule leaves out derives no file and changes no count, so only this shows that the read goes on.
         position["set_aside"] = expansion.skipped

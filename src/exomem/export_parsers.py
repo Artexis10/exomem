@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
 
-from . import export_mail, export_notes, export_photos, export_transcripts
+from . import export_mail, export_notes, export_transcripts
 
 if TYPE_CHECKING:
     from .export_transcripts import ReadItem
@@ -26,7 +26,7 @@ class Parser:
 
     `needs` names the registry attributes, beyond the common ones, that the parser reads; an entry carries all of them and
     no other. `words` is the closed key set of the entry's `words` map, empty for a parser with no such words.
-    `recognise` says whether an open staged file is this parser's container and carries the entry's recognition facts.
+    `recognise` checks for an export container and its recognition facts. The separate sidecar pass checks its own files.
     `read` yields each item from a position, as (position after it, item), and raises `ExportFault` when the container
     ends early or is not what it declared. `workdir` is a hidden folder in the stage where a reader may keep bytes that
     the expander then moves into place. A parser with no `read` derives no items: its files are read for what they say about
@@ -35,7 +35,7 @@ class Parser:
 
     needs: frozenset[str]
     words: frozenset[str]
-    recognise: Callable[[BinaryIO, SourceFormat], bool]
+    recognise: Callable[[BinaryIO, SourceFormat], bool] | None
     read: Callable[..., Iterator[ReadItem]] | None
 
 
@@ -59,7 +59,7 @@ PARSERS: Mapping[str, Parser] = {
     "claude-conversations": Parser(_JSON_NEEDS, _NO_WORDS, export_transcripts.recognise_json, export_transcripts.read),
     "evernote-notes": Parser(_NOTE_NEEDS, _NOTE_WORDS, export_notes.recognise, export_notes.read),
     "gmail-mbox": Parser(_MAIL_NEEDS, _MAIL_WORDS, export_mail.recognise, export_mail.read),
-    "photo-sidecar": Parser(_PHOTO_NEEDS, _NO_WORDS, export_photos.recognise, None),
+    "photo-sidecar": Parser(_PHOTO_NEEDS, _NO_WORDS, None, None),
 }
 
 

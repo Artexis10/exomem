@@ -72,6 +72,11 @@ _BATCH = 200
 _ROW_KEYS = ("sidecar", "unreadable", "pair", "sidecars_end")  # nosemgrep: ep-word-set -- the closed row keys of the pass: this module's own record format.
 
 
+def counts_as_filed(code: str) -> bool:
+    outcome = STAYS.get(code)
+    return outcome is not None and outcome[0]
+
+
 class Record(Protocol):
     """The part of the expansion record that the pass uses (`export_expansion._Record`)."""
 
@@ -134,8 +139,10 @@ def read_rows(root: Path, import_id: str) -> Rows:
     pairs: dict[str, tuple[str | None, str | None]] = {}
     unreadable: set[str] = set()
     end = None
-    for _after, row in import_stage.read_expansion_rows(root, import_id):
+    for start, row in import_stage.read_expansion_rows(root, import_id, starts=True):
         if isinstance(path := row.get("sidecar"), str) and _key_of(row) is not None:
+            row["captioned"] = bool(row.pop("caption", None))
+            row["offset"] = start
             sidecars[path] = row
         elif isinstance(path := row.get("unreadable"), str):
             unreadable.add(path)
@@ -201,8 +208,7 @@ class Hold:
             return None
         if media_type_for(path) in KINDS:
             return CODE_WAITING
-        name = PurePosixPath(path).name
-        if size <= export_photos.MAX_BYTES and path > self._cursor and any(fmt.names(name) for fmt in self._known):
+        if path > self._cursor and can_read(path, size, self._known):
             return CODE_WAITING
         return None
 
@@ -215,26 +221,24 @@ def hold(root: Path, import_id: str, *, prefix: str = "") -> Hold | None:
     return Hold(reading, photo_formats(root), prefix)
 
 
-def waiting(root: Path, import_id: str) -> int:
-    """How many staged files wait for the pass now: a photo or an unexamined JSON file; none once the pass ended."""
-    held = hold(root, import_id)
-    if held is None:
-        return 0
-    return sum(1 for path, size in import_stage.staged_files(root, import_id) if held.code(path, size) == CODE_WAITING)
-
-
 def photo_formats(root: Path | None) -> tuple[source_formats.SourceFormat, ...]:
     """The active entries whose parser derives no items: the sidecar formats (the shipped ones when `root` is None)."""
     return tuple(fmt for fmt in source_formats.formats(root) if not export_parsers.derives(fmt))
 
 
-def photo_facts(reading: Reading) -> dict[str, dict]:
-    """The caption and timestamps of each paired photo, by its path in the stage."""
+def photo_facts(root: Path, import_id: str, selected: set[str]) -> dict[str, dict]:
+    """Load captions only for the paired photos that this page of filing selected."""
+    reading = read(root, import_id)
     facts = {}
+    captions: dict[int, str] = {}
     for sidecar, (photo, _why) in reading.rows.pairs.items():
         row = reading.rows.sidecars.get(sidecar)
-        if photo is not None and row is not None:
-            facts[photo] = {"caption": row.get("caption"), "timestamps": row.get("timestamps") or {}}
+        if photo is not None and photo in selected and row is not None:
+            facts[photo] = {"caption": None, "timestamps": row.get("timestamps") or {}}
+            if row["captioned"]:
+                captions[row["offset"]] = photo
+    for offset, row in import_stage.read_expansion_rows_at(root, import_id, captions):
+        facts[captions[offset]]["caption"] = row["caption"]
     return facts
 
 
@@ -286,12 +290,12 @@ def settle(reading: Reading, photo_filing: Callable[[str], str]) -> tuple[dict[s
         elif filing != STORED:
             codes[path] = CODE_PHOTO_NOT_FILED
         else:
-            has_caption = row.get("caption") is not None
+            has_caption = row["captioned"]
             codes[path] = CODE_APPLIED if has_caption else CODE_EMPTY
             captioned += has_caption
     by_reason: dict[str, int] = {}
     for code in codes.values():
-        if STAYS[code][0]:
+        if counts_as_filed(code):
             by_reason[code] = by_reason.get(code, 0) + 1
     return codes, {"captioned": captioned, "by_reason": by_reason}
 
@@ -309,14 +313,19 @@ def open_pass(root: Path, record: Record, *, listing: list[tuple[str, int]], ski
     return True
 
 
+def can_read(path: str, size: int, known: tuple[source_formats.SourceFormat, ...]) -> bool:
+    """Whether the file fits a sidecar parser's name and size limits."""
+    name = PurePosixPath(path).name
+    return size <= export_photos.MAX_BYTES and any(fmt.names(name) for fmt in known)
+
+
 def _candidates(
     listing: list[tuple[str, int]], cursor: str, skip: Callable[[str], bool], known: tuple[source_formats.SourceFormat, ...],
 ) -> list[str]:
     """The staged paths after `cursor` that the pass reads: a name that a sidecar format may have, within the size bound."""
     return [
         path for path, size in listing
-        if path > cursor and size <= export_photos.MAX_BYTES and not skip(path)
-        and any(fmt.names(PurePosixPath(path).name) for fmt in known)
+        if path > cursor and not skip(path) and can_read(path, size, known)
     ]
 
 
@@ -357,14 +366,14 @@ def advance(
         if hit is None:
             continue
         fmt, document = hit
-        if record.sidecars is None:
-            record.sidecars = new_entry(fmt.key)
-            record.save(root)  # before the first row, so that a crash never leaves rows whose pass has no format
-        elif record.sidecars["format"] is None:
-            record.sidecars["format"] = fmt.key
         key = export_pairing.key_of(PurePosixPath(path).name, document.get("title"), fmt)
         if key is None:  # the entry's glob matched a name that is no `.json` file: not a sidecar
             continue
+        if record.sidecars is None:
+            record.sidecars = new_entry(None)
+        if record.sidecars["format"] is None:
+            record.sidecars["format"] = fmt.key
+            record.save(root)  # Persist the parser before any recoverable sidecar rows.
         buffered.append(_row(path, key, document))
         if len(buffered) >= _BATCH:
             record.append(root, buffered)

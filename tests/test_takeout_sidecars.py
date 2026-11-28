@@ -347,6 +347,18 @@ def test_a_photo_without_a_sidecar_files_without_a_caption_and_a_folder_keeps_it
     assert view["sidecars"]["by_reason"] == {APPLIED: 2}
 
 
+def test_a_caption_with_an_invalid_unicode_value_keeps_the_rest_of_its_text(vault: Path) -> None:
+    """Catches a single invalid code point parking filing before the photo can be recorded."""
+    name = "IMG_77.jpg"
+    _id, pages, view = one_photo_albums(vault, {
+        f"{ALBUM}/{name}": photo(name),
+        f"{ALBUM}/{name}.json": sidecar(name, caption="First \ud800 café"),
+    })
+
+    assert caption_of(pages, f"{ALBUM}/{name}") == "First ? café"
+    assert view["sidecars"]["by_reason"] == {APPLIED: 1}
+
+
 def test_photo_provenance_keeps_valid_timestamp_text_and_ignores_other_sidecar_values(vault: Path) -> None:
     """Catches a sidecar with a valid pre-epoch time and a non-time value in its other timestamp field."""
     name = "scan.jpg"
@@ -420,6 +432,7 @@ def test_the_reply_to_a_second_import_says_the_sidecars_captions_were_not_applie
     residual = reply["filed"]["residual"]
     assert residual["unfiled"]["files"] == 0  # the photo is in the vault, so nothing needs the person
     assert "caption was not applied, because the vault already held its photo" in residual["summary"]
+    assert [item["need"] for item in reply["person"]] == ["discard"]
 
 
 def test_an_album_copy_of_a_photo_already_filed_counts_its_sidecar_as_already_imported_and_not_for_review(vault: Path) -> None:
@@ -546,7 +559,7 @@ def test_no_photo_files_before_every_sidecar_is_read_when_the_pass_outlasts_a_ca
         calls.append(1)
         if not any("sidecars_end" in row for row in expansion_rows(root, import_id)):
             filed_while_reading.append(len(source_pages(root)))
-        expand(root, import_id, keep_going=lambda: False, rewalk=rewalk)
+        return expand(root, import_id, keep_going=lambda: False, rewalk=rewalk)
 
     monkeypatch.setattr(export_expansion, "expand", one_sidecar_a_call)
     members = {}
@@ -563,6 +576,70 @@ def test_no_photo_files_before_every_sidecar_is_read_when_the_pass_outlasts_a_ca
     for number in range(12):
         assert caption_of(pages, f"{ALBUM}/IMG_{number:02d}.jpg") == f"photo {number}"
     assert view["sidecars"]["by_reason"] == {APPLIED: 12}
+
+
+def test_yielding_after_the_first_scan_counts_each_member_once(vault: Path, monkeypatch) -> None:
+    """Catches telling the caller there are four files left in a two-file Takeout stage."""
+    from exomem import adoption_run
+
+    name = "IMG_56.jpg"
+    import_id = stage_takeout(vault, {f"{ALBUM}/{name}": photo(name), f"{ALBUM}/{name}.json": sidecar(name)})
+    monkeypatch.setattr(adoption_run, "_stop_now", lambda *_args, **_kwargs: "budget")
+
+    reply = adoption_run.file(vault, path=f"_Imports/{import_id}")
+
+    assert reply["filing"] == "working"
+    assert reply["progress"]["remaining"] == 2
+
+
+def test_filing_after_a_saved_preview_reads_sidecars_before_filing_photos(vault: Path) -> None:
+    """Catches resuming the saved preview without discovering the paired sidecar."""
+    from exomem import adoption_run
+
+    name = "IMG_57.jpg"
+    import_id = stage_takeout(vault, {
+        f"{ALBUM}/{name}": photo(name),
+        f"{ALBUM}/{name}.json": sidecar(name, caption="Blue hour"),
+    })
+    preview = adoption_run.start(vault, path=f"_Imports/{import_id}", max_candidates=1)
+    assert preview["next_after"]
+
+    view = file_to_done(vault, import_id, calls=200)
+
+    pages = filed_files(vault, import_id)
+    assert set(pages) == {f"{ALBUM}/{name}"}
+    assert caption_of(pages, f"{ALBUM}/{name}") == "Blue hour"
+    assert view["sidecars"]["by_reason"] == {APPLIED: 1}
+
+
+def test_filing_recovers_a_caption_after_the_first_sidecar_row_was_saved(vault: Path, monkeypatch) -> None:
+    """Catches a restart that remembers the sidecar row but loses its parser and skips pairing."""
+    name = "first.jpg"
+    import_id = stage_takeout(vault, {
+        f"{ALBUM}/{name}": photo(name),
+        f"{ALBUM}/{name}.json": sidecar(name, caption="First stop"),
+    })
+    export_expansion.find_exports(vault, import_id)
+    append_rows = import_stage.append_expansion_rows
+
+    class Interrupted(Exception):
+        pass
+
+    def interrupt_after_append(root, stage_id, rows):
+        append_rows(root, stage_id, rows)
+        assert rows[0]["sidecar"] == f"{ALBUM}/{name}.json"
+        raise Interrupted
+
+    with monkeypatch.context() as patch:
+        patch.setattr(import_stage, "append_expansion_rows", interrupt_after_append)
+        with pytest.raises(Interrupted):
+            export_expansion.expand(vault, import_id, keep_going=lambda: True)
+
+    view = file_to_done(vault, import_id, calls=200)
+
+    assert caption_of(filed_files(vault, import_id), f"{ALBUM}/{name}") == "First stop"
+    assert view["sidecars"]["by_reason"] == {APPLIED: 1}
+    assert view["left_out"]["items"] == []
 
 
 def test_an_ordinary_import_with_json_files_opens_each_of_them_once_however_often_it_is_filed_again(vault: Path, monkeypatch) -> None:

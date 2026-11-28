@@ -77,6 +77,7 @@ class Reading:
     stop: dict | None  # why the expansion waits for the person: its code and the export, when the volume is full
     sidecars: str | None = None  # the state of the sidecar pass, or None for a stage with no sidecar to read
     sidecar_fault_has_member: bool = False
+    sidecar_cursor: str = ""  # the last staged path examined by the sidecar pass
 
 
 def _entry(format_key: str | None = None, kind: str | None = None, size: int = 0) -> dict:
@@ -188,6 +189,7 @@ def read(root: Path, import_id: str) -> Reading:
     record = _load(root, import_id)
     exports = record.exports
     partial_sidecars = _partial_sidecars(record.sidecars)
+    cursor = (record.sidecars or {}).get("cursor")
     return Reading(
         exports=tuple(exports),
         held=tuple(path for path, state in exports.items() if state.get("state") == WORKING),
@@ -197,7 +199,8 @@ def read(root: Path, import_id: str) -> Reading:
         partial=sum(1 for state in exports.values() if state.get("state") == PARTIAL and state.get("code"))
         + int(partial_sidecars is not None),
         stop=record.stop, sidecars=None if record.sidecars is None else record.sidecars["state"],
-        sidecar_fault_has_member=bool(partial_sidecars and partial_sidecars.get("fault")))
+        sidecar_fault_has_member=bool(partial_sidecars and partial_sidecars.get("fault")),
+        sidecar_cursor=cursor if isinstance(cursor, str) else "")
 
 
 def unfiled(root: Path, import_id: str) -> list[dict]:

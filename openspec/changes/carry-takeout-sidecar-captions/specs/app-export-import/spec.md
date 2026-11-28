@@ -172,6 +172,12 @@ Over the sidecars whose photo filed now, the filing view SHALL count those that 
 
 A stage that holds any JSON file of at most 1 MiB SHALL keep its images and videos out of selection until the pass over those files ends, before any of them is known to be a sidecar. The pass ends when every such file is examined and the pairs are decided. A JSON file that cannot be read SHALL get its own record, and the pass SHALL read on past it and end in part. Each paired photo SHALL then file with its sidecar's caption.
 
+#### Scenario: Filing resumes a saved preview
+
+- **WHEN** filing starts from a saved preview of a stage with a photo and its sidecar
+- **THEN** filing reads the sidecar before selecting the photo
+- **AND** the photo's Source carries its caption and the sidecar files no Source
+
 #### Scenario: A Takeout larger than one call's budget
 
 - **WHEN** a stage holds more sidecars than one `file` call reads

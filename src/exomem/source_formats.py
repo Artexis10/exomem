@@ -247,12 +247,13 @@ def recognise(vault_root: Path, path: Path) -> SourceFormat | None:
     tell, is not recognised, and files as an ordinary file.
     """
     # An entry whose parser derives no items (a sidecar) is read by its own pass, so a sidecar is never an export.
-    for candidate in (
-        candidate for candidate in formats(vault_root) if candidate.names(path.name) and PARSERS[candidate.parser].read is not None
-    ):
+    for candidate in formats(vault_root):
+        check = PARSERS[candidate.parser].recognise
+        if check is None or not candidate.names(path.name):
+            continue
         try:
             with open_export(path) as stream:
-                if PARSERS[candidate.parser].recognise(stream, candidate):
+                if check(stream, candidate):
                     return candidate
         except OSError:
             return None

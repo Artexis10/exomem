@@ -14,10 +14,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, BinaryIO
-
-if TYPE_CHECKING:
-    from .source_formats import SourceFormat
+from typing import BinaryIO
 
 #: A larger file is not opened: a sidecar holds about a kilobyte, so a bigger one is not a sidecar.
 MAX_BYTES = 1024 * 1024
@@ -41,18 +38,14 @@ def read_object(stream: BinaryIO) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
-def recognise(stream: BinaryIO, fmt: SourceFormat) -> bool:
-    """Whether the stream is a JSON object of at most `MAX_BYTES` that carries every key of the entry's `item_keys`."""
-    found = read_object(stream)
-    return found is not None and all(key in found for key in fmt.item_keys)
-
-
 def caption_of(document: dict) -> str | None:
     """The owner's `description` of a recognised sidecar, trimmed and cut to `MAX_CAPTION_CHARS`; None when it holds no text."""
     value = document.get("description")
     if not isinstance(value, str):
         return None
-    return value.translate(_NO_CONTROLS).strip()[:MAX_CAPTION_CHARS].strip() or None
+    caption = value.translate(_NO_CONTROLS).strip()[:MAX_CAPTION_CHARS].strip()
+    # JSON can decode a lone surrogate that the Source writer cannot encode.
+    return caption.encode("utf-8", errors="replace").decode("utf-8") or None
 
 
 def _timestamp(value: object) -> str | None:
