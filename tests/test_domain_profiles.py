@@ -26,6 +26,7 @@ from exomem import (
     activation_conventions,
     commands,
     context_catalogue,
+    context_views,
     domain_profiles,
     embeddings,
     lexstore,
@@ -546,6 +547,19 @@ def test_without_a_turn_vector_the_paraphrase_selects_nothing_and_the_block_says
     assert packet["domain_profiles"] == {"state": "empty", "profiles": [], "omitted": [], "selection": "lexical"}
 
 
+def test_a_resident_index_without_profile_vectors_uses_the_lexical_reading(semantic_vault) -> None:
+    index = embeddings.get_embedding_index(semantic_vault)
+    for name in ("media", "games", "music", "cooking"):
+        index.delete_file(f"{PROFILES}/{name}.md")
+    index.all_vectors()
+    _set_budgets(semantic_vault)
+
+    packet = _activate(semantic_vault, GAMES_TURN)
+
+    assert packet["domain_profiles"]["selection"] == "lexical"
+    assert _served(packet) == {"games": [RULE["games"]], "media": [RULE["media"]]}
+
+
 def test_a_vault_floor_decides_whether_a_meaning_match_selects(semantic_vault) -> None:
     _set_budgets(semantic_vault, profile_semantic_floor=0.9, profile_lexical_floor=8.5)
 
@@ -589,6 +603,13 @@ def test_a_keyword_reading_that_does_not_run_with_no_turn_vector_leaves_the_prof
     packet = _activate(profiles_vault, GAMES_TURN)
 
     assert packet["domain_profiles"] == {"state": "unavailable", "profiles": [], "omitted": None, "selection": "none"}
+
+
+def test_a_follow_up_without_content_words_still_needs_a_snapshot_to_read_profiles(profiles_vault) -> None:
+    packet = context_views.activation_packet(profiles_vault, 2000, generation={}, turn="What is it?")
+
+    assert packet["domain_profiles"]["state"] == "unavailable"
+    assert packet["domain_profiles"]["omitted"] is None
 
 
 # --------------------------------------------------------------------------- #

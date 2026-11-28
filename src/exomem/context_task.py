@@ -791,12 +791,15 @@ def compile_context(
         if reach is not None and any(gap.get("reason") == _LANE_FAILED for gap in missing):
             reach.stop(_LANE_FAILED)
         candidates = []
+        routed = set()
         identities: dict[tuple[str, str], dict[str, Any]] = {}
         methods_by_source: dict[str, list[dict[str, Any]]] = {}
         contract_chars = int(
             activation_conventions.load_conventions(root).conventions.budget("method_contract_max_chars") or 0
         )
         for candidate in discovered:
+            if candidate.pop("routed", False):
+                routed.add(candidate["source_ref"])
             try:
                 with find_types.timing_span(timings, "working_set.task_context_projection"):
                     source = project_source(root, candidate["source_ref"], caller, cache=sources)
@@ -833,6 +836,8 @@ def compile_context(
                 source, candidate["source_ref"],
             ):
                 methods_by_source.setdefault(candidate["source_ref"], []).extend(items)
+        if len(candidates) > 1 and full_source_access(root, caller):
+            working_set_runtime.prefer_named_task_notes(root, turn, candidates, routed)
         with find_types.timing_span(timings, "working_set.method_fit"):
             selected, block["method_fit"] = _selected_methods(
                 root, caller=caller, catalogue=catalogue, turn=turn, conversation=conversation, sources=sources,
