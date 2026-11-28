@@ -41,11 +41,11 @@ Before the intake queues a `record_memory` append with an object `item`, or an u
 
 ### Requirement: A Planning value that the vault does not define is refused before queueing
 
-Before the intake queues a `plan_memory` add with an object `item`, an update with an object `changes` or a triage with an object `transition`, whose `collection` is a string, the serving process SHALL check each supplied value that is not null: a field that the Planning values govern with the Planning commit's own rule, then every field with the declared per-field rules. A refused value SHALL get that refusal at once and SHALL NOT be queued.
+Before the intake queues a `plan_memory` add, update or triage with an object `item`, `changes` or `transition` and a string `collection`, the serving process SHALL check each supplied value, an add's null one included: a governed field with the Planning commit's own rule, then every field with the declared per-field rules. An add with a refused value SHALL be refused at once, not queued. An update or a triage with one SHALL be refused only as the store read below allows.
 
 #### Scenario: A Planning status outside the Planning values behind the queue is refused at once
 
-- **WHEN** an owner sends a `plan_memory` add, update or triage whose `status` is not one of the vault's Planning statuses, for an update or triage unless the target item stores that value
+- **WHEN** an owner sends a `plan_memory` add whose `status` is null or not one of the vault's Planning statuses
 - **AND** earlier saves are still queued
 - **AND** there is no open queued save of a command that declares `sets_any_frontmatter_field`, and no open `record_memory` or `plan_memory` save carrying `manifest_text`
 - **THEN** the call returns `INVALID_PLAN` with the statuses that the vault defines
@@ -53,7 +53,7 @@ Before the intake queues a `plan_memory` add with an object `item`, an update wi
 
 ### Requirement: The declared value check queues the save when it cannot be certain
 
-The declared value check SHALL leave the save queued when an open queued save of a command that declares `sets_any_frontmatter_field`, or an open save that carries a non-null `manifest_text`, exists; when the declaration read or the queue read fails or misses their shared 0.5 s budget; or when the egress filter faults. A declaration change outside the queue that has not committed at the check, such as a direct revise or a Planning values save, is not seen, so a value it adds is refused.
+The intake SHALL mark the queue before it reads the declaration and look again after. The check SHALL leave the save queued when a save open at the mark, or one that entered the queue after it, is of a command that declares `sets_any_frontmatter_field` or may carry a non-null `manifest_text`; when the declaration read or a queue read fails or misses their shared 0.5 s budget; or when the egress filter faults. A declaration change outside the queue that has not committed at the check is not seen.
 
 #### Scenario: A Records value behind a queued edit of its manifest still queues
 
@@ -69,27 +69,46 @@ The declared value check SHALL leave the save queued when an open queued save of
 - **THEN** the save is queued
 - **AND** once its replay is applied, the row holds the value
 
-### Requirement: A Planning value that its item may keep is not refused before queueing
+#### Scenario: A value that a revision commits during the declaration read is saved
 
-For a `plan_memory` update or triage, a value that the Planning values deprecate or no longer define SHALL stay queued when the item that the save names by `plan_id` or `item_id` stores that value in that field, as the commit's rule accepts it. Another item's stored value SHALL NOT exempt it. The value SHALL also stay queued when no one item that the caller may read answers to that name.
+- **WHEN** a `plan_memory` revise that adds a value to a field's enum is queued before or while the intake reads the declaration for an add with that value
+- **AND** the revise commits before the intake looks at the queue again
+- **THEN** the add is queued
+- **AND** once its replay is applied, the row holds the value
 
-#### Scenario: A busy Planning update that keeps a removed status is saved
+### Requirement: A Planning update is refused before queueing only for an item its store reads by key
 
-- **WHEN** a Planning item stores a status that the owner has since removed from the Planning values
-- **AND** an owner sends a `plan_memory` update of that item with the same status behind queued saves
+A `plan_memory` update or triage with a value that the Planning check refuses SHALL be refused before queueing only when it names its item by `plan_id` and both guards, the store that owns the collection reads that item by its key, the guards equal the collection's container hash and the item's version, the caller reads the item whole, and the item does not store that value in that field. Otherwise the save SHALL be queued.
+
+#### Scenario: A busy Planning update that keeps a removed status is queued
+
+- **WHEN** an item of a store-owned Planning collection stores a status that the owner has since removed from the Planning values
+- **AND** an owner sends a `plan_memory` update of that item with the same status while the store is busy
 - **THEN** the update is queued
-- **AND** once its replay is applied, the item holds the status
 
-#### Scenario: Another item's removed status behind the queue is refused at once
+#### Scenario: Another item's removed status on a busy store is refused at once
 
-- **WHEN** a Planning item stores a status that the owner has since removed from the Planning values
-- **AND** an owner sends a `plan_memory` update of another item with that status behind queued saves
+- **WHEN** an item of a store-owned Planning collection stores a status that the owner has since removed from the Planning values
+- **AND** an owner sends a `plan_memory` update of another item, by its `plan_id` and both guards, with that status while the store is busy
 - **THEN** the call returns `INVALID_PLAN` with the statuses that the vault defines
-- **AND** the intake holds only the earlier saves
+- **AND** the intake holds no copy of the update
+
+#### Scenario: A busy update by a stale item id is queued
+
+- **WHEN** an owner queries a Planning item and then changes it
+- **AND** the owner sends a `plan_memory` update with the item's old `item_id` and a status outside the Planning values while the store is busy
+- **THEN** the update is queued, not refused for its status
+
+#### Scenario: A busy update of a file collection is queued
+
+- **WHEN** an owner sends a `plan_memory` update or triage of a file collection item with a status outside the Planning values
+- **AND** earlier saves are still queued
+- **THEN** the save is queued
+- **AND** its replay refuses it with `INVALID_PLAN`
 
 ### Requirement: The Planning check leaves the rest to the replay
 
-The Planning check SHALL leave a governed value to the replay when the caller cannot read the vault's Planning values. Planning's own single-field rules SHALL stay at the replay: the title's length, the fixed lifecycle set, window dates, the bound on results and motivation references. Rules that join fields, such as the lifecycle rules and what an area may carry, SHALL stay at the replay too.
+The Planning check SHALL leave a governed value to the replay when the caller cannot read the vault's Planning values, and an update's or a triage's null, which deletes its field. Planning's own single-field rules SHALL stay at the replay: the title's length, the fixed lifecycle set, window dates, the bound on results and motivation references. Rules that join fields, such as the lifecycle rules and what an area may carry, SHALL stay at the replay too.
 
 #### Scenario: A Planning value that only a single-field rule refuses still queues
 

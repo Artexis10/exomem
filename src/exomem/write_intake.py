@@ -1546,18 +1546,65 @@ def _summary_line(state_counts: Mapping[str, int]) -> str:
     return f"{queued} queued save(s) waiting, {failed} failed save(s) to review."
 
 
-def may_change_declaration(
-    vault_root: Path, *, rewriting: Sequence[str], manifest_commands: Sequence[str], manifest_field: str,
-    seconds: float,
-) -> bool | None:
-    """Whether a save that still waits or applies may change a declaration before a later save replays.
+#: A queued save that may change a declaration: a save of a `rewriting` command, or a save of a manifest
+#: command whose manifest field is not null. An applied save keeps no arguments, so an applied save of a
+#: manifest command counts: it may have carried one. An open save always keeps its arguments.
+_CHANGES_A_DECLARATION = (
+    "(command IN (SELECT value FROM json_each(?)) OR (command IN (SELECT value FROM json_each(?)) "
+    "AND (arguments IS NULL OR json_extract(arguments, '$.' || ?) IS NOT NULL)))"
+)
+
+
+@dataclass(frozen=True)
+class DeclarationWatch:
+    """The queued saves that may change a declaration before a later save replays.
 
     A save of a command in `rewriting` may, whichever page it names: only its own resolution, when it
     applies, decides which page that is. A save of a command in `manifest_commands` may when its
-    `manifest_field` holds a value other than null; MCP stores a field the caller left unset as null. One
-    EXISTS query over the open rows decides it inside SQLite, so no queued arguments reach Python. A query
-    that has not answered within `seconds` stops: None, unknown, as for a queue that cannot be read.
+    `manifest_field` holds a value other than null; MCP stores a field the caller left unset as null.
+
+    A check that reads a declaration takes `mark` before that read and asks `changed_since` after it. A save
+    that has ended never reopens, and AUTOINCREMENT never reuses a `seq`. So a change that commits between
+    the two reads was either open at the mark, which `mark` reports, or accepted after it, which
+    `changed_since` reports in whatever state it is now. Each is one query decided inside SQLite, so no queued
+    arguments reach Python. A query that has not answered within `seconds` stops: None, unknown, as for a
+    queue that cannot be read.
     """
+
+    rewriting: Sequence[str]
+    manifest_commands: Sequence[str]
+    manifest_field: str
+
+    def mark(self, vault_root: Path, *, seconds: float) -> int | None:
+        """The `seq` of the last save accepted, 0 for none, where no open save may change a declaration;
+        None where one may, or where that is unknown."""
+        row = _declaration_query(
+            vault_root, seconds,
+            f"SELECT EXISTS (SELECT 1 FROM intake WHERE state IN (?, ?) AND {_CHANGES_A_DECLARATION}), "
+            "COALESCE((SELECT MAX(seq) FROM intake), 0)",
+            (*_OPEN_STATES, *self._parameters()), empty=(0, 0),
+        )
+        return None if row is None or row[0] else int(row[1])
+
+    def changed_since(self, vault_root: Path, marker: int, *, seconds: float) -> bool | None:
+        """Whether a save accepted after `marker` may have changed a declaration; None where that is unknown.
+
+        It reads only the rows after `marker`, by the primary key."""
+        row = _declaration_query(
+            vault_root, seconds,
+            f"SELECT EXISTS (SELECT 1 FROM intake WHERE seq > ? AND {_CHANGES_A_DECLARATION})",
+            (marker, *self._parameters()), empty=(0,),
+        )
+        return None if row is None else bool(row[0])
+
+    def _parameters(self) -> tuple[str, str, str]:
+        return _json(list(self.rewriting)), _json(list(self.manifest_commands)), self.manifest_field
+
+
+def _declaration_query(
+    vault_root: Path, seconds: float, sql: str, parameters: Sequence[Any], *, empty: tuple[int, ...]
+) -> tuple[Any, ...] | None:
+    """The one row that `sql` answers, `empty` where no save was ever queued, None where it is unknown."""
     if seconds <= 0:
         return None
     deadline = time.monotonic() + seconds
@@ -1565,18 +1612,11 @@ def may_change_declaration(
         with _store(vault_root, mode="read") as conn:
             # A row costs a handful of steps and only a `manifest_commands` row is parsed, so the deadline is read often.
             conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 100)
-            (found,) = conn.execute(
-                "SELECT EXISTS (SELECT 1 FROM intake WHERE state IN (?, ?) AND ("
-                "command IN (SELECT value FROM json_each(?)) "
-                "OR (command IN (SELECT value FROM json_each(?)) "
-                "AND json_extract(arguments, '$.' || ?) IS NOT NULL)))",
-                (*_OPEN_STATES, _json(list(rewriting)), _json(list(manifest_commands)), manifest_field),
-            ).fetchone()
-        return bool(found)
+            return tuple(conn.execute(sql, parameters).fetchone())
     except FileNotFoundError:
-        return False
+        return empty
     except Exception:  # noqa: BLE001 - a queue that cannot be read is an unknown, never an empty one
-        log.debug("write intake could not read its open saves", exc_info=True)
+        log.debug("write intake could not read its queued saves", exc_info=True)
         return None
 
 

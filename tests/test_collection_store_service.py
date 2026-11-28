@@ -2678,12 +2678,23 @@ RELEASE_PLAN = "Release Plan"
 RELEASE_PLAN_ID = "77777777-7777-4777-8777-777777777777"
 
 
-@pytest.mark.parametrize("status", ["resolved", "waiting"], ids=["undefined", "removed-but-stored"])
+@pytest.mark.parametrize(
+    ("named_by", "status", "refused"),
+    [
+        ("plan_id", "resolved", True),
+        ("plan_id", "waiting", False),
+        ("another item's plan_id", "waiting", True),
+        ("stale item_id", "resolved", False),
+    ],
+    ids=["undefined", "removed-but-stored", "removed-and-stored-by-another-item", "undefined-by-stale-item-id"],
+)
 def test_a_planning_status_for_a_store_collection_is_refused_while_the_store_is_busy_unless_its_item_stores_it(
-        service, monkeypatch, status):
+        service, monkeypatch, named_by, status, refused):
     """Defect: a Planning status outside the Planning values came back "Queued, not saved yet" and failed only at its
-    replay. The check reads the store-owned item beside the busy store thread, so an update that sends the status
-    the item stores, which the owner has since removed, still queues."""
+    replay. The check reads the item the update names by its key, at the caller's version, beside the busy store
+    thread. An item keeps a status that the owner has since removed, so an update that sends it again queues; another
+    item cannot take that status. An update by item id queues, so that a stale id gets its replay's STALE_ITEM and
+    the current id, not a refusal of its status."""
     from exomem import write_intake
 
     root = service.root
@@ -2693,28 +2704,34 @@ def test_a_planning_status_for_a_store_collection_is_refused_while_the_store_is_
     values = call(root, "schema_memory", subject="planning-values", operation="inspect")
     call(root, "schema_memory", subject="planning-values", operation="save", expected_hash=values["content_hash"],
          proposal={"upsert": {"status.waiting": {"attributes": {"class": "open"}}}}, why="items that wait")
-    call(root, "plan_memory", action="add", collection=RELEASE_PLAN, why="plan it", item={
-        "title": "Wait on the vendor", "kind": "outcome", "status": "waiting", "commitment": "committed",
-        "horizon": "week"})
+    for title, stored in (("Wait on the vendor", "waiting"), ("Ship the release", "active")):
+        call(root, "plan_memory", action="add", collection=RELEASE_PLAN, why="plan it", item={
+            "title": title, "kind": "outcome", "status": stored, "commitment": "committed", "horizon": "week"})
     history = call(root, "schema_memory", subject="planning-values", operation="history")
     call(root, "schema_memory", subject="planning-values", operation="restore", version=history["versions"][0]["version"],
          expected_hash=history["content_hash"], why="keep the shipped statuses")
+    title = "Ship the release" if named_by == "another item's plan_id" else "Wait on the vendor"
     view = call(root, "plan_memory", action="query", collection=RELEASE_PLAN)
-    (row,) = view["rows"]
+    (row,) = [row for row in view["rows"] if row["title"] == title]
+    target = {"plan_id": row["plan_id"], "expected_container_hash": view["snapshot"],
+              "expected_item_version": row["item_version"]}
+    if named_by == "stale item_id":
+        target = {"item_id": row["id"]}
+        call(root, "plan_memory", action="update", collection=RELEASE_PLAN, item_id=row["id"],
+             changes={"priority": "low"}, why="it can wait")
     command = next(c for c in commands.product_commands_for("mcp") if c.name == "plan_memory")
     try:
         with _store_thread_held_with_intake_on(service, monkeypatch), request_scope(OWNER):
             def save():
                 return writer_lease.invoke_command(
                     command, root, implicit_idempotency_scope="principal:session-b", action="update",
-                    collection=RELEASE_PLAN, plan_id=row["plan_id"], changes={"status": status, "priority": "high"},
-                    expected_container_hash=view["snapshot"], expected_item_version=row["item_version"],
-                    why="settle the release")
-            if status == "resolved":
-                with pytest.raises(OpError) as refused:
+                    collection=RELEASE_PLAN, changes={"status": status, "priority": "high"}, why="settle the release",
+                    **target)
+            if refused:
+                with pytest.raises(OpError) as refusal:
                     save()
-                assert refused.value.code == "INVALID_PLAN"
-                assert refused.value.message.startswith("status must be one of: candidate, planned")
+                assert refusal.value.code == "INVALID_PLAN"
+                assert refusal.value.message.startswith("status must be one of: candidate, planned")
                 assert write_intake.read(root)["items"] == []
             else:
                 assert save()["state"] == "queued"

@@ -7,7 +7,7 @@ import json
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from functools import cache, partial
+from functools import partial
 from pathlib import Path
 from typing import Any, Never
 
@@ -156,34 +156,30 @@ def supplied_value_refusal(
     manifest: collections.CollectionManifest,
     values: Mapping[str, Any],
     *,
-    stored: Callable[[], Mapping[str, Any] | None] | None = None,
+    adding: bool = False,
+    stored: Mapping[str, Any] | None = None,
 ) -> CollectionError | None:
     """The refusal that a write of `values` gets from the Planning values and the manifest's per-field rules alone.
 
     It runs the commit's own rules over the values that `values` names: `_governed` for each field that the
     Planning values govern, in `normalize_item`'s order, then `records.supplied_value_refusal`. Nothing else
     decides it: not a rule that joins fields, such as the lifecycle rules or what an area may carry, which
-    another field or an earlier write can still change. A null is an update's deletion, which the commit judges.
-    The Planning values that this caller cannot read leave their field unrefused.
+    another field or an earlier write can still change. The Planning values that this caller cannot read leave
+    their field unrefused.
 
-    A new item has no stored value, so `stored` is None. An update or triage names one item, which keeps a value
-    that it stores even once that value is no longer active. For one, `stored()` reads the values that item
-    stores now, or None where the item is not known, and `_governed` decides with them as the commit does. It is
-    read only once a value is refused without them, and an item that is not known leaves the value unrefused.
+    An add's null is a value that the item is written with, and `_governed` refuses it as the commit does; an
+    update's or a triage's null deletes its field, which the commit judges. `stored` is the item that an update
+    or a triage names, as the vault holds it: `_governed` keeps a value equal to its stored one even once that
+    value is no longer active. Without it, such a value is refused.
     """
     supplied = {name: value for name, value in values.items() if value is not None}
+    governed = values if adding else supplied
     planning_values = PlanningValues(vault_root)
-    item = cache(stored) if stored is not None else None
     for name in planning_values.fields():
-        if name not in supplied:
+        if name not in governed:
             continue
-        refusal = _governed_refusal(planning_values, supplied, None, name)
-        if refusal is None or refusal.code == _VALUES_UNAVAILABLE:
-            continue
-        if item is None:
-            return refusal
-        if (target := item()) is not None and (refusal := _governed_refusal(
-                planning_values, supplied, target, name)) is not None:
+        refusal = _governed_refusal(planning_values, governed, stored, name)
+        if refusal is not None and refusal.code != _VALUES_UNAVAILABLE:
             return refusal
     return records.supplied_value_refusal(manifest, supplied)
 

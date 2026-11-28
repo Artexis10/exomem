@@ -3,20 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from functools import partial
 from pathlib import Path
 from typing import Any, Literal, Never
 
-from . import (
-    collection_refs,
-    operation_entries,
-    page_ids,
-    planning,
-    record_formats,
-    record_governance,
-    request_budget,
-    structured_collections,
-)
+from . import collection_refs, operation_entries, planning, request_budget, structured_collections
 from .cli_ops import OpError, action_argument_contract
 from .query_compat import public_filter_annotation
 from .structured_collections import CollectionError, collection_remediation
@@ -350,8 +340,12 @@ def value_refusal(
 
     The busy intake raises it instead of queueing a save whose replay would refuse the same value
     (`commands.declared_refusal_before_queueing`, which also decides whether a queued save may change the
-    declaration first). It takes no lock and no store writer, and reads within `budget`: the manifest, the
-    Planning values and, for an update or triage with a value that is no longer active, the item it names.
+    declaration first). It takes no lock, never waits on the store thread, and reads within `budget`: the
+    manifest and the Planning values. An update or a triage is refused only once its values are refused
+    without the item it names and again with that item as the store holds it, read by its key at the caller's
+    version (`row_binding.edited_row_values`): the commit finds that item before it judges a value, and a
+    store's commit checks its version first too. A file collection has no read of one item by its key, so
+    where no such read answers, the save queues.
     """
     action = arguments.get("action")
     values = (
@@ -367,8 +361,11 @@ def value_refusal(
 
     def decide(manifest: structured_collections.CollectionManifest) -> CollectionError | None:
         planning.require_planning_profile(manifest)
-        stored = None if action == "add" else partial(_stored_item, root, manifest, arguments)
-        return planning.supplied_value_refusal(root, manifest, values, stored=stored)
+        refusal = planning.supplied_value_refusal(root, manifest, values, adding=action == "add")
+        if refusal is None or action == "add":
+            return refusal
+        stored = _edited_item(root, manifest, arguments)
+        return None if stored is None else planning.supplied_value_refusal(root, manifest, values, stored=stored)
 
     refusal = collection_refs.decide_on_declaration(root, collection, budget, profile="planning", decide=decide)
     if refusal is None:
@@ -377,31 +374,25 @@ def value_refusal(
     return OpError(code, _public_error_message(refusal, code), collection_refs.RESEND_WITH_A_DECLARED_VALUE)
 
 
-def _stored_item(
+def _edited_item(
     vault_root: Path, manifest: structured_collections.CollectionManifest, arguments: Mapping[str, Any]
 ) -> Mapping[str, Any] | None:
-    """The values that the item an update or triage names by `plan_id` or `item_id` stores now; None where no one
-    item that the caller may read answers, which the commit refuses itself.
+    """The values of the item that an update or a triage names by its plan id and both guards, where the store that
+    owns the collection reads it by its key at that version; None otherwise.
 
-    It reads the items as the commit reads them to find its own (`planning.update`): a file collection has no read
-    of one item by its key.
-    """
-    plan_id, item_id = arguments.get("plan_id"), arguments.get("item_id")
-    if type(plan_id) is str:
-        def named(key: str) -> bool:
-            return key == plan_id
-    elif type(item_id) is str:
-        head = collection_refs.id_head(item_id)
+    An `item_id` answers None: only the store thread's head map binds one without a collection scan, and the commit
+    refuses a stale or ambiguous one before it judges a value, so its save queues."""
+    from .collection_store import preview, row_binding
 
-        def named(key: str) -> bool:
-            return page_ids.part_head(key) == head
-    else:
+    plan_id, version, container = (
+        arguments.get(name) for name in ("plan_id", "expected_item_version", "expected_container_hash"))
+    if not all(type(value) is str for value in (plan_id, version, container)):
         return None
-    snapshot = record_formats.load_adapter(
-        vault_root, manifest, authorize_path=record_governance.full_release_filter(vault_root)
-    ).read()
-    found = [record for record in snapshot.records if named(record.identity.key)]
-    return found[0].values if len(found) == 1 and not found[0].ambiguous else None
+    writer = preview.selected_writer(vault_root, manifest)
+    if writer is None:
+        return None
+    return row_binding.edited_row_values(
+        writer, manifest, item_key=plan_id, expected_item_version=version, expected_container_hash=container)
 
 
 def refuse_arguments(detail: str) -> Never:
