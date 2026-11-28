@@ -603,6 +603,7 @@ class _Derivation:
         previous = dependency_pass.for_paths(self.tx, sorted(chunked))
         covered = set(self.written) | set(self.refreshed) | set(self.removed)
         scheduled = covered | found
+        scanned: dict[tuple[str, bool], str | None] = {}
         remaining = self.dependency_limit
         for target in sorted(chunked):
             keys = epistemic_graph._dependency_changed_keys(
@@ -618,7 +619,7 @@ class _Derivation:
             )
             # A folder restore already derived its own links against all restored pages.
             # Spend the continuation budget only on sources that still need to run.
-            paths, following = cursor.batch(self.tx, remaining, covered=scheduled)
+            paths, following = cursor.batch(self.tx, remaining, covered=scheduled, scanned=scanned)
             remaining -= len(paths)
             found.update(paths)
             scheduled.update(paths)

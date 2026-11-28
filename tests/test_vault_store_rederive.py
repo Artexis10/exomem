@@ -91,8 +91,10 @@ def test_unit_links_report_lag_until_the_older_store_finishes_backfill(
     with writer.handle.transaction() as tx:
         tx.execute("UPDATE graph_meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'generation'")
     assert graph.unit_links(ALPHA).state == "lag"
+    assert mode.status(stored)["registry"] == mode.UNKNOWN
     settle_to_the_end(stored, writer)
     assert graph.unit_links(ALPHA).total == 1
+    assert mode.status(stored)["registry"] == rederive.CURRENT
 
 
 @contextmanager

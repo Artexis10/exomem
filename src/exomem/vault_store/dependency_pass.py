@@ -29,28 +29,41 @@ class DependencyPass:
 
     def batch(
         self, conn: Connection, limit: int, *, covered: set[str] | frozenset[str] = frozenset(),
+        scanned: dict[tuple[str, bool], str | None] | None = None,
     ) -> tuple[list[str], DependencyPass | None]:
         """Seek at most `limit` source paths across the target's indexed dependency names."""
+        # The initial transaction can share its frontier across targets that share a lookup name.
+        # Both the covered rows and the newly selected rows commit with that frontier.
+        scanned = {} if scanned is None else scanned
         found: list[str] = []
         found_paths: set[str] = set()
         after = self.after
         filter_fragment = " AND instr(raw_target, '#') > 0" if self.fragments_only else ""
         for index in range(self.key_offset, len(self.keys)):
+            key = self.keys[index]
+            scope = (key, self.fragments_only)
+            frontier = scanned.get(scope, "")
+            if frontier is None:
+                after = ""
+                continue
+            after = max(after, frontier)
             rows = conn.execute(
                 "SELECT DISTINCT source_path FROM graph_dependencies "
                 f"WHERE lookup_key = ? AND source_path > ?{filter_fragment} "
                 "ORDER BY source_path LIMIT ?",
-                (self.keys[index], after, limit + len(covered) + 1),
+                (key, after, limit + len(covered) + 1),
             )
             for (path,) in rows:
                 if path in covered or path in found_paths:
                     after = path
                     continue
                 if len(found) == limit:
+                    scanned[scope] = after
                     return found, replace(self, key_offset=index, after=after)
                 found.append(path)
                 found_paths.add(path)
                 after = path
+            scanned[scope] = None
             after = ""
         return found, None
 
