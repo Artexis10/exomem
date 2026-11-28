@@ -16197,10 +16197,18 @@ def refusal_before_queueing(command: Command, arguments: Mapping[str, Any]) -> E
     return None
 
 
-#: How long a busy save's declared check may read: the declaration, then the queue. It only buys an earlier
-#: refusal, so a slow read gives the save up to the queue it would have joined, which is what its caller was
-#: already going to wait on.
+#: How long a busy save's declared check may read: the queue's mark, the declaration and, after a refusal, the
+#: queue again, each open included. It only buys an earlier refusal, so a read that answers later gives the save
+#: up to the queue it would have joined, which is what its caller was already going to wait on.
 _DECLARED_REFUSAL_SECONDS = 0.5
+
+
+#: The busy check of each command whose saves carry values that a collection declares: each reads the
+#: declaration within the budget it is given and answers the refusal its own commit would give, or None.
+_DECLARED_VALUE_REFUSALS = MappingProxyType({
+    operation_entries.RECORDS.command: record_memory_module.value_refusal,
+    operation_entries.PLANS.command: plan_memory_module.value_refusal,
+})
 
 
 def declared_refusal_before_queueing(
@@ -16208,30 +16216,32 @@ def declared_refusal_before_queueing(
 ) -> Exception | None:
     """The refusal that a save's values get from what the vault declares, or None.
 
-    `refusal_before_queueing` reads nothing. This one reads a declaration (a collection's manifest),
-    so the intake runs it only for a save that is about to queue. The refusal holds only while no open
-    queued save can change that declaration before this one replays: a save of a command that declares
-    `Command.sets_any_frontmatter_field`, whichever page it names, or a Records save that carries a
-    manifest's text. A declaration change made outside the queue and not committed at this check, such
-    as a direct revise that holds the boundary, is not seen: the check refuses a value that the change
+    `refusal_before_queueing` reads nothing. This one reads a declaration (a collection's manifest, and for
+    Planning the vault's Planning values), so the intake runs it only for a save that is about to queue. The
+    refusal holds only while no queued save can change that declaration before this one replays: a save of a
+    command that declares `Command.sets_any_frontmatter_field`, whichever page it names, or a save that
+    carries a manifest's text (`write_intake.may_change_declaration`, which each queued save keeps). The queue
+    is marked before the declaration is read, and only a refusal looks at it again from that mark, each at a
+    cost that does not grow with the queue (`write_intake.declaration_mark`), so a queued save that commits
+    between the two reads queues this one too. Every read shares one budget, and an answer after it queues the
+    save. A declaration change made outside the queue and not committed at this check, such as a direct revise
+    that holds the boundary or a saved Planning value, is not seen: the check refuses a value that the change
     adds, and the refusal tells the caller to send it again once that change has committed.
     """
-    if command.name != operation_entries.RECORDS.command:
+    value_refusal = _DECLARED_VALUE_REFUSALS.get(command.name)
+    if value_refusal is None:
         return None
     from . import request_budget, write_intake
 
     budget = request_budget.RequestBudget(seconds=_DECLARED_REFUSAL_SECONDS)
-    refusal = record_memory_module.value_refusal(vault_root, arguments, budget)
-    if refusal is None:
+    marker = write_intake.declaration_mark(vault_root, seconds=budget.remaining())
+    if marker is None:
         return None
-    changing = write_intake.may_change_declaration(
-        vault_root,
-        rewriting=tuple(item.name for item in PRODUCT_COMMANDS if item.sets_any_frontmatter_field),
-        manifest_command=operation_entries.RECORDS.command,
-        manifest_field=operation_entries.MANIFEST_TEXT_FIELD,
-        seconds=budget.remaining(),
-    )
-    return refusal if changing is False else None
+    refusal = value_refusal(vault_root, arguments, budget)
+    if refusal is None or budget.remaining() <= 0:
+        return None
+    changed = write_intake.declaration_changed_since(vault_root, marker, seconds=budget.remaining())
+    return refusal if changed is False else None
 
 
 _MCRC = frozenset({"mcp", "rest", "cli"})

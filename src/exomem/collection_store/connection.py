@@ -25,6 +25,7 @@ from contextlib import closing, contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from .. import request_budget
 from . import schema
 
 if TYPE_CHECKING:
@@ -167,25 +168,28 @@ def _writer_engine(database: str):
 
 
 @contextmanager
-def checked_sql(conn, check):
-    """Keep the caller's interruption when SQLite or a migration wraps its progress error."""
+def checked_sql(conn, check, *, on_steps=None):
+    """Keep the caller's interruption and optionally account for SQL work."""
     if check is None:
         yield
         return
     from sqlalchemy.exc import DBAPIError
 
     interrupted = None
+    interval = 1000
 
     def progress():
         nonlocal interrupted
         try:
+            if on_steps is not None:
+                on_steps(interval)
             check()
         except BaseException as error:  # noqa: BLE001 - SQLite otherwise discards the caller's interruption
             interrupted = error
             return 1
         return 0
 
-    conn.set_progress_handler(progress, 1000)
+    conn.set_progress_handler(progress, interval)
     try:
         check()
         yield
@@ -193,6 +197,10 @@ def checked_sql(conn, check):
         if interrupted is not None:
             raise interrupted from error
         raise
+    else:
+        # A passive proof must not claim certainty if a fallback caught SQLite's interruption.
+        if on_steps is not None and interrupted is not None:
+            raise interrupted
     finally:
         conn.set_progress_handler(None, 0)
 
@@ -714,7 +722,7 @@ def recorded_schema(path: Path) -> int | None:
         return None
 
 
-def _open_read_only(path: Path, busy_timeout_ms: int) -> tuple[sqlite3.Connection, int]:
+def _open_read_only(path: Path, busy_timeout_ms: int, *, checkpoint=None) -> tuple[sqlite3.Connection, int]:
     """An existing store opened read-only at any schema up to the current one, with that schema."""
     if type(busy_timeout_ms) is not int or busy_timeout_ms < 0:
         raise ValueError("busy_timeout_ms must be a non-negative integer")
@@ -732,7 +740,8 @@ def _open_read_only(path: Path, busy_timeout_ms: int) -> tuple[sqlite3.Connectio
         conn.execute("PRAGMA query_only=ON")
         conn.execute("PRAGMA foreign_keys=ON")
         try:
-            found = schema.schema_version(conn, ceiling=schema.SCHEMA_VERSION)
+            with checked_sql(conn, checkpoint, on_steps=None if checkpoint is None else checkpoint.store_sql_progress):
+                found = schema.schema_version(conn, ceiling=schema.SCHEMA_VERSION)
         except schema.SchemaMetadataError as error:
             raise CollectionStoreError("COLLECTION_STORE_SCHEMA_INVALID", str(error)) from error
         except schema.SchemaVersionError as error:
@@ -741,6 +750,20 @@ def _open_read_only(path: Path, busy_timeout_ms: int) -> tuple[sqlite3.Connectio
         conn.close()
         raise
     return conn, found
+
+
+@contextmanager
+def _budgeted_reader(path, *, head: bool, oldest: int, checkpoint):
+    """An exclusive lend for a busy proof. A locked reader leaves the save to replay."""
+    checkpoint()
+    conn, version = _open_read_only(path, 0, checkpoint=checkpoint)
+    with closing(conn), checked_sql(conn, checkpoint, on_steps=checkpoint.store_sql_progress):
+        if version < oldest:
+            raise CollectionStoreError(
+                "COLLECTION_STORE_SCHEMA_PENDING", "the collection store has not been migrated by its writer yet")
+        if head:
+            conn.set_authorizer(_head_only)
+        yield conn
 
 
 def _file_identity(path: Path) -> tuple[int, int]:
@@ -801,6 +824,10 @@ class ReaderPool:
     @contextmanager
     def lend(self, *, head: bool, oldest: int = 0) -> Iterator[sqlite3.Connection]:
         """Lend a head or plain reader that refuses a store whose recorded schema is below ``oldest``."""
+        if (checkpoint := request_budget.store_read_checkpoint()) is not None:
+            with _budgeted_reader(self.path, head=head, oldest=oldest, checkpoint=checkpoint) as conn:
+                yield conn
+            return
         conn, version, identity = self._take(head)
         healthy = False
         try:
@@ -881,19 +908,26 @@ def _quiet(conn: sqlite3.Connection) -> bool:
 
 def head_reader(path: Path, pool: ReaderPool | None = None):
     """A head reader for one ``with`` block: lent by ``pool`` when given, else freshly opened and closed."""
+    if pool is None and (checkpoint := request_budget.store_read_checkpoint()) is not None:
+        return _budgeted_reader(path, head=True, oldest=0, checkpoint=checkpoint)
     return closing(open_head_reader(path)) if pool is None else pool.lend(head=True)
 
 
 def ownership_reader(path: Path, pool: ReaderPool | None = None):
     """A plain reader at any supported schema (ownership declarations ride the unchanged metadata wire)."""
+    if pool is None and (checkpoint := request_budget.store_read_checkpoint()) is not None:
+        return _budgeted_reader(path, head=False, oldest=0, checkpoint=checkpoint)
     return closing(_open_read_only(path, BUSY_TIMEOUT_MS)[0]) if pool is None else pool.lend(head=False)
 
 
 def store_reader(path: Path, pool: ReaderPool | None = None, *, oldest: int | None = None):
     """A plain reader at schema ``oldest`` or later, by default the current schema, as ``open_reader`` opens it."""
+    oldest = schema.SCHEMA_VERSION if oldest is None else oldest
     if pool is None:
+        if (checkpoint := request_budget.store_read_checkpoint()) is not None:
+            return _budgeted_reader(path, head=False, oldest=oldest, checkpoint=checkpoint)
         return closing(open_reader(path, oldest=oldest))
-    return pool.lend(head=False, oldest=schema.SCHEMA_VERSION if oldest is None else oldest)
+    return pool.lend(head=False, oldest=oldest)
 
 
 def open_query_reader(path: Path, *, busy_timeout_ms: int = 200) -> sqlite3.Connection:

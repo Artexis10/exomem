@@ -117,13 +117,14 @@ def require_records_summary(root=None) -> None:
         )
 
 
-def require_records_summary_route(vault_root, writer, action, values, *, prove=None) -> None:
+def require_records_summary_route(vault_root, writer, action, values, *, prove=None, released_manifest=None) -> None:
     """Refuse the slice's routes on a production session while the release keeps it off.
 
     Those are an import, whatever its target, and every request on a store-routed summary
     collection. The collection is read under the caller's own authority first, so a
     collection it cannot see refuses as it would anyway; items-mode store collections
-    and file collections pass unchanged.
+    and file collections pass unchanged. The busy check can reuse the manifest
+    already released for this selector in the same store snapshot.
     """
     if records_summary_enabled(vault_root):
         return
@@ -134,9 +135,10 @@ def require_records_summary_route(vault_root, writer, action, values, *, prove=N
 
     if selector is None or selected_writer(vault_root, selector, prove=prove) is None:
         return
-    with writer.read_collection(selector) as manifest:
-        open_ = summary_route_open(vault_root, manifest)
-    if not open_:
+    if released_manifest is None:
+        with writer.read_collection(selector) as manifest:
+            released_manifest = manifest
+    if not summary_route_open(vault_root, released_manifest):
         require_records_summary(vault_root)
 
 
