@@ -41,6 +41,9 @@ Raw Records items do not appear in search.
    `edit_record(collection=..., record=<row id>, changes={...}, why=...)`. Copy the row `id` that `query_records`
    returned into `record`.
 
+Use `rows` for an ordinary query. For an export, pass `options.output_format` with a format the
+query supports, such as `json`, `markdown` or `csv`.
+
 An empty ordinary search does not establish that no matching Record exists. If inspection or a query refuses,
 report that unavailable boundary, not absence. The server checks the row version and the collection state, and a
 stale id refuses with the current one. Preserve provenance and verify the updated row. Do not infer that a
