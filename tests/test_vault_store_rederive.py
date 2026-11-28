@@ -65,6 +65,36 @@ def revision(root):
     return rows(root, "SELECT revision FROM store_mode")[0][0]
 
 
+def test_unit_links_report_lag_until_the_older_store_finishes_backfill(
+    stored, writer, monkeypatch,  # noqa: F811
+):
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "relationship evidence", puts=(
+            write.PagePut(ALPHA, b"# Alpha\n\nRefer to [[Beta#^signal]].\n"),
+            write.PagePut(BETA, b"# Beta\n\n- [rule] A signal. ^signal\n"),
+        ),
+    ))
+    graph = epistemic_graph.EpistemicGraphIndex(stored)
+    assert graph.unit_links(ALPHA).total == 1
+
+    with writer.handle.transaction() as tx:
+        tx.execute("UPDATE store_meta SET value = '5' WHERE key = ?", (rederive.OWNER_SCHEMA,))
+        tx.execute("DROP TABLE graph_unit_links")
+    monkeypatch.setattr(rederive, "BATCH_PAGES", 1)
+    assert graph.unit_links(ALPHA).state == "lag"
+    assert rederive.settle(stored, writer) == rederive.ADVANCED
+    assert graph.unit_links(ALPHA).total is None
+    settle_to_the_end(stored, writer)
+    assert graph.unit_links(ALPHA).total == 1
+
+    # An older writer advances the ordinary graph generation without proving the new projection.
+    with writer.handle.transaction() as tx:
+        tx.execute("UPDATE graph_meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'generation'")
+    assert graph.unit_links(ALPHA).state == "lag"
+    settle_to_the_end(stored, writer)
+    assert graph.unit_links(ALPHA).total == 1
+
+
 @contextmanager
 def store_writer(root):
     """A second store writer, once a fixture's is closed, as a restarted service opens one."""

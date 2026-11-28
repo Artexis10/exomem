@@ -395,6 +395,18 @@ def test_a_rollback_returns_every_find_and_graph_answer_that_the_vault_gave_befo
 ):
     """A rollback that loses a page or leaves an index that answers differently than before store mode, or a vault
     that cannot enter store mode again afterwards."""
+    target = vault / BETA
+    target.write_bytes(target.read_bytes() + b"\n- [rule] Check the tide. ^tide\n")
+    source = vault / ALPHA
+    source.write_bytes(source.read_bytes() + b"\n![[Beta#^tide]]\n")
+    build_indexes(vault)
+    with sidecar(epistemic_graph.sidecar_path(vault)) as graph:
+        file_links = table_rows(graph, "graph_unit_links")
+    assert len(file_links) == 1
+
+    def check_stored_links():
+        with closing(connection.open_reader(connection.store_path(vault))) as store:
+            assert table_rows(store, "graph_unit_links") == file_links
 
     def answers():
         with library_scope():
@@ -412,6 +424,7 @@ def test_a_rollback_returns_every_find_and_graph_answer_that_the_vault_gave_befo
         "the graph answer must carry the link for this drill to mean anything"
     )
     assert migrate_apply(vault) == 0
+    check_stored_links()
     with monkeypatch.context() as windows:
         windows.setattr(capability, "sys", SimpleNamespace(platform="win32"))
         assert answers() == before
@@ -429,7 +442,7 @@ def test_a_rollback_returns_every_find_and_graph_answer_that_the_vault_gave_befo
         json.loads(line) for line in (tmp_path / "export/audit.jsonl").read_text().splitlines()
     ]
     assert [entry["operation"] for entry in audit] == ["migrate"]
-    assert not store_objects(vault) & {"pages", "fts", "graph_nodes", "graph_edges"}
+    assert not store_objects(vault) & {"pages", "fts", "graph_nodes", "graph_edges", "graph_unit_links"}
     with closing(connection.open_reader(connection.store_path(vault))) as store:
         assert store.execute("SELECT mode FROM store_mode").fetchone() == ("file",)
         assert store.execute("SELECT COUNT(*) FROM store_pages").fetchone() == (0,)
@@ -442,6 +455,7 @@ def test_a_rollback_returns_every_find_and_graph_answer_that_the_vault_gave_befo
     # A vault that returned to file mode migrates again, and the store keeps its history across both.
     assert migrate_apply(vault) == 0
     assert mode.store_mode_active(vault)
+    check_stored_links()
 
 
 def test_a_rollback_export_names_the_page_that_a_moved_page_came_from(vault, tmp_path):

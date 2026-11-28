@@ -142,6 +142,102 @@ def commit(root, **change):
     )
 
 
+@pytest.mark.parametrize(("visible_name", "fragment", "hidden_body", "outcome"), [
+    ("Beacon", "^signal", "- [rule] West signal. ^signal", "ambiguous"),
+    ("Beacon Ledger", "signal", "## Signal\n\nWest signal.", "not_unit"),
+])
+def test_link_pages_resolve_the_visible_namesake_before_counting(
+    stored, service, visible_name, fragment, hidden_body, outcome,
+):
+    source = f"{NOTES}/Dispatch.md"
+    visible = f"{NOTES}/East/{visible_name}.md"
+    hidden = f"{NOTES}/West/Beacon.md"
+    commit(stored, puts=(
+        write.PagePut(source, (f"# Dispatch\n\nFollow [[Beacon#{fragment}|the signal]].\n"
+                               f"\n![[Beacon#{fragment}]]\n\n`[[Beacon#{fragment}]]`\n").encode()),
+        write.PagePut(visible, b"---\ntitle: Beacon\n---\n# Beacon\n\n- [rule] East signal. ^signal\n"),
+        write.PagePut(hidden, f"---\ntitle: Beacon\n---\n# Beacon\n\n{hidden_body}\n".encode()),
+    ))
+    derived(stored)
+    assert store_rows(
+        stored, "SELECT resolution FROM graph_unit_links WHERE source_path = ? ORDER BY occurrence", source,
+    ) == [(outcome,), (outcome,)]
+
+    graph = epistemic_graph.EpistemicGraphIndex(stored)
+    assert graph.unit_links(visible, incoming=True).total == 0
+    def allowed(path):
+        return path != hidden
+
+    first = graph.unit_links(visible, incoming=True, keep=allowed, limit=1)
+    assert first.state == "ready" and first.total == 2
+    assert [(path, link.embed) for path, link in first.links] == [(source, False)]
+    second = graph.unit_links(visible, incoming=True, keep=allowed, limit=1, after=first.next_after)
+    assert second.total == 2 and second.next_after is None
+    assert [(path, link.embed) for path, link in second.links] == [(source, True)]
+    assert graph.unit_links(hidden, incoming=True, keep=allowed).total == 0
+
+
+def test_fragment_landing_follows_committed_bytes_while_the_projection_lags(stored, service, monkeypatch):
+    source = f"{NOTES}/Watch.md"
+    graph = epistemic_graph.EpistemicGraphIndex(stored)
+    (stored / BETA).write_text("# Beta\n\n- [rule] Obsolete signal. ^removed\n")
+    commit(stored, puts=(
+        write.PagePut(BETA, b"---\ntitle: Beta\n---\n# Beta\n\n## Overview\n\n- [rule] Current signal. ^signal\n"),
+        write.PagePut(source, b"# Watch\n\n[[Notes/Beta#^signal]] [[Notes/Beta#^removed]] [[Notes/Beta#Overview]]\n"),
+    ))
+    derived(stored)
+    sql = "SELECT fragment, resolution FROM graph_unit_links WHERE source_path = ? ORDER BY occurrence"
+    assert store_rows(stored, sql, source) == [
+        ("^signal", "unit"), ("^removed", "missing"), ("Overview", "not_unit"),
+    ]
+    assert graph.unit_links(source).total == 1
+
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_args, **_kwargs: derivation.Drained())
+        commit(stored, deletes=(write.PageDelete(BETA),))
+        assert store_rows(stored, "SELECT path FROM store_derivation_queue WHERE path = ?", BETA) == [(BETA,)]
+        page = graph.unit_links(source)
+        assert page.state == "lag" and page.total is None
+    derived(stored)
+    assert graph.unit_links(source).total == 0
+    assert store_rows(stored, sql, source) == [
+        ("^signal", "missing"), ("^removed", "missing"), ("Overview", "missing"),
+    ]
+    assert (stored / BETA).exists()
+
+
+def test_a_served_assessment_commits_page_bytes_before_the_verdict_projection(stored, service, monkeypatch):
+    path = f"{NOTES}/Insights/Signal Assessment.md"
+    commit(stored, puts=(write.PagePut(
+        path,
+        b"---\ntitle: Signal Assessment\ntype: insight\nstatus: active\n---\n# Signal Assessment\n\n"
+        b"See the [[Beacon Design]].\n\n"
+        b"## Claim\n- id: signal\n- verdict: confirmed\n\nThe signal is visible.\n\n"
+        b"## Claim\n- id: lamp\n- verdict: confirmed\n\nThe lamp is lit.\n",
+    ), write.PagePut(
+        f"{NOTES}/Insights/Beacon Design.md",
+        b"---\ntitle: Beacon Design\ntype: insight\nstatus: active\n---\n# Beacon Design\n\n"
+        b"## Observations\n\n- [rule] Keep the beacon lit.\n",
+    )))
+    derived(stored)
+    projected = "SELECT anchor, verdict FROM semantic_units WHERE parent_path = ? AND anchor IS NOT NULL ORDER BY anchor"
+    assert store_rows(stored, projected, path) == [("lamp", "confirmed"), ("signal", "confirmed")]
+    assessment = dict(path=path, operation="assess", unit="signal", verdict="refuted", reason="Checked at the pier.")
+    preview = call(stored, "observe_memory", **assessment, validate_only=True)
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_args, **_kwargs: derivation.Drained())
+        result = call(
+            stored, "observe_memory", **assessment, response_detail="full",
+            transition_token=preview["semantic"]["transition_token"],
+        )
+        assert result["diagnostics"]["operational"]["state"] == "committed"
+        assert b"verdict: refuted" in read_write.stored_body(stored, path)
+        assert store_rows(stored, projected, path) == [("lamp", "confirmed"), ("signal", "confirmed")]
+        assert epistemic_graph.EpistemicGraphIndex(stored).unit_links(path).state == "lag"
+    derived(stored)
+    assert store_rows(stored, projected, path) == [("lamp", "confirmed"), ("signal", "refuted")]
+
+
 @contextmanager
 def held_elsewhere(root):
     """Another thread of this process holds the vault boundary, as a background holder does, until

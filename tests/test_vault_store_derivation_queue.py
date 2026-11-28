@@ -174,6 +174,60 @@ class Killed(BaseException):
     """The process stopping mid-transaction: no handler of ordinary errors catches it."""
 
 
+def test_a_hub_edit_resumes_both_fragment_projections_after_an_interrupted_batch(
+    served, writer, monkeypatch, tmp_path,  # noqa: F811
+):
+    hub = "Knowledge Base/Notes/Signal Hub.md"
+    hub_text = "---\ntitle: Signal Hub\ntype: note\n---\n# Signal Hub\n\n- [rule] A signal. ^old\n"
+    for index in range(5):
+        path = f"Knowledge Base/Notes/Signal Reader {index}.md"
+        save(served, path, f"# Signal Reader {index}\n\n[[Signal Hub#^old]]\n\n"
+             "## Claim\n- relations: supports: [[Signal Hub#^old]]\n\nThe light is visible.\n")
+    save(served, hub, hub_text)
+    derivation.drain(served, writer)
+    landed = """
+        SELECT COUNT(*) FROM graph_unit_links
+        WHERE target_path = ? AND resolution = 'unit'
+    """
+    typed = """
+        SELECT COUNT(*) FROM graph_edges
+        WHERE dst_page_key = ? AND json_extract(metadata, '$.fragment_resolution') = 'unit'
+    """
+    assert store_rows(served, landed, hub) == [(10,)]
+    assert store_rows(served, typed, f"file:{hub}") == [(5,)]
+
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_args, **_kwargs: None)
+        with writer_lease.get_manager().mutation_guard(served):
+            vault_module.batch_atomic_write(
+                [planned(served, hub, hub_text.replace("^old", "^new"), create_only=False)],
+                vault_root=served, post_commit_fanout=False,
+            )
+    real = derive.resume_fragments
+
+    def interrupted(*args, **kwargs):
+        real(*args, **kwargs)
+        raise Killed
+
+    monkeypatch.setattr(derivation, "BATCH_PAGES", 2)
+    with monkeypatch.context() as patch:
+        patch.setattr(derive, "resume_fragments", interrupted)
+        with pytest.raises(Killed):
+            derivation.drain(served, writer)
+
+    assert store_rows(served, "SELECT path FROM store_derivation_queue") == [(hub,)]
+    assert store_rows(served, "SELECT path FROM graph_fragment_pass") == [(hub,)]
+    assert store_rows(served, landed, hub) == [(6,)]
+    assert store_rows(served, typed, f"file:{hub}") == [(3,)]
+    derivation.started(served, writer)
+    derivation.drain(served, writer)
+    assert store_rows(served, "SELECT path FROM graph_fragment_pass") == []
+    assert store_rows(served, "SELECT path FROM store_derivation_queue") == []
+    assert store_rows(served, landed, hub) == [(0,)]
+    assert store_rows(served, typed, f"file:{hub}") == [(0,)]
+    assert_rows_equal_a_cold_derivation(served, tmp_path)
+
+
 def test_a_drain_stopped_inside_its_transaction_leaves_its_intents_for_the_next_start(
     served, writer, monkeypatch, tmp_path  # noqa: F811
 ):
@@ -732,12 +786,16 @@ def test_an_upload_behind_a_backlog_derives_its_own_rows_while_it_holds_its_cred
 
     with media_capacity.commit_credit("upload-session"):
         write.commit(writer, write.StoreChange(
-            write.Origin.GOVERNED, "upload", puts=(write.PagePut(upload, SMALL_TEXT.encode()),)
+            write.Origin.GOVERNED, "upload",
+            puts=(write.PagePut(upload, SMALL_TEXT.encode() + b"\nFollow [[Beta#^signal]].\n"),),
         ))
         waiting = store_rows(served, "SELECT path FROM store_derivation_queue")
 
     assert upload not in {path for (path,) in waiting}, "the upload's rows waited for the backlog"
     assert waiting, "the older intents must still be queued for this check to mean anything"
+    assert store_rows(
+        served, "SELECT fragment FROM graph_unit_links WHERE source_path = ?", upload,
+    ) == [("^signal",)]
 
 
 def test_a_page_whose_derivation_failed_holds_no_reader_back(served, writer, monkeypatch):  # noqa: F811

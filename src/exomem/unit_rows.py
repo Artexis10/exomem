@@ -4,8 +4,7 @@ OpenSpec make-vault-store-canonical D10, task 5.1. A page's registry-independent
 candidates become one `UnitRow` each, keyed by the page path and the occurrence key. The lexical
 `semantic_units` rows and the graph's candidate nodes are projections of those rows, so each rule
 that decides a field lives here or in the projection that names it: `lexical_columns` below,
-`epistemic_graph._candidate_node`. No table stores the rows yet; task 5.2 adds it with its first
-reader.
+`epistemic_graph._candidate_node`. The existing page summary supplies positions and identity facts.
 
 A row holds no bound public `unit_ref`. Which candidates emit, and so which anonymous unit binds
 occurrence 1 or 2, depends on the selected registries, so a reader binds the reference when it
@@ -15,12 +14,13 @@ selects a page's units. The row's own facts derive from the bytes alone.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .semantic_index import SemanticParentIndexState
+    from .semantic_units import SemanticUnit
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,7 +39,6 @@ class UnitRow:
     form: str
     line: int
     end_line: int
-    node_key: str
     unit_source_hash: str
     parent_ref: str | None
     parent_generation: str
@@ -75,15 +74,20 @@ class UnitRow:
         )
 
 
-def build(rel: str, state: SemanticParentIndexState) -> tuple[UnitRow, ...]:
+def build(
+    rel: str, state: SemanticParentIndexState, *,
+    candidates: Sequence[SemanticUnit] | None = None,
+) -> tuple[UnitRow, ...]:
     """The unit rows of one page's parent state, in source order.
 
     The state must hold structural candidates.
     """
-    from . import epistemic_graph, lexstore, semantic_language_registry, semantic_units
+    from . import lexstore, semantic_language_registry, semantic_units
 
     rows = []
-    for ordinal, unit in enumerate(semantic_units.candidate_units(state.candidates)):
+    if candidates is None:
+        candidates = semantic_units.candidate_units(state.candidates)
+    for ordinal, unit in enumerate(candidates):
         key = semantic_units.occurrence_key(unit.form, unit.span, unit.source_hash)
         verdict, check_by_day, check_by_json, tags_canonical_json = (
             lexstore.unit_eligibility_columns(unit)
@@ -91,7 +95,6 @@ def build(rel: str, state: SemanticParentIndexState) -> tuple[UnitRow, ...]:
         rows.append(UnitRow(
             path=rel, occurrence_key=key, ordinal=ordinal, form=unit.form,
             line=unit.line, end_line=unit.end_line,
-            node_key=epistemic_graph.unit_node_key(rel, key, unit.form),
             unit_source_hash=unit.source_hash, parent_ref=state.parent_ref,
             parent_generation=state.parent_generation, parent_source_hash=state.parent_source_hash,
             parser_version=state.parser_version, anchor=unit.anchor, title=unit.title,

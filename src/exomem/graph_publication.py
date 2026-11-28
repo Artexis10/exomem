@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import sqlite3
 
-# These five row tables are fixed by the maintained graph schema, not vocabulary.
+# The graph schema fixes these row tables.
 ROW_TABLES = (
     "graph_nodes",
     "graph_edges",
     "graph_parent_refs",
     "graph_dependencies",
     "graph_dependency_coverage",
+    "graph_unit_links",
 )
 
 

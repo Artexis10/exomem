@@ -37,7 +37,7 @@ from .. import (
 from ..cli_ops import OpError
 from ..collection_store import admission, authority, capability, connection
 from ..governance import page_admission
-from . import availability, graph_state, marker, mode, ownership, rederive, verify
+from . import availability, fragment_pass, graph_state, marker, mode, ownership, rederive, verify
 from .write import Origin, frontmatter_json
 
 #: A migration's private directory beside the live store; a run that died leaves one, and the next migrate or rollback removes it.
@@ -131,6 +131,7 @@ def create_owner_schema(
     refs_done = schema_objects(conn)
     vault.create_inbound_schema(conn)
     page_admission.create_schema(conn)
+    fragment_pass.create_schema(conn)
     after = schema_objects(conn)
     return (
         {n: t for n, t in middle.items() if n not in before},
@@ -228,7 +229,12 @@ def _graph_sidecar_differences(
     """How the graph sidecar's rows differ from the derivation in ``expected``, taken instead."""
     path = epistemic_graph.sidecar_path(vault_root)
     with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as sidecar:
-        return verify.compare_tables(sidecar, expected, only=_graph_row_tables(staged)).differences
+        tables = _graph_row_tables(staged)
+        # An older file-mode sidecar has no unit-link projection. Stage that table
+        # from the fresh derivation and compare the graph rows the old sidecar holds.
+        if "graph_unit_links" not in schema_objects(sidecar):
+            tables.remove("graph_unit_links")
+        return verify.compare_tables(sidecar, expected, only=tables).differences
 
 
 def _copy_sidecars(
