@@ -2,7 +2,7 @@
 
 ### Requirement: A scope may select by sensitivity class
 
-A scope SHALL accept a `sensitivity` selector: a list of registered `sensitivity-classes` keys. It SHALL match a page or row whose effective classes intersect the list. A scope that uses it SHALL have no other selector, and `exclude` SHALL NOT accept it. An unregistered key SHALL be a compile error. The selector set SHALL stay closed, so a binary without this selector refuses such a policy.
+A scope SHALL accept a `sensitivity` selector of registered class keys. It SHALL match pages and rows with any listed effective class. A match SHALL only lower the ceiling. This scope SHALL have no other selector, and `exclude` SHALL NOT accept it. An unregistered key or an unknown selector SHALL be a compile error.
 
 #### Scenario: An owner-only class
 
@@ -55,11 +55,49 @@ A test SHALL run every registered read operation, MCP resource and prompt under 
 - **WHEN** a change registers a read operation that returns a classified page's title to a restricted caller
 - **THEN** the test suite fails and names the operation
 
-### Requirement: A class scope never takes a page out of the residual scope
+### Requirement: A residual scope uses ordinary policy rules
 
-When residual membership is assigned, a match by a scope whose selector is `sensitivity` SHALL NOT count as another scope selecting the item. Such a scope SHALL only ever lower an item's ceiling. An item's effective sensitivity classes SHALL count as part of the item for the rule that membership is a function of the item, its path and the compiled policy.
+A residual scope SHALL be an ordinary scope that rules, grants, release grants, `default_deny`, organisation caps, connector denied sets and private vocabulary instances name by id. When the connector boundary protects it, its pinned document SHALL include `residual`.
+
+#### Scenario: A boundary pins the residual scope
+- **WHEN** a connector boundary protects the residual scope
+- **THEN** its pinned scope document includes `residual`
+
+### Requirement: The residual scope has no selectors or exclusions
+
+A policy MAY declare at most one residual scope with `residual: true`. The compile SHALL refuse a residual scope with a selector or exclusion, a second residual scope or a non-boolean `residual`.
+
+#### Scenario: A residual scope declares a selector
+- **WHEN** a scope sets `residual: true` and supplies `paths`
+- **THEN** policy compilation refuses the scope
+
+## MODIFIED Requirements
+
+### Requirement: A residual scope selects what no other scope selects
+
+Membership SHALL assign the residual scope to a page or file exactly when no registry binding or non-`sensitivity` scope selects it. Membership SHALL use the item, including effective classes, its path and the compiled policy. Public registry storage counts as classified with no scope. The residual scope SHALL never select a directory. Without a residual scope, membership SHALL stay as before.
+
+#### Scenario: An unclassified page is withheld from an unnamed audience
+- **WHEN** a residual scope declares `default_deny` and an audience that no rule names reads a page that no other scope selects
+- **THEN** the page is answered as a missing page, and the owner receives it in full
+
+#### Scenario: Classification moves a page out of the residual scope
+- **WHEN** the owner adds a scope with a selector other than `sensitivity` that selects a residual page
+- **THEN** the next decision for that page uses the new scope and not the residual scope
+
+#### Scenario: A fenced connector and an opted-in connector
+- **WHEN** one client's denied set lists the residual scope and another client's does not
+- **THEN** the first receives no unclassified page from any read, search, recall or recent-context door, and the second receives them
+
+#### Scenario: Vocabulary and folders stay available
+- **WHEN** a fenced connector interprets pages or browses a folder that holds pages it may see
+- **THEN** public vocabulary overlays and history are admitted, and the folder is listed
+
+#### Scenario: A vault without a residual scope
+- **WHEN** a policy declares no residual scope
+- **THEN** scope membership is unchanged by the exception
 
 #### Scenario: A class scope keeps the residual restriction
 
-- **WHEN** a residual scope declares `default_deny`, a scope selects `sensitivity: [health]`, a rule grants the health scope to an audience, and a page with effective class `health` matches no other scope
+- **WHEN** a residual scope declares `default_deny`, a scope selects `sensitivity: [health]`, a rule grants the health scope to an audience, and an otherwise unclassified page matches only that class scope
 - **THEN** the page keeps the residual scope as well, and that audience still gets it as missing

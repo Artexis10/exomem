@@ -45,10 +45,24 @@ A derivation ref SHALL be a `sources` value, a frontmatter field mapped to an `i
 
 The carry-over step SHALL resolve each ref under the writer's visibility and SHALL treat a ref the writer cannot read exactly as a ref to no page.
 
-#### Scenario: A source the writer cannot read
+#### Scenario: A compiled source citation the writer cannot read
 
-- **WHEN** a restricted writer names in `sources` a page withheld from it
-- **THEN** the write keeps the ref unresolved with the warning it gives for a page that does not exist, and takes and reports no class from it
+- **WHEN** a restricted writer adds a withheld source to a compiled note's `sources`
+- **THEN** the existing compiled source closure refuses the write as it does for a missing source, and exposes no class
+
+#### Scenario: A permissive link to a withheld page
+
+- **WHEN** a restricted writer adds a typed body link to a withheld page, and the global graph later resolves the link
+- **THEN** the write and the later restricted view behave as if the target were missing, because the text has no authorized lineage binding
+
+### Requirement: Only authorized derivation bindings carry sensitivity classes
+
+The store SHALL inherit classes only from a ref resolved under writer authority and bound to the written page or row version. The writer SHALL recheck the binding under writer authority before publication. Mechanical rewrites SHALL preserve it. Graph resolution alone SHALL NOT establish a binding. A legacy derivation claim without binding evidence SHALL remain unresolved for class-policy reads until the owner verifies it, regardless of target existence.
+
+#### Scenario: A legacy claim has no binding evidence
+
+- **WHEN** a class-restricted read reaches a legacy note with a derivation claim that has no binding evidence
+- **THEN** the note answers as missing whether its claimed target exists or is absent
 
 ### Requirement: Record writes accept sources
 
@@ -70,7 +84,7 @@ Classify and mechanical rewrites, such as link repair after a rename, folder mer
 
 ### Requirement: The owner masks an inherited class on one page
 
-Classify SHALL set or clear `sensitivity_mask` on a page, with a required reason and a revert. Setting a mask and clearing a floor SHALL require the owner principal. A mask SHALL name only a class the page holds now by floor or inheritance. A masked class SHALL leave the page's effective classes and SHALL NOT reach its dependents through it.
+Classify SHALL set or clear `sensitivity_mask` on a page, with a required reason and a revert. Setting a mask and clearing a floor SHALL require the owner principal. A mask SHALL name only a class the page holds now by floor or inheritance, and SHALL apply to those contributions until the owner clears it. Dependents SHALL inherit the page's resulting effective classes.
 
 #### Scenario: Masking a class on a note
 
@@ -82,9 +96,14 @@ Classify SHALL set or clear `sensitivity_mask` on a page, with a required reason
 - **WHEN** a non-owner writer, or the owner before the class arrives, asks to mask `health` on a note that does not hold `health`
 - **THEN** classify refuses and the note's bytes are unchanged
 
+#### Scenario: An inherited class is also an own class
+
+- **WHEN** the owner masks a class the note holds both as its own class and by inheritance
+- **THEN** the note and its dependents still receive the class through the note's own contribution
+
 ### Requirement: Inheritance follows derivation edges and stays current
 
-The vault store SHALL hold a derived `page_sensitivity` object with each page's effective and inherited classes and a generation. Inheritance SHALL follow the graph edges whose relation carries `inherits_sensitivity`, transitively. A derivation that changes a page's own classes, floor, mask or derivation edges SHALL mark its dependents pending in the same transaction. The generation SHALL increase whenever the effective classes change.
+The vault store SHALL hold a derived `page_sensitivity` object with each page's effective and inherited classes and a generation. Inheritance SHALL follow authorized graph bindings whose relation carries `inherits_sensitivity`, transitively. A commit SHALL mark its affected lineage pending before readers can see it. The generation SHALL increase whenever the effective classes change.
 
 #### Scenario: A Source is classified after a note cites it
 
@@ -98,12 +117,21 @@ The vault store SHALL hold a derived `page_sensitivity` object with each page's 
 
 ### Requirement: Governance caches key on the inheritance revision
 
-Every cache entry for a scope set or a governance decision SHALL key on its page's generation and its scope parents' generations as well as its existing inputs. A change to one page's classes SHALL NOT invalidate entries for pages whose generations did not move. Projected retrieval under a policy with a `sensitivity` scope SHALL check that scope against the current effective classes, not against scope ids stored at publish.
+Every cache entry for a scope set or governance decision SHALL key on its page's generation and its scope parents' generations as well as its existing inputs. The store SHALL read generations in batches. A change to one page's classes SHALL NOT invalidate entries for pages whose generations did not move.
 
 #### Scenario: A cached decision after a raise
 
 - **WHEN** a restricted caller's decision for a note is cached and the note's Source then gains a class
 - **THEN** the next read decides the note under the new effective classes
+
+### Requirement: Projected retrieval uses the current release decision
+
+Under a policy with a `sensitivity` scope, projected retrieval SHALL check the scope against current effective classes. It SHALL exclude an item before ranking or reduction when the exact authorized representation is unavailable, while continuing to decide the remaining items.
+
+#### Scenario: A current class requires a variant that has not published
+
+- **WHEN** the current classes require a lower-level variant that the catalog does not yet hold
+- **THEN** the item contributes nothing to matches, counts or ranks, and other authorized items can still be returned
 
 ### Requirement: Removals flow down only to pages written before the class
 
@@ -125,7 +153,7 @@ Capture, classify and a plain edit SHALL refuse a class on a page the graph does
 
 ### Requirement: Uncurrent inheritance answers as missing
 
-When the active policy has a `sensitivity` scope and the caller is not the owner, a page SHALL be released only when its effective classes are current at the read's pinned snapshot. The pending set SHALL hold pages with an underived intent, pages marked for inheritance work and the dependents of both. A page in it SHALL answer as a page that does not exist, in response shape and in timing, and projected retrieval SHALL remove it before ranking.
+Class-policy reads by non-owners SHALL release a page only with proof of current effective classes at the pinned snapshot. Pending pages SHALL answer as missing in shape and timing and be excluded before ranking. Readers SHALL reuse the snapshot proof without waiting for derivation or walking the graph again.
 
 #### Scenario: A page was classified a moment ago
 
@@ -136,6 +164,15 @@ When the active policy has a `sensitivity` scope and the caller is not the owner
 
 - **WHEN** a hub Source gains `health` and a restricted caller searches while some dependents are still pending
 - **THEN** the pending dependents answer as missing, and the answer cannot be told apart from one where those pages do not exist
+
+### Requirement: A commit marks affected lineage pending
+
+The store SHALL maintain pending pages and their dependents, including changed binding resolutions found through indexed keys before and after the commit. Newly resolved authored placeholders without bindings SHALL NOT seed pending work.
+
+#### Scenario: A commit changes citation resolution before derivation
+
+- **WHEN** a committed title or path changes the resolution of an authorized binding before its graph rows refresh
+- **THEN** the citer and its dependents answer as missing until their current lineage is proven
 
 ### Requirement: Owner reads do not pay for inheritance
 

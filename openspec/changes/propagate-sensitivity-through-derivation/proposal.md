@@ -14,7 +14,7 @@ This change delivers those three properties and the policy selector that uses th
 
 ## What Changes
 
-- **Effective classes.** A page's effective classes are its own `sensitivity`, plus a write-time floor, plus the classes inherited live from the pages it derives from, minus the classes the owner masked on that page. The store keeps the result in one column that every consumer reads.
+- **Effective classes.** A page always keeps its own `sensitivity` classes. It adds a write-time floor and the classes inherited from authorized derivation. An owner mask can remove those added contributions. The store keeps the result in one column that every consumer reads.
 - **Carry-over at write time.** An authored write takes the effective classes of:
   - the pages it names in `sources`;
   - the pages it names in `links` whose relation carries derivation;
@@ -22,8 +22,8 @@ This change delivers those three properties and the policy selector that uses th
   - the page it edits.
 
   The classes go into a protocol-owned `inherited_sensitivity` field. `add_record` and `edit_record` gain `sources`; the note tools already take `sources` or `links`. Mechanical rewrites, such as link repair after a rename, keep the existing floor.
-- **Live inheritance.** A new derived store object, `page_sensitivity`, holds each page's effective and inherited classes and a generation. A class added to a Source later reaches every page derived from it, through the graph's derivation edges.
-- **Removals and masks.** Clearing a class on a Source removes it from pages that hold it only by inheritance. A page written after the class was set keeps it in its floor. The owner can mask an inherited class on one page with a reason. The mask also stops the class from reaching that page's dependents.
+- **Live inheritance.** A new derived store object, `page_sensitivity`, holds each page's effective and inherited classes and a generation. A class added to a Source later reaches pages with authorized derivation bindings to it.
+- **Removals and masks.** Clearing a class on a Source removes it from pages that hold it only by inheritance. A page written after the class was set keeps it in its floor. An owner can mask a floor or inherited contribution with a reason. Dependents still inherit any own class with the same key.
 - **Read results ask for sources.** A read result that releases a classified page tells the agent to name the page in `sources` if a write uses it.
 - **Withheld equals missing.** Under a policy that selects by class, a non-owner caller gets as missing any page whose inherited classes are not current at the read's snapshot.
 - **One egress decision.** The existing result postfilter decides on effective classes. A test runs every registered read under a restricted caller over synthetic classified pages and fails on any leak.
