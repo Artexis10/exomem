@@ -16937,18 +16937,27 @@ class GraphView:
         return self.edge(_edge_row_to_dict(row))
 
     def replaced_units(
-        self, predecessors: Mapping[str, str], *, edge_limit: int, source_limit: int,
+        self, predecessors: Mapping[str, tuple[str, str]], *, edge_limit: int, source_limit: int,
     ) -> frozenset[str] | None:
         """Find exact predecessor keys through incoming unit relations in an unrestricted view."""
-        pages = {_file_key(path): path for path in predecessors.values()}
+        # The graph snapshot must cover the predecessor bytes admitted earlier.
+        pages = json.dumps(dict(predecessors.values()))
+        different = self.conn.execute(
+            "SELECT 1 FROM json_each(?) AS predecessor "
+            "LEFT JOIN graph_nodes AS page ON page.node_key = 'file:' || predecessor.key "
+            "WHERE page.source_hash IS NOT predecessor.value LIMIT 1",
+            (pages,),
+        ).fetchone()
+        if different is not None:
+            return None
         # The neutral row can land elsewhere. The selected parser owns the exact end.
         rows = self.conn.execute(
-            f"SELECT predecessor.value, {EDGE_COLUMNS} FROM json_each(?) AS predecessor "
-            "CROSS JOIN graph_edges AS e ON e.dst_page_key = predecessor.key "
-            "WHERE e.origin = 'semantic_relation' AND e.source_path <> predecessor.value "
+            f"SELECT predecessor.key, {EDGE_COLUMNS} FROM json_each(?) AS predecessor "
+            "CROSS JOIN graph_edges AS e ON e.dst_page_key = 'file:' || predecessor.key "
+            "WHERE e.origin = 'semantic_relation' AND e.source_path <> predecessor.key "
             "AND json_extract(e.metadata, '$.target_fragment') IS NOT NULL "
             "LIMIT ?",
-            (json.dumps(pages), edge_limit + 1),
+            (pages, edge_limit + 1),
         ).fetchall()
         sources = {str(row[11]) for row in rows}
         if len(rows) > edge_limit or len(sources) > source_limit:
@@ -16994,7 +17003,7 @@ class GraphView:
 
         if not by_source:
             return frozenset()
-        authors: dict[str, Sequence[dict[str, Any]]] = {}
+        authors: dict[str, tuple[str, Sequence[dict[str, Any]]]] = {}
         type_basis = note_types.Basis(self.vault_root)
         status_basis = lifecycle_statuses.Basis(self.vault_root)
         for path, edges in by_source.items():
@@ -17016,7 +17025,10 @@ class GraphView:
                 return None
             # A later replacement or archival does not undo a historical author's decision.
             if status.live or status.historical:
-                authors[path] = edges
+                source_hash = parent.metadata.get("parent_source_hash")
+                if not source_hash:
+                    return None
+                authors[path] = (source_hash, edges)
         if not authors:
             return frozenset()
         snapshot = store_read.snapshot_for_connection(self.conn)
@@ -17027,12 +17039,12 @@ class GraphView:
                 total_bytes = sum(meta.size for meta in snapshot.page_metas(authors).values())
                 if total_bytes > runtime_resources.SEMANTIC_SMALL_RESERVE_BYTES:
                     return None
-            for path, edges in authors.items():
+            for path, (source_hash, edges) in authors.items():
                 try:
                     with runtime_resources.semantic_preparation(
                         self.vault_root, self.vault_root / path,
                         limit_bytes=runtime_resources.SEMANTIC_SMALL_RESERVE_BYTES,
-                        check=self._check,
+                        check=self._check, expected_hash=source_hash,
                     ) as prepared:
                         state = semantic_index.selected_parent_index_state(
                             self.vault_root, path, source=prepared.source,

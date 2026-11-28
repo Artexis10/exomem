@@ -365,6 +365,46 @@ def test_draft_successor_cannot_retire_a_global_claim(stance_vault):
     assert _stance(stance_vault) == before
 
 
+def test_replacement_lookup_refuses_a_graph_newer_than_the_admitted_page(stance_vault, monkeypatch):
+    from exomem import commands, unit_corrections, working_set_runtime
+    from exomem.writer_lease import invoke_command
+
+    earlier = "## Claim\n- id: old\n\nOld operating rule.\n"
+    predecessor = _page(stance_vault, "global", "stance: true\n", body=earlier)
+    _page(stance_vault, "inspection", "", body=(
+        "## Claim\n- id: new\n- relations: supersedes: [[Notes/Insights/global#old]]\n\n"
+        "New operating rule.\n"
+    ))
+    assert _stance(stance_vault)["state"] == "empty"
+    working_set_runtime.reset_caches_for_tests()
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    recall = next(command for command in commands.PRODUCT_COMMANDS if command.name == "activate_context")
+    assert invoke_command(recall, stance_vault, turn="Which operating rule is current?")["stance"]["state"] == "empty"
+    lookup = unit_corrections.replaced_units
+    published = False
+
+    def write_revision(root):
+        # Moving the heading changes its graph occurrence without changing its authored identity.
+        _page(root, "global", "stance: true\n", body="Inspection record.\n\n" + earlier)
+        lexstore.ensure_fresh(root)
+        _built(root).close()
+
+    def publish_revision(root, predecessors):
+        nonlocal published
+        if not published and any(path == predecessor for path, _ in predecessors.values()):
+            with ThreadPoolExecutor(max_workers=1) as writer:
+                writer.submit(write_revision, root).result(timeout=30)
+            published = True
+        return lookup(root, predecessors)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(unit_corrections, "replaced_units", publish_revision)
+        mixed = invoke_command(recall, stance_vault, turn="Which operating rule is current?")["stance"]
+    assert published
+    assert mixed["state"] == "unavailable" and mixed["items"] == []
+    assert _stance(stance_vault)["state"] == "empty"
+
+
 def test_hook_uses_supplied_or_generated_moves_and_stance_generation():
     from exomem._hooks import exomem_retrieve_nudge as hook
 

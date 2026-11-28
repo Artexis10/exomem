@@ -60,7 +60,7 @@ def discover(
     deadline: float | None = None,
     outgoing_sources: Mapping[str, Sequence[tuple[str, Sequence[Mapping[str, Any]]]]] | None = None,
     accept_outgoing: Callable[[dict[str, Any]], bool] | None = None,
-    replacement_nodes: Mapping[str, str] | None = None,
+    replacement_nodes: Mapping[str, tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Discover references once; the caller admits exact units before the cap.
 
@@ -311,7 +311,7 @@ def discover(
             conn.close()
 
 
-def replaced_units(root: Path, predecessors: Mapping[str, str]) -> frozenset[str] | None:
+def replaced_units(root: Path, predecessors: Mapping[str, tuple[str, str]]) -> frozenset[str] | None:
     """The exact replaced keys, or None when the current graph cannot prove coverage."""
     if not predecessors:
         return frozenset()

@@ -66,6 +66,7 @@ def admit(
     guards = {}
     check_replacements = egress.unrestricted_source_access(root, purpose=caller.purpose)
     node_keys: dict[tuple[str, str], str] = {}
+    source_hashes: dict[str, str] = {}
     for path in sorted(paths):
         source, guard = vault.read_guarded_text(root, root / path)
         guards[path] = guard
@@ -81,6 +82,7 @@ def admit(
             if check_replacements:
                 occurrence = semantic_units.occurrence_key(unit.form, unit.span, unit.source_hash)
                 node_keys[path, unit.unit_ref] = epistemic_graph.unit_node_key(path, occurrence, unit.form)
+                source_hashes[path] = page.source_hash
             group = release_groups[path] if release_groups is not None else ""
             candidates.setdefault(group, []).append(working_set.LaneItem(
                 role="", level="unit", ref=unit.unit_ref, path=path, title=page.title,
@@ -102,7 +104,7 @@ def admit(
     if not node_keys:
         return current, basis
     predecessors = {
-        node_keys[item.path, item.ref]: item.path for item in current
+        node_keys[item.path, item.ref]: (item.path, source_hashes[item.path]) for item in current
         if (ordering := basis.ordering(item.lifecycle, path=item.path)) is not None and ordering.live
     }
     replaced = unit_corrections.replaced_units(root, predecessors)
