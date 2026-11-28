@@ -34,7 +34,7 @@
 - [ ] 4.1 Make membership subjects carry effective classes, `UNRESOLVED` when not current. List every fact released without a path (counts, rollups, aggregates, snippets, titles, link names, suggestions) and decide each for its pages. Decide binaries by their Evidence page.
 - [ ] 4.2 Implement indexed pending reads and atomic publication. Prove input generations and durable dependency coverage through supersession and restart.
 - [ ] 4.3 Add the `sensitivity` selector: no other selector in the same scope, refused in `exclude`, never removing the residual scope, refused on a vault without the store.
-- [ ] 4.4 Casefold path selectors and exclusions.
+- [x] 4.4 Casefold path selectors and exclusions.
 - [ ] 4.5 Test every registered read operation, MCP resource and prompt with the synthetic canaries. Include a fenced owner before derivation.
 
 ## 5. Proof and delivery

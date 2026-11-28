@@ -130,6 +130,8 @@ A binary from before this change refuses a policy that uses the selector. A proc
 
 `membership._matches_paths` uses `fnmatchcase`, so a scope on `Health/**` misses `health/x.md`, which a case-insensitive file system treats as the same folder. Path selectors and exclusions match after casefolding both sides.
 
+Folder-level selector checks apply the same folding. The next projector version rebuilds representations that used the old scope matches.
+
 ## Risks / Trade-offs
 
 - **Spread.** Inheritance is transitive. An entity page that takes observations from many sources can collect several classes and pass them on. Task 0.1 measures the spread on a read-only copy of the owner's graph before inheritance is built; a large spread reopens D1's transitive rule. Masks are the owner's per-page remedy.
