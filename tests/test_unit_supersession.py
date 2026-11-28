@@ -403,6 +403,30 @@ def test_supersede_observation_uses_the_replacement_kind_for_a_compact_target(
     assert result["unit"]["kind"] == "correction"
 
 
+@pytest.mark.parametrize(("requested_kind", "stored_kind"), [(None, "correction"), ("reviewed_change", "reviewed_change")])
+def test_a_custom_replacement_kind_does_not_disable_the_default(tmp_path: Path, requested_kind, stored_kind) -> None:
+    from exomem import semantic_language_registry
+
+    _write_page(tmp_path, source=_page_source("# Observe\n\n## Observations\n\n- [rule] Opens at nine. ^old-1\n"))
+    overlay = semantic_language_registry.registry_path(tmp_path)
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(
+        "schema_version: 1\nkinds:\n  reviewed_change:\n"
+        "    description: A reviewed change.\n    labels: {en: Reviewed change}\n"
+        "    traits: [assertion, replacement]\n",
+        encoding="utf-8",
+    )
+    target, = _units_of(tmp_path, PAGE)
+
+    with request_scope(owner_principal(surface="cli")):
+        result = _edit_note(
+            tmp_path, action="supersede_observation", unit=target["id"], text="Opens at ten.", kind=requested_kind,
+        )
+
+    assert result["unit"]["kind"] == stored_kind
+    assert any(edge["kind"] == "supersedes" for edge in result["unit"]["relations"])
+
+
 def test_a_stale_unit_id_refuses_and_leaves_the_page_unchanged(tmp_path: Path) -> None:
     page = _write_page(
         tmp_path,

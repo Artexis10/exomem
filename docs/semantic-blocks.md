@@ -69,6 +69,14 @@ equivalent:
 
 Unknown headings remain normal Markdown and are not validation errors.
 
+## Replace a compact claim
+
+Use `edit_note(action="supersede_observation", ...)` to replace one compact claim. Omit `kind` to
+use the shipped replacement kind, or name a governed rich kind to choose another.
+
+When you assess or link a compact claim, provide a governed rich kind so it can hold the new
+metadata.
+
 ## Note relations
 
 Use a canonical `## Relations` section for directional note-to-note edges. Each
