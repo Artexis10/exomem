@@ -3649,7 +3649,10 @@ class EpistemicGraphIndex:
             with self._canonical_mutation_coordinator().try_hold(
                 operation="epistemic_graph_standalone_snapshot", holder_kind="graph",
             ) as held:
-                if not held or time.monotonic() >= deadline or freshness.external_pending(self.vault_root):
+                if (
+                    not held or time.monotonic() >= deadline
+                    or freshness.external_pending(self.vault_root)
+                ):
                     return None
                 state = self._startup_state(deadline=deadline)
                 if state is not None and state.coherent and time.monotonic() < deadline:

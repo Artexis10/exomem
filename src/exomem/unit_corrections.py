@@ -152,7 +152,9 @@ def discover(
         def still_current() -> bool:
             check_deadline()
             if standalone_state is not None:
-                current = index._standalone_snapshot_is_current(conn, standalone_state, deadline=deadline)
+                current = index._standalone_snapshot_is_current(
+                    view.conn, standalone_state, deadline=deadline,
+                )
             elif publication is not None:
                 final_reader = keep.fresh(withheld=frozenset())
                 final_admission = admission_of(final_reader)
