@@ -1653,18 +1653,20 @@ def _carry_item_time(item: dict, derived: import_stage.Derived) -> None:
 
 
 def _carry_sidecar(item: dict, paired: Mapping) -> None:
-    """Put the caption of a photo's paired Takeout sidecar on its planned item. The sidecar's time goes nowhere: no page is dated from it.
+    """Carry the caption and vendor timestamps of a paired Takeout sidecar into its photo's plan.
 
     The caption passes through the redaction of an upload's description before the plan holds it, so no plan,
     page or log keeps a card number or a credential that the owner typed. The sidecar pass redacts it too, before it
-    writes the row; a second pass changes nothing in that text, and covers a row that an earlier pass wrote. A sidecar
-    with no caption leaves the item as it is.
+    writes the row. A second pass covers rows written before that redaction. The timestamps go to Source provenance.
     """
     from . import preserve
 
+    if item["form"] != "artifact":
+        return
     _text, caption, _extracted, _warnings = preserve.redact_capture_text(description=paired["caption"])
-    if item["form"] == "artifact" and caption is not None:
-        item["sidecar"] = {"caption": caption}
+    timestamps = paired["timestamps"]
+    if caption is not None or timestamps:
+        item["sidecar"] = {"caption": caption, "timestamps": timestamps}
 
 
 def _recorded_stage(stage: import_stage.Stage | None) -> dict | None:
@@ -2150,18 +2152,14 @@ def _earlier_pages(store: AdoptionRunStore, run: dict) -> tuple[dict, ...]:
 
 
 def unfiled_members(root: Path, import_id: str, runs: tuple[dict, ...] | None = None) -> list[dict]:
-    """The members of an import that adoption did not file or `finish` did not verify, as `unfiled_report` lists them.
-
-    A Takeout sidecar that counts as filed (its photo is in the vault) is left out: it is no member that the person must
-    keep the source for, and a resend would send it back without its photo. The filing view counts it (`unfiled_report`).
-    """
-    return [member for member in unfiled_report(root, import_id, runs)[0] if not adoption_consume.is_filed(member["code"])]
+    """The members that still need review or can be resent."""
+    return unfiled_report(root, import_id, runs)[0]
 
 
 def unfiled_report(root: Path, import_id: str, runs: tuple[dict, ...] | None = None) -> tuple[list[dict], dict | None]:
     """The members of an import that adoption did not file or `finish` did not verify, as a residual record lists them, and the counts of its sidecars.
 
-    The counts are None for a stage with no recognised Takeout sidecar, else `{"captioned"}`.
+    The sidecar counts are None for a stage with no recognised Takeout sidecar.
 
     Each entry has the path relative to the stage, its bytes and why it stays (see `adoption_consume.residual`).
     The members are the stage manifest's, plus any staged file that the manifest does not list, plus the items and
@@ -2172,8 +2170,8 @@ def unfiled_report(root: Path, import_id: str, runs: tuple[dict, ...] | None = N
     stage no longer holds. A caller that lists many windows passes `runs`, the stage's runs from `runs_by_stage`,
     so it reads the run store once.
 
-    A recognised Takeout sidecar is never filed, so it is a member that stays; its reason is what became of its photo
-    (`export_sidecars.settle`), never `unselected`, which would say that the person left it out.
+    A Takeout sidecar whose photo is in the vault counts only in the sidecar report. The members that still need
+    review carry their own reason from `export_sidecars.settle`.
     """
     pages = AdoptionRunStore(root).runs_of_stage(import_id) if runs is None else runs
     stage = import_stage.read(root, import_id)
@@ -2185,7 +2183,7 @@ def unfiled_report(root: Path, import_id: str, runs: tuple[dict, ...] | None = N
     unfiled = [
         import_stage.residual_member(path, size, reason)
         for path, size, reason in adoption_consume.stage_reasons(import_id, list(files.items()), pages, _APPLIED_STATUSES, settled)
-        if (path in settled or not adoption_consume.is_filed(reason)) and path != import_stage.SERIES_FILE
+        if not adoption_consume.is_filed(reason) and path != import_stage.SERIES_FILE
     ]
     # An item that could not be read or was left out and an export that was read in part have no staged file: the expansion record lists them.
     return [*unfiled, *export_expansion.unfiled(root, import_id)], counts

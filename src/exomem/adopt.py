@@ -510,13 +510,15 @@ def render_artifact_source(
 ) -> str:
     """The Source page of an artifact original, in capture's own page format."""
     from . import add as add_module
-    from . import memory_refs
+    from . import export_photos, memory_refs
     from .preserve import DESCRIPTION_HEADING, _sanitize_filename
 
     kind, domain_lines = _kind_lines(planned)
     name = _sanitize_filename(Path(planned["original_path"]).name)
     content = add_module._describe_artifact(name, planned["original_sha256"], planned["original_bytes"])
     sidecar = planned.get("sidecar") or {}
+    if lines := export_photos.provenance_lines(sidecar.get("timestamps") or {}):
+        content += "\n" + "\n".join(lines)
     if sidecar.get("caption"):
         # The owner's caption from a Takeout sidecar, in the section an upload's description has, so one caption has one home.
         content = f"{content}\n\n{DESCRIPTION_HEADING}\n\n{sidecar['caption']}"

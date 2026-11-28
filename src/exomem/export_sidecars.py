@@ -3,12 +3,11 @@
 `export_expansion.expand` runs this pass first, with the same call budget as an export's read. It derives no files. For
 each recognised sidecar (see `source_formats`, the `photo-sidecar` parser) it appends one row to the stage's expansion
 rows and moves the pass's cursor past it. A row holds the sidecar's path, its name key (`export_pairing.Key`) and the
-caption that it carries. The sidecar's time is not read: it dates no page, and the staged sidecar stays for the
-measurement that decides where Google's `photoTakenTime` comes from (OpenSpec `carry-takeout-sidecar-captions`, task 3.2).
+caption and Google's timestamp strings that it carries. The Source keeps the timestamps as labelled provenance.
 A row never holds a position. When the last sidecar is read, the pass decides every pair in one step and appends one
 `pair` row for each sidecar, then an `end` row:
 
-- `{"sidecar": path, "base", "copy", "limit", "title", "caption"}`: one sidecar that was read. Its caption is redacted
+- `{"sidecar": path, "base", "copy", "limit", "title", "caption", "timestamps"}`: one sidecar that was read. Its caption is redacted
   before the row is written, as an upload's description is, so no row keeps a card number or a credential.
 - `{"unreadable": path}`: a file that could be a sidecar and could not be read. The pass reads on past it.
 - `{"pair": path, "photo": photo path or None, "why": None | "no-photo" | "ambiguous"}`: the decision about it.
@@ -230,16 +229,23 @@ def photo_formats(root: Path | None) -> tuple[source_formats.SourceFormat, ...]:
 
 
 def photo_facts(reading: Reading) -> dict[str, dict]:
-    """Each paired photo, by its path in the stage, with what its sidecar gives it: the sidecar's path and the caption."""
+    """The caption and timestamps of each paired photo, by its path in the stage."""
     facts = {}
     for sidecar, (photo, _why) in reading.rows.pairs.items():
         row = reading.rows.sidecars.get(sidecar)
         if photo is not None and row is not None:
-            facts[photo] = {"sidecar": sidecar, "caption": row.get("caption")}
+            facts[photo] = {"caption": row.get("caption"), "timestamps": row.get("timestamps") or {}}
     return facts
 
 
-def settle(reading: Reading, photo_filing: Callable[[str], str]) -> tuple[dict[str, str], dict[str, int] | None]:
+def _album_key(row: dict) -> tuple[export_pairing.Key, tuple[str, str]] | None:
+    """An album entry must agree with a paired sidecar on the name, title and both Google timestamps."""
+    key = _key_of(row)
+    timestamps = export_photos.timestamp_pair(row.get("timestamps") or {})
+    return (key, timestamps) if key is not None and timestamps is not None else None
+
+
+def settle(reading: Reading, photo_filing: Callable[[str], str]) -> tuple[dict[str, str], dict | None]:
     """Each sidecar, by its path in the stage, with the one reason that it stays, and the counts of the stage's sidecars.
 
     The reason follows the photo's filing result (`photo_filing` says, for the photo at a path in the stage, whether it
@@ -248,7 +254,7 @@ def settle(reading: Reading, photo_filing: Callable[[str], str]) -> tuple[dict[s
     when it carried a caption, else `EMPTY`. `APPLIED` says that the sidecar was paired with a photo that filed now and gave it
     its caption.
 
-    An unpaired sidecar whose key (name and title) is that of a sidecar that paired is an album entry: Takeout stores a photo
+    A sidecar with no matching photo that agrees with a paired sidecar on its album key is an album entry. Takeout stores a photo
     once, in its year folder, and lists it in each album with a sidecar alone (GPTH Neo issue 133). It follows the photo of
     the paired sidecar: `ALBUM_ENTRY` when that photo is in the vault, `PHOTO_NOT_FILED` when it is not. It gives no caption
     and counts in no `captioned`. One index of the paired keys serves every sidecar, so the work stays linear.
@@ -258,16 +264,16 @@ def settle(reading: Reading, photo_filing: Callable[[str], str]) -> tuple[dict[s
     codes = dict.fromkeys(reading.rows.unreadable, CODE_UNREADABLE)
     if not reading.rows.sidecars:
         return codes, None
-    counts = {"captioned": 0}
-    photos: dict[export_pairing.Key, str] = {}  # each key that paired, with the first photo (by path) that it paired with
-    for path, row in reading.rows.sidecars.items():
-        photo, key = reading.rows.pairs.get(path, (None, None))[0], _key_of(row)
-        if photo is not None and key is not None:
-            photos[key] = min(photo, photos.get(key, photo))
+    captioned = 0
+    photos: dict[tuple[export_pairing.Key, tuple[str, str]], str | None] = {}
     for path, row in reading.rows.sidecars.items():
         photo = reading.rows.pairs.get(path, (None, None))[0]
+        if photo is not None and (key := _album_key(row)) is not None:
+            photos[key] = None if key in photos else photo
+    for path, row in reading.rows.sidecars.items():
+        photo, why = reading.rows.pairs.get(path, (None, None))
         if photo is None:
-            key = _key_of(row)
+            key = _album_key(row) if why == export_pairing.NO_PHOTO else None
             elsewhere = photos.get(key) if key is not None else None
             if elsewhere is None:
                 codes[path] = CODE_UNPAIRED
@@ -280,10 +286,14 @@ def settle(reading: Reading, photo_filing: Callable[[str], str]) -> tuple[dict[s
         elif filing != STORED:
             codes[path] = CODE_PHOTO_NOT_FILED
         else:
-            captioned = row.get("caption") is not None
-            codes[path] = CODE_APPLIED if captioned else CODE_EMPTY
-            counts["captioned"] += captioned
-    return codes, counts
+            has_caption = row.get("caption") is not None
+            codes[path] = CODE_APPLIED if has_caption else CODE_EMPTY
+            captioned += has_caption
+    by_reason: dict[str, int] = {}
+    for code in codes.values():
+        if STAYS[code][0]:
+            by_reason[code] = by_reason.get(code, 0) + 1
+    return codes, {"captioned": captioned, "by_reason": by_reason}
 
 
 def open_pass(root: Path, record: Record, *, listing: list[tuple[str, int]], skip: Callable[[str], bool]) -> bool:
@@ -355,7 +365,7 @@ def advance(
         key = export_pairing.key_of(PurePosixPath(path).name, document.get("title"), fmt)
         if key is None:  # the entry's glob matched a name that is no `.json` file: not a sidecar
             continue
-        buffered.append(_row(path, key, export_photos.caption_of(document)))
+        buffered.append(_row(path, key, document))
         if len(buffered) >= _BATCH:
             record.append(root, buffered)
             buffered = []
@@ -381,10 +391,13 @@ def _examine(path: Path, known: tuple[source_formats.SourceFormat, ...]) -> tupl
     return next(((fmt, document) for fmt in known if fmt.names(name) and all(key in document for key in fmt.item_keys)), None)
 
 
-def _row(path: str, key: export_pairing.Key, caption: str | None) -> dict:
+def _row(path: str, key: export_pairing.Key, document: dict) -> dict:
     """One sidecar's row. The caption is redacted as an upload's description is (`preserve`), before it reaches disk."""
-    _text, redacted, _extracted, _warnings = preserve.redact_capture_text(description=caption)
-    return {"sidecar": path, "base": key.base, "copy": key.copy, "limit": key.at_limit, "title": key.title, "caption": redacted}
+    _text, redacted, _extracted, _warnings = preserve.redact_capture_text(description=export_photos.caption_of(document))
+    return {
+        "sidecar": path, "base": key.base, "copy": key.copy, "limit": key.at_limit, "title": key.title,
+        "caption": redacted, "timestamps": export_photos.timestamps_of(document),
+    }
 
 
 def _end(root: Path, record: Record, photos: list[str], known: tuple[source_formats.SourceFormat, ...]) -> None:

@@ -682,16 +682,21 @@ class _Run:
         if unadmitted:
             return [], 0, unadmitted
         taken, cost, plain = [], series_cost, len(series_file)
-        groups = _groups(pool)
-        for group in groups:
+        potential = reading.reachable.bytes + reading.pinned.bytes
+        if ceiling is not None:
+            potential = min(potential, ceiling)
+        first = None
+        for group in _window_groups(pool, potential - series_cost, admitted, len(series_file)):
             weight, size = sum(member.cost for member in group), sum(member.size for member in group)
+            if first is None:
+                first = weight
             if cost + weight > limit or (admitted is not None and plain + size > admitted):
                 break
             taken.extend(group)
             cost, plain = cost + weight, plain + size
         if taken:
             return taken, cost, None
-        first = sum(member.cost for member in next(_groups(pool)))
+        assert first is not None  # the series plans only a non-empty pool
         need, pinned = series_cost + first, reading.pinned.bytes
         if ceiling is not None and need > ceiling:
             raise self.stop("WINDOW_REFUSED_FOR_SPACE", "the Job refused a window for space and the next member cannot form a smaller one")
@@ -1137,7 +1142,7 @@ def _travels_with(path: str, first: str) -> bool:
 def _groups(pool: list[Member]) -> Iterator[list[Member]]:
     """The pool as the units a window takes whole: a page with its part pages, a photo with its likely sidecars, or one member.
 
-    A wrong guess about a sidecar costs only its caption: it files as unpaired, as it did before a window kept it with its photo.
+    The cell checks the guess with the sidecar's title, and reports a sidecar it cannot pair.
     """
     group: list[Member] = []
     for member in pool:
@@ -1147,6 +1152,22 @@ def _groups(pool: list[Member]) -> Iterator[list[Member]]:
         group.append(member)
     if group:
         yield group
+
+
+def _window_groups(pool: list[Member], max_cost: int, admitted: int | None, series_bytes: int) -> Iterator[list[Member]]:
+    """Keep likely sidecars together when they fit; maintain indivisible page and part-page groups."""
+    for group in _groups(pool):
+        if len(group) == 1 or (
+            sum(member.cost for member in group) <= max_cost
+            and (admitted is None or series_bytes + sum(member.size for member in group) <= admitted)
+        ):
+            yield group
+            continue
+        page = _page_of(group[0].path)
+        yield [member for member in group if _page_of(member.path) == page]
+        for member in group:
+            if _page_of(member.path) != page:
+                yield [member]
 
 
 def _classify(kept: import_selection.Kept, reading: Reading) -> Member:

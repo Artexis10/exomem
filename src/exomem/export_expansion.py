@@ -76,6 +76,7 @@ class Reading:
     partial: int  # exports that were read in part, and the sidecar pass when it ended in part
     stop: dict | None  # why the expansion waits for the person: its code and the export, when the volume is full
     sidecars: str | None = None  # the state of the sidecar pass, or None for a stage with no sidecar to read
+    sidecar_fault_has_member: bool = False
 
 
 def _entry(format_key: str | None = None, kind: str | None = None, size: int = 0) -> dict:
@@ -178,10 +179,15 @@ def _files_folder_of(export: str) -> str:
     return path.with_name(f"{path.stem} files").as_posix()
 
 
+def _partial_sidecars(entry: dict | None) -> dict | None:
+    return entry if entry is not None and entry["state"] == export_sidecars.PARTIAL and entry.get("code") else None
+
+
 def read(root: Path, import_id: str) -> Reading:
     """The stage's expansion as filing reads it; a stage with no record has expanded nothing."""
     record = _load(root, import_id)
     exports = record.exports
+    partial_sidecars = _partial_sidecars(record.sidecars)
     return Reading(
         exports=tuple(exports),
         held=tuple(path for path, state in exports.items() if state.get("state") == WORKING),
@@ -189,8 +195,9 @@ def read(root: Path, import_id: str) -> Reading:
         files=record.files(), failed=sum(state["failed"] for state in exports.values()),
         skipped=sum(state["skipped"] for state in exports.values()),
         partial=sum(1 for state in exports.values() if state.get("state") == PARTIAL and state.get("code"))
-        + int(record.sidecars is not None and record.sidecars["state"] == export_sidecars.PARTIAL and bool(record.sidecars.get("code"))),
-        stop=record.stop, sidecars=None if record.sidecars is None else record.sidecars["state"])
+        + int(partial_sidecars is not None),
+        stop=record.stop, sidecars=None if record.sidecars is None else record.sidecars["state"],
+        sidecar_fault_has_member=bool(partial_sidecars and partial_sidecars.get("fault")))
 
 
 def unfiled(root: Path, import_id: str) -> list[dict]:
@@ -211,9 +218,9 @@ def unfiled(root: Path, import_id: str) -> list[dict]:
     members += [
         import_stage.residual_member(f"{path} items", 0, entry["code"])
         for path, entry in state.exports.items() if entry.get("state") == PARTIAL and entry.get("code")]
-    if state.sidecars is not None and state.sidecars["state"] == export_sidecars.PARTIAL and state.sidecars.get("code"):
-        fault = state.sidecars.get("fault")
-        members.append(import_stage.residual_member(f"sidecars, first unreadable file {fault}" if fault else "sidecars", 0, state.sidecars["code"]))
+    if (partial_sidecars := _partial_sidecars(state.sidecars)) is not None and not partial_sidecars.get("fault"):
+        # The unreadable path already has a staged-member reason. A partial pass without a path needs its own entry.
+        members.append(import_stage.residual_member("sidecars", 0, partial_sidecars["code"]))
     return members
 
 

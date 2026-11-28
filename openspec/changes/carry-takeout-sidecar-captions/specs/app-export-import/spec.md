@@ -96,12 +96,13 @@ A recognised Takeout sidecar SHALL pair with an image or video in its own staged
 
 ### Requirement: A Takeout sidecar is counted by its outcome, never filed
 
-A recognised sidecar SHALL never file as a Source. When filing reaches done, the filing view SHALL count each sidecar in `left_out` under exactly one reason, from its photo's filing result, and SHALL NOT add it to the stage total as a derived file. A reason's code is `IMPORT_SIDECAR_` and one of `APPLIED`, `EMPTY`, `PHOTO_ALREADY_IMPORTED`, `PHOTO_NOT_FILED`, `ALBUM_ENTRY`, `UNPAIRED` or `UNREADABLE`, and the view lists the sidecars by path.
+A recognised sidecar SHALL never file as a Source or count as a derived file. The done view SHALL count the `IMPORT_SIDECAR_` reasons `APPLIED`, `EMPTY`, `PHOTO_ALREADY_IMPORTED`, and `ALBUM_ENTRY` under `sidecars.by_reason`, as settled in progress. The view SHALL count the other sidecar reasons under `left_out.by_reason` and include their paths up to the report's limit.
 
 #### Scenario: A Takeout album
 
 - **WHEN** a staged folder holds 50 photos and their 50 sidecars, 24 of which carry a caption
-- **THEN** 50 photo Sources file and no JSON Source does, and the filing view counts 24 `IMPORT_SIDECAR_APPLIED` and 26 `IMPORT_SIDECAR_EMPTY`, and reads done
+- **THEN** 50 photo Sources file and no JSON Source does, and the filing view counts 24 `IMPORT_SIDECAR_APPLIED` and 26 `IMPORT_SIDECAR_EMPTY` under `sidecars.by_reason`
+- **AND** the filing view reads done with zero left out and zero remaining
 
 #### Scenario: A sidecar without its photo
 
@@ -131,7 +132,7 @@ A recognised sidecar SHALL never file as a Source. When filing reaches done, the
 
 ### Requirement: An album's sidecar follows the photo that Takeout stored once
 
-An unpaired sidecar whose name and `title` are those of a sidecar that paired with a photo in another folder of the same stage SHALL count as `IMPORT_SIDECAR_ALBUM_ENTRY`: it counts as filed, because that photo is in the vault, and it gives no caption of its own. When that photo did not file, the sidecar SHALL count as `IMPORT_SIDECAR_PHOTO_NOT_FILED`. A sidecar that fits no paired sidecar SHALL stay `IMPORT_SIDECAR_UNPAIRED`.
+A sidecar with no local match SHALL count as `IMPORT_SIDECAR_ALBUM_ENTRY` if its name key, title, and both Google timestamps match a unique paired sidecar in the stage and that photo is in the vault. If that photo did not file, it SHALL count as `IMPORT_SIDECAR_PHOTO_NOT_FILED`. A sidecar with no corroborating match or an ambiguous local match SHALL stay `IMPORT_SIDECAR_UNPAIRED`.
 
 #### Scenario: An album that holds only the sidecar
 
@@ -160,7 +161,7 @@ The window status and a discarded window's residual record SHALL list a sidecar 
 
 ### Requirement: The view counts the captions that sidecars gave
 
-Over the sidecars whose photo filed now, the filing view SHALL count those that carry a caption (`captioned`). It SHALL count no time, because no sidecar time is applied.
+Over the sidecars whose photo filed now, the filing view SHALL count those that carry a caption under `sidecars.captioned`. It SHALL count no time, because no sidecar time is applied.
 
 #### Scenario: Counts over an album
 
@@ -187,7 +188,7 @@ A stage that holds any JSON file of at most 1 MiB SHALL keep its images and vide
 - **WHEN** a sidecar of the stage cannot be read
 - **THEN** the pass reads on, ends in part, and the photos are released
 - **AND** the sidecars before it and after it keep their pairs, and the unreadable file does not file as a Source
-- **AND** the filing view counts the unreadable file as `IMPORT_SIDECAR_UNREADABLE`, lists it by path as needing review, and lists the partial read with `IMPORT_EXPORT_PARTIAL`
+- **AND** the filing view counts the unreadable file once as `IMPORT_SIDECAR_UNREADABLE` and lists its path as needing review
 
 ### Requirement: The sidecar pass runs once per stage
 
@@ -216,16 +217,16 @@ A paired sidecar's non-empty `description` SHALL go into the photo Source's desc
 
 ### Requirement: A Takeout sidecar's time dates no page
 
-A paired sidecar's `photoTakenTime` SHALL NOT be written to any page's capture record. The pass SHALL NOT read the time: the staged sidecar stays, so that a later change can measure where Google takes it from.
+A newly filed photo with a paired sidecar SHALL keep the valid original `timestamp` strings from `photoTakenTime` and `creationTime` in the Source. Each line SHALL label the value as Google Photos provenance and name its vendor field. The import and media worker SHALL NOT use either value as a capture date.
 
 #### Scenario: A received photo
 
-- **WHEN** a JPEG with no EXIF capture time files with a paired sidecar whose `photoTakenTime` is 2019-05-04 10:00:00 UTC
-- **THEN** the photo's page records no capture date
+- **WHEN** a JPEG with no EXIF capture time files with a paired sidecar that states `photoTakenTime` and `creationTime`
+- **THEN** the Source has both labelled Google Photos timestamps and has no capture date
 
 ### Requirement: A window keeps a likely sidecar with its photo
 
-When the CLI sends a folder in windows, a file whose name reads as a Takeout sidecar's SHALL go in the window of the photo or video that its name fits, as a page's part pages go with their page. The planner SHALL decide this from names and the shipped `source-formats` entry alone and SHALL open no file. A name that fits no file of the series, or a wrong guess, SHALL leave the sidecar in the window that the order gives it, and the sidecar counts as unpaired.
+The CLI SHALL use names and the shipped registry to put a likely sidecar in its photo's window. It SHALL open no files to decide. If the group cannot fit the reachable budget or admission limit, each admissible member SHALL remain eligible for its own window. The filing view SHALL list any unpaired sidecar.
 
 #### Scenario: A Takeout folder that spans two windows
 

@@ -7,8 +7,7 @@ word, the length limits, the replaced characters) is registry data on the entry 
 
 Names compare exactly after NFC normalisation, and a copy number `(n)` compares apart from the name. A title's
 extension fits a file's when both have the same MIME type, so `.jpeg` fits `.jpg`, and `.heic`, a raw file or a video never
-fits a `.jpg` sibling. The pairing is linear in the files: one index over the folder's photos, and a sidecar looks up its
-few candidates in it.
+fits a `.jpg` sibling. The title narrows each lookup before the sidecar name is checked.
 """
 
 from __future__ import annotations
@@ -55,8 +54,7 @@ class _Reading:
 @dataclass(frozen=True, slots=True)
 class _Entry:
     path: str
-    mime: str
-    stem: str
+    name: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,11 +137,11 @@ def decide(sidecars: Mapping[str, Key], photos: Iterable[str], fmt: SourceFormat
     `photos` are the staged files that may be photos; only the images and videos count. A sidecar pairs only when
     exactly one photo fits it by name and by title, in the sidecar's own folder, and that photo fits no other sidecar.
     """
-    index = _index(photos)
+    index = _index(photos, prefixes=False)
     fitting: dict[str, list[str]] = {}
     claims: dict[str, int] = {}
     for path, key in sidecars.items():
-        fits = _fits(path.rpartition("/")[0], key, index) if key.title is not None else []
+        fits = _title_fits(path.rpartition("/")[0], key, index)
         fitting[path] = fits
         for photo in fits:
             claims[photo] = claims.get(photo, 0) + 1
@@ -158,7 +156,7 @@ def decide(sidecars: Mapping[str, Key], photos: Iterable[str], fmt: SourceFormat
     return decided
 
 
-def _index(photos: Iterable[str], *, across_folders: bool = False) -> _Index:
+def _index(photos: Iterable[str], *, across_folders: bool = False, prefixes: bool = True) -> _Index:
     """The staged files that are images or videos, indexed for a sidecar to look up its few candidates.
 
     With `across_folders` every file is indexed under the one folder `""`, so that a lookup there finds a photo of any folder.
@@ -174,9 +172,10 @@ def _index(photos: Iterable[str], *, across_folders: bool = False) -> _Index:
             continue
         mime = mime_of(name)
         for reading in _readings(name):
-            entry = _Entry(path, mime, reading.stem)
+            entry = _Entry(path, reading.full)
             exact.setdefault((folder, reading.stem, reading.copy, mime), []).append(entry)
-            by_copy.setdefault((folder, reading.copy), []).append((reading.full, entry))
+            if prefixes:
+                by_copy.setdefault((folder, reading.copy), []).append((reading.full, entry))
     names: dict[tuple[str, int | None], list[str]] = {}
     entries: dict[tuple[str, int | None], list[_Entry]] = {}
     for key, pairs in by_copy.items():
@@ -185,25 +184,34 @@ def _index(photos: Iterable[str], *, across_folders: bool = False) -> _Index:
     return _Index(exact, names, entries)
 
 
-def _fits(folder: str, key: Key, index: _Index, *, by_title: bool = True) -> list[str]:
-    """The photos of `folder` that the sidecar's name fits and, when `by_title`, its title too."""
-    title_stem, title_mime = (key.title.rpartition(".")[0], mime_of(key.title)) if by_title and key.title is not None else (None, None)
-    base_mime, base_is_media = mime_of(key.base), media_type_for(key.base) in KINDS
+def _title_fits(folder: str, key: Key, index: _Index) -> list[str]:
+    """Use the full title to narrow the candidates before checking a cut sidecar name."""
+    if key.title is None:
+        return []
+    title_stem, title_mime = key.title.rpartition(".")[0], mime_of(key.title)
+    base_matches_mime = mime_of(key.base) == title_mime and media_type_for(key.base) in KINDS
     fits: dict[str, None] = {}
+    for reading in _readings(key.base, key.copy):
+        exact = base_matches_mime and reading.stem == title_stem
+        for entry in index.exact.get((folder, title_stem, reading.copy, title_mime), ()):
+            if exact or (key.at_limit and reading.full and entry.name.startswith(reading.full)):
+                fits[entry.path] = None
+    return list(fits)
+
+
+def _name_fits(folder: str, key: Key, index: _Index) -> Iterable[str]:
+    """The photos of `folder` that the sidecar's name fits, for the sender that has no title."""
+    base_mime, base_is_media = mime_of(key.base), media_type_for(key.base) in KINDS
     for reading in _readings(key.base, key.copy):
         if base_is_media:
             for entry in index.exact.get((folder, reading.stem, reading.copy, base_mime), ()):
-                if title_stem is None or (entry.stem == title_stem and entry.mime == title_mime):
-                    fits[entry.path] = None
+                yield entry.path
         if key.at_limit and reading.full:
             held = index.names.get((folder, reading.copy), ())
             at = bisect.bisect_left(held, reading.full)
             while at < len(held) and held[at].startswith(reading.full):
-                entry = index.entries[(folder, reading.copy)][at]
-                if title_stem is None or (entry.stem == title_stem and entry.mime == title_mime):
-                    fits[entry.path] = None
+                yield index.entries[(folder, reading.copy)][at].path
                 at += 1
-    return list(fits)
 
 
 def likely_photos(paths: Iterable[str], fmt: SourceFormat) -> dict[str, str]:
@@ -218,17 +226,20 @@ def likely_photos(paths: Iterable[str], fmt: SourceFormat) -> dict[str, str]:
     paths = list(paths)
     index = _index(paths)
     anywhere: _Index | None = None  # built when a sidecar has no photo in its own folder
+    first_anywhere: dict[Key, str | None] = {}  # albums repeat the same name, so look it up once across the series
     likely: dict[str, str] = {}
     for path in paths:
         folder, _slash, name = path.rpartition("/")
         key = key_of(name, None, fmt)
         if key is None:
             continue
-        fits = _fits(folder, key, index, by_title=False)
-        if not fits:
+        first = min(_name_fits(folder, key, index), default=None)
+        if first is None:
             if anywhere is None:
                 anywhere = _index(paths, across_folders=True)
-            fits = _fits("", key, anywhere, by_title=False)
-        if fits:
-            likely[path] = min(fits)
+            if key not in first_anywhere:
+                first_anywhere[key] = min(_name_fits("", key, anywhere), default=None)
+            first = first_anywhere[key]
+        if first is not None:
+            likely[path] = first
     return likely

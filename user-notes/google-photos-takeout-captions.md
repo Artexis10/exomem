@@ -1,4 +1,4 @@
 ---
 title: Takeout photos keep their captions
 ---
-Photos from a new Google Photos Takeout import now keep your caption, its small data files no longer become pages, and a photo whose file name states when it was taken gets that date.
+Photos you add from Google Photos Takeout now keep their captions, and the small files that hold those captions stay off your pages.

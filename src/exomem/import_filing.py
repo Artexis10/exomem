@@ -181,8 +181,7 @@ def _rate(samples: list) -> dict | None:
 def _progress(record: dict) -> dict | None:
     """The contract's counts: what the last call reported, the manifest's total and what is neither filed nor left out.
 
-    On `done` each failed member is also one of the left-out members, so `remaining` takes it away once; before
-    `done` nothing is left out yet, and a failed member is taken away as failed.
+    On `done`, left-out members and resolved sidecars are settled. Until then, failed and set-aside members are settled.
     """
     counts = record.get("progress")
     if not isinstance(counts, dict):
@@ -190,7 +189,11 @@ def _progress(record: dict) -> dict | None:
     total = record.get("total")
     left_out = (record.get("left_out") or {}).get("count", 0)
     # Before `done` an item that the entry's rule left out (`set_aside`) is already settled, as a failed one is: it will never file.
-    settled = left_out if record["state"] == DONE else counts["failed"] + (record.get("set_aside") or 0)
+    if record["state"] == DONE:
+        sidecars_by_reason = (record.get("sidecars") or {}).get("by_reason", {})
+        settled = left_out + sum(sidecars_by_reason.values())
+    else:
+        settled = counts["failed"] + (record.get("set_aside") or 0)
     remaining = None if total is None else max(0, total - counts["filed"] - counts["skipped_duplicates"] - settled)
     return {
         "total": total, "filed": counts["filed"], "skipped_duplicates": counts["skipped_duplicates"],
@@ -213,7 +216,9 @@ def read_view(vault_root: Path, import_id: str) -> dict:
         "stop": record.get("stop"), "needs": record.get("needs") or [], "person": record.get("person") or [],
     }
     if record["state"] == DONE and record.get("left_out") is not None:
-        view["left_out"] = {key: record["left_out"][key] for key in ("by_reason", "items", "truncated", "sidecars") if key in record["left_out"]}
+        view["left_out"] = {key: record["left_out"][key] for key in ("by_reason", "items", "truncated") if key in record["left_out"]}
+    if record["state"] == DONE and record.get("sidecars") is not None:
+        view["sidecars"] = record["sidecars"]
     if (rate := _rate(record.get("calls") or [])) is not None:
         view["rate"] = rate
     # The filer holds this in memory, and it ends by itself with the quiet window: a record would claim it for good.
@@ -245,7 +250,7 @@ def _stage_total(vault_root: Path, import_id: str) -> int | None:
     reading = export_expansion.read(vault_root, import_id)
     return (
         sum(1 for path in stage.members if path != import_stage.SERIES_FILE) + reading.files
-        + reading.failed + reading.skipped + reading.partial)
+        + reading.failed + reading.skipped + reading.partial - int(reading.sidecar_fault_has_member))
 
 
 def _set_aside(vault_root: Path, import_id: str) -> int:
@@ -255,18 +260,16 @@ def _set_aside(vault_root: Path, import_id: str) -> int:
     return export_expansion.read(vault_root, import_id).skipped
 
 
-def _left_out(vault_root: Path, import_id: str) -> dict:
-    """The members that adoption did not file, once, for a stage that just finished: counts by reason and a bounded list.
+def _finished_report(vault_root: Path, import_id: str) -> tuple[dict, dict | None]:
+    """The left-out members and resolved sidecar counts for a stage that just finished.
 
     A `done` stage is never filed again unless a caller files it again, so this is read once and stored; the
     view then answers without opening a run. Raises when the runs cannot be read, so the stage is not `done` yet.
     """
-    from . import adoption_run, export_sidecars
+    from . import adoption_run
 
     unfiled, sidecars = adoption_run.unfiled_report(vault_root, import_id)
-    # A sidecar that did its work is counted, not listed, so that a long Takeout never crowds out the files that need a look.
-    done_work = {code for code, (in_the_vault, _summary) in export_sidecars.STAYS.items() if in_the_vault}
-    members = sorted(unfiled, key=lambda member: (member["code"] in done_work, member["path"]))
+    members = sorted(unfiled, key=lambda member: member["path"])
     by_reason: dict[str, int] = {}
     for member in members:
         by_reason[member["code"]] = by_reason.get(member["code"], 0) + 1
@@ -275,9 +278,7 @@ def _left_out(vault_root: Path, import_id: str) -> dict:
         "items": [{"path": member["path"], "code": member["code"]} for member in members[:LEFT_OUT_ITEMS]],
         "truncated": len(members) > LEFT_OUT_ITEMS,
     }
-    if sidecars is not None:
-        left_out["sidecars"] = sidecars
-    return left_out
+    return left_out, sidecars
 
 
 def _held(stop: dict | None) -> bool:
@@ -631,7 +632,7 @@ class Filer:
         continuation = reply.get("continuation") if isinstance(reply.get("continuation"), str) else None
         stop = reply.get("stop") if isinstance(reply.get("stop"), dict) else None
         # Both are read before the record changes: a fault here leaves the call stored, and its repeat reads them again.
-        left_out = _left_out(self.vault_root, import_id) if filing == _REPLY_DONE else None
+        left_out, sidecars = _finished_report(self.vault_root, import_id) if filing == _REPLY_DONE else (None, None)
         needs = _stopped_needs(self.vault_root, reply, person) if filing == _REPLY_STOPPED else []
         total = _stage_total(self.vault_root, import_id)  # filing derives members from an app export, so the total grows
         set_aside = _set_aside(self.vault_root, import_id)
@@ -642,7 +643,7 @@ class Filer:
         stored_mark = None if mark is None else [list(mark[0]), mark[1]]
 
         def change(record: dict) -> None:
-            record.update(call=None, progress=counts, left_out=left_out, needs=needs, person=person, busy=[])
+            record.update(call=None, progress=counts, left_out=left_out, sidecars=sidecars, needs=needs, person=person, busy=[])
             repeated = stored_mark is not None and record.get("mark") == stored_mark
             record["unmoved"] = record.get("unmoved", 0) + 1 if repeated else 0
             if not repeated:
