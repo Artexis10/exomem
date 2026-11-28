@@ -21,7 +21,7 @@ This change covers store mode only. `make-vault-store-canonical` D15 makes store
 
 ## What Changes
 
-- In store mode, offload, the offload scan, the refusal status, upload admission and the import window status read the owner total from the binding projection, in one ledger read outside the boundary. While offload holds the boundary, it walks no notes for the allowance, and it replays at most one batch of 256 audit rows or fewer. Upload admission follows the audit trail before it decides, so a lagging projection never admits an upload that does not fit. In file mode, upload admission keeps today's census.
+- In store mode, offload, the offload scan, the refusal status, upload admission and the import window status read the owner total from the binding projection, in one ledger read outside the boundary. While offload holds the boundary, it walks no notes for the allowance, and it replays at most one batch of 256 audit rows or fewer. Upload admission applies the audit trail's pending rows to the total in memory before it decides, without the boundary, so a lagging projection never admits an upload that does not fit. A backlog of more than 2,048 rows gets a busy answer with a retry hint. In file mode, upload admission keeps today's census.
 - Under the protection and publication holds, offload uses the total only while the projection is current. When the projection's checkpoint moved after offload read the total, offload reads the total again with one indexed query.
 - Before each hold, offload follows the audit trail until the projection lags the store by one batch or less.
 - A projection that is not current makes offload return the job to the queue without spending an attempt (`MEDIA_STORE_BUSY`). Status reports the total as being counted.

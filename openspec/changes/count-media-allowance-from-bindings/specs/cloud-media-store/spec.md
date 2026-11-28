@@ -36,7 +36,13 @@ In store mode, offload, the offload scan, the refusal status, upload admission a
 #### Scenario: An upload that does not fit is refused while the projection lags
 
 - **WHEN** in store mode saves bind new versions that the projection has not yet followed, and the owner uploads an original larger than what remains of the allowance after those versions
-- **THEN** upload admission follows the audit trail first and refuses the upload with `MEDIA_ALLOWANCE_EXCEEDED`
+- **THEN** upload admission counts the audit trail's pending rows without the mutation boundary and refuses the upload with `MEDIA_ALLOWANCE_EXCEEDED`
+
+#### Scenario: An upload during a large backlog is answered busy
+
+- **WHEN** in store mode the projection lags the audit head by more than 2,048 rows and the owner uploads an original that the allowance charges
+- **THEN** upload admission answers `MEDIA_STORE_BUSY` with a retry hint and does not admit the upload
+- **AND** once the projection has followed the backlog, a retry decides on the total at the store's head
 
 ### Requirement: A total that is not current makes offload wait
 
