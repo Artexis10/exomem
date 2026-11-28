@@ -17114,7 +17114,7 @@ class GraphView:
                 "SELECT * FROM graph_unit_links WHERE source_path = ? ORDER BY occurrence", (path,),
             )
         total = 0
-        window = []
+        window: list[tuple[str, UnitLink]] = []
         destinations: dict[str, str | None] = {}
         landed: dict[tuple[str, str], str | None] = {}
         while batch := candidates.fetchmany(_SQL_PARAMETER_BATCH):
