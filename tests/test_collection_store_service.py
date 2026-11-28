@@ -2599,13 +2599,13 @@ INCIDENT_TEXT = sqlite_text(manifest_text().replace("title: Work", f"title: {INC
 
 
 @contextmanager
-def _store_thread_held_with_intake_on(service, monkeypatch):
-    """The store thread is busy, a save that would wait for it queues after 0.3 s, and the drainer runs."""
+def _store_thread_held_with_intake_on(service, monkeypatch, *, intake_wait=0.3, store_wait=0.1):
+    """Keep the store thread busy while the public dispatcher runs with the intake on."""
     from concurrent.futures import ThreadPoolExecutor
 
     from exomem import request_budget, write_intake
 
-    monkeypatch.setenv("EXOMEM_BUSY_INTAKE_AFTER_SECONDS", "0.3")
+    monkeypatch.setenv("EXOMEM_BUSY_INTAKE_AFTER_SECONDS", str(intake_wait))
     server = runtime._SERVERS[service.root]
     entered, release = threading.Event(), threading.Event()
 
@@ -2622,7 +2622,7 @@ def _store_thread_held_with_intake_on(service, monkeypatch):
             token = request_budget.set_current(request_budget.RequestBudget(
                 seconds=request_budget.DELIVERY_RESERVE_SECONDS + 5))
             with monkeypatch.context() as short:
-                short.setattr(service.manager, "_mutation_timeout_seconds", 0.1)
+                short.setattr(service.manager, "_mutation_timeout_seconds", store_wait)
                 try:
                     yield
                 finally:
@@ -2630,6 +2630,51 @@ def _store_thread_held_with_intake_on(service, monkeypatch):
         finally:
             release.set()
             occupied.result(timeout=10)
+
+
+def test_a_save_waiting_for_the_store_queues_within_the_intake_budget(service, monkeypatch):
+    """A busy store thread must not spend the full store timeout before returning a durable receipt."""
+    from exomem import write_intake
+
+    root = service.root
+    arguments = dict(action="append", collection=CID, item={"title": "Queued row"},
+                     item_key=LATER, why="record the row", idempotency_key="queued-row")
+    try:
+        with _store_thread_held_with_intake_on(service, monkeypatch, intake_wait=2, store_wait=5):
+            started = time.monotonic()
+            receipt = call(root, "record_memory", **arguments)
+            elapsed = time.monotonic() - started
+            assert receipt["state"] == "queued"
+            assert elapsed < 3.5, elapsed
+            ref = receipt["queued_write"]["ref"]
+            assert call(root, "record_memory", **arguments)["queued_write"]["ref"] == ref
+        _until(lambda: write_intake.read(root, ref=ref)["queued_write"]["state"] == "applied")
+        assert titles(root, CID) == ["Canonical", "Queued row"]
+    finally:
+        write_intake.stop(root)
+
+
+@pytest.mark.parametrize("intake_unreadable", [False, True], ids=["available", "unreadable"])
+def test_zero_intake_wait_allows_an_idle_store_to_commit(service, monkeypatch, intake_unreadable):
+    """Zero intake wait removes retries, not the first attempt at an idle store."""
+    from exomem import write_intake
+
+    root = service.root
+    monkeypatch.setenv("EXOMEM_BUSY_INTAKE_AFTER_SECONDS", "0")
+    write_intake.start(root)
+
+    def unreadable(*_args, **_kwargs):
+        raise OSError("intake unavailable")
+
+    try:
+        if intake_unreadable:
+            monkeypatch.setattr(write_intake, "_store", unreadable)
+        result = call(root, "record_memory", action="append", collection=CID, item={"title": "New row"},
+                      item_key=LATER, why="record the row", idempotency_key="zero-intake-wait")
+        assert result["outcome"] == "committed"
+        assert titles(root, CID) == ["Canonical", "New row"]
+    finally:
+        write_intake.stop(root)
 
 
 def _save_by_title(service, changes, **guards):

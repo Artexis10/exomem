@@ -428,7 +428,9 @@ class _Replay:
 
 
 _REPLAY: contextvars.ContextVar[_Replay | None] = contextvars.ContextVar("exomem_intake_replay", default=None)
-_WAIT_CAP: contextvars.ContextVar[float | None] = contextvars.ContextVar("exomem_intake_wait_cap", default=None)
+_WAIT_CAP: contextvars.ContextVar[tuple[float, float] | None] = contextvars.ContextVar(
+    "exomem_intake_wait_cap", default=None
+)
 
 
 _QUEUEABLE: contextvars.ContextVar[bool] = contextvars.ContextVar("exomem_intake_queueable", default=False)
@@ -439,9 +441,16 @@ def queues_busy_refusal() -> bool:
     return _QUEUEABLE.get()
 
 
-def busy_wait_cap() -> float | None:
+def busy_wait_cap(*, initial_attempt: bool = False) -> float | None:
     """The deadline (monotonic) by which an eligible save stops waiting and is queued, if any."""
-    return _WAIT_CAP.get()
+    budget = _WAIT_CAP.get()
+    if budget is None:
+        return None
+    started, deadline = budget
+    # Zero skips the contention retries but still allows one ordinary store acquire.
+    if initial_attempt and deadline == started:
+        return None
+    return deadline
 
 
 def replay_stop_event() -> threading.Event | None:
@@ -1268,7 +1277,7 @@ class Admission:
             except Exception:  # noqa: BLE001 - an intake that cannot write runs the save now
                 log.warning("write intake could not queue a %s save behind its queue", self.command.name,
                             exc_info=True)
-        token = _WAIT_CAP.set(deadline)
+        token = _WAIT_CAP.set((started, deadline))
         queueable = _QUEUEABLE.set(self.refusal is None)
         try:
             return call()
