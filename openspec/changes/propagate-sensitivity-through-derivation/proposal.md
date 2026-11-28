@@ -39,6 +39,7 @@ This change delivers those three properties and the policy selector that uses th
 ### Modified Capabilities
 
 - `governance-kernel`: the `sensitivity` scope selector and its store-mode requirement, the residual scope's treatment of it, case-insensitive path selectors, and the single egress decision on effective classes.
+- `canonical-vault-store`: the class-policy exception to the ordinary wait for pending intents.
 
 ## Impact
 

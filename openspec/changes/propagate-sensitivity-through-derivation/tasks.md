@@ -3,12 +3,14 @@
 ## 0. Before building inheritance
 
 - [ ] 0.1 On a read-only copy of the owner's graph, measure how far each candidate class spreads under transitive inheritance: dependents per classified page, and classes per entity page. Record the numbers in the design. Reopen D1's transitive rule if the spread makes classes meaningless.
+- [ ] 0.2 Agree the class-policy read exception with the store owner and reconcile the active canonical store read contract.
 
 ## 1. Registry and fields
 
 - [ ] 1.1 Add the closed relation behaviour `inherits_sensitivity` and assign it in the core pack to `derived_from`, `evidenced_by`, `cites`, `refines`, `duplicates` and `supersedes`.
 - [ ] 1.2 Hold `inherited_sensitivity` as a protocol-owned key in `page_fields.py`. Declare `sensitivity_mask` in the `page-fields` pack as a list pointer field with writer `classify`.
 - [ ] 1.3 Extend classify to clear a floor and to set or clear a mask, each with a reason and a revert, owner principal only. A mask names only a class the page holds now.
+- [ ] 1.4 Guard removals of own classes at the page and row write boundary when a class policy is active.
 
 ## 2. Carry-over at authored writes
 
@@ -30,13 +32,13 @@
 ## 4. Disclosure
 
 - [ ] 4.1 Make membership subjects carry effective classes, `UNRESOLVED` when not current. List every fact released without a path (counts, rollups, aggregates, snippets, titles, link names, suggestions) and decide each for its pages. Decide binaries by their Evidence page.
-- [ ] 4.2 Reuse the snapshot's pending proof across reads. Include affected indexed resolver keys from both sides of each commit.
+- [ ] 4.2 Reuse the snapshot's pending proof across reads. Look up affected dependents through the bound targets' stable identities.
 - [ ] 4.3 Add the `sensitivity` selector: no other selector in the same scope, refused in `exclude`, never removing the residual scope, refused on a vault without the store.
 - [ ] 4.4 Casefold path selectors and exclusions.
 - [ ] 4.5 Add the behavioural egress test over every registered read operation, MCP resource and prompt with the five synthetic canaries, comparing counts with and without them.
 
 ## 5. Proof and delivery
 
-- [ ] 5.1 Measure a restricted first read and a hub raise before and after, on generated data at the load target.
+- [ ] 5.1 Measure a restricted first read and a hub raise before and after at the load target. Include commit time.
 - [ ] 5.2 Extend the twin-world rig with the direct, cited, episode, uncited copy and unresolved-link cases. Run the blind Opus re-attack before merge.
 - [ ] 5.3 Run the full suite, the strict OpenSpec gate and the privacy gate. Obtain two independent reviews, merge, and verify the ordinary release.

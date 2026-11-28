@@ -44,6 +44,8 @@ A mask removes floor and inherited contributions on that page. A dependent inher
 
 Setting a mask and clearing a floor need the owner principal, because each one can widen access. A mask may name only a class the page holds now by floor or inheritance. The mask remains an explicit owner exception for that key until the owner clears it, even if the contribution disappears and later returns.
 
+When a class policy is active, removing any own class also needs the owner principal and a reason. The write boundary applies this to a change of a page or row, including classification, a plain edit, a replacement or a revert. Policies without a class selector keep their existing write checks.
+
 Rejected: a byte cascade that rewrites each dependent when a source gains a class. A restricted writer's out-of-ceiling side effects are skipped, so the cascade fails open for it. A raise on a 10,000-dependent hub would take about 22 minutes of projection (inferred from 7.5 files per second).
 
 ### D2. Carry-over at authored writes
@@ -55,7 +57,7 @@ An authored write calls one pre-plan carry-over step, beside the names step of `
 - an episode's `about` refs;
 - the page the write edits.
 
-The step resolves each ref under the writer's visibility. It uses the existing bounded `UNRESOLVED_SOURCE_CITATION` refusal where compiled-source-lineage requires closure. For a permissive input, a missing or withheld target leaves the same unresolved text. Only a target resolved under writer authority and bound to the written page or row version can contribute classes. The writer rechecks these bindings under writer authority before publication. Mechanical rewrites preserve them. The vault-wide resolver cannot promote a placeholder. An authorized edit can establish a binding later.
+The step resolves each ref under the writer's visibility. It uses the existing bounded `UNRESOLVED_SOURCE_CITATION` refusal where compiled-source-lineage requires closure. For a permissive input, a missing or withheld target leaves the same unresolved text. The writer binds the resolved target's stable identity to the written page or row version and rechecks it under writer authority before publication. Mechanical rewrites preserve the binding through moves and title changes. The vault-wide resolver cannot promote a placeholder or retarget a binding. An authorized edit can establish a binding later.
 
 The plan function refuses an authored write whose floor lacks a class that the step computes. Classify and mechanical rewrites (link repair after a rename, folder merges, relocations) do not run the step and keep the floor they find. Otherwise a mechanical rewrite would freeze inherited classes into hundreds of floors, and a later clear could not flow down.
 
@@ -88,11 +90,11 @@ Clearing a class on a source recomputes inheritance, so dependents that hold the
 The store keeps two revisions: the last committed revision, and the revision up to which `page_sensitivity` is complete, including derivation of every committed intent. At a read's pinned snapshot:
 
 - When the second equals the first, every page's `effective` is current. The check is O(1).
-- Otherwise the read uses the store's pending set for that snapshot. The commit marks changed pages and looks up dependents by indexed path, stem and title keys in both resolver states. This catches a binding whose resolution changes before its graph rows do. An authored placeholder without a binding never seeds pending work when its guessed target changes. The store includes the transitive dependents of these pages and pages already marked for inheritance work. Where expansion is incomplete, the snapshot cannot prove currency for the affected scope and withholds it. The store computes the set in bounded work and reuses the proof for reads of that snapshot.
+- Otherwise the read uses the store's pending set for that snapshot. The commit publishes the affected set before the new snapshot can be read. It uses a batched, indexed lookup of direct and transitive dependents bound to the changed identities, including deleted targets. Unrelated pages keep their available proof. Guessed targets and name collisions cannot affect pending lineage. Derived class recompute runs later in slices. Measure the commit cost as well as the restricted read at the load target.
 
 Projected retrieval removes the pending set before ranking, so document frequency and ranks cannot reveal a withheld page.
 
-The check runs only when the active policy has a `sensitivity` scope and the caller is not the owner. For those callers it replaces the derived-behind notice of `make-vault-store-canonical` D2 and D3 with a missing answer, in the shape and timing of a page that does not exist. Owner reads keep D2 and D3 unchanged.
+For non-owners under a `sensitivity` policy, this is an exception to the ordinary wait and lag notice in "A read reflects the writes acknowledged before it, or says what lags" in `make-vault-store-canonical`. The read skips that wait and treats pending pages as absent in shape and timing. Owner and other reads keep the existing waiting rules. Agree this exception with the store owner and reconcile the read-door requirement before implementation.
 
 ### D6. One egress decision, proved by behaviour
 

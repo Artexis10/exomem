@@ -57,12 +57,21 @@ The carry-over step SHALL resolve each ref under the writer's visibility and SHA
 
 ### Requirement: Only authorized derivation bindings carry sensitivity classes
 
-The store SHALL inherit classes only from a ref resolved under writer authority and bound to the written page or row version. The writer SHALL recheck the binding under writer authority before publication. Mechanical rewrites SHALL preserve it. Graph resolution alone SHALL NOT establish a binding. A legacy derivation claim without binding evidence SHALL remain unresolved for class-policy reads until the owner verifies it, regardless of target existence.
+The store SHALL inherit classes only from a target resolved under writer authority. The writer SHALL bind its stable identity to the written page or row version and recheck it before publication. A move or rename SHALL preserve the binding. The graph resolver SHALL NOT create or retarget it.
 
 #### Scenario: A legacy claim has no binding evidence
 
 - **WHEN** a class-restricted read reaches a legacy note with a derivation claim that has no binding evidence
 - **THEN** the note answers as missing whether its claimed target exists or is absent
+
+### Requirement: Class-policy reads require proof for legacy derivation
+
+A legacy derivation claim without binding evidence SHALL remain unresolved for class-policy reads until the owner verifies it, regardless of target existence.
+
+#### Scenario: An owner verifies a legacy claim
+
+- **WHEN** the owner verifies the stable target of a legacy derivation claim
+- **THEN** the store can use that binding to prove the page's inherited classes
 
 ### Requirement: Record writes accept sources
 
@@ -100,6 +109,15 @@ Classify SHALL set or clear `sensitivity_mask` on a page, with a required reason
 
 - **WHEN** the owner masks a class the note holds both as its own class and by inheritance
 - **THEN** the note and its dependents still receive the class through the note's own contribution
+
+### Requirement: Only the owner can remove an own class under a class policy
+
+While a `sensitivity` policy is active, a page or row write SHALL require the owner principal and a reason to remove an own class. The write boundary SHALL apply the rule to classify, edits, replacements and reverts, independent of surface.
+
+#### Scenario: A permitted writer removes a class
+
+- **WHEN** a non-owner with write access submits a page or row edit that removes an own class under a class policy
+- **THEN** the write refuses and the former classes and stored content stay in force
 
 ### Requirement: Inheritance follows derivation edges and stays current
 
@@ -153,7 +171,7 @@ Capture, classify and a plain edit SHALL refuse a class on a page the graph does
 
 ### Requirement: Uncurrent inheritance answers as missing
 
-Class-policy reads by non-owners SHALL release a page only with proof of current effective classes at the pinned snapshot. Pending pages SHALL answer as missing in shape and timing and be excluded before ranking. Readers SHALL reuse the snapshot proof without waiting for derivation or walking the graph again.
+Class-policy reads by non-owners SHALL release a page only with proof of current effective classes at the pinned snapshot. Pending pages SHALL answer as missing in shape and timing and be excluded before ranking.
 
 #### Scenario: A page was classified a moment ago
 
@@ -167,12 +185,22 @@ Class-policy reads by non-owners SHALL release a page only with proof of current
 
 ### Requirement: A commit marks affected lineage pending
 
-The store SHALL maintain pending pages and their dependents, including changed binding resolutions found through indexed keys before and after the commit. Newly resolved authored placeholders without bindings SHALL NOT seed pending work.
+The store SHALL publish the pending set with the commit, using an index of bound target identities. A change or deletion SHALL mark the target's transitive dependents. Unrelated pages SHALL keep their available proof. Graph resolution or a name collision alone SHALL NOT seed pending work.
 
-#### Scenario: A commit changes citation resolution before derivation
+#### Scenario: A bound target changes before derivation
 
-- **WHEN** a committed title or path changes the resolution of an authorized binding before its graph rows refresh
+- **WHEN** a commit changes classes on a bound target before its graph rows refresh
 - **THEN** the citer and its dependents answer as missing until their current lineage is proven
+
+#### Scenario: An unrelated title collides with a bound target
+
+- **WHEN** an unreadable page takes the title of a target already bound to a visible citer
+- **THEN** the unrelated page cannot change the citer's binding or its restricted visibility
+
+#### Scenario: A pending change affects only withheld pages
+
+- **WHEN** all pages in the changed lineage are withheld from a caller
+- **THEN** unrelated pages that are visible to that caller remain visible while the affected lineage derives
 
 ### Requirement: Owner reads do not pay for inheritance
 
