@@ -782,6 +782,67 @@ def test_a_person_edit_made_after_the_migration_blocks_the_rollback_until_it_is_
     assert not mode.store_mode_active(vault)
 
 
+def test_rollback_exports_an_unrecorded_relations_file_and_refuses_a_later_save(
+    vault, capsys, tmp_path, monkeypatch,
+):
+    from exomem.vault_store import projection
+
+    assert migrate_apply(vault) == 0
+    queue_change(vault, relationship_change=relationships.Change(
+        actor="owner",
+        identities=(relationships.UnitIdentity("canonical-id", ALPHA, "tide"),),
+        added=(relationships.Relationship("canonical-edge", "canonical-id", "supports", target_page_path=BETA),),
+    ))
+    queue_change(vault, deletes=(write.PageDelete(ALPHA),))
+    artifact = relationship_files.path_for(ALPHA)
+    file = vault / artifact
+    outside = b"".join(relationship_files.lines(
+        ALPHA, 1, (relationships.UnitIdentity("outside-id", ALPHA, "tide"),), (),
+    ))
+    file.write_bytes(outside)
+    with closing(connection.open_reader(connection.store_path(vault))) as reader:
+        assert reader.execute("SELECT 1 FROM store_manifest WHERE path = ?", (artifact,)).fetchone() is None
+    capsys.readouterr()
+    assert store_mode(vault, "rollback", "--dry-run", operator=False) == 0
+    assert printed(capsys)["needs_export_held"]
+    assert file.read_bytes() == outside
+
+    refused = tmp_path / "refused"
+    assert rollback_apply(vault, refused) == 1
+    assert "VAULT_STORE_HELD_ITEMS" in capsys.readouterr().err
+    assert mode.store_mode_active(vault) and not refused.exists()
+    assert file.read_bytes() == outside
+
+    racing = tmp_path / "racing"
+    later = outside.replace(b"outside-id", b"later-id")
+    original_write = projection.write_file
+
+    def save_after_the_export(target_root, rel, body, *, durable):
+        result = original_write(target_root, rel, body, durable=durable)
+        if target_root == racing / "relationships" and rel == artifact:
+            summary = json.loads((racing / "export.json").read_bytes())
+            assert artifact in summary["held_edits"]
+            file.write_bytes(later)
+        return result
+
+    with monkeypatch.context() as editor:
+        editor.setattr(projection, "write_file", save_after_the_export)
+        assert rollback_apply(vault, racing, "--export-held") == 1
+    assert "VAULT_STORE_RELATIONS_CHANGED" in capsys.readouterr().err
+    assert mode.store_mode_active(vault)
+    assert file.read_bytes() == later
+    assert (racing / "held" / artifact).read_bytes() == outside
+
+    accepted = tmp_path / "accepted"
+    assert rollback_apply(vault, accepted, "--export-held") == 0, capsys.readouterr().err
+    assert (accepted / "held" / artifact).read_bytes() == later
+    with file.open("rb") as encoded:
+        restored = relationship_files.parse(encoded)
+    assert [unit.id for unit in restored.units] == ["canonical-id"]
+    assert [edge.id for edge in restored.relationships] == ["canonical-edge"]
+    assert not mode.store_mode_active(vault)
+
+
 GAMMA = "Knowledge Base/Notes/Gamma.md"
 
 

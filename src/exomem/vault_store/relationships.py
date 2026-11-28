@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Iterator
+from collections.abc import Generator, Iterable, Iterator
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from sqlite3 import Connection, OperationalError
 
@@ -99,40 +100,34 @@ class Change:
     expected_retirement: tuple[str, tuple[RelationshipKey, ...], int] | None = None
 
 
-def incident_window(
-    tx: Connection, path: str, *, after: str, limit: int,
-) -> Iterator[BoundRelationship]:
-    """Seek a bounded window of distinct active edges touching the page."""
+def incident(tx: Connection, path: str) -> Generator[BoundRelationship, None, None]:
+    """Stream distinct active edges touching the page from its three indexes."""
+    columns = (
+        "SELECT r.id,r.source_unit_id,r.relation_type,r.target_unit_id,r.target_page_path,"
+        " r.target_page_ref,s.id,s.parent_path,s.anchor,s.parent_ref,t.id,t.parent_path,t.anchor,t.parent_ref"
+    )
+    # Outgoing edges own same-page edges. The schema makes the two incoming target forms disjoint.
+    scans = (
+        " FROM store_unit_ids AS s CROSS JOIN store_relationships AS r ON r.source_unit_id=s.id"
+        " LEFT JOIN store_unit_ids AS t ON t.id=r.target_unit_id WHERE s.parent_path=?1",
+        " FROM store_unit_ids AS t CROSS JOIN store_relationships AS r ON r.target_unit_id=t.id"
+        " JOIN store_unit_ids AS s ON s.id=r.source_unit_id WHERE t.parent_path=?1 AND s.parent_path<>?1",
+        " FROM store_relationships AS r CROSS JOIN store_unit_ids AS s ON s.id=r.source_unit_id"
+        " LEFT JOIN store_unit_ids AS t ON t.id=r.target_unit_id WHERE r.target_page_path=?1 AND s.parent_path<>?1",
+    )
     try:
-        rows = tx.execute(
-            "WITH at_page AS (SELECT id FROM store_unit_ids WHERE parent_path = ?1),"
-            " edges AS ("
-            " SELECT r.id FROM at_page AS unit CROSS JOIN store_relationships AS r"
-            " ON r.source_unit_id = unit.id WHERE r.retired_revision IS NULL AND r.id > ?2"
-            " UNION"
-            " SELECT r.id FROM at_page AS unit CROSS JOIN store_relationships AS r"
-            " ON r.target_unit_id = unit.id WHERE r.retired_revision IS NULL AND r.id > ?2"
-            " UNION"
-            " SELECT id FROM store_relationships"
-            " WHERE target_page_path = ?1 AND retired_revision IS NULL AND id > ?2"
-            "), edge_window AS (SELECT id FROM edges ORDER BY id LIMIT ?3)"
-            " SELECT r.id,r.source_unit_id,r.relation_type,r.target_unit_id,r.target_page_path,"
-            " r.target_page_ref,s.id,s.parent_path,s.anchor,s.parent_ref,t.id,t.parent_path,t.anchor,t.parent_ref"
-            " FROM edge_window CROSS JOIN store_relationships AS r ON r.id = edge_window.id"
-            " JOIN store_unit_ids AS s ON s.id = r.source_unit_id"
-            " LEFT JOIN store_unit_ids AS t ON t.id = r.target_unit_id ORDER BY r.id",
-            (path, after, limit),
-        )
+        for scan in scans:
+            with closing(tx.execute(columns + scan + " AND r.retired_revision IS NULL", (path,))) as rows:
+                for row in rows:
+                    yield BoundRelationship(
+                        Relationship(*row[:6]), UnitIdentity(*row[6:10]),
+                        UnitIdentity(*row[10:]) if row[10] is not None else None,
+                    )
     except OperationalError:
         # A reader can open a store before its writer migrates that store to relationship storage.
         if tx.execute("SELECT 1 FROM sqlite_schema WHERE name = 'store_relationships'").fetchone():
             raise
         return
-    for row in rows:
-        yield BoundRelationship(
-            Relationship(*row[:6]), UnitIdentity(*row[6:10]),
-            UnitIdentity(*row[10:]) if row[10] is not None else None,
-        )
 
 
 def bind_additions(tx: Connection, change: Change) -> tuple[BoundRelationship, ...]:

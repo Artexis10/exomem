@@ -515,17 +515,6 @@ def observe_memory(
                     resolved.unit.span.end_offset,
                     rendered,
                 )
-            elif (store_edges and stored_arguments and resolved.unit is not None and kind is None
-                  and verdict is None and check_by is None):
-                selected_kind = str(resolved.unit.kind)
-                normalized_tags = tuple(resolved.unit.tags)
-                normalized_context = resolved.unit.context
-                normalized_relations = ()
-                normalized_as_of = None
-                normalized_until = None
-                preserved_metadata = ()
-                target_anchor = resolved.anchor
-                after_body = semantic_units.apply_splices(body, resolved.edits)
             else:
                 # A compact target has nowhere to put governed metadata, so an
                 # assessment promotes it to a rich block at the body's end with
@@ -866,6 +855,7 @@ def observe_memory(
         else None
     )
     relationship_plan = None
+    replace_stored = proposal_mode == "update" and relations is not None
     old_unit = resolved.unit if op == "assess" else current_unit
     unchanged_unit = bool(
         store_edges and (stored_arguments or proposal_mode == "update")
@@ -875,18 +865,18 @@ def observe_memory(
     if unchanged_unit:
         after_body = body
     if (store_edges and target_anchor is not None
-            and (stored_arguments or proposal_mode == "update")):
+            and (stored_arguments or replace_stored)):
         predecessor_anchor = resolved.unit.anchor if op == "supersede" and resolved.unit else None
         try:
             after_body, relationship_plan = _plan_stored_relationships(
                 vault_root, editable, current, after_body, target_anchor, stored_arguments,
-                selected_kind=selected_kind, replacing=proposal_mode == "update", reason=reason,
+                selected_kind=selected_kind, replacing=replace_stored, reason=reason,
                 predecessor_anchor=predecessor_anchor,
             )
         except OpError as error:
             raise ObserveMemoryError(error.code, error.message, error.remediation) from error
     after_source = (
-        editable.raw_text if relationship_plan is not None and after_body == body
+        editable.raw_text if (relationship_plan is not None or unchanged_unit) and after_body == body
         and fm_text == editable.fm_text and origin_block is None
         else _rebuild_source(editable.original_text, fm_text, after_body, today=authored_day)
     )
@@ -1533,7 +1523,8 @@ def _plan_stored_relationships(
         plan = unit_edges.plan_change(
             root, source=unit_edges.End(source_path, anchor, current.parent_ref),
             targets=tuple(targets), visible=visible, replacing=replacing, reason=reason,
-            writes=tuple(writes), guards=tuple(guards), supersession_check=supersession_check,
+            writes=tuple(writes), guards=tuple(guards), preserved_types=registry.keys_with("replaces"),
+            supersession_check=supersession_check,
         )
     return semantic_units.apply_splices(body, primary.edits), plan
 

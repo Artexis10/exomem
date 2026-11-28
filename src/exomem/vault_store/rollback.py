@@ -13,7 +13,8 @@ import json
 import os
 import sqlite3
 import time
-from contextlib import closing
+from collections.abc import Callable, Mapping
+from contextlib import closing, nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -57,6 +58,8 @@ class Findings:
     projected_blocks: list[str] = field(default_factory=list)
     edited_relations: list[str] = field(default_factory=list)
     deleted_relations: list[str] = field(default_factory=list)
+    #: Every portable replacement destination, including a receipt of absence.
+    portable_relations: dict[str, projector.OnDisk | None] = field(default_factory=dict)
 
     @property
     def unexported(self) -> int:
@@ -131,15 +134,7 @@ def inspect(vault_root: Path, conn: sqlite3.Connection) -> Findings:
                 found.projected_blocks.append(rel)
             else:
                 (found.deleted if on_disk is None else found.edited).append(rel)
-    for rel, sha256 in conn.execute(
-        "SELECT path,sha256 FROM store_manifest WHERE path LIKE '%' || ? ORDER BY path",
-        (relationship_files.RELATIONS_FILE_SUFFIX,),
-    ):
-        if ownership.relation_source(rel) is None:
-            continue
-        on_disk = _disk_sha256(vault_root, rel)
-        if on_disk != sha256:
-            (found.deleted_relations if on_disk is None else found.edited_relations).append(rel)
+    _inspect_relations(vault_root, conn, found)
     # A held file whose page the store no longer holds.
     for (rel,) in conn.execute(
         "SELECT h.path FROM store_held h "
@@ -151,6 +146,67 @@ def inspect(vault_root: Path, conn: sqlite3.Connection) -> Findings:
     found.deleted.sort()
     found.vacated = sorted(vacated)
     return found
+
+
+def _inspect_relations(root: Path, conn: sqlite3.Connection, found: Findings) -> None:
+    recorded: dict[str, str | None] = {
+        rel: digest for rel, digest in conn.execute(
+            "SELECT path,sha256 FROM store_manifest WHERE path LIKE '%' || ?",
+            (relationship_files.RELATIONS_FILE_SUFFIX,),
+        ) if ownership.relation_source(rel) is not None
+    }
+    # A dry run can still inspect a store whose writer has yet to install the relationship tables.
+    if conn.execute("SELECT 1 FROM sqlite_schema WHERE name = 'store_unit_ids'").fetchone():
+        for source, _ in relationship_files.export_pages(conn):
+            rel = relationship_files.path_for(source)
+            if ownership.relation_source(rel) == source:
+                found.portable_relations[rel] = None
+                recorded.setdefault(rel, None)
+    rel = "the vault's relations folder"
+    try:
+        anchor = held_fs.acquire(projector.anchor(root)).require() if found.portable_relations else nullcontext()
+        with anchor as filesystem:
+            for rel, digest in sorted(recorded.items()):
+                if rel in found.portable_relations:
+                    assert filesystem is not None
+                    receipt = projector.observe(filesystem, rel)
+                    found.portable_relations[rel] = receipt
+                    on_disk = None if receipt is None else receipt.sha256
+                else:
+                    on_disk = _disk_sha256(root, rel)
+                if on_disk != digest:
+                    (found.deleted_relations if on_disk is None else found.edited_relations).append(rel)
+    except held_fs.HeldFsError as error:
+        raise _relation_changed(rel) from error
+
+
+def _relation_changed(rel: str) -> OpError:
+    return OpError(
+        "VAULT_STORE_RELATIONS_CHANGED",
+        f"The inspected version of {json.dumps(rel)} could not be verified for rollback",
+        "Keep the current file and make it a readable regular file. Retry with a new export "
+        "directory and use --export-held to keep any outside edit.",
+    )
+
+
+def _read_portable_edit(root: Path, rel: str, receipt: projector.OnDisk) -> bytes:
+    """Copy only the exact version the owner agreed to export."""
+    try:
+        with held_fs.acquire(projector.anchor(root)).require() as filesystem:
+            def capture(file: held_fs.HeldFile) -> bytes:
+                if file.version() != receipt.version:
+                    raise _relation_changed(rel)
+                body = filesystem.read(file).require()
+                if file.version() != receipt.version or hashlib.sha256(body).hexdigest() != receipt.sha256:
+                    raise _relation_changed(rel)
+                return body
+
+            body = projector._with_file(filesystem, rel, capture)
+    except held_fs.HeldFsError as error:
+        raise _relation_changed(rel) from error
+    if body is None:
+        raise _relation_changed(rel)
+    return body
 
 
 def _has_projected_block(root: Path, rel: str, canonical_sha: str) -> bool:
@@ -313,7 +369,7 @@ def _rollback(
             "Run again with --export-held to keep those edits in the export and project the store's version.",
         )
     started = time.perf_counter()
-    exported = _export(root, conn, destination, found, why=why, revision=row[1])
+    exported = _export(root, conn, destination, found, why=why, revision=row[1], authority_check=authority_check)
     timings["export_s"] = time.perf_counter() - started
     started = time.perf_counter()
     with writer.handle.transaction() as tx:
@@ -365,6 +421,7 @@ def _export(
     *,
     why: str,
     revision: int,
+    authority_check: Callable[[], None],
 ) -> dict:
     """Make the audit trail and each held edit durable in ``destination``, then project the store's version over them.
 
@@ -405,7 +462,11 @@ def _export(
     kept: dict[str, bytes] = {path: body for path, _, body in found.held if body is not None}
     beside: dict[str, bytes] = {}
     for rel in (*found.edited, *found.vacated, *found.edited_relations):
-        on_disk = vault.read_disk_bytes_without_pinning(root / rel)
+        receipt = found.portable_relations.get(rel)
+        on_disk = (
+            _read_portable_edit(root, rel, receipt) if receipt is not None
+            else vault.read_disk_bytes_without_pinning(root / rel)
+        )
         if rel not in kept:
             kept[rel] = on_disk
         elif kept[rel] != on_disk:
@@ -414,8 +475,12 @@ def _export(
         projection.write_file(destination / "held", rel, body, durable=True)
     for rel, body in beside.items():
         projection.write_file(destination / "on-disk", rel, body, durable=True)
-    with read.snapshot(root, join_request=False) as view:
-        relation_files = _export_relationships(root, view.connection, destination, revision)
+    relation_files = len(found.portable_relations)
+    held_deletes = sorted(
+        {*found.deleted, *found.deleted_relations,
+         *(path for path, kind, _ in found.held if kind == "delete")}
+    )
+    absent_from_store = _trash_paths(root, found.vacated)
     summary = {
         "exported_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "reason": why,
@@ -424,12 +489,9 @@ def _export(
         "relation_files": relation_files,
         "held_edits": sorted(kept),
         "on_disk_beside_held": sorted(beside),
-        "held_deletes": sorted(
-            {*found.deleted, *found.deleted_relations,
-             *(path for path, kind, _ in found.held if kind == "delete")}
-        ),
+        "held_deletes": held_deletes,
         # Where each file whose page the store no longer holds goes: a free path in the trash.
-        "absent_from_store": _trash_paths(root, found.vacated),
+        "absent_from_store": absent_from_store,
     }
     projection.write_file(
         destination,
@@ -437,11 +499,13 @@ def _export(
         json.dumps(summary, indent=2, sort_keys=True).encode(),
         durable=True,
     )
+    with read.snapshot(root, join_request=False) as view:
+        _export_relationships(root, view.connection, destination, revision, found.portable_relations, authority_check)
     # The rebuild starts from the store's state: each file that differs gets the store's bytes, and the edit stays in the export.
     for rel in (*found.edited, *found.deleted, *found.projected_blocks):
         (body,) = conn.execute("SELECT body FROM store_pages WHERE path = ?", (rel,)).fetchone()
         projection.write_file(root, rel, body, durable=True)
-    for rel, trashed in summary["absent_from_store"].items():
+    for rel, trashed in absent_from_store.items():
         try:
             projector.move_into_custody(root, rel, trashed)
         except (projector.Deferred, held_fs.HeldFsError, OSError) as error:
@@ -460,15 +524,22 @@ def _export(
         "relation_files": relation_files,
         "held_edits": len(kept),
         "on_disk_beside_held": len(beside),
-        "held_deletes": len(summary["held_deletes"]),
-        "moved_to_trash": len(summary["absent_from_store"]),
+        "held_deletes": len(held_deletes),
+        "moved_to_trash": len(absent_from_store),
     }
 
 
-def _export_relationships(root: Path, conn: sqlite3.Connection, destination: Path, revision: int) -> int:
+def _export_relationships(
+    root: Path,
+    conn: sqlite3.Connection,
+    destination: Path,
+    revision: int,
+    inspected: Mapping[str, projector.OnDisk | None],
+    authority_check: Callable[[], None],
+) -> None:
     """Keep each identity and current edge on disk before dropping its canonical rows."""
     if conn.execute("SELECT 1 FROM store_unit_ids LIMIT 1").fetchone() is None:
-        return 0
+        return
     factory = conn.row_factory
     conn.row_factory = sqlite3.Row
     try:
@@ -484,25 +555,26 @@ def _export_relationships(root: Path, conn: sqlite3.Connection, destination: Pat
         )
     finally:
         conn.row_factory = factory
-    count = 0
     reference_paths = []
-    for source, witness in relationship_files.export_pages(conn):
-        rel = relationship_files.path_for(source)
-        if ownership.relation_source(rel) != source:
-            if next(relationships.outgoing_on(conn, source), None) is not None:
-                raise OpError(
-                    "INVALID_RELATIONS_FILE", "a stored relationship has an unsafe source path",
-                )
-            # Owned source files already include active far-end locators. The explicit
-            # export keeps the remaining reference identities without writing beside them.
-            reference_paths.append(source)
-            continue
-        with relationship_files.prepare_file(conn, source, revision, canonical_sha256=witness) as artifact:
-            if artifact is None:
+    anchor = held_fs.acquire(projector.anchor(root)).require() if inspected else nullcontext()
+    with anchor as filesystem:
+        for source, witness in relationship_files.export_pages(conn):
+            rel = relationship_files.path_for(source)
+            if ownership.relation_source(rel) != source:
+                if next(relationships.outgoing_on(conn, source), None) is not None:
+                    raise OpError(
+                        "INVALID_RELATIONS_FILE", "a stored relationship has an unsafe source path",
+                    )
+                # Owned source files already include active far-end locators. The explicit
+                # export keeps the remaining reference identities without writing beside them.
+                reference_paths.append(source)
                 continue
-            for target in (destination / "relationships", root):
-                projection.write_file(target, rel, artifact.data.open(), durable=True)
-            count += 1
+            if rel not in inspected or filesystem is None:
+                raise _relation_changed(rel)
+            with relationship_files.prepare_file(conn, source, revision, canonical_sha256=witness) as artifact:
+                assert artifact is not None
+                projection.write_file(destination / "relationships", rel, artifact.data.open(), durable=True)
+                _publish_portable_relation(filesystem, rel, artifact, inspected[rel], authority_check)
     if reference_paths:
         rows = conn.execute(
             "SELECT id,parent_path,anchor,parent_ref FROM store_unit_ids "
@@ -516,7 +588,26 @@ def _export_relationships(root: Path, conn: sqlite3.Connection, destination: Pat
              for unit_id, path, anchor, reference in rows),
             durable=True,
         )
-    return count
+
+
+def _publish_portable_relation(
+    filesystem: held_fs.HeldFilesystem,
+    rel: str,
+    artifact: relationship_files.PreparedFile,
+    receipt: projector.OnDisk | None,
+    authority_check: Callable[[], None],
+) -> None:
+    expected = None if receipt is None else receipt.version
+
+    def check() -> None:
+        authority_check()
+        if projector.witness(filesystem, rel) != expected:
+            raise _relation_changed(rel)
+
+    try:
+        projector._publish(filesystem, rel, artifact.data, receipt, check, sha256=artifact.sha256)
+    except (projector.Deferred, held_fs.HeldFsError, OSError) as error:
+        raise _relation_changed(rel) from error
 
 
 def _trash_paths(root: Path, rels: list[str]) -> dict[str, str]:

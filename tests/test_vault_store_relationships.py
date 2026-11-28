@@ -232,6 +232,13 @@ def test_assess_anchors_the_far_end_and_later_changes_only_relationships(
     assert rows(served, "SELECT relation_type FROM store_relationships WHERE retired_revision IS NULL") == [
         ("supports",),
     ]
+    commands.op_observe_memory(
+        served, path=source_path, operation="update", unit=claim_id, category="rule",
+        kind="claim", content="Check the incoming tide.", reason="Clarify the observation.",
+    )
+    assert rows(served, "SELECT relation_type FROM store_relationships WHERE retired_revision IS NULL") == [
+        ("supports",),
+    ]
     [(source_id,)] = rows(served, "SELECT id FROM store_unit_ids WHERE parent_path=?", source_path)
     write.commit(writer, write.StoreChange(
         write.Origin.GOVERNED, "Link to the excerpt as a page.",
@@ -324,11 +331,50 @@ def test_supersession_is_stored_once_and_updates_current_history(served, writer)
     assert {item["unit_ref"] for item in revision["affected_units"]} == {
         prior.unit_ref, result["unit_ref"],
     }
+    with library_scope():
+        updated = commands.op_observe_memory(
+            served, path=page, operation="update", unit=successor["id"], category="rule",
+            kind="claim", content="The morning ferry arrives at ten.", relations=[],
+            reason="Clarify which ferry.",
+        )
+        updated_units = commands.op_read_memory(served, path=page, units=True)["units"]
+    assert updated["unit_ref"] == result["unit_ref"]
+    assert next(item for item in updated_units if item["id"] == previous["id"])["superseded_by"] == [
+        updated["unit_id"],
+    ]
+    assert rows(served, "SELECT relationship_id,action FROM store_relationship_history") == [
+        (relationship_id, "add"),
+    ]
     with pytest.raises(ValueError, match="ALREADY_SUPERSEDED"):
         commands.op_observe_memory(
             served, path=page, operation="supersede", unit=previous["id"],
             content="The ferry arrives at eleven.", reason="Correct the timetable again.",
         )
+
+
+def test_linking_a_compact_unit_in_store_mode_requires_a_rich_kind(served, writer):  # noqa: F811
+    page = "Knowledge Base/Notes/Observations/Tide.md"
+    original = (
+        b"---\ntitle: Tide\ntype: insight\nstatus: active\n"
+        b"exomem_id: 03b68654-8da6-433f-82fa-b8239668e43a\n---\n\n# Tide\n\n"
+        b"- [rule] Check the tide. ^tide\n\n- [rule] Read the schedule. ^schedule\n"
+    )
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "Record two observations.", puts=(write.PagePut(page, original),),
+    ))
+    link = dict(
+        path=page, operation="assess", unit="tide", reason="Record the supporting observation.",
+        relations=[{"kind": "supports", "target": "[[#^schedule]]"}],
+    )
+    with library_scope():
+        with pytest.raises(ValueError, match="COMPACT_METADATA_REQUIRES_RICH_KIND"):
+            commands.op_observe_memory(served, **link)
+        assert stored_body(served, page) == original
+        assert rows(served, "SELECT id FROM store_relationships") == []
+        promoted = commands.op_observe_memory(served, **link, kind="claim")
+    assert promoted["unit"]["anchor"] == "tide"
+    assert promoted["unit"]["kind"] == "claim"
+    assert rows(served, "SELECT relation_type FROM store_relationships") == [("supports",)]
 
 
 def test_supersede_refuses_a_relationship_that_lands_after_preflight(

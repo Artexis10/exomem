@@ -11,6 +11,7 @@ from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, replace
+from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -364,6 +365,7 @@ def plan_change(
     root: Path, *, source: End, targets: tuple[tuple[str, End], ...],
     visible: Callable[[str], bool] | None, replacing: bool, reason: str | None,
     writes: tuple[vault.PlannedWrite, ...], guards: tuple[vault.PathGuard, ...],
+    preserved_types: frozenset[str],
     supersession_check: relationships.SupersessionCheck | None = None,
 ) -> StoredPlan | None:
     """Bind admitted ends to allocated IDs and compute a guarded change of active edges."""
@@ -415,7 +417,7 @@ def plan_change(
                 active.update(edge.relationship.key for edge in batch)
                 expected.update(edge.relationship.id for edge in batch)
                 for edge in _write_visible_edges(root, snapshot, batch, visible):
-                    if edge.relationship.key not in wanted:
+                    if edge.relationship.relation_type not in preserved_types and edge.relationship.key not in wanted:
                         retired.append(relationships.Retirement(edge.relationship.id))
                         paths.add(edge.target_path)
                 if len(batch) < read.KEYS_PER_QUERY:
@@ -465,20 +467,17 @@ def with_stored_facts(
     after_anchors: dict[str, dict[str, semantic_units.SemanticUnit | None]] = {}
     with _preflight_relationships(root) as (snapshot, conn):
         visible = vault.writer_link_visibility(root)
-        cursor = ""
-        while True:
-            request_budget.checkpoint()
-            batch = tuple(relationships.incident_window(
-                conn, path, after=cursor, limit=read.KEYS_PER_QUERY,
-            ))
-            admitted = _write_visible_edges(root, snapshot, batch, visible)
-            before_facts.extend(_facts(before, admitted, before_anchors))
-            after_facts.extend(_facts(
-                after, (item for item in admitted if item.relationship.id not in retired), after_anchors,
-            ))
-            if len(batch) < read.KEYS_PER_QUERY:
-                break
-            cursor = batch[-1].relationship.id
+        with closing(relationships.incident(conn, path)) as edges:
+            while batch := tuple(islice(edges, read.KEYS_PER_QUERY)):
+                request_budget.checkpoint()
+                admitted = _write_visible_edges(root, snapshot, batch, visible)
+                before_facts.extend(_facts(before, admitted, before_anchors))
+                after_facts.extend(_facts(
+                    after, (item for item in admitted if item.relationship.id not in retired), after_anchors,
+                ))
+        # Keep refusal precedence independent of the order of the incident scans.
+        before_facts.sort(key=lambda fact: fact.identity)
+        after_facts.sort(key=lambda fact: fact.identity)
         if change is not None:
             after_facts.extend(_facts(after, relationships.bind_additions(conn, change), after_anchors))
     if not before_facts and not after_facts:
