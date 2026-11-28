@@ -150,6 +150,8 @@ curl -i http://127.0.0.1:8765/mcp
 **Cloudflare Tunnel** (after a one-time, browser-interactive
 `cloudflared tunnel login`):
 
+If you already have a tunnel, pass its current name to the script.
+
 ```bash
 pwsh -File scripts/setup-cloudflared.ps1 -Hostname kb.example.com -TunnelName evermatter-host
 ```

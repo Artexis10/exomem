@@ -16,6 +16,7 @@
 #     authorizing your domain's zone). This step is browser-interactive,
 #     so it is intentionally NOT in this script.
 #
+# For an existing tunnel, pass its current name.
 # Usage (desktop):
 #   pwsh -File scripts/setup-cloudflared.ps1 -Hostname kb.example.com -TunnelName evermatter-desktop
 # Usage (laptop):
