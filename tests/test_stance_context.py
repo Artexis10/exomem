@@ -331,6 +331,30 @@ def test_invalid_cross_page_successor_cannot_retire_a_global_claim(stance_vault)
     assert _stance(stance_vault) == before
 
 
+def test_raw_capture_cannot_retire_a_global_claim(stance_vault):
+    _page(stance_vault, "global", "stance: true\n", body="## Claim\n- id: old\n\nOld operating rule.\n")
+    before = _stance(stance_vault)
+    _write(stance_vault, "Knowledge Base/Sources/raw.md", (
+        "---\ntype: source\n---\n\n## Claim\n- id: new\n"
+        "- relations: supersedes: [[Notes/Insights/global#old]]\n\nNew operating rule.\n"
+    ))
+    assert _stance(stance_vault) == before
+
+
+def test_a_replaced_successor_still_retires_its_predecessor(stance_vault):
+    _page(stance_vault, "global", "stance: true\n", body="## Claim\n- id: old\n\nOld operating rule.\n")
+    assert [item["text"] for item in _stance(stance_vault)["items"]] == ["Old operating rule."]
+    _write(stance_vault, "Knowledge Base/Notes/Insights/inspection.md", (
+        "---\ntype: insight\nstatus: superseded\n---\n\n## Claim\n- id: intermediate\n"
+        "- relations: supersedes: [[Notes/Insights/global#old]]\n\nIntermediate rule.\n"
+    ))
+    _page(stance_vault, "reinspection", "", body=(
+        "## Claim\n- id: latest\n- relations: supersedes: [[Notes/Insights/inspection#intermediate]]\n\n"
+        "Latest rule.\n"
+    ))
+    assert _stance(stance_vault)["state"] == "empty"
+
+
 def test_hook_uses_supplied_or_generated_moves_and_stance_generation():
     from exomem._hooks import exomem_retrieve_nudge as hook
 

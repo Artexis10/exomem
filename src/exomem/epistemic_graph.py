@@ -16641,14 +16641,15 @@ class GraphView:
         self._require_current_parser()
         if self.source_limit is not None:
             return self._bounded_summaries(paths)
-        return {
-            str(path): _json(metadata).get(STRUCTURAL_METADATA) or {}
-            for path, metadata in self.conn.execute(
-                "SELECT path, metadata FROM graph_nodes "
-                "WHERE node_key IN (SELECT 'file:' || value FROM json_each(?))",
-                (json.dumps(paths),),
-            )
-        }
+        summaries: dict[str, Mapping[str, Any]] = {}
+        for path, metadata in self.conn.execute(
+            "SELECT path, metadata FROM graph_nodes "
+            "WHERE node_key IN (SELECT 'file:' || value FROM json_each(?))",
+            (json.dumps(paths),),
+        ):
+            self._check()
+            summaries[str(path)] = _json(metadata).get(STRUCTURAL_METADATA) or {}
+        return summaries
 
     def _check(self) -> None:
         if self.check is not None:
@@ -16952,7 +16953,22 @@ class GraphView:
         sources = {str(row[11]) for row in rows}
         if len(rows) > edge_limit or len(sources) > source_limit:
             return None
-        self.prefetch(sources | {str(row[0]) for row in rows})
+        if not rows:
+            return frozenset()
+        paths = sources | {str(row[0]) for row in rows}
+        # The source-count cap cannot bound the combined parser summaries.
+        sizes = self.conn.execute(
+            "SELECT length(CAST(metadata AS BLOB)) FROM graph_nodes "
+            "WHERE node_key IN (SELECT 'file:' || value FROM json_each(?))",
+            (json.dumps(sorted(paths)),),
+        )
+        summary_bytes = 0
+        for size, in sizes:
+            self._check()
+            summary_bytes += size or 0
+            if summary_bytes > runtime_resources.SEMANTIC_SMALL_RESERVE_BYTES:
+                return None
+        self.prefetch(paths)
         by_source: dict[str, list[dict[str, Any]]] = {}
         for path, *row in rows:
             self._node_paths[row[2]] = path
@@ -16973,19 +16989,37 @@ class GraphView:
         self, by_source: Mapping[str, Sequence[dict[str, Any]]],
     ) -> frozenset[str] | None:
         """Check normal unit diagnostics that the structural graph does not retain."""
+        from . import activation
         from .vault_store import read as store_read
 
         if not by_source:
             return frozenset()
+        authors: dict[str, Sequence[dict[str, Any]]] = {}
+        type_basis = note_types.Basis(self.vault_root)
+        for path, edges in by_source.items():
+            parent = self.parent(path)
+            if parent is None:
+                return None
+            page = ParsedPage(
+                path=self.vault_root / path, rel_path=path, frontmatter=dict(parent.frontmatter),
+                body="", title="", mtime=0.0,
+            )
+            # A later replacement of this author leaves its earlier replacement in history.
+            if activation.structurally_eligible(
+                self.vault_root, page, selects=note_types.governed_endpoint, type_basis=type_basis,
+            ):
+                authors[path] = edges
+        if not authors:
+            return frozenset()
         snapshot = store_read.snapshot_for_connection(self.conn)
-        batch = snapshot.prefetch(by_source) if snapshot is not None else nullcontext()
+        batch = snapshot.prefetch(authors) if snapshot is not None else nullcontext()
         replaced: set[str] = set()
         with batch:
             if snapshot is not None:
-                total_bytes = sum(meta.size for meta in snapshot.page_metas(by_source).values())
+                total_bytes = sum(meta.size for meta in snapshot.page_metas(authors).values())
                 if total_bytes > runtime_resources.SEMANTIC_SMALL_RESERVE_BYTES:
                     return None
-            for path, edges in by_source.items():
+            for path, edges in authors.items():
                 try:
                     with runtime_resources.semantic_preparation(
                         self.vault_root, self.vault_root / path,
