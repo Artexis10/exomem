@@ -358,8 +358,8 @@ def stale_edit(
         guard = {name: guard}
     return OpError(
         "STALE_EDIT",
-        f"The page changed since that id was issued; its current id is {current.id}. "
-        "If this repeats your own earlier edit, read the page first: the change may already be there.",
+        f"The page changed since that id was issued. Its current id is {current.id}. "
+        "Read the page before retrying. Your earlier edit may already be there.",
         details={"retry_with": {path_field: current.id, **guard}},
     )
 

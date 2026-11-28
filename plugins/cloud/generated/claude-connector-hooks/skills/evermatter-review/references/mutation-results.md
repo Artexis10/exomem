@@ -19,8 +19,9 @@ edits and moves; the part after the dot names the version you read.
 
 ## Report only what committed
 
-Only a committed result is a save. A call that could not run, failed in transport or returned no
-committed result saved nothing: say so, and never report it saved.
+Report a save when the result confirms it. If the server says the attempt saved nothing, report
+that refusal. If a transport failure or a missing receipt hides the outcome, say it is unknown
+and follow [Retries and identity](#retries-and-identity).
 
 - Repeat the reply's `user_summary` to the user. It names each page by its title and names the
   store that took the write.
@@ -95,10 +96,11 @@ On MCP, an expected refusal arrives as normal tool content with an `error`, not 
 failure. Its `message` says what was refused and, for a write, whether anything was saved. Report
 that outcome as the message states it.
 
-When the refusal has a `retry`, it is the exact next call. For the tool you called, merge its
-`arguments` key by key into the arguments you sent: `null` clears one, and a value in angle brackets
-is yours to supply. For another tool, `retry` is the whole call. Wait `after_s` seconds when it
-gives one. With no `retry`, no repeat of the call can succeed; the `message` holds the fix.
+Follow the steps in `message` before applying `retry`. For a stale-page refusal, read the page
+and check whether the earlier edit already landed. If the change is present, skip the retry.
+When you still need the retry, merge its `arguments` into the arguments you sent for the same tool.
+`null` clears a value. Supply any value in angle brackets. For another tool, `retry` is the whole
+call. Wait `after_s` seconds when provided. With no `retry`, follow the fix in `message`.
 
 ### Relations on a write
 
