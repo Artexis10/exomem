@@ -78,7 +78,7 @@ function Invoke-DoctorGate {
     $args = @("-m", "exomem", "doctor", "--profile", $Profile)
     $vault = Get-DotenvValue "EXOMEM_VAULT_PATH"
     if ($vault) { $args += @("--vault", $vault) }
-    Write-Host "Preflight: exomem doctor --profile $Profile..."
+    Write-Host "Preflight: evermatter doctor --profile $Profile..."
     & $VenvPy @args
     if ($LASTEXITCODE -ne 0) {
         throw "Doctor preflight failed for profile '$Profile'. Install the missing extras (for example: uv sync --frozen --extra embeddings) before restarting."

@@ -324,7 +324,7 @@ exomem_update_transition_receipt \
     "$VENV_PYTHON" "$TRANSITION_RECEIPT" "$SERVICE_ID" "$BINDING_PATH" \
     "$MANAGED_STATE_ROOT" "$VAULT" "$PORT" migrated
 
-echo "Preflight: exomem doctor --profile $PROFILE..."
+echo "Preflight: evermatter doctor --profile $PROFILE..."
 if ! "$VENV_PYTHON" -m exomem doctor --profile "$PROFILE" --vault "$VAULT"; then
     die "doctor preflight failed for profile '$PROFILE'; the target is installed and the service remains stopped"
 fi
