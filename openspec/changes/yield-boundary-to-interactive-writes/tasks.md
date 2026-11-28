@@ -21,7 +21,7 @@
 
 ## 2. Replay marker
 
-- [x] 2.1 Return `replayed: true` on a replayed terminal; keep the original `mutated`, `request_id` and `receipt_id`.
+- [x] 2.1 Mark replays in compact and full. Keep the original fields when returning the stored terminal. Report no new write for a verified no-op replay. Recover the retained commit fields when exact canonical receipt evidence supplies a missing terminal. Preserve the legacy projection.
 - [x] 2.2 Hash the implicit-retry digest over NFC strings.
 - [x] 2.3 Correct the retry window in the retry-safe-mutations spec from 60 s to 600 s.
 

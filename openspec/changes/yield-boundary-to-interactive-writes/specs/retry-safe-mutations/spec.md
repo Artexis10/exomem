@@ -1,21 +1,39 @@
 ## MODIFIED Requirements
 
 ### Requirement: Prompt MCP retries replay successful mutations
-The system SHALL detect a successful mutation repeated through MCP by the same authenticated principal with the same command and canonical arguments within a bounded retry window, and SHALL return the original result without executing the mutation leaf again. Replay SHALL resolve the persisted terminal even when the original call's derived-state acknowledgement failed after the commit, because the terminal is persisted before that acknowledgement. A replayed reply SHALL carry `replayed: true` in the compact projection and in `full`, and its `mutated`, `request_id` and `receipt_id` SHALL be those of the commit it replays, so the reply says the commit happened earlier. A reply that is not a replay SHALL carry no `replayed` key.
+The system SHALL detect a successful mutation repeated through MCP by the same authenticated principal with the same command and canonical arguments within a bounded retry window. It SHALL resolve the completed write without executing the mutation leaf again. Replay SHALL resolve the persisted terminal even when the original call's derived-state acknowledgement failed after the commit.
+
+The compact and full projections of a replayed terminal SHALL carry `replayed: true`. When a replay returns the stored terminal, it SHALL retain the stored `mutated`, `request_id` and `receipt_id`. A verified no-op replay terminal SHALL report `status="replayed"` and `mutated=false` and retain original identities when available. A committed terminal recovered from exact canonical receipt evidence SHALL retain the available commit fields. Receipt-only recovery SHALL use an empty leaf when the receipt holds no leaf content. An original terminal SHALL omit the replay marker. Legacy detail for a versioned terminal SHALL return the compatibility leaf without adding the terminal's replay marker. Pre-versioned results remain replayable under the mutation-terminal contract.
 
 #### Scenario: Lost save acknowledgement is retried
-- **WHEN** an authenticated MCP client repeats an identical successful additive save within the retry window
-- **THEN** the system returns the first save result and creates only one vault artifact
-- **AND** the reply carries `replayed: true` and the receipt of the first save
+- **WHEN** an authenticated MCP client repeats an identical successful additive save within the retry window using compact or full detail
+- **THEN** the system resolves the completed save and creates only one vault artifact
+- **AND** the projection carries `replayed: true` and full detail provides the original receipt identity when available
 
 #### Scenario: Lost delete acknowledgement is retried
 - **WHEN** an authenticated MCP client repeats an identical successful delete within the retry window
-- **THEN** the system returns the first delete result instead of executing a second delete that reports `NOT_FOUND`
+- **THEN** the system resolves the completed delete without executing the mutation leaf again
 
 #### Scenario: Artifact batch acknowledgement failed after commit
 - **WHEN** an artifact preservation commits, its derived-state acknowledgement fails, and the client repeats the identical call within the retry window
-- **THEN** the system returns the persisted batch terminal with `derived_sync="pending"` rather than `MUTATION_OUTCOME_UNKNOWN`
+- **THEN** the system resolves the persisted batch terminal as a success
+- **AND** full detail exposes `derived_sync="pending"` in `diagnostics.operational`
 - **AND** no file is fetched or written again
+
+#### Scenario: A verified no-op supplies a replay terminal
+- **WHEN** the system verifies that a governed write is a no-op replay
+- **THEN** the terminal records `status="replayed"`, `mutated=false`, `replayed: true` and the original identities available for the commit
+- **AND** compact and full show the marker and full detail shows the operational fields in `diagnostics.operational`
+
+#### Scenario: A canonical receipt recovers a committed terminal
+- **WHEN** a retry recovers a missing terminal from exact canonical receipt evidence of a successful commit
+- **THEN** full detail shows `status="committed"` and `mutated=true` in `diagnostics.operational`
+- **AND** the system does not execute the mutation leaf again
+
+#### Scenario: A client requests legacy detail for a replayed terminal
+- **WHEN** the client retries a completed versioned mutation with `response_detail="legacy"`
+- **THEN** the system returns the compatibility leaf without adding the terminal's replay marker
+- **AND** the mutation leaf does not execute again
 
 ### Requirement: Implicit retry detection is narrowly scoped and bounded
 The system MUST scope implicit retry detection to the authenticated caller when available, MUST compare canonical command arguments, and MUST expire implicit completed entries after 600 seconds. Canonical arguments SHALL be the schema-validated arguments with defaults applied, with every string in Unicode NFC and with sorted keys, so one text composed in two ways is one request. The digest SHALL NOT depend on vault state. Calls from another authenticated principal or after the window SHALL execute normally.
