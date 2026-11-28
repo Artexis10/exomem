@@ -12,15 +12,15 @@
 
 ## 2. Repository and registries (operator steps marked)
 
-- [ ] 2.1 Operator: create the PyPI pending trusted publisher for `evermatter`.
-- [ ] 2.2 Move the repository to `substrate-systems/evermatter` in one move (licence change owner); operator: point the `exomem` trusted publisher at it.
+- [x] 2.1 Operator: create the PyPI pending trusted publisher for `evermatter`.
+- [x] 2.2 Move the repository to `substrate-systems/evermatter` in one move (licence change owner); operator: point the `exomem` trusted publisher at it.
 - [ ] 2.3 Publish the new MCP registry entry; mark the old entry deprecated with a pointer to the new one.
 - [ ] 2.4 Submit the display-name change to the ChatGPT app directory and the Claude directory.
 
 ## 3. Release
 
-- [ ] 3.1 Agree the rename release with the release owner and with `adopt-fair-source-licence` section 3.
-- [ ] 3.2 Cut the rename release; prove `pip install evermatter==<release>`, `uv tool upgrade exomem` from 0.200.0, and an image pull under both names.
+- [x] 3.1 Agree the rename release with the release owner and with `adopt-fair-source-licence` section 3.
+- [x] 3.2 Cut the rename release; prove `pip install evermatter==<release>`, `uv tool upgrade exomem` from 0.200.0, and an image pull under both names.
 - [ ] 3.3 Publish one statement for the rename and the licence change in the changelog, the README and the website.
 
 ## 4. Compatibility window (optional for archive: dated reviews tracked after the release)
