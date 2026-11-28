@@ -14,6 +14,8 @@ from pathlib import Path
 import pytest
 from test_agent_upload_handoff import _post, _prepare
 from test_agent_upload_handoff import upload_env as upload_env
+from test_cloud_upload_bridge import LOGIN_A, _mcp_origin, _run, _ticket, _tool, _upload_origin
+from test_cloud_upload_bridge import cell as cell
 from test_connector_boundary import configured_boundary as configured_boundary
 from test_governance_egress import _reset_governance_caches, write_rule, write_scope
 
@@ -2409,6 +2411,68 @@ def test_a_source_ticket_upload_that_its_length_shows_above_the_allowance_is_ref
     evidence = _post(upload_env, _prepare(upload_env, dataset, lane="evidence"), dataset, filename="table.csv",
                      lane="evidence")
     assert evidence.status_code == 201, evidence.text
+
+
+def test_cloud_upload_files_checks_the_declaration_before_issuing_a_ticket(
+    vault: Path, selected_store, cell,
+):
+    """File size and Evidence name reach admission through the public MCP call."""
+    used = _recorded_by_a_batch(vault)
+    values, config = selected_store
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "allowance_bytes": used + 40}}}))
+    key, app, _ = cell
+    data = b"a" * 41
+    arguments = {"size_bytes": len(data), "expected_sha256": hashlib.sha256(data).hexdigest()}
+
+    async def scenario(client):
+        origin = _mcp_origin(key, LOGIN_A)
+        source = await _tool(client, "upload_files", {**arguments, "lane": "source"}, origin)
+        evidence = await _tool(client, "upload_files", {
+            **arguments, "lane": "evidence", "filename": "photo.jpg",
+        }, origin)
+        dataset = await _tool(client, "upload_files", {
+            **arguments, "lane": "evidence", "filename": "table.csv",
+        }, origin)
+        for refused in (source, evidence):
+            assert refused["error"]["code"] == "MEDIA_ALLOWANCE_EXCEEDED"
+            assert f"{used + 40:,} bytes" in refused["error"]["message"]
+            assert "token" not in refused
+        held = await client.post(
+            "/upload", headers=_upload_origin(key, LOGIN_A, _ticket(dataset)),
+            files={"file": ("table.csv", data, "text/csv")}, data={"lane": "evidence", "hold": "1"},
+        )
+        assert held.status_code == 201, held.text
+
+    _run(app, scenario)
+
+
+def test_a_prepared_ticket_checks_a_lower_allowance_before_reading_the_upload(vault, selected_store, upload_env):
+    """A ticket issued earlier still refuses without reading bytes if the remaining space is now smaller."""
+    import asyncio
+
+    import httpx
+
+    used = _recorded_by_a_batch(vault)
+    values, config = selected_store
+    data = b"a" * 41
+    ticket = _prepare(upload_env, data, lane="evidence", size_bytes=len(data), filename="photo.jpg")
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "allowance_bytes": used + 40}}}))
+
+    async def body():
+        pytest.fail("the server read a body that the declared allowance could not fit")
+        yield b""
+
+    async def send():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=upload_env[-1]), base_url="https://capture.example",
+        ) as client:
+            return await client.post("/upload", content=body(), headers={
+                "Authorization": "Bearer " + ticket["token"], "Content-Type": "multipart/form-data; boundary=part",
+            })
+
+    response = asyncio.run(send())
+    assert response.status_code == 413
+    assert response.json()["code"] == "MEDIA_ALLOWANCE_EXCEEDED"
 
 
 def test_allowance_rechecks_a_new_upload_before_publishing_and_keeps_protection(vault: Path, selected_store, monkeypatch):

@@ -228,6 +228,11 @@ def _hold_upload_room(vault_root: Path, *, device: int):
         raise HeldUploadError(error.code, error.message) from error
 
 
+def upload_filename(filename: str) -> str:
+    """The file name a multipart hold records."""
+    return Path(filename.replace("\\", "/")).name.strip()[:255]
+
+
 def hold(
     vault_root: Path,
     stream: BinaryIO,
@@ -251,7 +256,7 @@ def hold(
         )
     if lane not in LANE_COMMANDS:
         raise HeldUploadError("INVALID_UPLOAD", f"lane must be one of {sorted(LANE_COMMANDS)}")
-    name = Path(str(filename or "").replace("\\", "/")).name.strip()[:255]
+    name = upload_filename(str(filename or ""))
     kind = (content_type or "").split(";", 1)[0].strip()[:255] or None
 
     store = _store(vault_root)

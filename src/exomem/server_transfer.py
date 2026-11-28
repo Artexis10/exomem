@@ -78,8 +78,9 @@ async def _allowance_refused(
     """The refusal body for an upload that the media allowance cannot hold, read before its bytes are kept (D10).
 
     In the Evidence lane the file's name decides whether it charges the allowance. A multipart body names its
-    file only in the body, so the multipart lanes ask once the form is read, before they hold or file a byte. The
-    ticket lane also asks before the body, from Content-Length, with no name: that can refuse only a Source upload.
+    file only in the body, so the multipart lanes ask once the form is read, before they hold or file a byte.
+    The ticket lane asks before the body from the ticket's declaration. Without one, Content-Length
+    can establish only a minimum Source size.
     A resumable session names its file at creation, before any byte. A request without a size carries nothing to
     admit here; offload's own admission then keeps its original local.
     """
@@ -917,9 +918,13 @@ async def _hold_ticket_upload(vault_root: Path, request: Request, ticket: dict) 
     declared = _header_count(request.headers.get("content-length", ""))
     if declared is not None and declared > maximum + _FORM_OVERHEAD_BYTES:
         return 413, {"code": "TOO_LARGE", "reason": "upload exceeds the handoff limit"}
-    # Content-Length less the framing allowance is the least the file can hold. With no name yet, only a
-    # Source upload can be refused here; any other request reads its form and asks again below.
-    if declared is not None and declared > _FORM_OVERHEAD_BYTES:
+    file = ticket.get("declared_file")
+    if file is not None:
+        refused = await _allowance_refused(vault_root, file["size_bytes"], file["filename"], ticket["lane"])
+        if refused is not None:
+            return 413, refused
+    elif declared is not None and declared > _FORM_OVERHEAD_BYTES:
+        # Without a declaration the length less the framing allowance is the least the file can hold.
         refused = await _allowance_refused(
             vault_root, declared - _FORM_OVERHEAD_BYTES, None, ticket["lane"], most_bytes=declared)
         if refused is not None:
@@ -941,7 +946,9 @@ async def _hold_ticket_upload(vault_root: Path, request: Request, ticket: dict) 
             if not await upload_handoff._active(vault_root, ticket["principal"]):
                 # The cause alone: the refusal's remedy is the spent ticket's, which the caller adds.
                 return 401, {"code": "UPLOAD_HANDOFF_UNAVAILABLE", "reason": upload_handoff.UNAVAILABLE_REASON}
-            filename = str(form.get("filename") or upload.filename or "")
+            filename = held_uploads.upload_filename(str(form.get("filename") or upload.filename or ""))
+            if file is not None and (upload.size != file["size_bytes"] or file["filename"] not in (None, filename)):
+                return 400, {"code": "INVALID_UPLOAD", "reason": "send the file with the declared size and name"}
             if (refused := await _allowance_refused(vault_root, upload.size, filename, ticket["lane"])) is not None:
                 return 413, refused
             with principal_module.request_scope(ticket["principal"]):
@@ -1703,7 +1710,8 @@ def register_transfer_routes(
             if delegated:
                 try:
                     ticket = await upload_handoff.claim_upload(
-                        vault_root, token, resumable=True, size_bytes=declared, sha256=sha256, admit=admit_source,
+                        vault_root, token, resumable=True, size_bytes=declared, sha256=sha256,
+                        filename=target["filename"], admit=admit_source,
                     )
                 except upload_handoff.SourceOriginBusy:
                     return _tus_refusal("UPLOAD_ORIGIN_BUSY", "the issuing login cannot be checked yet", 503)
