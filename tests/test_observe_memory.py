@@ -136,6 +136,29 @@ def test_an_ambiguous_observation_boundary_uses_the_end_of_the_note(tmp_path: Pa
     assert result["outcome"] == "Saved with its date. The observation is at the end of the note."
 
 
+def test_a_rich_kind_with_the_observations_heading_keeps_its_own_body(tmp_path: Path) -> None:
+    page = _write_page(tmp_path, source=_page_source("# Observe\n\n## Observations\n\nAuthored report."))
+    overlay = semantic_language_registry.registry_path(tmp_path)
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(
+        "schema_version: 1\nkinds:\n  observations:\n"
+        "    description: A custom report.\n    labels: {en: Observations}\n",
+        encoding="utf-8",
+    )
+
+    result = commands.op_observe_memory(
+        tmp_path, path=PAGE, category="rule", content="Dated fact", as_of="2026-11-25",
+    )
+
+    source = page.read_text(encoding="utf-8")
+    units = semantic_index.selected_parent_index_state(tmp_path, PAGE, source=source).document.units
+    assert [(unit.kind, unit.content) for unit in units] == [
+        ("observations", "Authored report."), ("record", "Dated fact"),
+    ]
+    assert "Authored report.\n\n## Record\n" in source
+    assert "The observation is at the end of the note." in result["outcome"]
+
+
 def test_edit_moves_a_nested_record_to_keep_its_markdown_and_anchor(tmp_path: Path) -> None:
     page = _write_page(tmp_path, source=_page_source(
         "# Observe\n\n## Observations\n\n### Record\n- id: dated\n- category: rule\n"
@@ -203,6 +226,7 @@ def test_edit_cannot_touch_a_following_section_that_the_reader_included_in_a_rec
 @pytest.mark.parametrize(("body", "content", "error"), [
     ("# Observe\n\n## Observations", "Account.\n\n## Details\n\nKeep this.", "AMBIGUOUS_SEMANTIC_UNIT_CONTENT"),
     ("# Observe\n\n## Observations\n\n```md\nOpen example.", "Account.", "INVALID_SEMANTIC_UNIT"),
+    ("# Observe\n\n## Observations\n\n<!-- Open comment.", "Account.", "INVALID_SEMANTIC_UNIT"),
 ])
 def test_no_dated_placement_writes_a_partial_record(tmp_path: Path, body: str, content: str, error: str) -> None:
     page = _write_page(tmp_path, source=_page_source(body))
@@ -210,6 +234,23 @@ def test_no_dated_placement_writes_a_partial_record(tmp_path: Path, body: str, c
 
     with pytest.raises(ValueError, match=error):
         commands.op_observe_memory(tmp_path, path=PAGE, category="rule", content=content, as_of="2026-11-25")
+
+    assert page.read_bytes() == before
+
+
+def test_edit_refuses_if_an_unfinished_comment_hides_the_existing_record(tmp_path: Path) -> None:
+    page = _write_page(tmp_path, source=_page_source(
+        "# Observe\n\n## Observations\n\n<!-- Open comment.\n\n"
+        "### Record\n- id: dated\n- category: rule\n- as_of: 2026-11-25\n\nAccount."
+    ))
+    dated, = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units
+    before = page.read_bytes()
+
+    with pytest.raises(ValueError, match="INVALID_SEMANTIC_UNIT.*hides the record heading"):
+        commands.op_observe_memory(
+            tmp_path, path=PAGE, operation="update", category="rule", content="Updated account.",
+            unit_ref=dated.unit_ref, expected_fingerprint=dated.fingerprint, expected_hash=_page_hash(page),
+        )
 
     assert page.read_bytes() == before
 

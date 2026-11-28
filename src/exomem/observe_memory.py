@@ -735,9 +735,13 @@ def observe_memory(
             insertion_body = body if current_unit is None else _remove_unit(
                 body, current_unit.span.start_offset, current_unit.span.end_offset,
             )
-            after_body = _place_dated_block(insertion_body, render(3))
+            # A vault may use this heading for an authored rich unit. Rich units own their descendants.
+            observation_heading = semantic_language_registry.for_attached_projects(language, page_projects).resolve_heading(
+                "Observations", page_type=page_type,
+            )
+            after_body = None if observation_heading.resolved is not None else _place_dated_block(insertion_body, render(3))
             if after_body is None:
-                after_body = _append_rich(insertion_body, render(2))
+                after_body = _append_visible_record(insertion_body, render(2))
                 placement_outcome = _end_placement_notice(previewing)
         elif current_unit is not None and proposal_mode == "update":
             start, end = current_unit.span.start_offset, current_unit.span.end_offset
@@ -750,7 +754,7 @@ def observe_memory(
                 if _fits_nested_block(rendered, depth):
                     after_body = _replace_unit(body, start, end, rendered)
                 else:
-                    after_body = _append_rich(_remove_unit(body, start, end), render(2))
+                    after_body = _append_visible_record(_remove_unit(body, start, end), render(2))
                     placement_outcome = _end_placement_notice(previewing)
             elif current_unit.form == "compact" and not compact:
                 # A promoted compact line cannot become a rich block in place:
@@ -2128,12 +2132,30 @@ def _place_dated_block(body: str, rendered: str) -> str | None:
     visible = [offset for offset, level, title in outline
                if level == 2 and semantic_language_registry.normalize_label(title) == "observations"]
     if not sections and not visible:
-        return _append_rich(body, f"## Observations\n\n{rendered}")
-    if len(sections) != 1 or visible != [sections[0].start]:
+        candidate = _append_rich(body, f"## Observations\n\n{rendered}")
+        point = len(body)
+    elif len(sections) != 1 or visible != [sections[0].start]:
         return None
-    section = sections[0]
-    visible_end = next((offset for offset, level, _ in outline if offset > section.start and level <= 2), len(body))
-    return _insert_observation(body, section.end, rendered) if section.end == visible_end else None
+    else:
+        section = sections[0]
+        visible_end = next((offset for offset, level, _ in outline if offset > section.start and level <= 2), len(body))
+        if section.end != visible_end:
+            return None
+        point = section.end
+        candidate = _insert_observation(body, point, rendered)
+    return candidate if _shows_rendered_heading(candidate, rendered, point) else None
+
+
+def _shows_rendered_heading(body: str, rendered: str, point: int) -> bool:
+    return any(offset >= point and body.startswith(rendered, offset)
+               for offset, _, _ in markdown_regions.block_headings(body))
+
+
+def _append_visible_record(body: str, rendered: str) -> str:
+    candidate = _append_rich(body, rendered)
+    if not _shows_rendered_heading(candidate, rendered, len(body)):
+        raise _hidden_record_heading()
+    return candidate
 
 
 def _observation_section_containing(body: str, point: int) -> _ObservationSection | None:
@@ -2145,12 +2167,23 @@ def _guard_nested_observation_span(body: str, unit: semantic_units.SemanticUnit)
     start, end = unit.span.start_offset, unit.span.end_offset
     if level <= 2 or _observation_section_containing(body, start) is None:
         return
-    if any(start < offset < end and depth <= level for offset, depth, _ in markdown_regions.block_headings(body)):
+    outline = markdown_regions.block_headings(body)
+    if not any(offset == start and depth == level for offset, depth, _ in outline):
+        raise _hidden_record_heading()
+    if any(start < offset < end and depth <= level for offset, depth, _ in outline):
         raise ObserveMemoryError(
             "AMBIGUOUS_SEMANTIC_UNIT_CONTENT",
             "the record crosses a Markdown section boundary",
             "Use a page edit to separate the heading from the record, then read the unit and retry.",
         )
+
+
+def _hidden_record_heading() -> ObserveMemoryError:
+    return ObserveMemoryError(
+        "INVALID_SEMANTIC_UNIT",
+        "the note's Markdown hides the record heading",
+        "Close the unfinished Markdown block, then retry.",
+    )
 
 
 def _append_rich(body: str, rendered: str) -> str:

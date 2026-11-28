@@ -53,11 +53,20 @@ compact `kind`, SHALL keep the refusal. No refusal SHALL offer to omit `as_of` o
 - **THEN** the writer keeps the full dated block at the end of the note and names its placement
 
 #### Scenario: Neither placement can store the whole block
-- **WHEN** the writer cannot read back the full dated block at either placement
+- **WHEN** neither placement shows the dated block's heading or lets the writer read back its full body
 - **THEN** the operation refuses and the page is unchanged
+
+#### Scenario: A rich kind owns the observation heading
+- **WHEN** the vault resolves `Observations` as a rich kind and the full record fits at the note's end
+- **THEN** the writer places the dated record at the end and names its placement
+- **AND** the custom kind's existing units retain their bodies
 
 #### Scenario: The existing record overlaps a separate section
 - **WHEN** a replacement, move or removal of a nested record would touch a peer or parent heading that CommonMark reads as a separate section inside the record span
+- **THEN** the operation refuses and the page is unchanged
+
+#### Scenario: The existing record heading is hidden
+- **WHEN** CommonMark hides the heading of a nested record that the writer would replace, move or remove
 - **THEN** the operation refuses and the page is unchanged
 
 ### Requirement: Entity Pages Accept Unit Writes
