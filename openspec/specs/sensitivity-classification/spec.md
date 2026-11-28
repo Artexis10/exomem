@@ -49,7 +49,7 @@ A page without the field SHALL read as unclassified.
 
 #### Scenario: An unknown class
 
-- **WHEN** a capture, classify or plain edit call names a class the registry does not hold
+- **WHEN** a capture or classify call, or a plain edit of a compiled page, names a class the registry does not hold
 - **THEN** it refuses with `SENSITIVITY_CLASS_UNKNOWN`, names the registered keys, and writes nothing
 
 #### Scenario: A plain edit cannot change the class of a Source
@@ -59,7 +59,7 @@ A page without the field SHALL read as unclassified.
 
 ### Requirement: A plain edit takes only registered classes
 
-On a compiled page, a plain edit of `sensitivity` SHALL accept only a list of registered keys. A row's own `sensitivity` field in any collection SHALL take the same check.
+On a compiled page, a non-null `sensitivity` edit SHALL accept only a list of registered keys. A null value SHALL clear the page's classes. Registry validation SHALL apply to a row's `sensitivity` array of strings. A field of another type SHALL remain an ordinary field.
 
 #### Scenario: A plain edit names a string
 
@@ -68,7 +68,7 @@ On a compiled page, a plain edit of `sensitivity` SHALL accept only a list of re
 
 ### Requirement: Capture records the agent's classification
 
-`save_source`, `save_evidence`, `create_note`, `save_episode` and `add_record` SHALL accept an optional `sensitivity` list, which the calling agent decides. When a Source or Evidence capture gives none, the capture SHALL apply its Source kind's `sensitivity` attribute when the kind declares one. A kind default SHALL apply only its registered keys and SHALL NOT refuse the capture. The server SHALL NOT infer a class from content by any word list, pattern or model call.
+`save_source`, `save_evidence`, `create_note` and `save_episode` SHALL accept an optional `sensitivity` list, which the calling agent decides. When a Source or Evidence capture gives none, the capture SHALL apply its Source kind's `sensitivity` attribute when the kind declares one. A kind default SHALL apply only its registered keys and SHALL NOT refuse the capture. The server SHALL NOT infer a class from content by any word list, pattern or model call.
 
 #### Scenario: An agent captures an identity document photo
 
@@ -89,12 +89,12 @@ On a compiled page, a plain edit of `sensitivity` SHALL accept only a list of re
 
 ### Requirement: Results report the class and the disclosure in force
 
-Each single-item capture and classify result SHALL report `sensitivity` with:
+A completed single-item page capture or classify operation, or a completed row capture with classes, SHALL report `sensitivity` with:
 - `classes`
 - `basis`: `declared`, `kind-default`, `collection-floor` or `none`
 - `disclosure`, taken from live governance state
 
-It SHALL NOT report a restriction that nothing enforces.
+A row without classes SHALL omit the report. A result SHALL NOT report a restriction that nothing enforces.
 
 #### Scenario: No governance policy
 
@@ -103,12 +103,26 @@ It SHALL NOT report a restriction that nothing enforces.
 
 ### Requirement: Collections carry a class floor
 
-A collection definition MAY declare `sensitivity`, and every row SHALL take it, reported with basis `collection-floor`. A row MAY add classes through its own `sensitivity` field when its schema declares one. A row SHALL NOT remove a class that its collection declares. A row's classes SHALL be stored with its governance metadata.
+A store collection MAY declare a `sensitivity` floor. Each stored row SHALL carry the floor classes in its governance metadata. A row without its own classes SHALL report that basis as `collection-floor`. A file collection SHALL refuse a manifest that declares a non-empty floor.
 
-#### Scenario: A health collection
+#### Scenario: A health collection backed by the store
 
-- **WHEN** a collection declares `sensitivity: [health]` and an agent adds a row without a class
+- **WHEN** a store collection declares `sensitivity: [health]` and an agent adds a row without a class
 - **THEN** the row's governance metadata carries `health`
+
+#### Scenario: A file collection declares a floor
+
+- **WHEN** a file collection definition declares `sensitivity: [health]`
+- **THEN** creation refuses with `INVALID_COLLECTION_MANIFEST`
+
+### Requirement: A row keeps its declared classes
+
+`add_record` SHALL accept an optional list of classes when the row schema declares a `sensitivity` array of strings. A store row SHALL keep the collection's floor when it declares its own classes. A file collection SHALL keep the declared classes on the row.
+
+#### Scenario: A file row names a class
+
+- **WHEN** a row in a file collection declares the registered class `financial`
+- **THEN** the row stores `financial` and reports `declared` as the basis
 
 ### Requirement: Agents keep sensitive material and never protect it by omission
 
