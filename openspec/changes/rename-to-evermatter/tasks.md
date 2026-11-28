@@ -21,7 +21,7 @@
 
 - [x] 3.1 Agree the rename release with the release owner and with `adopt-fair-source-licence` section 3.
 - [x] 3.2 Cut the rename release; prove `pip install evermatter==<release>`, `uv tool upgrade exomem` from 0.200.0, and an image pull under both names.
-- [ ] 3.3 Publish one statement for the rename and the licence change in the changelog, the README and the website.
+- [x] 3.3 Publish one statement for the rename and the licence change in the changelog, the README and the website.
 
 ## 4. Compatibility window (optional for archive: dated reviews tracked after the release)
 
