@@ -99,9 +99,7 @@ def item_line(item: Mapping[str, Any], *, method: bool = False) -> str:
             # The line is part of the method, so the allowance charges it with the method. It carries only the title.
             return f"Approved procedure: {title}. Read it, then follow it where it fits."
         return f"Method: {title}. Read the source for applicability and exclusions."
-    # A skill lead names itself a skill; its name is page text, so it is quoted and escaped like a method's.
-    label = f"Skill {json.dumps(str(item.get('name', '')), ensure_ascii=False)}" if item.get("kind") == SKILL_KIND else item.get("title", "")
-    line = f"{label}: {item.get('reason', '')}"
+    line = f"{vault_skills.task_lead_label(item)}: {item.get('reason', '')}"
     # The listed links are served beside the lead, so the allowance charges them with it.
     # The title is page text, so it is quoted and escaped exactly as the hook renderer quotes it.
     links = [
