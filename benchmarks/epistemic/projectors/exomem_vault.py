@@ -84,11 +84,11 @@ KIND_MAPPING_EVIDENCE: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "pattern": ("src/exomem/_scaffold/_Schema/references/page-types.md:277",),
         "failure": ("src/exomem/_scaffold/_Schema/references/page-types.md:239",),
         "experiment": ("src/exomem/_scaffold/_Schema/references/page-types.md:373",),
-        "production-log": ("src/exomem/_scaffold/_Schema/references/page-types.md:492",),
-        "entity": ("src/exomem/_scaffold/_Schema/references/page-types.md:551",),
+        "production-log": ("src/exomem/_scaffold/_Schema/references/page-types.md:508",),
+        "entity": ("src/exomem/_scaffold/_Schema/references/page-types.md:567",),
         "entity:decision": (
-            "src/exomem/_scaffold/_Schema/references/page-types.md:551",
-            "src/exomem/_scaffold/_Schema/references/page-types.md:606",
+            "src/exomem/_scaffold/_Schema/references/page-types.md:567",
+            "src/exomem/_scaffold/_Schema/references/page-types.md:622",
         ),
         "sources_fallback": ("src/exomem/_scaffold/_Schema/references/page-types.md:117",),
     }
