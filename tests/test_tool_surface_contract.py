@@ -530,6 +530,30 @@ def test_create_note_records_an_experiment_outcome_in_the_same_call(
     assert frontmatter["outcome"] == "refuted"
 
 
+def test_create_note_keeps_a_registered_yes_outcome_as_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mcp = _build_server(tmp_path, monkeypatch)
+    vault = tmp_path / "empty-vault"
+    registry = semantic_language_registry.registry_path(vault)
+    registry.write_text(
+        json.dumps({
+            "schema_version": 1,
+            "verdicts": {
+                "yes": {"labels": {"en": "Yes"}, "description": "The claim held."},
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    saved = _public(mcp, "create_note", _experiment_with_outcome("YES"))
+
+    assert "error" not in saved
+    page = next((vault / "Knowledge Base" / "Notes" / "Experiments").rglob("*.md"))
+    frontmatter, _body, _raw = vault_module.parse_frontmatter(page.read_text(encoding="utf-8"))
+    assert frontmatter["outcome"] == "yes"
+
+
 def test_create_note_refuses_an_unknown_verdict_and_names_the_accepted_ones(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

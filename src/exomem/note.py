@@ -1543,7 +1543,7 @@ def _render_note(
         if concluded:
             lines.append(f"concluded: {concluded}")
         if outcome:
-            lines.append(f"outcome: {outcome}")
+            lines.append(f"outcome: {yaml_scalar(outcome)}")
         lines.append(f"n: {n if n is not None else 1}")
         if hypothesis:
             lines.append(f'hypothesis: "{hypothesis}"')
