@@ -177,9 +177,9 @@ def test_a_migration_leaves_the_marker_in_the_replica_and_another_state_root_ref
     assert not mode.store_mode_active(vault), "the other state root holds no record of store mode"
     error = refused(vault)
     assert error.code == availability.STORE_ELSEWHERE
-    assert "exomem store-mode rollback" in error.reason
+    assert "evermatter store-mode rollback" in error.reason
     claim = marker.read_replica(vault).order.decision.id
-    assert f"exomem store-mode release --apply --claim {claim} --why" in error.reason
+    assert f"evermatter store-mode release --apply --claim {claim} --why" in error.reason
     with pytest.raises(connection.CollectionStoreError) as started:
         server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
     assert started.value.code == availability.STORE_ELSEWHERE
@@ -290,7 +290,7 @@ def test_the_status_and_the_doctor_show_the_marker_that_the_replica_carries(
 
     claim = marker.read_replica(vault).order.decision.id
     assert (check.status, check.message) == ("fail", availability.ELSEWHERE_REASON)
-    assert f"exomem store-mode release --apply --claim {claim}" in check.remediation
+    assert f"evermatter store-mode release --apply --claim {claim}" in check.remediation
     assert mode.status(vault)["vault_marker"] == marker.STORE
 
 
@@ -627,7 +627,7 @@ def test_a_holder_that_returns_after_a_release_reads_displaced_and_does_not_repu
 
     error = refused(vault)
     assert error.code == "VAULT_STORE_CLAIM_DISPLACED"
-    assert "exomem store-mode rollback --apply --export-held" in error.reason
+    assert "evermatter store-mode rollback --apply --export-held" in error.reason
 
     admit_after_the_lease_expires(vault)
 
@@ -677,7 +677,7 @@ def test_a_takeover_republishes_a_replica_decision_that_this_build_cannot_read(
         copy.commit()
     error = refused(vault)
     assert error.code == "VAULT_STORE_CLAIM_UNKNOWN"
-    assert "exomem store-mode rollback --apply --export-held" in error.reason
+    assert "evermatter store-mode rollback --apply --export-held" in error.reason
 
     as_root(monkeypatch, tmp_path, "other", state="other-state")
     assert not marker.read_replica(vault).order.known

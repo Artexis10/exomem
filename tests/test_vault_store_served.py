@@ -46,6 +46,7 @@ from exomem import (
     extraction_parts,
     freshness,
     graph_drain,
+    lexstore,
     media_jobs,
     media_replicas,
     media_store,
@@ -57,6 +58,7 @@ from exomem import (
     scene_frames,
     schema,
     server_runtime,
+    service_standby,
     warmup,
     writer_lease,
 )
@@ -140,6 +142,133 @@ def commit(root, **change):
             writer, write.StoreChange(write.Origin.GOVERNED, "served test", **change)
         )
     )
+
+
+@pytest.mark.parametrize(("visible_name", "fragment", "hidden_body", "outcome"), [
+    ("Beacon", "^signal", "- [rule] West signal. ^signal", "ambiguous"),
+    ("Beacon Ledger", "signal", "## Signal\n\nWest signal.", "not_unit"),
+])
+def test_link_pages_resolve_the_visible_namesake_before_counting(
+    stored, service, visible_name, fragment, hidden_body, outcome,
+):
+    source = f"{NOTES}/Dispatch.md"
+    visible = f"{NOTES}/East/{visible_name}.md"
+    hidden = f"{NOTES}/West/Beacon.md"
+    commit(stored, puts=(
+        write.PagePut(source, (f"# Dispatch\n\nFollow [[Beacon#{fragment}|the signal]].\n"
+                               f"\n![[Beacon#{fragment}]]\n\n`[[Beacon#{fragment}]]`\n").encode()),
+        write.PagePut(visible, b"---\ntitle: Beacon\n---\n# Beacon\n\n- [rule] East signal. ^signal\n"),
+        write.PagePut(hidden, f"---\ntitle: Beacon\n---\n# Beacon\n\n{hidden_body}\n".encode()),
+    ))
+    derived(stored)
+    assert store_rows(
+        stored, "SELECT resolution FROM graph_unit_links WHERE source_path = ? ORDER BY occurrence", source,
+    ) == [(outcome,), (outcome,)]
+
+    graph = epistemic_graph.EpistemicGraphIndex(stored)
+    assert graph.unit_links(visible, incoming=True).total == 0
+    def allowed(path):
+        return path != hidden
+
+    first = graph.unit_links(visible, incoming=True, keep=allowed, limit=1)
+    assert first.state == "ready" and first.total == 2
+    assert [(path, link.embed) for path, link in first.links] == [(source, False)]
+    second = graph.unit_links(visible, incoming=True, keep=allowed, limit=1, after=first.next_after)
+    assert second.total == 2 and second.next_after is None
+    assert [(path, link.embed) for path, link in second.links] == [(source, True)]
+    assert graph.unit_links(hidden, incoming=True, keep=allowed).total == 0
+
+
+def test_fragment_landing_follows_committed_bytes_while_the_projection_lags(stored, service, monkeypatch):
+    source = f"{NOTES}/Watch.md"
+    graph = epistemic_graph.EpistemicGraphIndex(stored)
+    (stored / BETA).write_text("# Beta\n\n- [rule] Obsolete signal. ^removed\n")
+    commit(stored, puts=(
+        write.PagePut(BETA, b"---\ntitle: Beta\n---\n# Beta\n\n## Overview\n\n- [rule] Current signal. ^signal\n"),
+        write.PagePut(source, b"# Watch\n\n[[Notes/Beta#^signal]] [[Notes/Beta#^removed]] [[Notes/Beta#Overview]]\n"),
+    ))
+    derived(stored)
+    sql = "SELECT fragment, resolution FROM graph_unit_links WHERE source_path = ? ORDER BY occurrence"
+    assert store_rows(stored, sql, source) == [
+        ("^signal", "unit"), ("^removed", "missing"), ("Overview", "not_unit"),
+    ]
+    assert graph.unit_links(source).total == 1
+
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_args, **_kwargs: derivation.Drained())
+        commit(stored, deletes=(write.PageDelete(BETA),))
+        assert store_rows(stored, "SELECT path FROM store_derivation_queue WHERE path = ?", BETA) == [(BETA,)]
+        page = graph.unit_links(source)
+        assert page.state == "lag" and page.total is None
+    derived(stored)
+    assert graph.unit_links(source).total == 0
+    assert store_rows(stored, sql, source) == [
+        ("^signal", "missing"), ("^removed", "missing"), ("Overview", "missing"),
+    ]
+    assert (stored / BETA).exists()
+
+
+def test_link_pages_find_a_moved_claim_after_filtering_the_live_namesake(stored, service):
+    source = f"{NOTES}/Dispatch.md"
+    visible = f"{NOTES}/Moved Claim.md"
+    hidden = f"{NOTES}/Current/Beacon.md"
+    prior = f"{NOTES}/Prior/Beacon.md"
+    moved_text = (
+        "---\ntitle: Moved Claim\nexomem_id: 11111111-1111-4111-8111-111111111111\n"
+        f"moved_from:\n- path: {prior}\n---\n# Moved Claim\n\n- [rule] East signal. ^signal\n"
+    )
+    commit(stored, puts=(
+        write.PagePut(source, b"# Dispatch\n\n[[Beacon#^signal]] ![[Notes/Prior/Beacon#^signal]]\n"),
+        write.PagePut(visible, moved_text.encode()),
+        write.PagePut(hidden, b"# Beacon\n\n- [rule] West signal. ^signal\n"),
+    ))
+    derived(stored)
+    graph = epistemic_graph.EpistemicGraphIndex(stored)
+
+    def allowed(path):
+        return path != hidden
+
+    page = graph.unit_links(visible, incoming=True, keep=allowed)
+    assert page.total == 2
+    assert [path for path, _ in page.links] == [source, source]
+    commit(stored, puts=(write.PagePut(visible, moved_text.replace("^signal", "^new").encode()),))
+    derived(stored)
+    assert store_rows(
+        stored, "SELECT resolution FROM graph_unit_links WHERE target_path = ?", visible,
+    ) == [("missing",)]
+    assert graph.unit_links(visible, incoming=True, keep=allowed).total == 0
+
+
+def test_a_served_assessment_commits_page_bytes_before_the_verdict_projection(stored, service, monkeypatch):
+    path = f"{NOTES}/Insights/Signal Assessment.md"
+    commit(stored, puts=(write.PagePut(
+        path,
+        b"---\ntitle: Signal Assessment\ntype: insight\nstatus: active\n---\n# Signal Assessment\n\n"
+        b"See the [[Beacon Design]].\n\n"
+        b"## Claim\n- id: signal\n- verdict: confirmed\n\nThe signal is visible.\n\n"
+        b"## Claim\n- id: lamp\n- verdict: confirmed\n\nThe lamp is lit.\n",
+    ), write.PagePut(
+        f"{NOTES}/Insights/Beacon Design.md",
+        b"---\ntitle: Beacon Design\ntype: insight\nstatus: active\n---\n# Beacon Design\n\n"
+        b"## Observations\n\n- [rule] Keep the beacon lit.\n",
+    )))
+    derived(stored)
+    projected = "SELECT anchor, verdict FROM semantic_units WHERE parent_path = ? AND anchor IS NOT NULL ORDER BY anchor"
+    assert store_rows(stored, projected, path) == [("lamp", "confirmed"), ("signal", "confirmed")]
+    assessment = dict(path=path, operation="assess", unit="signal", verdict="refuted", reason="Checked at the pier.")
+    preview = call(stored, "observe_memory", **assessment, validate_only=True)
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_args, **_kwargs: derivation.Drained())
+        result = call(
+            stored, "observe_memory", **assessment, response_detail="full",
+            transition_token=preview["semantic"]["transition_token"],
+        )
+        assert result["diagnostics"]["operational"]["state"] == "committed"
+        assert b"verdict: refuted" in read_write.stored_body(stored, path)
+        assert store_rows(stored, projected, path) == [("lamp", "confirmed"), ("signal", "confirmed")]
+        assert epistemic_graph.EpistemicGraphIndex(stored).unit_links(path).state == "lag"
+    derived(stored)
+    assert store_rows(stored, projected, path) == [("lamp", "confirmed"), ("signal", "refuted")]
 
 
 @contextmanager
@@ -1151,6 +1280,59 @@ def test_a_served_start_runs_no_whole_vault_graph_rebuild_over_file_modes_graph_
     assert [r.getMessage() for r in caplog.records if "graph rebuild" in r.getMessage()] == []
     assert deferred_index.graph_full_rebuild_pending(stored) is None
     assert epistemic_graph.EpistemicGraphIndex(stored).available()
+
+
+def test_store_mode_restart_admits_retrieval_without_a_file_catalogue(stored, monkeypatch):
+    """The canonical store can serve even if its former Markdown catalogue never warms."""
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "auto")
+
+    def file_catalogue_is_stale(*_args, **_kwargs):
+        pytest.fail("store-mode startup tried to rebuild the file catalogue")
+
+    monkeypatch.setattr(freshness, "rebaseline", file_catalogue_is_stale)
+    monkeypatch.setattr(lexstore, "request_lag_repair", file_catalogue_is_stale)
+    readiness.reset()
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    try:
+        assert warmup.warm_retrieval_catalog(stored)
+        assert readiness.retrieval_admission(stored) == {"state": "ready", "admitted": True}
+        assert service_standby.prove_retrieval_catalog(stored)
+    finally:
+        readiness.reset()
+
+
+def test_store_mode_startup_retries_a_temporary_read_failure(stored, monkeypatch):
+    """A quiet worker can recover without a health probe or the file event indexes."""
+    monkeypatch.setenv("EXOMEM_DISABLE_EVENT_INDEXES", "1")
+    monkeypatch.setattr(server_runtime, "CATALOGUE_RECOVERY_FIRST_BACKOFF_SECONDS", 0.01)
+    snapshot = read.snapshot
+    failed = False
+
+    def first_read_fails(root, **kwargs):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("store read temporarily unavailable")
+        return snapshot(root, **kwargs)
+
+    monkeypatch.setattr(read, "snapshot", first_read_fails)
+    activation = server_runtime.LocalRuntimeActivation(stored)
+    readiness.reset()
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    try:
+        with pytest.raises(OSError, match="temporarily unavailable"):
+            warmup.warm_retrieval_catalog(stored)
+        readiness.finish_warm()
+        activation._start_catalogue_recovery(stored)
+        assert readiness.wait("retrieval_catalog", timeout=3)
+        assert readiness.retrieval_admission(stored)["admitted"]
+    finally:
+        activation._catalogue_stop.set()
+        if activation.catalogue_recovery is not None:
+            activation.catalogue_recovery.join(timeout=3)
+        readiness.reset()
 
 
 def test_a_save_after_a_restart_is_not_held_behind_a_graph_snapshot_proof(

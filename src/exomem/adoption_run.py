@@ -48,6 +48,7 @@ from . import (
     due_state,
     duplicates,
     export_expansion,
+    export_sidecars,
     frontmatter_update,
     held_fs,
     import_filing,
@@ -89,6 +90,7 @@ StatusView = Literal["summary", "inventory", "selection", "plan", "outcomes", "s
 STATUS_PAGE_ITEMS = 100
 STATUS_PAGE_BYTES = 32 * 1024
 MAX_CANDIDATES_DEFAULT = 5000
+_EXPORTS_CHECKED = "stage_exports_checked"
 # Where Evermatter Cloud stages an uploaded collection (see `cloud_import_job`).
 IMPORT_STAGE_DIR = import_stage.STAGE_DIR
 # One `apply` batch holds at most this many items or bytes of originals. A batch costs about 3.5 s of fixed
@@ -1254,8 +1256,8 @@ def _materialize_selection(
     overrides: list[str],
     include_junk: bool,
     taxonomy: source_taxonomy.SourceTaxonomy | None,
-) -> tuple[list[str], dict[str, dict], list[dict]]:
-    """Materialize the concrete file set from folder rules, validating per-path.
+) -> tuple[list[str], dict[str, dict], list[dict], int]:
+    """Materialize the concrete file set from folder rules, validating per-path; the last value counts the files that wait for the sidecar pass.
 
     Include/exclude entries are subtree (or exact-file) rules applied in
     ascending path depth, so a deeper rule always overrides its ancestor —
@@ -1311,8 +1313,15 @@ def _materialize_selection(
 
     accepted: list[str] = []
     classification_of: dict[str, dict] = {}
+    held = _sidecar_hold(root, run)
+    waiting = 0
     for p in sorted(chosen):
         row = files[p]
+        # A Takeout sidecar never files, and a photo waits until the stage's sidecars are read; neither is a rejection to report.
+        code = held.code(p.removeprefix(held.prefix), row.get("bytes") or 0) if held is not None else None
+        if code is not None:
+            waiting += code == export_sidecars.CODE_WAITING
+            continue
         if not row.get("eligible"):
             rejected.append(_reject(p, row.get("reason") or "UNSUPPORTED_IMPORT_TYPE"))
         elif row.get("junk") and not include_junk and p not in override_set:
@@ -1322,7 +1331,7 @@ def _materialize_selection(
             if chosen[p]:
                 classification_of[p] = chosen[p]
     unique = {(r["path"], r["code"]): r for r in rejected}
-    return accepted, classification_of, [unique[key] for key in sorted(unique)]
+    return accepted, classification_of, [unique[key] for key in sorted(unique)], waiting
 
 
 # --------------------------------------------------------------------------- #
@@ -1471,15 +1480,17 @@ def _residual_actions(residual: dict | None, where: str = "finish.residual") -> 
     # A run finished before paging existed has no `more_pages` key, and no later page.
     if not residual or not residual["files"] or residual.get("more_pages"):
         return []
-    # A run finished before the unfiled count existed has no summary.
-    summary = residual.get("summary") or f"{residual['files']} files stay staged."
-    return [
-        {"action": "review-residual", "status": "available",
-         "description": f"{summary} {residual['files']} files ({residual['bytes']} bytes) stay staged in {residual['folder']}; "
-                        f"{where}.by_reason says why. Review them with the person before anything is discarded."},
-        {"action": "discard", "status": "available",
-         "description": f"Only after the person agrees, and permanently: {residual['discard']}."},
-    ]
+    actions = []
+    reasons = residual.get("by_reason") or {}
+    if not reasons or any(not export_sidecars.counts_as_filed(code) for code in reasons):
+        # A run finished before the unfiled count existed has no summary.
+        summary = residual.get("summary") or f"{residual['files']} files stay staged."
+        actions.append({"action": "review-residual", "status": "available",
+                        "description": f"{summary} {residual['files']} files ({residual['bytes']} bytes) stay staged in {residual['folder']}; "
+                                       f"{where}.by_reason says why. Review members that still need attention before discarding."})
+    actions.append({"action": "discard", "status": "available",
+                    "description": f"Only after the person agrees, and permanently: {residual['discard']}."})
+    return actions
 
 
 def _handoff(run: dict) -> dict:
@@ -1644,6 +1655,23 @@ def _carry_item_time(item: dict, derived: import_stage.Derived) -> None:
         item.pop("file_modified", None)
 
 
+def _carry_sidecar(item: dict, paired: Mapping) -> None:
+    """Carry the caption and vendor timestamps of a paired Takeout sidecar into its photo's plan.
+
+    The caption passes through the redaction of an upload's description before the plan holds it, so no plan,
+    page or log keeps a card number or a credential that the owner typed. The sidecar pass redacts it too, before it
+    writes the row. A second pass covers rows written before that redaction. The timestamps go to Source provenance.
+    """
+    from . import preserve
+
+    if item["form"] != "artifact":
+        return
+    _text, caption, _extracted, _warnings = preserve.redact_capture_text(description=paired["caption"])
+    timestamps = paired["timestamps"]
+    if caption is not None or timestamps:
+        item["sidecar"] = {"caption": caption, "timestamps": timestamps}
+
+
 def _recorded_stage(stage: import_stage.Stage | None) -> dict | None:
     """`{"stage": id, "proof": ...}` for the stage a run starts in, or None when it has no member manifest.
 
@@ -1687,7 +1715,7 @@ def _refuse_outside_vault(root: Path, path: str) -> None:
     raw = path or ""
     route = (
         "start scans folders inside the vault; stage a folder elsewhere with "
-        "`exomem import <folder>`, then start on the path it prints"
+        "`evermatter import <folder>`, then start on the path it prints"
     )
     # Both spellings, whatever the host: a drive letter or UNC share is absolute on Windows
     # and an ordinary relative name on POSIX, and either one means "not a vault path".
@@ -1778,6 +1806,7 @@ def start(
     after: str | None = None,
     max_candidates: int = MAX_CANDIDATES_DEFAULT,
     today: dt.date | None = None,
+    _stage_exports_checked: bool = False,
 ) -> dict:
     """Scan a folder into a run holding one page of candidates; `after` starts the page that follows a cursor.
 
@@ -1872,6 +1901,8 @@ def start(
         "cancel": None,
         "errors": [],
     }
+    if _stage_exports_checked or (source_run is not None and source_run.get(_EXPORTS_CHECKED)):
+        run[_EXPORTS_CHECKED] = True
     if remaining or pinned:
         run["paging"] = {
             "page": 1 if source_run is None else source_run["paging"]["page"] + 1,
@@ -2075,7 +2106,7 @@ def select(
             if any(not isinstance(entry, str) for entry in include or [])
             else None
         )
-        accepted, classification, rejected = _materialize_selection(
+        accepted, classification, rejected, waiting = _materialize_selection(
             root, run, include or [], exclude or [], overrides or [], include_junk, taxonomy
         )
         run["selection"] = {
@@ -2089,6 +2120,8 @@ def select(
             },
             "classification": classification,
             "rejected_counts": dict(Counter(row["code"] for row in rejected)),
+            # The files left out until the stage's sidecars are read; once the pass ends, a new scan files them.
+            "waiting_for_sidecars": waiting,
             "updated": _now_iso(),
         }
         # A selection call always invalidates any existing plan, and any plan in progress.
@@ -2125,7 +2158,14 @@ def _earlier_pages(store: AdoptionRunStore, run: dict) -> tuple[dict, ...]:
 
 
 def unfiled_members(root: Path, import_id: str, runs: tuple[dict, ...] | None = None) -> list[dict]:
-    """The members of an import that adoption did not file or `finish` did not verify, as a residual record lists them.
+    """The members that still need review or can be resent."""
+    return unfiled_report(root, import_id, runs)[0]
+
+
+def unfiled_report(root: Path, import_id: str, runs: tuple[dict, ...] | None = None) -> tuple[list[dict], dict | None]:
+    """The members of an import that adoption did not file or `finish` did not verify, as a residual record lists them, and the counts of its sidecars.
+
+    The sidecar counts are None for a stage with no recognised Takeout sidecar.
 
     Each entry has the path relative to the stage, its bytes and why it stays (see `adoption_consume.residual`).
     The members are the stage manifest's, plus any staged file that the manifest does not list, plus the items and
@@ -2135,19 +2175,62 @@ def unfiled_members(root: Path, import_id: str, runs: tuple[dict, ...] | None = 
     that adoption filed, and the series file, are left out: filed is what a run's outcome says, not what the
     stage no longer holds. A caller that lists many windows passes `runs`, the stage's runs from `runs_by_stage`,
     so it reads the run store once.
+
+    A Takeout sidecar whose photo is in the vault counts only in the sidecar report. The members that still need
+    review carry their own reason from `export_sidecars.settle`.
     """
     pages = AdoptionRunStore(root).runs_of_stage(import_id) if runs is None else runs
     stage = import_stage.read(root, import_id)
     files = dict(import_stage.staged_files(root, import_id))
     for path, (size, _digest) in (stage.members if stage is not None else {}).items():
         files.setdefault(path, size)
+    reading = export_sidecars.read(root, import_id)
+    settled, counts = export_sidecars.settle(reading, _photo_filing(pages, f"{import_stage.STAGE_DIR}/{import_id}/"))
     unfiled = [
         import_stage.residual_member(path, size, reason)
-        for path, size, reason in adoption_consume.stage_reasons(import_id, list(files.items()), pages, _APPLIED_STATUSES)
+        for path, size, reason in adoption_consume.stage_reasons(import_id, list(files.items()), pages, _APPLIED_STATUSES, settled)
         if not adoption_consume.is_filed(reason) and path != import_stage.SERIES_FILE
     ]
     # An item that could not be read or was left out and an export that was read in part have no staged file: the expansion record lists them.
-    return [*unfiled, *export_expansion.unfiled(root, import_id)]
+    return [*unfiled, *export_expansion.unfiled(root, import_id)], counts
+
+
+def _stage_residual(root: Path, run: dict, pages: tuple[dict, ...]) -> dict | None:
+    """What is still in the run's stage (`adoption_consume.residual`), each recognised Takeout sidecar under what became of its photo.
+
+    `pages` are the run's page and the earlier ones, nearest first. A sidecar is never selected, so no scan says why it
+    stays and the scan's reason would be `unselected`, which says that the person left it out.
+    """
+    stage = run.get("stage")
+    stage_id = stage.get("stage") if isinstance(stage, dict) else None
+    settled = {}
+    if stage_id is not None:
+        settled = export_sidecars.settle(export_sidecars.read(root, stage_id), _photo_filing(pages, f"{import_stage.STAGE_DIR}/{stage_id}/"))[0]
+    return adoption_consume.residual(root, run, _APPLIED_STATUSES, pages[1:], settled)
+
+
+def _photo_filing(pages: tuple[dict, ...], prefix: str) -> Callable[[str], str]:
+    """What became of a staged file (its path in the stage) in the import, as `export_sidecars.settle` reads it.
+
+    A file is `STORED` when a page of the import stored its Source, or its newest outcome is a filing that no earlier
+    Source held, as a `file` reply counts a filed file. It is `ALREADY_IMPORTED` when its newest outcome is a skipped
+    duplicate: a Source in the vault already holds its bytes. A failed file and a file with no outcome did not file.
+    """
+    newest: dict[str, int] = {}
+    stored: set[str] = set()
+    for tally in sorted((_Tally.of(page) for page in pages), key=lambda tally: tally.created):
+        for path, marks in tally.outcomes.items():
+            newest[path] = marks
+            if marks & _STORED:
+                stored.add(path)
+
+    def filing(path: str) -> str:
+        marks = newest.get(prefix + path, 0)
+        if prefix + path in stored or (marks & _FILED and not marks & _SKIPPED):
+            return export_sidecars.STORED
+        return export_sidecars.ALREADY_IMPORTED if marks & _SKIPPED else export_sidecars.NOT_FILED
+
+    return filing
 
 
 def _earlier_page_unapplied(store: AdoptionRunStore, run: dict) -> str | None:
@@ -2430,6 +2513,9 @@ def plan(
         # A recognised export files as an artifact, so its conversations are indexed once, as the transcripts derived from it.
         exports = set(export_expansion.read(root, stage_id).exports) if stage_id is not None else set()
         stage_prefix = f"{IMPORT_STAGE_DIR}/{stage_id}/"
+        sidecar_facts = export_sidecars.photo_facts(
+            root, stage_id, {rel.removeprefix(stage_prefix) for rel in selected[draft["next"]:]}
+        ) if stage_id is not None else {}
         budget = _call_budget()
         with call_spans.span("adoption.plan_index", {}) as measured:
             # The first read of a large vault is long, so it ends like an item loop does and the next call resumes it.
@@ -2485,6 +2571,8 @@ def plan(
                         result[0]["kept"] = awaiting
                     if (item_time := derived.get(rel.removeprefix(stage_prefix))) is not None:
                         _carry_item_time(result[0], item_time)
+                    if (paired := sidecar_facts.get(rel.removeprefix(stage_prefix))) is not None:
+                        _carry_sidecar(result[0], paired)
                     draft["items"].append(result[0])
                     if result[0]["form"] == "artifact":
                         recordings[rel] = result[0]
@@ -4947,7 +5035,7 @@ def finish(
         coverage = _coverage(root, run, budget, recall=recall)
         # Empty folders go only for a run that consumes; the residual is reported for any recorded stage.
         removed_folders = adoption_consume.remove_empty_folders(root, run) if run.get("consume", True) else 0
-        stage_residual = adoption_consume.residual(root, run, _APPLIED_STATUSES, _earlier_pages(store, run))
+        stage_residual = _stage_residual(root, run, (run, *_earlier_pages(store, run)))
         if stage_residual is not None:
             stage_residual["removed_empty_folders"] = removed_folders
         # The counts the last `apply` recorded from its own re-hash — never a fresh
@@ -5222,7 +5310,13 @@ def _unscanned(root: Path, store: AdoptionRunStore, page: dict) -> int:
 def _reading_exports(root: Path, run: dict) -> bool:
     """Whether an app export of the run's stage is still being read, so a new scan must meet what the next slice derives."""
     stage_id = _stage_id_of(run["source_root"])
-    return stage_id is not None and bool(export_expansion.read(root, stage_id).held)
+    return stage_id is not None and (bool(export_expansion.read(root, stage_id).held) or _reading_sidecars(root, run))
+
+
+def _reading_sidecars(root: Path, run: dict) -> bool:
+    """Whether the stage's Takeout sidecars are still being read: its photos wait, so the next scan is the one that meets the pairs."""
+    stage_id = _stage_id_of(run["source_root"])
+    return stage_id is not None and export_expansion.read(root, stage_id).sidecars == export_sidecars.WORKING
 
 
 def _released_exports(root: Path, store: AdoptionRunStore, run: dict) -> bool:
@@ -5246,15 +5340,34 @@ def _released_exports(root: Path, store: AdoptionRunStore, run: dict) -> bool:
     )
 
 
+def _released_sidecars(root: Path, store: AdoptionRunStore, run: dict) -> bool:
+    """Whether a page of the scan left files out for the stage's sidecar pass and the pass has ended since.
+
+    The pass reads in calls of its own (`_expand_exports`), so the scan that met the held photos ran before it ended,
+    and only a new scan files them.
+    """
+    stage_id = _stage_id_of(run["source_root"])
+    if stage_id is None or export_expansion.read(root, stage_id).sidecars in (None, export_sidecars.WORKING):
+        return False
+    return any(((page.get("selection") or {}).get("waiting_for_sidecars") or 0) > 0 for page in (run, *_earlier_pages(store, run)))
+
+
 def _filing_step(root: Path, store: AdoptionRunStore, run: dict) -> str:
     """The step that moves the import on: the page's own step, or `rescan` when its scan is done and missed staged files.
 
     `done` ends the import only when no staged file came after the scan; else a new scan of the folder files them.
+    While the stage's sidecars are read every photo is held out of selection, so a page that is done goes
+    straight to a new scan, which reads the next slice of them first, and no call walks pages that hold nothing to file.
     """
     step = _next_filing_step(run)
+    if step == "start" and _reading_sidecars(root, run):
+        return "rescan"
     if step != "done":
         return step
-    rescan = _unscanned(root, store, run) or _reading_exports(root, run) or _released_exports(root, store, run)
+    rescan = (
+        _unscanned(root, store, run) or _reading_exports(root, run) or _released_exports(root, store, run)
+        or _released_sidecars(root, store, run)
+    )
     return "rescan" if rescan else step
 
 
@@ -5274,6 +5387,12 @@ def _stage_id_of(source_root: str) -> str | None:
     """The import ID of a staged folder `_Imports/<id>[/...]`, or None for any other path."""
     parts = _clean(source_root).split("/")
     return parts[1] if len(parts) >= 2 and parts[0] == IMPORT_STAGE_DIR and is_import_id(parts[1]) else None
+
+
+def _sidecar_hold(root: Path, run: dict) -> export_sidecars.Hold | None:
+    """The hold that the run's stage puts on its files while it has sidecars, or None for a run outside a recorded stage."""
+    stage_id = _stage_id_of(run["source_root"])
+    return None if stage_id is None else export_sidecars.hold(root, stage_id, prefix=f"{IMPORT_STAGE_DIR}/{stage_id}/")
 
 
 def _export_rules(root: Path, run: dict) -> tuple[list[str | dict], list[str]]:
@@ -5314,17 +5433,16 @@ def _file_step(
     that progress already, so its read ends as soon as the call has no room.
     """
     index_floor = None if first else 0
-    if step == "start" and run is None:
-        # The first scan leaves out the exports that expansion has not read, so they are found before it. It reads no
-        # item: reading is a step of its own (`_expand_exports`), which a call that follows runs before it scans again.
-        stage_id = _stage_id_of(path)
-        if stage_id is not None:
-            export_expansion.find_exports(root, stage_id)
     if step == "start":
         if run is None:
+            # Find staged exports here. Their items are read during a separate filing step.
+            stage_id = _stage_id_of(path)
+            if stage_id is not None:
+                export_expansion.find_exports(root, stage_id)
             # Read here, not as a default argument, so a test or an operator can change the page size.
             opened = start(
-                root, path=_clean(path), collection=collection, max_candidates=MAX_CANDIDATES_DEFAULT, today=today
+                root, path=_clean(path), collection=collection, max_candidates=MAX_CANDIDATES_DEFAULT, today=today,
+                _stage_exports_checked=stage_id is not None,
             )
         else:
             opened = start(root, after=f"{run['run_id']}:{_open_cursor(run, 'after')}", today=today)
@@ -5334,7 +5452,7 @@ def _file_step(
         # and its `consume` choice, so staged copies that the import keeps stay.
         opened = start(
             root, path=run["source_root"], collection=run["collection"]["label"], consume=run.get("consume", True),
-            max_candidates=MAX_CANDIDATES_DEFAULT, today=today,
+            max_candidates=MAX_CANDIDATES_DEFAULT, today=today, _stage_exports_checked=True,
         )
         return store.load(opened["run_id"])
     run_id = run["run_id"]
@@ -5431,6 +5549,13 @@ def file(
                 continuation=invocation.get("continuation"), today=today,
             )
             return _filing_reply(root, store, _chain_end(store, store.load(page_id)))
+        if run is not None and not reconciling and not run.get(_EXPORTS_CHECKED) and _next_filing_step(run) == "select":
+            if (stage_id := _stage_id_of(run["source_root"])) is not None:
+                # Saved previews and older filing continuations can reach selection without export discovery.
+                export_expansion.find_exports(root, stage_id)
+                with _LOCK:
+                    run[_EXPORTS_CHECKED] = True
+                    store.save_changes(run)
         while True:
             step = "start" if run is None else _filing_step(root, store, run)
             if step == "done":
@@ -5605,6 +5730,11 @@ def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict 
         remaining += len(expansion.held) if expansion else 0  # an export still being read stays unfiled until its last item
     pages_done = sum(1 for tally in scans if tally.phase in _FINISHED_PHASES)
     position = _page_position(run)
+    if expansion is not None and expansion.sidecars == export_sidecars.WORKING:
+        # Inventory already counts these files until selection sets them aside.
+        remaining += sum((page.get("selection") or {}).get("waiting_for_sidecars") or 0 for page in (run, *_earlier_pages(store, run)))
+        # Show movement without publishing the path last examined by the pass.
+        position["sidecar_progress"] = hashlib.sha256(expansion.sidecar_cursor.encode("utf-8", errors="surrogatepass")).hexdigest()
     if expansion is not None and expansion.held:
         # An item that the entry's rule leaves out derives no file and changes no count, so only this shows that the read goes on.
         position["set_aside"] = expansion.skipped
@@ -5629,7 +5759,7 @@ def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict 
         pages = (run, *_earlier_pages(store, run))
         finished = next((page for page in pages if page.get("finish")), None)
         # Read now from the stage, as `_unscanned` reads it, so a file put in the stage after the last `finish` is listed.
-        residual = adoption_consume.residual(root, run, _APPLIED_STATUSES, pages[1:])
+        residual = _stage_residual(root, run, pages)
         done: dict = {}
         if finished is not None:
             finish = _presented_finish(finished)

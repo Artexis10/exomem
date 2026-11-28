@@ -1359,6 +1359,39 @@ def test_only_a_real_run_on_main_or_the_release_tag_writes_release_notes_to_gith
     assert notes["concurrency"]["group"] == "release-notes-${{ needs.plan.outputs.notes_publish == 'true' && 'publish' || 'dry-run' }}"
 
 
+@pytest.mark.parametrize(
+    ("ref", "event", "dry_run", "missing_arguments"),
+    [
+        ("refs/heads/main", "push", "false", "missing"),  # the sweep of the window
+        ("refs/heads/main", "workflow_dispatch", "false", "missing --also v1.2.3"),  # main's code heals one older tag as well
+        ("refs/tags/v1.2.3", "workflow_dispatch", "false", "missing --only v1.2.3"),  # a recovery run: its own tag, no sweep
+        ("refs/heads/main", "workflow_dispatch", "true", None),  # a dry run builds its own tag and lists nothing
+    ],
+)
+def test_a_real_run_on_a_release_tag_publishes_the_notes_of_its_own_tag_and_never_sweeps(
+    ref: str, event: str, dry_run: str, missing_arguments: str | None, tmp_path: Path
+) -> None:
+    """Catches a recovery run on an older tag sweeping the window with that tag's older generator and escaping, which the permanent file and page section then keep on newer releases."""
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release-please.yml").read_text())
+    scan = next(step for step in workflow["jobs"]["release-notes"]["steps"] if step.get("id") == "scan")["run"]
+    stub = tmp_path / "bin" / "python3"
+    stub.parent.mkdir()
+    stub.write_text('#!/bin/bash\necho "${@:2}"\n')  # the scan step's own `python3 scripts/release_notes_asset.py ...` call, answered with its arguments
+    stub.chmod(0o755)
+    github_output = tmp_path / "output"
+
+    subprocess.run(
+        ["bash", "-c", scan],
+        env={
+            "GITHUB_REF": ref, "EVENT": event, "DRY_RUN": dry_run, "TAG": "v1.2.3",
+            "GITHUB_OUTPUT": str(github_output), "PATH": f"{stub.parent}:{os.environ['PATH']}",
+        },
+        capture_output=True, text=True, check=True,
+    )
+
+    assert github_output.read_text().strip() == f"tags={'v1.2.3' if missing_arguments is None else missing_arguments}"
+
+
 #: The worst cross-platform session observed, in seconds. No longer censored:
 #: with the cap above real runtime, all six Windows shards ran to completion at
 #: 1950s, 2575s, 2698s, 2788s, 2886s and 2896s. The previous value of 2705 was a

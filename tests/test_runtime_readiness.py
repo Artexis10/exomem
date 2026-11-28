@@ -9,12 +9,37 @@ from pathlib import Path
 import pytest
 from cellctl_cell_readiness import cell_readiness
 
+from exomem import readiness
 from exomem.runtime_readiness import (
     HTTP_TRANSPORT,
     RETRIEVAL_STATE_LAGGING,
     RUNTIME_CONTRACT,
     build_runtime_readiness,
 )
+from exomem.vault_store import mode
+
+
+def test_disabled_file_event_indexes_keep_admission_after_a_transient_mode_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_DISABLE_EVENT_INDEXES", "1")
+    mode_observations = iter([OSError("mode temporarily unreadable"), False])
+
+    def store_mode(_root):
+        observation = next(mode_observations)
+        if isinstance(observation, OSError):
+            raise observation
+        return observation
+
+    monkeypatch.setattr(mode, "store_mode_for_reads", store_mode)
+    readiness.reset()
+    readiness.manage_runtime()
+    readiness.mark_ready("retrieval_catalog")
+    try:
+        assert not readiness.retrieval_admission(tmp_path)["admitted"]
+        assert readiness.retrieval_admission(tmp_path)["admitted"]
+    finally:
+        readiness.reset()
 
 
 def test_standalone_runtime_is_ready_without_multi_host_coordination() -> None:

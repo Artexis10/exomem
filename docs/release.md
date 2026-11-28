@@ -37,7 +37,7 @@ uv sync
 uv run python -m pytest -q
 uvx ruff check .
 source infra/tool-versions.env && node scripts/openspec_strict_gate.mjs -- npm exec --yes @fission-ai/openspec@$OPENSPEC_VERSION --
-uv run exomem demo --json
+uv run evermatter demo --json
 uv run python scripts/generate-capabilities.py --check
 uv build
 ```
@@ -425,13 +425,17 @@ distributions were already present.
 The `release-notes` job publishes each release's user notes. Nothing waits for it: when it fails, the
 job and the workflow run are red and no package, image or rollout stops. A red run counts toward the
 plan's failed hand-off runs for its tag only when it is a dispatch run on that tag, which a push starts
-only when the tag misses another artifact. Every real run gives its notes to each release published since
+only when the tag misses another artifact. A real run on main gives its notes to each release published since
 the start of the previous UTC month that has no `release-notes.json`: it reads the release list 100 a page
 until a page holds only releases published before that start (the list is in version order, not in publish
 order), and builds only the releases that lack the file. One run handles at most 40 releases, to keep the
 repository's shared GitHub token budget: the release a dispatch names first, then the oldest first. It says
-how many wait, and the next run takes them. A `workflow_dispatch` run also takes its `tag` input, whatever
-its age, which heals one named older release; the run says why when it leaves that release alone. For each
+how many wait, and the next run takes them. A `workflow_dispatch` run on main also takes its `tag` input,
+whatever its age, which heals one named older release; the run says why when it leaves that release alone. When
+a newer real run replaces the waiting one, the replaced run's named tag can be dropped, so the operator
+dispatches again when the job shows cancelled. A real run on a release tag never sweeps: it serves its own tag
+alone, and only when that tag lacks the file, because its code may be older than main's and the file and the page
+section are permanent. For each
 release the job reads the notes from the release tag's tree and writes the file with the code of the run
 that heals it: a run on main has main's code and a run on the release tag has that tag's code, so a healed
 file has the schema of that run's code, not always the newest. The file holds only that release's entry from

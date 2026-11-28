@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    __version__,
     asr_runtime,
     backoff,
     capture_metadata,
@@ -61,6 +62,7 @@ from . import (
     runtime_resources,
     scene_frames,
     semantic_segments,
+    speech_tracks,
 )
 from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, AsrFacts
 from .backfill import iter_kb_files
@@ -88,6 +90,7 @@ from .vault import (
     PlannedWrite,
     batch_atomic_write,
     content_hash,
+    parse_frontmatter,
     post_commit_batch_fanout,
     read_guarded_text,
 )
@@ -130,6 +133,7 @@ _PREVIEW_SETTLEMENT_ATTEMPTS = 3
 _RETURNED = "returned"
 _RENDERER_ACTION = "check the timestamp renderer, then retry"
 _FAILED_ACTION = "repair or replace the media artifact, then retry"
+_TRACKS_ACTION = "reprocess the recording with its tracks"
 _LANGUAGE_ACTION = (
     "choose a language the speech model supports and process the file again with reprocess, "
     "or correct EXOMEM_ASR_LANGUAGE"
@@ -163,6 +167,24 @@ _SLOT_TOO_SMALL_EXIT_CODE = 80
 #: The child found the GPU busy for the speech engine and left only speech work pending. The
 #: jobs are still pending: nothing is blocked, and the supervisor starts the next child later.
 _GPU_BUSY_EXIT_CODE = 81
+#: The exit statuses of the parent-child protocol above. A child that exits with one decided
+#: what happens to its job itself; any other non-zero status ends the job as a crash does.
+_PROTOCOL_EXIT_CODES = frozenset({
+    _TRANSIENT_EXIT_CODE,
+    _LOCK_UNAVAILABLE_EXIT_CODE,
+    _MEMORY_RECYCLE_EXIT_CODE,
+    _MEMORY_WAIT_EXIT_CODE,
+    _AUTHORITY_UNAVAILABLE_EXIT_CODE,
+    _SLOT_TOO_SMALL_EXIT_CODE,
+    _GPU_BUSY_EXIT_CODE,
+})
+#: The POSIX signals that ask a process to end: a service manager's stop, an operator's kill,
+#: a closed terminal. A child that dies by one was told to stop, which says nothing about its
+#: job. SIGKILL is not one: the kernel's out-of-memory kill also sends it, and a file that drives
+#: the child into it every time is a file that kills it. Windows has no SIGHUP.
+_STOP_REQUEST_SIGNALS = frozenset(
+    {signal.SIGTERM, signal.SIGINT, *((signal.SIGHUP,) if hasattr(signal, "SIGHUP") else ())}
+)
 #: Relaunch delay after consecutive authority refusals: from the follower cadence,
 #: doubling to this ceiling, so a lease that frees up still starts work within it.
 _AUTHORITY_BACKOFF_MAX_SECONDS = 60.0
@@ -579,6 +601,17 @@ class MediaWorker:
                         "media worker: recovered %d sidecar sharing failure(s)",
                         sharing_recovered,
                     )
+                # A file that killed the media process under another release gets one more
+                # try under this one, which may carry the fix.
+                crash_returns = self._store.recover_crash_blocks(
+                    __version__, stop_limit=media_brakes.settings().stop_limit
+                )
+                if crash_returns:
+                    log.info(
+                        "media worker: returned %d file(s) that crashed the media process under "
+                        "another release to the queue",
+                        crash_returns,
+                    )
                 # Read here, converged on the supervisor thread: presenting a dropped
                 # job as pending writes its sidecar, which must not hold up startup.
                 self._engine_waits = self._store.engine_waits()
@@ -903,6 +936,22 @@ class MediaWorker:
             return self._publication_outcome(
                 committed, BLOCKED, self._asr_runtime_failure
             )
+        if job.tracks_unreadable is not None:
+            # The stored row is wrong, not the media: every retry reads the same row,
+            # so only a new declaration repairs it. The error names that remedy as well,
+            # because a reprocess over a complete transcript keeps only the error, on the job row.
+            unreadable = f"{job.tracks_unreadable}; {_TRACKS_ACTION}"
+            committed = self._commit_processing_failure(
+                job,
+                expected_sidecar=expected_sidecar,
+                expected_evidence_version=expected_evidence_version,
+                expected_binary=expected_binary,
+                state=FAILED,
+                error=unreadable,
+                next_action=_TRACKS_ACTION,
+                retryable=False,
+            )
+            return self._publication_outcome(committed, FAILED, unreadable)
         try:
             if job.diarize is not None and not media_engines.stage_enabled(job.media_type):
                 raise extract.EngineDisabled(media_engines.SPEECH, "the speech engine is switched off")
@@ -918,6 +967,10 @@ class MediaWorker:
                 kwargs["multilingual"] = True
             if diarize is not None:
                 kwargs["diarize"] = diarize
+            # A request's declaration wins over the one the sidecar records; the commit then records it.
+            tracks = speech_tracks.as_data(job.tracks) if job.tracks is not None else preserve.speech_tracks_pin(claimed_content)
+            if tracks is not None:
+                kwargs["tracks"] = tracks
             with media_store.logical_view(self._vault_root, job.binary_path) as view:
                 result = extract.extract_text(view, **kwargs)
         except extract.TimestampRenderingUnavailable as e:
@@ -1017,7 +1070,7 @@ class MediaWorker:
             return self._publication_outcome(committed, FAILED, error)
         text = _within_result_limit(result.sidecar_text, job.sidecar_path.name)
         result.capture = capture_metadata.with_name_date(
-            self._vault_root, result.capture, job.media_type, job.binary_path.name
+            self._vault_root, result.capture, job.media_type, capture_metadata.given_name(parse_frontmatter(claimed_content)[0], job.binary_path.name)
         )
         if preserve._has_ambiguous_legacy_preserved_notes(claimed_content):
             return _ProcessOutcome(
@@ -1194,6 +1247,26 @@ class MediaWorker:
             # try again, so the sidecar must not offer a retry the ledger refuses.
             retryable=False,
             blocked_reason=media_jobs.OVER_BUDGET,
+            blocked_context=context,
+        )
+
+    def publish_crash_block(self, job: _Job, error: str, context: str) -> bool:
+        """Show that the file crashed the media process the stop limit of times.
+
+        `error` and `context` are the `media_jobs.crash_verdict` pair the ledger recorded.
+        """
+        expected_sidecar = _content_digest(job.sidecar_path)
+        expected_binary = self._identity(job)
+        if expected_sidecar is None or expected_binary is None:
+            return False
+        return self._commit_processing_failure(
+            job,
+            expected_sidecar=expected_sidecar,
+            expected_binary=expected_binary,
+            state=BLOCKED,
+            error=error,
+            next_action=media_jobs.CHILD_CRASHED_ACTION,
+            blocked_reason=media_jobs.CHILD_CRASHED,
             blocked_context=context,
         )
 
@@ -1483,6 +1556,49 @@ class MediaWorker:
         self._allocation_abort_of = child_pid
         return True
 
+    def _record_crash_stops(self, returncode: int | None) -> None:
+        """Count a death of the media child that the supervisor did not cause against each job it ran.
+
+        The caller passes only a child that died without its own cleanup, so it still owns the runtime
+        record and the running jobs are its own. The recovery after this returns each job to run again,
+        so without the count a file that kills its child would start a child for ever at the head of
+        the queue. After the stop limit of crashes under one release the job is blocked as crashed and
+        the jobs behind it run. A preview job keeps its own attempt limit. A recorded stop takes the job
+        out of running, so a replayed exit counts it once.
+        """
+        assert self._store is not None
+        if returncode is None or returncode == 0 or returncode in _PROTOCOL_EXIT_CODES:
+            return
+        stop_requested = returncode < 0 and -returncode in _STOP_REQUEST_SIGNALS
+        if self._child_stopped or self._stop_event.is_set() or stop_requested:
+            return
+        signal_name = cuda_containment.signal_name(-returncode) if returncode < 0 else None
+        stop_limit = media_brakes.settings().stop_limit
+        error, context = media_jobs.crash_verdict(
+            signal_name=signal_name,
+            exit_status=None if returncode < 0 else returncode,
+            release=__version__,
+        )
+        for job in self._store.running_jobs():
+            if job.media_type == media_jobs.PREVIEW_MEDIA_TYPE:
+                continue
+            verdict = self._store.record_crash_stop(
+                job,
+                release=__version__,
+                stop_limit=stop_limit,
+                error=error,
+                context=context,
+                progress=self._speech_progress(job),
+            )
+            if verdict == media_jobs.CHILD_CRASHED:
+                log.error(
+                    "media worker: the media process kept dying while it ran %s (last %s); "
+                    "blocked until a retry or another release",
+                    job.binary_path.name,
+                    signal_name or f"exit status {returncode}",
+                )
+                self.publish_crash_block(job, error, context)
+
     def _record_stop(self) -> None:
         """Record the stop that `_stop_child` made for each job its child ran, once.
 
@@ -1627,6 +1743,8 @@ class MediaWorker:
         handoff, receipts, surplus, epoch_published = committed
         self._complete_deferred_graph_completion(handoff, receipts, epoch_published=epoch_published)
         self._retire_surplus_parts(surplus)
+        # The transcript is published: a multitrack recording's track records are no longer needed to resume.
+        self._discard_speech_progress(job)
         return True
 
     def _extraction_writes(
@@ -1656,6 +1774,7 @@ class MediaWorker:
             speakers=speakers,
             speaker_verification=speaker_verification,
             diarize=job.diarize,
+            speech_tracks=job.tracks,
             attempts=max(1, job.attempts),
             asr=asr,
             ocr=ocr,
@@ -2334,6 +2453,9 @@ class MediaWorker:
                         self._record_stop()
                         aborted = brakes and self._record_allocation_abort(child_pid, returncode)
                         owns_runtime = self._store.worker_pid() == child_pid
+                        if owns_runtime and not aborted:
+                            # A child that still owns the runtime died without its own cleanup.
+                            self._record_crash_stops(returncode)
                         recovered = self._store.recover_interrupted() if owns_runtime else 0
                         if owns_runtime:
                             self._store.clear_worker(child_pid)
@@ -3000,6 +3122,8 @@ class MediaWorker:
             self._store.finalize_result(
                 item.result, requeue_remaining=item.result.kind in {"extraction", "pending"}
             )
+            if item.result.kind == "extraction":
+                self._discard_speech_progress(item.result.job)
             ended.append(item.result)
         return ended
 

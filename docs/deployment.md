@@ -222,7 +222,7 @@ At <https://github.com/settings/developers> → **OAuth Apps** → **New OAuth A
 
 | Field | Value |
 |---|---|
-| Application name | `exomem` |
+| Application name | `Evermatter` |
 | Homepage URL | `https://kb.example.com` |
 | Authorization callback URL | `https://kb.example.com/auth/callback` |
 
@@ -271,7 +271,7 @@ uv run python -m exomem --transport streamable-http --host 127.0.0.1 --port 8765
 #                                                              → expect JSON metadata
 ```
 
-Once the tunnel is up (step 2) and `.env` is populated (step 4), `exomem doctor
+Once the tunnel is up (step 2) and `.env` is populated (step 4), `evermatter doctor
 --profile remote --probe` runs the equivalent checks above — plus the public
 OAuth-discovery and bare well-known endpoints through the live tunnel — in one
 command.
@@ -399,7 +399,7 @@ Check the resolved command and its paired service identity without loading those
 optional stacks:
 
 ```powershell
-exomem --version --json
+evermatter --version --json
 kb --version
 ```
 
@@ -420,7 +420,7 @@ put its symlink) in uv's bin directory.
 Evermatter 0.47.0 began requiring a protected, principal-private DACL on Windows
 idempotency runtime state. An install upgraded from 0.46.0 or earlier can already
 have a runtime directory whose inherited ACL does not meet that contract. Evermatter
-does not silently rewrite it: the service and `exomem doctor` fail closed and print
+does not silently rewrite it: the service and `evermatter doctor` fail closed and print
 the exact offending path plus a one-line `icacls.exe` repair for the current runtime
 identity.
 
@@ -437,22 +437,22 @@ Administrators. One `EVERMATTER_WRITER_LEASE_STATE_DIR` therefore cannot serve b
 NSSM LocalSystem service and a direct user process. More importantly, that directory
 also anchors the process-safe mutation lock. Do not point the two identities at
 separate state roots and then mutate the same vault concurrently. Route ordinary
-mutations through the service. Before direct CLI maintenance such as `exomem index`,
+mutations through the service. Before direct CLI maintenance such as `evermatter index`,
 stop the service, use a user-private state root, finish the command, and restart the
-service. `exomem mode` only updates machine configuration and does not enter the
+service. `evermatter mode` only updates machine configuration and does not enter the
 vault mutation path.
 
 Releases carrying semantic parser changes bump the parser generation used by the
 lexical, vector, graph, pack, and count sidecars. Canonical Markdown is not
 rewritten. After upgrading, quiesce vault mutations and explicitly run
-`exomem maintain --reconcile` on the host to
+`evermatter maintain --reconcile` on the host to
 refresh stale derived rows; service restart alone does not promise this rebuild. Anonymous
 unit references whose normalized content changed become explicitly stale rather
 than resolving to a nearby unit; authored `^anchors` remain the stable reference
 mechanism. A full `maintain_memory(mode="fix", rebuild_embeddings=true)` rebuild
 is optional when exact vector regeneration is required.
 
-Upgrading by hand is the trap this replaces: `uv pip install --upgrade exomem[...]`
+Upgrading by hand is the trap this replaces: `uv pip install --upgrade evermatter[...]`
 ignores `[tool.uv.sources]` (only `uv sync` reads it), so it silently pulls the PyPI
 **CPU** torch wheel over the CUDA build and moves embeddings/media onto the CPU with
 no other symptom. `doctor` now fails on that state when an NVIDIA driver is present
@@ -531,7 +531,7 @@ never creates the state root, copies or removes a legacy file, resumes an
 interrupted transition, or upgrades a manifest. Until an explicit offline
 migration has completed, it refuses with
 `STATE_MIGRATION_OFFLINE_REQUIRED`. A complete manifest plus even one
-reintroduced legacy duplicate refuses the same way. `exomem doctor` names the
+reintroduced legacy duplicate refuses the same way. `evermatter doctor` names the
 local paths and conflict without exposing them in the public refusal.
 
 Every desktop upgrade is one fail-closed transition:
@@ -676,7 +676,7 @@ The service keeps its existing durable sessions and FastMCP OAuth storage when
 `EVERMATTER_OAUTH_STORAGE_URL` is absent. Supplying that URL still selects shared
 storage and requires its existing credentials and namespace. Omitting the
 topology retains multi-host behavior and its shared OAuth requirement.
-`exomem doctor --profile ha --probe` checks the local coordinator and lease
+`evermatter doctor --profile ha --probe` checks the local coordinator and lease
 configuration without requiring an HA edge or two replica origins. It checks
 authenticated lease status and requires HTTP 401 for a credential-free status
 request. Other results fail the diagnostic, including unavailable transport.
@@ -753,7 +753,7 @@ EVERMATTER_OAUTH_STORAGE_TOKEN=<same-edge-secret>
 
 The coordinator's `EVERMATTER_LEASE_COORDINATOR_TOKEN`, each replica's
 `EVERMATTER_WRITER_LEASE_TOKEN`, and `EVERMATTER_OAUTH_STORAGE_TOKEN` must be the same
-non-empty value. `exomem doctor --profile ha --probe` proves that anonymous
+non-empty value. `evermatter doctor --profile ha --probe` proves that anonymous
 state reads receive `401` and an authenticated absent-key read succeeds; a
 coordinator that accepts anonymous state access is not safe for session authority.
 
@@ -848,7 +848,7 @@ could resurrect a revoked session.
 
 ### When files change before a migration finishes
 
-`exomem collections migrate --apply` publishes its store before it installs the
+`evermatter collections migrate --apply` publishes its store before it installs the
 marker. Until the marker is installed, the files stay canonical. If an apply
 stops in that window and a writer outside the writer lease, such as a sync
 client or an editor, then changes an imported file, the next apply does not
@@ -867,10 +867,10 @@ admit the published store, because admitting it would lose that change:
 To finish the migration:
 
 1. Keep the Evermatter service stopped on every host that serves the vault.
-2. Run `EVERMATTER_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> exomem collections migrate --vault <vault> --apply`.
+2. Run `EVERMATTER_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> evermatter collections migrate --vault <vault> --apply`.
 3. If the apply reports `status: restored`, wait until the writer lease expires, then run step 2 again.
 4. If the apply reports `COLLECTION_STORE_SYNC_PENDING`, wait for the vault replica, start and stop the service once, then repeat step 2.
-5. If the apply reports `COLLECTION_STORE_DIVERGED`, run `exomem collections adopt-local --vault <vault> --why "<reason>" --dry-run`, apply that preview with `--preview-id`, then run step 2 again.
+5. If the apply reports `COLLECTION_STORE_DIVERGED`, run `evermatter collections adopt-local --vault <vault> --why "<reason>" --dry-run`, apply that preview with `--preview-id`, then run step 2 again.
 6. If the apply reports `COLLECTION_STORE_MIGRATION_STALE`, put back the files of each collection that it names, then run step 2 again.
 7. Start the Evermatter services.
 
@@ -914,13 +914,13 @@ The rebuild gives way to requests between batches.
 
 The owner creates a vault's first summary collection offline, which enrols the
 vault's store with the coordinator: stop the service, then run
-`exomem collections create --manifest-path <path> --manifest-file <file> --why "<reason>"`
+`evermatter collections create --manifest-path <path> --manifest-file <file> --why "<reason>"`
 with the service's lease environment and `EVERMATTER_LEASE_COORDINATOR_OPERATOR_TOKEN`
 set. Later summary collections are created through `manage_memory` with `records.create` on the
 running service.
 
 To turn summary collections off for one vault, stop the service and run
-`exomem collections rollback --vault <vault>` with the same environment. The
+`evermatter collections rollback --vault <vault>` with the same environment. The
 rollback is one-way: it
 keeps every row, history entry and preserved source, pauses import jobs and
 refuses summary reads with `COLLECTION_STORE_DISABLED`. A later release does
@@ -928,7 +928,7 @@ not turn the vault's summary collections back on.
 
 ### Store mode for vault pages
 
-New vaults start in file mode. An owner can opt in with `exomem store-mode migrate`.
+New vaults start in file mode. An owner can opt in with `evermatter store-mode migrate`.
 Store mode uses SQLite as the source for vault pages and indexes. The service
 projects the stored pages back to Markdown. Migration has been tested on
 Linux. Windows migration awaits NTFS acceptance.
@@ -940,9 +940,9 @@ Keep the service's vault, state root, and lease environment in your shell.
 Start the service once to build the indexes, then stop it and set
 `EVERMATTER_LEASE_COORDINATOR_OPERATOR_TOKEN`.
 
-1. Run `exomem store-mode migrate --dry-run` to check the store, lease, and indexes.
-2. Run `exomem store-mode migrate --apply --why 'Enable store mode'` to move the vault.
-3. Run `exomem store-mode status` and check for `mode=store`.
+1. Run `evermatter store-mode migrate --dry-run` to check the store, lease, and indexes.
+2. Run `evermatter store-mode migrate --apply --why 'Enable store mode'` to move the vault.
+3. Run `evermatter store-mode status` and check for `mode=store`.
 4. Start the service on the same state root so it serves the stored pages.
 
 CLI subcommands that read or write vault pages directly, such as
@@ -950,7 +950,7 @@ CLI subcommands that read or write vault pages directly, such as
 in store mode. Use the service operation named in the refusal when available.
 
 To return to files, stop the service. From a directory outside the vault, run
-`exomem store-mode rollback --apply --export-to ./store-mode-export --why 'Return to file mode'`.
+`evermatter store-mode rollback --apply --export-to ./store-mode-export --why 'Return to file mode'`.
 Use a new or empty export directory. Add `--export-held` to keep unimported
 edits in the export before the store's pages replace the Markdown projections.
 Check for `mode=file` before starting the service again.
@@ -974,8 +974,8 @@ collections:
   stops. The new worker refuses store reads and writes with
   `WRITER_LEASE_REQUIRED`, and it migrates the store once it acquires the lease.
 - An offline owner command that only reads the store, such as
-  `exomem collections backup`, refuses with `COLLECTION_STORE_SCHEMA_PENDING`.
-  Start the service once to migrate the store. `exomem collections create` holds
+  `evermatter collections backup`, refuses with `COLLECTION_STORE_SCHEMA_PENDING`.
+  Start the service once to migrate the store. `evermatter collections create` holds
   the writer lease itself, so it migrates the store before it creates.
 
 File collections are not affected, and neither are knowledge writes in file mode.
@@ -1015,7 +1015,7 @@ The check refuses nothing in these cases:
   supervisor has no schema to compare.
 - After an export to files, no collection routes to the store. The exporting
   host sets its store aside, and every other host keeps its store until
-  `exomem collections export --retire-local`. An earlier release is then the way
+  `evermatter collections export --retire-local`. An earlier release is then the way
   back.
 - If the supervisor cannot read the store's schema, the target meets the store
   as any release would. A refusal would also block the release that repairs it.
@@ -1050,7 +1050,7 @@ to 0.120.0 or later.
 
 To upgrade a vault with a collection store to a release that changes its schema:
 
-1. With the release that you run now, back up the store: `exomem collections backup --vault <vault> --to <file outside the vault>`.
+1. With the release that you run now, back up the store: `evermatter collections backup --vault <vault> --to <file outside the vault>`.
 2. Upgrade the service.
 3. Read a store collection, for example with `query_records`.
 
@@ -1068,15 +1068,15 @@ store. Only the owner can export, with the service stopped on every host and the
 operator credential, `EVERMATTER_LEASE_COORDINATOR_OPERATOR_TOKEN`, set.
 
 1. Stop the Evermatter service on every host that serves the vault.
-2. Preview the export: `exomem collections export --vault <vault> --dry-run`
+2. Preview the export: `evermatter collections export --vault <vault> --dry-run`
 3. If the verdict is `blocked`, resolve each collection that the preview names, then preview again.
 4. Note the `plan_id` value in the preview.
-5. Apply it: `EVERMATTER_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> exomem collections export --vault <vault> --plan-id <plan_id> --why "<reason>"`
+5. Apply it: `EVERMATTER_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> evermatter collections export --vault <vault> --plan-id <plan_id> --why "<reason>"`
 6. If the apply stops before it reports `exported`, run step 5 again with the same `plan_id`.
 7. If the apply reports `COLLECTION_STORE_EXPORT_STALE`, start again at step 2.
 8. If the apply reports `COLLECTION_STORE_COORDINATOR_UPGRADE_REQUIRED`, upgrade the coordinator, then start again at step 2.
 9. If a rerun reports `COLLECTION_STORE_EXPORT_VIEW_EDITED`, `COLLECTION_STORE_EXPORT_UNVERIFIED` or `COLLECTION_STORE_SYNC_PENDING`, follow "When an export cannot finish" below.
-10. On every other host, after the exported vault reaches it, run `exomem collections export --vault <vault> --retire-local`.
+10. On every other host, after the exported vault reaches it, run `evermatter collections export --vault <vault> --retire-local`.
 11. Install the older release on every host, then start the Evermatter services.
 
 The services then read every collection from its files. The `--retire-local`
@@ -1143,7 +1143,7 @@ that enrolment.
 The coordinator keeps every retired generation. The fence read reports
 `enrolled: false` with the newest retired generation, or 0 for a vault that was
 never enrolled. A later enrolment, such as the owner's first
-`exomem collections create` or `exomem collections migrate --apply` on an
+`evermatter collections create` or `evermatter collections migrate --apply` on an
 exported vault, takes the next generation with a new store identity. Run that
 enrolment with a release that has the retire, because an older release cannot
 read a retired fence. An enrolment request based on an older generation gets
@@ -1188,7 +1188,7 @@ abandons it, on this host and on every host that adopts the replica.
 To abandon an export:
 
 1. Keep the Evermatter service stopped on every host that serves the vault.
-2. Run `EVERMATTER_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> exomem collections export --vault <vault> --abandon --plan-id <plan_id> --why "<reason>"`.
+2. Run `EVERMATTER_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> evermatter collections export --vault <vault> --abandon --plan-id <plan_id> --why "<reason>"`.
 3. Start the Evermatter services. The services serve every store collection again.
 
 The command reports `abandoned`. The vault stays routed to the store, and the
@@ -1218,7 +1218,7 @@ remain. Do these steps only when the export itself retired the fence:
 2. Pick one time for both renames, in the form `YYYYMMDDTHHMMSSZ` (UTC).
 3. Rename `<knowledge base folder>/_Collections/mode.json` to `mode.json.exported-<time>`.
 4. Rename `<knowledge base folder>/_Collections/collections.sqlite` to `collections.sqlite.exported-<time>`.
-5. Run `exomem collections export --vault <vault> --retire-local`.
+5. Run `evermatter collections export --vault <vault> --retire-local`.
 
 The command reports `retired` and removes the store's state compatibility
 descriptors. Start the services, which then read every collection from its
@@ -1375,8 +1375,8 @@ written meanwhile are picked up. When it finishes, the service switches
 model; the old sidecar is deleted by the next start. Until then both models are
 resident.
 
-- Progress: `exomem doctor` (`embeddings.reembed`, read from disk) and
-  `exomem status` (`recall_reembed`: pages done, seconds per 1,000 chunks, ETA).
+- Progress: `evermatter doctor` (`embeddings.reembed`, read from disk) and
+  `evermatter status` (`recall_reembed`: pages done, seconds per 1,000 chunks, ETA).
 - `EVERMATTER_RECALL_REEMBED=off` builds nothing and keeps the old sidecar serving
   on a personal server.
 - On a personal server both models are resident while the build runs, in every
@@ -1390,7 +1390,7 @@ resident.
   lanes answer until the cutover, and doctor warns that dense recall is off.
   Writes meanwhile are built by the job's catch-up. With
   `EVERMATTER_RECALL_REEMBED=off` a cell's dense recall stays off.
-- `exomem index` maintains whichever sidecar is serving, with its own model.
+- `evermatter index` maintains whichever sidecar is serving, with its own model.
 - The sidecar for bge-m3 is about a third larger: 1,024 dimensions against 768.
 
 ## The activation packet mode
@@ -1736,7 +1736,7 @@ The worker budget stays modest: decoding I-frames of an hour-long 1080p video
 takes seconds, plus at most `EVERMATTER_MAX_VIDEO_KEYFRAMES` (40) full-res seeks.
 Tune boundaries with `EVERMATTER_VIDEO_SCENE_THRESHOLD` (hash bits of 64, default 10)
 and `EVERMATTER_VIDEO_SCENE_MIN_SECS` (default 4). To upgrade already-indexed videos,
-run `exomem backfill-media` with the flag set — idempotent, and it replaces the
+run `evermatter backfill-media` with the flag set — idempotent, and it replaces the
 old uniform CLIP rows with scene-aware ones.
 
 **Semantic video segments** (`EVERMATTER_SEMANTIC_SEGMENTS`, default off) make the
@@ -1748,7 +1748,7 @@ frames. A transcript match then surfaces `transcript_match_at` on the hit with
 the nearest scene frame attached. Pure measurement, no LLM, no new dependency;
 gate off is byte-identical. The worker re-embeds a video's sidecar once after
 its frame OCRs so segments see all signals (bounded, off the request path).
-Upgrade existing recordings with `exomem backfill-media --retime` (opt-in —
+Upgrade existing recordings with `evermatter backfill-media --retime` (opt-in —
 re-runs ASR; combine with `--rediarize` to gain both markers in one pass).
 
 **Install:** `uv sync --extra media --extra diarization`, then build the isolated
@@ -1764,10 +1764,10 @@ Named-speaker diarization's ECAPA voice embedder (`diarization` extra) runs on
 torch and follows the same precedent: it defaults to **CPU when ASR is active** (and
 to CPU on Apple Silicon for cross-machine voiceprint parity), with a
 `EVERMATTER_VOICE_DEVICE=cuda`/`mps`/`cpu` override. Enroll voices with
-`exomem enroll-speaker --name <name> [--self] <sample.wav>` (profiles live in a local
+`evermatter enroll-speaker --name <name> [--self] <sample.wav>` (profiles live in a local
 `.voice_profiles.json` beside the embedding sidecar; `list-speakers` / `remove-speaker`
 manage them). To keep a voice from a recording that is already a Source, run
-`exomem enroll-speaker --name <name> --recording <vault path> --label "Speaker A"`: it shows
+`evermatter enroll-speaker --name <name> --recording <vault path> --label "Speaker A"`: it shows
 the label's lines, asks, and only then reads the audio; `--cloud --page-file <page>` reads the
 original through the signed-in Cloud download and deletes the copy, and reads the part pages of a
 long transcript from beside the saved page. The terminal Home does the
@@ -1787,8 +1787,8 @@ Pick the strongest option that fits the situation:
 
 | Situation | Action |
 |---|---|
-| Suspect the GitHub OAuth grant is compromised | Revoke at <https://github.com/settings/applications> → find `exomem` → Revoke. claude.ai's token dies on the next call (the verifier hits `api.github.com/user` per request). |
-| Suspect the GitHub OAuth App secret leaked | Rotate the secret at <https://github.com/settings/developers> → `exomem` → "Generate a new client secret". Update `GITHUB_CLIENT_SECRET` in `.env`, restart the service. |
+| Suspect the GitHub OAuth grant is compromised | Revoke at <https://github.com/settings/applications> → find the app you named at setup (`Evermatter` by default; `exomem` if you created it earlier) → Revoke. claude.ai's token dies on the next call (the verifier hits `api.github.com/user` per request). |
+| Suspect the GitHub OAuth App secret leaked | Rotate the secret at <https://github.com/settings/developers> → your OAuth App (`Evermatter` by default; `exomem` if you created it earlier) → "Generate a new client secret". Update `GITHUB_CLIENT_SECRET` in `.env`, restart the service. |
 | Want to disconnect just claude.ai | Delete the connector in claude.ai → Settings → Connectors. |
 | Want to take the endpoint offline entirely | `tailscale funnel --https=443 off` (or stop the Cloudflare tunnel). The endpoint becomes unreachable from the public internet. |
 | Want to stop the service but leave the public URL configured | Stop the service (e.g. elevated `Start-Process -Verb RunAs -Wait sc.exe -ArgumentList 'stop','exomem'`). The tunnel stays up but proxies to nothing. |
@@ -1802,7 +1802,7 @@ makes remote sign-ins by that GitHub account act as the owner, labelled remote
 Unset, the remote sign-in is a separate non-owner principal, as before. The
 value must equal `EVERMATTER_GITHUB_USER_ID`: `github:` then ASCII digits, no
 leading zero. Anything else is treated as unset, and
-`exomem doctor --profile remote` reports it as `malformed` or `mismatch`. It is
+`evermatter doctor --profile remote` reports it as `malformed` or `mismatch`. It is
 read only from the process environment (`service.env`, or the working
 directory's `.env`), never from the vault, and a hosted cell clears it. The
 service refuses to load a `.env` that is in, or resolves into, a vault and logs
@@ -1821,8 +1821,8 @@ with the replica that answers.
 
 | Situation | Action |
 |---|---|
-| A remote token may be stolen | `exomem auth revoke -- SESSION_ID` for one session (`exomem auth sessions` lists them, marking the owner-equivalent ones), or `exomem auth revoke --all`. Put any options before `--`: an opaque session ID can begin with a hyphen. To drop owner power only, without signing anyone out, remove `EVERMATTER_OWNER_OAUTH_SUBJECT` and restart; this works even while an HA coordinator is down. |
-| The GitHub account is taken over, or you move to another account | Set `EVERMATTER_GITHUB_USER_ID` and `EVERMATTER_GITHUB_USERNAME` to the new account, and set `EVERMATTER_OWNER_OAUTH_SUBJECT` to its id (or remove it), restart, and **always** run `exomem auth revoke --all`. Changing the allowed account only suspends the former account's sessions: they would come back, with owner power if the binding names that account again, the moment it is re-allowed. `revoke --all` ends them for good; every client then signs in once more. |
+| A remote token may be stolen | `evermatter auth revoke -- SESSION_ID` for one session (`evermatter auth sessions` lists them, marking the owner-equivalent ones), or `evermatter auth revoke --all`. Put any options before `--`: an opaque session ID can begin with a hyphen. To drop owner power only, without signing anyone out, remove `EVERMATTER_OWNER_OAUTH_SUBJECT` and restart; this works even while an HA coordinator is down. |
+| The GitHub account is taken over, or you move to another account | Set `EVERMATTER_GITHUB_USER_ID` and `EVERMATTER_GITHUB_USERNAME` to the new account, and set `EVERMATTER_OWNER_OAUTH_SUBJECT` to its id (or remove it), restart, and **always** run `evermatter auth revoke --all`. Changing the allowed account only suspends the former account's sessions: they would come back, with owner power if the binding names that account again, the moment it is re-allowed. `revoke --all` ends them for good; every client then signs in once more. |
 
 ### Same-machine clients: the local listener
 
@@ -1855,14 +1855,14 @@ token are all refused there, and a local token is refused on the public path.
 Issue one token per client, into a new file that only you can read:
 
 ```bash
-exomem auth issue-local --client home --output ~/.config/exomem/home.token
+evermatter auth issue-local --client home --output ~/.config/exomem/home.token
 ```
 
-The command needs the same environment as `exomem auth sessions`
+The command needs the same environment as `evermatter auth sessions`
 (`EVERMATTER_JWT_SIGNING_KEY`, `EVERMATTER_GITHUB_USER_ID` and `EVERMATTER_GITHUB_USERNAME`)
-and prints only the session id. Local tokens do not expire. `exomem auth
-sessions` lists them with `ingress: local`; `exomem auth revoke -- SESSION_ID`
-ends one, and `exomem auth revoke --all` ends them with every other session.
+and prints only the session id. Local tokens do not expire. `evermatter auth
+sessions` lists them with `ingress: local`; `evermatter auth revoke -- SESSION_ID`
+ends one, and `evermatter auth revoke --all` ends them with every other session.
 A request with a local token acts as the owner and is recorded as
 `principal_kind: owner-local`; access log lines carry `ingress=local` and the
 client label, never the token. Tokens give attribution and revocation, not
@@ -1871,7 +1871,7 @@ A token that nobody revokes stays valid until someone does. The command does
 not check who runs it: any process that runs as your user and can read the
 service configuration can issue, list and revoke local tokens.
 
-An agent that needs a token, for `exomem attach` or to redeem a held upload,
+An agent that needs a token, for `evermatter attach` or to redeem a held upload,
 needs the same command. Issuing needs `EVERMATTER_JWT_SIGNING_KEY`, which can
 forge any owner session, so give the agent a wrapper instead of the key. The
 wrapper:
@@ -1881,7 +1881,7 @@ wrapper:
   could name a person or client, because the label reaches every access log
   line;
 - logs each session id;
-- revokes the token with `exomem auth revoke -- SESSION_ID` when the task
+- revokes the token with `evermatter auth revoke -- SESSION_ID` when the task
   ends.
 
 A refusal that a wrapper makes, such as for a caller of another tenant or for
@@ -1889,7 +1889,7 @@ an output path inside a git work tree, guards against mistakes. It is not a
 security boundary, because any process of your user can read the service
 configuration and run the command directly. To keep an excluded tenant away
 from this owner's memory, use a separate OS user or machine.
-`exomem auth revoke` does not check who issued a session. `--all` ends every
+`evermatter auth revoke` does not check who issued a session. `--all` ends every
 session, remote ones included. Nothing enforces who runs it, so a wrapper for
 agents should never offer `--all`; leave it to the operator.
 
@@ -1900,7 +1900,7 @@ A client then points at `http://127.0.0.1:8764/mcp` with
   `EVERMATTER_LOCAL_TOKEN_FILE` names the file and `EVERMATTER_LOCAL_PORT` is set (in the
   hook's environment or `service.env`). For one release it still falls back to
   the key it lifts from `service.env` when the local request fails.
-- `exomem attach <file> --scope <scope> --category <category>` sends a file's
+- `evermatter attach <file> --scope <scope> --category <category>` sends a file's
   bytes to the local `/upload` and prints the handle the service returns. It
   reads `EVERMATTER_LOCAL_TOKEN_FILE` and `EVERMATTER_LOCAL_PORT`, or `--token-file` and
   `--port`. Without `--scope` and `--category` the service holds the bytes
@@ -1918,7 +1918,7 @@ A client then points at `http://127.0.0.1:8764/mcp` with
   within that same cap, so one file of the largest size always fits. The
   listener refuses a hold that does not fit in free disk with
   `HELD_UPLOAD_NO_SPACE`.
-- For direct audio or video preservation, `exomem attach --diarize` requests
+- For direct audio or video preservation, `evermatter attach --diarize` requests
   speaker labels and `--no-diarize` skips them. The choice also applies to
   resumable uploads. Set `diarize` on the file handle when you redeem a held
   upload. Use `kb process-media --operation reprocess` with `--path` and
@@ -1940,8 +1940,8 @@ A client then points at `http://127.0.0.1:8764/mcp` with
   it is unpacked or refused.
 - A file over 64 MiB, a file that the listener refuses as too large, or any
   file with `--resumable` goes through a resumable upload session. The
-  listener's cap is in the service's environment, so `exomem attach` does not
-  read it; the listener's refusal tells it to use a session. `exomem attach`
+  listener's cap is in the service's environment, so `evermatter attach` does not
+  read it; the listener's refusal tells it to use a session. `evermatter attach`
   keeps the session's address and secret in a private file under your state
   directory. If the upload stops, run the same command again: it continues from
   the last byte that the service holds. After a timed-out part, the command
@@ -1974,7 +1974,7 @@ after its last part.
 For a large original on the personal HTTP listener, call `upload_files` with
 `lane="source"`, the file's `expected_sha256` and its exact `size_bytes`.
 Above the one-shot limit, the reply describes a resumable Source upload.
-Save that reply privately as a handoff file and run `exomem attach --handoff-file handoff.json original.bin`.
+Save that reply privately as a handoff file and run `evermatter attach --handoff-file handoff.json original.bin`.
 The same command resumes from the server's offset after a dropped request.
 It returns a Source receipt after the full hash matches and the Source commits.
 It can retrieve the same receipt for 24 hours after settlement. The account
@@ -2034,7 +2034,7 @@ server routes do not lift the separate Cloud gateway exclusion.
 For local Evidence uploads, use the maintained client:
 
 ```sh
-exomem attach export.zip --scope Device --category Exports --resumable
+evermatter attach export.zip --scope Device --category Exports --resumable
 ```
 
 The client reads its local token and port from the configuration above. It
@@ -2132,7 +2132,7 @@ writing a new one.
 
 ### New archives
 
-A new archive starts in shared storage. `exomem init`, the setup wizard, the
+A new archive starts in shared storage. `evermatter init`, the setup wizard, the
 terminal interface and Cloud cell provisioning record this in the archive's
 state when they create it. The first service start with launcher support for
 the format then turns on shared storage, before the service serves a request.
@@ -2144,13 +2144,13 @@ in ordinary storage and keeps the record for a later start. Its startup log
 and the `original_storage` block of `/health/ready` name the fix: update the
 launcher, as
 [A supervisor older than the vault's state](managed-service-upgrades.md#a-supervisor-older-than-the-vaults-state)
-describes, then restart the service. `exomem init` and the setup wizard print
+describes, then restart the service. `evermatter init` and the setup wizard print
 when shared storage starts. Once shared storage is on, `/health/ready` has no
 `original_storage` block, and the file `_Originals/format.json` exists.
 
 Originals filed before shared storage turns on keep their ordinary files, and
 the archive holds both kinds. An existing archive never changes its storage
-when you upgrade or start a release, and `exomem init --force` on an existing
+when you upgrade or start a release, and `evermatter init --force` on an existing
 archive never changes its storage either.
 
 Once shared storage is on, a release without shared storage refuses the new
@@ -2347,7 +2347,7 @@ storage through every upgrade until its owner converts it.
 
 The refusal of Evermatter 0.182.0 does not name shared storage. It prints
 `the state migration manifest is unreadable or invalid; startup refuses to
-guess`, and its `exomem doctor` advises a repair of the state authority. Do
+guess`, and its `evermatter doctor` advises a repair of the state authority. Do
 not follow that advice for an archive that records shared storage.
 
 To recover from that refusal, roll forward to this release or a later one.
@@ -2390,7 +2390,7 @@ curl -s http://127.0.0.1:8765/health
 `install_source` is the field that matters. `wheel` with a null `revision` means the server
 is **not** running a local checkout — upgrade the venv directly. `editable` reports the git
 `revision` it is serving. For local CLI/service release, profile, route, and
-interpreter identity, run `exomem --version --json` (or `exomem install-info`);
+interpreter identity, run `evermatter --version --json` (or `evermatter install-info`);
 `/health` withholds local paths because it is unauthenticated and publicly
 reachable. A false `version_match` means the shell command and managed service
 are split and should be reconciled before treating the upgrade as complete.
@@ -2443,13 +2443,13 @@ the service, so day-to-day restarts don't need UAC:
 ```powershell
 sc.exe stop exomem
 sc.exe start exomem
-$logDir = ((exomem doctor --json | ConvertFrom-Json).checks | Where-Object { $_.id -eq 'observability' }).details.log_dir
+$logDir = ((evermatter doctor --json | ConvertFrom-Json).checks | Where-Object { $_.id -eq 'observability' }).details.log_dir
 Get-Content "$logDir\exomem.log" -Tail 6
 ```
 
 (`install-service.ps1` pins `EVERMATTER_LOG_DIR` — `%ProgramData%\exomem\logs` by
 default — into the service's environment for a `-Release` install, so its
-`exomem.log` is NOT under the repo checkout's `logs\` folder. `exomem doctor`
+`exomem.log` is NOT under the repo checkout's `logs\` folder. `evermatter doctor`
 reports the resolved path directly, which the command above reads rather than
 hardcoding it, so it stays correct whether the box uses the default or an
 operator-pinned override.)
@@ -2478,7 +2478,7 @@ sc.exe start exomem
   (`logging_config.resolve_log_dir()`, see `docs/observability.md`): the repo
   `logs/` folder for a repo-mode/dev checkout, or the pinned/per-platform
   location (`%ProgramData%\exomem\logs` by default on a Windows
-  `-Release`/service install) otherwise. `exomem doctor --json` always reports
+  `-Release`/service install) otherwise. `evermatter doctor --json` always reports
   the actual resolved path under the `observability` check's `log_dir` detail
   — read it from there rather than assuming `logs/exomem.log`.
 - `logs/service.out.log`, `logs/service.err.log` — service stdout/stderr,
@@ -2494,11 +2494,11 @@ sc.exe start exomem
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| claude.ai "Couldn't reach the MCP server" during connector add | OAuth discovery failed | `curl.exe -i https://<your-host>/.well-known/oauth-authorization-server` should return JSON (or run `exomem doctor --profile remote --probe`, which checks this plus the bare well-known path). If 404, the OAuthProxy isn't mounted — most likely `EVERMATTER_BASE_URL` has a trailing slash or includes `/mcp`. |
-| GitHub redirects to "The redirect_uri MUST match…" error | OAuth App callback URL mismatch | At github.com/settings/developers → exomem, set the callback to exactly `https://<your-host>/auth/callback` (no trailing slash). |
+| claude.ai "Couldn't reach the MCP server" during connector add | OAuth discovery failed | `curl.exe -i https://<your-host>/.well-known/oauth-authorization-server` should return JSON (or run `evermatter doctor --profile remote --probe`, which checks this plus the bare well-known path). If 404, the OAuthProxy isn't mounted — most likely `EVERMATTER_BASE_URL` has a trailing slash or includes `/mcp`. |
+| GitHub redirects to "The redirect_uri MUST match…" error | OAuth App callback URL mismatch | At github.com/settings/developers → your OAuth App (`Evermatter` by default; `exomem` if created earlier), set the callback to exactly `https://<your-host>/auth/callback` (no trailing slash). |
 | GitHub: "The redirect_uri is not associated with this application" on a *second* machine | Reused another host's OAuth App client ID/secret (the app's one callback points at the other host) | Create a per-host OAuth App with callback `https://<this-host>.example.com/auth/callback`, put its client ID/secret in this `.env`, restart the service. See § Deploying on a second machine. |
 | claude.ai connector connects but every tool call returns 401 | Wrong GitHub user | `EVERMATTER_GITHUB_USERNAME` must equal the login of the GitHub account you authorized with. Check the exomem log for `rejecting token for github login=...`. |
-| Existing client receives one `401 invalid_token` after the durable-session cutover | Legacy FastMCP reference JWT is intentionally not dual-read | Complete one final login without deleting or changing the connector URL. If a durable session later gets 401, inspect it with `exomem auth sessions`. |
+| Existing client receives one `401 invalid_token` after the durable-session cutover | Legacy FastMCP reference JWT is intentionally not dual-read | Complete one final login without deleting or changing the connector URL. If a durable session later gets 401, inspect it with `evermatter auth sessions`. |
 | Authenticated tools return `503` without `WWW-Authenticate` | Authoritative session storage is unavailable or corrupt | Repair the coordinator/network/storage path. Do not reauthorize: a fresh login uses the same unavailable authority. |
 | claude.ai shows "connector failed" | service down (host asleep, service stopped, crash loop) | Check the service status; tail `logs/service.err.log` and `exomem.log` (see § Logs for its resolved path — not always under `logs/`). Multiple startup banners within seconds = orphan python processes — kill them and force-restart. |
 | Edits to `.env` not picked up | service didn't restart | Restart the service (elevated on Windows). Confirm the python process restarted. |

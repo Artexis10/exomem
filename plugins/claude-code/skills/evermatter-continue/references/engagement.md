@@ -18,7 +18,7 @@ live value; the table describes the levels and is not a request to change one.
 Only an explicit user request to change the setting authorizes `settings.set` or `settings.clear`.
 Read `settings.inspect` first and pass its revision. Recall, capture, reading instructions,
 installation and missing hooks never authorize a change. When `engagement` carries `hook_cadence`,
-`exomem prominence <level>` (CLI only) changes that client's local reminders, not the saved level.
+`evermatter prominence <level>` (CLI only) changes that client's local reminders, not the saved level.
 
 ## Proactive retrieval
 

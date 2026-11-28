@@ -1879,7 +1879,7 @@ def _upkeep_lines(packet: dict) -> list[str]:
     lines: list[str] = []
     if block.get("status") == "failed":
         since = " ".join(str(block.get("since") or "an unknown time").split())
-        lines.append(f"- upkeep: the background pass is failing since {since}; see exomem status.")
+        lines.append(f"- upkeep: the background pass is failing since {since}; see evermatter status.")
     for item in block.get("items") or ():
         if not isinstance(item, dict):
             continue

@@ -303,7 +303,7 @@ def _store_figures(vault_root: Path) -> dict:
         connection.store_path(vault_root), connection.BUSY_TIMEOUT_MS
     )
     with closing(reader):
-        registry = rederive.read(reader)
+        registry = rederive.read(reader, include_link_proof=True)
         waiting = rederive.waiting_on(reader, vault_root)
         revision, release, changed_at = reader.execute(
             "SELECT revision, release, changed_at FROM store_mode WHERE id = 1"

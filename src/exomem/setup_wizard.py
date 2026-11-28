@@ -645,7 +645,7 @@ def _offer_learning_instruction(
         print_fn(f"    {prominence.LEARNING_INSTRUCTION}")
         print_fn(
             "  Setup keeps it between the `evermatter learning instruction` markers. Delete that "
-            "block, or run `exomem install-hook --uninstall --client all`, to remove it."
+            "block, or run `evermatter install-hook --uninstall --client all`, to remove it."
         )
     for name, client, path, change in pending:
         verb = "Update it in" if change == "updated" else "Add it to"
@@ -719,7 +719,7 @@ def run_setup(
             print_fn(f"  {name:<10} {status}")
         return 1 if any("[failed" in status for _, status in steps) else 0
 
-    print_fn("exomem setup")
+    print_fn("evermatter setup")
     print_fn("")
 
     # 1. vault path
@@ -774,7 +774,7 @@ def run_setup(
         print_fn(f"    Likely packs: {_format_pack_suggestions(packs)}")
     print_fn("")
     print_fn(f"  Contract: {overview_module.SCOPE_NOTE}")
-    print_fn("  Adoption: run `exomem adopt` anytime for manifest review, source copy, and compile planning.")
+    print_fn("  Adoption: run `evermatter adopt` anytime for manifest review, source copy, and compile planning.")
     print_fn("")
     report("scan", "[done]")
 
@@ -894,7 +894,7 @@ def run_setup(
                 input_fn,
                 "\nA capable idle GPU was detected. Use performance mode for "
                 "faster explicit indexing? Normal mode avoids steady-state CUDA "
-                "residency. (change anytime with `exomem mode`)",
+                "residency. (change anytime with `evermatter mode`)",
                 False,
             ):
                 mode_mod.write_mode("performance")
@@ -922,7 +922,7 @@ def run_setup(
     else:
         if route.transport == "stdio" and route.command[0] == "uvx":
             print_fn(
-                "  Note: exomem is not durably installed, so the server will be "
+                "  Note: Evermatter is not durably installed, so the server will be "
                 "registered as `uvx exomem`. For a registration that never "
                 "re-resolves, run `uv tool install exomem` first."
             )
@@ -1120,8 +1120,8 @@ def run_setup(
     print_fn('  2. Try: "what does this vault look like" or "find my notes on X".')
     print_fn("  3. Optional, for direct CLI use (`kb find ...`): set EVERMATTER_VAULT_PATH.")
     print_fn(
-        "  4. For foreground work/gaming: exomem mode quiet; inspect with "
-        "exomem status --resources --json."
+        "  4. For foreground work/gaming: evermatter mode quiet; inspect with "
+        "evermatter status --resources --json."
     )
     return code
 
@@ -1136,14 +1136,14 @@ def setup_main(argv: list[str]) -> int:
         return remote_setup_main([a for a in argv if a != "--remote"])
 
     parser = argparse.ArgumentParser(
-        prog="exomem setup",
+        prog="evermatter setup",
         description=(
             "Guided local setup: scan the vault, init the "
             f"{managed_root_rel()}, pick a "
             "search profile, run doctor, register with Claude Code, and install "
             "the skill — one idempotent command. Existing vault content is never "
-            f"touched; exomem writes only under {managed_join('')}. For remote "
-            "connector setup (claude.ai / iOS), use `exomem setup --remote`."
+            f"touched; Evermatter writes only under {managed_join('')}. For remote "
+            "connector setup (claude.ai / iOS), use `evermatter setup --remote`."
         ),
     )
     parser.add_argument("--vault", help="Vault root (default: prompt, or $EVERMATTER_VAULT_PATH).")

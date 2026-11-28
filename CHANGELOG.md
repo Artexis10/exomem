@@ -5,6 +5,85 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.210.1](https://github.com/substrate-systems/evermatter/compare/v0.210.0...v0.210.1) (2026-11-28)
+
+
+### Bug Fixes
+
+* **retrieval:** admit store-mode search after restart ([#3396](https://github.com/substrate-systems/evermatter/issues/3396)) ([c4b07a2](https://github.com/substrate-systems/evermatter/commit/c4b07a26e85f5eff29436624d8efe342d22b6422))
+* **writes:** refuse a plan value the vault never defines before queueing it ([#3373](https://github.com/substrate-systems/evermatter/issues/3373)) ([7ceef9b](https://github.com/substrate-systems/evermatter/commit/7ceef9b732cb765013a810fcdb904e78b51eb16c))
+
+## [0.210.0](https://github.com/substrate-systems/evermatter/compare/v0.209.0...v0.210.0) (2026-11-28)
+
+
+### Features
+
+* **store:** derive links to individual claims ([#3386](https://github.com/substrate-systems/evermatter/issues/3386)) ([03a9025](https://github.com/substrate-systems/evermatter/commit/03a9025edbedd848f6365b9a2ecda34ae4976a8e))
+
+
+### Bug Fixes
+
+* **cli:** show the current service check command ([#3390](https://github.com/substrate-systems/evermatter/issues/3390)) ([0372a11](https://github.com/substrate-systems/evermatter/commit/0372a11bc0f33292305fc7a947761531b790adf7))
+* **imports:** keep less memory while filing large folders ([#3383](https://github.com/substrate-systems/evermatter/issues/3383)) ([5f16a9e](https://github.com/substrate-systems/evermatter/commit/5f16a9ecb85e1c2feb5b99e1d28ca6196cf46113))
+* **media:** set aside a file that keeps crashing media processing ([#3382](https://github.com/substrate-systems/evermatter/issues/3382)) ([5e15dcf](https://github.com/substrate-systems/evermatter/commit/5e15dcf8b60f5a8f4dddea11f1872862a717f45d))
+* **observations:** keep dated entries with their section ([#3388](https://github.com/substrate-systems/evermatter/issues/3388)) ([23b8a48](https://github.com/substrate-systems/evermatter/commit/23b8a484c8abbaa4ad4fef69cb486a9c9cfd26d9))
+* **recall:** keep recorded positions when another save lands mid-request ([#3372](https://github.com/substrate-systems/evermatter/issues/3372)) ([17d7d1f](https://github.com/substrate-systems/evermatter/commit/17d7d1f0bb5b9fba56546e1760b6f4e23baf6b4e))
+* **records:** send each query row once by default ([#3389](https://github.com/substrate-systems/evermatter/issues/3389)) ([f43ba7d](https://github.com/substrate-systems/evermatter/commit/f43ba7d58745ee4237498fab963e81c80c76bce1))
+* **rehearsal:** report page rates when an import hits its deadline ([#3385](https://github.com/substrate-systems/evermatter/issues/3385)) ([08d4569](https://github.com/substrate-systems/evermatter/commit/08d45691ed27ac8b5c057faa0edfa4b8b0607a20))
+* **release:** publish only its own tag's notes in a run on a release tag ([#3376](https://github.com/substrate-systems/evermatter/issues/3376)) ([e240715](https://github.com/substrate-systems/evermatter/commit/e2407154217ff045663fde7fa9e66627e5b42db0))
+* **upload:** advise covering authenticators and archive the sensitivity capture change ([#3380](https://github.com/substrate-systems/evermatter/issues/3380)) ([2b9c4b2](https://github.com/substrate-systems/evermatter/commit/2b9c4b2c40a7a708b931de065b5c5f5e8b9c34ac))
+
+
+### Performance
+
+* **egress:** decide a packet's store pages on one request, not one per page ([#3381](https://github.com/substrate-systems/evermatter/issues/3381)) ([28c3c4b](https://github.com/substrate-systems/evermatter/commit/28c3c4bea8cca31b7ed99b9518059c46d52026d6))
+
+## [0.209.0](https://github.com/substrate-systems/evermatter/compare/v0.208.0...v0.209.0) (2026-11-28)
+
+
+### Features
+
+* **capture:** keep sensitive material in full and record its sensitivity classes ([#3331](https://github.com/substrate-systems/evermatter/issues/3331)) ([bcd7596](https://github.com/substrate-systems/evermatter/commit/bcd759664708d3d405317bc0f2b67f3e200e5a56))
+* **capture:** save what the person says in passing, whatever the task ([#3342](https://github.com/substrate-systems/evermatter/issues/3342)) ([373f086](https://github.com/substrate-systems/evermatter/commit/373f086c854c7b0d85d391762e08f2bba6b9e30c))
+* **cli:** name the evermatter command in every message, help text and doc ([#3353](https://github.com/substrate-systems/evermatter/issues/3353)) ([5f8f150](https://github.com/substrate-systems/evermatter/commit/5f8f150f198e309e60df31829e10d1242cf32e90))
+* **doctor:** show which MCP clients declare which protocol features ([#3333](https://github.com/substrate-systems/evermatter/issues/3333)) ([577edad](https://github.com/substrate-systems/evermatter/commit/577edad7723040190a4f7e29862562afb07e8bab))
+* **faces:** find photos and videos by the people in them ([#3307](https://github.com/substrate-systems/evermatter/issues/3307)) ([caafeb4](https://github.com/substrate-systems/evermatter/commit/caafeb4f8d95fe630196d20ed1a2cff3a4b2181e))
+* **helm:** give the Cloud gateway the product site origin ([#3354](https://github.com/substrate-systems/evermatter/issues/3354)) ([d50f3fe](https://github.com/substrate-systems/evermatter/commit/d50f3fecdd7e1d5a7ce8b9305e0388e5d553c5e5))
+* **import:** file each Evernote note and each Gmail message as its own Source ([#3325](https://github.com/substrate-systems/evermatter/issues/3325)) ([65860a7](https://github.com/substrate-systems/evermatter/commit/65860a707199a615c2bc00b429ec9ea8140fa492))
+* **infra:** manage the sign-in Turnstile widget in the foundation root ([#3365](https://github.com/substrate-systems/evermatter/issues/3365)) ([a8025ed](https://github.com/substrate-systems/evermatter/commit/a8025ed9bb94aa702cddef8288a9cf626650aa66))
+* **recall:** show a named person's running tally from Records ([#3349](https://github.com/substrate-systems/evermatter/issues/3349)) ([3a038b8](https://github.com/substrate-systems/evermatter/commit/3a038b863f11e50f803696e45c314ce444d446a0))
+* **records:** import a Markdown table into a Records collection in one call ([#3348](https://github.com/substrate-systems/evermatter/issues/3348)) ([96de61a](https://github.com/substrate-systems/evermatter/commit/96de61a4c1a26acf98ca9c8954d5be6442d8a205))
+* **release:** publish each release's user notes and start its page with What's new ([#3361](https://github.com/substrate-systems/evermatter/issues/3361)) ([6fdec03](https://github.com/substrate-systems/evermatter/commit/6fdec033abc385e30f7e15d6e394e88785cb5c3f))
+* **settings:** every writer emits EVERMATTER_* and no file keeps two names ([#3335](https://github.com/substrate-systems/evermatter/issues/3335)) ([eefbaf5](https://github.com/substrate-systems/evermatter/commit/eefbaf53dbd51f2a46d7cd0ef4a3bbbbbe2f63a4))
+* **skills:** rebuild the shipped skills on the published tool surface ([#3237](https://github.com/substrate-systems/evermatter/issues/3237)) ([2dcfc01](https://github.com/substrate-systems/evermatter/commit/2dcfc01fb5eb2c672889e9f755509f7703e29b7c))
+* **speech:** name each microphone's lines when a recording declares its tracks ([#3351](https://github.com/substrate-systems/evermatter/issues/3351)) ([e65039d](https://github.com/substrate-systems/evermatter/commit/e65039d11f05b44f398e27db22708587921f1952))
+* **whats-new:** give every user note its short title ([#3314](https://github.com/substrate-systems/evermatter/issues/3314)) ([0274961](https://github.com/substrate-systems/evermatter/commit/02749617c5a909b9db952d0bc1a3df1a177569d6))
+* **writes:** land a new folder in its separator look-alike and merge such pairs ([#3363](https://github.com/substrate-systems/evermatter/issues/3363)) ([059b0dd](https://github.com/substrate-systems/evermatter/commit/059b0dd814dd759b5b6e23551b8352edde53895e))
+
+
+### Bug Fixes
+
+* **benchmarks:** let the actors run the evermatter command ([#3374](https://github.com/substrate-systems/evermatter/issues/3374)) ([81dd390](https://github.com/substrate-systems/evermatter/commit/81dd390d2714b02a366064be997c7f8bbd777e6c))
+* **capture:** skip pages saved while the capture census reads them ([#3332](https://github.com/substrate-systems/evermatter/issues/3332)) ([a75de37](https://github.com/substrate-systems/evermatter/commit/a75de37044d5f296eb07d9a3dfdd593c583fd90f))
+* **capture:** take saves that land while the census lists a folder ([#3347](https://github.com/substrate-systems/evermatter/issues/3347)) ([245140c](https://github.com/substrate-systems/evermatter/commit/245140c41c9077680f71b8d3cb774bb42307d2d1))
+* **cloud-deploy:** stop on a registry token answer that is not an object ([#3306](https://github.com/substrate-systems/evermatter/issues/3306)) ([1518d88](https://github.com/substrate-systems/evermatter/commit/1518d889b8c02a046485086c0e42ed808ce06062))
+* **cloud-rehearsal:** end a hung cell call at the deadline and keep the report ([#3362](https://github.com/substrate-systems/evermatter/issues/3362)) ([385b2fe](https://github.com/substrate-systems/evermatter/commit/385b2fedac09e78201b35891390d812e7929717b))
+* **cloud-restore:** judge the restore drill on what the backup read ([#3323](https://github.com/substrate-systems/evermatter/issues/3323)) ([2d3c6cc](https://github.com/substrate-systems/evermatter/commit/2d3c6cc97891452fcb930f582d770153d9921350))
+* **export:** refuse a case-split vault before the pause copies anything ([#3352](https://github.com/substrate-systems/evermatter/issues/3352)) ([4d4c239](https://github.com/substrate-systems/evermatter/commit/4d4c23944e4bb6f946ae485be029df87be484580))
+* **export:** verify a Cloud export with one download of its archive ([#3359](https://github.com/substrate-systems/evermatter/issues/3359)) ([751b48c](https://github.com/substrate-systems/evermatter/commit/751b48c66557aa8a8b0299c52620628109123272))
+* **faces:** tell the owner how to turn faces off on a newer face store ([#3329](https://github.com/substrate-systems/evermatter/issues/3329)) ([8c6b07a](https://github.com/substrate-systems/evermatter/commit/8c6b07a733b134b6404fe9980167ebd086c86ed0))
+* **imports:** end every import step for a waiting write and keep a later page's plan cheap ([#3318](https://github.com/substrate-systems/evermatter/issues/3318)) ([26ba98b](https://github.com/substrate-systems/evermatter/commit/26ba98b9ab023a87d6c556de3b258abb6786a8b9))
+* **recall:** look up later questions and jobs under way in skills-only clients ([#3355](https://github.com/substrate-systems/evermatter/issues/3355)) ([2ab048a](https://github.com/substrate-systems/evermatter/commit/2ab048a3888eb8dd184646ffa42f5ec8e76723a0))
+* **recall:** name the warm-up an index_warming answer waits on ([#3358](https://github.com/substrate-systems/evermatter/issues/3358)) ([877c95b](https://github.com/substrate-systems/evermatter/commit/877c95ba01f60646a813342ffd58537bc6891717))
+* **recall:** wait a bounded time for a fresh process's warm-up before abstaining ([#3344](https://github.com/substrate-systems/evermatter/issues/3344)) ([1099cf8](https://github.com/substrate-systems/evermatter/commit/1099cf89292e5f544f1190af731cb30390d670aa))
+* **records:** name the row and collection in a store write's receipt ([#3339](https://github.com/substrate-systems/evermatter/issues/3339)) ([2acc3b1](https://github.com/substrate-systems/evermatter/commit/2acc3b1f80db54f3ef2eff06a43d32b4824a6d34))
+* **search:** keep a full rebuild to one extra catalogue copy and wait when the disk is nearly full ([#3326](https://github.com/substrate-systems/evermatter/issues/3326)) ([cfe1e90](https://github.com/substrate-systems/evermatter/commit/cfe1e900bec94d99505a02b514214f3cf306f61b))
+* **search:** keep search current during a large import without full rebuilds ([#3356](https://github.com/substrate-systems/evermatter/issues/3356)) ([1b6289d](https://github.com/substrate-systems/evermatter/commit/1b6289d03b88545d1fc1e42423ca7a6390823b92))
+* **store:** refuse a write outside the vault without naming the host path ([#3341](https://github.com/substrate-systems/evermatter/issues/3341)) ([d48d163](https://github.com/substrate-systems/evermatter/commit/d48d163190f7acbeabd0d84f5a30ed4b78a2d80f))
+* **whats-new:** give the instructions note its title ([#3330](https://github.com/substrate-systems/evermatter/issues/3330)) ([13c4c35](https://github.com/substrate-systems/evermatter/commit/13c4c35a1656fd343e6ac3c303e5ca8e1f75d857))
+* **writes:** keep the dates of a dated observation and ignore a review field where no review applies ([#3338](https://github.com/substrate-systems/evermatter/issues/3338)) ([061b5b1](https://github.com/substrate-systems/evermatter/commit/061b5b1c7327e8ff2dda9326a973d2d6ebeb2935))
+* **writes:** refuse a record value its collection never declares before queueing it ([#3350](https://github.com/substrate-systems/evermatter/issues/3350)) ([a8dc68d](https://github.com/substrate-systems/evermatter/commit/a8dc68da06a929022e1bac56f1fe3fcf3463a8b2))
+
 ## [0.208.0](https://github.com/substrate-systems/evermatter/compare/v0.207.0...v0.208.0) (2026-11-27)
 
 
@@ -176,6 +255,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.202.0](https://github.com/substrate-systems/evermatter/compare/v0.201.0...v0.202.0) (2026-11-24)
 
+[This release](docs/licensing/licence-change.md) renamed Exomem to Evermatter
+and changed the licence for the server, CLI and container images to FSL-1.1-ALv2.
 
 ### ⚠ BREAKING CHANGES
 

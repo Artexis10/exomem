@@ -140,7 +140,7 @@ def tool_report(vault_root, cursor=None) -> dict:
         found["outcome"] = (
             f"This process does not serve the collection store, so this answer withholds the {stored} store "
             "collection row(s) of this page: inventory.total counts them, and inventory.collections lists only "
-            "file collections. Ask the running service, or run `exomem collections migrate --dry-run` on the "
+            "file collections. Ask the running service, or run `evermatter collections migrate --dry-run` on the "
             "host, for every row.")
     return found
 

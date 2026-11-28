@@ -4683,6 +4683,7 @@ def _bounded_directory_entries(
     include_internal_state: bool = False,
 ) -> tuple[PathIdentity, ...]:
     """Capture a bounded descriptor-relative directory census."""
+    request_budget.checkpoint()
     try:
         descriptor = _open_directory_path(path)
     except OSError as error:
@@ -4698,6 +4699,7 @@ def _bounded_directory_entries(
         residue_names: list[str] = []
         ordinary_names: list[str] = []
         for entry in iterator:
+            request_budget.checkpoint()
             name = entry.name
             entry_relative = f"{relative}/{name}" if relative else name
             if admission is not None and not admission(entry_relative):
@@ -4717,6 +4719,7 @@ def _bounded_directory_entries(
         iterator = None
 
         for name in sorted(residue_names):
+            request_budget.checkpoint()
             if admission is not None and not admission(f"{relative}/{name}"):
                 raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory admission changed")
             _classify_batch_residue(path, descriptor, name)
@@ -4725,6 +4728,7 @@ def _bounded_directory_entries(
 
         entries: list[PathIdentity] = []
         for name in sorted(ordinary_names):
+            request_budget.checkpoint()
             if admission is not None and not admission(f"{relative}/{name}"):
                 raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory admission changed")
             try:
@@ -8390,7 +8394,7 @@ def resolve_under_vault(
             raise VaultPathError(
                 code="INVALID_PATH",
                 reason=(
-                    f"path is outside Knowledge Base/: {raw!r} — exomem only "
+                    f"path is outside Knowledge Base/: {raw!r} — Evermatter only "
                     "writes governed content under Knowledge Base/"
                 ),
             ) from None

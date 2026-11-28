@@ -213,6 +213,16 @@ def read(path: Path, media_type: str) -> CaptureFacts | None:
     return facts or None
 
 
+def given_name(fields: dict, stored: str) -> str:
+    """The file name the owner's original had, as its sidecar page records it; `stored` when the page records none.
+
+    A filed original lives under a name of the filer's own, which states nothing of the file the owner kept, so
+    the page's `original_filename` is the name that a file-name date reads.
+    """
+    recorded = fields.get("original_filename")
+    return recorded if isinstance(recorded, str) and recorded else stored
+
+
 def with_name_date(
     vault_root: Path, facts: CaptureFacts | None, media_type: str, name: object,
 ) -> CaptureFacts | None:

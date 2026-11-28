@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-from . import note_types, semantic_language_registry
+from . import note_types, semantic_kinds, semantic_language_registry
 
 AUTHORING_CONTRACT_VERSION = 12
 AUTHORING_CONTRACT_ID = "exomem.semantic-authoring"
@@ -219,7 +219,7 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
             "Parse valid compact observations anywhere outside fenced code blocks."
         ),
         "canonical_authoring": (
-            "Exomem writers use `-` under the canonical `## Observations` section."
+            "Evermatter writers use `-` under the canonical `## Observations` section."
         ),
         "parser_bullet_markers": ["-", "*", "+"],
         "canonical_bullet_marker": "-",
@@ -229,7 +229,7 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
             "Parse from the end by taking anchor, then context, then trailing tags; "
             "the authored display order remains tags, context, anchor."
         ),
-        "kind": "observation",
+        "kind": semantic_kinds.compact_kind(),
         "category": {
             "role": "the unit's one primary open-vocabulary subject or domain label",
             "vocabulary": "open",
@@ -650,7 +650,7 @@ AUTHORING_TOOLS = frozenset(
 )
 CLI_REST_POINTER = (
     'Semantic authoring rules: see bootstrap(profile="full") / '
-    "`exomem bootstrap --profile full`."
+    "`evermatter bootstrap --profile full`."
 )
 
 

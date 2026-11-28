@@ -25,6 +25,7 @@ from .vault import _FM_PATTERN as FRONTMATTER_PATTERN
 from .vault import CORPUS_EXCLUDED_DIR_NAMES, markdown_lf, relative_posix
 
 if TYPE_CHECKING:
+    from .reserved_paths import GenericFileSnapshot
     from .vault_store.read import PageMeta, StoredPage
 
 log = logging.getLogger(__name__)
@@ -227,7 +228,7 @@ class FrontmatterCache:
         stored = stored_relative(path, vault_root)
         if stored is not None:
             return self._get_stored(path, vault_root, stored)
-        snapshot = _read_page_snapshot(path, vault_root)
+        snapshot = read_page_snapshot(path, vault_root)
         if snapshot is None:
             self._discard(path)
             return None
@@ -872,7 +873,8 @@ def _listed_names(directory: Path) -> frozenset[str] | None:
         return None
 
 
-def _read_page_snapshot(path: Path, vault_root: Path):
+def read_page_snapshot(path: Path, vault_root: Path) -> GenericFileSnapshot | None:
+    """Read the page at its physical spelling and keep the version of those bytes."""
     from . import reserved_paths
 
     try:
@@ -891,7 +893,7 @@ def _read_page_snapshot(path: Path, vault_root: Path):
 
 
 def _read_page_bytes(path: Path, vault_root: Path) -> bytes | None:
-    snapshot = _read_page_snapshot(path, vault_root)
+    snapshot = read_page_snapshot(path, vault_root)
     return snapshot.data if snapshot is not None else None
 
 

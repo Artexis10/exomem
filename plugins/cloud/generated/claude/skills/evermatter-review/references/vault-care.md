@@ -190,7 +190,7 @@ owner-only and writes nothing. For each collection it reports whether the store 
 collection the store created, one over a file-mode bound, a value with no file form, or a view changed by hand.
 The vault verdict is `exportable`, `blocked`, `export_pending` or `nothing_to_export`. Applying the preview's
 `plan_id` with a `why` is the owner's offline step. The CLI-only command is
-`exomem collections export --plan-id ID --why REASON`, run with the service stopped. The service refuses the
+`evermatter collections export --plan-id ID --why REASON`, run with the service stopped. The service refuses the
 apply.
 
 ### `maintenance.cutover`
@@ -199,7 +199,7 @@ This operation previews the move of every structured collection to SQLite-only s
 writes nothing. For each collection it names the steps the apply takes: `migrate` for a collection still in
 files, `convert` for one with item files, `rewrite_strategy` for a summary collection, or none. It lists every
 blocker with its fix and returns a `plan_id`. Applying that `plan_id` with a `why` is the owner's offline step.
-The CLI-only command is `exomem collections cutover --plan-id ID --why REASON --backup-to FILE`, run with the
+The CLI-only command is `evermatter collections cutover --plan-id ID --why REASON --backup-to FILE`, run with the
 service stopped. The apply takes and verifies a backup first, checks each collection's rows after its step, and
 resumes after a crash when run again with a new `--backup-to` file. The preview counts, for each collection, the
 items that carry a body. After the apply, read that body with `read_page` on the old item path, or with a

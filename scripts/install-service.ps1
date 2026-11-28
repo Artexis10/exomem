@@ -390,14 +390,14 @@ if ($existingTransition) {
 }
 
 $doctorArgs = @("-m", "exomem", "doctor", "--profile", $Profile, "--vault", $vault)
-Write-Host "Preflight: exomem doctor --profile $Profile..."
+Write-Host "Preflight: evermatter doctor --profile $Profile..."
 & $python @doctorArgs
 if ($LASTEXITCODE -ne 0) {
     throw "Doctor preflight failed for profile '$Profile'; '$ServiceName' remains stopped."
 }
 
 $remoteDoctorArgs = @("-m", "exomem", "doctor", "--profile", "remote", "--vault", $vault)
-Write-Host "Preflight: exomem doctor --profile remote..."
+Write-Host "Preflight: evermatter doctor --profile remote..."
 & $python @remoteDoctorArgs
 if ($LASTEXITCODE -ne 0) {
     throw "Remote doctor preflight failed; '$ServiceName' remains stopped."
@@ -425,7 +425,7 @@ if ($existingService) {
 & $NssmPath set $ServiceName Start SERVICE_AUTO_START
 & $NssmPath set $ServiceName AppRestartDelay 5000
 & $NssmPath set $ServiceName AppThrottle 10000
-& $NssmPath set $ServiceName Description "exomem: Obsidian Knowledge Base MCP server for mobile claude.ai"
+& $NssmPath set $ServiceName Description "Evermatter MCP server"
 Set-NssmEnvironment -Map (ConvertTo-ExomemPublishedSettings -Map $serviceEnv -Source ".env")
 
 if ($existingTransition) {

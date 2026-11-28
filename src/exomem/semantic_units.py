@@ -28,6 +28,7 @@ from . import (
     markdown_relations,
     memory_refs,
     semantic_blocks,
+    semantic_kinds,
     semantic_labels,
     semantic_language_registry,
 )
@@ -500,6 +501,11 @@ def structural_occurrences(candidates: SemanticUnitCandidates) -> tuple[Structur
     return tuple(sorted((*rich, *compact), key=lambda item: (item.span.start_offset, item.form)))
 
 
+def candidate_occurrence_keys(candidates: SemanticUnitCandidates) -> frozenset[str]:
+    """Keep the neutral sidecar identities without retaining their text."""
+    return frozenset(occurrence.key for occurrence in structural_occurrences(candidates))
+
+
 @dataclass(frozen=True, slots=True)
 class UnitStructure:
     """Selected summary facts and public identity; source text is absent."""
@@ -762,12 +768,13 @@ def interpret_structural_summary(
         )
         emitted.append((rich_rows[block.line], "rich", block.type, category, tuple(block.relations)))
     ranges = tuple((block.line, block.end_line) for block in rich.blocks)
+    compact_kind = semantic_kinds.compact_kind()
     for item in _outside_rich_ranges(summary["compact"], ranges, line=lambda row: row["line"]):
         category, _ = _selected_category(
-            item["category_raw"], item["category_key"], form="compact", kind="observation",
+            item["category_raw"], item["category_key"], form="compact", kind=compact_kind,
             explicit=True, language=language_registry, project=project, page_type=page_type,
         )
-        emitted.append((item, "compact", "observation", category, ()))
+        emitted.append((item, "compact", compact_kind, category, ()))
     emitted.sort(key=lambda entry: (entry[0]["start_offset"], entry[1]))
     if not definitions_available:
         safe = _core_safe_keys(summary, emitted)
@@ -1650,6 +1657,7 @@ def _parse_compact_units(
     units: list[SemanticUnit],
     errors: list[SemanticUnitDiagnostic],
 ) -> None:
+    kind = semantic_kinds.compact_kind()
     fence_char: str | None = None
     fence_length = 0
     for line in lines:
@@ -1711,9 +1719,9 @@ def _parse_compact_units(
         units.append(
             SemanticUnit(
                 form="compact",
-                kind="observation",
-                kind_raw="observation",
-                kind_key="observation",
+                kind=kind,
+                kind_raw=kind,
+                kind_key=kind,
                 category_raw=label,
                 category_key=category_key,
                 category=category_key,

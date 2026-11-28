@@ -76,7 +76,10 @@ def warm_retrieval_catalog(vault_root: Path) -> bool:
     boot waits for that same owner, preserving its synchronous rollback contract
     without introducing a second rebuild path.
     """
-    from . import freshness, lexstore, readiness
+    from . import find_corpus, freshness, lexstore, readiness
+
+    if find_corpus.store_serves(vault_root):
+        return prove_store_retrieval(vault_root)
 
     if not lexstore.maintained_content_index_enabled():
         # Explicit Python mode and SQLite builds without FTS retain the supported
@@ -480,6 +483,16 @@ def warm_store_reads(vault_root: Path) -> None:
         except find.RetrievalIndexWarming:
             # No recall resolver yet: the first restricted read groups the names itself, as now.
             return
+
+
+def prove_store_retrieval(vault_root: Path) -> bool:
+    """Publish a current store proof without involving the file repair owner."""
+    from . import lexstore, readiness
+
+    generation = readiness.retrieval_proof_generation()
+    if not lexstore.runtime_retrieval_catalog_current(vault_root, schedule_repair=False):
+        return False
+    return readiness.admit_retrieval_proof(generation) or readiness.is_ready("retrieval_catalog")
 
 
 def warm_all(vault_root: Path) -> dict[str, float]:

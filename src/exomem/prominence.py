@@ -915,7 +915,7 @@ def resolved(surface: str | None = None) -> dict:
         "context": context,
         "contract": CONTRACTS[level].as_dict(gate),
         "levels": list(CANON),
-        "change_with": "exomem prominence <level>",
+        "change_with": "evermatter prominence <level>",
     }
     cadence = _hook_cadence_for_context(context)
     if cadence is not None:
@@ -968,7 +968,7 @@ def _hook_cadence_for_context(context: str) -> dict | None:
         # everything, which would undo the identity-scoped preference the
         # agent-accessible control exists to offer.
         "change_with": (
-            "exomem prominence <level> on the client machine "
+            "evermatter prominence <level> on the client machine "
             "(changes hook cadence only; a saved preference still decides what is served)"
         ),
     }

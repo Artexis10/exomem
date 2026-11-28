@@ -1922,6 +1922,57 @@ def test_only_a_longer_job_timeout_returns_a_file_that_outran_the_watchdog(
     assert store.claim_next() is not None
 
 
+def test_a_crash_blocked_file_returns_on_a_retry_or_once_under_another_release(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(_job(vault))
+
+    def crash(release: str) -> str | None:
+        error, context = media_jobs.crash_verdict(signal_name="SIGSEGV", exit_status=None, release=release)
+        claimed = store.claim_next()
+        assert claimed is not None
+        return store.record_crash_stop(claimed, release=release, stop_limit=3, error=error, context=context)
+
+    pending, crashed = media_jobs.PENDING, media_jobs.CHILD_CRASHED
+    assert [crash("1.0.0") for _ in range(3)] == [pending, pending, crashed]
+    # A start of the release that blocked it leaves it; a retry starts its count again.
+    assert store.recover_crash_blocks("1.0.0", stop_limit=3) == 0
+    assert store.retry() == 1
+    assert [crash("1.0.0") for _ in range(3)] == [pending, pending, crashed]
+    # The first start of another release tries a still-deadly file once more, not three times.
+    assert store.recover_crash_blocks("1.0.1", stop_limit=3) == 1
+    assert crash("1.0.1") == crashed
+    assert store.recover_crash_blocks("1.0.1", stop_limit=3) == 0
+    # Crashes under an earlier release do not count toward a block under a later one.
+    assert store.retry() == 1
+    assert [crash("1.0.1") for _ in range(2)] + [crash("1.0.2") for _ in range(3)] == [
+        pending, pending, pending, pending, crashed]
+
+
+def test_a_crash_blocked_reprocess_names_the_request_that_runs_it_again(vault: Path) -> None:
+    # A retry leaves a reprocess row alone, so telling the person to retry it does nothing.
+    store = media_jobs.MediaJobStore(vault)
+    job = _job(vault)
+    store.enqueue(job)
+    first = store.claim_next()
+    assert first is not None
+    store.complete(first)
+    assert store.request_extraction(job, None, None, reprocess=True) is not None
+    error, context = media_jobs.crash_verdict(signal_name="SIGSEGV", exit_status=None, release="1.0.0")
+    for _ in range(3):
+        claimed = store.claim_next()
+        assert claimed is not None and claimed.reprocess
+        store.record_crash_stop(claimed, release="1.0.0", stop_limit=3, error=error, context=context)
+
+    [row] = media_jobs.status(vault)["jobs"]
+    assert (row["state"], row["retryable"]) == (media_jobs.BLOCKED, False)
+    assert row["next_action"] == (
+        "a new Evermatter release retries the file by itself; to try it sooner, reprocess the file again"
+    )
+    assert store.retry() == 0
+    assert store.request_extraction(job, None, None, reprocess=True) is not None
+    assert media_jobs.status(vault)["jobs"][0]["state"] == media_jobs.PENDING
+
+
 def test_a_memory_blocked_return_keeps_the_files_watchdog_count(vault: Path) -> None:
     # The watchdog bounds a file at the stop limit times the timeout. A file that also
     # meets memory pressure must not get a fresh count each time it returns from it.

@@ -77,7 +77,7 @@ def test_happy_path_human_output() -> None:
     assert any(line.startswith("3. get retrieval insight: PASS") for line in lines)
     assert any(line.startswith("4. audit: PASS") for line in lines)
     assert any("demo PASS" in line for line in lines)
-    assert any("exomem setup" in line for line in lines)
+    assert any("evermatter setup" in line for line in lines)
 
 
 def test_cli_dispatch_runs_demo_and_returns_0(capsys: pytest.CaptureFixture) -> None:

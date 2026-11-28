@@ -117,7 +117,7 @@ def _names_a_file(root: Path, raw: str, visible: Callable[[str], bool] | None) -
     from .vault_store import read
 
     stem = raw.removesuffix(".md")
-    with egress.decide_without_receipt():
+    with egress.decide_without_receipt(root):
         for base in ("", managed_join("")):
             for candidate in (f"{base}{raw}", f"{base}{stem}.md"):
                 try:
@@ -152,7 +152,7 @@ def _paths_for_head(
     leading = base64.b32decode((head + "a").upper()).hex()[:8]
     paths: set[str] = set()
     stored = memory_refs.store_owners_by_prefix(root, leading)
-    with egress.decide_without_receipt():
+    with egress.decide_without_receipt(root):
         for owner in _identity_owners(root, serve_stale) if stored is None else stored:
             if not owner.startswith(leading) or page_ids.id_head(owner, "") != head:
                 continue
@@ -279,7 +279,7 @@ def resolve_page(
         else (vault.prior_stem_pages, f"once had the file name \u201c{raw}\u201d")
     )
     if writer_lease.invocation_reads():
-        with egress.decide_without_receipt():
+        with egress.decide_without_receipt(root):
             moved = lineage(root, raw, resolver, visible=visible)
     if len(moved) > 1 and prefer is not None:
         moved = [path for path in moved if prefer(path)] or moved
@@ -288,7 +288,7 @@ def resolve_page(
     if moved:
         return resolve_reference(root, moved[0], serve_stale=serve_stale)
     key = vault.title_key(raw)
-    with egress.decide_without_receipt():
+    with egress.decide_without_receipt(root):
         matches = vault.wikilink_candidates(
             resolver.candidates_by_key,
             resolver.titles.get(key, ()),
@@ -358,7 +358,8 @@ def stale_edit(
         guard = {name: guard}
     return OpError(
         "STALE_EDIT",
-        f"The page changed since that id was issued; its current id is {current.id}.",
+        f"The page changed since that id was issued. Its current id is {current.id}. "
+        "Read the page before retrying. Your earlier edit may already be there.",
         details={"retry_with": {path_field: current.id, **guard}},
     )
 

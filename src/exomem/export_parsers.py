@@ -26,29 +26,32 @@ class Parser:
 
     `needs` names the registry attributes, beyond the common ones, that the parser reads; an entry carries all of them and
     no other. `words` is the closed key set of the entry's `words` map, empty for a parser with no such words.
-    `recognise` says whether an open staged file is this parser's container and carries the entry's recognition facts.
+    `recognise` checks for an export container and its recognition facts. The separate sidecar pass checks its own files.
     `read` yields each item from a position, as (position after it, item), and raises `ExportFault` when the container
     ends early or is not what it declared. `workdir` is a hidden folder in the stage where a reader may keep bytes that
-    the expander then moves into place.
+    the expander then moves into place. A parser with no `read` derives no items: its files are read for what they say about
+    other staged files (a Takeout sidecar captions the photo beside it), and `export_sidecars` runs that pass.
     """
 
     needs: frozenset[str]
     words: frozenset[str]
-    recognise: Callable[[BinaryIO, SourceFormat], bool]
-    read: Callable[..., Iterator[ReadItem]]
+    recognise: Callable[[BinaryIO, SourceFormat], bool] | None
+    read: Callable[..., Iterator[ReadItem]] | None
 
 
 # nosemgrep: ep-word-set -- The registry attribute names that a JSON-array parser reads: this module's own schema, not vocabulary.
-_JSON_NEEDS = frozenset({"item_keys", "roles", "attachment"})
+_JSON_NEEDS = frozenset({"item_keys", "item_kind", "untitled", "roles", "attachment"})
 _NO_WORDS: frozenset[str] = frozenset()
 # nosemgrep: ep-word-set -- The registry attribute names that the notes parser reads: this module's own schema, not vocabulary.
-_NOTE_NEEDS = frozenset({"root", "words"})
+_NOTE_NEEDS = frozenset({"root", "item_kind", "untitled", "words"})
 # nosemgrep: ep-word-set -- The display-word keys that the notes parser reads: this module's own schema, not vocabulary.
 _NOTE_WORDS = frozenset({"created", "updated", "tags", "source", "attachments", "extracted", "kept", "cut_short"})
 # nosemgrep: ep-word-set -- The registry attribute names that the mailbox parser reads: this module's own schema, not vocabulary.
-_MAIL_NEEDS = frozenset({"label_header", "skip_labels", "words"})
+_MAIL_NEEDS = frozenset({"label_header", "item_kind", "untitled", "skip_labels", "words"})
 # nosemgrep: ep-word-set -- The display-word keys that the mailbox parser reads: this module's own schema, not vocabulary.
 _MAIL_WORDS = frozenset({"attachments", "extracted", "kept", "cut_short"})
+# nosemgrep: ep-word-set -- The registry attribute names that the photo-sidecar parser reads: this module's own schema, not vocabulary.
+_PHOTO_NEEDS = frozenset({"item_keys", "suffix_word", "sidecar_name_limit", "media_name_limit", "replaced"})
 
 #: The parser of each closed `parser` value; the keys are the only values that the `source-formats` registry accepts.
 PARSERS: Mapping[str, Parser] = {
@@ -56,9 +59,17 @@ PARSERS: Mapping[str, Parser] = {
     "claude-conversations": Parser(_JSON_NEEDS, _NO_WORDS, export_transcripts.recognise_json, export_transcripts.read),
     "evernote-notes": Parser(_NOTE_NEEDS, _NOTE_WORDS, export_notes.recognise, export_notes.read),
     "gmail-mbox": Parser(_MAIL_NEEDS, _MAIL_WORDS, export_mail.recognise, export_mail.read),
+    "photo-sidecar": Parser(_PHOTO_NEEDS, _NO_WORDS, None, None),
 }
 
 
+def derives(fmt: SourceFormat) -> bool:
+    """Whether the entry's parser derives items from its files, as the other parsers do; a sidecar parser derives none."""
+    return PARSERS[fmt.parser].read is not None
+
+
 def read(fmt: SourceFormat, stream: BinaryIO, *, start: int, workdir: Path) -> Iterator[ReadItem]:
-    """Each item of the export from `start`, through the parser that its entry names."""
-    return PARSERS[fmt.parser].read(fmt, stream, start=start, workdir=workdir)
+    """Each item of the export from `start`, through the parser that its entry names; the entry's parser must derive items."""
+    reader = PARSERS[fmt.parser].read
+    assert reader is not None, f"{fmt.parser} derives no items"
+    return reader(fmt, stream, start=start, workdir=workdir)

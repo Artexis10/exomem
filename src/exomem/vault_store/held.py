@@ -187,7 +187,7 @@ def resolve_held(
         raise OpError(
             read.NOT_ACTIVE,
             "this vault is not in store mode, so it holds no held items",
-            "Resolve held items only in a vault that `exomem store-mode` has migrated.",
+            "Resolve held items only in a vault that `evermatter store-mode` has migrated.",
         )
     if ownership.classify(rel) is not ownership.Ownership.PAGE:
         raise OpError(

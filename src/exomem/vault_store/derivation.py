@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, TypeVar
 from .. import find, foreground_priority, media_capacity, writer_lease
 from ..cli_ops import OpError
 from ..collection_store import connection
-from . import derive, mode, read, rederive, resident_catalogue
+from . import dependency_pass, derive, mode, read, rederive, resident_catalogue
 
 if TYPE_CHECKING:
     from ..collection_store.writer import CollectionWriter
@@ -591,6 +591,7 @@ class Drained:
     failed: int = 0
     stopped: bool = False
     cut: bool = False
+    dependency_batches: int = 0
 
 
 def drain(
@@ -610,16 +611,26 @@ def drain(
     """
     root = Path(root)
     result = Drained()
+    next_dependency_cost = 0.0
+    yielded = False
     with _UNADVANCED_LOCK:
         _OWED.pop(root, None)
     with scope(root):
         _advance(root, writer)
         while not result.stopped and (deadline is None or time.monotonic() < deadline):
+            if deadline is not None and time.monotonic() + next_dependency_cost >= deadline:
+                yielded = True
+                break
             try:
                 batch = _next_batch(writer, from_revision)
                 if not batch:
                     break
-                if _derive(root, writer, batch, result) or len(batch) == 1:
+                began, dependency_batches = time.monotonic(), result.dependency_batches
+                completed = _derive(root, writer, batch, result)
+                if result.dependency_batches != dependency_batches:
+                    # Leave enough of this slice for one more transaction before starting it.
+                    next_dependency_cost = max(next_dependency_cost, time.monotonic() - began)
+                if completed or len(batch) == 1:
                     continue
                 for position, intent in enumerate(batch):
                     if result.stopped or (position and deadline is not None and time.monotonic() >= deadline):
@@ -628,7 +639,7 @@ def drain(
             except connection.CollectionStoreError:
                 result.stopped = True
     due_now = _owe_remaining(root, writer, stopped=result.stopped)
-    result.cut = due_now and deadline is not None and time.monotonic() >= deadline
+    result.cut = due_now and deadline is not None and (yielded or time.monotonic() >= deadline)
     return result
 
 
@@ -684,7 +695,7 @@ def _next_batch(writer: CollectionWriter, from_revision: int = 0) -> list[_Inten
     ).fetchone()
     if first is None:
         return []
-    if first[3] > 0:
+    if first[3] > 0 or dependency_pass.for_intents(writer.connection, [(first[0], first[1])]):
         return [_Intent(*first)]
     rows = writer.connection.execute(
         f"SELECT {_INTENT_COLUMNS} FROM store_derivation_queue WHERE {_DUE} "
@@ -692,26 +703,37 @@ def _next_batch(writer: CollectionWriter, from_revision: int = 0) -> list[_Inten
         (_stamp(_now()), from_revision, BATCH_PAGES + 1),
     ).fetchall()
     intents = [_Intent(*row) for row in rows]
-    if len(intents) <= BATCH_PAGES:
-        return intents
-    # Whole revisions only, so that one transaction never derives half of a commit's pages; a single
-    # revision larger than the bound runs whole.
-    last = intents[BATCH_PAGES].revision
-    whole = [intent for intent in intents[:BATCH_PAGES] if intent.revision != last]
-    if whole:
-        return whole
-    rows = writer.connection.execute(
-        f"SELECT {_INTENT_COLUMNS} FROM store_derivation_queue WHERE {_DUE} "
-        "AND attempts = 0 AND revision = ? ORDER BY path",
-        (_stamp(_now()), last),
-    ).fetchall()
-    return [_Intent(*row) for row in rows]
+    if len(intents) > BATCH_PAGES:
+        # Whole revisions only. A single revision larger than the bound still runs whole.
+        last = intents[BATCH_PAGES].revision
+        intents = [intent for intent in intents[:BATCH_PAGES] if intent.revision != last]
+        if not intents:
+            rows = writer.connection.execute(
+                f"SELECT {_INTENT_COLUMNS} FROM store_derivation_queue WHERE {_DUE} "
+                "AND attempts = 0 AND revision = ? ORDER BY path",
+                (_stamp(_now()), last),
+            ).fetchall()
+            intents = [_Intent(*row) for row in rows]
+    cursors = dependency_pass.for_intents(writer.connection, [(it.path, it.revision) for it in intents])
+    if cursors:
+        first_cursor = min(cursor.revision for cursor in cursors.values())
+        ready = [intent for intent in intents if intent.revision < first_cursor]
+        if ready:
+            return ready
+        # A failed page can retry alongside a cursor from the same original revision.
+        return [next(intent for intent in intents if intent.path in cursors)]
+    return intents
 
 
 def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: Drained) -> bool:
     """Derive ``batch`` in one transaction; on failure record it against each intent and return False."""
     from . import write
 
+    if len(batch) == 1:
+        [intent] = batch
+        cursor = dependency_pass.for_intents(writer.connection, [(intent.path, intent.revision)]).get(intent.path)
+        if cursor is not None:
+            return _derive_dependency_pass(root, writer, intent, cursor, result)
     started = False
     try:
         # Close the transaction before releasing capacity, including on rollback, as a commit does. A
@@ -739,10 +761,14 @@ def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: 
                 tx, root, written=written, removed=removed, refreshed=refreshed,
                 before=before, prepared_lexical=prepared, reserve_graph=reserve_graph,
                 metered=frozenset(metered),
+                dependency_revisions={intent.path: intent.revision for intent in batch},
+                dependency_limit=BATCH_PAGES,
             )
             settle()
+            completed = [intent.path for intent in batch if intent.path not in delta.pending_dependencies]
+            dependency_pass.discard(tx, completed)
             tx.executemany(
-                "DELETE FROM store_derivation_queue WHERE path = ?", [(intent.path,) for intent in batch]
+                "DELETE FROM store_derivation_queue WHERE path = ?", [(path,) for path in completed]
             )
             revision = row[1] + 1
             tx.execute("UPDATE store_mode SET revision = ? WHERE id = 1", (revision,))
@@ -757,6 +783,45 @@ def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: 
     # After the transaction: a reader that meets the advanced catalogue must see this revision.
     resident_catalogue.remember(root, after, delta.catalogue)
     find.on_store_commit(root, before, after, delta.entries, delta.deleted, ())
+    _signal()
+    return True
+
+
+def _derive_dependency_pass(
+    root: Path, writer: CollectionWriter, intent: _Intent,
+    cursor: dependency_pass.DependencyPass, result: Drained,
+) -> bool:
+    """Commit a cursor and its graph rows together. The page's receipt covers both phases."""
+    started = False
+    try:
+        with writer.handle.transaction(collection_free=True) as tx:
+            started = True
+            mode_row = tx.execute("SELECT mode, revision FROM store_mode WHERE id = 1").fetchone()
+            if mode_row is None or mode_row[0] != mode.STORE_MODE:
+                result.stopped = True
+                return True
+            before = read.vault_triple(tx, mode_row[1])
+            completed = derive.resume_dependencies(tx, root, before, cursor, limit=BATCH_PAGES)
+            if completed:
+                dependency_pass.discard(tx, [intent.path])
+                tx.execute("DELETE FROM store_derivation_queue WHERE path = ?", (intent.path,))
+            elif intent.failed_code is not None:
+                tx.execute(
+                    "UPDATE store_derivation_queue SET attempts = 0, retry_at = NULL, failed_code = NULL WHERE path = ?",
+                    (intent.path,),
+                )
+            revision = mode_row[1] + 1
+            tx.execute("UPDATE store_mode SET revision = ? WHERE id = 1", (revision,))
+            after = read.vault_triple(tx, revision)
+    except Exception as error:  # noqa: BLE001 - Retry the receipt that owns the interrupted cursor.
+        if not started:
+            raise
+        _record_failure(writer, [intent], error, result)
+        return False
+    result.batches += 1
+    resident_catalogue.advance(root, before, after)
+    find.on_store_commit(root, before, after, (), (), ())
+    result.dependency_batches += 1
     _signal()
     return True
 

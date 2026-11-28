@@ -41,7 +41,7 @@ vault: /tmp/exomem-demo-XXXXXX
 4. audit: PASS (0.0s)
 
 demo PASS — total 1.0s. This is your proof: agents search files you own.
-Next: connect your own vault with `exomem setup`
+Next: connect your own vault with `evermatter setup`
 ```
 
 Runs fully local and read-only against a sample vault bundled in the package.
@@ -61,7 +61,7 @@ curl -fsSL https://raw.githubusercontent.com/substrate-systems/evermatter/main/s
 irm https://raw.githubusercontent.com/substrate-systems/evermatter/main/scripts/install.ps1 | iex
 ```
 
-Either one installs `uv`, installs Evermatter, and walks you through `exomem setup`,
+Either one installs `uv`, installs Evermatter, and walks you through `evermatter setup`,
 which wires up **every agent client on the machine** — Claude Code and Codex both
 get the MCP server, all ten skills, and the capture/retrieve hooks.
 
@@ -86,16 +86,16 @@ Then choose the route. If you already run Evermatter as a service for phone or
 hosted access, reuse that one authenticated core:
 
 ```bash
-exomem setup --vault "/path/to/vault" --mcp-url https://<host>/mcp
+evermatter setup --vault "/path/to/vault" --mcp-url https://<host>/mcp
 ```
 
-For local-only use, run `exomem setup --vault "/path/to/vault" --stdio`.
+For local-only use, run `evermatter setup --vault "/path/to/vault" --stdio`.
 Stdio is intentionally explicit because each client session owns its process
 and can load its own embedding runtime.
 
 The plugin was called `exomem` before the rename, and the marketplace keeps that name.
-Claude Code moves an installed `exomem` plugin to `evermatter` on its own and tells you once.
-For a plugin from Git, run `/plugin install evermatter@exomem` once to finish the move.
+Claude Code moves the plugin settings from `exomem` to `evermatter`.
+If Claude Code reports that `evermatter` is not cached, run `/plugin install evermatter@exomem`.
 Then run `/reload-plugins` or restart Claude Code before you rerun setup.
 
 The plugin's server key changed from `exomem` to `evermatter` too. Claude Code stores a
@@ -161,7 +161,7 @@ Neither platform can install skills programmatically — upload is manual. Build
 the archives, then upload them in the client's settings:
 
 ```bash
-exomem package-skills          # writes dist/skills/*.zip (all ten)
+evermatter package-skills          # writes dist/skills/*.zip (all ten)
 ```
 
 Point the client at your server as a connector (see
@@ -172,14 +172,14 @@ hook system, so capture there is skill-driven rather than automatic.
 
 ```bash
 uv tool install evermatter==<version>
-exomem setup --vault "/path/to/your/Obsidian"
+evermatter setup --vault "/path/to/your/Obsidian"
 ```
 
 Replace `<version>` with the newest release on
 [PyPI](https://pypi.org/project/evermatter/). An existing install named `exomem`
 keeps upgrading under that name: rerun the one-line installer or
 `uv tool upgrade exomem`, and do not install `evermatter` beside it.
-`exomem --version --json` is a model-free provenance check, so it also works in
+`evermatter --version --json` is a model-free provenance check, so it also works in
 the intentional lean CLI paired with a fuller managed service.
 
 One command does the whole local setup: the wizard scans your vault and shows
@@ -208,10 +208,10 @@ existing files stay untouched unless you explicitly copy or compile selected mat
 [QUICKSTART.md § Already have a vault full of notes?](QUICKSTART.md#already-have-a-vault-full-of-notes)
 for the full contract, including daily-notes vaults. Re-running `setup` is
 safe; completed steps report `[skipped]`. Non-interactive:
-`exomem setup --yes --vault "/path" --lean` (add `--learning-instruction` to
+`evermatter setup --yes --vault "/path" --lean` (add `--learning-instruction` to
 place the learning instruction as well).
 
-The individual steps (`exomem init` / `doctor` / `install-skill` /
+The individual steps (`evermatter init` / `doctor` / `install-skill` /
 `install-hook`, plus `claude mcp add`) still exist as the manual path — see
 [QUICKSTART.md](QUICKSTART.md).
 
@@ -232,7 +232,7 @@ retrieved KB content (`EVERMATTER_RETRIEVE_INJECT=1`, opt-in; the legacy
 `EVERMATTER_RETRIEVE_INJECT=working_set`, to a compiled `recall_context` packet
 under a data header, bounded by `EVERMATTER_RETRIEVE_INJECT_MAX_CHARS` (default
 4,000). For Codex, run
-`exomem install-hook --client codex`; for Claude Code, `exomem install-hook` —
+`evermatter install-hook --client codex`; for Claude Code, `evermatter install-hook` —
 see
 [QUICKSTART.md § 7](QUICKSTART.md#7-recommended-make-the-kb-automatic-both-directions).
 Both clients checkpoint on manual or automatic `PreCompact` and reinject on
@@ -247,7 +247,7 @@ also teaches the authoring loop: search first, draft the typed note, run
 report the path.
 
 How eagerly it does that is tunable: four prominence levels (`off` / `light` /
-`balanced` / `maximal`), set with `exomem prominence <level>` or pasted into a web
+`balanced` / `maximal`), set with `evermatter prominence <level>` or pasted into a web
 assistant's custom instructions. Clients with hooks default to `balanced`; web and
 hosted default to `maximal`, because nothing there re-arms the check between turns.
 See [docs/prominence.md](docs/prominence.md) for the levels and the copy-paste
@@ -264,10 +264,10 @@ in [docs/remote-quickstart.md](docs/remote-quickstart.md) and
 
 Remote OAuth uses GitHub once to prove the configured login plus immutable user
 ID, then issues an Evermatter-owned durable session. Operators can inspect and revoke
-those sessions with `exomem auth sessions`, `exomem auth revoke <session-id>`,
-and `exomem auth revoke --all`; session administration is never an MCP tool.
+those sessions with `evermatter auth sessions`, `evermatter auth revoke <session-id>`,
+and `evermatter auth revoke --all`; session administration is never an MCP tool.
 
-The product model is intentionally simple: built-in AI memory remembers preferences and routing, while Evermatter stores durable governed knowledge with sources, proof, history, decisions, records, and review. See [docs/product-model.md](docs/product-model.md) for the full mental model, [docs/records.md](docs/records.md) for human-owned longitudinal Records, [docs/tui.md](docs/tui.md) for the interactive terminal UI (`exomem tui`, optional `tui` extra), [docs/review-studio.md](docs/review-studio.md) for the packaged browser review loop, [docs/epistemic-inbox.md](docs/epistemic-inbox.md) for daily review and relation repair, [docs/knowledge-packs.md](docs/knowledge-packs.md) for pack/admin details, and [docs/workflow-skills.md](docs/workflow-skills.md) for the named agent workflows.
+The product model is intentionally simple: built-in AI memory remembers preferences and routing, while Evermatter stores durable governed knowledge with sources, proof, history, decisions, records, and review. See [docs/product-model.md](docs/product-model.md) for the full mental model, [docs/records.md](docs/records.md) for human-owned longitudinal Records, [docs/tui.md](docs/tui.md) for the interactive terminal UI (`evermatter tui`, optional `tui` extra), [docs/review-studio.md](docs/review-studio.md) for the packaged browser review loop, [docs/epistemic-inbox.md](docs/epistemic-inbox.md) for daily review and relation repair, [docs/knowledge-packs.md](docs/knowledge-packs.md) for pack/admin details, and [docs/workflow-skills.md](docs/workflow-skills.md) for the named agent workflows.
 
 For development, or to run the sample vault from a checkout instead of a
 package install:
@@ -276,15 +276,15 @@ package install:
 git clone https://github.com/substrate-systems/evermatter.git
 cd evermatter
 uv sync
-uv run exomem demo
+uv run evermatter demo
 ```
 
 ## Connect your agent
 
 | Client | How |
 | --- | --- |
-| Claude Code | `exomem setup` registers it for you (see above) |
-| Codex CLI | `codex mcp add` plus optional `exomem install-hook --client codex` - see [docs/ai-assistant-guide.md#codex-cli](docs/ai-assistant-guide.md#codex-cli) |
+| Claude Code | `evermatter setup` registers it for you (see above) |
+| Codex CLI | `codex mcp add` plus optional `evermatter install-hook --client codex` - see [docs/ai-assistant-guide.md#codex-cli](docs/ai-assistant-guide.md#codex-cli) |
 | claude.ai or hosted chat | Remote MCP/connector - see [docs/remote-quickstart.md](docs/remote-quickstart.md) and [docs/ai-assistant-guide.md#hosted-chat-clients](docs/ai-assistant-guide.md#hosted-chat-clients) |
 | Any MCP client | Generic stdio config - see below and [docs/ai-assistant-guide.md#generic-stdio-mcp-clients](docs/ai-assistant-guide.md#generic-stdio-mcp-clients); call `read_instructions()` first |
 | Docker (no Python) | One `docker run` line — see below and [docs/docker.md](docs/docker.md) |
@@ -299,13 +299,13 @@ codex mcp add exomem --env EVERMATTER_VAULT_PATH="/path/to/vault" -- exomem --tr
 Optional local hooks, using the same Evermatter scripts as Claude Code:
 
 ```bash
-exomem install-hook --client codex
+evermatter install-hook --client codex
 ```
 
 Verify deployed Claude Code/Codex hooks without changing anything:
 
 ```bash
-exomem install-hook --check
+evermatter install-hook --check
 ```
 
 For the `AGENTS.md` instruction block and the "do not search every tiny prompt"
@@ -359,13 +359,13 @@ vault should usually prefer the native install (WSL2 bind mounts miss live
 file-watch events). macOS cannot serve a vault today: exomem's held-filesystem
 substrate, which every governed write acquires a reserved-path root through, has
 a Linux backend and a Windows backend and no darwin implementation, so `exomem`
-refuses there and `exomem doctor` says why.
+refuses there and `evermatter doctor` says why.
 
 </details>
 
 The first start downloads search models in the background — `find` works
 immediately with keyword ranking and upgrades to semantic search automatically
-once the models land. Run `exomem warm` to pre-download them ahead of time.
+once the models land. Run `evermatter warm` to pre-download them ahead of time.
 
 ## Resource modes
 
@@ -373,16 +373,16 @@ Evermatter is CPU-first by default so an idle server does not quietly occupy GPU
 memory. Control the machine footprint without editing code:
 
 ```bash
-exomem mode quiet          # low-resource: no heavy warm-up, evict caches, defer semantic reindex
-exomem mode normal         # default: CPU steady-state, warm CPU caches allowed
-exomem mode performance    # explicit opt-in for GPU-capable bulk/model work
-exomem status --resources --json
+evermatter mode quiet          # low-resource: no heavy warm-up, evict caches, defer semantic reindex
+evermatter mode normal         # default: CPU steady-state, warm CPU caches allowed
+evermatter mode performance    # explicit opt-in for GPU-capable bulk/model work
+evermatter status --resources --json
 ```
 
 Use `quiet` before gaming or other foreground workloads. Keyword/BM25 freshness,
 file-change freshness, inbound links, and resolver state stay live; expensive
 semantic/CLIP reindex work can be deferred and is reported in resource status.
-Run `exomem index` or `kb reconcile` later to heal deferred semantic work.
+Run `evermatter index` or `kb reconcile` later to heal deferred semantic work.
 
 Automatic quiet switching is optional. Its watcher skips GPU pressure queries
 when you select `quiet` manually, pin a mode with `EVERMATTER_MODE`, or disable
@@ -574,7 +574,7 @@ The server reads environment variables or a `.env` file. The main ones are:
 | `EVERMATTER_MODE` | Hard-pin resource mode: `quiet`, `normal`, or `performance`. Env wins over config. |
 | `EVERMATTER_QUIET_MODE` | Legacy truthy alias for `quiet` when `EVERMATTER_MODE` is unset. |
 | `EVERMATTER_AUTO_QUIET` | `1` enables optional non-torch GPU-pressure auto-quiet switching (default off). |
-| `EVERMATTER_DEVICE` / `EVERMATTER_TORCH_DEVICE` | Force all torch models to `cuda`, `mps`, or `cpu`. Normally leave unset and use `exomem mode`. |
+| `EVERMATTER_DEVICE` / `EVERMATTER_TORCH_DEVICE` | Force all torch models to `cuda`, `mps`, or `cpu`. Normally leave unset and use `evermatter mode`. |
 | `EVERMATTER_MPS_FP16` | On Apple Silicon, run bge/CLIP in fp16 on the Metal GPU — ~half the memory, faster encodes (default on; set `0` to keep fp32). |
 | `EVERMATTER_VIDEO_SCENE_FRAMES` | Set to enable video scene detection + persisted, OCR'd scene-frame JPEGs (default off). |
 | `EVERMATTER_VIDEO_SCENE_THRESHOLD` | Scene-boundary hash threshold in bits of 64 (default 10). |
@@ -591,7 +591,7 @@ The server reads environment variables or a `.env` file. The main ones are:
 
 `EVERMATTER_CLAIM_NLI_MODEL` is **retired**. Model identity comes only from the
 in-repo pin registry; a value left in it selects nothing and is reported as
-ignored by `exomem doctor`.
+ignored by `evermatter doctor`.
 
 The shipped pin is the multilingual
 [`MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7`](https://huggingface.co/MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7)
@@ -612,7 +612,7 @@ substitute. What "absent" means, per tier:
 | Semantic search | `--extra embeddings` | Keyword/BM25 retrieval; every surface still answers. |
 | Media extraction | `--extra media` | Server-side OCR/ASR/PDF extraction is skipped; the model-driven upload `text` path still works. |
 | Vector KNN (`sqlite-vec`) | with `embeddings` | Exact in-memory scan over the same vectors; identical results, more work. |
-| Frozen stance verifier | `--extra nli` | Review-queue entries carry **no** model polarity label — never a differently-produced label under the verifier's name. Write responses, rankings, and every other surface are byte-identical to a build with no verifier tier at all; only `exomem doctor` names the absence. The verifier runs only under an exact pinned revision and artifact-manifest digest, a versioned label map, and a green bounded multilingual fixture set, and it labels review-queue entries only. Hosted cells do not install or enable it. |
+| Frozen stance verifier | `--extra nli` | Review-queue entries carry **no** model polarity label — never a differently-produced label under the verifier's name. Write responses, rankings, and every other surface are byte-identical to a build with no verifier tier at all; only `evermatter doctor` names the absence. The verifier runs only under an exact pinned revision and artifact-manifest digest, a versioned label map, and a green bounded multilingual fixture set, and it labels review-queue entries only. Hosted cells do not install or enable it. |
 
 Every setting takes the `EVERMATTER_` prefix. The earlier `EXOMEM_` and `KB_MCP_`
 prefixes still work as aliases, so an existing `.env` or service file needs no
@@ -629,12 +629,14 @@ Remote-only variables and full deployment notes are in
 
 ## Project status
 
-exomem is packaged on PyPI, uses Release Please for versioning, and follows the
-lightweight SemVer policy in [docs/release.md](docs/release.md). The public CLI
-entry point is `exomem`; `kb` is the short daily-driver alias for knowledge-base
-operations.
+Evermatter is packaged on PyPI and follows the version policy in
+[docs/release.md](docs/release.md). Run `evermatter` to use the CLI. Existing
+scripts can still use `exomem` or `kb`.
 
 ## License
+
+[Release v0.202.0](docs/licensing/licence-change.md) renamed Exomem to Evermatter
+and changed the licence for the server, CLI and container images to FSL-1.1-ALv2.
 
 The server, CLI and everything not listed below, except third-party files that carry their own
 licence, are source-available under the

@@ -1,6 +1,6 @@
 ## Context
 
-`make-vault-store-canonical` makes one SQLite store canonical for a vault's page bytes. Its stage 2 (D10) adds one store row per semantic unit and stores typed relationships as rows. A unit's reference (`unit_ref`) is its anchor when it carries one, or else a reference bound to a fingerprint of its text. A fingerprint-bound reference changes with every edit of the unit. So when a unit becomes either end of its first stored relationship, stage 2 writes an anchor into it. A stored relationship keys on a store-assigned unit id, and a table maps each anchored unit to that id.
+`make-vault-store-canonical` makes one SQLite store canonical for a vault's page bytes. Its stage 2 (D10) reuses the unit projections and stores typed relationships as rows. A unit's reference (`unit_ref`) is its anchor when it carries one, or else a reference bound to a fingerprint of its text. A fingerprint-bound reference changes with every edit of the unit. So when a unit becomes either end of its first stored relationship, stage 2 writes an anchor into it. A stored relationship keys on a store-assigned unit id, and a table maps each anchored unit to that id.
 
 This change extends anchored identity to the other ways that something names a unit. A soft reference that names an unanchored unit gets the unit's anchor, written off the reader's path. Agents change, move and embed a unit by its reference, and the unit carries an anchor afterwards. A page can embed a unit of another page. A reference that the store replaces keeps resolving through an alias.
 
@@ -72,7 +72,7 @@ The store itself writes an anchor into a unit that carries none in three cases o
 2. The unit gains its first embed, in the governed write that adds the embed.
 3. A saved soft reference names the unit. This write is deferred, and A3 runs it.
 
-Cases 1 and 2 write into another page and need write admission on it, under stage 2's rule. This change splits stage 2's requirement "Semantic units are first-class store rows" into three requirements, each under 500 characters. They keep its text word for word, including the one-transaction write of page bytes and unit rows, apart from the list of these three cases.
+Cases 1 and 2 write into another page and need write admission on it, under stage 2's rule. This change splits stage 2's requirement "Semantic units are first-class store rows" into three requirements, each under 500 characters. They keep its distinction between the governed transaction and the derived unit rows. This change expands the set of writes that can add an anchor.
 
 ### A3. A saved soft reference anchors its unit, off the reader's path
 
@@ -169,7 +169,7 @@ This change's build moves the owner-schema version, so the registry pass creates
 
 An earlier build can serve a store that this change has run on. It ignores the two tables, so it follows no alias and anchors no request until this change's build returns. No compatibility id is needed, because an earlier build cannot corrupt either table.
 
-Rollback to file mode drops every owner object, as D8 does. Before it projects, it rewrites every embed and unit-level link that resolves only through an alias to the unit's current reference, as governed writes that commit before the projection drain, so file mode's search and graph answers match the store's, as main's rollback scenario requires. A page that it cannot rewrite, such as an append-only page whose declared pointer write refuses because the moved unit's page has no `exomem_id`, makes the rollback refuse unless `--export-aliased` exports the list of those links beside the vault, as `--export-held` does for held items. It exports the aliases beside the vault with D8's exports, and a later migration loads them. File mode does not follow aliases, so a soft reference to a unit that the anchor job anchored is stale there, as an edited unit's reference is today.
+Rollback to file mode drops every owner object, as D8 does. Before it projects, it rewrites every embed and unit-level link that resolves only through an alias to the unit's current reference, as governed writes that commit before the projection drain, so file mode can match the store's page-derived search and graph answers. A page that it cannot rewrite, such as an append-only page whose declared pointer write refuses because the moved unit's page has no `exomem_id`, makes the rollback refuse unless `--export-aliased` exports the list of those links beside the vault, as `--export-held` does for held items. It exports the aliases with D8's exports. A later migration restores the unit IDs, including IDs for units without stored relationships, before it loads the aliases. File mode does not follow aliases, so a soft reference to a unit that the anchor job anchored is stale there, as an edited unit's reference is today.
 
 ### A10. Scale
 
@@ -224,7 +224,7 @@ Sizes use the store change's pace, the Records and Planning move's, which landed
 
 ## Migration Plan
 
-1. The owner's vault switches to store mode, then stage 2 ships and the vault runs it.
+1. The owner's vault switches to store mode and runs the releases for tasks 5.2, 5.5, and 5.6.
 2. This change ships behind its release capability. Its build's registry pass creates the two owner tables and derives every page once.
 3. Soft references start anchoring their units, and unit operations and embeds become available.
 4. A return to an earlier build needs no command. Rollback to file mode follows A9.

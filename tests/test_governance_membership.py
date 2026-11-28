@@ -1303,6 +1303,33 @@ def test_a_scene_frame_keeps_its_own_scopes_and_takes_its_videos(vault: Path) ->
     assert live == snapshot == frozenset({"01ARZ3NDEKTSV4RRFFQ69G5FB2", "01ARZ3NDEKTSV4RRFFQ69G5FB4"})
 
 
+def test_frame_inherits_from_parent_with_canonical_filename(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On case-insensitive filesystems a parent reference can differ from the scoped spelling."""
+    from exomem import find_corpus
+
+    _video_with_a_frame(vault)
+    canonical = Path(_VIDEO).with_name("Clip.mp4.md").as_posix()
+    relative_path = find_corpus.page_relative_path
+
+    def use_canonical_case(path: Path, root: Path) -> str:
+        relative = relative_path(path, root)
+        return canonical if relative == _VIDEO else relative
+
+    monkeypatch.setattr(find_corpus, "page_relative_path", use_canonical_case)
+    scope_id = "01ARZ3NDEKTSV4RRFFQ69G5FB2"
+    _write_scope(vault, "parent", f'governance_version: 1\nid: {scope_id}\npaths: ["{canonical}"]\n')
+    frame = _parse(vault, _VIDEO_FRAME)
+    compiled = policy.load(vault)
+
+    assert frame.snapshot_hash is not None
+    assert membership.evaluate(frame, compiled) == {scope_id}
+    assert membership.evaluate_snapshot(
+        frame, compiled, content_hash=frame.snapshot_hash,
+    ) == {scope_id}
+
+
 def test_a_page_that_claims_a_video_parent_keeps_its_own_scopes(vault: Path) -> None:
     _write_page(vault, "Knowledge Base/Notes/public.md", "type: insight")
     _write_page(

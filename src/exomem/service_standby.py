@@ -673,9 +673,11 @@ def prove_retrieval_catalog(vault_root: Path) -> bool:
     rebuild the whole catalogue while ingress waits. A build that ran and
     failed falls back to this proof, which is as good as this standby can do.
     """
-    from . import freshness, lexstore
+    from . import find_corpus, freshness, lexstore
 
     try:
+        if find_corpus.store_serves(vault_root):
+            return lexstore.runtime_retrieval_catalog_current(vault_root, schedule_repair=False)
         if not lexstore.maintained_content_index_enabled():
             # No maintained content index to prove; nothing gates retrieval.
             return True
@@ -719,10 +721,10 @@ def prepare_detached_catalog(vault_root: Path) -> bool:
     publishes.
     """
     global _detached_catalog, _detached_built, _detached_attempted
-    from . import freshness, lexstore
+    from . import find_corpus, freshness, lexstore
 
     try:
-        if not lexstore.maintained_content_index_enabled():
+        if find_corpus.store_serves(vault_root) or not lexstore.maintained_content_index_enabled():
             return False
         vault_root = Path(vault_root)
         assessment = lexstore.assess_live_catalog(

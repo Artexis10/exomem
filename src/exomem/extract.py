@@ -52,7 +52,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from . import accel, asr_runtime, capture_metadata, diarizer_sidecar, runtime_resources
+from . import (
+    accel,
+    asr_runtime,
+    capture_metadata,
+    diarizer_sidecar,
+    runtime_resources,
+    speech_tracks,
+)
 from .asr_facts import (
     DECODING_BATCHED,
     DECODING_SEQUENTIAL,
@@ -77,6 +84,7 @@ from .media_types import (
     media_type_for as _registry_media_type_for,
 )
 from .ocr_facts import OcrFacts
+from .speech_tracks import Track
 
 if TYPE_CHECKING:
     from .ocr_models import OcrReading
@@ -246,6 +254,7 @@ def extract_text(
     language: str | None = None,
     multilingual: bool = False,
     diarize: bool | None = None,
+    tracks: object = None,
 ) -> ExtractResult:
     """Extract text from a media file. Raises ExtractionUnavailable if no engine fits/installed.
 
@@ -259,6 +268,11 @@ def extract_text(
 
     `diarize` requests or skips speaker labeling for this audio or video item. An omitted
     choice uses the deployment default.
+
+    `tracks` declares the recording's separate microphones, a list of `{name, stream, channel,
+    single_voice}` (`speech_tracks.declaration`). Without it, published fields that the speech
+    data maps to a microphone decide; the shipped data maps none, so the file is read as one mix
+    from its first audio stream.
     """
     p = Path(path)
     mt = media_type or media_type_for(p)
@@ -270,6 +284,8 @@ def extract_text(
             options["multilingual"] = True
         if diarize is not None:
             options["diarize"] = diarize
+        if tracks is not None:
+            options["tracks"] = tracks
         result = _transcribe(p, mt, vault_root=vault_root, **options)
         if mt == "video":
             result.capture = capture_metadata.read(p, mt)
@@ -518,6 +534,7 @@ class TranscriptionBackend(Protocol):
         language: str | None = None,
         multilingual: bool = False,
         report: AsrFacts | None = None,
+        track: Track | None = None,
     ) -> tuple[Iterable[TranscriptionSegment], str]:
         """Transcribe `path` → ``(segments, engine_label)``.
 
@@ -526,6 +543,8 @@ class TranscriptionBackend(Protocol):
         to force instead of detecting one. ``multilingual`` detects the language per
         decoding window, and a backend that cannot raises `MultilingualUnsupported`.
         ``report`` receives what the engine decided once the segments have been read.
+        ``track`` reads that audio stream or channel alone; only a recording with declared tracks
+        passes it, and without it the backend reads the first audio stream as one mix.
 
         ``segments`` yields objects exposing ``.text`` / ``.start`` / ``.end``;
         ``engine_label`` is the provenance string stored on the sidecar (e.g.
@@ -538,15 +557,18 @@ class TranscriptionBackend(Protocol):
         ...
 
 
-def _decode_audio_float32(path: Path):
+def _decode_audio_float32(path: Path, track: Track | None = None):
     """Mono float32 samples at the speech model's rate, from audio or video, through PyAV.
 
     One decoder serves every backend that decodes for itself; it keeps loud samples
-    unclipped, which faster-whisper's own int16 path does not.
+    unclipped, which faster-whisper's own int16 path does not. A track selects its stream or channel.
     """
     from . import media_models, onnx_asr_runtime
 
-    return onnx_asr_runtime.decode_audio(path, media_models.model_spec("speech")["sample_rate"])
+    rate = media_models.model_spec("speech")["sample_rate"]
+    if track is None:
+        return onnx_asr_runtime.decode_audio(path, rate)
+    return onnx_asr_runtime.decode_audio(path, rate, track.stream, track.channel)
 
 
 def _seconds(value: object) -> float | None:
@@ -619,6 +641,7 @@ class FasterWhisperBackend:
         language: str | None = None,
         multilingual: bool = False,
         report: AsrFacts | None = None,
+        track: Track | None = None,
     ) -> tuple[Iterable[TranscriptionSegment], str]:
         # The policy is data (media_models.json): its VAD makes the language be detected
         # on speech rather than on a quiet opening, and it stops one wrong stretch from
@@ -635,7 +658,7 @@ class FasterWhisperBackend:
                     segments, info, decoding = _start_decoding(
                         model,
                         policy,
-                        _decode_audio_float32(path),
+                        _decode_audio_float32(path) if track is None else _decode_audio_float32(path, track),
                         language=language,
                         multilingual=multilingual,
                     )
@@ -703,15 +726,16 @@ class MlxWhisperBackend:
         language: str | None = None,
         multilingual: bool = False,
         report: AsrFacts | None = None,
+        track: Track | None = None,
     ) -> tuple[Iterable[TranscriptionSegment], str]:
         if multilingual:
             raise MultilingualUnsupported("mlx-whisper")
         mlx_whisper = self._require_mlx()
         # mlx-whisper rejects a code it does not know; with none it detects the language.
         options = {"language": language} if language is not None else {}
-        result = mlx_whisper.transcribe(
-            self._load_audio(path), path_or_hf_repo=MLX_WHISPER_MODEL, **options
-        )
+        # A track needs its own stream or channel, which mlx-whisper's loader cannot select.
+        audio = self._load_audio(path) if track is None else _decode_audio_float32(path, track)
+        result = mlx_whisper.transcribe(audio, path_or_hf_repo=MLX_WHISPER_MODEL, **options)
         if report is not None:
             report.language = result.get("language")
         segments = [_MlxSegment(s) for s in result.get("segments", [])]
@@ -841,6 +865,7 @@ def _transcribe(
     language: str | None = None,
     multilingual: bool = False,
     diarize: bool | None = None,
+    tracks: object = None,
 ) -> ExtractResult:
     # A silent video (no audio stream) can't be transcribed — that's NOT a failure.
     # Return an empty transcript cleanly; its visual content is still searchable via
@@ -848,7 +873,18 @@ def _transcribe(
     if media_type == "video" and not _has_audio_stream(path):
         return ExtractResult(text="", media_type=media_type, engine="no-audio")
     forced, source = _resolve_language(language, multilingual)
-    report = AsrFacts()
+    declared = speech_tracks.resolve(path, tracks).tracks
+    skipped: list[str] = []
+    if declared:
+        result = _transcribe_tracks(
+            path, media_type, declared, vault_root=vault_root, timestamps=timestamps, forced=forced,
+            source=source, multilingual=multilingual,
+            diarize=_diarize_enabled() if diarize is None else diarize, skipped=skipped,
+        )
+        if result is not None:
+            return result
+        log.warning("no declared track of %s is in the file; reading its first audio stream", path.name)
+    report = AsrFacts(tracks_skipped="; ".join(skipped) or None)
     segments, engine = get_transcriber().transcribe(
         path, vault_root=vault_root, language=forced, multilingual=multilingual, report=report
     )
@@ -959,6 +995,149 @@ def _transcribe(
         speaker_verification="unavailable" if diarize else None,
         asr=asr,
     )
+
+
+@dataclass
+class _Heard:
+    """A transcribed segment with the track that heard it; `label_transcript` reads `track` to name the turn."""
+
+    text: str
+    start: float
+    end: float
+    track: str
+
+
+def _diarize_track(path: Path, track: Track, sample_rate: int) -> list[tuple[float, float, str]] | None:
+    """Diarise one track's own audio, or None where diarisation cannot run.
+
+    Writing a track out decodes all of it, so nothing is written where no diarizer is installed.
+    """
+    if _diarizer_sidecar_python() is None:
+        return None
+    try:
+        with tempfile.TemporaryDirectory(prefix="exomem-track-") as scratch:
+            audio = Path(scratch) / "track.wav"
+            speech_tracks.export_wav(path, track, audio, sample_rate)
+            return _run_diarization(audio)
+    except Exception:  # noqa: BLE001 - diarisation must never break extraction (Soft-Fail Degradation)
+        log.warning("diarization failed for track %s of %s; its turns keep the track name", track.key, path.name, exc_info=True)
+        return None
+
+
+def _transcribe_tracks(
+    path: Path,
+    media_type: str,
+    tracks: tuple[Track, ...],
+    *,
+    vault_root: Path | None,
+    timestamps: bool,
+    forced: str | None,
+    source: str,
+    multilingual: bool,
+    diarize: bool,
+    skipped: list[str],
+) -> ExtractResult | None:
+    """Transcribe each declared track on its own and merge the segments by start, named by track.
+
+    A track keeps a segment only where it is the dominant source (`track_dominance`). Labels, where
+    requested, come from diarising each track that is not declared single-voice within itself; where
+    diarisation cannot run the turns still read their track names, and the result says that labels are unavailable.
+
+    A declared track that the file does not have is skipped, and `skipped` and the result's facts say
+    why. None when the file has no declared track, so that the caller reads the recording as one mix.
+    Each track's progress record stays until the worker publishes the transcript: a stop before then
+    transcribes no finished track again.
+    """
+    from . import media_models, track_dominance
+    from .speaker_assignment import Turn, label_transcript
+
+    data = speech_tracks.policy()
+    rate = media_models.model_spec("speech")["sample_rate"]
+    backend = get_transcriber()
+    # Keyed by the audio each track reads: two tracks never read the same audio, whatever their names.
+    heard: dict[str, list[_Heard]] = {}
+    reports: list[AsrFacts] = []
+    engine = ""
+    read: list[Track] = []
+    for track in tracks:
+        report = AsrFacts()
+        try:
+            segments, engine = backend.transcribe(
+                path, vault_root=vault_root, language=forced, multilingual=multilingual, report=report, track=track
+            )
+            heard[track.key] = [_Heard(seg.text, float(seg.start), float(seg.end), track.name) for seg in segments]
+        except speech_tracks.TrackUnavailable as missing:
+            log.warning("track %s of %s skipped: %s", track.key, path.name, missing)
+            skipped.append(f"{track.name}: {missing}")
+            continue
+        read.append(track)
+        reports.append(report)
+    if not read:
+        return None
+    tracks = tuple(read)
+    kept = heard
+    if len(tracks) > 1:
+        try:
+            envelopes = {
+                track.key: track_dominance.envelope(
+                    speech_tracks.audio(path, track, rate, rate * 30), rate, data["energy_hop_seconds"]
+                )
+                for track in tracks
+            }
+            kept = track_dominance.keep_dominant(
+                heard, envelopes, hop_seconds=data["energy_hop_seconds"], margin_db=data["dominance_margin_db"]
+            )
+        except Exception:  # noqa: BLE001 - a measurement that fails must keep every segment, never drop a speaker's words
+            log.warning("track energy unreadable for %s; keeping every track's segments", path.name, exc_info=True)
+    # The sort is stable, so segments that start together keep the order in which the tracks were declared.
+    merged = sorted((segment for track in tracks for segment in kept[track.key]), key=lambda s: (s.start, s.end))
+    turns: list[Turn] = []
+    diarised = unavailable = False
+    for track in tracks if diarize else ():
+        if track.single_voice:
+            continue
+        found = _diarize_track(path, track, rate)
+        if found:
+            diarised = True
+            turns.extend(Turn(start, end, label, track.name) for start, end, label in found)
+        else:
+            unavailable = True
+    facts = _merged_facts(reports)
+    facts.tracks_policy = data["revision"]
+    facts.tracks_skipped = "; ".join(skipped) or None
+    asr = _asr_facts(facts, forced, source, multilingual)
+    engine_label = f"{engine}+tracks"
+    labelled = label_transcript(
+        merged, turns, timed=timestamps or _semantic_segments_enabled(), require_timed=timestamps, description=path.name
+    )
+    verification = "unavailable" if unavailable else ("anonymous" if diarised else None)
+    if labelled is None:
+        text = "[0:00] (no speech detected)" if timestamps else ""
+        return ExtractResult(
+            text=text, media_type=media_type, engine=f"{engine_label}+timed" if timestamps else engine_label,
+            speaker_verification=verification, asr=asr,
+        )
+    text, speakers = labelled
+    timed = _is_timed_text(text)
+    if timestamps and not timed:
+        raise TimestampRenderingUnavailable("timed transcript rendering produced no output")
+    marker = f"{engine_label}{'+timed' if timed else ''}{'+diarized' if diarised and not unavailable else ''}"
+    return ExtractResult(
+        text=text, media_type=media_type, engine=marker, speakers=speakers, speaker_verification=verification, asr=asr,
+    )
+
+
+def _merged_facts(reports: list[AsrFacts]) -> AsrFacts:
+    """One engine report for the recording: the first track's decisions, with its speech and length counted over all tracks."""
+    facts = AsrFacts(**reports[0].as_payload())
+    for other in reports[1:]:
+        if facts.language is None and other.language is not None:
+            facts.language, facts.language_probability = other.language, other.language_probability
+        if other.speech_seconds is not None:
+            facts.speech_seconds = (facts.speech_seconds or 0.0) + other.speech_seconds
+        if other.duration_seconds is not None:
+            facts.duration_seconds = max(facts.duration_seconds or 0.0, other.duration_seconds)
+    return facts
 
 
 def _asr_facts(

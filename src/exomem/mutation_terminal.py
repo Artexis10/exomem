@@ -2689,14 +2689,14 @@ def project_terminal(
             f"({cloud_cell.store_identity()['name']})"
         )
         # An update that dropped relations, a compact observation whose source link went to the
-        # page, or a dated observation that became a rich unit says so where the person reads,
-        # with the repair, the page field or the kind it cites.
+        # page, or a dated observation reports its effect where the person reads the reply.
         if (
             isinstance(leaf, Mapping)
             and (
                 leaf.get("relations_dropped")
                 or leaf.get("relations_cited")
                 or leaf.get("kind_defaulted")
+                or leaf.get("observation_at_end")
             )
             and isinstance(leaf.get("outcome"), str)
         ):
