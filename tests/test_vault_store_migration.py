@@ -859,12 +859,20 @@ def test_rollback_exports_unadmitted_relations_without_restoring_them(
 ):
     from exomem.vault_store import importer
 
+    source_path = ALPHA
+    if not observe:
+        folders = [f"depth-{level}-{'x' * 38}" for level in range(6)]
+        source_path = "/".join(("Knowledge Base", *folders, "Deep.md"))
+        page = vault / source_path
+        page.parent.mkdir(parents=True)
+        page.write_bytes(b"# Deep\n\n- [rule] Check the tide. ^tide\n")
+        build_indexes(vault)
     assert migrate_apply(vault) == 0
-    artifact = relationship_files.path_for(ALPHA)
-    source = relationships.UnitIdentity("outside-id", ALPHA, "tide")
+    artifact = relationship_files.path_for(source_path)
+    source = relationships.UnitIdentity("outside-id", source_path, "tide")
     edge = relationships.Relationship("outside-edge", source.id, "supports", target_page_path=BETA)
     outside = b"".join(relationship_files.lines(
-        ALPHA, 1, (source,), (relationships.BoundRelationship(edge, source, None),),
+        source_path, 1, (source,), (relationships.BoundRelationship(edge, source, None),),
     ))
     file = vault / artifact
     file.write_bytes(outside)
@@ -903,7 +911,8 @@ def test_rollback_exports_unadmitted_relations_without_restoring_them(
         with monkeypatch.context() as editor:
             editor.setattr(_held_fs_posix, "_rename_noreplace", save_during_custody)
             assert rollback_apply(vault, racing, "--export-held") == 1
-        custody_path = json.loads((racing / "export.json").read_bytes())["relations_custody"][artifact]
+        (journal,) = (racing / "relation-projections").glob("*.json")
+        custody_path = json.loads(journal.read_bytes())["custody"]
         error = capsys.readouterr().err
         assert "VAULT_STORE_RELATIONS_CHANGED" in error and custody_path in error
         assert mode.store_mode_active(vault)
@@ -919,6 +928,7 @@ def test_rollback_exports_unadmitted_relations_without_restoring_them(
         assert (exported / "on-disk" / artifact).read_bytes() == on_disk
     custody_path = json.loads((exported / "export.json").read_bytes())["relations_custody"][artifact]
     assert (vault / custody_path).read_bytes() == on_disk
+    assert (vault / custody_path).parent == file.parent
     assert not file.exists()
 
     fresh = tmp_path / "restored" / "vault"
@@ -1017,6 +1027,121 @@ def test_rollback_drains_queued_relationships_with_recoverable_custody(vault, ca
             recovered = relationship_files.parse(encoded)
         assert recovered.canonical_sha256 == hashlib.sha256(new_body).hexdigest()
         assert [edge.id for edge in recovered.relationships] == ["canonical-edge"]
+
+
+@pytest.mark.parametrize("recreated", [False, True], ids=["clean-resume", "editor-recreated"])
+def test_rollback_retries_an_interrupted_final_export(vault, capsys, tmp_path, monkeypatch, recreated):
+    assert migrate_apply(vault) == 0
+    queue_change(vault, relationship_change=relationships.Change(
+        actor="owner",
+        identities=(relationships.UnitIdentity("canonical-id", ALPHA, "tide"),),
+        added=(relationships.Relationship("canonical-edge", "canonical-id", "supports", target_page_path=BETA),),
+    ))
+    queue_writes(vault, (GAMMA, b"# Gamma\n\nAn unrelated note.\n"))
+    with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
+        writer = CollectionWriter(vault, handle)
+        assert not projector.Projector(vault, run=lambda work: work(writer)).run_pass().deferred
+        assert table_rows(handle.connection, "store_projection_queue") == []
+        assert table_rows(handle.connection, "store_held") == []
+
+    alpha = relationship_files.path_for(ALPHA)
+    beta = relationship_files.path_for(BETA)
+    first = (vault / alpha).read_bytes()
+    previous = (vault / beta).read_bytes()
+    outside = previous.replace(b'"revision":', b'"revision": ')
+    assert outside != previous
+    capsys.readouterr()
+    interrupted = tmp_path / "interrupted-final"
+    rename = projector._rename
+
+    def interrupt_second_install(filesystem, old, new, expected, check):
+        if old.endswith(".stage.held") and new == beta:
+            if recreated:
+                (vault / beta).write_bytes(outside)
+            else:
+                raise projector.Deferred("the final replacement was interrupted")
+        return rename(filesystem, old, new, expected, check)
+
+    with monkeypatch.context() as injection:
+        injection.setattr(projector, "_rename", interrupt_second_install)
+        assert rollback_apply(vault, interrupted) == 1
+    entries = [json.loads(entry.read_bytes()) for entry in (interrupted / "relation-projections").glob("*.json")]
+    receipts = {receipt["path"]: receipt for receipt in entries}
+    assert set(receipts) == {alpha, beta} and all(receipt["phase"] == "export" for receipt in entries)
+    prior = vault / receipts[beta]["custody"]
+    staged = vault / receipts[beta]["stage"]
+    intended_beta = staged.read_bytes()
+    error = capsys.readouterr().err
+    assert "VAULT_STORE_RELATIONS_CHANGED" in error and receipts[beta]["custody"] in error
+    assert mode.store_mode_active(vault)
+    assert prior.read_bytes() == previous
+    assert (vault / receipts[alpha]["custody"]).read_bytes() == first
+
+    assert store_mode(vault, "rollback", "--dry-run", operator=False) == 0
+    assert printed(capsys)["needs_export_held"] is recreated
+    complete = tmp_path / "complete-final"
+    first_installed = (vault / alpha).read_bytes()
+    assert first_installed != first
+    if recreated:
+        assert rollback_apply(vault, tmp_path / "needs-consent") == 1
+        assert "VAULT_STORE_HELD_ITEMS" in capsys.readouterr().err
+        assert mode.store_mode_active(vault) and (vault / beta).read_bytes() == outside
+        assert rollback_apply(vault, complete, "--export-held") == 0, capsys.readouterr().err
+        newer = json.loads((complete / "export.json").read_bytes())["relations_custody"][beta]
+        assert (vault / newer).read_bytes() == outside
+        assert (complete / "held" / beta).read_bytes() == outside
+    else:
+        assert not (vault / beta).exists()
+        assert rollback_apply(vault, complete) == 0, capsys.readouterr().err
+    assert not mode.store_mode_active(vault)
+    assert (vault / alpha).read_bytes() == first_installed
+    assert (vault / beta).read_bytes() == intended_beta
+    assert prior.read_bytes() == previous and not staged.exists()
+
+
+def test_rollback_refuses_a_sidecar_recreated_while_finishing_export(vault, capsys, tmp_path, monkeypatch):
+    assert migrate_apply(vault) == 0
+    queue_change(vault, relationship_change=relationships.Change(
+        actor="owner",
+        identities=(relationships.UnitIdentity("canonical-id", ALPHA, "tide"),),
+        added=(relationships.Relationship("canonical-edge", "canonical-id", "supports", target_page_path=BETA),),
+    ))
+    queue_writes(vault, (GAMMA, b"# Gamma\n\n- [rule] Make a record. ^reading\n"))
+    with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
+        writer = CollectionWriter(vault, handle)
+        assert not projector.Projector(vault, run=lambda work: work(writer)).run_pass().deferred
+
+    portable = relationship_files.path_for(ALPHA)
+    unexpected = relationship_files.path_for(GAMMA)
+    file = vault / unexpected
+    source = relationships.UnitIdentity("outside-id", GAMMA, "reading")
+    edge = relationships.Relationship("outside-edge", source.id, "supports", target_page_path=BETA)
+    outside = b"".join(relationship_files.lines(
+        GAMMA, 1, (source,), (relationships.BoundRelationship(edge, source, None),),
+    ))
+    file.write_bytes(outside)
+    late = outside.replace(b"outside-edge", b"later-edge")
+    capsys.readouterr()
+
+    rename = projector._rename
+
+    def recreate_after_custody(filesystem, old, new, expected, check):
+        installed = rename(filesystem, old, new, expected, check)
+        if old.endswith(".stage.held") and new == portable:
+            assert not file.exists()
+            file.write_bytes(late)
+        return installed
+
+    export = tmp_path / "race-final-census"
+    with monkeypatch.context() as editor:
+        editor.setattr(projector, "_rename", recreate_after_custody)
+        assert rollback_apply(vault, export, "--export-held") == 1
+    error = capsys.readouterr().err
+    assert "VAULT_STORE_RELATIONS_CHANGED" in error and unexpected in error
+    assert mode.store_mode_active(vault) and file.read_bytes() == late
+    assert (export / "held" / unexpected).read_bytes() == outside
+    caught = json.loads((export / "export.json").read_bytes())["relations_custody"][unexpected]
+    assert (vault / caught).read_bytes() == outside
 
 
 GAMMA = "Knowledge Base/Notes/Gamma.md"

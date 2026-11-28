@@ -13,11 +13,12 @@ import json
 import os
 import sqlite3
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from contextlib import closing, nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 from .. import epistemic_graph, held_fs, lexstore, memory_refs, state_migration, vault
 from ..cli_ops import OpError
@@ -69,6 +70,8 @@ class Findings:
     deleted_relations: list[str] = field(default_factory=list)
     #: Every portable replacement destination, including a receipt of absence.
     portable_relations: dict[str, projector.OnDisk | None] = field(default_factory=dict)
+    #: Manifest hashes for interrupted final replacements whose live sidecars are absent.
+    resuming_relations: dict[str, str] = field(default_factory=dict)
     #: Managed sidecars whose canonical projection is absence.
     vacated_relations: dict[str, projector.OnDisk | None] = field(default_factory=dict)
 
@@ -96,7 +99,7 @@ def inspect(vault_root: Path, conn: sqlite3.Connection) -> Findings:
             "SELECT path, kind, body FROM store_held ORDER BY path"
         )
     ]
-    (revision,) = conn.execute("SELECT revision FROM store_mode WHERE id = 1").fetchone()
+    revision, changed_at = conn.execute("SELECT revision, changed_at FROM store_mode WHERE id = 1").fetchone()
     view = read.StoreSnapshot(revision, conn)
     vacated: set[str] = set()
     after = ("", "")
@@ -145,7 +148,7 @@ def inspect(vault_root: Path, conn: sqlite3.Connection) -> Findings:
                 found.projected_blocks.append(rel)
             else:
                 (found.deleted if on_disk is None else found.edited).append(rel)
-    _inspect_relations(vault_root, conn, found)
+    _inspect_relations(vault_root, conn, found, revision, _activation_id(conn, changed_at))
     # A held file whose page the store no longer holds.
     for (rel,) in conn.execute(
         "SELECT h.path FROM store_held h "
@@ -159,7 +162,10 @@ def inspect(vault_root: Path, conn: sqlite3.Connection) -> Findings:
     return found
 
 
-def _inspect_relations(root: Path, conn: sqlite3.Connection, found: Findings) -> None:
+def _inspect_relations(
+    root: Path, conn: sqlite3.Connection, found: Findings, revision: int, activation_id: str,
+) -> None:
+    portable: dict[str, tuple[str, str | None]] = {}
     recorded: dict[str, str | None] = {
         rel: digest for rel, digest in conn.execute(
             "SELECT path,sha256 FROM store_manifest WHERE path LIKE '%' || ?",
@@ -168,10 +174,10 @@ def _inspect_relations(root: Path, conn: sqlite3.Connection, found: Findings) ->
     }
     # A dry run can still inspect a store whose writer has yet to install the relationship tables.
     if conn.execute("SELECT 1 FROM sqlite_schema WHERE name = 'store_unit_ids'").fetchone():
-        for source, _ in relationship_files.export_pages(conn):
+        for source, witness in relationship_files.export_pages(conn):
             rel = relationship_files.path_for(source)
             if ownership.relation_source(rel) == source:
-                found.portable_relations[rel] = None
+                portable[rel] = (source, witness)
                 recorded.setdefault(rel, None)
     for rel, _, _ in found.held:
         if ownership.relation_source(rel) is not None:
@@ -181,15 +187,23 @@ def _inspect_relations(root: Path, conn: sqlite3.Connection, found: Findings) ->
             recorded.setdefault(owned.rel, None)
     if not recorded:
         return
+    recovery = _RollbackRelationProjection(None, activation_id, phase="export")
     rel = "the vault's relations folder"
     try:
         with held_fs.acquire(projector.anchor(root)).require() as filesystem:
             for rel, digest in sorted(recorded.items()):
                 receipt = projector.observe(filesystem, rel)
-                vacated = rel not in found.portable_relations
+                vacated = rel not in portable
                 receipts = found.vacated_relations if vacated else found.portable_relations
                 receipts[rel] = receipt
                 on_disk = None if receipt is None else receipt.sha256
+                if not vacated and digest is not None and on_disk != digest:
+                    source, witness = portable[rel]
+                    with relationship_files.prepare_file(conn, source, revision, canonical_sha256=witness) as artifact:
+                        if artifact is not None and recovery.owns_replacement(filesystem, rel, artifact, digest, on_disk):
+                            if receipt is None:
+                                found.resuming_relations[rel] = digest
+                            continue
                 if on_disk != digest or (vacated and receipt is not None):
                     (found.deleted_relations if on_disk is None else found.edited_relations).append(rel)
     except held_fs.HeldFsError as error:
@@ -363,8 +377,8 @@ def _rollback(
         raise OpError("VAULT_STORE_EXPORT_DESTINATION", "the export directory must be new or empty")
     timings: dict[str, float] = {}
     started = time.perf_counter()
-    decision = marker.order(marker.read_meta(conn)).decision
-    unsettled = _drain(root, writer, destination, activation_id=decision.id if decision else row[2])
+    activation_id = _activation_id(conn, row[2])
+    unsettled = _drain(root, writer, destination, activation_id=activation_id)
     timings["project_s"] = time.perf_counter() - started
     started = time.perf_counter()
     found = inspect(root, conn)
@@ -391,7 +405,11 @@ def _rollback(
             "Run again with --export-held to keep those edits in the export and project the store's version.",
         )
     started = time.perf_counter()
-    exported = _export(root, conn, destination, found, why=why, revision=row[1], authority_check=authority_check)
+    exported, relation_digests = _export(
+        root, conn, destination, found, why=why, revision=row[1], activation_id=activation_id,
+        authority_check=authority_check,
+    )
+    _verify_exported_relations(root, relation_digests)
     timings["export_s"] = time.perf_counter() - started
     started = time.perf_counter()
     with writer.handle.transaction() as tx:
@@ -399,6 +417,11 @@ def _rollback(
     timings["drop_s"] = time.perf_counter() - started
     result = _finish(root, conn, authority_check, timings)
     return {"status": "rolled-back", "revision": row[1] + 1, "export": exported, **result}
+
+
+def _activation_id(conn: sqlite3.Connection, fallback: str) -> str:
+    decision = marker.order(marker.read_meta(conn)).decision
+    return decision.id if decision else fallback
 
 
 def _rerun(root: Path, writer, authority_check, *, committed: bool) -> dict:
@@ -443,8 +466,9 @@ def _export(
     *,
     why: str,
     revision: int,
+    activation_id: str,
     authority_check: Callable[[], None],
-) -> dict:
+) -> tuple[dict, dict[str, str]]:
     """Make the audit trail and each held edit durable in ``destination``, then project the store's version over them.
 
     A held edit's body goes to ``held/<path>``. A file whose bytes differ from the store's page and from its
@@ -454,8 +478,8 @@ def _export(
     delete moves a file: the store's version of it is no file. It moves by one rename, never a copy
     and a removal, so a write that lands after the export's copy is in the moved file; a move that
     is refused stops the rollback in store mode. ``export.json`` names where each one went.
-    A present relation sidecar also moves to a named custody slot before rollback publishes its
-    canonical replacement. A file-mode migration skips those custody slots.
+    A present relation sidecar moves to a named sibling custody slot. The export records each slot
+    before its move under ``relation-projections/``. File-mode migration skips those slots.
     ``export.json`` is written before the first file is projected, so it lists every edit about to be overwritten.
     A crash during the projection leaves those bytes listed only in that first export directory: a rerun finds
     the files already projected, so its own export names none of them.
@@ -505,10 +529,7 @@ def _export(
          *(path for path, kind, _ in found.held if kind == "delete")}
     )
     absent_from_store = _trash_paths(root, found.vacated)
-    relations_custody = _trash_paths(
-        root, [rel for rel, receipt in (found.portable_relations | found.vacated_relations).items()
-               if receipt is not None], relations=True,
-    )
+    recovery = _RollbackRelationProjection(destination, activation_id, phase="export")
     summary = {
         "exported_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "reason": why,
@@ -520,22 +541,28 @@ def _export(
         "held_deletes": held_deletes,
         # Where each file whose page the store no longer holds goes: a free path in the trash.
         "absent_from_store": absent_from_store,
-        "relations_custody": relations_custody,
+        "relations_custody": recovery.custody,
     }
-    projection.write_file(
-        destination,
-        "export.json",
-        json.dumps(summary, indent=2, sort_keys=True).encode(),
-        durable=True,
-    )
+
+    def write_summary() -> None:
+        projection.write_file(
+            destination, "export.json", json.dumps(summary, indent=2, sort_keys=True).encode(), durable=True,
+        )
+
+    write_summary()
     if found.vacated_relations:
         with held_fs.acquire(projector.anchor(root)).require() as filesystem:
             for rel, receipt in found.vacated_relations.items():
-                _vacate_portable_relation(filesystem, rel, receipt, relations_custody.get(rel), authority_check)
+                if receipt is None:
+                    _vacate_portable_relation(filesystem, rel, None, None, authority_check)
+                else:
+                    recovery.remove(filesystem, rel, receipt, authority_check)
     with read.snapshot(root, join_request=False) as view:
-        _export_relationships(
-            root, view.connection, destination, revision, found.portable_relations, relations_custody, authority_check,
+        relation_digests = _export_relationships(
+            root, view.connection, destination, revision, found, recovery, authority_check,
         )
+    if recovery.custody:
+        write_summary()
     # The rebuild starts from the store's state: each file that differs gets the store's bytes, and the edit stays in the export.
     for rel in (*found.edited, *found.deleted, *found.projected_blocks):
         (body,) = conn.execute("SELECT body FROM store_pages WHERE path = ?", (rel,)).fetchone()
@@ -560,8 +587,8 @@ def _export(
         "held_edits": len(kept),
         "on_disk_beside_held": len(beside),
         "held_deletes": len(held_deletes),
-        "moved_to_trash": len(absent_from_store) + len(relations_custody),
-    }
+        "moved_to_trash": len(absent_from_store),
+    }, relation_digests
 
 
 def _export_relationships(
@@ -569,13 +596,13 @@ def _export_relationships(
     conn: sqlite3.Connection,
     destination: Path,
     revision: int,
-    inspected: Mapping[str, projector.OnDisk | None],
-    custody_paths: Mapping[str, str],
+    found: Findings,
+    recovery: _RollbackRelationProjection,
     authority_check: Callable[[], None],
-) -> None:
+) -> dict[str, str]:
     """Keep each identity and current edge on disk before dropping its canonical rows."""
     if conn.execute("SELECT 1 FROM store_unit_ids LIMIT 1").fetchone() is None:
-        return
+        return {}
     factory = conn.row_factory
     conn.row_factory = sqlite3.Row
     try:
@@ -592,6 +619,8 @@ def _export_relationships(
     finally:
         conn.row_factory = factory
     reference_paths = []
+    digests = {}
+    inspected = found.portable_relations
     anchor = held_fs.acquire(projector.anchor(root)).require() if inspected else nullcontext()
     with anchor as filesystem:
         for source, witness in relationship_files.export_pages(conn):
@@ -610,9 +639,17 @@ def _export_relationships(
             with relationship_files.prepare_file(conn, source, revision, canonical_sha256=witness) as artifact:
                 assert artifact is not None
                 projection.write_file(destination / "relationships", rel, artifact.data.open(), durable=True)
-                custody = custody_paths.get(rel)
-                _vacate_portable_relation(filesystem, rel, inspected[rel], custody, authority_check)
-                _publish_new_relation(filesystem, rel, artifact, authority_check, custody=custody)
+                disk = inspected[rel]
+                if rel in found.resuming_relations:
+                    if recovery.resume(filesystem, rel, artifact, found.resuming_relations[rel], authority_check) is None:
+                        raise _relation_changed(rel)
+                elif disk is not None and disk.sha256 == artifact.sha256:
+                    authority_check()
+                    if projector.witness(filesystem, rel) != disk.version:
+                        raise _relation_changed(rel)
+                else:
+                    recovery.publish(filesystem, rel, artifact, disk, authority_check)
+                digests[rel] = artifact.sha256
     if reference_paths:
         rows = conn.execute(
             "SELECT id,parent_path,anchor,parent_ref FROM store_unit_ids "
@@ -626,6 +663,28 @@ def _export_relationships(
              for unit_id, path, anchor, reference in rows),
             durable=True,
         )
+    return digests
+
+
+def _verify_exported_relations(root: Path, expected: dict[str, str]) -> None:
+    """Observe the managed sidecars once more before committing file mode."""
+    paths = {
+        owned.rel for owned in ownership.iter_owned(root, include_relations=True)
+        if owned.ownership is ownership.Ownership.RELATIONS
+    }
+    if changed := paths.symmetric_difference(expected):
+        raise _relation_changed(min(changed))
+    if not paths:
+        return
+    rel = "the vault's relations folder"
+    try:
+        with held_fs.acquire(projector.anchor(root)).require() as filesystem:
+            for rel, digest in expected.items():
+                receipt = projector.observe(filesystem, rel)
+                if receipt is None or receipt.sha256 != digest:
+                    raise _relation_changed(rel)
+    except held_fs.HeldFsError as error:
+        raise _relation_changed(rel) from error
 
 
 def _vacate_portable_relation(
@@ -661,23 +720,23 @@ def _publish_new_relation(
     rel: str,
     artifact: relationship_files.PreparedFile,
     check: Callable[[], None],
-    *,
-    custody: str | None = None,
 ) -> projector.OnDisk:
     try:
         return projector._publish(
             filesystem, rel, artifact.data, None, check, sha256=artifact.sha256, rename_new=True,
         )
     except (projector.Deferred, held_fs.HeldFsError, OSError) as error:
-        raise _relation_changed(rel, custody) from error
+        raise _relation_changed(rel) from error
 
 
 class _RollbackRelationProjection:
-    """Keep queued sidecar replacements recoverable even if rollback stops mid-projection."""
+    """Keep sidecar replacements recoverable if rollback stops between capture and install."""
 
-    def __init__(self, destination: Path, activation_id: str) -> None:
-        self._destination = destination / "relation-projections"
+    def __init__(self, destination: Path | None, activation_id: str, *, phase: str = "queue") -> None:
+        self._destination = destination / "relation-projections" if destination is not None else None
         self._activation_id = activation_id
+        self._phase = phase
+        self.custody: dict[str, str] = {}
 
     def publish(
         self, filesystem: held_fs.HeldFilesystem, rel: str, artifact: relationship_files.PreparedFile,
@@ -692,6 +751,9 @@ class _RollbackRelationProjection:
             staged = projector.observe(filesystem, stage)
         if staged is None or staged.sha256 != artifact.sha256:
             raise _relation_changed(stage)
+        if projector.witness(filesystem, prior) is not None:
+            # An earlier capture owns the stable slot. Preserve this newly present version separately.
+            key, prior, _ = self._slots(rel, uuid4().hex)
         self._record(key, rel, prior, disk.sha256, stage=stage, intended_sha256=artifact.sha256)
         _vacate_portable_relation(filesystem, rel, disk, prior, check)
         return self._install(filesystem, rel, prior, stage, staged, check)
@@ -701,11 +763,11 @@ class _RollbackRelationProjection:
         manifest_sha256: str, check: Callable[[], None],
     ) -> projector.OnDisk | None:
         key, prior, stage = self._slots(rel, artifact.sha256)
-        saved = projector.observe(filesystem, prior)
-        if saved is None or saved.sha256 != manifest_sha256:
+        receipts = self._receipts(filesystem, prior, stage, manifest_sha256, artifact.sha256)
+        if receipts is None:
             return None
-        staged = projector.observe(filesystem, stage)
-        if staged is None or staged.sha256 != artifact.sha256:
+        saved, staged = receipts
+        if staged is None:
             return None
         self._record(key, rel, prior, saved.sha256, stage=stage, intended_sha256=artifact.sha256)
 
@@ -716,16 +778,40 @@ class _RollbackRelationProjection:
 
         return self._install(filesystem, rel, prior, stage, staged, validate_prior)
 
+    def owns_replacement(
+        self, filesystem: held_fs.HeldFilesystem, rel: str, artifact: relationship_files.PreparedFile,
+        manifest_sha256: str, live_sha256: str | None,
+    ) -> bool:
+        _, prior, stage = self._slots(rel, artifact.sha256)
+        receipts = self._receipts(filesystem, prior, stage, manifest_sha256, artifact.sha256)
+        if receipts is None:
+            return False
+        _, staged = receipts
+        return (live_sha256 is None and staged is not None) or (live_sha256 == artifact.sha256 and staged is None)
+
+    @staticmethod
+    def _receipts(
+        filesystem: held_fs.HeldFilesystem, prior: str, stage: str, prior_sha256: str, intended_sha256: str,
+    ) -> tuple[projector.OnDisk, projector.OnDisk | None] | None:
+        saved = projector.observe(filesystem, prior)
+        if saved is None or saved.sha256 != prior_sha256:
+            return None
+        staged = projector.observe(filesystem, stage)
+        if staged is not None and staged.sha256 != intended_sha256:
+            return None
+        return saved, staged
+
     def remove(
         self, filesystem: held_fs.HeldFilesystem, rel: str, disk: projector.OnDisk, check: Callable[[], None],
     ) -> None:
-        key, prior, _ = self._slots(rel, f"delete:{disk.sha256}")
+        # An editor can recreate the same bytes after a removal. Give each capture its own slot.
+        key, prior, _ = self._slots(rel, uuid4().hex)
         self._record(key, rel, prior, disk.sha256)
         _vacate_portable_relation(filesystem, rel, disk, prior, check)
 
     def _slots(self, rel: str, revision_witness: str) -> tuple[str, str, str]:
         # Migration can reuse a path and revision. Only this store activation may resume the slot.
-        key = hashlib.sha256(f"{self._activation_id}\0{rel}\0{revision_witness}".encode()).hexdigest()
+        key = hashlib.sha256(f"{self._activation_id}\0{self._phase}\0{rel}\0{revision_witness}".encode()).hexdigest()
         # Sibling dot files stay on the source volume and outside the ownership walk.
         folder = rel.rpartition("/")[0]
         return key, f"{folder}/.{key}.prior.held", f"{folder}/.{key}.stage.held"
@@ -734,13 +820,15 @@ class _RollbackRelationProjection:
         self, key: str, rel: str, prior: str, prior_sha256: str, *,
         stage: str | None = None, intended_sha256: str | None = None,
     ) -> None:
+        assert self._destination is not None
         receipt = {
-            "path": rel, "custody": prior, "prior_sha256": prior_sha256,
+            "phase": self._phase, "path": rel, "custody": prior, "prior_sha256": prior_sha256,
             "stage": stage, "intended_sha256": intended_sha256,
         }
         projection.write_file(
             self._destination, f"{key}.json", json.dumps(receipt, sort_keys=True).encode(), durable=True,
         )
+        self.custody[rel] = prior
 
     @staticmethod
     def _install(
@@ -762,7 +850,7 @@ class _RollbackRelationProjection:
             raise _relation_changed(rel, prior) from error
 
 
-def _trash_paths(root: Path, rels: list[str], *, relations: bool = False) -> dict[str, str]:
+def _trash_paths(root: Path, rels: list[str]) -> dict[str, str]:
     """A free trash path for each of ``rels``, named as file mode's delete names one."""
     from ..delete_file import free_trash_path, planned_trash_path
 
@@ -771,9 +859,6 @@ def _trash_paths(root: Path, rels: list[str], *, relations: bool = False) -> dic
     taken: set[Path] = set()
     for rel in rels:
         planned = root / planned_trash_path(root, rel, now)
-        if relations:
-            # The ownership walk skips dot files, so recovery bytes cannot become vault content.
-            planned = planned.with_name(f".{planned.name}.held")
         free = free_trash_path(planned, lambda slot: slot in taken or os.path.lexists(slot))
         taken.add(free)
         chosen[rel] = free.relative_to(root).as_posix()

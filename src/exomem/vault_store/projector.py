@@ -1512,7 +1512,7 @@ def _publish(
     after the install, and the folder above each folder that it made, before it returns.
 
     ``check`` runs after the bytes are staged, at the publication's last hook before it installs
-    them: ``validate_existing`` before a replacing rename, ``prepare`` before a create-only link.
+    them: ``validate_existing`` before a replacement, ``before_install`` before a create-only install.
     """
     folder, leaf = _split(rel)
     opened, created = _open_creating(filesystem, folder)
@@ -1539,11 +1539,8 @@ def _publish(
                         expected_sha256=None if existing is None else existing.sha256,
                         rename_new=rename_new,
                         validate_existing=None if existing is None else (lambda _held: check()),
-                        prepare=(
-                            (lambda _staged: check())
-                            if existing is None
-                            else _keep_permissions(existing.permissions)
-                        ),
+                        prepare=None if existing is None else _keep_permissions(existing.permissions),
+                        before_install=check if existing is None else None,
                     )
             except OpError as refused:
                 if refused.code == media_capacity.UPLOAD_SPACE_BUSY:
