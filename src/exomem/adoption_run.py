@@ -90,6 +90,7 @@ StatusView = Literal["summary", "inventory", "selection", "plan", "outcomes", "s
 STATUS_PAGE_ITEMS = 100
 STATUS_PAGE_BYTES = 32 * 1024
 MAX_CANDIDATES_DEFAULT = 5000
+_EXPORTS_CHECKED = "stage_exports_checked"
 # Where Evermatter Cloud stages an uploaded collection (see `cloud_import_job`).
 IMPORT_STAGE_DIR = import_stage.STAGE_DIR
 # One `apply` batch holds at most this many items or bytes of originals. A batch costs about 3.5 s of fixed
@@ -1805,6 +1806,7 @@ def start(
     after: str | None = None,
     max_candidates: int = MAX_CANDIDATES_DEFAULT,
     today: dt.date | None = None,
+    _stage_exports_checked: bool = False,
 ) -> dict:
     """Scan a folder into a run holding one page of candidates; `after` starts the page that follows a cursor.
 
@@ -1899,6 +1901,8 @@ def start(
         "cancel": None,
         "errors": [],
     }
+    if _stage_exports_checked or (source_run is not None and source_run.get(_EXPORTS_CHECKED)):
+        run[_EXPORTS_CHECKED] = True
     if remaining or pinned:
         run["paging"] = {
             "page": 1 if source_run is None else source_run["paging"]["page"] + 1,
@@ -5429,17 +5433,16 @@ def _file_step(
     that progress already, so its read ends as soon as the call has no room.
     """
     index_floor = None if first else 0
-    if step == "start" and run is None:
-        # The first scan leaves out the exports that expansion has not read, so they are found before it. It reads no
-        # item: reading is a step of its own (`_expand_exports`), which a call that follows runs before it scans again.
-        stage_id = _stage_id_of(path)
-        if stage_id is not None:
-            export_expansion.find_exports(root, stage_id)
     if step == "start":
         if run is None:
+            # Find staged exports here. Their items are read during a separate filing step.
+            stage_id = _stage_id_of(path)
+            if stage_id is not None:
+                export_expansion.find_exports(root, stage_id)
             # Read here, not as a default argument, so a test or an operator can change the page size.
             opened = start(
-                root, path=_clean(path), collection=collection, max_candidates=MAX_CANDIDATES_DEFAULT, today=today
+                root, path=_clean(path), collection=collection, max_candidates=MAX_CANDIDATES_DEFAULT, today=today,
+                _stage_exports_checked=stage_id is not None,
             )
         else:
             opened = start(root, after=f"{run['run_id']}:{_open_cursor(run, 'after')}", today=today)
@@ -5449,7 +5452,7 @@ def _file_step(
         # and its `consume` choice, so staged copies that the import keeps stay.
         opened = start(
             root, path=run["source_root"], collection=run["collection"]["label"], consume=run.get("consume", True),
-            max_candidates=MAX_CANDIDATES_DEFAULT, today=today,
+            max_candidates=MAX_CANDIDATES_DEFAULT, today=today, _stage_exports_checked=True,
         )
         return store.load(opened["run_id"])
     run_id = run["run_id"]
@@ -5546,10 +5549,13 @@ def file(
                 continuation=invocation.get("continuation"), today=today,
             )
             return _filing_reply(root, store, _chain_end(store, store.load(page_id)))
-        if run is not None and continuation is None and not reconciling and _next_filing_step(run) == "select":
+        if run is not None and not reconciling and not run.get(_EXPORTS_CHECKED) and _next_filing_step(run) == "select":
             if (stage_id := _stage_id_of(run["source_root"])) is not None:
-                # A saved preview can omit later members. Discover exports across the stage before selecting its first page.
+                # Saved previews and older filing continuations can reach selection without export discovery.
                 export_expansion.find_exports(root, stage_id)
+                with _LOCK:
+                    run[_EXPORTS_CHECKED] = True
+                    store.save_changes(run)
         while True:
             step = "start" if run is None else _filing_step(root, store, run)
             if step == "done":

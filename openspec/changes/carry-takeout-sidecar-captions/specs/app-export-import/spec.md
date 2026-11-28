@@ -178,6 +178,11 @@ A stage that holds any JSON file of at most 1 MiB SHALL keep its images and vide
 - **THEN** filing reads the sidecar before selecting the photo
 - **AND** the photo's Source carries its caption and the sidecar files no Source
 
+#### Scenario: Filing resumes a continuation saved before export discovery
+
+- **WHEN** filing resumes a saved scan that predates export discovery for its stage
+- **THEN** filing discovers sidecars across the stage before selecting files
+
 #### Scenario: A Takeout larger than one call's budget
 
 - **WHEN** a stage holds more sidecars than one `file` call reads

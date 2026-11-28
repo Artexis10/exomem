@@ -612,6 +612,36 @@ def test_filing_after_a_saved_preview_reads_sidecars_before_filing_photos(vault:
     assert view["sidecars"]["by_reason"] == {APPLIED: 1}
 
 
+def test_filing_resumes_a_continuation_saved_before_sidecar_discovery(vault: Path, monkeypatch) -> None:
+    """Catches resuming a pre-upgrade scan by token and filing its sidecar as a standalone page."""
+    from exomem import adoption_run
+
+    name = "IMG_58.jpg"
+    import_id = stage_takeout(vault, {
+        f"{ALBUM}/{name}": photo(name),
+        f"{ALBUM}/{name}.json": sidecar(name, caption="Morning light"),
+    })
+    with monkeypatch.context() as patch:
+        patch.setattr(export_expansion, "find_exports", lambda *_args, **_kwargs: False)
+        patch.setattr(adoption_run, "_stop_now", lambda *_args, **_kwargs: "budget")
+        first = adoption_run.file(vault, path=f"_Imports/{import_id}")
+    store = adoption_run.AdoptionRunStore(vault)
+    previous = store.load(first["run_id"])
+    previous.pop("stage_exports_checked", None)
+    store.save_changes(previous)
+
+    reply = adoption_run.file(vault, continuation=first["continuation"])
+    for _ in range(40):
+        if reply["filing"] != "working":
+            break
+        reply = adoption_run.file(vault, continuation=reply["continuation"])
+
+    pages = filed_files(vault, import_id)
+    assert reply["filing"] == "done"
+    assert set(pages) == {f"{ALBUM}/{name}"}
+    assert caption_of(pages, f"{ALBUM}/{name}") == "Morning light"
+
+
 def test_filing_recovers_a_caption_after_the_first_sidecar_row_was_saved(vault: Path, monkeypatch) -> None:
     """Catches a restart that remembers the sidecar row but loses its parser and skips pairing."""
     name = "first.jpg"
