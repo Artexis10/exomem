@@ -197,10 +197,13 @@ def _inspect_relations(
                 receipts = found.vacated_relations if vacated else found.portable_relations
                 receipts[rel] = receipt
                 on_disk = None if receipt is None else receipt.sha256
-                if not vacated and digest is not None and on_disk != digest:
+                if not vacated and on_disk != digest:
                     source, witness = portable[rel]
                     with relationship_files.prepare_file(conn, source, revision, canonical_sha256=witness) as artifact:
-                        if artifact is not None and recovery.owns_replacement(filesystem, rel, artifact, digest, on_disk):
+                        if artifact is not None and digest is None and on_disk == artifact.sha256:
+                            continue  # The live bytes already match this export's canonical output.
+                        if (artifact is not None and digest is not None
+                                and recovery.owns_replacement(filesystem, rel, artifact, digest, on_disk)):
                             if receipt is None:
                                 found.resuming_relations[rel] = digest
                             continue
@@ -668,23 +671,23 @@ def _export_relationships(
 
 def _verify_exported_relations(root: Path, expected: dict[str, str]) -> None:
     """Observe the managed sidecars once more before committing file mode."""
+    if expected:
+        rel = "the vault's relations folder"
+        try:
+            with held_fs.acquire(projector.anchor(root)).require() as filesystem:
+                for rel, digest in expected.items():
+                    receipt = projector.observe(filesystem, rel)
+                    if receipt is None or receipt.sha256 != digest:
+                        raise _relation_changed(rel)
+        except held_fs.HeldFsError as error:
+            raise _relation_changed(rel) from error
+    # List membership last so a sidecar created during hashing reaches the cutover check.
     paths = {
         owned.rel for owned in ownership.iter_owned(root, include_relations=True)
         if owned.ownership is ownership.Ownership.RELATIONS
     }
     if changed := paths.symmetric_difference(expected):
         raise _relation_changed(min(changed))
-    if not paths:
-        return
-    rel = "the vault's relations folder"
-    try:
-        with held_fs.acquire(projector.anchor(root)).require() as filesystem:
-            for rel, digest in expected.items():
-                receipt = projector.observe(filesystem, rel)
-                if receipt is None or receipt.sha256 != digest:
-                    raise _relation_changed(rel)
-    except held_fs.HeldFsError as error:
-        raise _relation_changed(rel) from error
 
 
 def _vacate_portable_relation(

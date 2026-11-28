@@ -1099,6 +1099,49 @@ def test_rollback_retries_an_interrupted_final_export(vault, capsys, tmp_path, m
     assert prior.read_bytes() == previous and not staged.exists()
 
 
+def test_rollback_retries_after_installing_a_canonical_orphan_sidecar(vault, capsys, tmp_path, monkeypatch):
+    from exomem.vault_store import projection
+
+    assert migrate_apply(vault) == 0
+    queue_change(vault, relationship_change=relationships.Change(
+        actor="owner",
+        identities=(relationships.UnitIdentity("canonical-id", ALPHA, "tide"),),
+        added=(relationships.Relationship("canonical-edge", "canonical-id", "supports", target_page_path=BETA),),
+    ))
+    queue_change(vault, deletes=(write.PageDelete(ALPHA),))
+    alpha = relationship_files.path_for(ALPHA)
+    beta = relationship_files.path_for(BETA)
+    with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
+        writer = CollectionWriter(vault, handle)
+        assert not projector.Projector(vault, run=lambda work: work(writer)).run_pass().deferred
+        assert table_rows(handle.connection, "store_projection_queue") == []
+        assert table_rows(handle.connection, "store_held") == []
+        assert not (vault / ALPHA).exists() and not (vault / alpha).exists()
+        assert handle.connection.execute("SELECT 1 FROM store_manifest WHERE path = ?", (alpha,)).fetchone() is None
+
+    interrupted = tmp_path / "interrupted-orphan"
+    write_file = projection.write_file
+
+    def interrupt_later_sidecar(root, rel, body, *, durable):
+        if root == interrupted / "relationships" and rel == beta:
+            assert (vault / alpha).read_bytes() == (interrupted / "relationships" / alpha).read_bytes()
+            raise OSError("the next sidecar was interrupted")
+        return write_file(root, rel, body, durable=durable)
+
+    with monkeypatch.context() as injection:
+        injection.setattr(projection, "write_file", interrupt_later_sidecar)
+        assert rollback_apply(vault, interrupted) == 1
+    assert mode.store_mode_active(vault)
+    installed = (vault / alpha).read_bytes()
+
+    assert store_mode(vault, "rollback", "--dry-run", operator=False) == 0
+    assert printed(capsys)["needs_export_held"] is False
+    complete = tmp_path / "complete-orphan"
+    assert rollback_apply(vault, complete) == 0, capsys.readouterr().err
+    assert not mode.store_mode_active(vault)
+    assert (vault / alpha).read_bytes() == installed == (complete / "relationships" / alpha).read_bytes()
+
+
 def test_rollback_refuses_a_sidecar_recreated_while_finishing_export(vault, capsys, tmp_path, monkeypatch):
     assert migrate_apply(vault) == 0
     queue_change(vault, relationship_change=relationships.Change(
@@ -1111,7 +1154,6 @@ def test_rollback_refuses_a_sidecar_recreated_while_finishing_export(vault, caps
         writer = CollectionWriter(vault, handle)
         assert not projector.Projector(vault, run=lambda work: work(writer)).run_pass().deferred
 
-    portable = relationship_files.path_for(ALPHA)
     unexpected = relationship_files.path_for(GAMMA)
     file = vault / unexpected
     source = relationships.UnitIdentity("outside-id", GAMMA, "reading")
@@ -1123,19 +1165,23 @@ def test_rollback_refuses_a_sidecar_recreated_while_finishing_export(vault, caps
     late = outside.replace(b"outside-edge", b"later-edge")
     capsys.readouterr()
 
-    rename = projector._rename
+    export = tmp_path / "race-final-census"
+    summary = export / "export.json"
+    stream_sha256 = projector._stream_sha256
+    recreated = False
 
-    def recreate_after_custody(filesystem, old, new, expected, check):
-        installed = rename(filesystem, old, new, expected, check)
-        if old.endswith(".stage.held") and new == portable:
+    def recreate_during_final_hash(handle):
+        nonlocal recreated
+        if not recreated and summary.exists() and unexpected in json.loads(summary.read_bytes())["relations_custody"]:
             assert not file.exists()
             file.write_bytes(late)
-        return installed
+            recreated = True
+        return stream_sha256(handle)
 
-    export = tmp_path / "race-final-census"
     with monkeypatch.context() as editor:
-        editor.setattr(projector, "_rename", recreate_after_custody)
+        editor.setattr(projector, "_stream_sha256", recreate_during_final_hash)
         assert rollback_apply(vault, export, "--export-held") == 1
+    assert recreated
     error = capsys.readouterr().err
     assert "VAULT_STORE_RELATIONS_CHANGED" in error and unexpected in error
     assert mode.store_mode_active(vault) and file.read_bytes() == late
