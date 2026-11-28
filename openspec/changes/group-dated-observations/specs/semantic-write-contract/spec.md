@@ -44,13 +44,21 @@ compact `kind`, SHALL keep the refusal. No refusal SHALL offer to omit `as_of` o
 - **AND** the dated block keeps its heading depth and the next section remains separate
 
 #### Scenario: Nested content needs the shallower placement
-- **WHEN** an add or edit would produce a nested dated block whose text cuts the block short or hides a following section
+- **WHEN** an add or edit can store the full dated body at the note's end but nesting would cut it short or hide a following section
 - **THEN** the writer uses the end of the note to keep the full body in one dated block
 - **AND** the reply names the placement and an existing anchor survives the move
 
 #### Scenario: An uncertain destination uses the end of the note
-- **WHEN** a date would land inside `## Observations` and the note has multiple observation sections or an uncertain Markdown boundary
+- **WHEN** a date would land inside `## Observations` and a whole dated block fits at the note's end, but the note has multiple observation sections or an uncertain Markdown boundary
 - **THEN** the writer keeps the full dated block at the end of the note and names its placement
+
+#### Scenario: Neither placement can store the whole block
+- **WHEN** the writer cannot read back the full dated block at either placement
+- **THEN** the operation refuses and the page is unchanged
+
+#### Scenario: The existing record overlaps a separate section
+- **WHEN** a replacement, move or removal of a nested record would touch a peer or parent heading that CommonMark reads as a separate section inside the record span
+- **THEN** the operation refuses and the page is unchanged
 
 ### Requirement: Entity Pages Accept Unit Writes
 
@@ -90,7 +98,7 @@ revision history. It SHALL NOT change any other unit's text or metadata, and SHA
 - **AND** `read_page(part="history")` shows the entry with `why` as its reason and both units among
   the affected units
 
-#### Scenario: A rich replacement keeps its target's kind
+#### Scenario: The replacement kind follows the target
 - **WHEN** the caller passes no `kind` and the target is rich
 - **THEN** the replacement uses the target's kind
 

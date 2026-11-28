@@ -342,6 +342,8 @@ def observe_memory(
         current_unit = resolution.unit
 
     frontmatter, body, _ = vault.parse_frontmatter(editable.original_text)
+    if current_unit is not None and proposal_mode in {"update", "remove"}:
+        _guard_nested_observation_span(body, current_unit)
     target_anchor: str | None = None
     removed_unit = None
     dropped_relations: tuple[tuple[str, str], ...] = ()
@@ -461,6 +463,7 @@ def observe_memory(
             normalized_category = resolved.category
             normalized_content = resolved.content
             if resolved.unit is not None and resolved.unit.form == "rich":
+                _guard_nested_observation_span(body, resolved.unit)
                 selected_kind = str(resolved.kind)
                 if kind is not None and _select_kind(
                     language,
@@ -2135,6 +2138,19 @@ def _place_dated_block(body: str, rendered: str) -> str | None:
 
 def _observation_section_containing(body: str, point: int) -> _ObservationSection | None:
     return next((section for section in _observation_sections(body) if section.start < point < section.end), None)
+
+
+def _guard_nested_observation_span(body: str, unit: semantic_units.SemanticUnit) -> None:
+    level = unit.level or 2
+    start, end = unit.span.start_offset, unit.span.end_offset
+    if level <= 2 or _observation_section_containing(body, start) is None:
+        return
+    if any(start < offset < end and depth <= level for offset, depth, _ in markdown_regions.block_headings(body)):
+        raise ObserveMemoryError(
+            "AMBIGUOUS_SEMANTIC_UNIT_CONTENT",
+            "the record crosses a Markdown section boundary",
+            "Use a page edit to separate the heading from the record, then read the unit and retry.",
+        )
 
 
 def _append_rich(body: str, rendered: str) -> str:

@@ -9,7 +9,7 @@ A note with a custom replacement kind also makes a compact observation harder to
 ## What Changes
 
 - Save implicitly dated observations as rich blocks within the note's `## Observations` section. Create that section when the note has none.
-- Put compact lines above child headings so each dated block has a clear end. Content edits preserve the block's place when its text still fits there.
+- Put compact lines above canonical child headings. Edits preserve a dated block's place when its text fits there and the Markdown readers agree on its span.
 - When a compact observation gains a date, move it to the dated part of the same section and keep its anchor.
 - Use the shipped replacement kind when correcting a compact observation without a kind. An explicit request can still select a custom kind.
 

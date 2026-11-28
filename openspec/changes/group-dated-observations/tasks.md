@@ -7,6 +7,7 @@
 - [x] 1.3 Keep the level of an edited rich block at its existing placement. Preserve its anchor on dating, conversion to compact, or a move to the note's end. Cover assessment and link edits.
 - [x] 1.4 Run the governed add, edit and preview flows in a temporary vault. Reject an old preview token without a write, commit a fresh one, and inspect the resulting hierarchy in a renderer.
 - [ ] 1.5 Add a user note and synchronize the finished contract at delivery.
+- [x] 1.6 Prove that edits and removals refuse when their existing span overlaps a separate heading, and that no new date writes a partial block.
 
 ## 2. Compact corrections
 

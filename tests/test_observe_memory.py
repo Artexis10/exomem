@@ -174,6 +174,46 @@ def test_converting_a_dated_record_to_compact_keeps_it_above_child_headings(tmp_
     assert [(unit.form, unit.anchor) for unit in units] == [("compact", "earlier"), ("compact", "dated")]
 
 
+@pytest.mark.parametrize(("operation", "heading", "changes"), [
+    ("update", "  ## References", {"category": "rule", "content": "Updated account."}),
+    ("remove", "References\n----------", {}),
+    ("assess", "References\n----------", {"relations": [{"kind": "supports", "target": "#earlier"}]}),
+])
+def test_edit_cannot_touch_a_following_section_that_the_reader_included_in_a_record(
+    tmp_path: Path, operation: str, heading: str, changes: dict,
+) -> None:
+    page = _write_page(tmp_path, source=_page_source(
+        "# Observe\n\n## Observations\n\n- [rule] Earlier fact ^earlier\n\n"
+        "### Record\n- id: dated\n- category: rule\n- as_of: 2026-11-25\n\n"
+        f"Account.\n\n{heading}\n\nMust remain."
+    ))
+    units = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units
+    dated = next(unit for unit in units if unit.anchor == "dated")
+    before = page.read_bytes()
+
+    with pytest.raises(ValueError, match="AMBIGUOUS_SEMANTIC_UNIT_CONTENT.*section boundary"):
+        commands.op_observe_memory(
+            tmp_path, path=PAGE, operation=operation, unit_ref=dated.unit_ref,
+            expected_fingerprint=dated.fingerprint, expected_hash=_page_hash(page), **changes,
+        )
+
+    assert page.read_bytes() == before
+
+
+@pytest.mark.parametrize(("body", "content", "error"), [
+    ("# Observe\n\n## Observations", "Account.\n\n## Details\n\nKeep this.", "AMBIGUOUS_SEMANTIC_UNIT_CONTENT"),
+    ("# Observe\n\n## Observations\n\n```md\nOpen example.", "Account.", "INVALID_SEMANTIC_UNIT"),
+])
+def test_no_dated_placement_writes_a_partial_record(tmp_path: Path, body: str, content: str, error: str) -> None:
+    page = _write_page(tmp_path, source=_page_source(body))
+    before = page.read_bytes()
+
+    with pytest.raises(ValueError, match=error):
+        commands.op_observe_memory(tmp_path, path=PAGE, category="rule", content=content, as_of="2026-11-25")
+
+    assert page.read_bytes() == before
+
+
 def test_a_preview_from_before_dated_placement_cannot_write_the_new_structure(tmp_path: Path, monkeypatch) -> None:
     page = _write_page(tmp_path)
     before = page.read_bytes()
