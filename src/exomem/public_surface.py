@@ -476,7 +476,7 @@ def _door_call(
 
 _IMPORT_GUIDE = (
     "Send a folder to a personal server as one archive, in three steps, from a client that can run a shell command or has a networked sandbox. "
-    "A client with neither cannot: give the person `exomem import <folder>`. Evermatter Cloud refuses lane `import`; its folders go through `exomem cloud import <folder>`. "
+    "A client with neither cannot: give the person `evermatter import <folder>`. Evermatter Cloud refuses lane `import`; its folders go through `evermatter cloud import <folder>`. "
     "1. From the folder's parent, pack the folder as one archive, such as `tar -czf folder.tgz folder`, and take its SHA-256. "
     "2. Call upload_files with lane `import` and that expected_sha256, then run the `shell` line of the reply's `next` send step, "
     "with `<token>` and `<archive>` filled in, to send the archive. "
@@ -490,8 +490,8 @@ _FILE_GUIDE = (
     "1. Take the file's SHA-256. "
     "2. Call upload_files with lane `source` (an original) or `evidence` (proof) and that expected_sha256. "
     "The digest holds the upload for this session, so `hold` is optional. The reply is a handoff that stores nothing yet. "
-    "3. Send the bytes: save the reply as JSON and run `exomem attach <file> --handoff-file <json> --root .`, "
-    "or, from a sandbox with no `exomem`, run the `shell` line of the reply's `next` send step with `<token>` and `<file>` filled in. "
+    "3. Send the bytes: save the reply as JSON and run `evermatter attach <file> --handoff-file <json> --root .`, "
+    "or, from a sandbox with no `evermatter`, run the `shell` line of the reply's `next` send step with `<token>` and `<file>` filled in. "
     "The token is a secret: never show it to the person. The send returns a held `file` handle. "
     "4. Call save_source or save_evidence with that handle in `files`. A held upload lasts an hour and only the same session can redeem it. "
     "The save's receipt proves the file is kept: check each row's `hash` against the digest of step 1 before you tell the person it is saved. "

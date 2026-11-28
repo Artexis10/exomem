@@ -17,3 +17,10 @@
 - [ ] 3.1 The next release carries `release-notes.json` and its page starts with "What's new".
 - [ ] 3.2 A run again on that release uploads nothing and leaves one section on the page.
 - [ ] 3.3 The section on the first real release page shows no link from note text (check after merge).
+
+## 4. Follow-up from the review of the first delivery
+
+- [x] 4.1 A real run on a release tag serves its own tag alone, when it lacks the file, and never sweeps; the sweep runs only on main, and a dispatch from main still names one older tag with `--also`. Evidence: `missing --only TAG` in `scripts/release_notes_asset.py`, the scan step's `GITHUB_REF` branch in `release-please.yml`, `test_a_real_run_on_a_release_tag_publishes_the_notes_of_its_own_tag_and_never_sweeps` (red on the tag case before the workflow change: `tags=missing --also v1.2.3`; green after) and `test_only_serves_the_named_release_and_reads_no_release_list` (red before: the script rejected `--only`).
+- [x] 4.2 The first sentence of "Publishing the notes never gates the release" says a later real run on `main` heals a failed release in its window or one that a dispatch names.
+- [x] 4.3 The workflow comment and the dispatch requirement say a named dispatch tag can be dropped when a newer real run replaces the waiting one, and that the operator dispatches again when the job shows cancelled. Evidence: the concurrency comment in `release-please.yml`, the spec's dispatch requirement and its new scenario, `docs/release.md`.
+- [x] 4.4 The proposal says the key-set pin makes a key change visible in review as an edit to that schema's key set, and no longer says a change fails until `schema` changes.

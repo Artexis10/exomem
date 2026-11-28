@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import cloud_cell, held_fs, media_brakes, media_engines, reserved_paths
+from . import cloud_cell, held_fs, media_brakes, media_engines, reserved_paths, speech_tracks
 from .asr_facts import AsrFacts
 from .asr_runtime import COMPUTE_RUNTIME_MARKERS, is_compute_runtime_failure
 from .capture_metadata import CaptureFacts
@@ -517,10 +517,19 @@ class MediaJob:
     language: str | None = None
     language_mode: str | None = None
     diarize: bool | None = None
+    # The tracks a request declared (`speech_tracks.declaration`); the worker reads them and the sidecar records them.
+    tracks: tuple[speech_tracks.Track, ...] | None = None
     preview_sha256: str | None = None
     preview_receipt_id: str | None = None
     # The failure to retain if a receipt-only claim proves there is no matching record.
     preview_finish_error: str | None = None
+    # Why the row's declaration of tracks cannot be read; the worker fails this job with it, and the queue goes on.
+    tracks_unreadable: str | None = None
+
+
+def _tracks_text(tracks: tuple[speech_tracks.Track, ...] | None) -> str | None:
+    """A declaration of tracks as a job row keeps it: the same data as the sidecar's (`speech_tracks.as_data`)."""
+    return None if tracks is None else json.dumps(speech_tracks.as_data(tracks), ensure_ascii=False)
 
 
 @dataclass(frozen=True)
@@ -1161,6 +1170,8 @@ class MediaJobStore:
             conn.execute("ALTER TABLE jobs ADD COLUMN language_mode TEXT")
         if "diarize" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN diarize INTEGER")
+        if "tracks" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN tracks TEXT")
 
     @staticmethod
     def _migrate_result_schema(conn: sqlite3.Connection) -> None:
@@ -1541,9 +1552,9 @@ class MediaJobStore:
                     """
                     INSERT INTO jobs (
                         job_key, binary_rel, sidecar_rel, media_type, do_ocr, state, attempts,
-                        ocr_generation, reprocess, language, language_mode, diarize,
+                        ocr_generation, reprocess, language, language_mode, diarize, tracks,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, 1, 'pending', 0, 1, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, 1, 'pending', 0, 1, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         key,
@@ -1554,6 +1565,7 @@ class MediaJobStore:
                         language,
                         language_mode,
                         job.diarize,
+                        _tracks_text(job.tracks),
                         now,
                         now,
                     ),
@@ -1563,13 +1575,13 @@ class MediaJobStore:
                 conn.execute(
                     """
                     UPDATE jobs SET do_ocr = 1, reprocess = ?, language = ?, language_mode = ?,
-                        diarize = COALESCE(?, diarize),
+                        diarize = COALESCE(?, diarize), tracks = COALESCE(?, tracks),
                         state = 'pending', ocr_generation = ocr_generation + 1, last_error = NULL,
                         blocked_reason = NULL, blocked_context = NULL, memory_stops = 0,
                         memory_soft_stops = 0, timeout_stops = 0, updated_at = ?
                     WHERE id = ?
                     """,
-                    (int(reprocess), language, language_mode, job.diarize, now, row_id),
+                    (int(reprocess), language, language_mode, job.diarize, _tracks_text(job.tracks), now, row_id),
                 )
             conn.commit()
             return row_id
@@ -1674,7 +1686,7 @@ class MediaJobStore:
                 conn.execute(
                     """
                     UPDATE jobs SET do_ocr = ?, do_clip = ?, do_reembed = ?,
-                        reprocess = 0, language = NULL, language_mode = NULL, diarize = NULL,
+                        reprocess = 0, language = NULL, language_mode = NULL, diarize = NULL, tracks = NULL,
                         state = 'pending', pinned = 0, returns = 0, retry_at = NULL,
                         updated_at = ?, last_error = NULL
                     WHERE id = ? AND state = 'running' AND claim_revision = ?
@@ -2356,11 +2368,13 @@ class MediaJobStore:
                             language = CASE WHEN ? THEN language ELSE NULL END,
                             language_mode = CASE WHEN ? THEN language_mode ELSE NULL END,
                             diarize = CASE WHEN ? THEN diarize ELSE NULL END,
+                            tracks = CASE WHEN ? THEN tracks ELSE NULL END,
                             updated_at = ? WHERE id = ? AND state IN (""" + state_placeholders + """)
                             AND claim_revision = ?
                         """,
                         (
                             remaining_ocr,
+                            keep_request,
                             keep_request,
                             keep_request,
                             keep_request,
@@ -2487,7 +2501,7 @@ class MediaJobStore:
         with contextlib.closing(self._connect(readonly=True)) as conn:
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
             # These are the only request fields in the ledger schema. An older ledger may omit them.
-            flags = {"reprocess": "reprocess = 1", "diarize": "diarize IS NOT NULL",
+            flags = {"reprocess": "reprocess = 1", "diarize": "diarize IS NOT NULL", "tracks": "tracks IS NOT NULL",
                      "language": "language IS NOT NULL", "language_mode": "language_mode IS NOT NULL"}
             request = " OR ".join(test for field, test in flags.items() if field in columns)
             if not request:
@@ -3078,6 +3092,13 @@ class MediaJobStore:
 
     def _row_to_job(self, row: Any) -> MediaJob:
         diarize = row["diarize"] if "diarize" in row.keys() else None
+        stored = row["tracks"] if "tracks" in row.keys() else None
+        tracks, unreadable = None, None
+        # The door read the declaration before it queued it, so only a corrupt row fails here; that fails its own job.
+        try:
+            tracks = None if stored is None else speech_tracks.declaration(json.loads(stored))
+        except (ValueError, TypeError) as error:  # TrackDeclarationError and JSONDecodeError are ValueErrors
+            unreadable = f"the job's declaration of tracks cannot be read ({error})"
         return MediaJob(
             id=int(row["id"]),
             binary_path=self.vault_root / str(row["binary_rel"]),
@@ -3099,6 +3120,8 @@ class MediaJobStore:
             language=row["language"] if "language" in row.keys() else None,
             language_mode=row["language_mode"] if "language_mode" in row.keys() else None,
             diarize=None if diarize is None else bool(diarize),
+            tracks=tracks,
+            tracks_unreadable=unreadable,
             preview_sha256=row["preview_sha256"] if "preview_sha256" in row.keys() else None,
             preview_receipt_id=row["preview_receipt_id"] if "preview_receipt_id" in row.keys() else None,
             preview_finish_error=row["preview_finish_error"] if "preview_finish_error" in row.keys() else None,

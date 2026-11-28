@@ -86,4 +86,5 @@ date, outside this repository. Two rules hold for these tokens:
   `infra/contracts/secret-destinations-v1.json`.
 - The foundation root reads its account token as the `cloudflare_api_token`
   variable. When that token expires, every foundation plan fails to
-  authenticate.
+  authenticate. It also needs Account > Turnstile > Edit for the sign-in
+  widget (`docs/runbooks/cloud-turnstile-widget.md`).

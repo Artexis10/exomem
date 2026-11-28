@@ -79,7 +79,7 @@ DERIVED_NOT_COPIED = ("its rows rebuild from the store's import log and the sour
                       "backup names the file by size and sha256 and copies nothing")
 #: The run records, beside the archives of the item files the conversions retired.
 RUNS = "cutover"
-APPLY = ("stop the service, then run `exomem collections cutover --plan-id ID --why REASON --backup-to FILE` "
+APPLY = ("stop the service, then run `evermatter collections cutover --plan-id ID --why REASON --backup-to FILE` "
          "on the host with EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set")
 _SETTLE = ("start the service until edit-back applies or holds every edit to the collection's views and its "
            "views are published, stop it, then preview again")
@@ -448,7 +448,7 @@ def _remeasure(root, run, destination):
             _, _, staging = stack.enter_context(_surveyed(root))
             if staging is None:
                 raise CollectionStoreError(MIGRATION_INCOMPLETE, "the files of a collection the migration has not "
-                                           "moved yet no longer import; run `exomem collections migrate --dry-run` "
+                                           "moved yet no longer import; run `evermatter collections migrate --dry-run` "
                                            "for its blockers, then apply again")
         for entry in pending:
             entry["baseline"] = measure(staging if _from_files(run, entry) else snapshot, entry["collection_id"])
@@ -463,7 +463,7 @@ def _migrate(root, run):
         if not _routed(root, pending):
             raise CollectionStoreError(MIGRATION_INCOMPLETE, "the migration did not move every file collection into "
                                        f"the store (verdict {result.get('verdict')}, status {result.get('status')}); "
-                                       "run `exomem collections migrate --dry-run` for its blockers, then apply again")
+                                       "run `evermatter collections migrate --dry-run` for its blockers, then apply again")
     # A migration changes no store collection, and imports each file collection as the proof import did.
     with closing(connection.open_reader(connection.store_path(root))) as reader:
         for entry in run["collections"]:

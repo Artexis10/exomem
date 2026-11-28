@@ -8,6 +8,8 @@ file format. This script adds no second assignment and no second serialiser. Two
            the release `--also` names (which may be older), then the releases published since the start of
            the previous UTC month, oldest first. The release list is read a page of 100 at a time until a
            page holds only releases older than that start. What a run leaves, the next run takes.
+           `--only` names one release and reads no list: a run on a release tag serves that release alone, so
+           its older generator and escaping never reach a newer release's permanent file and page section.
   publish  For each tag given, builds that release's notes from its tag's tree, starts its page with a
            "What's new" section when it has notes, then uploads the file. Page first, so a release that
            has the file has its page. A tag that fails does not stop the others; the run then fails.
@@ -180,18 +182,20 @@ def _release_pages() -> Iterator[list[dict]]:
     raise SystemExit(f"missing: the release list has more than {MAX_PAGES * PAGE_SIZE} releases and none of its pages is entirely before the window")
 
 
-def print_missing(also: str | None, now: datetime | None = None) -> None:
+def print_missing(named_tag: str | None, now: datetime | None = None, *, sweep: bool = True) -> None:
     """Print the first `MAX_RELEASES_PER_RUN` tags that `missing_tags` finds, and say on stderr what is left for later runs.
 
-    When `also` is left out, stderr says why.
+    `named_tag` is a release to serve whatever its age; when it is left out, stderr says why. With `sweep` false the
+    run serves `named_tag` alone and reads no release list.
     """
     named = None
-    if also:
-        named = _release_row(json.loads(_run("gh", "api", f"repos/{{owner}}/{{repo}}/releases/tags/{also}")))
+    if named_tag:
+        named = _release_row(json.loads(_run("gh", "api", f"repos/{{owner}}/{{repo}}/releases/tags/{named_tag}")))
         reason = why_left_alone(named)
         if reason is not None:
-            print(f"{also} is left alone: {reason}", file=sys.stderr)
-    tags = missing_tags(_release_pages(), previous_month_start(now or datetime.now(UTC)), named)
+            print(f"{named_tag} is left alone: {reason}", file=sys.stderr)
+    pages = _release_pages() if sweep else ()
+    tags = missing_tags(pages, previous_month_start(now or datetime.now(UTC)), named)
     for tag in tags[:MAX_RELEASES_PER_RUN]:
         print(tag)
     if len(tags) > MAX_RELEASES_PER_RUN:
@@ -247,7 +251,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
 
     find = commands.add_parser("missing", help="print the first 40 releases since the previous month's start that have no notes file")
-    find.add_argument("--also", metavar="TAG", help="a release of any age to include when it lacks the file")
+    named = find.add_mutually_exclusive_group()
+    named.add_argument("--also", metavar="TAG", help="a release of any age to include when it lacks the file")
+    named.add_argument("--only", metavar="TAG", help="print this release alone when it lacks the file, and read no release list")
 
     build = commands.add_parser("publish", help="publish the notes of the given releases")
     build.add_argument("tags", nargs="+", help="release tags, vX.Y.Z")
@@ -258,7 +264,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "missing":
         try:
-            print_missing(args.also)
+            print_missing(args.only or args.also, sweep=args.only is None)
         except subprocess.CalledProcessError as error:  # `gh` says why, for example that a named tag has no release
             raise SystemExit(f"missing: {_why(error)}") from error
         return 0

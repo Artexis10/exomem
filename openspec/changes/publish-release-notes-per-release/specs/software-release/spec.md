@@ -41,7 +41,7 @@ The format of `release-notes.json` SHALL be a contract with readers outside this
 
 ### Requirement: Publishing the notes never gates the release
 
-The release workflow SHALL attempt the notes of every release, and a later real run SHALL heal a release whose attempt failed; that is the whole sense in which the notes are required. The file, the page section and the upload SHALL run in their own job, which no publish, image or deploy job needs. A failure there SHALL turn the job and the run red and SHALL stop no other job. The plan SHALL NOT count the file when it decides whether a release is complete.
+The release workflow SHALL attempt the notes of every release; a later real run on `main` SHALL heal a failed one that is in its window or that a dispatch names, and that is the whole sense in which the notes are required. The file, the page section and the upload SHALL run in their own job, which no publish, image or deploy job needs. A failure there SHALL turn the job and the run red and SHALL stop no other job. The plan SHALL NOT count the file when it decides whether a release is complete.
 
 #### Scenario: The notes cannot be built
 
@@ -59,14 +59,14 @@ The release workflow SHALL attempt the notes of every release, and a later real 
 - **THEN** the upload refuses to replace it and the notes job fails
 - **AND** no other release artifact is changed or held
 
-### Requirement: Every run publishes the notes that recent releases lack
+### Requirement: Every real run on main publishes the notes that recent releases lack
 
-Every real run SHALL publish the file and the page section for each release published since the start of the previous UTC month that has assets and lacks the file, building each from its tag. It SHALL read the release list 100 a page until a page holds only releases published before that start. A draft SHALL NOT count, and a release with no asset SHALL be left alone, because the release controller reads its page for the changelog before publication starts.
+Every real run on `main` SHALL publish the file and the page section for each release published since the start of the previous UTC month that has assets and lacks the file, building each from its tag. It SHALL read the release list 100 a page until a page holds only releases published before that start. A draft SHALL NOT count, and a release with no asset SHALL be left alone, because the release controller reads its page for the changelog before publication starts.
 
 #### Scenario: A failed run left a release without its notes
 
 - **WHEN** the run that published release 1.3.0 failed before it uploaded the notes file
-- **THEN** the next real run, on any push or dispatch within the window, builds the notes from the 1.3.0 tag and publishes the file and the section
+- **THEN** the next real run on `main`, a push or a dispatch from `main`, within the window, builds the notes from the 1.3.0 tag and publishes the file and the section
 
 #### Scenario: A release from before this change
 
@@ -98,6 +98,16 @@ Every real run SHALL publish the file and the page section for each release publ
 - **WHEN** a release exists with no asset because the release controller has not finished with it
 - **THEN** the run leaves that release's page and files alone
 
+### Requirement: A run on a release tag serves that tag alone
+
+A real run on a release tag SHALL publish the notes of that tag alone, when it lacks the file, and SHALL NOT sweep the window. That tag's code may be older than `main`'s, and the file and the page section it writes are permanent: the upload never replaces a file and the marker blocks a rewrite.
+
+#### Scenario: A recovery run on an older release tag
+
+- **WHEN** a real run on the tag of release 1.2.0 runs while newer releases lack the file
+- **THEN** it builds and publishes the notes of 1.2.0 alone, when 1.2.0 lacks the file, with that tag's code
+- **AND** it writes no file and no page section for any other release
+
 ### Requirement: One run handles at most 40 releases
 
 A run SHALL handle at most 40 releases, so that the first run after a merge stays inside the repository's shared GitHub token budget. It SHALL take the release a dispatch names first and then the others oldest first, and SHALL say how many wait. The next run SHALL take them.
@@ -114,12 +124,17 @@ A run SHALL handle at most 40 releases, so that the first run after a merge stay
 
 ### Requirement: A dispatch run can heal one named release
 
-In a real `workflow_dispatch` run, the `tag` input SHALL join the releases above, whatever its age, when its release lacks the file. The run SHALL say why it leaves a named release alone.
+In a real `workflow_dispatch` run on `main`, the `tag` input SHALL join the releases above, whatever its age, when its release lacks the file. The run SHALL say why it leaves a named release alone. The notes job's concurrency group keeps one waiting run, so a newer real run that replaces the waiting run MAY drop the tag that run named; the operator SHALL dispatch again when the job shows cancelled.
 
 #### Scenario: A dispatch names an older release
 
 - **WHEN** an operator dispatches the workflow with the tag of a release published two months ago that lacks the file
 - **THEN** that run publishes that release's notes in addition to the window's
+
+#### Scenario: A newer run replaces the waiting dispatch
+
+- **WHEN** a dispatch names an older release and waits for the notes job, and a newer real run then replaces it
+- **THEN** the replaced run's notes job shows cancelled, the newer run checks the window only, and the operator dispatches again to heal the named release
 
 #### Scenario: A dispatch names a release that has its file
 
@@ -133,7 +148,7 @@ The release plan SHALL decide whether a run writes the notes to GitHub: only a r
 #### Scenario: A push to main
 
 - **WHEN** a merge to `main` starts the workflow
-- **THEN** the notes job publishes the notes that releases lack
+- **THEN** the notes job publishes the notes that releases in the window lack
 
 #### Scenario: A dispatch from a branch
 
@@ -143,7 +158,7 @@ The release plan SHALL decide whether a run writes the notes to GitHub: only a r
 #### Scenario: A dispatch on the release tag
 
 - **WHEN** a run on the release tag itself is not a dry run
-- **THEN** the notes job publishes the notes that releases lack
+- **THEN** the notes job publishes the notes of that tag alone, when it lacks the file, and sweeps no other release
 
 #### Scenario: Dry run
 

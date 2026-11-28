@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from test_media_processing import _handle_stat
 
-from exomem import backfill, embeddings, extract, preserve
+from exomem import backfill, embeddings, extract, preserve, speech_tracks
 
 REL = "Knowledge Base/Evidence/Old/photos/legacy.jpg"
 
@@ -173,6 +173,29 @@ def test_rediarize_reextracts_plain_asr_sidecar(vault, monkeypatch: pytest.Monke
     assert "extracted_by: faster-whisper:large-v3+diarized" in body
     assert "speakers: [Fixture Speaker, Speaker B]" in body  # the speakers= kwarg fix
     assert "[Fixture Speaker]: hello there" in body
+
+
+def test_rediarize_reads_a_recording_with_declared_tracks_by_those_tracks(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
+    _, sidecar = _drop_audio_with_plain_transcript(vault)
+    declared = [
+        {"name": "Host", "stream": 0, "channel": None, "single_voice": False},
+        {"name": "Guest", "stream": 1, "channel": None, "single_voice": False},
+    ]
+    page = preserve.set_speech_tracks_pin(sidecar.read_text("utf-8"), speech_tracks.declaration(declared))
+    sidecar.write_text(page, "utf-8")
+    asked = []
+
+    def diarized(*a, tracks=None, **k):
+        asked.append(tracks)
+        return _diarized_result()
+
+    monkeypatch.setattr(extract, "extract_text", diarized)
+    stats = backfill.backfill_media(vault, do_clip=False, rediarize=True, log_fn=_quiet)
+
+    assert asked == [declared]
+    assert stats.rediarized == 1
+    assert preserve.speech_tracks_pin(sidecar.read_text("utf-8")) == declared
 
 
 def test_rediarize_second_run_is_noop(vault, monkeypatch: pytest.MonkeyPatch) -> None:

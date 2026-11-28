@@ -39,7 +39,7 @@ from .mcp_client import TenantClient, ToolResult
 from .native_import import UPLOAD_ONLY, retain_cli_diagnostics, run_cli_import
 from .report import StepFailure, StepRecord, innermost, percentile
 from .scenarios import Context, first_session
-from .shell import CommandFailed, run
+from .shell import DEFAULT_TIMEOUT_SECONDS, CommandFailed, run
 
 SEED = "exomem-large-import-v1"
 # The loop-device disk is sparse and attached before K3s starts, so its size must not depend on the
@@ -54,6 +54,19 @@ APP_LOG_TAIL_BYTES = 20 << 20  # kept per file of the cell's app log; the pod's 
 TRANSIENT_ATTEMPTS = 8
 MUTATION_BUSY = "MUTATION_BUSY"  # a write that the vault's write boundary refused; the call may be repeated
 BUSY_RETRIES = 30  # refusals of one call before the run calls it a livelock and fails it
+# What is bounded, against the workflow's 140-minute step and the deadline default of 115 minutes:
+# - While the stage runs, a tool call is cancelled at the deadline, and so is a kubectl call (`timeout` ends kubectl in the
+#   node's container, `infra.K3s.kubectl`). Far from the deadline a kubectl call ends at `shell.DEFAULT_TIMEOUT_SECONDS`.
+# - Once the stage has ended its work, its evidence reads each take at most WRAP_UP_READ_SECONDS and all of them
+#   WRAP_UP_SECONDS. The stage ends at minute 125 at the latest. These limits stop with the stage.
+# - `__main__` then writes the report and copies the logs the stage kept, before the post checks read the cluster.
+#   `scenarios.snapshot_logs` fails on its first read that takes over WRAP_UP_READ_SECONDS, and the diagnostics
+#   (`__main__._collect_diagnostics`) take five reads of one minute at most: about nine minutes are left for teardown.
+# Not bounded: `ready_matches_pods` reads with the usual limit, and so do the teardown's commands. They run after the
+# report is on disk, so the step's end costs the output of those reads and nothing else. A script that `kubectl exec`
+# started in the pod runs on until it ends, after its kubectl was ended.
+WRAP_UP_SECONDS = 600
+WRAP_UP_READ_SECONDS = 60
 CELL_COLLECTION = {"notes": "Imported notes", "media": "Imported media"}
 
 # Everything below runs inside the cell's pod, against its volume, with the cell's own interpreter.
@@ -127,6 +140,27 @@ try:
 except FileNotFoundError:
     pass
 print(json.dumps({'rows': rows, 'busy_by_command': busy, 'inode': inode}))
+"""
+# What holds the vault's write boundary now (the product's own probe, as graph_sync reads it: operation, holder kind and
+# age, content-free) and the last rows of the mutation journal, which record each refused write. A part that cannot be
+# read says why and the rest still prints.
+HANG_SCRIPT = """import json
+from pathlib import Path
+from exomem import mutation_journal, mutation_lock, writer_lease
+found = {'boundary': None, 'journal_tail': None}
+try:
+    state_dir = writer_lease.LeaseConfig.from_env().state_dir
+    found['boundary'] = mutation_lock.VaultMutationCoordinator(state_dir, Path('/data/vault')).snapshot()
+except Exception as error:
+    found['boundary_error'] = type(error).__name__ + ': ' + str(error)[:200]
+try:
+    with open(mutation_journal.journal_path(), 'rb') as handle:
+        size = handle.seek(0, 2)
+        handle.seek(max(0, size - 16384))
+        found['journal_tail'] = [line[:400] for line in handle.read().decode('utf-8', 'replace').splitlines()[-10:]]
+except Exception as error:
+    found['journal_error'] = type(error).__name__ + ': ' + str(error)[:200]
+print(json.dumps(found, default=str))
 """
 # The cell's call ledger (`ledger.jsonl`, one row per MCP tool call): its newest sequence number, and for each row the
 # thread CPU of its `command.body` span, the instrument of `REFERENCE_START_CPU_SECONDS`. A row with no such span, or a
@@ -292,6 +326,16 @@ class LargeImportPlan:
     smoke: bool = False
     seed: str = SEED
     node: drill_cluster.Agent | None = None
+    wrap_up_started: float | None = None  # a time.monotonic() value, set once when the scenario has ended
+    active: bool = False  # the stage is running: only then do its call limits apply
+    read_seconds: float = WRAP_UP_READ_SECONDS  # the longest one read of the cluster's state may take as evidence
+
+    def begin_stage(self) -> None:
+        self.active, self.wrap_up_started = True, None
+
+    def end_stage(self) -> None:
+        """The stage's call limits end with it: a read after the stage (the post checks) keeps its usual limit."""
+        self.active, self.wrap_up_started = False, None
 
     @property
     def volume_gib(self) -> int:
@@ -303,6 +347,29 @@ class LargeImportPlan:
     def require_time(self, what: str, *, seconds: float = 0) -> None:
         if self.remaining() < seconds:
             raise OutOfTime(f"the scenario's deadline came before {what}")
+
+    def start_wrap_up(self) -> None:
+        """The scenario has ended, by a failure or its end: from here every read is evidence and is cut short."""
+        if self.wrap_up_started is None:
+            self.wrap_up_started = time.monotonic()
+
+    def call_limit(self, what: str) -> float | None:
+        """The seconds one kubectl call may run while the stage runs: until the deadline, or the wrap-up's own limit once
+        the stage has ended its work. None outside the stage, and the call keeps its usual limit."""
+        if not self.active:
+            return None
+        if self.wrap_up_started is not None:
+            left = self.wrap_up_started + WRAP_UP_SECONDS - time.monotonic()
+            return max(1.0, min(self.read_seconds, left))
+        if self.remaining() <= 0:
+            raise OutOfTime(f"the scenario's deadline had passed before {what}")
+        return min(DEFAULT_TIMEOUT_SECONDS, self.remaining())
+
+    def call_timed_out(self, what: str, seconds: float) -> StepFailure:
+        """The failure for a call that its limit ended: the deadline's, or a hang with the deadline still far."""
+        if self.wrap_up_started is None and self.remaining() <= 0:
+            return OutOfTime(f"the scenario's deadline came during {what}, which had run {seconds:.0f} s")
+        return StepFailure(f"{what} did not return within {seconds:.0f} s")
 
 
 def make_plan(*, run_id: str, workdir: Path, cli_image: str, files: int, target_bytes: int, smoke: bool,
@@ -566,15 +633,40 @@ class Agent:
     """The MCP client of the person's agent. Each call opens its own session, so a restart of the
     cell between calls costs a retry and nothing more."""
 
-    def __init__(self, client: TenantClient) -> None:
+    def __init__(self, client: TenantClient, plan: LargeImportPlan | None = None) -> None:
         self.client = client
+        self.plan = plan  # when set, no call outlives the scenario's deadline
+        self.where = ""  # what the caller is doing (the folder, the call's number), named when the deadline ends a call
         self.retries: list[str] = []
         self.seconds: dict[str, list[float]] = {}
         self.refusals: list[dict[str, Any]] = []
 
     async def call(self, name: str, arguments: dict[str, Any], *, kind: str = "",
                    tolerated: frozenset[str] = frozenset()) -> tuple[dict, float]:
-        """One tool call; an error code in `tolerated` comes back as `{"error_code": ...}` instead of failing."""
+        """One tool call, with its retries, ended at the scenario's deadline: `OutOfTime` names the call, where the
+        run was and what the call had met. An error code in `tolerated` comes back as `{"error_code": ...}`."""
+        if self.plan is None:
+            return await self._call(name, arguments, kind, tolerated)
+        label = f"{name}.{kind}" if kind else name
+        left = self.plan.remaining()
+        if left <= 0:
+            raise OutOfTime(f"the scenario's deadline had passed before {label} ({self.where})")
+        started, retried, refused = time.monotonic(), len(self.retries), len(self.refusals)
+        limit = asyncio.timeout(left)
+        try:
+            async with limit:
+                return await self._call(name, arguments, kind, tolerated)
+        except TimeoutError:
+            if not limit.expired():
+                raise
+        retries, refusals = self.retries[retried:], refusal_counts(self.refusals[refused:])
+        raise OutOfTime(
+            f"the scenario's deadline came during {label} ({self.where}) after {time.monotonic() - started:.1f} s in the call; "
+            f"{len(retries)} transport retries{f', the last {retries[-1]}' if retries else ''}; "
+            f"{refusals['count']} busy refusals by cause {refusals['by_cause']}")
+
+    async def _call(self, name: str, arguments: dict[str, Any], kind: str,
+                    tolerated: frozenset[str]) -> tuple[dict, float]:
         label = f"{name}.{kind}" if kind else name
         last = "no attempt"
         attempt = busy = 0
@@ -911,6 +1003,7 @@ async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder,
     collection = CELL_COLLECTION[folder.name]
     problems: dict[str, list[str]] = {"manifest_proof": [], "no_space_failure": [], "filing": [], "compact_reply": []}
     if folder.name == "notes":
+        agent.where = f"{folder.name} folder, start call"
         before = await read_ledger() if read_ledger else None
         _, started_in = await agent.import_op("start", path=stage_path, collection=collection, initialize_kb=True)
         folder.report["start_call"] = start_call_cpu(before, await read_ledger() if read_ledger else None, started_in)
@@ -920,6 +1013,8 @@ async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder,
     while True:
         record_paging(folder, pages, plan)
         plan.require_time(f"the {folder.name} folder was filed")
+        agent.where = (f"{folder.name} folder, file call {sum(len(page['file_steps']) for page in pages.values()) + 1}, "
+                       f"{len(pages)} pages so far")
         reply, took = await agent.import_op("file", **fields)
         page = pages.setdefault(reply["run_id"], {"page": len(pages) + 1, "run_id": reply["run_id"], "file_seconds": 0.0,
                                                   "file_steps": []})
@@ -942,6 +1037,7 @@ async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder,
         problems["filing"].append(f"{failed} files failed to file")
     consumed = 0
     for page in pages.values():
+        agent.where = f"{folder.name} folder, status read of page {page['page']}"
         stored = await read_run(agent, page["run_id"])
         rows = stored.get("inventory") or []
         recorded = stored.get("finish") or {}
@@ -988,6 +1084,9 @@ async def page_stage(ctx: Context, agent: Agent, plan: LargeImportPlan, folder: 
 
     try:
         return await file_pages(agent, plan, folder, read_ledger)
+    except StepFailure:
+        plan.start_wrap_up()  # the reads in `finally` are evidence of a failed run: each is cut short
+        raise
     finally:
         folder.report["paging_refusals"] = {
             "journal": journal_refusals(journal_before, await read_refusal_journal(ctx)),
@@ -1129,6 +1228,22 @@ async def read_refusal_journal(ctx: Context) -> dict[str, Any] | None:
         return None
 
 
+async def collect_hang_evidence(ctx: Context, agent: Agent, sampler: Sampler) -> dict[str, Any]:
+    """What the cell was doing when the deadline ended a call: the writer boundary's holder and the journal's last rows
+    (`HANG_SCRIPT`), the newest sample's readiness with its repair and retrieval state, and the agent's refusals.
+    A read that fails says so and costs only itself; the cell's logs and the ledger row are kept beside this."""
+    last = sampler.rows[-1] if sampler.rows else None
+    evidence: dict[str, Any] = {
+        "last_sample": {key: last.get(key) for key in ("at", "label", "ready", "cell_error")} if last else None,
+        "agent_calls": {"refusals": refusal_counts(agent.refusals), "last_retries": agent.retries[-5:]},
+    }
+    try:
+        evidence["boundary"] = await asyncio.to_thread(exec_json, ctx, HANG_SCRIPT, attempts=1)
+    except Exception as error:  # noqa: BLE001 - an unread boundary is reported as unread
+        evidence["boundary"] = {"error": f"{type(error).__name__}: {str(error)[:300]}"}
+    return evidence
+
+
 async def wait_import_state(ctx: Context, import_id: str, state: str, timeout: float) -> dict:
     deadline = time.monotonic() + timeout
     while True:
@@ -1211,6 +1326,7 @@ async def run_folder(ctx: Context, agent: Agent, plan: LargeImportPlan, out: dic
     def phase(step: str) -> Iterator[None]:
         label = f"{name}.{step}"
         sampler.label = label
+        agent.where = label
         started = time.monotonic()
         print(f"[rehearsal] large-import {label}: start", flush=True)
         try:
@@ -1366,7 +1482,16 @@ def measurements(out: dict, sampler: Sampler, environment: Mapping[str, Any]) ->
 
 
 async def run_large_import(ctx: Context, plan: LargeImportPlan) -> None:
-    """The stage body: write into `report.stages["large_import"]` as it goes, so partial results survive."""
+    """The stage: its call limits apply while it runs, and stop with it."""
+    plan.begin_stage()
+    try:
+        await _stage_body(ctx, plan)
+    finally:
+        plan.end_stage()
+
+
+async def _stage_body(ctx: Context, plan: LargeImportPlan) -> None:
+    """Write into `report.stages["large_import"]` as it goes, so partial results survive."""
     out = ctx.report.stages["large_import"]
     out.update({
         "mode": "smoke" if plan.smoke else "full", "seed": plan.seed, "ceiling_bytes": plan.ceiling, "import_reserve_bytes": plan.reserve,
@@ -1384,7 +1509,7 @@ async def run_large_import(ctx: Context, plan: LargeImportPlan) -> None:
     if in_cell != [plan.ceiling, plan.reserve]:
         raise RuntimeError(f"the cell's adoption ceiling and import reserve are {in_cell}, "
                            f"the fixture and the volume were sized for {[plan.ceiling, plan.reserve]}")
-    agent, sampler = Agent(ctx.a.client), Sampler(ctx, plan)
+    agent, sampler = Agent(ctx.a.client, plan), Sampler(ctx, plan)
     task = asyncio.create_task(sampler.run())
     space: dict[str, int] = {}
     folders: dict[str, dict[str, list[str]] | None] = {"notes": None, "media": None}
@@ -1393,14 +1518,19 @@ async def run_large_import(ctx: Context, plan: LargeImportPlan) -> None:
         for name in folders:
             folders[name] = await run_folder(ctx, agent, plan, out, sampler, name, space)
     except StepFailure as error:
+        plan.start_wrap_up()
         out["findings"].append({"phase": sampler.label, "message": str(error)[:1500], "deadline": isinstance(error, OutOfTime)})
         with contextlib.suppress(Exception):
-            latest = await ctx.fetchrow("SELECT * FROM exomem_cloud_imports WHERE cell_id = $1 ORDER BY created_at DESC LIMIT 1",
-                                        ctx.a.cell_id)
+            async with asyncio.timeout(plan.call_limit("the ledger read")):
+                latest = await ctx.fetchrow("SELECT * FROM exomem_cloud_imports WHERE cell_id = $1 ORDER BY created_at DESC LIMIT 1",
+                                            ctx.a.cell_id)
             out["findings"][-1]["latest_import"] = import_summary(latest or {})
+        if isinstance(error, OutOfTime):
+            out["hang_evidence"] = await collect_hang_evidence(ctx, agent, sampler)
         with contextlib.suppress(Exception):
             out["import_failure_evidence"] = await asyncio.to_thread(save_import_failure_evidence, ctx)
     finally:
+        plan.start_wrap_up()
         await sampler.stop(task)
         with contextlib.suppress(Exception):
             volume["after"] = await volume_state(ctx)

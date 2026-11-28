@@ -22,7 +22,7 @@
     "mcp_url": {
       "type": "string",
       "title": "Evermatter MCP URL",
-      "description": "Optional full Evermatter MCP service URL ending in /mcp. Leave blank and run `exomem setup` to configure a native client route.",
+      "description": "Optional full Evermatter MCP service URL ending in /mcp. Leave blank and run `evermatter setup` to configure a native client route.",
       "default": "",
       "required": false
     }

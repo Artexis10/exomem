@@ -78,9 +78,9 @@ download stream with an idle bound (default 60 seconds) and a total cap (default
 
 1. Call `tools/list` through the gateway; expect `upload_files` and `inspect_memory` with status, with video decoding excluded.
 2. Call `transfer_artifact(operation="upload", lane="source", hold=true, expected_sha256=<digest>)`.
-3. Run `exomem attach <file> --handoff-file handoff.json --root <dir>`; expect a held file handle.
+3. Run `evermatter attach <file> --handoff-file handoff.json --root <dir>`; expect a held file handle.
 4. Call `save_source` with the returned file and the same digest; expect a stored receipt with that hash.
-5. Call `transfer_artifact(operation="download", artifact=<path>)`, run its `next_step` (`exomem cloud download -- '<path>'`, which writes to the current folder and refuses to replace an existing file unless given `--overwrite`); expect JSON with `path`, `bytes` and `sha256`, and a file whose SHA-256 matches.
+5. Call `transfer_artifact(operation="download", artifact=<path>)`, run its `next_step` (`evermatter cloud download -- '<path>'`, which writes to the current folder and refuses to replace an existing file unless given `--overwrite`); expect JSON with `path`, `bytes` and `sha256`, and a file whose SHA-256 matches.
 
 ## Accepted risk: the read timeout covers every edge route
 

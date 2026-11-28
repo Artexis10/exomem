@@ -115,7 +115,7 @@ REMOTE_MAINTENANCE_MESSAGE = (
 # Only a mode with no remote form reaches this refusal, and today that is `collections-store-export`
 # apply, which runs on the host with the service stopped. A mode that joins it needs its own text.
 REMOTE_MAINTENANCE_REMEDIATION = (
-    "Stop the service on the host, then run `exomem collections export --plan-id ID --why REASON` there. "
+    "Stop the service on the host, then run `evermatter collections export --plan-id ID --why REASON` there. "
     "Preview the export remotely without apply."
 )
 

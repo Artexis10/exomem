@@ -404,7 +404,7 @@ class ExomemBackend:
             raise BackendError(
                 "KB_NOT_INITIALIZED",
                 "connect or create a vault before adoption write modes",
-                "use the first-run flow, or exomem init",
+                "use the first-run flow, or evermatter init",
             )
         vault_root = Path(self._vault).resolve()
         target = Path(folder).expanduser().resolve()
@@ -658,7 +658,7 @@ class ExomemBackend:
                 "VAULT_EXISTS",
                 f"{folder} already holds (part of) a Knowledge Base",
                 "choose 'Use an existing vault' to connect to it, pick an empty "
-                "folder, or overlay an incomplete scaffold with `exomem init --force`",
+                "folder, or overlay an incomplete scaffold with `evermatter init --force`",
             ) from exc
         except (OSError, ValueError) as exc:
             raise BackendError.from_exception(exc) from exc

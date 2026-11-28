@@ -81,7 +81,7 @@ symlink, if it is one) names `exomem-retrieve-nudge.sh`. A profile that never
 wired the hook is left untouched. This never fails or rolls back the upgrade
 itself -- a per-profile error, such as the installer's own refusal of a
 group-writable config, is reported under `hook_refresh` in the upgrade result
-and surfaced by `exomem doctor` (`upgrade.hook_refresh`), not raised. Set
+and surfaced by `evermatter doctor` (`upgrade.hook_refresh`), not raised. Set
 `EVERMATTER_DISABLE_UPGRADE_HOOK_REFRESH` to opt out.
 
 For status or recovery, read the runtime directory from the rendered unit's
@@ -815,7 +815,7 @@ release refuses an archive in shared original storage, and no offline cleanup
 removes that format. An older release also refuses a vault that recorded the
 cancellation format. Before you start an older release on that
 vault, stop the server, then run
-`exomem maintain --vault VAULT --migrate-state --offline --cleanup-held-upload-cancellations`.
+`evermatter maintain --vault VAULT --migrate-state --offline --cleanup-held-upload-cancellations`.
 
 A worker records each optional state format that it uses in the vault's state
 manifest, for example the schema of a migrated collection store. The supervisor
@@ -953,7 +953,7 @@ changes during every handoff, or whose collections take longer than the
 budget, migrates offline instead:
 
 1. Stop the Evermatter service.
-2. Run `(set -a; . ~/.config/exomem/operator.env; exomem collections migrate --vault <vault> --apply)`.
+2. Run `(set -a; . ~/.config/exomem/operator.env; evermatter collections migrate --vault <vault> --apply)`.
 3. Start the Evermatter service.
 
 Step 2 reads the operator credential from the protected file in a subshell, so

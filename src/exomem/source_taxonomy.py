@@ -1122,7 +1122,7 @@ def _insert_in_section(text: str, section: str, entry: Sequence[str]) -> str:
         return text[:line_start] + block(first.column) + text[line_start:]
     raise vocabulary_registry.RegistryError(
         f"INVALID_REGISTRY_OVERLAY: `{section}` in {_REGISTRY_FILENAME} is not a block "
-        f"mapping; write `{section}:` followed by indented entries so exomem can add to "
+        f"mapping; write `{section}:` followed by indented entries so Evermatter can add to "
         "it and keep your comments"
     )
 

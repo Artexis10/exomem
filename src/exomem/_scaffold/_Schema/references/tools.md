@@ -56,7 +56,7 @@ on Evermatter Cloud.
    the send then saves the file on arrival, and step 6 is not needed.
 4. Save the reply as JSON, for example `handoff.json`. Its token is a secret: never print it or put it
    in a message. Send within fifteen minutes; the token works once.
-5. Send the bytes. With the CLI, run `exomem attach <file> --handoff-file handoff.json --root <dir>`
+5. Send the bytes. With the CLI, run `evermatter attach <file> --handoff-file handoff.json --root <dir>`
    (CLI only). A sandbox can install it with `pip install evermatter==<exomem-release>`. Otherwise, run the `shell` line of the reply's `next` send step, with `<token>` read
    from the file into a shell variable, such as
    `TOKEN=$(python3 -c 'import json; print(json.load(open("handoff.json"))["token"])')`.
@@ -73,7 +73,7 @@ A client with no shell and no networked sandbox cannot send bytes. On a personal
 person the `page` link from the evidence call of step 3; they pick the file on the device that holds
 it. Otherwise tell the person the original was not kept. Only an attached file reaches a sandbox; an
 image pasted inline does not. A local client with a local token can run
-`exomem attach <file> --lane source` (CLI only) and pass the printed handle in `files`.
+`evermatter attach <file> --lane source` (CLI only) and pass the printed handle in `files`.
 
 A chat app often sends a re-encoded copy of a photo without its camera metadata. Send the original
 file when the capture time or place matters.

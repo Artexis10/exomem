@@ -122,7 +122,7 @@ def test_plain_version_is_a_single_stable_line() -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.startswith("exomem ")
+    assert result.stdout.startswith("evermatter ")
     assert result.stdout.count("\n") == 1
     assert result.stderr == ""
 

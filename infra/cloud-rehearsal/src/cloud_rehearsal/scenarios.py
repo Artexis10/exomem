@@ -19,6 +19,7 @@ import base64
 import datetime as dt
 import json
 import secrets
+import subprocess
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -61,7 +62,7 @@ from .report import (
     innermost,
     stage,
 )
-from .shell import run, wait_for
+from .shell import wait_for
 from .substrate import PUBLIC_BASE_URL, Substrate
 
 if TYPE_CHECKING:
@@ -337,7 +338,16 @@ class Context:
     # --- the cluster, read as the operator ---
 
     def kubectl(self, *args: str, check: bool = True, input_text: str | None = None):
-        return self.stack.k3s.kubectl(*args, check=check, input_text=input_text)
+        plan = self.large_import
+        what = f"kubectl {args[0]}"
+        # The large-import stage ends each call at its own limit; every other call keeps the usual one.
+        limit = plan.call_limit(what) if plan is not None else None
+        try:
+            return self.stack.k3s.kubectl(*args, check=check, input_text=input_text, timeout=limit)
+        except subprocess.TimeoutExpired:
+            if limit is None:
+                raise
+            raise plan.call_timed_out(what, limit) from None
 
     def kube_json(self, *args: str) -> dict[str, Any]:
         return json.loads(self.kubectl(*args, "--output=json").stdout)
@@ -1463,17 +1473,23 @@ def snapshot_logs(ctx: Context) -> None:
     snapshots, taken after every step, not only what survives to the end.
     """
 
+    # The large-import run reads these in its post checks, when a cluster that stopped answering would cost the usual
+    # fifteen minutes a read: each read is cut at the plan's evidence limit. Other scenarios keep the usual limit.
+    limit = ctx.large_import.read_seconds if ctx.large_import is not None else None
     for namespace, selector in [
         (CLOUD_NAMESPACE, "app.kubernetes.io/name=exomem-cloud-gateway"),
         (CLOUD_NAMESPACE, "app.kubernetes.io/name=cellctl"),
         *[(namespace_name(t.cell_id), "app.kubernetes.io/name=exomem-cell") for t in ctx.tenants if t.cell_id],
     ]:
         for previous in ((), ("--previous",)):
-            result = run(
-                ["docker", "exec", ctx.stack.k3s.container, "kubectl", "logs", "--namespace", namespace,
-                 f"--selector={selector}", "--all-containers", "--tail=-1", "--prefix", *previous],
-                check=False,
-            )
+            try:
+                result = ctx.stack.k3s.kubectl(
+                    "logs", "--namespace", namespace, f"--selector={selector}", "--all-containers", "--tail=-1", "--prefix",
+                    *previous, check=False, timeout=limit)
+            except subprocess.TimeoutExpired:
+                if limit is None:
+                    raise
+                raise StepFailure(f"kubectl logs of {namespace} did not return within {limit:.0f} s") from None
             if result.stdout:
                 ctx.log_snapshots.append(result.stdout)
 

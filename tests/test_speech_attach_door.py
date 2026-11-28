@@ -8,15 +8,26 @@ ledger. The recording's bytes are fake, so only the container's duration is stat
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import wave
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 from fastmcp import Client
 
-from exomem import call_ledger, commands, extraction_parts, media_jobs, preserve, speech_attach, writer_lease
+from exomem import (
+    call_ledger,
+    commands,
+    extract,
+    extraction_parts,
+    media_jobs,
+    preserve,
+    speech_attach,
+    writer_lease,
+)
 from exomem import server as server_module
 from exomem.vault import parse_frontmatter
 
@@ -107,6 +118,70 @@ def test_an_agent_attaches_a_result_names_its_speakers_and_finds_the_recording_b
     job = media_jobs.MediaJobStore(vault).get_by_binary(binary, media_type="audio")
     assert job is None or not job.do_ocr, "the cell queues no speech work for an attached result"
     found = commands.op_find(vault, "welcome", speakers=["Host"])
+    assert [hit["path"] for hit in found] == [f"{relative}.md"], found
+
+
+@dataclass(frozen=True)
+class _Heard:
+    """What the owner's stubbed speech model returns for a segment: the fields `extract` reads."""
+
+    text: str
+    start: float
+    end: float
+
+
+def test_an_owners_agent_downloads_the_original_runs_its_own_speech_stack_and_attaches_the_result(
+    build, vault, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The payload comes from a speech run on bytes the agent downloaded over MCP, not from a literal.
+
+    A download that returns other bytes than the stored original makes the attach refuse the bound
+    SHA-256, and a payload that the door cannot read fails the call, so each hop is checked here.
+    """
+    monkeypatch.setenv("EXOMEM_JWT_SIGNING_KEY", "synthetic-private-signing-key")
+    monkeypatch.setenv("EXOMEM_BASE_URL", "https://capture.example")
+    monkeypatch.setattr(preserve, "_MAX_EXTRACT_BYTES", 600)
+    relative, binary, page = _pending_recording(vault)
+    heard: list[bytes] = []
+
+    class OwnersModel:
+        def transcribe(self, path: Path, **_options):
+            heard.append(path.read_bytes())
+            return [_Heard(s["text"], s["start"], s["end"]) for s in SEGMENTS], "owners-whisper"
+
+    monkeypatch.setattr(extract, "get_transcriber", OwnersModel)
+    monkeypatch.setattr(extract, "_run_diarization", lambda _path: [(t["start"], t["end"], t["label"]) for t in TURNS])
+
+    async def scenario(client):
+        handoff = await _call(client, "download_files", {"pages": [relative]})
+        delivery = handoff["artifacts"][0]["deliveries"]["native_resource"]["uri"]
+        original = base64.b64decode((await client.read_resource(delivery))[0].blob)
+        local = tmp_path / "owners-machine" / "interview.m4a"
+        local.parent.mkdir()
+        local.write_bytes(original)
+        segments, _engine = extract.get_transcriber().transcribe(local)
+        turns = extract._run_diarization(local)
+        attach = {
+            "path": relative, "binary_sha256": hashlib.sha256(original).hexdigest(), "binary_size": len(original),
+            "segments": [{"start": s.start, "end": s.end, "text": s.text} for s in segments],
+            "turns": [{"start": a, "end": b, "label": label} for a, b, label in turns],
+            "engine": "owners-whisper + pyannote",
+        }
+        return handoff, await _call(client, "manage_memory", {"operation": "media.attach_speech", "arguments": attach})
+
+    handoff, attached = _session(build(), scenario)
+
+    assert handoff["handoff_status"] == "handoff_prepared", handoff
+    assert heard == [PAYLOAD], "the model ran on the stored original's bytes"
+    assert attached["outcome"] == "attached" and attached["speech_job"] == "retired", attached
+    fields = parse_frontmatter(page.read_text(encoding="utf-8"))[0]
+    assert fields["speakers"] == ["Speaker A", "Speaker B"] and fields["extraction_origin"] == "attached"
+    parts = [extraction_parts.part_path(page, number) for number in range(2, extraction_parts.count_of(fields) + 1)]
+    texts = [page.read_text(encoding="utf-8"), *(part.read_text(encoding="utf-8") for part in parts)]
+    assert parts and "[0:03] [Speaker B]: Line 1 of the interview." in texts[0]
+    job = media_jobs.MediaJobStore(vault).get_by_binary(binary, media_type="audio")
+    assert job is None or not job.do_ocr, "the cell queues no speech work for an attached result"
+    found = commands.op_find(vault, "welcome", speakers=["Speaker A"])
     assert [hit["path"] for hit in found] == [f"{relative}.md"], found
 
 

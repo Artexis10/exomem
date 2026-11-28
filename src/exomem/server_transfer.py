@@ -1865,7 +1865,7 @@ def register_transfer_routes(
 
         html = f"""<!doctype html><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
-<title>exomem upload</title>
+<title>Evermatter upload</title>
 <style>body{{font:16px system-ui;max-width:34rem;margin:2rem auto;padding:0 1rem}}
 label{{display:block;margin:.75rem 0 .2rem}}input,textarea{{width:100%;padding:.5rem;font:inherit}}
 button{{margin-top:1rem;padding:.6rem 1rem;font:inherit}}#out{{margin-top:1rem;white-space:pre-wrap}}</style>

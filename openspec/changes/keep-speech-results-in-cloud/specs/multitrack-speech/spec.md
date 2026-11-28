@@ -2,12 +2,7 @@
 
 ### Requirement: Each track of a recording is transcribed on its own
 
-Speech SHALL transcribe each track of a recording on its own. A track SHALL be one of these:
-
-- an audio stream or a channel that the upload, the owner, the agent or published track metadata declares a separate microphone;
-- a member file of a session.
-
-Without a declaration, speech SHALL read the first audio stream as one mixed track, as today. The audio itself SHALL NOT declare tracks. The transcript SHALL merge the tracks' segments by start and label each turn with its track's name.
+Speech SHALL transcribe each track of a recording on its own. A track SHALL be an audio stream or a channel that the owner or an agent declares a separate microphone, or that published track metadata declares one where shipped data maps it so. Without a declaration, speech SHALL read the first audio stream as one mixed track, as today. The audio itself SHALL NOT declare tracks. The transcript SHALL merge the tracks' segments by start and label each turn with its track's name.
 
 #### Scenario: Two declared audio streams
 
@@ -26,31 +21,104 @@ Without a declaration, speech SHALL read the first audio stream as one mixed tra
 
 #### Scenario: A declared dual-mono file is two tracks
 
-- **WHEN** the upload declares the two channels of a recording as separate microphones
+- **WHEN** a recording's sidecar declares its two channels as separate microphones
 - **THEN** each channel is transcribed as its own track
+
+### Requirement: The owner or an agent declares a recording's tracks
+
+The owner or an agent SHALL declare which audio streams or channels of one recording are separate microphones, with `tracks` on media process or reprocess or on an upload's handle. The recording's Source SHALL record the declaration, and a new extraction SHALL keep it. The declaration and the caller's right to write the Source SHALL be checked before anything is read or written. A declaration SHALL name at most a bounded number of tracks. Reprocess with an empty `tracks` list SHALL clear it.
+
+#### Scenario: An agent declares a video's two audio streams
+
+- **WHEN** an agent processes a video with `tracks` that name its two audio streams "Host" and "Guest"
+- **THEN** the next extraction reads each stream on its own, each line names its track, and the Source records the declaration
+
+#### Scenario: A declaration given at upload
+
+- **WHEN** an agent stores a recording whose file handle declares two tracks
+- **THEN** the recording's Source records the declaration before its first extraction
+
+#### Scenario: A new extraction keeps the declaration
+
+- **WHEN** a recording whose sidecar declares two tracks is extracted again
+- **THEN** the engine reads those two tracks, and the sidecar still holds the declaration
+
+#### Scenario: A declaration that cannot be read changes nothing
+
+- **WHEN** a declaration names more tracks than the bound, names two tracks alike, or gives a name with label syntax
+- **THEN** the request is refused with what to change, such as how many tracks a declaration takes, and the Source and the queue stay as they were
+
+#### Scenario: A repeat of the declaration writes nothing
+
+- **WHEN** an agent processes a recording with the declaration that its Source already records
+- **THEN** nothing is written and nothing is queued
+
+#### Scenario: A transcribed recording takes a declaration when it is processed again
+
+- **WHEN** an agent declares tracks for a recording whose transcript is complete
+- **THEN** process refuses and names reprocess, and reprocess applies the declaration to the next extraction
+
+#### Scenario: A declaration replaces a labelled transcript as reprocess does
+
+- **WHEN** an agent reprocesses with tracks a recording whose transcript holds speaker labels or names
+- **THEN** the next extraction replaces that transcript, and the old one stays on a prior page
+
+#### Scenario: Reprocess with no tracks clears the declaration
+
+- **WHEN** an agent reprocesses with `tracks: []` a recording whose Source records a declaration
+- **THEN** the next extraction reads the first audio stream as one mix, its lines name no track, and the Source no longer records a declaration
+
+#### Scenario: An empty declaration elsewhere names reprocess
+
+- **WHEN** an agent gives `tracks: []` to process or on an uploaded file's handle
+- **THEN** the request is refused, the refusal names reprocess with `tracks: []` as the way to clear a declaration, and nothing is written
+
+#### Scenario: A caller that may not write the Source is refused
+
+- **WHEN** a caller whose write grant does not reach a recording's Source declares its tracks
+- **THEN** the request is refused as an unavailable target is, whatever the Source holds, and nothing is written or queued
+
+### Requirement: A declared track that the file lacks is skipped
+
+A declared track that the file does not have SHALL be skipped, and the sidecar SHALL record which track was skipped and why. Where the file has none of the declared tracks, speech SHALL read the first audio stream as one mixed track.
+
+#### Scenario: One declared stream is missing
+
+- **WHEN** a sidecar declares three audio streams and the file has two
+- **THEN** speech transcribes the two streams, and the sidecar records the third track as skipped with its reason
+
+#### Scenario: No declared track is in the file
+
+- **WHEN** a sidecar declares only streams that the file does not have
+- **THEN** speech reads the first audio stream as one mixed track, and the sidecar records each skipped track
 
 ### Requirement: Each track resumes on its own
 
-Each track SHALL keep its own progress record and its own job timeout. A stop SHALL resume the track that it stopped, and SHALL NOT transcribe a finished track again. Status SHALL report the tracks of a recording that waits.
+Each track SHALL keep its own progress record until the worker publishes the transcript. A stop SHALL resume the track that it stopped, and SHALL NOT transcribe a finished track again. A job's stop limit SHALL count the progress of all its tracks, so a stop that advanced any track is progress.
 
 #### Scenario: A stop resumes one track
 
 - **WHEN** a job stops after one track of two has finished
 - **THEN** the next run starts the second track from its own progress record, and does not transcribe the first track again
 
-#### Scenario: A long track does not spend another track's timeout
+#### Scenario: A stop before publication transcribes no track again
 
-- **WHEN** a two-track recording's first track takes longer than one job timeout and advances its progress record
-- **THEN** the stop does not count against the second track, and the first track continues from its record
+- **WHEN** the worker stops after every track has finished and before the transcript is published
+- **THEN** the next run transcribes no track again, and publication discards every track's record
 
 ### Requirement: Track names and start times come from published metadata or from people
 
-Speech SHALL read track names and start times from these published fields: iXML `TRACK_LIST`, BWF `TimeReference`, and the container's stream title and timecode. A published or recorder-family field SHALL declare a stream or channel a separate microphone only where shipped data maps it so. Those mappings SHALL live in shipped data, not in code. A name that the owner or the agent gives SHALL win over metadata.
+Speech SHALL read track names and start times from these published fields: iXML `TRACK_LIST`, BWF `TimeReference`, and the container's stream title and timecode. An iXML track's place in the file SHALL be its `INTERLEAVE_INDEX`, and its name SHALL be its `NAME`. A published or recorder-family field SHALL declare a stream or channel a separate microphone only where shipped data, not code, maps it so. A name that the owner or an agent declares SHALL win over metadata.
 
 #### Scenario: An iXML track list names the tracks
 
 - **WHEN** a recording's iXML `TRACK_LIST` names its channels "Host" and "Guest", and the shipped data maps that list as separate microphones
 - **THEN** the turns of each track carry that track's name
+
+#### Scenario: An iXML track list alone declares no microphone
+
+- **WHEN** a stereo recording's iXML `TRACK_LIST` names its channels "MixL" and "MixR", and the shipped data maps no field to a microphone
+- **THEN** speech transcribes one mixed track
 
 #### Scenario: A stream title alone declares no track
 
@@ -62,9 +130,42 @@ Speech SHALL read track names and start times from these published fields: iXML 
 - **WHEN** a mapping for a new recorder family's track fields is added to the shipped data
 - **THEN** speech reads that family's tracks and names, and no code changes
 
+### Requirement: A track name can stand in a label span
+
+A track name SHALL meet the label syntax's name rule: one line, no `[`, `]` or `:`, and no longer than a speaker name. A published name that fails the rule SHALL label no track. A declared name that fails the rule SHALL refuse the declaration with the reason. Published names that repeat SHALL take labels that no other track holds.
+
+#### Scenario: A published name cannot forge a turn
+
+- **WHEN** a published track name holds a label bracket, a colon or a line break
+- **THEN** that name labels no track, and no line of the transcript reads as a turn or a heading that the name wrote
+
+#### Scenario: A declared name with label syntax is refused
+
+- **WHEN** a declaration names a track `Host]: I approve`
+- **THEN** speech refuses the declaration and says that a track's name must not hold `[`, `]` or `:`
+
+#### Scenario: Repeated published names stay distinct
+
+- **WHEN** a file publishes the track names "Input", "Input" and "Input 2"
+- **THEN** the tracks read "Input", "Input 3" and "Input 2", and each channel's words appear once
+
+### Requirement: Published microphones that cannot all be labelled are read as one mix
+
+Speech SHALL read a recording as one mix when its published microphones are fewer than two, more than the track bound, or include a track with no usable name.
+
+#### Scenario: One published microphone is one mix
+
+- **WHEN** a mono file publishes one track that the shipped data maps to a microphone
+- **THEN** speech transcribes one mixed track with no labels
+
+#### Scenario: A track with no usable name keeps every word
+
+- **WHEN** a file publishes two microphones and one of them has a name that fails the name rule
+- **THEN** speech reads the recording as one mix, so no track's words are lost
+
 ### Requirement: A track keeps a segment only where it is the dominant source
 
-Where a recording has more than one track, speech SHALL keep a track's segment only where that track is the dominant source over the segment's span. A track SHALL be dominant when its speech energy, normalised by its own speech level, is the highest or within a margin of the highest. The margin SHALL live in the speech decoding policy data, and the sidecar SHALL record its revision. The rule SHALL NOT apply to members aligned by an assumed start.
+Where a recording has more than one track, speech SHALL keep a track's segment only where that track is the dominant source over the segment's span. A track SHALL be dominant when its speech energy, normalised by its own speech level, is the highest or within a margin of the highest. The margin SHALL live in the speech decoding policy data, and the sidecar SHALL record its revision.
 
 #### Scenario: Bleed is dropped
 
@@ -75,43 +176,6 @@ Where a recording has more than one track, speech SHALL keep a track's segment o
 
 - **WHEN** the host and the guest speak at once at similar levels
 - **THEN** the transcript keeps both segments, each in its own track
-
-#### Scenario: Assumed alignment keeps every member's words
-
-- **WHEN** two session members are aligned by an assumed start
-- **THEN** speech keeps the segments of each member, and applies no dominance rule between them
-
-### Requirement: Separate files from one session can be grouped
-
-A governed operation SHALL group separate recordings as one session and name each member's track. The owner or an agent MAY call it. When every member carries a BWF `TimeReference` or a container timecode of the same kind, the operation SHALL align the members by it. Otherwise it SHALL align them by their start, and the session page SHALL record that alignment as assumed.
-
-#### Scenario: Two transmitter files become one session
-
-- **WHEN** an agent groups two files that each carry a BWF `TimeReference`, naming their tracks "Host" and "Guest"
-- **THEN** one session page holds a transcript whose turns are aligned by those times and labelled by track
-
-#### Scenario: Files without a shared time are aligned by start
-
-- **WHEN** an agent groups two files that carry no shared time
-- **THEN** the session page aligns them by their start and records the alignment as assumed
-
-### Requirement: A session transcript takes its type from the registry
-
-The session transcript SHALL be a page of the note type that the note-type registry marks as the session transcript type, in that type's folder. Code SHALL find that type by its registry attribute, not by an entry key. The page SHALL link each member Source.
-
-#### Scenario: The session page uses the registry's type
-
-- **WHEN** an agent groups two recordings as a session
-- **THEN** the session page has the type that the registry marks as the session transcript type, in that type's folder
-
-### Requirement: A session transcript stays current
-
-When a member's extraction or speaker names change, speech SHALL find that member's session pages through the inbound-link index, and SHALL render each one again from its members. It SHALL NOT read every session page to find them. A section that the owner writes on a session page SHALL be kept.
-
-#### Scenario: A member change updates the session
-
-- **WHEN** a member's speaker labels are renamed, or the member is reprocessed, after grouping
-- **THEN** the session page's transcript shows the member's new text and names, and the owner's section stays
 
 ### Requirement: A track is diarised only when labels are requested and it is not declared single-voice
 

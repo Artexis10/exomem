@@ -215,7 +215,7 @@ def run_demo(
             echo("")
             if success:
                 echo(f"demo PASS — total {total:.2f}s. This is your proof: agents search files you own.")
-                echo("Next: connect your own vault with `exomem setup`")
+                echo("Next: connect your own vault with `evermatter setup`")
             else:
                 echo(f"demo FAIL — total {total:.2f}s", )
             if keep and is_temp:
@@ -244,9 +244,9 @@ def run_demo(
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem demo",
+        prog="evermatter demo",
         description=(
-            "Prove exomem works in ~30 seconds: run doctor -> find -> get -> audit "
+            "Prove Evermatter works in ~30 seconds: run doctor -> find -> get -> audit "
             "against a bundled sample vault. No clone, no config, no vault needed; "
             "fully local, read-only, keyword mode."
         ),

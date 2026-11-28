@@ -46,7 +46,7 @@ COMPILED_DESTINATIONS = {
 }
 EXPECTED_NORMATIVE_IDENTITY = (
     12,
-    "sha256:26c49ad6461355e0e9d3441c6130f290676aada986db30c37c2f97278c54fc47",
+    "sha256:64a50d0c7e553902cc2175ca2220406ec463b79090ab3f2e075b06d8ac2508f6",
 )
 PORTABLE_CORE_KEYS = [
     "action",
@@ -108,7 +108,7 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
             "Parse valid compact observations anywhere outside fenced code blocks."
         ),
         "canonical_authoring": (
-            "Exomem writers use `-` under the canonical `## Observations` section."
+            "Evermatter writers use `-` under the canonical `## Observations` section."
         ),
         "parser_bullet_markers": ["-", "*", "+"],
         "canonical_bullet_marker": "-",

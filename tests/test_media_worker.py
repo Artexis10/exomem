@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import json
 import os
 import threading
 import time
@@ -39,6 +40,7 @@ from exomem import (
 )
 from exomem import find as find_module
 from exomem import vault as vault_module
+from exomem.asr_facts import AsrFacts
 from exomem.vault import content_hash
 
 
@@ -2619,6 +2621,41 @@ def test_recovered_speech_request_keeps_its_diarization_choice(
     assert binary.read_bytes() == b"FAKEBYTES"
 
 
+def test_the_tracks_an_owner_declared_on_a_sidecar_reach_the_engine_and_outlive_the_extraction(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    saved = _preserve_media_stub(vault, filename="panel.wav")
+    sidecar = vault / saved.sidecar_path
+    declared = [{"name": "Host", "channel": 0, "single_voice": True}, {"name": "Guest", "channel": 1}]
+    # A unit fixture: no door writes `speech_tracks` yet, so the test sets the field with the private setter.
+    sidecar.write_text(
+        preserve._set_frontmatter_field(sidecar.read_text(encoding="utf-8"), "speech_tracks", json.dumps(declared)),
+        encoding="utf-8",
+    )
+    asked: list[object] = []
+
+    def transcribe(_path, *, media_type, tracks=None, **_options):
+        asked.append(tracks)
+        return extract.ExtractResult(
+            text="[0:00] [Host]: hello", media_type=media_type, engine="test+tracks+timed",
+            asr=AsrFacts(
+                language="en", tracks_policy="tracks-policy-test",
+                tracks_skipped="Ghost: the file has 1 audio streams; stream 3 does not exist",
+            ),
+        )
+
+    monkeypatch.setattr(extract, "extract_text", transcribe)
+
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+    worker._process(media_worker._Job(binary_path=vault / saved.path, sidecar_path=sidecar, media_type="audio"))
+
+    published = _parsed_frontmatter(sidecar)
+    assert asked == [declared]
+    assert published["speech_tracks"] == declared, "a new extraction keeps what the owner declared"
+    assert published["asr_tracks_policy"] == "tracks-policy-test"
+    assert published["asr_tracks_skipped"] == "Ghost: the file has 1 audio streams; stream 3 does not exist"
+
+
 @pytest.mark.parametrize("awaiting_dependency", [False, True])
 def test_a_disabled_speech_engine_retains_the_accepted_choice(vault, monkeypatch, awaiting_dependency) -> None:
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
@@ -4518,7 +4555,7 @@ def test_transcript_index_refresh_failure_is_durable_and_retryable_without_asr(
     assert "transcript survives index failure" in sidecar.read_text(encoding="utf-8")
     status = deferred_index.full_status(vault)
     assert status["count"] == 1
-    assert status["next_action"] == f'exomem index --vault "{vault}" --scope vault'
+    assert status["next_action"] == f'evermatter index --vault "{vault}" --scope vault'
 
     monkeypatch.setattr(
         index_sync,

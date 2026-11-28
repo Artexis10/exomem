@@ -615,7 +615,7 @@ explicit audit/cleanup. This protocol SHALL NOT claim cross-file all-or-none
 power-loss atomicity. A qualifying typed relation or genuinely empty-corpus
 bootstrap SHALL not require a reviewed-none decision from the caller.
 
-Review fields SHALL be checked against whether the page needs a relation review, with one check shared by validation and commit. When the page needs no review (a qualifying relation, connectivity signal or empty-corpus bootstrap), a commit that carries `relation_disposition`, `relation_review_hash` or `relation_review_reason` SHALL drop them, commit without a review artifact, and return one warning that names the review fields it dropped. When the page needs a review and the commit names a validated draft, a commit that omits any of the three fields SHALL be refused with `INVALID_RELATION_REVIEW`, whose `missing` list names each absent field and whose message says to copy `relation_review_hash` from the `validate_only` result or to send the other two fields without the draft fields to commit in one call. A commit that names no draft field SHALL NOT be refused for an absent hash. Validation SHALL NOT compare the hash. When the caller names a draft and supplied any review field, validation SHALL report the fields a commit would find missing or ignored under `relation_review_fields`.
+Review fields SHALL be checked against whether the page needs a relation review, with one check shared by validation and commit. When the page needs no review (a qualifying relation, connectivity signal or empty-corpus bootstrap), a commit that carries `relation_disposition`, `relation_review_hash` or `relation_review_reason` SHALL drop them, commit without a review artifact, and return one warning. A grouped tool's warning SHALL name the review fields it dropped. A typed tool's warning SHALL name the unlinked reason, the one review field it takes. When the page needs a review and the commit names a validated draft, a commit that omits any of the three fields SHALL be refused with `INVALID_RELATION_REVIEW`, whose `missing` list names each absent field and whose message says to copy `relation_review_hash` from the `validate_only` result or to send the other two fields without the draft fields to commit in one call. A commit that names no draft field SHALL NOT be refused for an absent hash. Validation SHALL NOT compare the hash. When the caller names a draft and supplied any review field, validation SHALL report the fields a commit would find missing or ignored under `relation_review_fields`.
 
 #### Scenario: Second disconnected page can be created after review
 - **WHEN** validation for a second page returns no qualifying candidate and the commit repeats the draft with matching reviewed-none fields
@@ -660,6 +660,11 @@ Review fields SHALL be checked against whether the page needs a relation review,
 - **WHEN** `validate_only` names a draft and carries a review field for a page that needs review but omits the hash
 - **THEN** `relation_review_fields.missing` lists `relation_review_hash`
 - **AND** the same call for a page that needs no review lists the supplied fields under `relation_review_fields.ignored`
+
+#### Scenario: A typed tool's warning names the unlinked reason
+- **WHEN** a typed tool commits to a page that needs no review with `unlinked_reason`
+- **THEN** the result carries one warning that says no link review applies, so the unlinked reason was not recorded
+- **AND** the warning does not name `relation_disposition` or `relation_review_reason`, which the caller never sent
 
 ### Requirement: Existing-Page Review Decisions And Transition Recovery Are Separate
 For an existing page with a unique valid stable memory UUID, a reviewed-none lifecycle decision SHALL be an immutable portable artifact at `Knowledge Base/_Schema/relation-reviews/lifecycle/<uuid>/<after-fingerprint>.json`. Its canonical bounded schema SHALL contain the schema/kind, normalized UUID, exact resulting review-content fingerprint, bounded non-empty reason, and a decision hash derived only from those stable decision fields. Its identity SHALL NOT depend on operation, prior bytes/path, transition token, log/index plan, or auxiliary digest. Transition-specific crash recovery SHALL use one separately guarded replaceable slot at `Knowledge Base/_Schema/relation-reviews/lifecycle/<uuid>/prepared.json`. Its canonical bounded schema SHALL contain the schema/kind, canonical transition UUID, operation, normalized page UUID, exact before/after paths and source hashes, after fingerprint, decision reference plus exact decision-bytes hash or JSON null when no decision is needed, transition-token hash, ordered auxiliary digest, and optional `carried_from` decision reference. The prepared slot SHALL NOT itself satisfy relation review. An exact unique UUID plus current-fingerprint decision match SHALL satisfy a reviewed-none disposition. An edit that carries a standing decision forward SHALL record in `carried_from` the lifecycle decision reference it carried and SHALL write no new decision. The loader SHALL read `carried_from` from a committed slot, that is, when the page's path, source hash and fingerprint equal the slot's after values, and from a pending slot when the page's path and source hash equal the slot's before values, because the pending slot copied the pointer from the decision it carried. A pending slot's own decision SHALL NOT review the before state. A slot or decision that cannot be read, a reference to anything other than a lifecycle decision of the same UUID, and a denied reference SHALL read as no decision for that page and SHALL NOT stop the evaluation of other pages. A reviewed-none request on an edit, validated or not, SHALL record a decision only when the edit needs one, so a pre-emptive request does not add decision files toward the bound. An edit that names a transition token and sends reviewed-none without `relation_review_hash` SHALL be refused with `INVALID_RELATION_REVIEW`. A `generic` disposition keeps the validated route: it SHALL be refused with `INVALID_RELATION_REVIEW` and `missing=["relation_review_hash"]` when it lacks the validated hash, and with `LIFECYCLE_TRANSITION_REVIEW_MISMATCH` only when the hash it sends does not match.
@@ -1094,7 +1099,7 @@ appears and no kind list lives in code.
   admitted kinds, `correction` among them
 
 #### Scenario: as_of on a compact unit names the valid kinds
-- **WHEN** `add_observation` sends `as_of` with no kind
+- **WHEN** `add_observation` sends `as_of` with `kind="observation"`, the compact kind
 - **THEN** it refuses with `COMPACT_METADATA_REQUIRES_RICH_KIND`, and the remediation lists the
   admitted kinds
 
@@ -1203,3 +1208,62 @@ A compact `add_observation` that carries any relation outside that rule SHALL re
 
 - **WHEN** an agent updates a rich unit that carries a `derived_from` relation, sends the relation again and omits `kind`
 - **THEN** the call refuses with `COMPACT_RELATIONS_REQUIRE_RICH_KIND` and the page is unchanged
+
+### Requirement: A Dated Observation With No Kind Keeps Its Dates On A Default Kind
+
+When `add_observation`, or `edit_note(action="edit_observation")` on a compact unit, carries `as_of`
+or `until` and no `kind`, the write SHALL commit a rich unit of the kind that carries the
+`dated_default` trait, and the reply SHALL say so plainly. `verdict` or `check_by`, and an explicit
+compact `kind`, SHALL keep the refusal. No refusal SHALL offer to omit `as_of` or `until`.
+
+#### Scenario: Dates alone land in a dated block and the reply says so
+- **WHEN** `add_observation` sends `as_of` and `until`, a category and a text, and no `kind`
+- **THEN** the page gains one rich `record` unit with the category, the text and both dates, at the end of the page body
+- **AND** the reply says "Saved with its dates."
+
+#### Scenario: Dating a compact observation moves it to a dated block
+- **WHEN** `edit_note(action="edit_observation")` sends `as_of` and no `kind` for a compact unit
+- **THEN** the compact line leaves the observation list and a `record` block with the same anchor goes at the end of the page body
+- **AND** the reply returns the unit id, whose version suffix differs from the id sent
+
+#### Scenario: Only the shipped pack sets the trait
+- **WHEN** a vault kind declares `dated_default`
+- **THEN** a dated observation still lands on `record`
+- **AND** the vault's schema diagnostics carry a warning that the trait was ignored
+
+#### Scenario: Verdict and check_by keep the refusal and keep the date in view
+- **WHEN** `add_observation` sends `verdict` or `check_by` with `as_of` and no `kind`
+- **THEN** it refuses with `COMPACT_METADATA_REQUIRES_RICH_KIND` and the page is unchanged
+- **AND** the remediation offers to pass a kind that takes the fields, or to omit `verdict` and `check_by` so the date lands in a dated block
+- **AND** it does not offer to omit `as_of`
+
+#### Scenario: The busy-write intake leaves a dated call to the page
+- **WHEN** the service is busy and `add_observation` sends `as_of` and no `kind`
+- **THEN** the intake queues the save and the replay writes it in a dated block
+- **AND** the applied save reads "Saved with its date."
+- **AND** a call that sends `verdict` or `check_by` is refused at once and never queued
+
+### Requirement: An Existing Page That Takes No Link Review Ignores The Review Fields
+
+A write to an existing page that takes no relation review, such as an entity page, SHALL accept
+`relation_disposition`, `relation_review_hash`, `relation_review_reason` and `unlinked_reason` as a
+no-op. It SHALL record no decision. A preview SHALL list the fields the caller sent under
+`relation_review_fields`, and a commit SHALL return one warning. A page that needs a review SHALL
+keep its checks.
+
+#### Scenario: An unlinked reason on an entity page is ignored and the reply says so
+- **WHEN** `add_observation` or `edit_note` sends `unlinked_reason` for an entity page
+- **THEN** the write commits and no review decision is recorded
+- **AND** the reply says that no link review applies to the page, so the unlinked reason was not
+  recorded
+
+#### Scenario: A preview names the ignored review fields
+- **WHEN** a preview of an observation on an entity page carries `relation_disposition` and
+  `relation_review_reason`
+- **THEN** the preview lists both under `relation_review_fields.ignored`
+- **AND** a typed tool's preview that sent `unlinked_reason` lists only `unlinked_reason`
+
+#### Scenario: A page that needs review keeps its checks
+- **WHEN** a write to an active compiled page that needs a review carries `reviewed_none` with a
+  hash that does not match the validated transition
+- **THEN** it refuses with `LIFECYCLE_TRANSITION_REVIEW_MISMATCH`

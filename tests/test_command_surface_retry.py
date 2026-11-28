@@ -1227,7 +1227,7 @@ def test_remote_export_apply_is_refused_before_manager_dispatch(
     assert raised.value.details == {"status": "terminal", "committed": False}
     assert raised.value.remediation is not None
     # Export is the one write that has no remote form: the text names it and says nothing of the job kinds.
-    assert "exomem collections export" in raised.value.remediation
+    assert "evermatter collections export" in raised.value.remediation
     assert "stop the service" in raised.value.remediation.lower()
     assert "reconcile" not in raised.value.remediation
 
@@ -1374,7 +1374,7 @@ def test_mcp_write_maintenance_returns_terminal_operator_refusal(
     assert "retry" not in result["error"]
     refusal = full["diagnostics"]["error"]
     assert (refusal["status"], refusal["committed"]) == ("terminal", False)
-    assert "exomem collections export" in refusal["remediation"]
+    assert "evermatter collections export" in refusal["remediation"]
 
 
 @pytest.mark.parametrize(

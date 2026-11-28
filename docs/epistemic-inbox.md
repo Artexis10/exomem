@@ -18,16 +18,16 @@ or user inspects the evidence and chooses what to do.
 ## Daily command
 
 ```bash
-exomem review
+evermatter review
 ```
 
 Human output shows a compact ranked inbox. Automation keeps the shared JSON
 envelope:
 
 ```bash
-exomem review --json
-exomem review --state all --json
-exomem review --category relation_debt --json
+evermatter review --json
+evermatter review --state all --json
+evermatter review --category relation_debt --json
 ```
 
 The MCP/REST product route is `list_review_items(queue="due")`. Every item
@@ -75,9 +75,9 @@ silently skipped.
 Triage is explicit write-capable state, separate from read-only review:
 
 ```bash
-exomem review snooze exomem://review/0123456789abcdef01234567 --until 2026-08-01
-exomem review dismiss exomem://review/0123456789abcdef01234567 --why "intentionally standalone"
-exomem review reopen exomem://review/0123456789abcdef01234567
+evermatter review snooze exomem://review/0123456789abcdef01234567 --until 2026-08-01
+evermatter review dismiss exomem://review/0123456789abcdef01234567 --why "intentionally standalone"
+evermatter review reopen exomem://review/0123456789abcdef01234567
 ```
 
 Agents call `decide_review_item` with the same `dismiss`, `snooze`, or `reopen`
@@ -122,7 +122,7 @@ one of `intentional:`, `false_positive:`, `handled:`, `deferred:`, or
 an item decision. The CLI composes the token for you:
 
 ```bash
-exomem review dismiss exomem://review/0123456789abcdef01234567 \
+evermatter review dismiss exomem://review/0123456789abcdef01234567 \
   --reason handled --why "closed in the incident review"
 ```
 
@@ -142,9 +142,9 @@ Triage is per item. When a *kind* of signal is noise for your corpus, set that
 family's disposition instead of lowering prominence, which silences everything:
 
 ```bash
-exomem review quiet prediction_window --reason too_frequent --why "fires more than it helps"
-exomem review off near-duplicate --reason false_positive
-exomem review normal prediction_window
+evermatter review quiet prediction_window --reason too_frequent --why "fires more than it helps"
+evermatter review off near-duplicate --reason false_positive
+evermatter review normal prediction_window
 ```
 
 Agents use the `review.set_family` operation of `manage_memory` with a family reference,

@@ -22,6 +22,10 @@ A citation is visible when the caller may read the citing collection, the link f
 the cited page or row. A target the caller may not read answers exactly as one that does not exist, and a
 withheld row is absent from both ``items`` and ``count``. The admission is the one the Records read
 paths use (`ReadSession`, `FieldPlan`, `reference_resolution.rows_released`); this module decides nothing by itself.
+
+`subject_records` sums the citing rows of a page instead of listing them. It admits collections and targets
+through this module's `_readable_fields` and `_visible_targets`, and reads the rows that `citing_rows` names,
+so the index and the row release stay here.
 """
 
 from __future__ import annotations
@@ -29,7 +33,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -115,14 +119,17 @@ RECALL_CITATIONS = 3
 _HIT_ITEM = ("ref", "label", "collection_title", "field")
 
 
-def for_hits(refs: Sequence[str | None], caller: Path) -> dict[str, dict[str, Any]]:
+def for_hits(refs: Sequence[str | None], caller: Path,
+             unlisted: Mapping[str, Collection[tuple[str, str]]] | None = None) -> dict[str, dict[str, Any]]:
     """What a recall response adds to its page hits, by page ref, from one indexed read for the whole response.
 
     ``refs`` are the refs of the first ``RECALL_HITS`` hits, in order; a ref that names no page is skipped.
     A page answers ``cited_by_count`` (the visible count, zero included) and, when it has citations,
     ``cited_by``: the first ``RECALL_CITATIONS`` with the fields a reader needs to open one. A count that is a
     lower bound adds ``cited_by_count_complete: false``. A page whose citations are not ready answers
-    ``cited_by_state`` alone, so a warming index never reads as no citations.
+    ``cited_by_state`` alone, so a warming index never reads as no citations. ``unlisted`` maps a page ref to
+    the (collection, link field) pairs whose citations count but are not listed, because another part of the
+    response already stands for them: the page's ``cited_by`` is then its first citations from every other field.
     A vault with no collection store, or a response with no page hit, makes no read.
     """
     wanted = list(dict.fromkeys(ref for ref in refs[:RECALL_HITS] if isinstance(ref, str)
@@ -130,7 +137,8 @@ def for_hits(refs: Sequence[str | None], caller: Path) -> dict[str, dict[str, An
     if not wanted or not applies(caller):
         return {}
     found = {}
-    for ref, answer in inbound_citations_batch(wanted, caller, per_ref=RECALL_CITATIONS).items():
+    for ref, answer in inbound_citations_batch(wanted, caller, per_ref=RECALL_CITATIONS,
+                                               unlisted=unlisted).items():
         if answer["state"] != "ready":
             found[ref] = {"cited_by_state": answer["state"]}
             continue
@@ -152,11 +160,14 @@ def without_page(caller: Path, more: str | None = None) -> dict[str, Any]:
     return _read({"": None}, Path(caller), DEFAULT_LIMIT, after)[""]
 
 
-def inbound_citations_batch(refs: Sequence[str], caller: Path, per_ref: int = 5) -> dict[str, dict[str, Any]]:
+def inbound_citations_batch(refs: Sequence[str], caller: Path, per_ref: int = 5, *,
+                            unlisted: Mapping[str, Collection[tuple[str, str]]] | None = None,
+                            ) -> dict[str, dict[str, Any]]:
     """The first ``per_ref`` citations and the visible count of each page, read for all the pages at once.
 
     Every page of the batch answers as `inbound_citations` answers it; a repeated ref answers once. The
-    pages share the read's `count_limit` equally, so a batch costs what one page costs.
+    pages share the read's `count_limit` equally, so a batch costs what one page costs. A page's ``unlisted``
+    (collection, link field) pairs count and list nothing (`_Tally`), so its items come from its other fields.
     """
     if len(refs) > MAX_BATCH:
         raise ValueError(f"a batch asks for at most {MAX_BATCH} pages")
@@ -165,7 +176,7 @@ def inbound_citations_batch(refs: Sequence[str], caller: Path, per_ref: int = 5)
     # Only a page or a row has citations here; a ref of any other kind is not an answer this reader can give.
     if any(key is None for key in keys.values()):
         return {ref: dict(_UNAVAILABLE) for ref in keys}
-    return _read(keys, Path(caller), limit, None) if keys else {}
+    return _read(keys, Path(caller), limit, None, unlisted or {}) if keys else {}
 
 
 def _empty() -> dict[str, Any]:
@@ -218,21 +229,21 @@ def applies(caller: Path) -> bool:
     return connection.store_path(Path(caller)).exists()
 
 
-def _read(keys: dict[str, str | None], root: Path, limit: int,
-          after: tuple[str, str, int] | None) -> dict[str, dict[str, Any]]:
+def _read(keys: dict[str, str | None], root: Path, limit: int, after: tuple[str, str, int] | None,
+          unlisted: Mapping[str, Collection[tuple[str, str]]] | None = None) -> dict[str, dict[str, Any]]:
     """Each asked ref's reply, from its index match key; a key of None is a page that does not exist."""
     store = connection.store_path(root)
     if not store.exists():
         return {ref: dict(_UNAVAILABLE) for ref in keys}
     try:
         with runtime.read_session(root, store) as session:
-            return _answer(session, root, keys, limit, after)
+            return _answer(session, root, keys, limit, after, unlisted or {})
     except QueryError:
         return {ref: dict(_UNAVAILABLE) for ref in keys}
 
 
-def _answer(session, root: Path, keys: dict[str, str | None], limit: int,
-            after: tuple[str, str, int] | None) -> dict[str, dict[str, Any]]:
+def _answer(session, root: Path, keys: dict[str, str | None], limit: int, after: tuple[str, str, int] | None,
+            unlisted: Mapping[str, Collection[tuple[str, str]]]) -> dict[str, dict[str, Any]]:
     """Every reply of one read. The state comes first and from the vault alone; only then does an asked page count.
 
     A read admits only the collections whose index holds a citation of a page the caller may read, and
@@ -264,7 +275,8 @@ def _answer(session, root: Path, keys: dict[str, str | None], limit: int,
                    if lookup.uniform or collection_id in filters["filtered"] for d in fields)
     decided = sorted((collection_id, d.dotted) for collection_id, (lookup, fields) in visible.items()
                      if not (lookup.uniform or collection_id in filters["filtered"]) for d in fields)
-    tallies = {key: _Tally(budget, limit, whole, decided, after) for key in sorted(asked)}
+    tallies = {key: _Tally(budget, limit, whole, decided, after, frozenset(unlisted.get(asked[key], ())))
+               for key in sorted(asked)}
     pending = {key: [window for window in (tally.shown, tally.counting, tally.paging) if window is not None]
                for key, tally in tallies.items()}
     counted = whole
@@ -349,17 +361,21 @@ class _Tally:
     the cursor, until the page and its continuation are full or none are left. Both stop on visible rows
     only, so a withheld row moves neither the count nor the page. Without a cursor, the page holds the
     first visible rows that the count finds, so unless the page outgrows the count, `counting` alone
-    serves both.
+    serves both. A field in ``unlisted`` is counted and never paged, so its rows take none of the page's
+    places; when it is one of the decided fields, `paging` reads the others.
     """
 
-    def __init__(self, budget: int, limit: int, whole: list, decided: list, after):
+    def __init__(self, budget: int, limit: int, whole: list, decided: list, after,
+                 unlisted: frozenset[tuple[str, str]] = frozenset()):
         self.budget, self.limit = budget, limit
         self.count = self.governed = self.paged = 0
         self.complete = True
         self.candidates: list[tuple] = []
-        self.shown = _Window(whole, after, limit + 1)
+        self.shown = _Window([field for field in whole if field not in unlisted], after, limit + 1)
         self.counting = _Window(decided, None, budget + 1)
-        self.paging = _Window(decided, after, limit + 1) if after is not None or budget < limit else None
+        listed = [field for field in decided if field not in unlisted]
+        self.paging = (_Window(listed, after, limit + 1)
+                       if after is not None or budget < limit or len(listed) < len(decided) else None)
 
     def settle(self, found: dict[_Window, list], released: set[int]) -> list[_Window]:
         """Take one round's entries; the windows the next round must read, widened."""
@@ -456,6 +472,26 @@ def _filters(session, visible) -> dict[str, Any]:
             "named": sorted(row_id for row_filter in found.values() for row_id in row_filter.named),
             "metadata": sorted(f"{collection_id}:{metadata}" for collection_id, row_filter in found.items()
                                for metadata in row_filter.metadata)}
+
+
+def citing_rows(session, lookup, field: str, key: str) -> tuple[str, str, dict[str, Any]] | None:
+    """The rows of one admitted collection that cite ``key`` through ``field`` and that the caller may read.
+
+    The answer is a FROM clause whose alias ``r`` carries each row's ``row_id``, the WHERE predicate that
+    keeps those rows, and the statement parameters. A uniform collection is read from the index alone; a
+    filtered one tests each entry against its row filter. None when the rows are released one at a time,
+    which only `inbound_citations` reads.
+    """
+    parameters = {"cite_collection": lookup.collection_id, "cite_field": field, "cite_match": key}
+    release = "1"
+    if not lookup.uniform:
+        filters = _filters(session, {lookup.collection_id: (lookup, ())})
+        if not filters["filtered"]:
+            return None
+        release = _FILTERED.format(e="r")
+        parameters |= {name: json.dumps(value) for name, value in filters.items()}
+    return ("item_references r", "r.collection_id=:cite_collection AND r.field_path=:cite_field "
+            f"AND r.match=:cite_match AND {release}", parameters)
 
 
 def _query(session, counted: list, matches: list[str], reads: list[list],

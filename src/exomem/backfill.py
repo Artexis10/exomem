@@ -486,13 +486,19 @@ def backfill_media(
                 continue
             try:
                 speech_guard = None
+                tracks = None
                 if media_type in media_engines.SPEECH_KINDS:
                     basis, speech_guard = read_guarded_text(vault_root, sidecar)
                     if preserve.diarize_pin(basis) is not diarize:
                         stats.skipped += 1
                         continue
+                    # The declared tracks, as written, as the worker passes them: a pin that cannot be
+                    # read fails this file in extraction instead of reading the recording as one mix.
+                    tracks = preserve.speech_tracks_pin(basis)
                 with media_store.logical_view(vault_root, f) as view:
                     options = {} if diarize is None else {"diarize": diarize, "timestamps": True}
+                    if tracks is not None:
+                        options["tracks"] = tracks
                     res = extract.extract_text(view, media_type=media_type, vault_root=vault_root, **options)
                 if not _is_automatic_media_candidate(vault_root, f):
                     _purge_suppressed_clip(clip_store, vault_root, f)

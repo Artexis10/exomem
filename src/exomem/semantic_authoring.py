@@ -219,7 +219,7 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
             "Parse valid compact observations anywhere outside fenced code blocks."
         ),
         "canonical_authoring": (
-            "Exomem writers use `-` under the canonical `## Observations` section."
+            "Evermatter writers use `-` under the canonical `## Observations` section."
         ),
         "parser_bullet_markers": ["-", "*", "+"],
         "canonical_bullet_marker": "-",
@@ -650,7 +650,7 @@ AUTHORING_TOOLS = frozenset(
 )
 CLI_REST_POINTER = (
     'Semantic authoring rules: see bootstrap(profile="full") / '
-    "`exomem bootstrap --profile full`."
+    "`evermatter bootstrap --profile full`."
 )
 
 
