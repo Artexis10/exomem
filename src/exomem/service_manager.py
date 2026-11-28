@@ -258,9 +258,10 @@ COLD_START_FLOOR_SECONDS = 120.0
 #: the crashes that motivated this came about six minutes apart, two to a window.
 RESTART_LIMIT = 3
 RESTART_WINDOW_SECONDS = 600.0
-#: How long a stopped worker's tree gets to show that every process exited,
-#: in a handoff and after a crash alike.
+#: How long a stopped worker's tree gets to prove exit outside the cutover.
 STOP_ALLOWANCE_SECONDS = 10.0
+#: The shared window for stopping the old worker and doing offline preparation.
+CUTOVER_SECONDS = 40.0
 #: How long a promotion request without a migration may take. The supervisor
 #: sends this budget in the request, and the standby spends at most
 #: `service_standby.PROMOTION_REPROOF_SHARE` of it, 12 s, re-proving a snapshot
@@ -755,10 +756,9 @@ class Supervisor:
             compatibility_refused = False
             cutover_started = False
             try:
-                # The cutover budget bounds everything that happens while
-                # abandoning the upgrade is still cheap. Past the stop there is
-                # no worker to give admission back to, so it ends there.
-                async with asyncio.timeout(deadline.remaining(40)):
+                # The separate readiness budget starts after the stop and offline preparation.
+                cutover = Deadline(deadline.remaining(CUTOVER_SECONDS))
+                async with asyncio.timeout(cutover.remaining(CUTOVER_SECONDS)):
                     cutover_started = True
                     await self.ingress.detach_streams()
                     # Enrollment may have changed during standby warming or
@@ -779,7 +779,7 @@ class Supervisor:
                     # Resume always repeats the stop proof, including a timed-out
                     # migrator or failed candidate retained by this supervisor.
                     self.records.phase("stopping")
-                    await self.runtime.stop(timeout=deadline.remaining(STOP_ALLOWANCE_SECONDS))
+                    await self.runtime.stop(timeout=cutover.remaining(CUTOVER_SECONDS))
                     stopped_at = time.monotonic()
                     if cleanup:
                         self.records.phase("preparing", worker_pid=0)
