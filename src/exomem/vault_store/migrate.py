@@ -46,11 +46,6 @@ from .write import Origin, frontmatter_json
 #: A migration's private directory beside the live store; a run that died leaves one, and the next migrate or rollback removes it.
 STAGING_PREFIX = ".exomem-vault-store-migration-"
 _COPY_BATCH = 5000
-_RELATIONSHIP_ENDPOINTS = (
-    "WITH endpoints AS (SELECT parent_path AS path FROM store_unit_ids UNION "
-    "SELECT target_page_path FROM store_relationships WHERE retired_revision IS NULL "
-    "AND target_page_path IS NOT NULL) "
-)
 #: The longest that apply spends draining queued graph repair, checked between passes. A pass
 #: clears at most `graph_drain.DRAIN_LIMIT` receipts and a whole-vault marker is one long pass,
 #: so a deep queue takes many. Past it the apply goes on: the staged graph rows come from the
@@ -260,7 +255,7 @@ def _load_files(vault_root: Path, conn: sqlite3.Connection, staged: Staged, revi
         relationship_files.validate_restored_types(vault_root, conn)
         if staged.relation_files:
             paths = conn.execute(
-                _RELATIONSHIP_ENDPOINTS
+                relationship_files.RECOVERY_ENDPOINTS
                 + "SELECT e.path, p.sha256 FROM endpoints e JOIN store_pages p ON p.path=e.path ORDER BY e.path"
             )
             while batch := paths.fetchmany(read.KEYS_PER_QUERY):
@@ -884,13 +879,13 @@ def _install_rows(
          for rel, (fact, base) in staged.relation_files.items()],
     )
     conn.execute(
-        _RELATIONSHIP_ENDPOINTS +
+        relationship_files.RECOVERY_ENDPOINTS +
         "INSERT INTO store_projection_queue(path,revision,operation,from_path,queued_at)"
         " SELECT e.path,?,'write',NULL,? FROM endpoints e"
         " JOIN store_pages p ON p.path=e.path", (revision, now),
     )
     conn.execute(
-        _RELATIONSHIP_ENDPOINTS +
+        relationship_files.RECOVERY_ENDPOINTS +
         "INSERT INTO store_derivation_queue(path,revision,operation,queued_at)"
         " SELECT e.path,?,'derive',? FROM endpoints e"
         " JOIN store_pages p ON p.path=e.path", (revision, now),

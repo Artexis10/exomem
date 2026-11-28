@@ -269,28 +269,22 @@ def lines(
 
 
 def export_pages(tx: Connection) -> Iterator[tuple[str, str | None]]:
-    """Read portable artifact paths and active canonical witnesses in one set query."""
-    rows = tx.execute(
-        "WITH bound(path, ref, page_end) AS ("
-        " SELECT u.parent_path, u.parent_ref, 0 FROM store_unit_ids u WHERE"
-        " EXISTS (SELECT 1 FROM store_relationships r WHERE r.source_unit_id=u.id AND r.retired_revision IS NULL)"
-        " OR EXISTS (SELECT 1 FROM store_relationships r WHERE r.target_unit_id=u.id AND r.retired_revision IS NULL)"
-        " UNION SELECT target_page_path, target_page_ref, 1 FROM store_relationships"
-        " WHERE target_page_path IS NOT NULL AND retired_revision IS NULL"
-        "), portable(path) AS (SELECT parent_path FROM store_unit_ids UNION SELECT path FROM bound)"
-        " SELECT e.path, p.sha256, p.frontmatter_json, b.path, b.ref, b.page_end"
-        " FROM portable e LEFT JOIN store_pages p ON p.path=e.path"
-        " LEFT JOIN bound b ON b.path=e.path ORDER BY e.path"
+    """Witness exact exported page bytes at each recovery path, including replacements."""
+    yield from tx.execute(
+        RECOVERY_ENDPOINTS
+        + "SELECT e.path, p.sha256 FROM endpoints e LEFT JOIN store_pages p ON p.path=e.path "
+        "WHERE p.path IS NOT NULL OR EXISTS (SELECT 1 FROM store_unit_ids u WHERE u.parent_path=e.path) "
+        "ORDER BY e.path",
     )
-    for path, group in groupby(rows, key=itemgetter(0)):
-        witness = None
-        for _, digest, fields, bound_path, ref, page_end in group:
-            if digest is not None and bound_path is not None and (
-                (page_end and ref is None) or store.page_reference(fields) == ref
-            ):
-                witness = digest
-                break
-        yield path, witness
+
+
+# Rebuild checks old locators at a reused path so leftover projection text cannot become authored.
+# Rollback witnesses the same set of available pages, even if the old relationship is orphaned.
+RECOVERY_ENDPOINTS = (
+    "WITH endpoints AS (SELECT parent_path AS path FROM store_unit_ids UNION "
+    "SELECT target_page_path FROM store_relationships WHERE retired_revision IS NULL "
+    "AND target_page_path IS NOT NULL) "
+)
 
 
 def projection_lines(tx: Connection, page: str) -> Iterator[str]:

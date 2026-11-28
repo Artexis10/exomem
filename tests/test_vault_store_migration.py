@@ -567,17 +567,23 @@ def test_a_rollback_and_remigration_preserve_relationship_ids_and_an_unresolved_
     target = (vault / BETA).read_bytes() + b"\n- [rule] Light the lamp. ^lamp\n"
     page_target = "Knowledge Base/Notes/Desk.md"
     page_body = f"# Desk\n\nThe daily log goes here.\n\n{ALPHA}#tide\n".encode()
+    replaced_target = "Knowledge Base/Notes/Spare Desk.md"
+    old_id = "04e56772-21a9-44ff-b0df-0a51ed0e166b"
+    new_id = "e8f840b6-3cf8-44cf-ab95-12d05683a194"
+    replaced_body = f"---\nexomem_id: {new_id}\n---\n# Spare Desk\n\n{ALPHA}#tide\n".encode()
     reference = "Reference/Manual.md"
     reference_body = b"# Manual\n\n- [rule] Verify the reading. ^reading\n"
     (vault / ALPHA).write_bytes(source)
     (vault / BETA).write_bytes(target)
     (vault / page_target).write_bytes(page_body)
+    (vault / replaced_target).write_bytes(replaced_body.replace(new_id.encode(), old_id.encode()))
     (vault / reference).parent.mkdir()
     (vault / reference).write_bytes(reference_body)
     build_indexes(vault)
     assert migrate_apply(vault) == 0
     with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
-        write.commit(CollectionWriter(vault, handle), write.StoreChange(
+        writer = CollectionWriter(vault, handle)
+        write.commit(writer, write.StoreChange(
             write.Origin.GOVERNED, "Connect two observations.",
             relationship_change=relationships.Change(
                 actor="owner",
@@ -588,10 +594,18 @@ def test_a_rollback_and_remigration_preserve_relationship_ids_and_an_unresolved_
                 ),
                 added=(
                     relationships.Relationship("link-id", "tide-id", "supports", "lamp-id"),
+                    relationships.Relationship(
+                        "orphan-page-link", "tide-id", "supports",
+                        target_page_path=replaced_target, target_page_ref=f"exomem://memory/{old_id}",
+                    ),
                     relationships.Relationship("page-link", "tide-id", "supports", target_page_path=page_target),
                     relationships.Relationship("reference-link", "tide-id", "supports", "reference-id"),
                 ),
             ),
+        ))
+        write.commit(writer, write.StoreChange(
+            write.Origin.GOVERNED, "Replace the desk page with a different identity.",
+            puts=(write.PagePut(replaced_target, replaced_body),),
         ))
     if previous := os.environ.get("EXOMEM_TEST_PREVIOUS_SCHEMA_PYTHON"):
         _previous_release_refuses_relationships(previous, vault, tmp_path)
@@ -600,6 +614,7 @@ def test_a_rollback_and_remigration_preserve_relationship_ids_and_an_unresolved_
     assert (vault / ALPHA).read_bytes() == source
     assert (vault / BETA).read_bytes() == target
     assert (vault / page_target).read_bytes() == page_body
+    assert (vault / replaced_target).read_bytes() == replaced_body
     assert (vault / reference).read_bytes() == reference_body
     assert not (vault / relationship_files.path_for(reference)).exists()
     assert json.loads((export / "reference-unit-ids.jsonl").read_text()) == {
@@ -608,7 +623,9 @@ def test_a_rollback_and_remigration_preserve_relationship_ids_and_an_unresolved_
     artifact = relationship_files.path_for(ALPHA)
     with (vault / artifact).open("rb") as encoded:
         recovered = relationship_files.parse(encoded)
-    assert {edge.id for edge in recovered.relationships} == {"link-id", "page-link", "reference-link"}
+    assert {edge.id for edge in recovered.relationships} == {
+        "link-id", "orphan-page-link", "page-link", "reference-link",
+    }
     assert recovered.canonical_sha256 == hashlib.sha256(source).hexdigest()
     assert (export / "relationships" / artifact).read_bytes() == (vault / artifact).read_bytes()
     page_artifact = relationship_files.path_for(page_target)
@@ -618,9 +635,11 @@ def test_a_rollback_and_remigration_preserve_relationship_ids_and_an_unresolved_
     assert received_page.canonical_sha256 == hashlib.sha256(page_body).hexdigest()
     assert received_page.units == () and received_page.relationships == ()
     assert (export / "relationships" / page_artifact).read_bytes() == (vault / page_artifact).read_bytes()
+    with (vault / relationship_files.path_for(replaced_target)).open("rb") as encoded:
+        assert relationship_files.parse(encoded).canonical_sha256 == hashlib.sha256(replaced_body).hexdigest()
     history = [json.loads(line) for line in (export / "relationship-history.jsonl").read_bytes().splitlines()]
     assert [(row["relationship_id"], row["action"]) for row in history] == [
-        ("link-id", "add"), ("page-link", "add"), ("reference-link", "add"),
+        ("link-id", "add"), ("orphan-page-link", "add"), ("page-link", "add"), ("reference-link", "add"),
     ]
     fresh = tmp_path / "restored" / "vault"
     shutil.copytree(vault, fresh, ignore=shutil.ignore_patterns("_Collections"))
@@ -677,12 +696,14 @@ def test_a_rollback_and_remigration_preserve_relationship_ids_and_an_unresolved_
     projected = (fresh / page_target).read_bytes()
     assert b"Incoming supports for page: 1" in projected
     assert relationship_files.strip_block(projected) == page_body
+    assert (fresh / replaced_target).read_bytes() == replaced_body
     with closing(connection.open_reader(connection.store_path(fresh))) as store:
         assert store.execute(
             "SELECT id,source_unit_id,target_unit_id FROM store_relationships ORDER BY id",
         ).fetchall() == [
             ("link-id", "tide-id", "lamp-id"),
             ("lost-link", "orphan-id", "lamp-id"),
+            ("orphan-page-link", "tide-id", None),
             ("page-link", "tide-id", None),
             ("reference-link", "tide-id", "reference-id"),
         ]
@@ -693,8 +714,8 @@ def test_a_rollback_and_remigration_preserve_relationship_ids_and_an_unresolved_
 
     with library_scope():
         report = audit.audit(fresh, categories=[audit.RELATIONSHIP_ORPHAN])
-    assert {(entry.path, entry.meta["anchor"]) for entry in report.findings} == {
-        (BETA, "lamp"), (orphan_path, "lost"),
+    assert {(entry.path, entry.meta.get("anchor")) for entry in report.findings} == {
+        (BETA, "lamp"), (orphan_path, "lost"), (replaced_target, None),
     }
 
 

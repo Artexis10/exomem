@@ -612,6 +612,19 @@ def test_moving_a_page_only_target_before_projection_keeps_its_witness_until_ret
     with artifact.open("rb") as encoded:
         assert relationship_files.parse(encoded).canonical_sha256 == hashlib.sha256(edited).hexdigest()
 
+    relation_path = relationship_files.path_for(moved)
+    artifact.unlink()
+    watcher = importer.Importer(served, run=lambda work: work(writer))
+    assert watcher.import_paths([relation_path]).held == [relation_path]
+    with library_scope():
+        [item] = held.list_held(served)
+        held.resolve_held(served, relation_path, "keep-store", why="Restore the relation witness.",
+                          seen=item.item_version, writer=writer)
+    assert not projection.run_pass().deferred
+    assert not projection.run_pass().deferred
+    with artifact.open("rb") as encoded:
+        assert relationship_files.parse(encoded).canonical_sha256 == hashlib.sha256(edited).hexdigest()
+
     write.commit(writer, write.StoreChange(
         write.Origin.GOVERNED, "Retire the relationship.",
         relationship_change=relationships.Change(actor="owner", retired=(relationships.Retirement("page-edge"),)),

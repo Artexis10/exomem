@@ -1032,9 +1032,13 @@ def commit(
             _degrade_moves(tx, new_intents)
             audit.intents.update((path, ("write", None)) for path in new_intents)
             base = change.relationship_change.projected_base
-            if base is not None and base.keep_store and not tx.execute(
-                "SELECT 1 FROM store_unit_ids WHERE parent_path=? LIMIT 1", (base.source,),
-            ).fetchone():
+            # The page projector owns the presence of its relations file.
+            if (
+                base is not None and base.keep_store and base.source not in relationship_paths
+                and not tx.execute(
+                    "SELECT 1 FROM store_unit_ids WHERE parent_path=? LIMIT 1", (base.source,),
+                ).fetchone()
+            ):
                 audit.intents[base.path] = ("delete", None)
         if overlay:
             # The overlay job settles the rows that the registries under ``_Schema`` derive.
