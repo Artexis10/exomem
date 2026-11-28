@@ -98,6 +98,8 @@ _OTHER_OWNER_POLL_SECONDS = 5.0
 _IDLE_RECHECK_SECONDS = 300.0
 _OUTCOME_LIMIT_BYTES = 16 * 1024
 _LIST_LIMIT = 50
+#: Bound the number of active caller scopes whose empty notice check we remember.
+_NOTICE_SCOPE_CACHE_LIMIT = 128
 _STABLE_READ_ATTEMPTS = 3
 #: How long a resend waits for an in-flight acceptance of its own origin; the acceptance itself is
 #: bounded by the store retries, well inside this.
@@ -667,6 +669,7 @@ class Drainer:
         #: start, so the first eligible save after a restart looks once (`failure_notice`).
         self._failure_unannounced = True
         self._failure_revision = 0
+        self._empty_notice_scopes: dict[tuple[str, ...], None] = {}
 
     @property
     def running(self) -> bool:
@@ -703,10 +706,22 @@ class Drainer:
         with self._condition:
             self._failure_unannounced = True
             self._failure_revision += 1
+            self._empty_notice_scopes.clear()
 
-    def unannounced_failure_revision(self) -> int | None:
+    def unannounced_failure_revision(self, scopes: tuple[str, ...]) -> int | None:
         with self._condition:
-            return self._failure_revision if self._failure_unannounced else None
+            if self._failure_unannounced and scopes not in self._empty_notice_scopes:
+                return self._failure_revision
+            return None
+
+    def no_unannounced_failures_in_scope(self, revision: int, scopes: tuple[str, ...]) -> None:
+        with self._condition:
+            if self._failure_revision != revision:
+                return
+            remembered = self._empty_notice_scopes
+            if len(remembered) >= _NOTICE_SCOPE_CACHE_LIMIT:
+                del remembered[next(iter(remembered))]
+            remembered[scopes] = None
 
     def no_unannounced_failures(self, revision: int) -> None:
         with self._condition:
@@ -1497,7 +1512,9 @@ class Admission:
             # Only the create path runs the schema, so an existing store from before the marker gains it here.
             _add_declaration_marker(conn)
             _add_retry_indexes(conn)
-            write_intake_access.ensure_index(conn)
+            # A legacy backfill belongs to the budgeted preparation path, never to a busy save.
+            if create and conn.execute("SELECT 1 FROM intake LIMIT 1").fetchone() is None:
+                write_intake_access.ensure_index(conn)
             conn.execute(
                 "INSERT INTO intake (id, origin, origin_ttl, command, arguments, principal, surface, state, "
                 "accepted_at, updated_at, next_attempt_at, error_code, declaration_change) "
@@ -1715,7 +1732,7 @@ def failure_notice(admission: Admission) -> int | None:
     transaction that counts it. A store that cannot be read leaves the flag set.
     """
     drainer, scopes = admission.drainer, admission.receipt_scopes
-    revision = drainer.unannounced_failure_revision()
+    revision = drainer.unannounced_failure_revision(scopes)
     if revision is None:
         return None
     try:
@@ -1723,17 +1740,19 @@ def failure_notice(admission: Admission) -> int | None:
             if not write_intake_access.indexed(conn):
                 return None
             waiting = any(conn.execute(
-                "SELECT 1 FROM intake WHERE state = 'failed' AND named_at IS NULL AND receipt_scope = ? LIMIT 1",
+                "SELECT 1 FROM intake INDEXED BY intake_receipt_notice "
+                "WHERE state = 'failed' AND named_at IS NULL AND receipt_scope = ? LIMIT 1",
                 (scope,),
             ).fetchone() for scope in scopes)
             if not waiting:
+                drainer.no_unannounced_failures_in_scope(revision, scopes)
                 if _unnamed_failure(conn) is None:
                     drainer.no_unannounced_failures(revision)
                 return None
         admission._check_receipt_access()
         with _write(drainer.vault_root) as conn:
             rows = [row[0] for scope in scopes for row in conn.execute(
-                "SELECT seq FROM intake WHERE state = 'failed' AND named_at IS NULL "
+                "SELECT seq FROM intake INDEXED BY intake_receipt_notice WHERE state = 'failed' AND named_at IS NULL "
                 "AND receipt_scope = ? ORDER BY seq LIMIT ?", (scope, _LIST_LIMIT),
             )]
             now = time.time()
@@ -1994,6 +2013,9 @@ def read(
             rows = _list_receipts(conn, scopes, cap)
     except FileNotFoundError:
         counts, rows = {}, []
+    except Exception:
+        _check_release(principal)
+        raise
     _check_release(principal)
     # The listing starts at the oldest row, so a running count of open rows is each one's position.
     items = []
@@ -2025,21 +2047,22 @@ def status(vault_root: Path, *, principal: RequestPrincipal | None = None) -> di
     """Counts for `coordination_status`; ``unknown`` when the store cannot be read."""
     try:
         scopes = _read_scope(principal)
-        with _store(vault_root, mode="read") as conn:
-            counts = _counts(conn, scopes)
-            if scopes is None:
-                oldest = conn.execute(
-                    "SELECT MIN(accepted_at) FROM intake WHERE state IN (?, ?)", _OPEN_STATES
-                ).fetchone()[0]
-            else:
-                rows = [row for scope in scopes for state in _OPEN_STATES for row in conn.execute(
-                    "SELECT accepted_at FROM intake WHERE receipt_scope = ? AND state = ? ORDER BY seq LIMIT 1",
-                    (scope, state),
-                )]
-                oldest = min((row[0] for row in rows), default=None)
+        try:
+            with _store(vault_root, mode="read") as conn:
+                counts = _counts(conn, scopes)
+                if scopes is None:
+                    oldest = conn.execute(
+                        "SELECT MIN(accepted_at) FROM intake WHERE state IN (?, ?)", _OPEN_STATES
+                    ).fetchone()[0]
+                else:
+                    rows = [row for scope in scopes for state in _OPEN_STATES for row in conn.execute(
+                        "SELECT accepted_at FROM intake WHERE receipt_scope = ? AND state = ? ORDER BY seq LIMIT 1",
+                        (scope, state),
+                    )]
+                    oldest = min((row[0] for row in rows), default=None)
+        except FileNotFoundError:
+            counts, oldest = {}, None
         _check_release(principal)
-    except FileNotFoundError:
-        counts, oldest = {}, None
     except _ReceiptUnavailable:
         return {"state": "unknown"}
     except Exception:  # noqa: BLE001 - an unreadable store is a visible unknown, never zero

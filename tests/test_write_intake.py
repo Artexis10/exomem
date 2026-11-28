@@ -1734,6 +1734,49 @@ def test_oauth_refresh_keeps_the_original_receipt_and_retry_identity(vault, tmp_
     assert len(_pages_titled(vault, "Queued save 973")) == 1
 
 
+def test_an_unconfirmed_login_cannot_tell_whether_intake_storage_exists(vault, managers, drainer, monkeypatch):
+    _, holder = managers
+    stale = replace(local_owner_principal(surface="mcp"),
+                    client_binding=ClientBinding("https://issuer.invalid", "client-one"),
+                    origin_session=OriginSessionBinding("login-a", "1", "mcp"))
+    monkeypatch.setattr(auth_sessions, "origin_login_state_sync",
+                        lambda _who, **_kwargs: auth_sessions.OriginLogin.UNREADABLE)
+    status, review = _command("coordination_status"), _command("review_memory")
+    assert _send(status, vault, {}, principal=stale, scope=None)["write_intake"] == {"state": "unknown"}
+    with pytest.raises(OpError) as missing:
+        _send(review, vault, {"mode": "queued-write"}, principal=stale, scope=None)
+
+    monkeypatch.setattr(write_intake.write_intake_access, "ensure_index", lambda _conn: None)
+    with _Hold(holder, vault):
+        _send(_command("remember"), vault, _remember_kwargs(vault, 975))
+        assert _send(status, vault, {}, principal=stale, scope=None)["write_intake"] == {"state": "unknown"}
+        with pytest.raises(OpError) as legacy_store:
+            _send(review, vault, {"mode": "queued-write"}, principal=stale, scope=None)
+        assert legacy_store.value.as_public_dict() == missing.value.as_public_dict()
+
+
+def test_a_busy_save_does_not_repeat_a_timed_out_legacy_scope_backfill(vault, managers, drainer, monkeypatch):
+    _, holder = managers
+    remember = _command("remember")
+    monkeypatch.setattr(write_intake, "_claim_head", lambda _root: 0.05)
+    with _Hold(holder, vault), monkeypatch.context() as previous:
+        previous.setattr(write_intake.write_intake_access, "ensure_index", lambda _conn: None)
+        older_ref = _send(remember, vault, _remember_kwargs(vault, 976))["queued_write"]["ref"]
+    write_intake.stop(vault)
+    write_intake.start(vault)
+    attempts = []
+
+    def spent(_conn):
+        attempts.append(True)
+        raise TimeoutError("legacy scope work budget ended")
+
+    monkeypatch.setattr(write_intake.write_intake_access, "ensure_index", spent)
+    with _Hold(holder, vault):
+        accepted = _send(remember, vault, _remember_kwargs(vault, 977))["queued_write"]
+    assert accepted["ref"] != older_ref and accepted["position"] is None
+    assert len(attempts) == 1
+
+
 def test_another_login_does_not_consume_a_failure_notice(
     vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
