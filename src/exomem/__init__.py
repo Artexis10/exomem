@@ -13,4 +13,4 @@ from .env_compat import refuse_program_entry_conflicts as _refuse_program_entry_
 _promote_legacy()
 _refuse_program_entry_conflicts()
 
-__version__ = "0.210.2"  # x-release-please-version
+__version__ = "0.211.0"  # x-release-please-version
