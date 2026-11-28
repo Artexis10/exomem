@@ -69,6 +69,9 @@ EXPECTED_TABLES = {
     "store_derivation_queue",
     "store_held",
     "store_audit",
+    "store_unit_ids",
+    "store_relationships",
+    "store_relationship_history",
 }
 APPEND_ONLY = (
     "txns",

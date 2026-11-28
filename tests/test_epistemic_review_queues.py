@@ -322,6 +322,9 @@ def test_default_attention_union_is_pinned() -> None:
     `name_drift` joins after it by the align-names-with-titles `attention-queue` delta: one
     item for the whole vault, whose call renames the next batch, so it adds one row however
     many names drifted. A stale name is housekeeping, so it sits below a page's home.
+
+    `relationship_orphan` follows `relation_debt` by the canonical vault store contract.
+    An owner can see a stored relationship that needs repair in the ordinary review list.
     """
     assert attention_module.DEFAULT_ATTENTION_CATEGORIES == (
         "bridge_review",
@@ -331,6 +334,7 @@ def test_default_attention_union_is_pinned() -> None:
         "stale_review",
         "unprocessed_source",
         "relation_debt",
+        "relationship_orphan",
         "entity_type_unregistered",
         "unreflected_outcomes",
         "unreflected_observations",
