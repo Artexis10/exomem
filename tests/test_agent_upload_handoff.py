@@ -75,6 +75,19 @@ def _post(env, descriptor, data=b"exact original\n", *, filename="original.txt",
     return asyncio.run(send())
 
 
+@pytest.mark.parametrize(("size", "name"), [(3, "original.txt"), (4, "other.txt")])
+def test_a_held_upload_must_match_its_file_declaration(upload_env, size, name):
+    """The send cannot replace the size or name that allowance admission used."""
+    payload = b"test"
+    ticket = _prepare(upload_env, payload, size_bytes=size, filename=name)
+
+    response = _post(upload_env, ticket, payload)
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "INVALID_UPLOAD"
+    assert "declared size and name" in response.json()["reason"]
+
+
 class _ASGISyncTransport(httpx.BaseTransport):
     def __init__(self, app):
         self.app = app

@@ -807,7 +807,8 @@ class UploadFiles(Wire):
     lane: Literal["source", "evidence", "import"] = Field(
         description="Source, Evidence or import archive.")
     expected_sha256: str | None = Field(default=None, description="File SHA-256.")
-    size_bytes: int | None = Field(default=None, strict=True, ge=0, description="Exact Source bytes.")
+    size_bytes: int | None = Field(default=None, strict=True, ge=0, description="Exact file bytes.")
+    filename: str | None = Field(default=None, description="File name. Give it with Evidence size.")
     import_identity: str | None = Field(default=None, description="Held Source import ID.")
     hold: bool | None = Field(default=None, description="Hold bytes for a later save.")
     scope: str | None = None
@@ -822,7 +823,7 @@ def _upload_files(wire: dict[str, Any], ctx: Context) -> Translated:
     return "transfer_artifact", {"operation": "upload", **_given({
         "lane": wire["lane"], "expected_sha256": wire.get("expected_sha256"), "hold": held,
         "import_identity": wire.get("import_identity"),
-        "size_bytes": wire.get("size_bytes"),
+        "size_bytes": wire.get("size_bytes"), "filename": wire.get("filename"),
         "scope": wire.get("scope"), "category": wire.get("category"), "description": wire.get("description"),
         "response_detail": wire.get("detail")})}
 

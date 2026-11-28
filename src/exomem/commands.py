@@ -10360,6 +10360,7 @@ def op_transfer_artifact(
     scope: str | None = None,
     category: str | None = None,
     description: str | None = None,
+    filename: str | None = None,
 ) -> dict:
     """Prepare a file transfer or cancel owned waiting uploads.
 
@@ -10374,7 +10375,8 @@ def op_transfer_artifact(
         expected_sha256: Intended original SHA-256.
         hold: One-use upload bound to this session; requires expected_sha256.
         import_identity: Durable external ID for a held Source upload.
-        size_bytes: Exact Source size in bytes to select resumable upload.
+        size_bytes: Exact file size for admission. For Evidence, give the filename too.
+        filename: Name of the file to upload with the declared size.
         lane: Upload target: source (raw) or evidence (proof); token-bound.
             Ignored for downloads.
         uploads: Cancellation only: held-upload references owned by this authenticated session.
@@ -10391,17 +10393,17 @@ def op_transfer_artifact(
     ):
         raise ValueError("INVALID_IMPORT_IDENTITY: use a held Source upload with expected_sha256")
 
-    if size_bytes is not None and (
-        operation != "upload" or lane != "source" or expected_sha256 is None
+    if (size_bytes is not None or filename is not None) and (
+        operation != "upload" or (expected_sha256 is None and scope is None)
         or artifact is not None or artifacts is not None or uploads is not None
     ):
-        raise ValueError("INVALID_MODE: size_bytes needs a Source upload with expected_sha256")
+        raise ValueError("INVALID_MODE: declare the file on a held upload or an Evidence upload with scope and category")
     held_only = hold
     destination = None
     if scope is not None or category is not None or description is not None:
         if (operation != "upload" or lane != "evidence" or scope is None or category is None
                 or artifact is not None or artifacts is not None or uploads is not None
-                or import_identity is not None or size_bytes is not None):
+                or import_identity is not None):
             raise ValueError("INVALID_MODE: scope and category save an evidence upload on arrival; "
                              "pass both with lane evidence and no artifact")
         destination = {"scope": scope, "category": category, "description": description}
@@ -10475,6 +10477,7 @@ def op_transfer_artifact(
         # A ticket that saves on arrival is the held route with its destination fixed now; the digest is optional.
         return upload_handoff.prepare_upload(
             vault_root, lane=lane, expected_sha256=expected_sha256, destination=destination,
+            size_bytes=size_bytes, filename=filename,
         )
     if cloud_cell.cloud_mode_enabled() and not hold:
         # A Cloud cell has the gateway's held-upload receiver and its proved exact-original download: no credential route.
@@ -10497,7 +10500,7 @@ def op_transfer_artifact(
 
         return upload_handoff.prepare_upload(
             vault_root, lane=lane, expected_sha256=expected_sha256, import_identity=import_identity,
-            size_bytes=size_bytes, held_only=held_only,
+            size_bytes=size_bytes, filename=filename, held_only=held_only,
         )
     if artifact is not None or expected_sha256 is not None:
         if operation != "download" or not artifact:

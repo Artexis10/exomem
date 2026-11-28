@@ -94,7 +94,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # 328 B on 2026-11-27 (keep-speech-results-in-cloud): with the `sensitivity` list above, the wire measures 33,379 B,
 # the two ceilings rise to 1,850 B and 1,650 B, and the total to 33,400 B. The handle names the shape that
 # `media.process` publishes, in 164 B each.
-TOTAL_BUDGET = 33_400
+# `upload_files` declares Evidence names and accepts exact sizes for allowance admission, adding 82 B.
+# The tool measures 1,009 B and the full wire measures 33,461 B.
+TOTAL_BUDGET = 33_500
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
@@ -133,7 +135,7 @@ TOOL_CEILINGS: dict[str, int] = {
     # A pointer to edit_note's supersede_observation joined 2026-11-24
     # (add-unit-level-supersession).
     "supersede_note": 1410,
-    "upload_files": 940,
+    "upload_files": 1050,
 }
 
 #: A Cloud cell serves the local surface minus the tools it withholds plus the Cloud-only

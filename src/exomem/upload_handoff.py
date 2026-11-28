@@ -225,7 +225,8 @@ async def _check_source_authority(root: Path, who: principal.RequestPrincipal) -
 def prepare_upload(
     vault_root: Path, *, lane: str, expected_sha256: str | None,
     base_url: str | None = None, max_bytes: int | None = None, import_identity: str | None = None,
-    size_bytes: int | None = None, held_only: bool = False, destination: Mapping[str, str | None] | None = None,
+    size_bytes: int | None = None, filename: str | None = None, held_only: bool = False,
+    destination: Mapping[str, str | None] | None = None,
 ) -> dict:
     """Issue one upload handoff; the caller's current session owns its result.
 
@@ -266,15 +267,20 @@ def prepare_upload(
             limit = min(limit, max_bytes)
         if limit <= 0:
             raise _unavailable()
-        if size_bytes is not None and (lane != "source" or type(size_bytes) is not int or size_bytes < 0):
-            raise ValueError("INVALID_UPLOAD_HANDOFF: size_bytes must be a nonnegative Source size")
-        large_source = size_bytes is not None and size_bytes > limit
+        if size_bytes is not None and (lane == held_uploads.IMPORT_LANE or type(size_bytes) is not int or size_bytes < 0):
+            raise ValueError("INVALID_UPLOAD_HANDOFF: size_bytes must be a nonnegative Source or Evidence file size")
+        if filename is not None and (size_bytes is None or not isinstance(filename, str)
+                                     or not filename or filename != held_uploads.upload_filename(filename)):
+            raise ValueError("INVALID_UPLOAD_HANDOFF: give a file name without a folder and its size_bytes")
+        if lane == "evidence" and size_bytes is not None and filename is None:
+            raise ValueError("INVALID_UPLOAD_HANDOFF: give the filename with the Evidence size_bytes")
+        large_source = lane == "source" and size_bytes is not None and size_bytes > limit
         resumable = large_source and not (cloud or held_only or import_key is not None)
         if resumable:
             await _check_source_authority(vault_root, who)
         elif not await _active(vault_root, who):
             raise _unavailable()
-        if size_bytes is not None and large_source:
+        if size_bytes is not None and size_bytes > limit:
             if not resumable:
                 raise ValueError(f"TOO_LARGE: this handoff holds at most {limit:,} bytes")
             session_limit = upload_sessions.max_bytes_from_env()
@@ -297,6 +303,12 @@ def prepare_upload(
         binding = held_uploads.principal_binding(who)
         if binding is None:
             raise _unavailable()
+        if size_bytes is not None:
+            from . import media_allowance, media_store
+
+            refusal = await asyncio.to_thread(media_store.upload_refusal, vault_root, size_bytes, filename, lane)
+            if refusal is not None:
+                raise ValueError(f"{media_allowance.MEDIA_ALLOWANCE_EXCEEDED}: {refusal}")
         # Lowercase hex survives the terminal scrubber without reducing the ticket's 256-bit entropy.
         secret = secrets.token_hex(_TICKET_BYTES)
         if route is not None:
@@ -343,7 +355,9 @@ def prepare_upload(
                 "expires": expires, "lane": lane,
                 "expected_sha256": expected, "max_bytes": limit,
                 **({"import_key": import_key} if import_key is not None else {}),
-                **({"size_bytes": size_bytes} if resumable else {}),
+                **({"size_bytes": size_bytes, "filename": filename} if resumable else {}),
+                **({"declared_file": {"size_bytes": size_bytes, "filename": filename}}
+                   if size_bytes is not None and not resumable else {}),
                 **({"destination": saved_to} if saved_to is not None else {}),
             }, temp_suffix=".part")
         return {
@@ -390,7 +404,8 @@ def page_endpoint(upload_url: str) -> str:
 
 
 async def claim_upload(
-    vault_root: Path, token: str, *, resumable: bool = False, size_bytes: int | None = None, sha256: str | None = None,
+    vault_root: Path, token: str, *, resumable: bool = False, size_bytes: int | None = None,
+    sha256: str | None = None, filename: str | None = None,
     admit: Callable[[principal.RequestPrincipal], Awaitable[None]] | None = None,
 ) -> dict:
     """Consume the ticket before byte receipt, after delegated admission if supplied."""
@@ -412,7 +427,8 @@ async def claim_upload(
             bound_size = record["max_bytes"]
             if resumable:
                 if (record["lane"] != "source" or record["size_bytes"] != bound_size or size_bytes != bound_size
-                        or sha256 != record["expected_sha256"] or not raw_protection.is_owner(who)):
+                        or sha256 != record["expected_sha256"] or not raw_protection.is_owner(who)
+                        or record.get("filename") not in (None, filename)):
                     raise _unavailable()
                 maximum = upload_sessions.max_bytes_from_env()
             else:
