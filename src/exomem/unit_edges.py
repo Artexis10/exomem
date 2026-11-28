@@ -202,13 +202,32 @@ class _RelationshipEndpoint:
     anchored_refs: frozenset[str]
 
     @classmethod
-    def from_parent(cls, parent: semantic_index.SelectedParent) -> _RelationshipEndpoint:
-        counts = Counter(
-            unit.unit_ref for unit in parent.structure.units if unit.unit_ref is not None
-        )
+    def from_units(cls, reference: str | None, refs: Iterable[str | None]) -> _RelationshipEndpoint:
+        counts = Counter(ref for ref in refs if ref is not None)
         return cls(
-            parent.structure.parent_ref, frozenset(ref for ref, count in counts.items() if count == 1),
+            reference, frozenset(ref for ref, count in counts.items() if count == 1),
         )
+
+
+def _external_endpoint(root: Path, path: str) -> _RelationshipEndpoint | None:
+    """Read an admitted read-only reference through the same guarded parser as a write."""
+    from . import semantic_index, vault
+
+    try:
+        source, _guard = vault.read_guarded_text(root, root / path)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        raise _RelationshipReadUnavailable() from None
+    try:
+        state = semantic_index.selected_parent_index_state(root, path, source=source)
+    except (OSError, ValueError):
+        raise _RelationshipReadUnavailable() from None
+    if state.definitions_unavailable:
+        raise _RelationshipReadUnavailable()
+    return _RelationshipEndpoint.from_units(
+        state.parent_ref, (unit.unit_ref for unit in state.document.units),
+    )
 
 
 def _visible_relationships(
@@ -230,12 +249,23 @@ def _visible_relationships(
         missing = paths.difference(endpoints)
         if missing:
             view = new_view()
-            present = [path for path in sorted(missing) if snapshot.page_meta(path) is not None]
+            owned = read.owned_as_pages(root, missing)
+            present = [
+                path for path in sorted(missing) if not owned[path] or snapshot.page_meta(path) is not None
+            ]
             view.admit(present)
-            view.prefetch(present)
-            for path in missing:
-                parent = _current_parent(snapshot, view, path)
-                endpoints[path] = None if parent is None else _RelationshipEndpoint.from_parent(parent)
+            view.prefetch(path for path in present if owned[path])
+            endpoints.update(dict.fromkeys(missing))
+            for path in present:
+                if owned[path]:
+                    parent = _current_parent(snapshot, view, path)
+                    if parent is not None:
+                        endpoints[path] = _RelationshipEndpoint.from_units(
+                            parent.structure.parent_ref,
+                            (unit.unit_ref for unit in parent.structure.units),
+                        )
+                elif view.allowed(path):
+                    endpoints[path] = _external_endpoint(root, path)
         for edge in batch:
             request_budget.checkpoint()
             target_path = edge.target_path

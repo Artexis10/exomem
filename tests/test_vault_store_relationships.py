@@ -567,3 +567,41 @@ def test_a_rename_into_a_vacant_path_preserves_both_old_and_current_targets(serv
     assert {(end.parent_path, end.anchor, end.parent_ref) for end in portable.target_units} == {
         (BETA, "lamp", beta_ref), (BETA, "lamp", other_ref),
     }
+
+
+def test_relationships_can_read_endpoints_on_a_read_only_reference(served, writer):  # noqa: F811
+    from exomem import audit, memory_refs
+
+    manual = "Reference/Manual.md"
+    (served / manual).parent.mkdir()
+    source_id = "e8f840b6-3cf8-44cf-ab95-12d05683a194"
+    manual_id = "04e56772-21a9-44ff-b0df-0a51ed0e166b"
+    source = f"---\nexomem_id: {source_id}\n---\n\n- [rule] Check the tide. ^tide\n".encode()
+    original = f"---\nexomem_id: {manual_id}\n---\n\n- [rule] Light the lamp. ^lamp\n".encode()
+    (served / manual).write_bytes(original)
+    imported = importer.Importer(served, run=lambda work: work(writer)).import_paths([manual])
+    assert imported.refreshed == [manual]
+    source_ref, manual_ref = map(memory_refs.memory_ref, (source_id, manual_id))
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "Connect to the reference.",
+        puts=(write.PagePut(ALPHA, source),),
+        relationship_change=relationships.Change(
+            actor="owner",
+            identities=(relationships.UnitIdentity("tide", ALPHA, "tide", source_ref),
+                        relationships.UnitIdentity("lamp", manual, "lamp", manual_ref)),
+            added=(relationships.Relationship("page-link", "tide", "supports", None, manual, manual_ref),
+                   relationships.Relationship("unit-link", "tide", "supports", "lamp")),
+        ),
+    ))
+    assert not projector.Projector(served, run=lambda work: work(writer)).run_pass().deferred
+    assert (served / manual).read_bytes() == original
+    with library_scope():
+        linked = unit_edges.relationship_page(served, ALPHA, "tide")
+        report = audit.audit(served, categories=[audit.RELATIONSHIP_ORPHAN])
+    assert {edge.relationship.id for edge in linked.edges} == {"page-link", "unit-link"}
+    assert not report.findings
+    (served / manual).unlink()
+    with library_scope():
+        assert unit_edges.relationship_page(served, ALPHA, "tide").total == 0
+        report = audit.audit(served, categories=[audit.RELATIONSHIP_ORPHAN])
+    assert {item.meta["signal_version"] for item in report.findings} == {manual_ref, "lamp"}

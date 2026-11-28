@@ -4522,6 +4522,7 @@ def _check_relation_debt(
 
 
 def _check_relationship_orphans(vault_root: Path) -> Iterator[AuditFinding]:
+    from . import semantic_index
     from .governance import egress
     from .governance.principal import effective_principal
     from .vault_store import mode, read, relationships
@@ -4530,6 +4531,16 @@ def _check_relationship_orphans(vault_root: Path) -> Iterator[AuditFinding]:
         vault_root, effective_principal(),
     ):
         return
+
+    @lru_cache(maxsize=read.KEYS_PER_QUERY)
+    def external_parent(path: str) -> semantic_index.SemanticParentIndexState | None:
+        if read.owned_as_page(vault_root, path):
+            return None
+        try:
+            return semantic_index.selected_parent_index_state(vault_root, path)
+        except (ValueError, OSError):
+            return None
+
     with read.snapshot(vault_root) as view:
         if not view.connection.execute(
             "SELECT 1 FROM sqlite_schema WHERE name='store_unit_ids'",
@@ -4537,6 +4548,10 @@ def _check_relationship_orphans(vault_root: Path) -> Iterator[AuditFinding]:
             return
         for unit in relationships.orphaned_units(view.connection):
             request_budget.checkpoint()
+            external = external_parent(unit.parent_path)
+            if (external is not None and external.parent_ref == unit.parent_ref
+                    and external.document.resolve_fragment(unit.anchor).unit is not None):
+                continue
             yield AuditFinding(
                 category=RELATIONSHIP_ORPHAN, severity="warn", path=unit.parent_path,
                 detail=f"Stored relationships still name the missing unit #{unit.anchor}.",
@@ -4545,6 +4560,9 @@ def _check_relationship_orphans(vault_root: Path) -> Iterator[AuditFinding]:
             )
         for path, reference in relationships.orphaned_pages(view.connection):
             request_budget.checkpoint()
+            external = external_parent(path)
+            if external is not None and (reference is None or external.parent_ref == reference):
+                continue
             yield AuditFinding(
                 category=RELATIONSHIP_ORPHAN, severity="warn", path=path,
                 detail="Stored relationships still name the missing page.",
