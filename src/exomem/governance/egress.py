@@ -316,23 +316,20 @@ def _collector() -> DisclosureCollector | None:
 
 
 @contextmanager
-def decide_without_receipt() -> Iterator[None]:
+def decide_without_receipt(vault_root: Path) -> Iterator[None]:
     """Decide as the request would, but record no outcome and claim no path outcome.
 
     For a lookup that releases nothing, such as resolving a title to a page. A receipt row claims its
     path once, so a lookup's row would be the one kept and would hide the page's own, later release row
-    with its hash, size and ref.
+    with its hash, size and ref. A nested canonical read joins the same sink.
     """
-    token = _DISCLOSURE_COLLECTOR.set(None)
-    try:
+    with disclosure_boundary(vault_root, "decision_only", sink=True):
         yield
-    finally:
-        _DISCLOSURE_COLLECTOR.reset(token)
 
 
 def _record_outcome(value: Mapping[str, Any]) -> None:
     collector = _collector()
-    if collector is None:
+    if collector is None or collector.sink:
         return
     collector.outcomes.append(DisclosureOutcome(dict(value)))
 
@@ -340,6 +337,8 @@ def _record_outcome(value: Mapping[str, Any]) -> None:
 def _claim_path_outcome(
     collector: DisclosureCollector, identity: str, outcome: str, level: int | None,
 ) -> bool:
+    if collector.sink:
+        return False
     key = (identity, outcome, level)
     if key in collector.path_outcomes:
         return False
@@ -489,7 +488,7 @@ def _outcome_for_decision(
             and not raw_protection.marked(rel_path)):
         return
     # Nothing emits a sink's outcomes, so claiming a path in it would only hash the page for nobody.
-    if collector is None or collector.sink or not _claim_path_outcome(
+    if collector is None or not _claim_path_outcome(
         collector, rel_path, outcome, decision.level if decision is not None else None,
     ):
         return
@@ -552,7 +551,7 @@ def _receipt_bytes(vault_root: Path, rel_path: str) -> bytes | None:
 def emit_boundary_receipt(collector: DisclosureCollector) -> None:
     """Synchronously append evidence after the final representation is fixed."""
     owners = _DISCLOSURE_BOUNDARY_OWNERS.get()
-    if not owners or not owners[-1]:
+    if collector.sink or not owners or not owners[-1]:
         return
     try:
         if collector.credential_redactions:

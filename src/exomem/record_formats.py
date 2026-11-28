@@ -1455,7 +1455,7 @@ def presentation_relationship_resolver(
                 # The reader's filter runs before candidates are counted, so a page it may not
                 # see never makes a name ambiguous or takes a path another page left. Counting
                 # releases nothing, so it records no receipt; the target's own check below does.
-                with egress.decide_without_receipt():
+                with egress.decide_without_receipt(root):
                     canonical, _warning = vault.normalize_wikilink(
                         link_target,
                         root,

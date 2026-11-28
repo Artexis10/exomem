@@ -499,12 +499,15 @@ def start(vault_root: Path) -> Drainer:
     return drainer
 
 
-def stop(vault_root: Path, *, timeout: float = 10.0) -> None:
+def stop(vault_root: Path, *, worker: Drainer | None = None, timeout: float = 10.0) -> None:
+    """Stop the current drainer, or only the named worker when its owner asks."""
     key = Path(vault_root).resolve()
     with _DRAINERS_LOCK:
-        drainer = _DRAINERS.pop(key, None)
-    if drainer is not None:
-        drainer.stop(timeout=timeout)
+        drainer = _DRAINERS.get(key)
+        if drainer is None or (worker is not None and drainer is not worker):
+            return
+        del _DRAINERS[key]
+    drainer.stop(timeout=timeout)
 
 
 def _note_finished(vault_root: Path, origin: str | None, intake_id: str, expires_at: float | None) -> None:
