@@ -1613,7 +1613,7 @@ def test_a_records_query_reads_the_last_commit_while_the_store_thread_is_busy(se
     from concurrent.futures import ThreadPoolExecutor
 
     from exomem import request_budget
-    from exomem.query_engine.runtime import WALL_BACKSTOP_MS
+    from exomem.query_engine import runtime as query_runtime
 
     root = service.root
     query = dict(action="query", collection=CID, limit=10, columns=["title"])
@@ -1624,8 +1624,13 @@ def test_a_records_query_reads_the_last_commit_while_the_store_thread_is_busy(se
     server = runtime._server(root)
     lease_status = service.manager.client.status
     remaining = []
+    timed_out = False
+    late_calls = []
+    caller = threading.get_ident()
 
     def status():
+        if timed_out and threading.get_ident() == caller:
+            late_calls.append(True)
         check = request_budget.store_read_checkpoint()
         if check is not None and check.wait_for_store_read_slot:
             remaining.append(check.remaining())
@@ -1646,10 +1651,24 @@ def test_a_records_query_reads_the_last_commit_while_the_store_thread_is_busy(se
                 result = call(root, "record_memory", **query)
                 with pytest.raises(OpError) as contended_refusal:
                     call(root, "record_memory", **{**query, "columns": ["fixture_unlisted"]})
+                expired = query_runtime.Deadline.expired
+
+                def record_expiry(deadline):
+                    nonlocal timed_out
+                    error = expired(deadline)
+                    if error is not None:
+                        timed_out = True
+                    return error
+
+                short.setattr(query_runtime.Deadline, "expired", record_expiry)
+                short.setitem(query_runtime.PROFILES, "records", {**query_runtime.PROFILES["records"], "timeout_ms": 0})
+                with pytest.raises(OpError) as stopped:
+                    call(root, "record_memory", **query)
             assert result["rows"] == expected["rows"]
             assert result["snapshot"] == expected["snapshot"]
             assert contended_refusal.value.code == idle_refusal.value.code == "INVALID_RECORD_QUERY_FIELD"
-            assert len(remaining) >= 2 and all(0 < seconds < WALL_BACKSTOP_MS / 1000 for seconds in remaining)
+            assert stopped.value.code == "QUERY_TIMEOUT" and timed_out and not late_calls
+            assert len(remaining) >= 2 and all(0 < seconds < query_runtime.WALL_BACKSTOP_MS / 1000 for seconds in remaining)
             assert not busy.done()
         finally:
             release.set()

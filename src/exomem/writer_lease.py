@@ -9719,7 +9719,8 @@ def invoke_command(
 
         # The dispatcher's own checks before the body, which the leaf span alone does not separate.
         call_spans.record_span_since("command.leaf_pre", "command.leaf_start")
-        detached = ownership_scope.before_release is not None
+        detached = ownership_scope.records_snapshot
+        body_returned = False
         try:
             try:
                 if vault_store_mode.store_mode_for_reads(injected[0]):
@@ -9728,9 +9729,10 @@ def invoke_command(
                 # Fixed phase labels carry timing only, never caller or vault data.
                 with body_meter as measured, call_spans.span("command.body", measured):
                     result = _invoke()
+                body_returned = True
                 if detached:
                     snapshot_scope.close()
-                    ownership_scope.before_release()
+                    detached.refresh_for_release()
                 retained_report = None
                 if preview_checkpoint is not None:
                     from .reclassification_preview import RetainedReport
@@ -9754,6 +9756,10 @@ def invoke_command(
                 # This exact internal terminal contains no content to scan or prove again.
                 if type(error) is _AuditBudgetExhausted:
                     raise
+                if detached is not None and not body_returned and isinstance(error, Exception):
+                    if (timeout := detached.expired_query_refusal()) is not None:
+                        # Drop the reader on unwind without fresh authority I/O for a fixed timeout.
+                        raise timeout from None
                 try:
                     if isinstance(error, request_budget.ReadBudgetExhausted):
                         raise

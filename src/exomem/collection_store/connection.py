@@ -484,7 +484,6 @@ class SnapshotHandle:
         self.connection = conn
         self.query_snapshot = query_snapshot
         self.query_deadline = None
-        self.release_checkpoint = None
         self._owner_thread = threading.get_ident()
         self._closed = False
         self._release_cache = None
@@ -520,9 +519,21 @@ class SnapshotHandle:
             from .ownership import unavailable
 
             raise unavailable()
-        self.release_checkpoint = self.query_deadline.release_checkpoint()
         self.connection.rollback()
         self._release_cache = None
+
+    def release_checkpoint(self):
+        return self.query_deadline.release_checkpoint() if self.query_deadline is not None else None
+
+    def expired_query_refusal(self):
+        """A fixed timeout carries only the query budget, with no rows or vault data."""
+        if self.query_deadline is None or (error := self.query_deadline.expired()) is None:
+            return None
+        from ..cli_ops import OpError
+        from ..query_engine.runtime import records_refusal
+
+        refusal = records_refusal(error, self.query_deadline)
+        return OpError(refusal.code, refusal.reason, details=refusal.details)
 
     def require_write_authority(self, *, allow_diverged: bool = False) -> None:
         raise CollectionStoreError("COLLECTION_STORE_SNAPSHOT_READ_ONLY", "a store snapshot cannot write")

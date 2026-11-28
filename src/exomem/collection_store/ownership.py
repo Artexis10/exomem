@@ -386,14 +386,13 @@ _READ: ContextVar[ReadScope | None] = ContextVar("collection_ownership_read", de
 
 
 class ReadScope:
-    def __init__(self, root, *, initial=None, verify=None, before_release=None, release_checkpoint=None):
+    def __init__(self, root, *, initial=None, verify=None, records_snapshot=None):
         # A decision set's resolution scope resolves the root once; `finish` proves it again.
         self.root = state_paths.resolved_vault_path(root, expanduser=False)
         # A proof the caller made earlier skips this scope's own; `finish` still proves again and compares.
         self.initial = initial
         self.verify = verify
-        self.before_release = before_release
-        self.release_checkpoint = release_checkpoint
+        self.records_snapshot = records_snapshot
         self.store_enrolled = False
         self.finished = False
 
@@ -422,7 +421,7 @@ class ReadScope:
             return
         from .preview import bound_writer, production_bound
 
-        check = self.release_checkpoint() if self.release_checkpoint is not None else None
+        check = self.records_snapshot.release_checkpoint() if self.records_snapshot is not None else None
         try:
             # A lend starts with no transaction, and fresh placement bypasses the body's resolution memo,
             # so neither this proof nor the body's WAL snapshot is reused. The binding changes only under the
@@ -462,13 +461,12 @@ class ReadScope:
 
 
 @contextmanager
-def read_scope(root, *, finalize=False, initial=None, verify=None, before_release=None, release_checkpoint=None):
+def read_scope(root, *, finalize=False, initial=None, verify=None, records_snapshot=None):
     previous = _READ.get()
     if previous is not None and previous.root == state_paths.resolved_vault_path(root, expanduser=False):
         yield previous
         return
-    scope = ReadScope(root, initial=initial, verify=verify, before_release=before_release,
-                      release_checkpoint=release_checkpoint)
+    scope = ReadScope(root, initial=initial, verify=verify, records_snapshot=records_snapshot)
     token = _READ.set(scope)
     try:
         yield scope
