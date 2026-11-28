@@ -1,4 +1,4 @@
 ---
-title: Faster context when you keep many records
+title: Faster context with many record collections
 ---
-When your memory holds many tables of records, your assistant now gets your context much sooner, and a slow moment keeps the parts it already checked.
+When you keep many record collections, your assistant now checks them together, so it gets your context sooner.

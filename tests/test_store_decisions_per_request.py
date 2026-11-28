@@ -449,7 +449,6 @@ def test_bounding_the_text_of_many_store_pages_asks_the_store_once(
     assert together == alone
 
 
-
 @pytest.mark.timeout(180)
 def test_pages_decided_before_the_deadline_keep_their_text_when_the_rest_are_withheld(
     service, monkeypatch: pytest.MonkeyPatch  # noqa: F811
@@ -486,6 +485,7 @@ def test_pages_decided_before_the_deadline_keep_their_text_when_the_rest_are_wit
     assert full, "a page decided before the deadline lost its text"
     assert len(full) < len(pages), "the deadline fell inside the request, so some pages were not reached"
     assert all(bounds[page] == 0 for page in pages if page not in full)
+
 
 @pytest.mark.timeout(180)
 def test_a_store_that_refuses_the_terminal_pass_withholds_the_store_pages_once_and_says_so(

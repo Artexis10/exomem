@@ -510,9 +510,10 @@ def _decide_through_store(server, read, batch, vault_root, path, args, kwargs):
     refused = None if decisions is None else decisions.refusals.get(server)
 
     def alone():
-        if refused is not None:
+        # Read now: a batch this call just made may have been refused at its deadline.
+        if decisions is not None and (current := decisions.refusals.get(server)) is not None:
             # One refusal object raised for every page: clear its traceback so it does not grow per page.
-            raise refused.with_traceback(None)
+            raise current.with_traceback(None)
         return _replay(_request(server, decisions, _Decide(read, vault_root, {path: (args, kwargs)}))[path])
 
     if (decisions is None or batch is None or len(args) != 1 or path not in decisions.paths
