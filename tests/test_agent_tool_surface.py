@@ -470,17 +470,22 @@ def test_an_agent_adds_queries_and_edits_a_record_by_its_id(build, vault) -> Non
             "manifest_text": record_fixtures.LEDGER_MANIFEST_TEXT, "why": "Track published entries", "scaffold": True}})
         added = await _call(client, "add_record", {
             "collection": "Publications ledger", "item": record_fixtures.ledger_item(), "why": "Log the first entry"})
-        rows = await _call(client, "query_records", {"collection": "Publications ledger", "columns": ["slug"]})
+        query = {"collection": "Publications ledger", "columns": ["slug"]}
+        rows = await _call(client, "query_records", query)
+        export = await _call(client, "query_records", {**query, "options": {"output_format": "json"}})
         row = rows["rows"][0]
         edit = {"collection": "Publications ledger", "record": row.get("id"), "why": "Corrected count"}
         edited = await _call(client, "edit_record", {**edit, "changes": {"word_count": 50}})
         stale = await _call(client, "edit_record", {**edit, "changes": {"word_count": 60}})
-        return created, added, row, edited, stale
+        return created, added, rows, export, edited, stale
 
-    created, added, row, edited, stale = _session(build(), scenario)
+    created, added, rows, export, edited, stale = _session(build(), scenario)
 
     assert "error" not in created and "error" not in added and "error" not in edited, (created, added, edited)
-    assert row["slug"] == "quarterly-note" and row["id"]
+    assert rows["rows"][0]["slug"] == "quarterly-note" and rows["rows"][0]["id"]
+    assert "rendered" not in rows, rows
+    assert {key: value for key, value in export.items() if key != "rendered"} == rows
+    assert "quarterly-note" in export["rendered"]
     assert stale.get("error", {}).get("code") == "STALE_ITEM", stale
     items = _item_files(vault, "Knowledge Base/Records/Publications")
     assert "word_count: 50" in items and "word_count: 60" not in items
