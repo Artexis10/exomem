@@ -1454,6 +1454,28 @@ def test_a_failed_drain_discards_the_standby_before_resuming(tmp_path):
     asyncio.run(scenario())
 
 
+def test_upgrade_keeps_a_ready_standby_while_a_slow_worker_stops(tmp_path):
+    async def scenario():
+        manager, ingress, runtime, target = _standby_supervisor(tmp_path)
+
+        async def stop(timeout):
+            runtime.events.append("stop")
+            # Model the old worker finishing a native load after the restart allowance.
+            if runtime.pid and timeout < 18:
+                raise TimeoutError("old worker still owns its state")
+            runtime.pid = 0
+
+        runtime.stop = stop
+        result = await manager.upgrade(target)
+
+        assert result["ok"], result
+        assert manager.phase == "ready" and runtime.pid == 200
+        assert ingress.events[-1] == ("resume", "new-upstream")
+        assert "discard-standby" not in runtime.events
+
+    asyncio.run(scenario())
+
+
 def test_an_owned_forward_over_the_stop_allowance_blocks_migration_and_promotion(tmp_path):
     """A live callback must retain recovery state instead of allowing a replacement to own its state."""
     async def scenario():
