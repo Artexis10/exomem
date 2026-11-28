@@ -137,23 +137,33 @@ On the turn that receives listed items, `next_action` SHALL be `skill_check`, po
 
 A request MAY name skills the client already loads natively in `native_skills`, a list of skill names.
 The catalogue SHALL omit visible skills whose `name` equals a listed name, and SHALL count them in neither `items` nor `omitted`.
-Native omission SHALL NOT change task discovery, which may still project an omitted skill as a relevant method.
+Native omission SHALL NOT change task discovery, which may still lead to an omitted skill as a candidate, or serve it as a method where the judgment selects it.
 
 #### Scenario: A client with native copies receives only the rest
 
 - **WHEN** a vault holds skills `a`, `b` and `c` and the request names `native_skills: ["a", "b"]`
 - **THEN** the catalogue lists only `c`
 
-### Requirement: A relevant skill is projected as a method
+### Requirement: A skill is a method item only when selected or declared
 
-When task discovery admits a skill page as a candidate, the response SHALL project it as a method item that carries the skill's `name`, its full `description`, `kind: "skill"` and a `read_ref` to the skill page.
-The projected text SHALL count against the turn-context allowance like other method items.
-Delivery SHALL grant no authority: the agent reads the skill and decides whether it applies.
+A skill page SHALL be a method item only when the method judgment selects it or a collection manifest declares it as its capture method, in every `method_fit` state. Retrieval rank alone SHALL NOT make it one. A skill page that task discovery leads to, and that the turn slice does not cover, SHALL be a candidate with `kind: "skill"` and its `name` and no description, because the catalogue arrives once per conversation.
 
-#### Scenario: A matching task surfaces the skill and its trigger text
+#### Scenario: A skill the judgment declined stays a lead
+- **WHEN** `method_fit.state` is `ready`, the judgment answers with no label, and discovery leads to a skill page that the turn slice does not cover
+- **THEN** `task_context.candidates` holds the skill page with `kind: "skill"` and its `name`, and `task_context.methods` holds no item for it
 
-- **WHEN** a turn asks for work that a visible skill's description covers and task discovery admits that skill page
-- **THEN** `task_context.methods` contains the skill with its full description and the read reference
+#### Scenario: Without a judgment a matching skill stays a lead
+- **WHEN** `method_fit.state` is `disabled`, `empty` or `unavailable` and discovery leads to a skill page that a visible skill's description covers
+- **THEN** the page is a candidate and `task_context.methods` holds no item for it
+- **AND** the catalogue lists the skill and `next_action.state` is `skill_check`
+
+#### Scenario: A later turn marks the lead as a skill
+- **WHEN** the catalogue arrived on an earlier turn and a later turn leads to a skill page
+- **THEN** the candidate carries `kind: "skill"` and the skill's `name`, and the start-of-turn hook shows the marker
+
+#### Scenario: A selected skill carries its trigger text
+- **WHEN** the judgment selects a skill page
+- **THEN** `task_context.methods` holds it with its full `description`, `kind: "skill"` and a `read_ref`, counted against the turn-context allowance, and the agent reads it and decides whether it applies
 
 ### Requirement: A bounded judgment selects the methods a turn needs
 
@@ -211,12 +221,12 @@ Selection SHALL grant no authority: the agent decides whether the method applies
 ### Requirement: The method judgment reports its state
 
 `task_context.method_fit` SHALL report `disabled` without a placement, `empty` when nothing could be offered, `ready` with the model identity after a judgment, and `unavailable` when the call fails, times out or answers outside the schema.
-Every state except `ready` SHALL select nothing and leave the rest of the response unchanged.
+Every state except `ready` SHALL select nothing; the methods served are then those that approval or a collection's declaration makes.
 
 #### Scenario: A failed judgment keeps the turn
 
 - **WHEN** the model call times out or names a label it was not offered
-- **THEN** no method is selected, `method_fit.state` is `unavailable`, and the leads and other methods are served as without a placement
+- **THEN** no method is selected, `method_fit.state` is `unavailable`, and the methods and leads are those served without a placement
 
 #### Scenario: No placement, no judgment
 
@@ -259,3 +269,30 @@ A skill the caller cannot see SHALL affect no item, count or generation in that 
 
 - **WHEN** a restricted caller cannot see one of three skill pages
 - **THEN** its catalogue lists two skills, `omitted` is 0 and its generation equals that of a vault holding only the two visible skills
+
+## MODIFIED Requirements
+
+### Requirement: Routing tables travel as vault skills
+
+A pick-by-problem routing table SHALL be carried as an ordinary vault skill, with no separate carrier and no table parsing.
+The skills catalogue SHALL list a routing skill, and a skill method item MAY serve it, exactly as for any other vault skill.
+The shipped scaffold SHALL teach the routing-skill convention:
+
+- the skill's description names the problems that the table covers;
+- the skill's body holds the pick-by-problem table, one row per problem, each row naming the sources or sections to read first;
+- the skill's body tells the agent to name the matched row and point to that row's sources first, and to answer without the table when no row fits.
+
+#### Scenario: A row-shaped turn reaches the routing skill
+
+- **WHEN** a vault holds a routing skill whose table has a row for slow builds, and a turn asks why the build has become slow
+- **THEN** the skills catalogue lists the routing skill, and the agent can load it by its reference and answer from the matching row
+
+#### Scenario: An unrelated turn does not use the table
+
+- **WHEN** a vault holds the same routing skill, and a turn asks for a dinner recipe
+- **THEN** the skill's own text tells an agent that has it loaded to answer without the table
+
+#### Scenario: The scaffold teaches the convention
+
+- **WHEN** a person reads the shipped skill guidance on vault skills
+- **THEN** it describes how to write a routing skill: the description, the table and the instruction to name the matched row

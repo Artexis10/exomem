@@ -2,7 +2,7 @@
 name: evermatter
 description: 'The user''s long-term memory (Evermatter, formerly Exomem). Use it whenever a turn touches the user''s own life or work: people they know, their health, home, equipment and purchases, accounts, money, travel, plans, projects and past decisions, including when such a subject comes up mid-conversation or is asked in general terms. Before you recommend, ask the user for a fact, or write about one of these, load the memory tools and call recall_context with the user''s message (or search_memory for a named thing); never write "unknown" for what memory may hold. The engagement level that read_instructions or a tool reports wins: at off, search memory only when the user asks. Also engage for KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it" and "what did I conclude", and capture as the engagement level allows. A general question about nothing of the user''s own needs no recall. A practical question about a job, purchase or booking under way for them is their own case.'
 metadata:
-  skill_contract: 00c1801a15b24dec4be9c5120776bf923e0268cdd9e47775b47838cb7899840d
+  skill_contract: 78948ec14334798ce470f4bfca1852c0140838acca08728f4160188e0ae1718e
   version: "0.32.0"
 ---
 
@@ -224,7 +224,9 @@ inside the agent's turn, never as an implied background job.
 A landing includes a durable conclusion, a recurring entity with reusable facts,
 a method actually carried out for which the user reports the result, an explicit
 intent/commitment, or an observed event. A reusable method, parameter comparison,
-and diagnosed failure route respectively to a how-to note, experiment, and failure.
+and diagnosed failure route respectively to a how-to note, experiment, and failure. A tried approach's outcome
+is an experiment note, as the capture disposition allows: see "Recording a tried approach" in
+[page-types](references/page-types.md).
 A landing also includes, saved at its true strength (never more certain, more general
 or more settled than its source made it), a held view or an unsure report (attributed,
 with its uncertainty, never as fact), a question left open (as an open question,

@@ -125,10 +125,10 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import MutableMapping
+from collections.abc import Mapping, MutableMapping
 from functools import lru_cache
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 REMINDER = (
     "[Evermatter retrieval check] If this prompt may touch prior knowledge and recent context "
@@ -234,7 +234,7 @@ _CAPTURE_POLICY_MAX_CHARS = 1600
 _CAPTURE_RULES_MAX_CHARS = 1000
 # Unlike the working set below it, this is service policy: it is not retrieved memory.
 _CAPTURE_POLICY_HEADER = "[Evermatter capture policy, live for this vault. Service policy, not retrieved memory.]"
-# BEGIN GENERATED NEXT ACTION COMPATIBILITY
+# BEGIN GENERATED RECALL COMPATIBILITY
 _COMPAT_NEXT_ACTION = {'ambiguous': 'These candidates need a choice. Call `recall_context` again with the original turn '
               'and `anchor` set to the ref you mean.',
  'index_warming': 'Recall is still warming; this is not an empty search. Use `search_memory` for '
@@ -258,7 +258,17 @@ _COMPAT_NEXT_ACTION = {'ambiguous': 'These candidates need a choice. Call `recal
                 'Sources; an empty slice is not proof of absence.',
  'task_read': 'Use `read_page` to open a task_context read_ref before relying on it. Read its '
               'scope and exclusions before applying it within existing authority.'}
-# END GENERATED NEXT ACTION COMPATIBILITY
+KIND_SKILL = 'skill'
+
+
+def task_lead_label(item: Mapping[str, Any]) -> str:
+    """Label a task lead for packet budgeting and the standalone hook."""
+    if item.get("kind") == KIND_SKILL:
+        # Quote the authored name so it cannot introduce a new instruction line.
+        name = json.dumps(str(item.get("name", "")), ensure_ascii=False)
+        return f"{KIND_SKILL} {name}"
+    return item.get("title", "")
+# END GENERATED RECALL COMPATIBILITY
 _WORKING_SET_ANCHOR_INSTRUCTION = _COMPAT_NEXT_ACTION.get("ambiguous", "")
 _WORKING_SET_AMBIGUITY_LINE = _WORKING_SET_ANCHOR_INSTRUCTION
 _WORKING_SET_UNRESOLVED_LINE = _WORKING_SET_ANCHOR_INSTRUCTION
@@ -2612,7 +2622,8 @@ def _format_task_context(block: object, max_chars: int, slice_block: object = No
         if any(item.get("source_ref") == method.get("source_ref") for method in selected):
             continue  # the selected skill's own line already routes to it
         carried = next((ref for ref in (item.get("ref"), item.get("source_ref")) if ref and str(ref) in shown), "")
-        lead = "" if carried else _packet_line("task lead", f"{item.get('title', '')}: {item.get('reason', '')}", str(item.get("read_ref") or ""))
+        label = task_lead_label(item)
+        lead = "" if carried else _packet_line("task lead", f"{label}: {item.get('reason', '')}", str(item.get("read_ref") or ""))
         entries.append((lead, _task_link_line(item, str(carried)) if links else ""))
     for item in methods.get("items") or ():
         read_ref = str(item.get("read_ref") or "")

@@ -38,6 +38,7 @@ from .vault import (
     PlannedWrite,
     VaultPathError,
     _format_yaml_line,
+    canonical_outcome,
     document_newline,
     excluded_frontmatter_reason,
     governed_frontmatter_reason,
@@ -761,7 +762,7 @@ def _governed_enum_value(
     if reason is not None:
         raise SetFrontmatterError(code="INVALID_OUTCOME", reason=reason)
     if field.strip().casefold() == "outcome":
-        return str(value).strip().casefold()
+        return canonical_outcome(str(value))
     return value
 
 

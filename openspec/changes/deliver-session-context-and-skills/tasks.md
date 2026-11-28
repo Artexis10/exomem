@@ -9,8 +9,8 @@
 
 - [x] 2.1 Add the `skill` flag and frontmatter description to the context catalogue; verify recognition, the malformed case, the Source exclusion and a catalogue rebuild from an older version.
 - [x] 2.2 Serve the `skills` block in maps responses with its own bound, continuity generation and `unchanged` state; verify first delivery, the unchanged turn, an edited skill and the off switch.
-- [x] 2.3 Accept `native_skills` and omit matching names from the catalogue only; verify a projected method still appears for an omitted skill.
-- [x] 2.4 Project admitted skill pages as `kind: "skill"` method items with the full description; verify against a real turn that names no skill.
+- [x] 2.3 Accept `native_skills` and omit matching names from the catalogue only; verify an omitted skill still leads the task as a candidate.
+- [x] 2.4 Mark a skill lead as `kind: "skill"` with its name, and project a skill as a method item with the full description only when the judgment selects it or a collection declares it; verify on a turn that names no skill.
 - [x] 2.5 Keep a skill's other files one `read_page` away by the paths its body names, with no directory listing: a listing that is both bounded and blind to hidden pages needs an indexed folder read the catalogue does not have.
 - [x] 2.6 Render the catalogue and skill methods in the start-of-turn hook and pass the client's native skill names; verify the hook output for a Claude Code and a Codex home.
 - [ ] 2.7 Prove recall latency before and after on the recall latency instrument.

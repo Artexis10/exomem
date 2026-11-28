@@ -30,6 +30,7 @@ from exomem import (
     vault_skills,
     working_set_runtime,
 )
+from exomem._hooks import exomem_retrieve_nudge as hook
 from exomem.governance import principal
 from exomem.writer_lease import invoke_command
 
@@ -156,31 +157,35 @@ def test_the_skills_block_takes_nothing_from_the_turn_allowance(skills_vault, mo
     assert with_skills["map"] == without["map"]
 
 
-def test_native_skills_leave_the_catalogue_but_a_task_still_projects_them(skills_vault):
+def test_a_skill_that_retrieval_leads_to_is_a_lead_and_the_catalogue_is_the_pointer(skills_vault):
+    """Without a method-fit judgment, a retrieval rank is no reason to tell the agent to read a skill first."""
+    packet = _activate(skills_vault, turn=NO_SKILL_NAMED)
+
+    task = packet["task_context"]
+    assert ZETA in [item["source_ref"] for item in task["candidates"]]
+    assert task["methods"]["items"] == []
+    assert ZETA in [item["ref"] for item in packet["skills"]["items"]]
+    assert packet["next_action"]["state"] == "skill_check"
+
+
+def test_a_skill_lead_after_the_catalogue_turn_still_reaches_the_agent_marked_as_a_skill(skills_vault):
+    """The catalogue arrives once per conversation, so a later turn's lead must say it is a skill, and no more."""
+    first = _activate(skills_vault)
+    later = _activate(skills_vault, turn=NO_SKILL_NAMED, continuity=first["continuity"])
+
+    assert later["skills"]["state"] == "unchanged"
+    (lead,) = [item for item in later["task_context"]["candidates"] if item["source_ref"] == ZETA]
+    assert (lead["kind"], lead["name"]) == ("skill", "zeta") and "description" not in lead
+    assert 'task lead: skill "zeta":' in hook._format_task_context(later["task_context"], 4000)
+
+
+def test_native_skills_leave_the_catalogue_but_a_task_still_leads_to_them(skills_vault):
     packet = _activate(skills_vault, turn=NO_SKILL_NAMED, native_skills=["zeta", 5, ""])
 
     assert _names(packet["skills"]) == ["alpha", "mid"]
     assert packet["skills"]["omitted"] == 0
-    methods = packet["task_context"]["methods"]["items"]
-    assert [(item["kind"], item["name"], item["read_ref"]) for item in methods] == [("skill", "zeta", ZETA)]
-
-
-def test_a_projected_skill_carries_its_whole_description_or_none_of_it(skills_vault):
-    """The method counts against the turn allowance: it fits whole, or the turn reports a budget miss, never a cut text."""
-    description = "Use when tuning the zeta engine. " + "Check every gauge before and after. " * 12
-    _skill(skills_vault, ZETA, "zeta", description, "Steps for the zeta engine tuning.\n")
-    _refresh(skills_vault)
-
-    roomy = _activate(skills_vault, turn=NO_SKILL_NAMED, max_chars=6000)
-    # Half of 1,000 is the turn's share, too small for this description.
-    tight = _activate(skills_vault, turn=NO_SKILL_NAMED, max_chars=1000)
-
-    assert [item["description"] for item in roomy["task_context"]["methods"]["items"]] == [description.strip()]
-    assert roomy["budget"]["used_chars"] <= 6000
-    assert tight["task_context"]["methods"]["items"] == []
-    assert {"role": "task_context", "reason": "budget"} in tight["task_context"]["missing"]
-    assert tight["budget"]["used_chars"] <= 1000
-    assert [item["summary"] for item in tight["skills"]["items"] if item["name"] == "zeta"] == ["Use when tuning the zeta engine."]
+    assert ZETA in [item["source_ref"] for item in packet["task_context"]["candidates"]]
+    assert packet["task_context"]["methods"]["items"] == []
 
 
 def test_a_caller_who_cannot_see_a_skill_is_told_nothing_of_it(skills_vault):

@@ -232,6 +232,11 @@ def excluded_frontmatter_reason(field: str) -> str | None:
     return f"`{field}` is a schema-excluded frontmatter field. {remedy} Omit this field."
 
 
+def canonical_outcome(value: str) -> str:
+    """The key that an accepted `outcome` spelling stores: trimmed and casefolded."""
+    return value.strip().casefold()
+
+
 def governed_frontmatter_reason(
     field: str,
     value: Any,
@@ -272,7 +277,7 @@ def governed_frontmatter_reason(
         else semantic_language_registry.core_registry()
     ).label_keys(semantic_labels.VERDICTS)
     # An outcome takes a key only; a unit verdict also takes a label.
-    if not isinstance(value, str) or value.strip().casefold() not in keys:
+    if not isinstance(value, str) or canonical_outcome(value) not in keys:
         return (
             f"`outcome:` must be exactly one of {', '.join(keys)}. "
             f"{semantic_units.NO_CONFIDENCE_RULE}"

@@ -461,6 +461,22 @@ Both rows exist only in the rich form; a compact `- [category] ...` observation 
 Edits preserve both rows, so correcting a prediction's wording never costs its verdict. A refuted
 prediction stays active and ranked, for the same reason a refuted experiment stays concluded.
 
+### Recording a tried approach
+
+A tried approach is a change that was tried to improve a result and compared before and after, with an outcome
+that a later session needs. A verification run after an edit, such as tests that pass or fail, is not one.
+Record it as an `experiment` note, as the capture disposition allows. The note's `outcome:` is the experiment's
+verdict; a `## Prediction` unit keeps its own `verdict:`. Use `refuted` when the result rules out the hoped-for
+gain, including a change that made the result worse: say the direction and size in the body. Use `inconclusive` when the interval includes no change or is too wide to say. The body holds:
+
+- the intent: what the run was meant to learn or achieve;
+- what changed, with its commit or run id;
+- the limits: its cases, its instrument and what it could not show;
+- what would reopen it: the change that makes a retry worth trying.
+
+A concluded experiment's body is read-only, so a retry is a new `experiment` note that links the earlier one.
+When the project keeps a run record, give the record a link to this note; the note holds the verdict.
+
 ### Recording a degree of belief
 
 A claim carries no confidence score. A degree of belief is its own `## Belief` unit: the belief in

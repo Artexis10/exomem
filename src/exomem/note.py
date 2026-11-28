@@ -83,6 +83,7 @@ from .vault import (
     _create_parent_dirs_held,
     append_frontmatter_list_item,
     batch_atomic_write,
+    canonical_outcome,
     canonical_vault_rel,
     content_hash,
     ensure_canonical_h1,
@@ -90,6 +91,7 @@ from .vault import (
     filename_adjusted_warning,
     find_body_wikilinks,
     folder_split_warnings,
+    governed_frontmatter_reason,
     kb_root,
     normalize_body_wikilinks,
     normalize_wikilink,
@@ -1494,6 +1496,7 @@ def _render_note(
     hypothesis: str | None = None,
     n: int | None = None,
     concluded: str | None = None,
+    outcome: str | None = None,
     medium: str | None = None,
     recorded: str | None = None,
     published: str | None = None,
@@ -1539,6 +1542,8 @@ def _render_note(
         lines.append(f'duration: "{duration}"')
         if concluded:
             lines.append(f"concluded: {concluded}")
+        if outcome:
+            lines.append(f"outcome: {yaml_scalar(outcome)}")
         lines.append(f"n: {n if n is not None else 1}")
         if hypothesis:
             lines.append(f'hypothesis: "{hypothesis}"')
@@ -1859,6 +1864,30 @@ def _clean_tags(tags: list[str] | None) -> list[str]:
     return out
 
 
+def _outcome_key(
+    root: Path,
+    destination: str,
+    *,
+    note_type: str,
+    outcome: str | None,
+    frontmatter: Mapping[str, Any],
+) -> str | None:
+    """The verdict key that an experiment's `outcome` stores, or None when the call sets none.
+
+    `vault.governed_frontmatter_reason` holds the rule, shared with the field setter and the file
+    creator. The page's own instance decides which verdicts it takes, so the policy gets the path and
+    the frontmatter fields that select an instance.
+    """
+    if outcome is None:
+        return None
+    reason = governed_frontmatter_reason(
+        "outcome", outcome, note_type, page=(root, destination, frontmatter)
+    )
+    if reason is not None:
+        raise NoteError("INVALID_OUTCOME", ["outcome"], reason)
+    return canonical_outcome(outcome)
+
+
 def _frontmatter_lines(fields: Mapping[str, str | Sequence[str]]) -> str:
     """Front-matter lines for a caller's extra fields: a scalar, or an inline list."""
     lines = []
@@ -1958,6 +1987,7 @@ def note(
     hypothesis: str | None = None,
     n: int | None = None,
     concluded: str | None = None,
+    outcome: str | None = None,
     medium: str | None = None,
     recorded: str | None = None,
     published: str | None = None,
@@ -2187,6 +2217,19 @@ def note(
         destination = token_value.destination
         note_path = root / destination
         encoded_token = draft_token or ""
+    outcome_key = _outcome_key(
+        root,
+        destination,
+        note_type=note_type,
+        outcome=outcome,
+        frontmatter={
+            "type": note_type,
+            "exomem_id": identity,
+            "project": project,
+            "projects": projects,
+            "tags": _clean_tags(tags),
+        },
+    )
     # Link-free preparation has no consumer for a vault-wide title snapshot.
     # Keep the detached pending destination and normalizers, but do not read
     # the corpus merely to resolve an empty set of links.
@@ -2225,6 +2268,7 @@ def note(
         hypothesis=hypothesis,
         n=n,
         concluded=concluded,
+        outcome=outcome_key,
         medium=medium,
         recorded=recorded,
         published=published,

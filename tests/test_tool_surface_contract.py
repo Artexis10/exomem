@@ -13,7 +13,13 @@ from conftest import initialize_vault_state_offline
 from fastmcp import Client
 from starlette.testclient import TestClient
 
-from exomem import commands, semantic_authoring, semantic_index
+from exomem import (
+    commands,
+    semantic_authoring,
+    semantic_index,
+    semantic_labels,
+    semantic_language_registry,
+)
 from exomem import server as server_module
 from exomem import vault as vault_module
 from exomem.__main__ import main
@@ -493,6 +499,93 @@ def test_mcp_create_note_carries_neighbour_domain_decision(
         {**base, "vocabulary_decision": {"evidence_fingerprint": fingerprint, "outcome": "create", "extra": "refuse"}},
     )
     assert extra["error"]["code"] == "INVALID_ARGUMENT"
+
+
+def _experiment_with_outcome(outcome: str) -> dict:
+    """A create_note call for a concluded experiment in a domain the shipped vocabulary already has."""
+    return {
+        "title": "Reranker beats BM25 alone",
+        "content": "# Reranker beats BM25 alone\n\n## Hypothesis\n\nA reranker lifts the top result.\n",
+        "type": "experiment",
+        "fields": {
+            "domain": "research",
+            "started": "2026-11-20",
+            "duration": "one week",
+            "status": "concluded",
+            "outcome": outcome,
+        },
+    }
+
+
+def test_create_note_records_an_experiment_outcome_in_the_same_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mcp = _build_server(tmp_path, monkeypatch)
+
+    saved = _public(mcp, "create_note", _experiment_with_outcome("Refuted"))
+
+    assert "error" not in saved
+    page = next((tmp_path / "empty-vault" / "Knowledge Base" / "Notes" / "Experiments").rglob("*.md"))
+    frontmatter, _body, _raw = vault_module.parse_frontmatter(page.read_text(encoding="utf-8"))
+    assert frontmatter["outcome"] == "refuted"
+
+
+def test_create_note_keeps_a_registered_yes_outcome_as_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mcp = _build_server(tmp_path, monkeypatch)
+    vault = tmp_path / "empty-vault"
+    registry = semantic_language_registry.registry_path(vault)
+    registry.write_text(
+        json.dumps({
+            "schema_version": 1,
+            "verdicts": {
+                "yes": {"labels": {"en": "Yes"}, "description": "The claim held."},
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    saved = _public(mcp, "create_note", _experiment_with_outcome("YES"))
+
+    assert "error" not in saved
+    page = next((vault / "Knowledge Base" / "Notes" / "Experiments").rglob("*.md"))
+    frontmatter, _body, _raw = vault_module.parse_frontmatter(page.read_text(encoding="utf-8"))
+    assert frontmatter["outcome"] == "yes"
+
+
+def test_create_note_refuses_an_unknown_verdict_and_names_the_accepted_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mcp = _build_server(tmp_path, monkeypatch)
+
+    refused = _public(mcp, "create_note", _experiment_with_outcome("mostly-right"))
+
+    assert refused["error"]["code"] == "INVALID_OUTCOME"
+    registry = semantic_language_registry.core_registry()
+    for verdict in registry.label_keys(semantic_labels.VERDICTS):
+        assert verdict in refused["error"]["message"]
+    assert not (tmp_path / "empty-vault" / "Knowledge Base" / "Notes" / "Experiments").exists()
+
+
+def test_create_note_refuses_an_outcome_on_a_page_that_is_not_an_experiment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mcp = _build_server(tmp_path, monkeypatch)
+
+    refused = _public(
+        mcp,
+        "create_note",
+        {
+            "title": "Weekly releases beat batch releases",
+            "content": "# Weekly releases beat batch releases\n\n## Observations\n- [finding] Rollbacks halved #release\n",
+            "type": "insight",
+            "fields": {"outcome": "confirmed"},
+        },
+    )
+
+    assert refused["error"]["code"] == "INVALID_OUTCOME"
+    assert "experiment" in refused["error"]["message"]
 
 
 def test_missing_unit_failure_envelope_matches_mcp_rest_and_cli_json(

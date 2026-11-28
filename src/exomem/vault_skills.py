@@ -6,6 +6,7 @@ The context catalogue, task-method projection, page reads and the session block
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from collections.abc import Mapping, Sequence
@@ -77,6 +78,15 @@ def bounded_native_names(names: object) -> frozenset[str]:
         return frozenset()
     kept = (name.strip() for name in names[:NATIVE_SKILLS_MAX] if isinstance(name, str))
     return frozenset(name for name in kept if name and len(name) <= NATIVE_SKILL_NAME_MAX_CHARS)
+
+
+def task_lead_label(item: Mapping[str, Any]) -> str:
+    """Label a task lead for packet budgeting and the standalone hook."""
+    if item.get("kind") == KIND_SKILL:
+        # Quote the authored name so it cannot introduce a new instruction line.
+        name = json.dumps(str(item.get("name", "")), ensure_ascii=False)
+        return f"{KIND_SKILL} {name}"
+    return item.get("title", "")
 
 
 def item_line(item: Mapping[str, Any]) -> str:

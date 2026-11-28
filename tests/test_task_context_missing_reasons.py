@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from test_activate_context_maps import _activate
+from test_approved_procedure_serving import _approve
 from test_context_catalogue import _built, _page
 from test_governance_egress import _external
 from test_working_set_withheld_twins import _withhold
@@ -17,8 +18,11 @@ def test_a_discovery_gap_survives_a_later_truncation(vault: Path, monkeypatch: p
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     # The excerpt-only page cannot be released whole, so discovery reports it as a failed lane.
     excerpt = _page(vault, "measurement-reference", body="- [technique] Inspect optical alignment ^excerpt\n\n" + "Neutral observation. " * 60)
-    for name in ("alignment-method-a", "alignment-method-b", "alignment-method-c"):
-        _page(vault, name, body=f"- [technique] Inspect optical alignment for {name} ^alignment\n\nExclude handheld field checks.\n")
+    for index, name in enumerate(("alignment-method-a", "alignment-method-b", "alignment-method-c")):
+        # Only a page whose method unit the owner approved serves a method item that a crowded packet can cut.
+        ref_id = f"6c1d0e2a-7b3f-4a58-9d46-0f1e2d3c4b{index:02d}"
+        method = _page(vault, name, f"exomem_id: {ref_id}\n", body=f"- [technique] Inspect optical alignment for {name} ^alignment\n\nExclude handheld field checks.\n")
+        _approve(vault, method, f"exomem://memory/{ref_id}")
     _withhold(vault, excerpt, ceiling=5)
     _built(vault).close()
     lexstore.ensure_fresh(vault)

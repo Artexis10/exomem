@@ -33,16 +33,17 @@ The bound and the summary length are the vault's `budgets` in its activation con
 Later turns receive `unchanged` and spend nothing.
 The `max_chars` allowance keeps its meaning: it bounds turn context.
 
-### Project relevant skills as methods with their full trigger text
+### Mark a skill lead, and project a skill as a method only when it is selected or declared
 
-When task discovery admits a skill page, the response projects it as a method item of kind `skill` with the full description.
-This reuses method projection, continuity method versions and the existing read-before-applying rule.
+Retrieval rank says nothing about which skill to read first. In the 72-file bench packet, case d08 (a plan for a CSV export) was served cycling-route-planning, change-review and vinyl-listening-log as skill method items.
+A skill page therefore becomes a method item, with its full description, only when the method-fit judgment selects it or a collection declares it. This reuses method projection, continuity method versions and the existing read-before-applying rule.
+Any other skill page that discovery leads to stays a candidate, and the catalogue offers the skill. The catalogue arrives once per conversation, so the candidate carries `kind: "skill"` and the skill's `name`. It carries no description, which keeps a lead cheap.
 
 ### Let clients omit native copies
 
 A client that already loads some skills natively names them in `native_skills`.
 The local hook can list its client's native skill directories without a model; an MCP-only client sends nothing and receives the whole catalogue.
-Omission applies only to the catalogue, so a native copy can still surface as a relevant method.
+Omission applies only to the catalogue, so a native copy can still lead the task as a candidate and, when the judgment selects it, as a method.
 
 ### Reach a skill's other files by the paths it names
 

@@ -20,7 +20,8 @@
 - [x] 3.1 Project existing governed methods with complete source versions and applicability read routes; verify an exclusion outside the selected unit invalidates the projection.
 - [x] 3.2 Extend existing continuation handling with bounded delivered-method versions; revalidate before applicability and verify reset, overflow and legacy-token behavior independently of map generation.
 - [x] 3.3 Update the canonical skill scaffold and hook renderer through their producers; verify generic clients and native hooks share the same method semantics.
-- [x] 3.4 Run a real-agent journey from a method edit in one client to use in another; verify the changed behavior, a local override and an unrelated negative case.
+- [ ] 3.4 Run a real-agent journey from a method edit in one client to use in another, with the method approved so that it is a method item; verify the changed behavior, a local override and an unrelated negative case.
+  - The earlier journey served the edited note by retrieval rank, which no longer makes a method item; an unapproved note now reaches the agent as a candidate.
 
 ## 4. Qualify the optional context-fit interpreter
 
@@ -39,7 +40,8 @@ Tasks 4.2 and 4.5 remain unqualified; this result does not block the model-free 
 
 ## 5. Verify and deliver the integrated behavior
 
-- [x] 5.1 Run the existing real-agent proof route on fresh source-derived cases with independent blind judgment; verify first-answer context use and cross-client method changes.
+- [ ] 5.1 Run the existing real-agent proof route on fresh source-derived cases with independent blind judgment; verify first-answer context use and cross-client method changes, with the changed method approved.
+  - The earlier run served method items by retrieval rank; repeat it under the approval, declaration and selection rule.
 - [ ] 5.2 Exercise unexpected inputs, refusals, crisis context, malformed model replies and provider outage; verify failure handling without invented state or authority.
 - [x] 5.3 Regenerate changed public surfaces and document behavior, configuration and rollback; verify schema parity, privacy, strict OpenSpec validation and scoped tests.
 - [x] 5.4 Obtain independent adversarial review of the integrated diff and correct its findings; record the exact reviewed content, C4/C6 findings and product/proof weight.
@@ -57,7 +59,7 @@ Development expectations were frozen before generation and exclude later repair 
 The missing original client trace still limits historical replay.
 
 Qualified historical journeys cover guarded method edits, current-source reads, temporary overrides and unrelated-task exclusions.
-The method code and guidance remain unchanged across those journeys; the current integration checks qualify their reuse.
+Those journeys ran while retrieval rank still made method items; tasks 3.4 and 5.1 rerun them under the approval rule.
 The edit uses a public writer callback, and a fresh client may read the current source before application.
 This evidence does not claim actor-issued MCP writing, a changed-token reset or one journey on the final artifact.
 The paired development comparison establishes no measured gain or equivalence.
