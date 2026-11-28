@@ -2473,6 +2473,16 @@ def _answer_then_absent(vault: Path, call) -> tuple[str, str]:
     return governed, absent
 
 
+def test_read_only_audience_cannot_observe_a_create_collision(vault: Path) -> None:
+    _restricted_vault(vault)
+    withheld, absent = _answer_then_absent(
+        vault,
+        lambda: _through_dispatcher(vault, "create_file", path=RESTRICTED_PATH, content="New note."),
+    )
+    assert withheld == absent == "ValueError: WRITE_REFUSED: target is unavailable"
+    assert not (vault / RESTRICTED_PATH).exists()
+
+
 def test_browse_memory_does_not_leak_a_withheld_path(vault: Path) -> None:
     """`browse_memory` is not in `commands.COMMANDS` in this build, so it is
     driven through the exact composition the dispatcher applies: leaf, then
