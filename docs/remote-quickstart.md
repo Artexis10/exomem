@@ -151,7 +151,7 @@ curl -i http://127.0.0.1:8765/mcp
 `cloudflared tunnel login`):
 
 ```bash
-pwsh -File scripts/setup-cloudflared.ps1 -Hostname kb.example.com -TunnelName exomem-host
+pwsh -File scripts/setup-cloudflared.ps1 -Hostname kb.example.com -TunnelName evermatter-host
 ```
 
 **ngrok** — your free static dev domain is auto-assigned to your account

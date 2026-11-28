@@ -1,4 +1,4 @@
-# Set up ngrok as the public ingress for exomem on this machine, using the free
+# Set up ngrok as the public ingress for Evermatter on this machine, using the free
 # static dev domain every ngrok account gets. Run ONCE per machine, AFTER:
 #   1. `ngrok config add-authtoken <token>` (claim a token at
 #      https://dashboard.ngrok.com/get-started/your-authtoken)
@@ -27,7 +27,7 @@
 #
 # After this: run `uv run --no-sync python scripts/set-env.py EVERMATTER_BASE_URL https://<Domain>`
 # (it removes any other name for the setting from .env), update the GitHub OAuth
-# App callback to https://<Domain>/auth/callback, restart exomem, re-add the connector.
+# App callback to https://<Domain>/auth/callback, restart Evermatter, re-add the connector.
 
 param(
     [Parameter(Mandatory = $true)][string]$Domain,

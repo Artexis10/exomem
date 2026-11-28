@@ -1,4 +1,4 @@
-# Set up a Cloudflare Tunnel as the public ingress for exomem on this machine,
+# Set up a Cloudflare Tunnel as the public ingress for Evermatter on this machine,
 # replacing Tailscale Funnel. Run ONCE per machine, AFTER `cloudflared tunnel login`.
 #
 # What it does (idempotent):
@@ -17,13 +17,13 @@
 #     so it is intentionally NOT in this script.
 #
 # Usage (desktop):
-#   pwsh -File scripts/setup-cloudflared.ps1 -Hostname kb.example.com -TunnelName exomem-desktop
+#   pwsh -File scripts/setup-cloudflared.ps1 -Hostname kb.example.com -TunnelName evermatter-desktop
 # Usage (laptop):
-#   pwsh -File scripts/setup-cloudflared.ps1 -Hostname kb-laptop.example.com -TunnelName exomem-laptop
+#   pwsh -File scripts/setup-cloudflared.ps1 -Hostname kb-laptop.example.com -TunnelName evermatter-laptop
 #
 # After this: run `uv run --no-sync python scripts/set-env.py EVERMATTER_BASE_URL https://<Hostname>`
 # (it removes any other name for the setting from .env), update the GitHub OAuth
-# App callback to https://<Hostname>/auth/callback, restart exomem, re-add the connector.
+# App callback to https://<Hostname>/auth/callback, restart Evermatter, re-add the connector.
 
 param(
     [Parameter(Mandatory = $true)][string]$Hostname,
