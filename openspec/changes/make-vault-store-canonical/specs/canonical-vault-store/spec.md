@@ -578,6 +578,8 @@ For files the store owns, the requirements that keep derived sidecars in step wi
 ### Requirement: Store-mode names read the store
 In store mode, the collision check for a new page name SHALL read the store and never the projected files. A name SHALL therefore be taken from the moment its write commits, whether or not projection has run.
 
+The case-collision check SHALL ignore paths a move or deletion in the same commit vacates. The paths that remain SHALL have distinct case-insensitive keys.
+
 #### Scenario: Two quick creates that differ only in case
 - **WHEN** two governed writes create pages whose titles differ only in case, and projection has not yet written the first page
 - **THEN** the second page gets a numbered suffix
