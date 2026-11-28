@@ -698,10 +698,7 @@ class ParentSubjects:
             elif held_only or not stored:
                 raise MembershipUnresolved("parent version is unavailable")
 
-            physical = None if stored else path.absolute().relative_to(root.absolute()).as_posix()
-            page = find_corpus.parse_page(
-                path, snapshot.mtime, root, content=snapshot.data, resolved_relative=physical,
-            )
+            page = find_corpus.parse_page(path, snapshot.mtime, root, content=snapshot.data)
             if page is None:
                 raise MembershipUnresolved("parent page is unreadable")
             if (
