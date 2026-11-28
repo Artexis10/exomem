@@ -179,7 +179,8 @@ _PROTOCOL_EXIT_CODES = frozenset({
 })
 #: The POSIX signals that ask a process to end: a service manager's stop, an operator's kill,
 #: a closed terminal. A child that dies by one was told to stop, which says nothing about its
-#: job. Windows has no SIGHUP.
+#: job. SIGKILL is not one: the kernel's out-of-memory kill also sends it, and a file that drives
+#: the child into it every time is a file that kills it. Windows has no SIGHUP.
 _STOP_REQUEST_SIGNALS = frozenset(
     {signal.SIGTERM, signal.SIGINT, *((signal.SIGHUP,) if hasattr(signal, "SIGHUP") else ())}
 )
@@ -600,8 +601,10 @@ class MediaWorker:
                         sharing_recovered,
                     )
                 # A file that killed the media process under another release gets one more
-                # round under this one, which may carry the fix.
-                crash_returns = self._store.recover_crash_blocks(__version__)
+                # try under this one, which may carry the fix.
+                crash_returns = self._store.recover_crash_blocks(
+                    __version__, stop_limit=media_brakes.settings().stop_limit
+                )
                 if crash_returns:
                     log.info(
                         "media worker: returned %d file(s) that crashed the media process under "
@@ -1558,9 +1561,9 @@ class MediaWorker:
         The caller passes only a child that died without its own cleanup, so it still owns the runtime
         record and the running jobs are its own. The recovery after this returns each job to run again,
         so without the count a file that kills its child would start a child for ever at the head of
-        the queue. After the stop limit of deaths the job is blocked as crashed and the jobs behind it
-        run. A preview job keeps its own attempt limit. A recorded stop takes the job out of running,
-        so a replayed exit counts it once.
+        the queue. After the stop limit of crashes under one release the job is blocked as crashed and
+        the jobs behind it run. A preview job keeps its own attempt limit. A recorded stop takes the job
+        out of running, so a replayed exit counts it once.
         """
         assert self._store is not None
         if returncode is None or returncode == 0 or returncode in _PROTOCOL_EXIT_CODES:
@@ -1574,13 +1577,13 @@ class MediaWorker:
             signal_name=signal_name,
             exit_status=None if returncode < 0 else returncode,
             release=__version__,
-            stop_limit=stop_limit,
         )
         for job in self._store.running_jobs():
             if job.media_type == media_jobs.PREVIEW_MEDIA_TYPE:
                 continue
             verdict = self._store.record_crash_stop(
                 job,
+                release=__version__,
                 stop_limit=stop_limit,
                 error=error,
                 context=context,
@@ -1588,9 +1591,8 @@ class MediaWorker:
             )
             if verdict == media_jobs.CHILD_CRASHED:
                 log.error(
-                    "media worker: the media process died %d times while it ran %s (last %s); "
+                    "media worker: the media process kept dying while it ran %s (last %s); "
                     "blocked until a retry or another release",
-                    stop_limit,
                     job.binary_path.name,
                     signal_name or f"exit status {returncode}",
                 )

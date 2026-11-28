@@ -3915,15 +3915,17 @@ def test_a_pdf_child_aborted_under_its_data_limit_ends_the_job_over_budget(
 
 @pytest.mark.parametrize(
     ("returncode", "death"),
-    [(-11, "signal SIGSEGV"), (3, "exit status 3")],
-    ids=["native-fault", "native-exit"],
+    [(-11, "signal SIGSEGV"), (3, "exit status 3"), (-15, None)],
+    ids=["native-fault", "native-exit", "asked-to-stop"],
 )
 def test_a_file_that_keeps_killing_the_media_process_is_blocked_and_the_queue_moves_on(
-    vault, monkeypatch: pytest.MonkeyPatch, returncode: int, death: str
+    vault, monkeypatch: pytest.MonkeyPatch, returncode: int, death: str | None
 ) -> None:
     # A file that kills the media process returned to the head of the queue after every death,
     # so a new process started on it for ever and the files queued behind it never ran. A PDF:
     # a stopped speech job already yields its place to fresh work, which would hide the loop.
+    # A process told to stop (`death` None) says nothing about its file: a service restart
+    # during a long file must not block it.
     monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
     worker = media_worker.MediaWorker(vault, execution_mode="process")
     deadly = _preserve_media_stub(vault, filename="kills-its-child.pdf")
@@ -3967,6 +3969,11 @@ def test_a_file_that_keeps_killing_the_media_process_is_blocked_and_the_queue_mo
     worker._supervise()
 
     stop_limit = media_brakes.settings().stop_limit
+    if death is None:
+        assert len(claims) > stop_limit and set(claims) == {"kills-its-child.pdf"}
+        kept = worker._store.get_by_binary(vault / deadly.path, media_type="pdf")
+        assert kept is not None and kept.state == media_jobs.PENDING
+        return
     assert claims == ["kills-its-child.pdf"] * stop_limit + ["queued-behind.pdf"]
     [row] = media_jobs.status(vault)["jobs"]
     assert (row["path"], row["state"], row["retryable"]) == (deadly.path, media_jobs.BLOCKED, True)

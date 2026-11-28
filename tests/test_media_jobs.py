@@ -1922,31 +1922,30 @@ def test_only_a_longer_job_timeout_returns_a_file_that_outran_the_watchdog(
     assert store.claim_next() is not None
 
 
-def test_a_crash_blocked_file_returns_on_a_retry_or_under_another_release(vault: Path) -> None:
+def test_a_crash_blocked_file_returns_on_a_retry_or_once_under_another_release(vault: Path) -> None:
     store = media_jobs.MediaJobStore(vault)
     store.enqueue(_job(vault))
 
-    def crash_until_blocked(release: str) -> list[str | None]:
-        error, context = media_jobs.crash_verdict(
-            signal_name="SIGSEGV", exit_status=None, release=release, stop_limit=3
-        )
-        verdicts: list[str | None] = []
-        while not verdicts or verdicts[-1] == media_jobs.PENDING:
-            claimed = store.claim_next()
-            assert claimed is not None
-            verdicts.append(store.record_crash_stop(claimed, stop_limit=3, error=error, context=context))
-        return verdicts
+    def crash(release: str) -> str | None:
+        error, context = media_jobs.crash_verdict(signal_name="SIGSEGV", exit_status=None, release=release)
+        claimed = store.claim_next()
+        assert claimed is not None
+        return store.record_crash_stop(claimed, release=release, stop_limit=3, error=error, context=context)
 
-    blocked = [media_jobs.PENDING, media_jobs.PENDING, media_jobs.CHILD_CRASHED]
-    assert crash_until_blocked("1.0.0") == blocked
+    pending, crashed = media_jobs.PENDING, media_jobs.CHILD_CRASHED
+    assert [crash("1.0.0") for _ in range(3)] == [pending, pending, crashed]
     # A start of the release that blocked it leaves it; a retry starts its count again.
-    assert store.recover_crash_blocks("1.0.0") == 0
+    assert store.recover_crash_blocks("1.0.0", stop_limit=3) == 0
     assert store.retry() == 1
-    assert crash_until_blocked("1.0.0") == blocked
-    # The first start of another release tries it again, with a fresh count.
-    assert store.recover_crash_blocks("1.0.1") == 1
-    assert crash_until_blocked("1.0.1") == blocked
-    assert store.recover_crash_blocks("1.0.1") == 0
+    assert [crash("1.0.0") for _ in range(3)] == [pending, pending, crashed]
+    # The first start of another release tries a still-deadly file once more, not three times.
+    assert store.recover_crash_blocks("1.0.1", stop_limit=3) == 1
+    assert crash("1.0.1") == crashed
+    assert store.recover_crash_blocks("1.0.1", stop_limit=3) == 0
+    # Crashes under an earlier release do not count toward a block under a later one.
+    assert store.retry() == 1
+    assert [crash("1.0.1") for _ in range(2)] + [crash("1.0.2") for _ in range(3)] == [
+        pending, pending, pending, pending, crashed]
 
 
 def test_a_memory_blocked_return_keeps_the_files_watchdog_count(vault: Path) -> None:
