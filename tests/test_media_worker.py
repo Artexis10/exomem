@@ -3913,6 +3913,70 @@ def test_a_pdf_child_aborted_under_its_data_limit_ends_the_job_over_budget(
         assert media_jobs.status(vault)["child_crashes"]["signal"] == "SIGABRT"
 
 
+@pytest.mark.parametrize(
+    ("returncode", "death"),
+    [(-11, "signal SIGSEGV"), (3, "exit status 3")],
+    ids=["native-fault", "native-exit"],
+)
+def test_a_file_that_keeps_killing_the_media_process_is_blocked_and_the_queue_moves_on(
+    vault, monkeypatch: pytest.MonkeyPatch, returncode: int, death: str
+) -> None:
+    # A file that kills the media process returned to the head of the queue after every death,
+    # so a new process started on it for ever and the files queued behind it never ran. A PDF:
+    # a stopped speech job already yields its place to fresh work, which would hide the loop.
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    deadly = _preserve_media_stub(vault, filename="kills-its-child.pdf")
+    for result in (deadly, _preserve_media_stub(vault, filename="queued-behind.pdf")):
+        worker.enqueue(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="pdf")
+    now = [1000.0]
+    claims: list[str] = []
+
+    class _ExitedChild:
+        pid = 2_147_483_644
+
+        def __init__(self, returncode: int) -> None:
+            self.returncode = returncode
+
+        def poll(self):
+            return self.returncode
+
+    def launch():
+        job = worker._store.claim_next()
+        worker._store.set_worker(_ExitedChild.pid, 30.0)  # as the child records itself
+        if job is None:
+            return _ExitedChild(0)
+        claims.append(job.binary_path.name)
+        if job.binary_path.name == "queued-behind.pdf":
+            worker._store.complete(job)
+            return _ExitedChild(0)
+        # Dies with the job claimed and no cleanup run, as a native fault or `os._exit` ends it.
+        return _ExitedChild(returncode)
+
+    monkeypatch.setattr(media_worker, "_clock", lambda: now[0])
+    monkeypatch.setattr(worker, "_launch_child", launch)
+
+    def poll(_timeout):
+        if worker._child is None:
+            now[0] += 10
+            if "queued-behind.pdf" in claims or now[0] >= 3000.0:
+                worker._stop_event.set()
+        return False
+
+    monkeypatch.setattr(worker._wake, "wait", poll)
+    worker._supervise()
+
+    stop_limit = media_brakes.settings().stop_limit
+    assert claims == ["kills-its-child.pdf"] * stop_limit + ["queued-behind.pdf"]
+    [row] = media_jobs.status(vault)["jobs"]
+    assert (row["path"], row["state"], row["retryable"]) == (deadly.path, media_jobs.BLOCKED, True)
+    assert row["next_action"] == media_jobs.CHILD_CRASHED_ACTION
+    assert death in row["error"] and f"(release {media_worker.__version__})" in row["error"]
+    # The tenant sees the same verdict on the file's sidecar.
+    shown = _parsed_frontmatter(vault / deadly.sidecar_path)
+    assert (shown["processing_state"], shown["processing_retryable"]) == (media_jobs.BLOCKED, True)
+
+
 def test_child_blocks_ambiguous_sidecar_boundary_without_writing_it(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:

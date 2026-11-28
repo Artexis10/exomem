@@ -117,6 +117,15 @@ OVER_BUDGET = "over_budget"
 #: The original exceeds the whole hydration capacity of the store policy; only a larger
 #: capacity and a retry clear it (`media_store.HYDRATION_TOO_LARGE_CODE`).
 HYDRATION_TOO_LARGE = "hydration_too_large"
+#: The media process died while it ran the job, the stop limit of times
+#: (`MediaJobStore.record_crash_stop`). `blocked_context` names how it died and the release
+#: it ran (`crash_verdict`). A retry, or the first start of another release, returns the job
+#: (`MediaJobStore.recover_crash_blocks`).
+CHILD_CRASHED = "child_crashed"
+CHILD_CRASHED_ACTION = (
+    "a new Evermatter release retries the file by itself; to try it sooner, "
+    "check the media log, then retry"
+)
 #: Reasons a tenant sees only as waiting: nothing for a person to repair or retry.
 _WAITING_REASONS = frozenset({MEMORY_BLOCKED, ENGINE_DISABLED})
 #: Reasons whose rows return by themselves, as a SQL list of these constants.
@@ -161,6 +170,33 @@ _UNCOUNTED_STOP = "state = 'pending', blocked_reason = NULL, last_error = NULL, 
 
 def _canonical_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def crash_verdict(
+    *, signal_name: str | None, exit_status: int | None, release: str, stop_limit: int
+) -> tuple[str, str]:
+    """The `last_error` and `blocked_context` of a CHILD_CRASHED verdict.
+
+    The context names the signal that ended the media process, or its exit status
+    when no signal did, and the release it ran; `crash_release` reads the release back.
+    """
+    how = {"signal": signal_name} if signal_name is not None else {"exit_status": exit_status}
+    last = f"signal {signal_name}" if signal_name is not None else f"exit status {exit_status}"
+    error = (
+        f"MediaProcessCrashed: the media process died {stop_limit} times while it ran this file, "
+        f"the last time by {last} (release {release})"
+    )
+    return error, _canonical_json({**how, "release": release})
+
+
+def crash_release(context: object) -> str | None:
+    """The release a `crash_verdict` context names, or None when the context names none."""
+    try:
+        parsed = json.loads(str(context))
+    except ValueError:
+        return None
+    release = parsed.get("release") if isinstance(parsed, dict) else None
+    return release if isinstance(release, str) else None
 
 
 def _is_sha256(value: object) -> bool:
@@ -1128,7 +1164,8 @@ class MediaJobStore:
 
         `memory_stops` counts consecutive memory stops and `memory_soft_stops` those
         of them that were pressure stops, not the child's own hard-limit failure.
-        `timeout_stops` counts the watchdog's stops apart from both. `blocked_reason`
+        `timeout_stops` counts the watchdog's stops apart from both, and `crash_stops` the
+        deaths of the media process that the supervisor did not cause. `blocked_reason`
         and `blocked_context` say why a row is blocked and what that verdict depended on.
         """
         columns = {
@@ -1143,6 +1180,8 @@ class MediaJobStore:
             )
         if "timeout_stops" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN timeout_stops INTEGER NOT NULL DEFAULT 0")
+        if "crash_stops" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN crash_stops INTEGER NOT NULL DEFAULT 0")
         if "blocked_context" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN blocked_context TEXT")
         if "blocked_reason" not in columns:
@@ -1578,7 +1617,7 @@ class MediaJobStore:
                         diarize = COALESCE(?, diarize), tracks = COALESCE(?, tracks),
                         state = 'pending', ocr_generation = ocr_generation + 1, last_error = NULL,
                         blocked_reason = NULL, blocked_context = NULL, memory_stops = 0,
-                        memory_soft_stops = 0, timeout_stops = 0, updated_at = ?
+                        memory_soft_stops = 0, timeout_stops = 0, crash_stops = 0, updated_at = ?
                     WHERE id = ?
                     """,
                     (int(reprocess), language, language_mode, job.diarize, _tracks_text(job.tracks), now, row_id),
@@ -1985,6 +2024,77 @@ class MediaJobStore:
             ),
             progress,
         )
+
+    def record_crash_stop(
+        self,
+        job: MediaJob,
+        *,
+        stop_limit: int,
+        error: str,
+        context: str,
+        progress: int | None = None,
+    ) -> str | None:
+        """Return a job whose media process died under it to pending, refunding its attempt.
+
+        A death counts apart from memory and watchdog stops. After `stop_limit` of them the
+        job is blocked as CHILD_CRASHED with the `crash_verdict` pair `error` and `context`:
+        a file that kills the process costs at most `stop_limit` processes, and the jobs
+        queued behind it run. A death of a speech job whose `progress` moved past its last
+        stop's does not count. Returns PENDING, CHILD_CRASHED, or None when the claim is no
+        longer this job's.
+        """
+        return self._record_stop(
+            job,
+            """
+            crash_stops = crash_stops + 1,
+            state = CASE WHEN crash_stops + 1 >= ? THEN 'blocked' ELSE 'pending' END,
+            blocked_reason = CASE WHEN crash_stops + 1 >= ? THEN ? ELSE NULL END,
+            last_error = CASE WHEN crash_stops + 1 >= ? THEN ? ELSE NULL END,
+            blocked_context = CASE WHEN crash_stops + 1 >= ? THEN ? ELSE NULL END
+            """,
+            (
+                stop_limit,
+                stop_limit, CHILD_CRASHED,
+                stop_limit, error,
+                stop_limit, context,
+            ),
+            progress,
+        )
+
+    def recover_crash_blocks(self, release: str) -> int:
+        """Return to pending the CHILD_CRASHED jobs that another release blocked.
+
+        A release can carry the fix for what killed the media process, so its first start
+        tries each such file again, and a death under it counts from zero. A job this
+        release blocked stays blocked until a retry. Writes nothing when no row is due.
+        """
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT id, blocked_context FROM jobs WHERE state = 'blocked' AND blocked_reason = ? "
+                "AND NOT EXISTS (SELECT 1 FROM media_job_results "
+                "WHERE media_job_results.job_id = jobs.id) ORDER BY id",
+                (CHILD_CRASHED,),
+            ).fetchall()
+            due = [
+                (int(row["id"]), row["blocked_context"])
+                for row in rows
+                if crash_release(row["blocked_context"]) != release
+            ]
+            changed = 0
+            if due:
+                with conn:
+                    for job_id, context in due:
+                        changed += conn.execute(
+                            "UPDATE jobs SET state = 'pending', last_error = NULL, crash_stops = 0, "
+                            "blocked_reason = NULL, blocked_context = NULL, updated_at = ? "
+                            "WHERE id = ? AND state = 'blocked' AND blocked_reason = ? "
+                            "AND blocked_context IS ?",
+                            (time.time(), job_id, CHILD_CRASHED, context),
+                        ).rowcount
+            return changed
+        finally:
+            conn.close()
 
     def _record_stop(
         self,
@@ -2825,7 +2935,7 @@ class MediaJobStore:
                 for job_id, state, error in admitted:
                     changed += conn.execute(
                         "UPDATE jobs SET state = 'pending', last_error = NULL, updated_at = ?, "
-                        "memory_stops = 0, memory_soft_stops = 0, timeout_stops = 0, "
+                        "memory_stops = 0, memory_soft_stops = 0, timeout_stops = 0, crash_stops = 0, "
                         "returns = 0, retry_at = NULL, blocked_reason = NULL, "
                         "blocked_context = NULL WHERE id = ? AND state = ? AND last_error IS ? "
                         "AND NOT EXISTS (SELECT 1 FROM media_job_results "
@@ -3697,6 +3807,8 @@ def _status_job(row: Any) -> dict[str, Any]:
         actions[BLOCKED] = OVER_BUDGET_ACTION
     elif reason == HYDRATION_TOO_LARGE:
         actions[BLOCKED] = _hydration_too_large_action()
+    elif reason == CHILD_CRASHED:
+        actions[BLOCKED] = CHILD_CRASHED_ACTION
     elif reason == ENGINE_UNAVAILABLE:
         actions[BLOCKED] = media_engines.unavailable_next_action(row["blocked_context"])
     # A stopped reprocess leaves the completed transcript as it was, and a retry would

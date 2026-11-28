@@ -3771,6 +3771,31 @@ def test_a_batch_charges_each_version_it_publishes_to_its_census(vault: Path, se
     assert len(reads) == 1
 
 
+def test_with_no_allowance_offload_reaches_its_unknown_refusal_without_a_census(
+        vault: Path, selected_store, monkeypatch):
+    """Catches an offload, a refusal status or an offload scan that walks every note to reach an unknown no census changes.
+
+    Each walk holds the mutation boundary for as long as the vault is large, and saves wait behind it.
+    """
+    from exomem import media_jobs, media_store
+
+    [path] = _filed(vault, 1)
+    values, config = selected_store
+    without_allowance = {key: value for key, value in values.items() if key != "allowance_bytes"}
+    config.write_text(json.dumps({"vaults": {str(vault): without_allowance}}))
+    reads = _count_censuses(monkeypatch)
+
+    with pytest.raises(media_store.MediaStoreError) as refused:
+        media_store.offload(vault, path, batch=media_store.OffloadBatch(vault))
+    [shown] = media_jobs.tool_status(vault)["offload_refusals"]
+    queued = media_store.enqueue_offloads(vault)
+
+    assert refused.value.code == shown["code"] == "MEDIA_ALLOWANCE_UNKNOWN"
+    assert queued == 0
+    assert originals.original_state(vault, path).reference is None
+    assert reads == []
+
+
 def test_a_batch_member_whose_reference_changed_before_publication_is_refused(vault: Path, selected_store, monkeypatch):
     """Catches a shared census standing in for the publication-time check that the original is unchanged."""
     from exomem import media_store
