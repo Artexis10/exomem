@@ -256,6 +256,23 @@ def test_a_sidecar_row_that_no_longer_matches_its_file_refuses_the_migration_and
     )
 
 
+def test_graph_parity_uses_the_derived_schema_when_a_sidecar_has_extra_columns(tmp_path):
+    expected = tmp_path / "expected.sqlite"
+    with closing(sqlite3.connect(expected)) as derived, derived:
+        derived.execute("CREATE TABLE graph_edges (edge_key TEXT PRIMARY KEY, target TEXT)")
+        derived.execute("INSERT INTO graph_edges VALUES ('edge-a','unit-a')")
+    with closing(sqlite3.connect(":memory:", isolation_level=None)) as sidecar:
+        sidecar.execute(
+            "CREATE TABLE graph_edges (edge_key TEXT PRIMARY KEY, target TEXT, future_column TEXT)"
+        )
+        sidecar.execute("INSERT INTO graph_edges VALUES ('edge-a','unit-a','future value')")
+        assert not verify.compare_tables(sidecar, expected).differences
+        sidecar.execute("UPDATE graph_edges SET target = 'unit-b'")
+        assert verify.compare_tables(sidecar, expected).differences == (
+            verify.Difference("graph_edges", 2, ("edge-a",)),
+        )
+
+
 def test_a_graph_sidecar_edge_to_a_page_that_left_the_catalogue_is_replaced_by_the_files_rows_and_reported(
     vault, capsys, tmp_path
 ):
