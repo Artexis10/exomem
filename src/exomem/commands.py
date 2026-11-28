@@ -16239,7 +16239,8 @@ def declared_refusal_before_queueing(
     marker = write_intake.declaration_mark(vault_root, seconds=budget.remaining(), guard_sensitive=guard_sensitive)
     if marker is None:
         return None
-    refusal = value_refusal(vault_root, arguments, budget)
+    leaf_arguments, _ = mutation_terminal_module.split_response_detail(arguments)
+    refusal = value_refusal(vault_root, leaf_arguments, budget)
     if refusal is None or budget.remaining() <= 0:
         return None
     changed = write_intake.declaration_changed_since(
