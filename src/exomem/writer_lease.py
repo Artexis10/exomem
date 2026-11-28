@@ -9009,13 +9009,37 @@ def _invocation_provenance(
     return wrapped
 
 
+def _cloud_read_only_guard(function: Callable[..., Any]) -> Callable[..., Any]:
+    """Refuse writes before intake or the store can take custody of them."""
+    @wraps(function)
+    def wrapped(command: Any, *injected: Any, **kwargs: Any) -> Any:
+        from . import cloud_cell
+
+        if cloud_cell.cloud_read_only_enabled():
+            from .commands import invocation_writes_outside_writer
+
+            if command.name == "edit_memory":
+                from .edit_operations import normalize_edit_surface_arguments
+
+                kwargs = normalize_edit_surface_arguments(kwargs)
+            if not _invocation_reads_only(command, kwargs) or invocation_writes_outside_writer(command, kwargs):
+                raise OpError(
+                    "CLOUD_CELL_READ_ONLY",
+                    "this Evermatter Cloud cell is serving read-only",
+                    "wait for the cell to leave read-only mode, or read instead of write",
+                )
+        return function(command, *injected, **kwargs)
+
+    return wrapped
+
+
 def _busy_write_intake(
     function: Callable[..., Any],
 ) -> Callable[..., Any]:
     """Queue an eligible save durably instead of refusing it while the boundary is busy.
 
-    Directly inside `_invocation_provenance`, so the contention refusal it accepts has passed
-    the terminal filter and the store-thread routing below. `write_intake.admission` decides
+    The contention refusal it accepts has passed the terminal filter and the store-thread
+    routing below, inside the caller's provenance scope. `write_intake.admission` decides
     eligibility; a call it does not admit runs exactly as before.
     """
     @wraps(function)
@@ -9243,8 +9267,8 @@ def _request_prominence_context(func):
     return wrapped
 
 
-def _store_request_is_read_only(command, kwargs):
-    """Whether a store-routed request changes nothing, as `invoke_command` will classify it."""
+def _invocation_reads_only(command, kwargs):
+    """Whether the dispatcher treats this request as a read before it checks its selector."""
     from .commands import invocation_is_read_only
     from .governance.egress import SelectorCoverageError
 
@@ -9287,7 +9311,7 @@ def _collection_store_thread(func):
             # Import status is a read-only protocol mode; polling must preserve maintenance backoff.
             import_status = (command.name == "record_memory" and kwargs.get("action") == "import"
                              and isinstance(import_request, Mapping) and import_request.get("mode") == "status")
-            read_only = _store_request_is_read_only(command, kwargs)
+            read_only = _invocation_reads_only(command, kwargs)
             # Keep demand visible between the routing proof and queue insertion.
             with foreground_priority.foreground():
                 # A title names a collection that the store may own; the request routes by the one it names.
@@ -9363,6 +9387,7 @@ def _foreground_priority_request(func):
 
 
 @_invocation_provenance
+@_cloud_read_only_guard
 @_busy_write_intake
 @_foreground_command_activity
 @_fixed_projected_command_completion
@@ -9384,7 +9409,6 @@ def invoke_command(
     from .commands import (
         invocation_is_audit,
         invocation_is_read_only,
-        invocation_writes_outside_writer,
         validate_process_media_operation,
         writes_through_superseded_maintenance_leaf,
     )
@@ -9426,16 +9450,6 @@ def invoke_command(
         # future read representation.
         selector_error = error
         read_only = False
-
-    if not read_only or invocation_writes_outside_writer(command, kwargs):
-        from . import cloud_cell
-
-        if cloud_cell.cloud_read_only_enabled():
-            raise OpError(
-                "CLOUD_CELL_READ_ONLY",
-                "this Evermatter Cloud cell is serving read-only",
-                "wait for the cell to leave read-only mode, or read instead of write",
-            )
 
     active_surface = capabilities_module.current_active_surface()
     job_start = False

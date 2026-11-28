@@ -60,7 +60,7 @@ For store-owned Planning saves, the intake SHALL check supplied values, includin
 
 #### Scenario: A read-only Cloud cell refuses a save with a backlog
 
-- **WHEN** a Cloud cell is in read-only mode and an earlier save is queued
+- **WHEN** a Cloud cell is in read-only mode, the store is busy and an earlier save is queued
 - **AND** an owner sends a Planning save with an undeclared value
 - **THEN** the ordinary dispatcher refuses the write with `CLOUD_CELL_READ_ONLY`
 - **AND** the intake holds only the earlier save and discloses no allowed values

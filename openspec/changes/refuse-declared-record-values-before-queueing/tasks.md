@@ -7,7 +7,7 @@
 - [x] 1.5 Check the Planning and declared field rules on store-owned saves. Share the dispatch route and bound writer arguments, and give the value refusal only when it is the commit’s first. Leave file-backed saves and edits by `item_id` to replay.
 - [x] 1.6 Prove direct and busy store saves give the same first refusal. Cover an undeclared value, an explicit null status, guarded edits, and a disabled summary route. Prove a file-backed add queues and its replay gives the direct refusal.
 - [x] 1.7 Give the busy decision one budget and cap Planning's store SQL work. Cover upgrade and rollback, a revision that commits during the read, a later ordinary save, slow opens, locked store readers, and a store publication. Cover an authorisation proof that exceeds the SQL allowance.
-- [x] 1.8 Bypass intake in a read-only Cloud cell. Prove an existing queue cannot bypass the normal refusal.
+- [x] 1.8 Refuse a Cloud read-only write before intake or store routing. Prove the refusal with an existing queue and a busy store.
 
 ## 2. Release
 

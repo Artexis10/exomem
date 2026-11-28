@@ -2936,15 +2936,15 @@ def test_a_cloud_read_only_cell_refuses_a_busy_planning_write_before_intake(serv
                 command, root, implicit_idempotency_scope="principal:session-a", action="add",
                 collection=RELEASE_PLAN_ID, why="size the earlier release",
                 item={"title": "Earlier release", "kind": "area", "effort": "small"})
-        assert first["state"] == "queued"
-        monkeypatch.setenv(cloud_cell.CLOUD_READ_ONLY_ENV, "1")
-        with request_scope(OWNER), pytest.raises(OpError) as refused:
-            writer_lease.invoke_command(
-                command, root, implicit_idempotency_scope="principal:session-b", action="add",
-                collection=RELEASE_PLAN_ID, why="size the release",
-                item={"title": "Ship it", "kind": "area", "effort": "medium"})
-        assert refused.value.code == "CLOUD_CELL_READ_ONLY"
-        assert [item["ref"] for item in write_intake.read(root)["items"]] == [first["queued_write"]["ref"]]
+            assert first["state"] == "queued"
+            monkeypatch.setenv(cloud_cell.CLOUD_READ_ONLY_ENV, "1")
+            with pytest.raises(OpError) as refused:
+                writer_lease.invoke_command(
+                    command, root, implicit_idempotency_scope="principal:session-b", action="add",
+                    collection=RELEASE_PLAN_ID, why="size the release",
+                    item={"title": "Ship it", "kind": "area", "effort": "medium"})
+            assert refused.value.code == "CLOUD_CELL_READ_ONLY"
+            assert [item["ref"] for item in write_intake.read(root)["items"]] == [first["queued_write"]["ref"]]
     finally:
         write_intake.stop(root)
 

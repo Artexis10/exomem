@@ -1449,11 +1449,6 @@ def admission(command: Any, injected: tuple[Any, ...], kwargs: Mapping[str, Any]
     """The intake admission for one dispatched call, or ``None`` when the intake does not apply."""
     if _REPLAY.get() is not None or not getattr(command, "busy_intake", False) or not injected or not enabled():
         return None
-    from . import cloud_cell
-
-    # Let the ordinary dispatcher refuse a Cloud write before the intake reads or accepts it.
-    if cloud_cell.cloud_read_only_enabled():
-        return None
     drainer = drainer_for(injected[0])
     if drainer is None:
         return None
