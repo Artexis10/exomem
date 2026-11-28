@@ -1523,19 +1523,21 @@ def _degrade_moves(tx: Connection, paths: tuple[str, ...]) -> None:
 def _enqueue(
     tx: Connection, intents: Mapping[str, tuple[str, str | None]], revision: int, now: str
 ) -> None:
+    if not intents:
+        return
     # A move vacates its old path, so whatever was queued there no longer has a file to act on.
-    tx.executemany(
-        "DELETE FROM store_projection_queue WHERE path = ?",
-        [(from_path,) for operation, from_path in intents.values() if operation == "move"],
-    )
+    vacated = [from_path for operation, from_path in intents.values() if operation == "move"]
+    if vacated:
+        tx.execute(
+            "DELETE FROM store_projection_queue WHERE path IN (SELECT value FROM json_each(?))",
+            (json.dumps(vacated),),
+        )
     # queued_at is left out of the update, so the queue keeps the age of the oldest change.
-    tx.executemany(
+    tx.execute(
         "INSERT INTO store_projection_queue(path, revision, operation, from_path, queued_at) "
-        "VALUES (?, ?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET "
+        "SELECT value->>0, ?1, value->>1, value->>2, ?2 FROM json_each(?3) WHERE 1 "
+        "ON CONFLICT(path) DO UPDATE SET "
         "revision = excluded.revision, operation = excluded.operation, "
         "from_path = excluded.from_path",
-        [
-            (rel, revision, operation, from_path, now)
-            for rel, (operation, from_path) in intents.items()
-        ],
+        (revision, now, json.dumps([(rel, *intent) for rel, intent in intents.items()])),
     )

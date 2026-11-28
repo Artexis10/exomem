@@ -4522,7 +4522,7 @@ def _check_relation_debt(
 
 
 def _check_relationship_orphans(vault_root: Path) -> Iterator[AuditFinding]:
-    from . import semantic_index
+    from . import unit_edges
     from .governance import egress
     from .governance.principal import effective_principal
     from .vault_store import mode, read, relationships
@@ -4533,12 +4533,12 @@ def _check_relationship_orphans(vault_root: Path) -> Iterator[AuditFinding]:
         return
 
     @lru_cache(maxsize=read.KEYS_PER_QUERY)
-    def external_parent(path: str) -> semantic_index.SemanticParentIndexState | None:
+    def external_parent(path: str) -> unit_edges._RelationshipEndpoint | None:
         if read.owned_as_page(vault_root, path):
             return None
         try:
-            return semantic_index.selected_parent_index_state(vault_root, path)
-        except (ValueError, OSError):
+            return unit_edges._external_endpoint(vault_root, path)
+        except unit_edges._RelationshipReadUnavailable:
             return None
 
     with read.snapshot(vault_root) as view:
@@ -4549,8 +4549,8 @@ def _check_relationship_orphans(vault_root: Path) -> Iterator[AuditFinding]:
         for unit in relationships.orphaned_units(view.connection):
             request_budget.checkpoint()
             external = external_parent(unit.parent_path)
-            if (external is not None and external.parent_ref == unit.parent_ref
-                    and external.document.resolve_fragment(unit.anchor).unit is not None):
+            if (external is not None and (unit.parent_ref is None or external.parent_ref == unit.parent_ref)
+                    and unit.anchor in external.anchors):
                 continue
             yield AuditFinding(
                 category=RELATIONSHIP_ORPHAN, severity="warn", path=unit.parent_path,

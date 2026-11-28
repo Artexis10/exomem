@@ -125,7 +125,7 @@ def relationship_page(
                     if restricted and path not in egress.full_release_among(root, [path]):
                         return RelationshipPage(total=0)
                     source = _current_parent(snapshot, source_view, path)
-                    if (source is None or source.structure.parent_ref != identity.parent_ref
+                    if (source is None or source.metadata.get("parent_ref") != identity.parent_ref
                             or source.structure.resolve_fragment(anchor).index is None):
                         return RelationshipPage(total=0)
                     registry = source.relations
@@ -199,14 +199,24 @@ def _current_parent(
 @dataclass(frozen=True, slots=True)
 class _RelationshipEndpoint:
     parent_ref: str | None
-    anchored_refs: frozenset[str]
+    anchors: frozenset[str]
 
     @classmethod
-    def from_units(cls, reference: str | None, refs: Iterable[str | None]) -> _RelationshipEndpoint:
-        counts = Counter(ref for ref in refs if ref is not None)
-        return cls(
-            reference, frozenset(ref for ref, count in counts.items() if count == 1),
-        )
+    def from_units(
+        cls, reference: str | None,
+        units: Iterable[semantic_units.UnitStructure | semantic_units.SemanticUnit],
+    ) -> _RelationshipEndpoint:
+        from . import semantic_units
+
+        described = tuple(units)
+        names = Counter(unit.anchor for unit in described if unit.anchor is not None)
+        if reference is None:
+            return cls(reference, frozenset(name for name, count in names.items() if count == 1))
+        refs = Counter(unit.unit_ref for unit in described)
+        return cls(reference, frozenset(
+            name for name, count in names.items()
+            if count == 1 and refs[semantic_units._anchored_unit_ref(reference, name)] == 1
+        ))
 
 
 def _external_endpoint(root: Path, path: str) -> _RelationshipEndpoint | None:
@@ -226,7 +236,7 @@ def _external_endpoint(root: Path, path: str) -> _RelationshipEndpoint | None:
     if state.definitions_unavailable:
         raise _RelationshipReadUnavailable()
     return _RelationshipEndpoint.from_units(
-        state.parent_ref, (unit.unit_ref for unit in state.document.units),
+        state.parent_ref, state.document.units,
     )
 
 
@@ -235,7 +245,7 @@ def _visible_relationships(
     batch: tuple[relationships.BoundRelationship, ...], restricted: bool,
     endpoints: OrderedDict[str, _RelationshipEndpoint | None],
 ) -> Iterator[relationships.BoundRelationship]:
-    from . import request_budget, semantic_units
+    from . import request_budget
     from .governance import egress
     from .vault_store import read
 
@@ -261,8 +271,7 @@ def _visible_relationships(
                     parent = _current_parent(snapshot, view, path)
                     if parent is not None:
                         endpoints[path] = _RelationshipEndpoint.from_units(
-                            parent.structure.parent_ref,
-                            (unit.unit_ref for unit in parent.structure.units),
+                            parent.metadata.get("parent_ref"), parent.structure.units,
                         )
                 elif view.allowed(path):
                     endpoints[path] = _external_endpoint(root, path)
@@ -274,10 +283,9 @@ def _visible_relationships(
                 continue
             parent_ref = target.parent_ref
             if edge.target is not None:
-                if target_path not in full or not parent_ref or parent_ref != edge.target.parent_ref:
-                    continue
-                ref = semantic_units._anchored_unit_ref(parent_ref, edge.target.anchor)
-                if ref not in target.anchored_refs:
+                if (target_path not in full
+                        or (edge.target.parent_ref is not None and parent_ref != edge.target.parent_ref)
+                        or edge.target.anchor not in target.anchors):
                     continue
             elif (edge.relationship.target_page_ref is not None
                   and parent_ref != edge.relationship.target_page_ref):

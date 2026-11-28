@@ -136,12 +136,12 @@ def test_assess_anchors_the_far_end_and_later_changes_only_relationships(
         EXTERNAL, client_binding=client, origin_session=OriginSessionBinding("fixture", "1", EXTERNAL.audience_id),
     )
     config = tmp_path / "host-boundary.json"
-    config.write_text(json.dumps({
+    profile = {
         "version": 1,
         "default_denied_scope_ids": [source_scope, withheld, residual],
         "clients": [{"issuer": client.issuer, "client_id": client.client_id,
                      "denied_scope_ids": [withheld, residual], "writable_scope_ids": [source_scope]}],
-    }))
+    }
     with monkeypatch.context() as host, request_scope(external_editor):
         host.setenv("EXOMEM_CONNECTOR_BOUNDARY_CONFIG", str(config))
         target_update = {key: value for key, value in update.items() if key != "unit"}
@@ -150,6 +150,12 @@ def test_assess_anchors_the_far_end_and_later_changes_only_relationships(
         original = rule.read_text()
         for ceiling in (0, 5):
             rule.write_text(original.replace("ceiling: 0", f"ceiling: {ceiling}"))
+            profile["clients"][0]["denied_scope_ids"] = [residual] if ceiling == 5 else [withheld, residual]
+            config.write_text(json.dumps(profile))
+            if ceiling == 5:
+                from exomem.governance import egress
+
+                assert egress.release_level_for(served, target_path, record=False) == 5
             with pytest.raises(ValueError, match="RELATIONSHIP_END_NOT_FOUND") as hidden:
                 commands.op_observe_memory(served, **target_update)
             with pytest.raises(ValueError, match="RELATIONSHIP_END_NOT_FOUND") as missing:
@@ -459,8 +465,19 @@ def test_a_relationship_hub_has_bounded_reads_and_a_complete_portable_file(serve
     with (served / relationship_files.path_for(ALPHA)).open("rb") as encoded:
         portable = relationship_files.parse(encoded)
     assert {edge.id for edge in portable.relationships} == {f"edge-{anchor}" for anchor in anchors}
+    other_paths = [f"Knowledge Base/Notes/Related {number}.md" for number in range(24)]
+    page_edges = tuple(
+        relationships.Relationship(f"page-edge-{number}", "tide-id", "supports", None, path)
+        for number, path in enumerate(other_paths)
+    )
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "Populate related pages.",
+        puts=tuple(write.PagePut(path, b"# Related") for path in other_paths),
+        relationship_change=relationships.Change(actor="owner", added=page_edges),
+    ))
+    edge_ids = [*(f"edge-{anchor}" for anchor in anchors), *(edge.id for edge in page_edges)]
     retirement_queries = []
-    for to_retire in (anchors[:1], anchors[1:]):
+    for to_retire in (edge_ids[:1], edge_ids[1:]):
         statements: list[str] = []
         writer.connection.set_trace_callback(statements.append)
         try:
@@ -468,17 +485,15 @@ def test_a_relationship_hub_has_bounded_reads_and_a_complete_portable_file(serve
                 write.Origin.GOVERNED, "Retire the old links.",
                 relationship_change=relationships.Change(
                     actor="owner",
-                    retired=tuple(relationships.Retirement(f"edge-{anchor}") for anchor in to_retire),
+                    retired=tuple(relationships.Retirement(edge_id) for edge_id in to_retire),
                 ),
             ))
         finally:
             writer.connection.set_trace_callback(None)
-        retirement_queries.append(sum(
-            statement.startswith(("UPDATE store_relationships", "INSERT INTO store_relationship_history"))
-            for statement in statements
-        ))
+        begin = statements.index("BEGIN IMMEDIATE")
+        retirement_queries.append(statements.index("COMMIT", begin) - begin)
     assert retirement_queries[0] == retirement_queries[1] > 0
-    assert rows(served, "SELECT COUNT(*) FROM store_relationship_history WHERE action='retire'") == [(count,)]
+    assert rows(served, "SELECT COUNT(*) FROM store_relationship_history WHERE action='retire'") == [(len(edge_ids),)]
 
 
 def test_moving_a_target_refreshes_other_pages_relations_files(served, writer):  # noqa: F811
@@ -570,38 +585,49 @@ def test_a_rename_into_a_vacant_path_preserves_both_old_and_current_targets(serv
 
 
 def test_relationships_can_read_endpoints_on_a_read_only_reference(served, writer):  # noqa: F811
-    from exomem import audit, memory_refs
+    from exomem import audit
 
     manual = "Reference/Manual.md"
+    source_path = "Knowledge Base/Notes/Observations/Tide.md"
+    companion_path = "Knowledge Base/Notes/Observations/Companion.md"
     (served / manual).parent.mkdir()
     source_id = "e8f840b6-3cf8-44cf-ab95-12d05683a194"
-    manual_id = "04e56772-21a9-44ff-b0df-0a51ed0e166b"
-    source = f"---\nexomem_id: {source_id}\n---\n\n- [rule] Check the tide. ^tide\n".encode()
-    original = f"---\nexomem_id: {manual_id}\n---\n\n- [rule] Light the lamp. ^lamp\n".encode()
+    source = (
+        f"---\ntitle: Tide\ntype: insight\nstatus: active\nexomem_id: {source_id}\n---\n\n"
+        "See [[Companion]].\n\n- [rule] Check the tide. ^tide\n"
+    ).encode()
+    companion = b"---\ntitle: Companion\ntype: insight\nstatus: active\n---\n\nRecord tide changes.\n"
+    original = b"---\ntitle: Manual\n---\n\n- [rule] Light the lamp. ^lamp\n"
     (served / manual).write_bytes(original)
     imported = importer.Importer(served, run=lambda work: work(writer)).import_paths([manual])
     assert imported.refreshed == [manual]
-    source_ref, manual_ref = map(memory_refs.memory_ref, (source_id, manual_id))
     write.commit(writer, write.StoreChange(
-        write.Origin.GOVERNED, "Connect to the reference.",
-        puts=(write.PagePut(ALPHA, source),),
-        relationship_change=relationships.Change(
-            actor="owner",
-            identities=(relationships.UnitIdentity("tide", ALPHA, "tide", source_ref),
-                        relationships.UnitIdentity("lamp", manual, "lamp", manual_ref)),
-            added=(relationships.Relationship("page-link", "tide", "supports", None, manual, manual_ref),
-                   relationships.Relationship("unit-link", "tide", "supports", "lamp")),
-        ),
+        write.Origin.GOVERNED, "Record an observation.",
+        puts=(write.PagePut(source_path, source), write.PagePut(companion_path, companion)),
     ))
+    claim = semantic_index.selected_parent_index_state(served, source_path).document.units[0]
+    result = commands.op_observe_memory(
+        served, path=source_path, operation="assess", unit=observe_memory.unit_id(claim),
+        relations=[
+            {"kind": "supports", "target": "[[Reference/Manual]]"},
+            {"kind": "supports", "target": "[[Reference/Manual#^lamp]]"},
+        ],
+        reason="Connect to the reference.",
+    )
+    assert result["mutated"]
     assert not projector.Projector(served, run=lambda work: work(writer)).run_pass().deferred
     assert (served / manual).read_bytes() == original
     with library_scope():
-        linked = unit_edges.relationship_page(served, ALPHA, "tide")
+        linked = unit_edges.relationship_page(served, source_path, "tide")
         report = audit.audit(served, categories=[audit.RELATIONSHIP_ORPHAN])
-    assert {edge.relationship.id for edge in linked.edges} == {"page-link", "unit-link"}
+    assert {(edge.target_path, edge.target.anchor if edge.target else None) for edge in linked.edges} == {
+        (manual, None), (manual, "lamp"),
+    }
     assert not report.findings
     (served / manual).unlink()
     with library_scope():
-        assert unit_edges.relationship_page(served, ALPHA, "tide").total == 0
+        assert unit_edges.relationship_page(served, source_path, "tide").total == 0
         report = audit.audit(served, categories=[audit.RELATIONSHIP_ORPHAN])
-    assert {item.meta["signal_version"] for item in report.findings} == {manual_ref, "lamp"}
+    assert {(item.path, item.meta.get("anchor")) for item in report.findings} == {
+        (manual, None), (manual, "lamp"),
+    }

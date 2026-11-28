@@ -5835,7 +5835,7 @@ def _relation_facts_from_rows(
         target_unit_fingerprint = None
         if target_anchor and target_state is not None:
             target_unit = raw.get("bound_target_unit")
-            if target_unit is None or target_unit.unit_ref is None:
+            if target_unit is None:
                 unit_resolution = target_state.document.resolve_fragment(target_anchor)
                 target_unit = unit_resolution.unit
                 target_unit_status = (

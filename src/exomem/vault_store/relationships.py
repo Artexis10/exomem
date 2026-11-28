@@ -320,7 +320,7 @@ def orphaned_units(tx: Connection) -> Iterator[UnitIdentity]:
         " WHERE s.anchor IS NOT NULL GROUP BY s.parent_path,s.parent_ref,s.anchor HAVING COUNT(*)=1)"
         " SELECT u.id,u.parent_path,u.anchor,u.parent_ref FROM store_unit_ids u"
         " LEFT JOIN present ON present.parent_path=u.parent_path"
-        " AND present.anchor=u.anchor AND present.parent_ref IS u.parent_ref"
+        " AND present.anchor=u.anchor AND (u.parent_ref IS NULL OR present.parent_ref=u.parent_ref)"
         " WHERE present.parent_path IS NULL"
         " AND NOT EXISTS (SELECT 1 FROM store_derivation_queue q WHERE q.path=u.parent_path)"
         " AND (EXISTS (SELECT 1 FROM store_relationships r WHERE r.source_unit_id=u.id AND r.retired_revision IS NULL)"

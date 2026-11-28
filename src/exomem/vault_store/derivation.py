@@ -18,6 +18,7 @@ holds back neither the other intents nor any reader; after ``ATTEMPTS`` status c
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -138,14 +139,20 @@ def enqueue(
     failure, so the path is derived again. ``metered`` names the paths of an original, whose derived
     rows the vault's disk floor meters when the drain writes them.
     """
-    tx.executemany(
+    rows = [
+        *((rel, DERIVE, int(rel in metered), int(rel in moved)) for rel in derived),
+        *((rel, REFRESH, 0, 0) for rel in refreshed),
+    ]
+    if not rows:
+        return
+    tx.execute(
         "INSERT INTO store_derivation_queue(path, revision, operation, queued_at, metered, relationship_move) "
-        "VALUES (?, ?, ?, ?, ?, ?) "
+        "SELECT value->>0, ?1, value->>1, ?2, value->>2, value->>3"
+        " FROM json_each(?3) WHERE 1 ORDER BY key "
         "ON CONFLICT(path) DO UPDATE SET revision = excluded.revision, operation = excluded.operation, "
         "relationship_move = MAX(relationship_move, excluded.relationship_move), "
         "metered = excluded.metered, attempts = 0, failed_code = NULL, retry_at = NULL",
-        [*((rel, revision, DERIVE, now, int(rel in metered), int(rel in moved)) for rel in derived),
-         *((rel, revision, REFRESH, now, 0, 0) for rel in refreshed)],
+        (revision, now, json.dumps(rows)),
     )
 
 
