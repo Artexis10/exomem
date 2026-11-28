@@ -4250,8 +4250,11 @@ def _packet_release(
     if ctx.policy_decides:
         ctx.grants_hash = _grants_hash(policy)
         ctx.declared_purpose = _declared_purpose(vault_root, who, purpose)
-        for rel_path in sorted(path for path in named_paths if path):
-            ctx.decide(rel_path)
+        named = sorted(path for path in named_paths if path)
+        # Announced, the store decides every named page on one request instead of one per page.
+        with deciding(named):
+            for rel_path in named:
+                ctx.decide(rel_path)
 
     # A candidate the guard could not resolve to a single real page has
     # a SET of interpretations instead (R3): a plain string containing `#`
@@ -4409,8 +4412,9 @@ def page_text_bounds(
         tombstoned=set(), withheld=set(), prose_resolved={},
         declared_purpose=_declared_purpose(root, who, purpose), grants_hash=_grants_hash(policy),
     )
-    for rel_path in wanted:
-        ctx.decide(rel_path)
+    with deciding(wanted):
+        for rel_path in wanted:
+            ctx.decide(rel_path)
     return {
         rel_path: page_text_bound(None if ctx.decisions[rel_path] is None else ctx.decisions[rel_path].level)
         for rel_path in wanted
@@ -4649,14 +4653,15 @@ def guard_working_set(
         # A relisted row may be one this packet never named, so nothing above
         # decided it. It is decided here for this caller, like every named path,
         # rather than trusted to the compiler's own view of the reader.
-        for entry in relisted:
-            rel_path = str(entry.get("path") or "")
-            if not rel_path or rel_path in decisions or rel_path in withheld:
-                continue
-            if _floor_withholds(vault_root, rel_path, who):
-                withheld.add(rel_path)
-            elif ctx.policy_decides:
-                ctx.decide(rel_path)
+        relisted_paths = [str(entry.get("path") or "") for entry in relisted]
+        with deciding(path for path in relisted_paths if path and path not in decisions and path not in withheld):
+            for rel_path in relisted_paths:
+                if not rel_path or rel_path in decisions or rel_path in withheld:
+                    continue
+                if _floor_withholds(vault_root, rel_path, who):
+                    withheld.add(rel_path)
+                elif ctx.policy_decides:
+                    ctx.decide(rel_path)
         guarded["anchors"] = [
             anchor
             for anchor in guarded["anchors"]

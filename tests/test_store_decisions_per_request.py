@@ -175,12 +175,12 @@ def _refs(packet: dict) -> list[str]:
 
 
 #: Store requests per command, the same at every page count. An activation now offers the store's collections, and
-#: each of its components that decides them (body, terminal pass, slice leads, task candidates, skills) asks once.
+#: the components that decide them ask once each, except where a component decides pages an earlier one announced.
 #: A policy that withholds the store's pages leaves the map's one batched decision. Sharing one decision among the
 #: components is the store's own follow-up; until then, more requests here mean a new component or a per-page one.
 STORE_REQUESTS = {
-    "owner": {"unresolved turn": 2, "phrase turn": 7, "title turn": 7, "follow-up": 6, "ask_memory": 2},
-    "owner_with_policy": {"unresolved turn": 2, "phrase turn": 6, "title turn": 6, "follow-up": 5, "ask_memory": 2},
+    "owner": {"unresolved turn": 2, "phrase turn": 4, "title turn": 4, "follow-up": 4, "ask_memory": 2},
+    "owner_with_policy": {"unresolved turn": 2, "phrase turn": 3, "title turn": 3, "follow-up": 3, "ask_memory": 2},
     "external": {"unresolved turn": 1, "phrase turn": 1, "title turn": 1, "follow-up": 1, "ask_memory": 1},
 }
 
@@ -428,6 +428,25 @@ def test_an_mcp_call_asks_the_store_once_for_the_body_and_once_for_the_terminal_
         assert not found & set(pages), "the policy withholds the Records pages from this caller"
     else:
         assert set(pages) <= found
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize("caller", ["owner_with_policy", "external"])
+def test_bounding_the_text_of_many_store_pages_asks_the_store_once(
+    service, store_requests: StoreRequests, caller: str  # noqa: F811
+) -> None:
+    """A turn's positions bound the text of every page they cite. Each page went to the store on a request of
+    its own, so a turn citing a few hundred pages queued a few hundred store requests. The pages go together."""
+    root, who = service.root, _who(caller)
+    pages = _seed(root, caller)
+    with request_scope(who):
+        alone = {page: egress.page_text_bounds(root, [page])[page] for page in pages}
+
+        store_requests.kwargs.clear()
+        together = egress.page_text_bounds(root, pages)
+
+    assert len(store_requests.kwargs) == 1, "a page asked the store on a request of its own"
+    assert together == alone
 
 
 @pytest.mark.timeout(180)
