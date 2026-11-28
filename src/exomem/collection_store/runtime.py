@@ -1429,7 +1429,8 @@ def _call_site(frame):
 class _Call:
     """One request handed to the store thread, run in a copy of the caller's context."""
 
-    def __init__(self, work, *, wake_maintenance=True, read_only=False, initial=None, execution="store"):
+    def __init__(self, work, *, wake_maintenance=True, read_only=False, initial=None, execution="store",
+                 take_before=None):
         import contextvars
 
         self.context = contextvars.copy_context()
@@ -1439,6 +1440,7 @@ class _Call:
         self.checkpoint = request_budget.current_checkpoint() if read_only else None
         self.initial = initial  # the caller's ownership proof, which only a read-only request may carry
         self.execution = execution
+        self.take_before = take_before
         self.client = None
         self.thread = threading.get_ident()  # the caller, which keeps any boundary it holds while it waits here
         self.taken = False
@@ -1595,6 +1597,7 @@ class StoreServer:
             checkpoint()
 
     def _call(self, work, *, wake_maintenance, read_only, extend, on_refusal, initial, execution="store"):
+        from .. import write_intake
         from ..cli_ops import OpError
 
         # nosemgrep: ep-word-membership -- These execution modes form the internal request protocol, not caller values.
@@ -1607,6 +1610,10 @@ class StoreServer:
             checkpoint()
         entry = time.monotonic()
         accepted_unit, completion_deadline, deadline = self._deadlines(entry, checkpoint, record_request=record_request)
+        # Once taken, the save owns its outcome. Only the wait to take it spends the intake budget.
+        take_before = None if read_only or accepted_unit else write_intake.busy_wait_cap()
+        if take_before is not None:
+            deadline = min(deadline, take_before)
         # The wait ends at the acceptance deadline, which the queue wait below shares.
         self._await_admission(deadline, checkpoint)
         def refuse(error):
@@ -1616,7 +1623,7 @@ class StoreServer:
 
         refusal = None
         request = _Call(work, wake_maintenance=wake_maintenance, read_only=read_only, initial=initial,
-                        execution=execution)
+                        execution=execution, take_before=take_before)
         if record_request:
             from .. import runtime_resources
             from ..governance.principal import effective_principal
@@ -1625,7 +1632,9 @@ class StoreServer:
             request.client = (who.issuer_family, who.audience_id, who.client_binding)
             maximum = max(1, runtime_resources.resolve_policy().sync_workers // 2)
         with self._condition:
-            if record_request and (len(self._record_requests) >= maximum
+            if take_before is not None and time.monotonic() >= take_before:
+                refusal = self._busy_refusal("the collection store did not take this request within the intake wait")
+            elif record_request and (len(self._record_requests) >= maximum
                     or any(active.client == request.client for active in self._record_requests)):
                 # One client cannot occupy every acquisition worker; plain reads and writes bypass this pool.
                 refusal = self._busy_refusal("original input acquisition is busy; retry this request shortly")
@@ -1643,8 +1652,10 @@ class StoreServer:
         with foreground_priority.foreground(), foreground_priority.awaiting_bulk(), self._condition, \
                 call_spans.span("store.queue_wait"):
             while not request.taken:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0 and not self._closed and extend is not None:
+                now = time.monotonic()
+                remaining = deadline - now
+                intake_expired = take_before is not None and now >= take_before
+                if remaining <= 0 and not intake_expired and not self._closed and extend is not None:
                     # Work the store has not taken never ran, so waiting longer cannot repeat it.
                     try:
                         later = extend(completion_deadline)
@@ -1655,15 +1666,15 @@ class StoreServer:
                             self._record_requests.discard(request)
                         raise
                     if later is not None and later > deadline:
-                        deadline = later
+                        deadline = min(later, take_before) if take_before is not None else later
                         continue
                 if remaining <= 0 or self._closed:
                     if request in self._requests:
                         self._requests.remove(request)
                         self._record_requests.discard(request)
                     # Built here, where the queue is stable; journaled below, off the lock the store thread takes.
-                    refusal = self._busy_refusal(
-                        "the collection store did not take this request within the mutation timeout")
+                    wait_name = "intake wait" if intake_expired else "mutation timeout"
+                    refusal = self._busy_refusal(f"the collection store did not take this request within the {wait_name}")
                     break
                 self._condition.wait(remaining)
         if refusal is not None:
@@ -2092,12 +2103,17 @@ class StoreServer:
         with self._condition:
             if not self._requests and timeout > 0:
                 self._condition.wait(timeout)
-            if not self._requests:
-                return None
-            request = self._requests.popleft()
-            request.taken = True
-            self._condition.notify_all()
-            return request
+            while self._requests:
+                request = self._requests.popleft()
+                # The worker can win the lock before the waiting caller wakes at its deadline.
+                if request.take_before is not None and time.monotonic() >= request.take_before:
+                    self._record_requests.discard(request)
+                    self._condition.notify_all()
+                    continue
+                request.taken = True
+                self._condition.notify_all()
+                return request
+            return None
 
     def _view_work_due(self, now):
         if now < self._view_retry_at:
