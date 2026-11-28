@@ -308,6 +308,7 @@ def principal_record(principal: Any) -> dict[str, Any] | None:
     of a local or remote client is kept, so the replay rechecks the login that sent the save.
     The same test gates who reads queued saves: they hold exactly these callers' arguments.
     """
+    from . import auth_sessions
     from .governance.raw_protection import is_owner
 
     if principal is None or not is_owner(principal):
@@ -316,6 +317,7 @@ def principal_record(principal: Any) -> dict[str, Any] | None:
         return None
     binding = principal.client_binding
     origin = principal.origin_session
+    family = auth_sessions.current_receipt_family(principal)
     return {
         "audience_id": principal.audience_id,
         "surface": principal.surface,
@@ -325,6 +327,7 @@ def principal_record(principal: Any) -> dict[str, Any] | None:
         "remote_owner": bool(principal.remote_owner),
         "local_owner": bool(principal.local_owner),
         "administrative_ingress": bool(principal.administrative_ingress),
+        **({"receipt_family": family} if family is not None else {}),
         "client_binding": (
             {"issuer": binding.issuer, "client_id": binding.client_id} if binding is not None else None
         ),
@@ -363,6 +366,10 @@ def restore_principal(record: Mapping[str, Any]) -> Any:
             else None
         ),
     )
+
+
+def _same_legacy_family(current: Mapping[str, Any], stored: Mapping[str, Any]) -> bool:
+    return write_intake_access.same_legacy_family(current, stored, restore=restore_principal)
 
 
 def login_state(principal: Any) -> Any:
@@ -1262,8 +1269,8 @@ class Admission:
     _released: bool = field(default=False, init=False, repr=False)
 
     @property
-    def receipt_scope(self) -> str:
-        return write_intake_access.recorded_scope(self.principal)
+    def receipt_scopes(self) -> tuple[str, ...]:
+        return write_intake_access.scopes(self.principal)
 
     def _check_receipt_access(self) -> None:
         from .governance.principal import effective_principal
@@ -1433,22 +1440,26 @@ class Admission:
                 ).fetchone()
             if row is None:
                 return None
-            if not write_intake_access.row_matches(row, self.receipt_scope):
-                raise _receipt_unavailable()
-            if row["state"] in _OPEN_STATES:
-                return _receipt(conn, row, self.receipt_scope)
-            if row["finished_at"] is None or row["finished_at"] + (row["origin_ttl"] or 0.0) <= now:
-                return None
-            if row["state"] == APPLIED:
-                # The original identity never committed; the queued replay did. Answer the resend
-                # with that outcome within the original identity's retry window.
-                outcome = json.loads(row["outcome"]) if row["outcome"] else {}
-                return {**outcome, "queued_write": {"ref": ref_for(row["id"]), "state": APPLIED}}
-            if row["state"] == FAILED:
-                failure = json.loads(row["error"]) if row["error"] else {}
-                committed = failure.get("committed")
-                return _index_answer(row["id"], FAILED, committed=committed if isinstance(committed, bool) else None)
+            scopes = self.receipt_scopes
+            exact = write_intake_access.row_matches(row, scopes)
+            position = _position(conn, row["seq"], scopes) if exact and row["state"] in _OPEN_STATES else None
+        if not exact and not write_intake_access.row_matches(
+            row, scopes, prior_login=lambda stored: _same_legacy_family(self.principal, stored),
+        ):
+            raise _receipt_unavailable()
+        if row["state"] in _OPEN_STATES:
+            return _receipt(row, position=position)
+        if row["finished_at"] is None or row["finished_at"] + (row["origin_ttl"] or 0.0) <= now:
             return None
+        if row["state"] == APPLIED:
+            # The original identity never committed; the queued replay did.
+            outcome = json.loads(row["outcome"]) if row["outcome"] else {}
+            return {**outcome, "queued_write": {"ref": ref_for(row["id"]), "state": APPLIED}}
+        if row["state"] == FAILED:
+            failure = json.loads(row["error"]) if row["error"] else {}
+            committed = failure.get("committed")
+            return _index_answer(row["id"], FAILED, committed=committed if isinstance(committed, bool) else None)
+        return None
 
     def _accept(self, *, reason: str, started: float) -> dict[str, Any]:
         self._check_receipt_access()
@@ -1480,9 +1491,9 @@ class Admission:
                 "SELECT * FROM intake WHERE origin = ? AND state IN (?, ?)", (self.origin, *_OPEN_STATES)
             ).fetchone()
             if row is not None:
-                if not write_intake_access.row_matches(row, self.receipt_scope):
+                if not write_intake_access.row_matches(row, self.receipt_scopes):
                     raise _receipt_unavailable()
-                return _receipt(conn, row, self.receipt_scope), None
+                return _receipt(row, position=_position(conn, row["seq"], self.receipt_scopes)), None
             # Only the create path runs the schema, so an existing store from before the marker gains it here.
             _add_declaration_marker(conn)
             _add_retry_indexes(conn)
@@ -1498,7 +1509,7 @@ class Admission:
                 ),
             )
             row = conn.execute("SELECT * FROM intake WHERE id = ?", (intake_id,)).fetchone()
-            return _receipt(conn, row, self.receipt_scope), intake_id
+            return _receipt(row, position=_position(conn, row["seq"], self.receipt_scopes)), intake_id
 
 
 _STORE_RETRIES = 5
@@ -1564,23 +1575,22 @@ def _journal_queued(admission: Admission, intake_id: str, reason: str, started: 
         log.debug("write intake journal row failed", exc_info=True)
 
 
-def _position(conn: sqlite3.Connection, seq: int, scope: str | None) -> int | None:
-    if scope is None:
+def _position(conn: sqlite3.Connection, seq: int, scopes: write_intake_access.Scopes) -> int | None:
+    if scopes is None:
         return conn.execute(
             "SELECT COUNT(*) FROM intake WHERE state IN (?, ?) AND seq <= ?", (*_OPEN_STATES, seq)
         ).fetchone()[0]
-    if not write_intake_access.indexed(conn):
+    if len(scopes) > 1 or not write_intake_access.indexed(conn):
         return None
-    observed = conn.execute(
+    observed = sum(conn.execute(
         "SELECT COUNT(*) FROM (SELECT 1 FROM intake WHERE receipt_scope = ? AND state IN (?, ?) "
         "AND seq <= ? LIMIT ?)", (scope, *_OPEN_STATES, seq, _LIST_LIMIT + 1),
-    ).fetchone()[0]
+    ).fetchone()[0] for scope in scopes)
     return observed if observed <= _LIST_LIMIT else None
 
 
-def _receipt(conn: sqlite3.Connection, row: sqlite3.Row, scope: str) -> dict[str, Any]:
+def _receipt(row: sqlite3.Row, *, position: int | None) -> dict[str, Any]:
     ref = ref_for(row["id"])
-    position = _position(conn, row["seq"], scope)
     return {
         "success": True,
         "state": QUEUED,
@@ -1704,7 +1714,7 @@ def failure_notice(admission: Admission) -> int | None:
     once after a restart. Each failed row is named once: `named_at` is set in the same
     transaction that counts it. A store that cannot be read leaves the flag set.
     """
-    drainer, scope = admission.drainer, admission.receipt_scope
+    drainer, scopes = admission.drainer, admission.receipt_scopes
     revision = drainer.unannounced_failure_revision()
     if revision is None:
         return None
@@ -1712,21 +1722,23 @@ def failure_notice(admission: Admission) -> int | None:
         with _store(drainer.vault_root, mode="read") as conn:
             if not write_intake_access.indexed(conn):
                 return None
-            waiting = conn.execute(
+            waiting = any(conn.execute(
                 "SELECT 1 FROM intake WHERE state = 'failed' AND named_at IS NULL AND receipt_scope = ? LIMIT 1",
                 (scope,),
-            ).fetchone()
-            if waiting is None:
+            ).fetchone() for scope in scopes)
+            if not waiting:
                 if _unnamed_failure(conn) is None:
                     drainer.no_unannounced_failures(revision)
                 return None
         admission._check_receipt_access()
         with _write(drainer.vault_root) as conn:
-            named = conn.execute(
-                "UPDATE intake SET named_at = ? WHERE seq IN (SELECT seq FROM intake WHERE state = 'failed' "
-                "AND named_at IS NULL AND receipt_scope = ? ORDER BY seq LIMIT ?)",
-                (time.time(), scope, _LIST_LIMIT),
-            ).rowcount
+            rows = [row[0] for scope in scopes for row in conn.execute(
+                "SELECT seq FROM intake WHERE state = 'failed' AND named_at IS NULL "
+                "AND receipt_scope = ? ORDER BY seq LIMIT ?", (scope, _LIST_LIMIT),
+            )]
+            now = time.time()
+            named = conn.executemany("UPDATE intake SET named_at = ? WHERE seq = ?",
+                                     ((now, seq) for seq in sorted(rows)[:_LIST_LIMIT])).rowcount
             unnamed = _unnamed_failure(conn)
     except FileNotFoundError:
         drainer.no_unannounced_failures(revision)
@@ -1767,9 +1779,13 @@ def with_failure_notice(admission: Admission, result: Any) -> Any:
     route = capabilities.active_call_text("review_memory", {"mode": MODE})
     saves = "save" if count == 1 else "saves"
     sentence = f"{count} earlier queued {saves} failed. Check the recorded outcomes with {route} before resending."
+    coverage = _scope_coverage(admission.receipt_scopes)
+    if coverage:
+        sentence += f" {coverage['older_saves']}"
     return {
         **result,
         "queued_writes_failed": count,
+        **({"queued_writes_failed_coverage": coverage["coverage"]} if coverage else {}),
         "user_summary": f"{summary} {sentence}" if summary.endswith(".") else f"{summary}. {sentence}",
     }
 
@@ -1884,14 +1900,14 @@ def _receipt_unavailable() -> _ReceiptUnavailable:
     )
 
 
-def _read_scope(principal: RequestPrincipal | None) -> str | None:
+def _read_scope(principal: RequestPrincipal | None) -> write_intake_access.Scopes:
     # Local intake administration passes no request principal and can recover any receipt.
     if principal is None or principal.administrative_ingress:
         return None
     record = principal_record(principal)
     if record is None:
         raise _receipt_unavailable()
-    return write_intake_access.recorded_scope(record)
+    return write_intake_access.scopes(record)
 
 
 def _check_release(principal: RequestPrincipal | None) -> None:
@@ -1899,8 +1915,8 @@ def _check_release(principal: RequestPrincipal | None) -> None:
         raise _receipt_unavailable()
 
 
-def _counts(conn: sqlite3.Connection, scope: str | None) -> dict[str, int]:
-    if scope is None:
+def _counts(conn: sqlite3.Connection, scopes: write_intake_access.Scopes) -> dict[str, int]:
+    if scopes is None:
         rows = conn.execute("SELECT state, COUNT(*) AS n FROM intake GROUP BY state")
     else:
         if not write_intake_access.indexed(conn):
@@ -1908,17 +1924,22 @@ def _counts(conn: sqlite3.Connection, scope: str | None) -> dict[str, int]:
                 "QUEUED_WRITE_STATUS_UNAVAILABLE", "the queued save list is unavailable",
                 "Check one save by its receipt reference, or use local intake review for older saves.",
             )
-        rows = conn.execute("SELECT state, n FROM intake_receipt_counts WHERE scope = ?", (scope,))
-    return {row["state"]: row["n"] for row in rows}
+        rows = (row for scope in scopes for row in conn.execute(
+            "SELECT state, n FROM intake_receipt_counts WHERE scope = ?", (scope,)
+        ))
+    counts: dict[str, int] = {}
+    for row in rows:
+        counts[row["state"]] = counts.get(row["state"], 0) + row["n"]
+    return counts
 
 
-def _list_receipts(conn: sqlite3.Connection, scope: str | None, cap: int) -> list[sqlite3.Row]:
+def _list_receipts(conn: sqlite3.Connection, scopes: write_intake_access.Scopes, cap: int) -> list[sqlite3.Row]:
     selection = "SELECT id, command, state, attempts, accepted_at, error, error_code, finished_at, seq FROM intake"
-    if scope is None:
+    if scopes is None:
         return conn.execute(f"{selection} WHERE state IN (?, ?, ?) ORDER BY seq LIMIT ?",
                             (*_OPEN_STATES, FAILED, cap)).fetchall()
     # Each state uses a separate bounded seek, then the first results merge in arrival order.
-    rows = [row for state in (*_OPEN_STATES, FAILED) for row in conn.execute(
+    rows = [row for scope in scopes for state in (*_OPEN_STATES, FAILED) for row in conn.execute(
         f"{selection} WHERE receipt_scope = ? AND state = ? ORDER BY seq LIMIT ?", (scope, state, cap),
     )]
     return sorted(rows, key=lambda row: row["seq"])[:cap]
@@ -1928,7 +1949,7 @@ def read(
     vault_root: Path, ref: str | None = None, limit: int | None = None, *, principal: RequestPrincipal | None = None,
 ) -> dict[str, Any]:
     """`review_memory(mode="queued-write")`: one save by `ref`, or the open and failed saves."""
-    scope = _read_scope(principal)
+    scopes = _read_scope(principal)
     if ref is not None:
         if not ref.startswith(REF_PREFIX) or not ref[len(REF_PREFIX):]:
             raise OpError(
@@ -1939,13 +1960,20 @@ def read(
         try:
             with _store(vault_root, mode="read") as conn:
                 row = conn.execute("SELECT * FROM intake WHERE id = ?", (ref[len(REF_PREFIX):],)).fetchone()
-                if row is None or not write_intake_access.row_matches(row, scope):
+                if row is None:
                     raise _receipt_unavailable()
-                position = _position(conn, row["seq"], scope) if row["state"] in _OPEN_STATES else None
-                view = _view(row, full=True, position=position)
+                exact = write_intake_access.row_matches(row, scopes)
+                position = _position(conn, row["seq"], scopes) if exact and row["state"] in _OPEN_STATES else None
         except FileNotFoundError:
             raise _receipt_unavailable() from None
+        if not exact:
+            current = principal_record(principal)
+            if not write_intake_access.row_matches(
+                row, scopes, prior_login=lambda stored: current is not None and _same_legacy_family(current, stored),
+            ):
+                raise _receipt_unavailable()
         _check_release(principal)
+        view = _view(row, full=True, position=position)
         summaries = {  # nosemgrep: ep-word-dict -- keyed by this store's own closed row states.
             QUEUED: "Queued, not saved yet.",
             APPLYING: "Being applied now, not confirmed yet.",
@@ -1962,18 +1990,19 @@ def read(
     cap = max(1, min(int(limit or _LIST_LIMIT), _LIST_LIMIT))
     try:
         with _store(vault_root, mode="read") as conn:
-            counts = _counts(conn, scope)
-            rows = _list_receipts(conn, scope, cap)
+            counts = _counts(conn, scopes)
+            rows = _list_receipts(conn, scopes, cap)
     except FileNotFoundError:
         counts, rows = {}, []
     _check_release(principal)
     # The listing starts at the oldest row, so a running count of open rows is each one's position.
     items = []
     position = 0
+    coverage = _scope_coverage(scopes)
     for row in rows:
         if row["state"] in _OPEN_STATES:
             position += 1
-            items.append(_view(row, full=False, position=position))
+            items.append(_view(row, full=False, position=None if coverage else position))
         else:
             items.append(_view(row, full=False, position=None))
     listed = sum(counts.get(state, 0) for state in (*_OPEN_STATES, FAILED))
@@ -1982,21 +2011,28 @@ def read(
         "items": items,
         "counts": {state: counts.get(state, 0) for state in (QUEUED, APPLYING, FAILED, APPLIED)},
         "truncated": listed > len(items),
+        **coverage,
     }
+
+
+def _scope_coverage(scopes: write_intake_access.Scopes) -> dict[str, Any]:
+    if scopes is None or len(scopes) < 2:
+        return {}
+    return {"coverage": "partial", "older_saves": "Check an older save by its receipt reference."}
 
 
 def status(vault_root: Path, *, principal: RequestPrincipal | None = None) -> dict[str, Any]:
     """Counts for `coordination_status`; ``unknown`` when the store cannot be read."""
     try:
-        scope = _read_scope(principal)
+        scopes = _read_scope(principal)
         with _store(vault_root, mode="read") as conn:
-            counts = _counts(conn, scope)
-            if scope is None:
+            counts = _counts(conn, scopes)
+            if scopes is None:
                 oldest = conn.execute(
                     "SELECT MIN(accepted_at) FROM intake WHERE state IN (?, ?)", _OPEN_STATES
                 ).fetchone()[0]
             else:
-                rows = [row for state in _OPEN_STATES for row in conn.execute(
+                rows = [row for scope in scopes for state in _OPEN_STATES for row in conn.execute(
                     "SELECT accepted_at FROM intake WHERE receipt_scope = ? AND state = ? ORDER BY seq LIMIT 1",
                     (scope, state),
                 )]
@@ -2015,6 +2051,7 @@ def status(vault_root: Path, *, principal: RequestPrincipal | None = None) -> di
         "applying": counts.get(APPLYING, 0),
         "failed": counts.get(FAILED, 0),
         "oldest_open_age_seconds": None if oldest is None else round(time.time() - oldest, 1),
+        **_scope_coverage(scopes),
     }
 
 

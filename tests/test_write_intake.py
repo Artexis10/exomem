@@ -1675,6 +1675,65 @@ def test_personal_receipt_release_uses_the_original_verified_login(
         assert write_intake.read(vault, ref=ref)["queued_write"]["ref"] == ref
 
 
+def test_oauth_refresh_keeps_the_original_receipt_and_retry_identity(vault, tmp_path, managers, drainer, monkeypatch):
+    from fastmcp.server import dependencies
+    from test_session_oauth import _proxy
+
+    from exomem import command_surface, server_auth
+
+    _, holder = managers
+    issuer = "https://memory.example"
+    monkeypatch.setenv("EXOMEM_BASE_URL", issuer)
+    monkeypatch.setenv("EXOMEM_GITHUB_USER_ID", "42")
+    monkeypatch.setenv("EXOMEM_OWNER_OAUTH_SUBJECT", "github:42")
+    authority = auth_sessions.SessionAuthority.local(
+        directory=tmp_path / "receipt-issuer", signing_root="disposable-issuer-key",
+        issuer=issuer, audience=f"{issuer}/mcp", allowed_github_user_id=42,
+    )
+    monkeypatch.setattr(server_auth, "build_session_authority", lambda **_kwargs: authority)
+    proxy = _proxy(authority=authority)
+    scopes = ("offline_access", "exomem:read", "exomem:write")
+
+    async def tokens():
+        identity = auth_sessions.SessionIdentity(42, "fixture-owner")
+        access, original, refresh = await authority.issue_offline(client_id="reader", scopes=scopes, identity=identity)
+        rotated_access, rotated, _ = await authority.rotate_refresh(refresh, client_id="reader", scopes=scopes)
+        other_access, _, _ = await authority.issue_offline(client_id="reader", scopes=scopes, identity=identity)
+        assert original.session_id != rotated.session_id and original.family_id == rotated.family_id
+        return [await proxy.load_access_token(bearer) for bearer in (access, rotated_access, other_access)]
+
+    first, refreshed, different = asyncio.run(tokens())
+
+    def send(token, tool, arguments):
+        with monkeypatch.context() as request:
+            request.setattr(dependencies, "get_access_token", lambda: token)
+            caller = principal_module.resolve_mcp_principal()
+            retry = command_surface.mcp_retry_scope()
+            assert caller.remote_owner and retry is not None
+            return _send(_command(tool), vault, arguments, principal=caller, scope=retry)
+
+    older, now = _remember_kwargs(vault, 971), _remember_kwargs(vault, 973)
+    with _Hold(holder, vault):
+        with monkeypatch.context() as previous:
+            previous.setattr(auth_sessions, "current_receipt_family", lambda _who: None)
+            older_ref = send(first, "remember", older)["queued_write"]["ref"]
+        current_ref = send(first, "remember", now)["queued_write"]["ref"]
+        for args, ref in ((older, older_ref), (now, current_ref)):
+            poll = {"mode": "queued-write", "ref": ref}
+            assert send(refreshed, "review_memory", poll)["queued_write"]["ref"] == ref
+            assert send(refreshed, "remember", args)["queued_write"]["ref"] == ref
+            with pytest.raises(OpError) as refused:
+                send(different, "review_memory", poll)
+            assert refused.value.code == "QUEUED_WRITE_NOT_FOUND"
+        listing = send(refreshed, "review_memory", {"mode": "queued-write"})
+        assert listing["coverage"] == "partial"
+        assert [item["ref"] for item in listing["items"]] == [current_ref]
+    for ref in (older_ref, current_ref):
+        _wait_for_state(vault, ref, "applied")
+    assert len(_pages_titled(vault, "Queued save 971")) == 1
+    assert len(_pages_titled(vault, "Queued save 973")) == 1
+
+
 def test_another_login_does_not_consume_a_failure_notice(
     vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

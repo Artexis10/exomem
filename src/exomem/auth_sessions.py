@@ -1660,11 +1660,58 @@ def origin_login_state_sync(who: Any, *, require_owner: bool = False) -> OriginL
     """``origin_login_state`` for a synchronous caller, retaining request evidence."""
     if who.origin_session is None:
         return OriginLogin.NOT_VALID if require_owner else OriginLogin.VALID
+    return _sync_login_check(origin_login_state(who, require_owner=require_owner))
+
+
+def _sync_login_check(check):
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(origin_login_state(who, require_owner=require_owner))
+        return asyncio.run(check)
     # Synchronous job ticks may run on an ASGI loop; retain its verified request context.
     context = contextvars.copy_context()
     with ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(context.run, lambda: asyncio.run(origin_login_state(who, require_owner=require_owner))).result()
+        return pool.submit(context.run, asyncio.run, check).result()
+
+
+def _receipt_family(family: str | None) -> str | None:
+    return None if family is None else hashlib.sha256(family.encode()).hexdigest()
+
+
+def current_receipt_family(who: Any) -> str | None:
+    """Extract a login family only from the verifier that actually bound this request."""
+    from . import local_ingress
+    from .governance.principal import _verified_access_token
+
+    origin, client = who.origin_session, who.client_binding
+    if origin is None or client is None:
+        return None
+    verifier = _request_verifier(origin)
+    if verifier is None or verifier[0].issuer != client.issuer:
+        return None
+    grant = local_ingress.current_grant()
+    if grant is not None and grant.origin_session == origin:
+        return _receipt_family(grant.login_family) if grant.client_id == client.client_id else None
+    token = _verified_access_token()
+    if getattr(token, "client_id", None) != client.client_id:
+        return None
+    return _receipt_family(getattr(token, "_login_family", None))
+
+
+async def _legacy_receipt_family(who: Any) -> str | None:
+    origin, client = who.origin_session, who.client_binding
+    try:
+        authority = _configured_authority(client, origin, authoritative_only=True)
+        if authority is None:
+            return None
+        record = await authority.revalidate_login(
+            session_id=origin.session_id, generation=origin.generation, client_id=client.client_id,
+        )
+    except (SessionStoreUnavailable, OSError, RuntimeError, ValueError):
+        return None
+    return _receipt_family(record.family_id) if record is not None else None
+
+
+def legacy_receipt_family(who: Any) -> str | None:
+    """Re-prove one older access identifier without using the live request's stale cache."""
+    return _sync_login_check(_legacy_receipt_family(who))

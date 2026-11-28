@@ -13,10 +13,12 @@ from .governance.principal import RequestPrincipal
 # These paths belong to the intake's stored principal record, not user vocabulary.
 _BINDING_FIELDS = (
     "audience_id", "issuer_family", "client_binding.issuer", "client_binding.client_id",
-    "origin_session.session_id", "origin_session.generation", "origin_session.audience",
+    "origin_session.generation", "origin_session.audience",
 )
 _LEGACY_SCOPE = ""
 _INVALID_SCOPE = "invalid"
+_FAMILY_PREFIX = "family:"
+Scopes = tuple[str, ...] | None
 
 
 def _path_value(record: Mapping[str, Any], path: str) -> Any:
@@ -28,12 +30,26 @@ def _path_value(record: Mapping[str, Any], path: str) -> Any:
     return value
 
 
+def _scope_key(record: Mapping[str, Any], login: str | None) -> str:
+    return json.dumps([*(_path_value(record, field) for field in _BINDING_FIELDS), login],
+                      ensure_ascii=False, separators=(",", ":"))
+
+
 def recorded_scope(record: Mapping[str, Any]) -> str:
     """The scope of a stored receipt, including rows from before the scope index."""
     if record.get("client_binding") is None and record.get("origin_session") is None:
         return _LEGACY_SCOPE
-    return json.dumps([_path_value(record, field) for field in _BINDING_FIELDS],
-                      ensure_ascii=False, separators=(",", ":"))
+    family = record.get("receipt_family")
+    login = _FAMILY_PREFIX + family if isinstance(family, str) else _path_value(record, "origin_session.session_id")
+    return _scope_key(record, login)
+
+
+def scopes(record: Mapping[str, Any]) -> tuple[str, ...]:
+    """Seek the current login and the earlier format's current access identifier."""
+    stable = recorded_scope(record)
+    if record.get("receipt_family") is None:
+        return (stable,)
+    return stable, _scope_key(record, _path_value(record, "origin_session.session_id"))
 
 
 def can_release(principal: RequestPrincipal) -> bool:
@@ -48,14 +64,26 @@ def can_release(principal: RequestPrincipal) -> bool:
     return auth_sessions.origin_login_state_sync(principal, require_owner=True) is auth_sessions.OriginLogin.VALID
 
 
-def row_matches(row: sqlite3.Row, scope: str | None) -> bool:
-    if scope is None:
+def row_matches(row: sqlite3.Row, allowed: Scopes, *, prior_login=None) -> bool:
+    if allowed is None:
         return True
     try:
         record = json.loads(row["principal"])
-        return isinstance(record, Mapping) and recorded_scope(record) == scope
-    except (TypeError, ValueError):
+        return isinstance(record, Mapping) and (
+            recorded_scope(record) in allowed or (prior_login is not None and prior_login(record))
+        )
+    except (KeyError, TypeError, ValueError):
         return False
+
+
+def same_legacy_family(current: Mapping[str, Any], stored: Mapping[str, Any], *, restore) -> bool:
+    """Confirm one older access identifier belongs to the currently verified refresh family."""
+    family = current.get("receipt_family")
+    if not family or stored.get("receipt_family") is not None or not isinstance(stored.get("origin_session"), Mapping):
+        return False
+    if any(_path_value(current, field) != _path_value(stored, field) for field in _BINDING_FIELDS):
+        return False
+    return auth_sessions.legacy_receipt_family(restore(stored)) == family
 
 
 def indexed(conn: sqlite3.Connection) -> bool:
@@ -74,7 +102,8 @@ def ensure_index(conn: sqlite3.Connection) -> None:
             CASE WHEN NOT json_valid(principal) THEN '{_INVALID_SCOPE}'
                  WHEN json_extract(principal, '$.client_binding') IS NULL
                   AND json_extract(principal, '$.origin_session') IS NULL THEN '{_LEGACY_SCOPE}'
-                 ELSE json_array({fields}) END
+                 ELSE json_array({fields}, COALESCE('{_FAMILY_PREFIX}' || json_extract(principal, '$.receipt_family'),
+                                                   json_extract(principal, '$.origin_session.session_id'))) END
         ) VIRTUAL
     """)
     conn.execute("CREATE INDEX intake_receipt_scope ON intake(receipt_scope, state, seq)")

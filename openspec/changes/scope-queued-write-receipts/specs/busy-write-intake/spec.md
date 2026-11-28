@@ -2,7 +2,7 @@
 
 ### Requirement: The originating login owns connector receipt disclosure
 
-A signed personal receipt SHALL be available only to its originating owner account, client, and login, or to local administrative recovery. The issuer SHALL verify the login before connector release. A signed login cannot release an unbound receipt. Lookup SHALL give identical results for missing and out-of-scope receipts. Lists, counts, positions, and notices SHALL use the same scope.
+A signed personal receipt SHALL be available only to its originating owner account, client, and login, or to local administrative recovery. The issuer SHALL verify the login before connector release. Lookup SHALL give identical results for missing and out-of-scope receipts. Lists, counts, and notices SHALL apply the same authority.
 
 #### Scenario: Another owner client checks a receipt
 
@@ -25,12 +25,19 @@ A signed personal receipt SHALL be available only to its originating owner accou
 
 - **WHEN** a connector refreshes its token and the issuer confirms the same login
 - **THEN** that login can still check its receipt
+- **AND** a resend using the same original identity returns that receipt and runs no new write
 
 #### Scenario: An owner recovers a legacy receipt
 
 - **WHEN** an owner uses the existing local administrative intake command to open a receipt with no verified client binding
 - **THEN** the receipt remains available with the recorded outcome and arguments
 - **AND** an authenticated connector cannot look up the legacy receipt through a different ingress
+
+#### Scenario: A refresh leaves older access identifiers outside the index
+
+- **WHEN** a verified login's indexed results may omit older access identifiers
+- **THEN** lists, counts, and notices mark their coverage partial and withhold queue position
+- **AND** an exact receipt lookup can recheck an older access identifier with the issuer
 
 #### Scenario: A legacy owner ingress asks for a signed receipt
 
