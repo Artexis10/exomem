@@ -52,7 +52,9 @@ from exomem import vault as pages
 from exomem.collection_store import capability, connection, custody, replica, schema
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import library_scope
-from exomem.vault_store import derivation, migrate, mode, ownership, relationship_files, relationships, verify, write
+from exomem.vault_store import (
+    derivation, migrate, mode, ownership, projector, relationship_files, relationships, verify, write,
+)
 
 ALPHA = "Knowledge Base/Notes/Alpha.md"
 BETA = "Knowledge Base/Notes/Beta.md"
@@ -496,8 +498,15 @@ def test_a_rollback_and_remigration_preserve_relationship_ids_and_an_unresolved_
 ):
     source = (vault / ALPHA).read_bytes() + b"\n- [rule] Check the tide. ^tide\n"
     target = (vault / BETA).read_bytes() + b"\n- [rule] Light the lamp. ^lamp\n"
+    page_target = "Knowledge Base/Notes/Desk.md"
+    page_body = b"# Desk\n\nThe daily log goes here.\n"
+    reference = "Reference/Manual.md"
+    reference_body = b"# Manual\n\n- [rule] Verify the reading. ^reading\n"
     (vault / ALPHA).write_bytes(source)
     (vault / BETA).write_bytes(target)
+    (vault / page_target).write_bytes(page_body)
+    (vault / reference).parent.mkdir()
+    (vault / reference).write_bytes(reference_body)
     build_indexes(vault)
     assert migrate_apply(vault) == 0
     with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
@@ -505,9 +514,16 @@ def test_a_rollback_and_remigration_preserve_relationship_ids_and_an_unresolved_
             write.Origin.GOVERNED, "Connect two observations.",
             relationship_change=relationships.Change(
                 actor="owner",
-                identities=(relationships.UnitIdentity("tide-id", ALPHA, "tide"),
-                            relationships.UnitIdentity("lamp-id", BETA, "lamp")),
-                added=(relationships.Relationship("link-id", "tide-id", "supports", "lamp-id"),),
+                identities=(
+                    relationships.UnitIdentity("tide-id", ALPHA, "tide"),
+                    relationships.UnitIdentity("lamp-id", BETA, "lamp"),
+                    relationships.UnitIdentity("reference-id", reference, "reading"),
+                ),
+                added=(
+                    relationships.Relationship("link-id", "tide-id", "supports", "lamp-id"),
+                    relationships.Relationship("page-link", "tide-id", "supports", target_page_path=page_target),
+                    relationships.Relationship("reference-link", "tide-id", "supports", "reference-id"),
+                ),
             ),
         ))
     if previous := os.environ.get("EXOMEM_TEST_PREVIOUS_SCHEMA_PYTHON"):
@@ -516,13 +532,20 @@ def test_a_rollback_and_remigration_preserve_relationship_ids_and_an_unresolved_
     assert rollback_apply(vault, export) == 0, capsys.readouterr().err
     assert (vault / ALPHA).read_bytes() == source
     assert (vault / BETA).read_bytes() == target
+    assert (vault / reference).read_bytes() == reference_body
+    assert not (vault / relationship_files.path_for(reference)).exists()
+    assert json.loads((export / "reference-unit-ids.jsonl").read_text()) == {
+        "id": "reference-id", "parent_path": reference, "anchor": "reading", "parent_ref": None,
+    }
     artifact = relationship_files.path_for(ALPHA)
     with (vault / artifact).open("rb") as encoded:
         recovered = relationship_files.parse(encoded)
-    assert recovered.relationships[0].id == "link-id"
+    assert {edge.id for edge in recovered.relationships} == {"link-id", "page-link", "reference-link"}
     assert (export / "relationships" / artifact).read_bytes() == (vault / artifact).read_bytes()
     history = [json.loads(line) for line in (export / "relationship-history.jsonl").read_bytes().splitlines()]
-    assert [(row["relationship_id"], row["action"]) for row in history] == [("link-id", "add")]
+    assert [(row["relationship_id"], row["action"]) for row in history] == [
+        ("link-id", "add"), ("page-link", "add"), ("reference-link", "add"),
+    ]
     fresh = tmp_path / "restored" / "vault"
     shutil.copytree(vault, fresh, ignore=shutil.ignore_patterns("_Collections"))
     (fresh / BETA).write_bytes(target.replace(b" ^lamp", b""))
@@ -549,18 +572,29 @@ def test_a_rollback_and_remigration_preserve_relationship_ids_and_an_unresolved_
     orphan_path = "Knowledge Base/Notes/Absent Source.md"
     orphan = relationships.UnitIdentity("orphan-id", orphan_path, "lost")
     orphan_edge = relationships.Relationship("lost-link", orphan.id, "unknown-private-type", "lamp-id")
+    lamp = next(unit for unit in recovered.target_units if unit.id == "lamp-id")
     orphan_file = fresh / relationship_files.path_for(orphan_path)
     orphan_file.write_bytes(b"".join(relationship_files.lines(
         orphan_path, recovered.revision, (orphan,),
-        (relationships.BoundRelationship(orphan_edge, orphan, recovered.target_units[0]),),
+        (relationships.BoundRelationship(orphan_edge, orphan, lamp),),
     )))
     assert migrate_apply(fresh) == 0, capsys.readouterr().err
     with connection.open_writer(connection.store_path(fresh), lease_check=lambda: True) as handle:
-        derivation.drain(fresh, CollectionWriter(fresh, handle))
+        writer = CollectionWriter(fresh, handle)
+        derivation.drain(fresh, writer)
+        assert not projector.Projector(fresh, run=lambda work: work(writer)).run_pass().deferred
+    projected = (fresh / page_target).read_bytes()
+    assert b"Incoming supports for page: 1" in projected
+    assert relationship_files.strip_block(projected) == page_body
     with closing(connection.open_reader(connection.store_path(fresh))) as store:
         assert store.execute(
             "SELECT id,source_unit_id,target_unit_id FROM store_relationships ORDER BY id",
-        ).fetchall() == [("link-id", "tide-id", "lamp-id"), ("lost-link", "orphan-id", "lamp-id")]
+        ).fetchall() == [
+            ("link-id", "tide-id", "lamp-id"),
+            ("lost-link", "orphan-id", "lamp-id"),
+            ("page-link", "tide-id", None),
+            ("reference-link", "tide-id", "reference-id"),
+        ]
         assert store.execute(
             "SELECT parent_path,anchor FROM store_unit_ids WHERE id='lamp-id'",
         ).fetchone() == (BETA, "lamp")

@@ -20,7 +20,7 @@ The owners' builders do the deriving (``lexstore.page_rows``, ``epistemic_graph.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from copy import copy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -55,7 +55,7 @@ class _LexicalPage(NamedTuple):
     rows: lexstore.PageRows | None
 
 
-ReserveGraph = Callable[[str, tuple[epistemic_graph.PageGraphRecords, ...]], None]
+ReserveGraph = Callable[[str, tuple[epistemic_graph.PageGraphRecords, ...], bool], None]
 
 
 def prepare_lexical_page(
@@ -144,6 +144,12 @@ class _FragmentLanding:
                     self.structures[path] = semantic_index.interpret_neutral_summary(path, summary)
             except (AttributeError, IndexError, KeyError, TypeError, ValueError, yaml.YAMLError):
                 continue  # An older or incomplete summary still has its committed source.
+
+    def retain_batch(self, paths: set[str]) -> None:
+        """Keep target summaries shared by consecutive batches, within this batch's size."""
+        self.structures = {path: value for path, value in self.structures.items() if path in paths}
+        self.landed.clear()
+        self.prime(paths)
 
     def __call__(self, canonical: str, fragment: str) -> tuple[str, str, dict[str, str]]:
         key = canonical, fragment
@@ -407,7 +413,9 @@ class _Derivation:
         inputs = _GraphInputs(
             resolver, epistemic_graph.graph_registry_stamps(self.root), self.type_basis, self.fragment_landing,
         )
-        paths, following = cursor.batch(self.tx, self.dependency_limit)
+        paths, following = cursor.batch(
+            self.tx, self.dependency_limit, include_relationships=self.stored_relationships,
+        )
         self._write_graph_batch(sorted(set(paths) - {cursor.path}), inputs, require_live=True)
         if self.stamp_unit_links:
             epistemic_graph.stamp_unit_links_generation(self.tx)
@@ -529,19 +537,12 @@ class _Derivation:
                 self.root, graph.resolver,
                 (dependency for _, page in pages if page is not None for dependency in page.dependencies),
             )
-            stored: dict[str, list[relationships.BoundRelationship]] = {}
-            if self.stored_relationships and batch:
-                for edge in relationships.outgoing_for_paths(self.tx, batch):
-                    stored.setdefault(edge.source.parent_path, []).append(edge)
-                    if edge.target is not None:
-                        targets.add(edge.target.parent_path)
             self.fragment_landing.prime(targets)
             for rel, page in pages:
-                self._write_graph(rel, page, graph, charge=rel in charge, stored=stored.get(rel))
+                self._write_graph(rel, page, graph, charge=rel in charge)
 
     def _write_graph(
         self, rel: str, page: _GraphPage | None, graph: _GraphInputs, *, charge: bool,
-        stored: list[relationships.BoundRelationship] | None = None,
     ) -> None:
         """Replace the graph rows of ``rel`` with the ones its bytes derive, or drop them."""
         rows = None
@@ -557,40 +558,64 @@ class _Derivation:
                 prepared_unit_rows=lexical.unit_rows if lexical else None,
                 prepared_dependencies=page.dependencies, unit_links=self.unit_links,
             )
-            if rows is not None and stored:
-                rows = replace(rows, edges=(*rows.edges, *self._relationship_edges(rel, page, graph, stored)))
         if rows is None:
             if charge and self.reserve_graph is not None:
-                self.reserve_graph(rel, ())  # the page's own rows go; their leaves draw on the reservation
+                self.reserve_graph(rel, (), True)  # leaves of the deleted rows draw on the reservation
             epistemic_graph.drop_page_graph_rows(self.tx, rel, unit_links=self.unit_links)
         else:
             epistemic_graph.write_page_graph_rows(
                 self.tx, rows, graph.stamps, derived_columns=self.graph_derived_columns,
                 unit_links=self.unit_links,
+                relationship_batches=(
+                    self._relationship_edge_batches(rel, page)
+                    if self.stored_relationships and page is not None else ()
+                ),
                 # Pages that link to an original re-derive in the same transaction, so their
                 # graph rows draw on the same reservation as the original's own.
                 before_write=self.reserve_graph if charge else None,
             )
 
-    def _relationship_edges(
-        self, rel: str, page: _GraphPage, graph: _GraphInputs,
-        stored: list[relationships.BoundRelationship],
-    ) -> list[epistemic_graph.GraphEdge]:
+    def _relationship_edge_batches(
+        self, rel: str, page: _GraphPage,
+    ) -> Iterator[tuple[epistemic_graph.GraphEdge, ...]]:
+        """Stream only the active adjacency of current anchors during graph replacement."""
         bound = {
-            unit.anchor: unit for unit in page.state.document.units
+            (rel, unit.anchor, page.state.parent_ref): unit for unit in page.state.document.units
             if unit.anchor is not None and unit.unit_ref is not None
         }
+        if not bound:
+            return
+        landing = _FragmentLanding(self.tx, self.root, self.page_bytes)
+        for locator, identity in relationships.identities_at(self.tx, set(bound), with_outgoing=True).items():
+            cursor = None
+            while True:
+                stored = tuple(relationships.outgoing_unit(
+                    self.tx, identity, after=cursor, limit=read.KEYS_PER_QUERY,
+                ))
+                if not stored:
+                    break
+                found = self._land_relationship_batch(rel, bound[locator], stored, landing)
+                if found:
+                    yield tuple(found)
+                if len(stored) < read.KEYS_PER_QUERY:
+                    break
+                last = stored[-1].relationship
+                cursor = last.relation_type, last.id
+
+    def _land_relationship_batch(
+        self, rel: str, source: semantic_units.SemanticUnit,
+        stored: tuple[relationships.BoundRelationship, ...],
+        landing: _FragmentLanding,
+    ) -> list[epistemic_graph.GraphEdge]:
+        landing.retain_batch({item.target.parent_path for item in stored if item.target is not None})
         found = []
         for item in stored:
-            source = bound.get(item.source.anchor)
-            if source is None or item.source.parent_ref != page.state.parent_ref:
-                continue
             anchor = item.target.anchor if item.target is not None else None
             parent_ref = item.target.parent_ref if item.target is not None else item.relationship.target_page_ref
             target_key = epistemic_graph._file_key(item.target_path)
             target_kind = None
             if anchor is not None:
-                target_key, _, details = graph.landing(item.target_path, anchor)
+                target_key, _, details = landing(item.target_path, anchor)
                 if details["fragment_resolution"] != "unit":
                     continue
                 target_kind = details.get("target_kind")
@@ -642,6 +667,10 @@ class _Derivation:
         found |= epistemic_graph.dependent_paths(
             self.tx, self._paths_and_priors(edited - chunked), resolvers, fragments_only=True,
         )
+        if self.stored_relationships:
+            found.update(path for (path,) in relationships.relanding_sources(
+                self.tx, (edited | moved) - chunked,
+            ))
         previous = dependency_pass.for_paths(self.tx, sorted(chunked))
         covered = set(self.written) | set(self.refreshed) | set(self.removed)
         scheduled = covered | found
@@ -665,7 +694,9 @@ class _Derivation:
             )
             # A folder restore already derived its own links against all restored pages.
             # Spend the continuation budget only on sources that still need to run.
-            paths, following = cursor.batch(self.tx, remaining, covered=scheduled)
+            paths, following = cursor.batch(
+                self.tx, remaining, covered=scheduled, include_relationships=self.stored_relationships,
+            )
             remaining -= len(paths)
             found.update(paths)
             scheduled.update(paths)
@@ -682,6 +713,10 @@ class _Derivation:
             linking |= epistemic_graph.dependent_paths(
                 self.tx, self._paths_and_priors(edited & self.metered), resolvers, fragments_only=True,
             )
+            if self.stored_relationships:
+                linking.update(path for (path,) in relationships.relanding_sources(
+                    self.tx, (edited | moved) & self.metered,
+                ))
         # A page of the commit is derived already; the rest follow in path order, so a kill-free
         # replay of the same commit writes the same rows.
         return sorted(found - covered), linking

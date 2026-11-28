@@ -484,10 +484,18 @@ def _export_relationships(root: Path, conn: sqlite3.Connection, destination: Pat
     finally:
         conn.row_factory = factory
     count = 0
+    reference_paths = []
     for (source,) in conn.execute("SELECT DISTINCT parent_path FROM store_unit_ids ORDER BY parent_path"):
         rel = relationship_files.path_for(source)
         if ownership.relation_source(rel) != source:
-            raise OpError("INVALID_RELATIONS_FILE", "a stored relationship has an unsafe source path")
+            if next(relationships.outgoing_on(conn, source), None) is not None:
+                raise OpError(
+                    "INVALID_RELATIONS_FILE", "a stored relationship has an unsafe source path",
+                )
+            # Owned source files already include active far-end locators. The explicit
+            # export keeps the remaining reference identities without writing beside them.
+            reference_paths.append(source)
+            continue
         for target in (destination / "relationships", root):
             projection.write_file(
                 target, rel, relationship_files.lines(
@@ -496,6 +504,19 @@ def _export_relationships(root: Path, conn: sqlite3.Connection, destination: Pat
                 ), durable=True,
             )
         count += 1
+    if reference_paths:
+        rows = conn.execute(
+            "SELECT id,parent_path,anchor,parent_ref FROM store_unit_ids "
+            "WHERE parent_path IN (SELECT value FROM json_each(?)) ORDER BY parent_path,anchor,id",
+            (json.dumps(reference_paths),),
+        )
+        projection.write_file(
+            destination, "reference-unit-ids.jsonl",
+            ((json.dumps({"id": unit_id, "parent_path": path, "anchor": anchor,
+                          "parent_ref": reference}) + "\n").encode()
+             for unit_id, path, anchor, reference in rows),
+            durable=True,
+        )
     return count
 
 

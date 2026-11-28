@@ -443,6 +443,10 @@ def test_a_relationship_hub_has_bounded_reads_and_a_complete_portable_file(serve
                         for anchor in anchors),
         ),
     ))
+    assert rows(
+        served, "SELECT edge_key FROM graph_edges WHERE source_path=? AND edge_key LIKE 'stored:%' ORDER BY edge_key",
+        ALPHA,
+    ) == [(f"stored:edge-{anchor}",) for anchor in anchors]
     with library_scope():
         first = unit_edges.relationship_page(served, ALPHA, "tide", limit=50)
         second = unit_edges.relationship_page(served, ALPHA, "tide", limit=50, after=first.next_after)
@@ -475,7 +479,15 @@ def test_a_relationship_hub_has_bounded_reads_and_a_complete_portable_file(serve
         puts=tuple(write.PagePut(path, b"# Related") for path in other_paths),
         relationship_change=relationships.Change(actor="owner", added=page_edges),
     ))
-    edge_ids = [*(f"edge-{anchor}" for anchor in anchors), *(edge.id for edge in page_edges)]
+    assert not projector.Projector(served, run=lambda work: work(writer)).run_pass().deferred
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "Move the related pages.",
+        moves=tuple(write.PageMove(path, path.replace("Related ", "Moved ")) for path in other_paths),
+    ))
+    assert rows(served, "SELECT COUNT(*) FROM store_projection_queue WHERE operation='move'") == [
+        (len(other_paths),),
+    ]
+    edge_ids = [*(edge.id for edge in page_edges), *(f"edge-{anchor}" for anchor in anchors)]
     retirement_queries = []
     for to_retire in (edge_ids[:1], edge_ids[1:]):
         statements: list[str] = []
@@ -516,6 +528,15 @@ def test_moving_a_target_refreshes_other_pages_relations_files(served, writer): 
     assert beta.exists()
     with alpha.open("rb") as encoded:
         assert relationship_files.parse(encoded).target_units[0].parent_path == BETA
+
+    graph_rows = "SELECT dst_key FROM graph_edges WHERE edge_key='stored:link-id'"
+    landings = rows(served, graph_rows)
+    assert len(landings) == 1
+    for body, expected in ((second.replace(b" ^lamp", b""), []), (second, landings)):
+        write.commit(writer, write.StoreChange(
+            write.Origin.GOVERNED, "Edit the target observation.", puts=(write.PagePut(BETA, body),),
+        ))
+        assert rows(served, graph_rows) == expected
 
     moved = "Knowledge Base/Notes/Lantern.md"
     write.commit(writer, write.StoreChange(

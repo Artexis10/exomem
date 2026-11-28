@@ -2858,12 +2858,14 @@ def write_page_graph_rows(
     *,
     derived_columns: bool = True,
     unit_links: bool = True,
-    before_write: Callable[[str, tuple[PageGraphRecords, ...]], None] | None = None,
+    relationship_batches: Iterable[tuple[GraphEdge, ...]] = (),
+    before_write: Callable[[str, tuple[PageGraphRecords, ...], bool], None] | None = None,
 ) -> None:
     """Replace the page's graph rows with ``rows`` and store ``registry_stamps`` beside them.
 
     ``registry_stamps`` is `graph_registry_stamps` of the pass. ``before_write`` receives the page
-    and the records that replace its rows, before any row changes. ``derived_columns`` is False for
+    and its records before the write. Its last argument is true for the replacement and false
+    for appended relationship batches. ``derived_columns`` is False for
     a store whose tables lack the columns that the owner pass adds
     (``graph_dependencies.body_link``, ``graph_edges.raw_target``): its rows omit them. The caller
     owns the transaction.
@@ -2911,7 +2913,7 @@ def write_page_graph_rows(
             replace=True,
         )
         records = (nodes, parent, edges, dependencies, coverage)
-        before_write(rel, (*records, link_rows) if unit_links else records)
+        before_write(rel, (*records, link_rows) if unit_links else records, True)
 
     EpistemicGraphIndex._drop_own_rows(conn, rel, unit_links=unit_links)
     for key, value in registry_stamps:
@@ -2929,6 +2931,14 @@ def write_page_graph_rows(
     coverage.write(conn)
     if unit_links:
         link_rows.write(conn)
+    for batch in relationship_batches:
+        records = PageGraphRecords(
+            "graph_edges", edge_columns,
+            tuple(_edge_values(edge)[: len(edge_columns)] for edge in batch), replace=True,
+        )
+        if before_write is not None:
+            before_write(rel, (records,), False)
+        records.write(conn)
     _bump_generation(conn)
 
 

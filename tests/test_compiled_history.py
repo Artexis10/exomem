@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -13,6 +14,7 @@ from test_connector_boundary import configured_boundary as configured_boundary
 from test_connector_boundary import public_matter_writer as public_matter_writer
 from test_episode_memory_command import _episodes, _record
 from test_latency_gate import _seed_freshness_live
+from test_managed_collections_migration import coordinator_url as coordinator_url
 from test_observe_memory import (
     PAGE,
     UNTYPED_PAGE,
@@ -21,6 +23,9 @@ from test_observe_memory import (
     _untyped_page_source,
     _write_page,
 )
+from test_vault_store_migration import build_indexes, migrate_apply
+from test_vault_store_migration import vault as migration_vault  # noqa: F401
+from test_vault_store_readers import EXTERNAL, restrict_external
 
 from exomem import (
     append_to_file,
@@ -28,6 +33,7 @@ from exomem import (
     compiled_history,
     readiness,
     registry_history,
+    request_budget,
     semantic_index,
     semantic_language_registry,
     semantic_writes,
@@ -36,6 +42,7 @@ from exomem import (
     working_set_runtime,
 )
 from exomem.governance.principal import library_scope, owner_principal, request_scope
+from exomem.vault_store import read as store_read
 
 
 @pytest.fixture
@@ -342,6 +349,72 @@ def test_pagination_skips_unavailable_entries_without_revealing_them(
     assert not {files[p].stem for p in (1, 5, 6)} & set(versions)
     first = compiled_history.read(tmp_path, path=PAGE, limit=2)
     assert first["continuation"] == first["revisions"][-1]["version"]
+
+
+def test_stored_history_pages_use_bounded_body_reads(migration_vault) -> None:  # noqa: F811
+    """A page of one scans withheld snapshots without fetching the whole log or reading each body separately."""
+    root = migration_vault
+    restrict_external(root, 'tags: ["secret"]')
+    current = _page_source("- [rule] Wording 9. ^stable")
+    _write_page(root, source=current)
+    parent_ref = semantic_index.build_parent_index_state(root, PAGE, source=current).document.parent_ref
+    directory = root / compiled_history.history_dir(parent_ref)
+    directory.mkdir(parents=True)
+    for index in range(9):
+        moment = dt.datetime(2026, 1, 1, 0, 0, index, tzinfo=dt.UTC)
+        version = registry_history.version_id(moment, f"{index:08x}")
+        prior = _page_source(f"- [rule] Wording {index}. ^stable")
+        if index in (3, 6, 7):
+            prior = prior.replace("status: active", "status: active\ntags: [secret]")
+        entry = {
+            "version": compiled_history.ENTRY_VERSION,
+            "path": PAGE,
+            "parent_ref": parent_ref,
+            "before_hash": vault.content_hash(prior),
+            "prior": {"source": prior},
+            "actor": {"audience": "owner"},
+            "affected_units": [],
+        }
+        (directory / f"{version}.json").write_text(
+            "not json" if index == 1 else json.dumps(entry), encoding="utf-8",
+        )
+    files = _entry_files_oldest_first(root)
+    with request_scope(EXTERNAL):
+        expected = _walk_history(root, limit=1)
+    assert [revision["version"] for revision in expected] == [files[i].stem for i in (8, 5, 4, 2, 0)]
+    build_indexes(root)
+    assert migrate_apply(root) == 0
+    for path in files:
+        path.unlink(missing_ok=True)
+
+    prefix = directory.relative_to(root).as_posix() + "/"
+    cursor = None
+    for index, revision in enumerate(expected):
+        statements = []
+        with request_scope(EXTERNAL), store_read.request_snapshot(root), store_read.snapshot(root) as view:
+            view.connection.set_trace_callback(statements.append)
+            try:
+                page = commands.op_read_memory(
+                    root, path=PAGE, include_history=True, history_limit=1, history_continuation=cursor,
+                )["revision_history"]
+            finally:
+                view.connection.set_trace_callback(None)
+        assert page["revisions"] == [revision]
+        assert page["truncated"] is (index < len(expected) - 1)
+        assert page["continuation"] == (revision["version"] if page["truncated"] else None)
+        reads = [sql for sql in statements if "FROM store_pages" in sql and prefix in sql]
+        assert 1 <= len(reads) <= 2, reads
+        assert all("body" in sql and "LIMIT" in sql and "ORDER BY" in sql for sql in reads), reads
+        cursor = page["continuation"]
+
+    with request_scope(EXTERNAL):
+        absent = compiled_history.read(root, path=PAGE, limit=1, continuation=files[0].stem)
+        token = request_budget.set_current(request_budget.RequestBudget(seconds=0))
+        try:
+            expired = compiled_history.read(root, path=PAGE, limit=1)
+        finally:
+            request_budget.reset_current(token)
+    assert expired == absent
 
 
 def _unit_pages(root: Path, unit_ref: str, *, limit: int) -> list[dict]:

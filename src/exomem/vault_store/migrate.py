@@ -863,15 +863,22 @@ def _install_rows(
         [(rel, fact.sha256, fact.size, fact.mtime_ns, base)
          for rel, (fact, base) in staged.relation_files.items()],
     )
-    conn.execute(
-        "INSERT INTO store_projection_queue(path,revision,operation,from_path,queued_at)"
-        " SELECT DISTINCT u.parent_path,?,'write',NULL,? FROM store_unit_ids u"
-        " JOIN store_pages p ON p.path=u.parent_path", (revision, now),
+    endpoints = (
+        "WITH endpoints AS (SELECT parent_path AS path FROM store_unit_ids UNION "
+        "SELECT target_page_path FROM store_relationships WHERE retired_revision IS NULL "
+        "AND target_page_path IS NOT NULL) "
     )
     conn.execute(
+        endpoints +
+        "INSERT INTO store_projection_queue(path,revision,operation,from_path,queued_at)"
+        " SELECT e.path,?,'write',NULL,? FROM endpoints e"
+        " JOIN store_pages p ON p.path=e.path", (revision, now),
+    )
+    conn.execute(
+        endpoints +
         "INSERT INTO store_derivation_queue(path,revision,operation,queued_at)"
-        " SELECT DISTINCT u.parent_path,?,'derive',? FROM store_unit_ids u"
-        " JOIN store_pages p ON p.path=u.parent_path", (revision, now),
+        " SELECT e.path,?,'derive',? FROM endpoints e"
+        " JOIN store_pages p ON p.path=e.path", (revision, now),
     )
     # The page's mtime is the manifest's: both come from the recheck, which is the last read before the commit.
     conn.execute(

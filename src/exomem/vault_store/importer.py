@@ -8,6 +8,8 @@ The importer reads those changes from the disk and settles each one for its path
   hash alone: the projection manifest, the stored page, and the bytes that the audit trail shows
   Evermatter wrote after the manifest. This is the projector's own rule (``Facts.own_hashes``), so
   Evermatter's projections cause no import and no hold.
+* Removing the whole managed relationships block queues a projection of the page. The importer
+  keeps any authored body edit and reprojects a block-only change without an import.
 * A change that the store has not moved past is an audited import. "Not moved past" is one test,
   the ``Expect(revision, projected=True)`` of the commit that adopts the bytes: the manifest
   names the stored revision and bytes, no projection is queued, and nothing is held.
@@ -96,6 +98,8 @@ class Verdict(enum.Enum):
 
     #: Nothing to settle: the file holds bytes of Evermatter's, or the store expects it missing.
     OWN = enum.auto()
+    #: The file holds the stored page without its managed relationships block.
+    REPROJECT = enum.auto()
     #: A person's bytes are at the path: import them, or hold them.
     ADOPT = enum.auto()
     #: A projected file is missing and Evermatter did not remove it: a person deleted it.
@@ -140,9 +144,22 @@ def judge(facts: Facts, disk: OnDisk | None) -> Verdict:
         return Verdict.CLEAR
     if page and _orphaned_manifest(facts):
         return Verdict.ADOPT
+    if (
+        disk.sha256 == facts.stored_sha256 and facts.intent is None and not facts.held
+        and _had_managed_block(facts)
+    ):
+        return Verdict.REPROJECT
     if disk.sha256 in facts.own_hashes or disk.sha256 in (facts.stored_sha256, facts.held_sha256):
         return Verdict.OWN
     return Verdict.ADOPT
+
+
+def _had_managed_block(facts: Facts) -> bool:
+    page, manifest = facts.page, facts.manifest
+    return (
+        page is not None and manifest is not None and page.revision == manifest.revision
+        and page.sha256 != manifest.sha256
+    )
 
 
 def _orphaned_manifest(facts: Facts) -> bool:
@@ -191,7 +208,7 @@ class ImportReport:
     managed: list[str] = field(default_factory=list)
     #: Media binaries that a media store read holds open now, left for the watcher to look at again.
     deferred: list[str] = field(default_factory=list)
-    #: Every path that was examined and carried no change, whatever its kind.
+    #: Paths whose stored content needed no change or hold.
     unchanged: int = 0
     #: What a sweep's walk of the lexical corpus cost: the Markdown files it reached, and the
     #: seconds it took, which include the walk itself. Zero for an import, which walks nothing.
@@ -394,15 +411,20 @@ class Importer:
 
         A manifest row counts only beside its page. With no page it is an Evermatter removal in flight or
         a page that the store lost, which ``judge`` tells apart, so the sweep settles the file.
+        A decorated page's canonical hash also goes to ``judge`` in case its block needs recovery.
         """
         known: dict[str, set[str]] = defaultdict(set)
         with read.snapshot(self._root) as view:
             for meta in view.pages():
                 known[meta.path].add(meta.sha256)
-            for path, sha256 in view.connection.execute(
-                "SELECT path, sha256 FROM store_manifest WHERE path IN (SELECT path FROM store_pages)"
-                " OR path LIKE '%' || ?", (relationship_files.RELATIONS_FILE_SUFFIX,),
+            for path, sha256, canonical_sha256 in view.connection.execute(
+                "SELECT m.path, m.sha256, CASE WHEN m.revision = p.revision THEN p.sha256 END "
+                "FROM store_manifest AS m LEFT JOIN store_pages AS p ON p.path = m.path "
+                "WHERE p.path IS NOT NULL OR m.path LIKE '%' || ?",
+                (relationship_files.RELATIONS_FILE_SUFFIX,),
             ):
+                if canonical_sha256 is not None:
+                    known[path].discard(canonical_sha256)
                 known[path].add(sha256)
             for path, sha256 in view.connection.execute("SELECT path, sha256 FROM store_binaries"):
                 known[path].add(sha256)
@@ -837,6 +859,13 @@ class Importer:
             return
         if not self._unchanged_since_read(filesystem, rel, disk, report):
             return
+        if verdict is Verdict.REPROJECT:
+            assert facts.page is not None and facts.manifest is not None
+            if write.queue_projection_repair(writer, facts.page, facts.manifest.sha256):
+                report.unchanged += 1
+            else:
+                report.unjudged[rel] = "the page's projection changed before it could be repaired"
+            return
         if ownership.relation_source(rel) is not None:
             self._settle_relation_file(writer, rel, facts, disk, verdict, report)
             return
@@ -929,7 +958,9 @@ class Importer:
             else write.Expect(revision=base.revision, projected=True)
         )
         try:
-            put, seen = write.outside_page(rel, disk.body, disk.sha256, disk.mtime_ns)
+            put, seen = write.outside_page(
+                rel, disk.body, disk.sha256, disk.mtime_ns, reproject=_had_managed_block(facts),
+            )
         except OpError:
             self._hold(writer, rel, HELD_EDIT, facts, disk.sha256, disk.body, report)
             return

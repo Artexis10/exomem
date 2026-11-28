@@ -140,6 +140,56 @@ def test_an_outside_body_edit_with_an_intact_relations_block_is_imported(
     assert not rows(stored, "SELECT path FROM store_held")
 
 
+@pytest.mark.parametrize(
+    ("edit_body", "sweep"),
+    [(False, False), (False, True), (True, False)],
+    ids=["block-only-event", "block-only-sweep", "block-and-body"],
+)
+def test_removing_the_managed_block_queues_its_recovery(
+    stored, projecting, importing, related_pages, edit_body, sweep,
+):
+    source, _target = related_pages
+    path = stored / ALPHA
+    projected = path.read_bytes()
+    assert projected != source
+    [(page_revision,)] = rows(stored, "SELECT revision FROM store_pages WHERE path = ?", ALPHA)
+    edited = source.replace(b"# Alpha", b"# Harbor") if edit_body else source
+    path.write_bytes(edited)
+
+    if sweep:
+        importing.sweep()
+    else:
+        importing.import_paths([ALPHA])
+
+    assert rows(stored, "SELECT body FROM store_pages WHERE path = ?", ALPHA) == [(edited,)]
+    if edit_body:
+        assert imports(stored, ALPHA) == [(ALPHA, "outside editor")]
+    else:
+        assert rows(stored, "SELECT revision FROM store_pages WHERE path = ?", ALPHA) == [(page_revision,)]
+        assert not imports(stored, ALPHA)
+    assert path.read_bytes() == edited
+    assert projecting.run_pass().projected == 1
+    expected = projected.replace(b"# Alpha", b"# Harbor") if edit_body else projected
+    assert path.read_bytes() == expected
+    assert not rows(stored, "SELECT path FROM store_held")
+
+
+def test_managed_block_recovery_preserves_a_later_outside_edit(
+    stored, projecting, importing, related_pages,
+):
+    source, _target = related_pages
+    path = stored / ALPHA
+    path.write_bytes(source)
+    importing.import_paths([ALPHA])
+    later = source + b"\nA second outside save.\n"
+    path.write_bytes(later)
+
+    assert projecting.run_pass().held == 1
+    assert path.read_bytes() == later
+    assert rows(stored, "SELECT body FROM store_pages WHERE path = ?", ALPHA) == [(source,)]
+    assert rows(stored, "SELECT kind, body FROM store_held WHERE path = ?", ALPHA) == [("edit", later)]
+
+
 def test_an_outside_rename_of_a_projected_target_keeps_the_relation_and_updates_its_locator(
     stored, writer, projecting, importing, related_pages,
 ):

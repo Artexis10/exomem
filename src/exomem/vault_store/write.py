@@ -230,15 +230,17 @@ class FileSeen:
 
 def outside_page(
     rel: str, raw: bytes, sha256: str, mtime_ns: int, *, keep_mine: bool = False,
+    reproject: bool = False,
 ) -> tuple[PagePut, tuple[FileSeen, ...]]:
     """Read canonical page bytes and retain the exact projected-file witness for its rewrite."""
     from . import relationship_files
 
     canonical = relationship_files.strip_block(raw, keep_mine=keep_mine)
-    if canonical == raw:
+    canonical_sha256 = None if canonical == raw else hashlib.sha256(canonical).hexdigest()
+    if canonical_sha256 is None and not reproject:
         return PagePut(rel, raw, on_disk_mtime_ns=mtime_ns), ()
     return PagePut(rel, canonical), (
-        FileSeen(rel, sha256, len(raw), mtime_ns, hashlib.sha256(canonical).hexdigest()),
+        FileSeen(rel, sha256, len(raw), mtime_ns, canonical_sha256),
     )
 
 
@@ -714,7 +716,7 @@ def _source_derived_pages(
 
 def _incoming_graph_pages(
     tx: Connection, rel: str, records: tuple[epistemic_graph.PageGraphRecords, ...], usable: int,
-    *, encoding: str, layouts: dict[str, list[tuple[tuple[int, ...], int]]],
+    *, encoding: str, layouts: dict[str, list[tuple[tuple[int, ...], int]]], replace_source: bool,
 ) -> _CellPages:
     """Size the graph rows that a page's derivation inserts."""
     cells = _CellPages()
@@ -762,7 +764,7 @@ def _incoming_graph_pages(
         for tree, (columns, seen) in enumerate(zip(placed, prefixes, strict=True), start=1):
             names = tuple(table.columns[column] for column in columns)
             cells.runs[(table.table, tree)] = _key_runs(tx, table.table, names, seen,
-                                                        replacing=(source_column, rel))
+                                                        replacing=(source_column, rel) if replace_source else None)
     return cells
 
 
@@ -931,12 +933,18 @@ def derived_room(
                 room.set_store_pages(database, estimated)
                 recorded = estimated
 
-        def reserve_graph(rel: str, records: tuple[epistemic_graph.PageGraphRecords, ...]) -> None:
-            cells = _incoming_graph_pages(conn, rel, records, usable, encoding=encoding, layouts=graph_layouts)
+        def reserve_graph(
+            rel: str, records: tuple[epistemic_graph.PageGraphRecords, ...], replace_source: bool,
+        ) -> None:
+            cells = _incoming_graph_pages(
+                conn, rel, records, usable, encoding=encoding, layouts=graph_layouts,
+                replace_source=replace_source,
+            )
             graph.merge(cells)
-            # A page that links to an original replaces its existing graph rows; a new page has none.
-            old = _source_derived_pages(conn, (rel,), usable, _GRAPH_SOURCE_TABLES, replaced_layouts)
-            replaced.merge(old)
+            if replace_source:
+                # Appended batches share one replacement of the old graph.
+                old = _source_derived_pages(conn, (rel,), usable, _GRAPH_SOURCE_TABLES, replaced_layouts)
+                replaced.merge(old)
             reserve()
 
         reserve()
@@ -1266,6 +1274,22 @@ def _projected(
     return queued is None and held is None
 
 
+def queue_projection_repair(writer: CollectionWriter, page: read.PageMeta, projected_sha256: str) -> bool:
+    """Restore a managed block without changing the page or its audit trail."""
+    with writer.handle.transaction(collection_free=True) as tx:
+        row = tx.execute(
+            "SELECT revision FROM store_mode WHERE id = 1 AND mode = ?", (mode.STORE_MODE,),
+        ).fetchone()
+        if (
+            row is None
+            or _stored(tx, page.path) != (page.revision, page.sha256)
+            or not _projected(tx, page.path, page.revision, page.sha256, on_disk_sha256=projected_sha256)
+        ):
+            return False
+        _enqueue(tx, {page.path: ("write", None)}, row[0], timestamp())
+        return True
+
+
 #: Which audit operations open and end a path's life in the store, as ``_Trail`` records them. A
 #: write, an import, or the new side of a move (the row that names the old path) opens a life; a
 #: delete, or the old side of a move, ends one. The projector reads them to tell the bytes that
@@ -1496,28 +1520,38 @@ def _degrade_moves(tx: Connection, paths: tuple[str, ...]) -> None:
     """
     from . import relationship_files
 
-    marks = ",".join("?" * len(paths))
+    if not paths:
+        return
     touched = tx.execute(
         "SELECT path, from_path, revision, queued_at FROM store_projection_queue "
-        f"WHERE operation = 'move' AND (path IN ({marks}) OR from_path IN ({marks}))",
-        (*paths, *paths),
+        "WHERE operation = 'move' AND (path IN (SELECT value FROM json_each(?1)) "
+        "OR from_path IN (SELECT value FROM json_each(?1)))",
+        (json.dumps(paths),),
     ).fetchall()
-    for path, from_path, revision, queued_at in touched:
+    if not touched:
+        return
+    for path, *_ in touched:
         if ownership.classify(path) is ownership.Ownership.BINARY:
             raise StoreConflict(path, "its file has not moved yet; retry once it has")
-        tx.execute(
-            "UPDATE store_projection_queue SET operation = 'write', from_path = NULL WHERE path = ?",
-            (path,),
-        )
-        tx.execute(
-            "INSERT OR IGNORE INTO store_projection_queue(path, revision, operation, queued_at) "
-            "SELECT ?1, ?2, 'delete', ?3 UNION ALL "
-            "SELECT path, ?2, 'delete', ?3 FROM store_manifest WHERE path = ?4",
-            (
-                from_path, revision, queued_at,
-                relationship_files.path_for(from_path) if ownership.is_markdown(from_path) else None,
-            ),
-        )
+    tx.execute(
+        "UPDATE store_projection_queue SET operation = 'write', from_path = NULL "
+        "WHERE path IN (SELECT value FROM json_each(?))",
+        (json.dumps([row[0] for row in touched]),),
+    )
+    deletes = [
+        (old, revision, queued_at,
+         relationship_files.path_for(old) if ownership.is_markdown(old) else None)
+        for _, old, revision, queued_at in touched
+    ]
+    tx.execute(
+        "WITH moves(old,revision,queued_at,relations) AS ("
+        " SELECT value->>0,value->>1,value->>2,value->>3 FROM json_each(?)) "
+        "INSERT OR IGNORE INTO store_projection_queue(path,revision,operation,queued_at) "
+        "SELECT old,revision,'delete',queued_at FROM moves UNION ALL "
+        "SELECT m.path,moves.revision,'delete',moves.queued_at "
+        "FROM moves JOIN store_manifest m ON m.path=moves.relations",
+        (json.dumps(deletes),),
+    )
 
 
 def _enqueue(

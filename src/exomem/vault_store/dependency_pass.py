@@ -29,19 +29,26 @@ class DependencyPass:
 
     def batch(
         self, conn: Connection, limit: int, *, covered: set[str] | frozenset[str] = frozenset(),
+        include_relationships: bool = False,
     ) -> tuple[list[str], DependencyPass | None]:
         """Seek at most `limit` source paths across the target's indexed dependency names."""
         found: list[str] = []
         found_paths: set[str] = set()
         after = self.after
         filter_fragment = " AND instr(raw_target, '#') > 0" if self.fragments_only else ""
-        for index in range(self.key_offset, len(self.keys)):
-            rows = conn.execute(
-                "SELECT DISTINCT source_path FROM graph_dependencies "
-                f"WHERE lookup_key = ? AND source_path > ?{filter_fragment} "
-                "ORDER BY source_path LIMIT ?",
-                (self.keys[index], after, limit + len(covered) + 1),
-            )
+        for index in range(self.key_offset, len(self.keys) + int(include_relationships)):
+            size = limit + len(covered) + 1
+            if index == len(self.keys):
+                from . import relationships
+
+                rows = relationships.relanding_sources(conn, (self.path,), after=after, limit=size)
+            else:
+                rows = conn.execute(
+                    "SELECT DISTINCT source_path FROM graph_dependencies "
+                    f"WHERE lookup_key = ? AND source_path > ?{filter_fragment} "
+                    "ORDER BY source_path LIMIT ?",
+                    (self.keys[index], after, size),
+                )
             for (path,) in rows:
                 if path in covered or path in found_paths:
                     after = path

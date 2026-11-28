@@ -156,13 +156,19 @@ def bind_additions(tx: Connection, change: Change) -> tuple[BoundRelationship, .
 
 def identities_at(
     tx: Connection, locations: set[UnitLocator],
+    *, with_outgoing: bool = False,
 ) -> dict[UnitLocator, UnitIdentity]:
     """Find the units of these page identities even if the path has an older orphan."""
+    active = (
+        " WHERE EXISTS (SELECT 1 FROM store_relationships r "
+        " WHERE r.source_unit_id=u.id AND r.retired_revision IS NULL)"
+        if with_outgoing else ""
+    )
     rows = tx.execute(
         "SELECT u.id,u.parent_path,u.anchor,u.parent_ref FROM json_each(?) AS location"
         " CROSS JOIN store_unit_ids AS u ON u.parent_path = json_extract(location.value,'$[0]')"
         " AND u.anchor = json_extract(location.value,'$[1]')"
-        " AND COALESCE(u.parent_ref,'') = COALESCE(json_extract(location.value,'$[2]'),'')",
+        " AND COALESCE(u.parent_ref,'') = COALESCE(json_extract(location.value,'$[2]'),'')" + active,
         (json.dumps(sorted(locations, key=repr)),),
     )
     units = (UnitIdentity(*row) for row in rows)
@@ -342,6 +348,27 @@ def orphaned_pages(tx: Connection) -> Iterator[tuple[str, str | None]]:
     for path, reference, live_path, fields in rows:
         if live_path is None or (reference is not None and page_reference(fields) != reference):
             yield path, reference
+
+
+def relanding_sources(
+    tx: Connection, paths: Iterable[str], *, after: str = "", limit: int | None = None,
+) -> Iterator[tuple[str]]:
+    """Seek the authors of current relationships independently of authored link aliases."""
+    targets = tuple(sorted(set(paths)))
+    if not targets:
+        return
+    yield from tx.execute(
+        "WITH targets AS (SELECT value AS path FROM json_each(?1)), related AS ("
+        " SELECT s.parent_path AS path FROM targets CROSS JOIN store_unit_ids t ON t.parent_path=targets.path"
+        " CROSS JOIN store_relationships r ON r.target_unit_id=t.id"
+        " JOIN store_unit_ids s ON s.id=r.source_unit_id"
+        " WHERE r.retired_revision IS NULL AND s.parent_path>?2 UNION"
+        " SELECT s.parent_path FROM targets CROSS JOIN store_relationships r ON r.target_page_path=targets.path"
+        " JOIN store_unit_ids s ON s.id=r.source_unit_id"
+        " WHERE r.retired_revision IS NULL AND s.parent_path>?2)"
+        " SELECT path FROM related ORDER BY path LIMIT ?3",
+        (json.dumps(targets), after, -1 if limit is None else limit),
+    )
 
 
 _AT_PAGE = (
