@@ -449,6 +449,44 @@ def test_bounding_the_text_of_many_store_pages_asks_the_store_once(
     assert together == alone
 
 
+
+@pytest.mark.timeout(180)
+def test_pages_decided_before_the_deadline_keep_their_text_when_the_rest_are_withheld(
+    service, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """On a starved host one store request decides many pages, and the deadline can fall inside it. The pages it
+    decided in time keep their text; only the pages it had not reached are withheld."""
+    from exomem import request_budget
+    from exomem.collection_store import preview
+
+    root = service.root
+    pages = _seed(root, "owner_with_policy")
+    real_init = preview._Decide.__init__
+
+    def slow_decisions(self, read, vault_root, calls):  # noqa: ANN001, ANN202
+        def slow_read(*args, **kwargs):  # noqa: ANN202
+            time.sleep(0.5)
+            return read(*args, **kwargs)
+
+        real_init(self, slow_read, vault_root, calls)
+
+    monkeypatch.setattr(preview._Decide, "__init__", slow_decisions)
+    budget = request_budget.RequestBudget(seconds=3)
+    token = request_budget.set_current(budget)
+    started = time.monotonic()
+    try:
+        with request_scope(OWNER):
+            bounds = egress.page_text_bounds(root, pages)
+    finally:
+        request_budget.reset_current(token)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < budget.seconds + request_budget.DELIVERY_RESERVE_SECONDS
+    full = [page for page in pages if bounds[page] is None]
+    assert full, "a page decided before the deadline lost its text"
+    assert len(full) < len(pages), "the deadline fell inside the request, so some pages were not reached"
+    assert all(bounds[page] == 0 for page in pages if page not in full)
+
 @pytest.mark.timeout(180)
 def test_a_store_that_refuses_the_terminal_pass_withholds_the_store_pages_once_and_says_so(
     service, store_requests: StoreRequests  # noqa: F811
