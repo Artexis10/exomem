@@ -18,6 +18,7 @@ holds back neither the other intents nor any reader; after ``ATTEMPTS`` status c
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -33,7 +34,7 @@ from typing import TYPE_CHECKING, TypeVar
 from .. import find, foreground_priority, media_capacity, writer_lease
 from ..cli_ops import OpError
 from ..collection_store import connection
-from . import derive, mode, read, rederive, resident_catalogue
+from . import dependency_pass, derive, mode, read, rederive, resident_catalogue
 
 if TYPE_CHECKING:
     from ..collection_store.writer import CollectionWriter
@@ -130,6 +131,7 @@ def _stamp(at: datetime) -> str:
 def enqueue(
     tx: Connection, derived: list[str], refreshed: list[str], revision: int, now: str,
     metered: frozenset[str] = frozenset(),
+    moved: frozenset[str] = frozenset(),
 ) -> None:
     """Queue one intent per path in the commit's own transaction.
 
@@ -137,13 +139,20 @@ def enqueue(
     failure, so the path is derived again. ``metered`` names the paths of an original, whose derived
     rows the vault's disk floor meters when the drain writes them.
     """
-    tx.executemany(
-        "INSERT INTO store_derivation_queue(path, revision, operation, queued_at, metered) "
-        "VALUES (?, ?, ?, ?, ?) "
+    rows = [
+        *((rel, DERIVE, int(rel in metered), int(rel in moved)) for rel in derived),
+        *((rel, REFRESH, 0, 0) for rel in refreshed),
+    ]
+    if not rows:
+        return
+    tx.execute(
+        "INSERT INTO store_derivation_queue(path, revision, operation, queued_at, metered, relationship_move) "
+        "SELECT value->>0, ?1, value->>1, ?2, value->>2, value->>3"
+        " FROM json_each(?3) WHERE 1 ORDER BY key "
         "ON CONFLICT(path) DO UPDATE SET revision = excluded.revision, operation = excluded.operation, "
+        "relationship_move = MAX(relationship_move, excluded.relationship_move), "
         "metered = excluded.metered, attempts = 0, failed_code = NULL, retry_at = NULL",
-        [*((rel, revision, DERIVE, now, int(rel in metered)) for rel in derived),
-         *((rel, revision, REFRESH, now, 0) for rel in refreshed)],
+        (revision, now, json.dumps(rows)),
     )
 
 
@@ -591,6 +600,7 @@ class Drained:
     failed: int = 0
     stopped: bool = False
     cut: bool = False
+    dependency_batches: int = 0
 
 
 def drain(
@@ -610,16 +620,26 @@ def drain(
     """
     root = Path(root)
     result = Drained()
+    next_dependency_cost = 0.0
+    yielded = False
     with _UNADVANCED_LOCK:
         _OWED.pop(root, None)
     with scope(root):
         _advance(root, writer)
         while not result.stopped and (deadline is None or time.monotonic() < deadline):
+            if deadline is not None and time.monotonic() + next_dependency_cost >= deadline:
+                yielded = True
+                break
             try:
                 batch = _next_batch(writer, from_revision)
                 if not batch:
                     break
-                if _derive(root, writer, batch, result) or len(batch) == 1:
+                began, dependency_batches = time.monotonic(), result.dependency_batches
+                completed = _derive(root, writer, batch, result)
+                if result.dependency_batches != dependency_batches:
+                    # Leave enough of this slice for one more transaction before starting it.
+                    next_dependency_cost = max(next_dependency_cost, time.monotonic() - began)
+                if completed or len(batch) == 1:
                     continue
                 for position, intent in enumerate(batch):
                     if result.stopped or (position and deadline is not None and time.monotonic() >= deadline):
@@ -628,7 +648,7 @@ def drain(
             except connection.CollectionStoreError:
                 result.stopped = True
     due_now = _owe_remaining(root, writer, stopped=result.stopped)
-    result.cut = due_now and deadline is not None and time.monotonic() >= deadline
+    result.cut = due_now and deadline is not None and (yielded or time.monotonic() >= deadline)
     return result
 
 
@@ -667,10 +687,11 @@ class _Intent:
     attempts: int
     metered: int
     failed_code: str | None
+    relationship_move: int
 
 
 #: The columns that make an ``_Intent``, in the order of its fields.
-_INTENT_COLUMNS = "path, revision, operation, attempts, metered, failed_code"
+_INTENT_COLUMNS = "path, revision, operation, attempts, metered, failed_code, relationship_move"
 
 
 def _next_batch(writer: CollectionWriter, from_revision: int = 0) -> list[_Intent]:
@@ -684,7 +705,7 @@ def _next_batch(writer: CollectionWriter, from_revision: int = 0) -> list[_Inten
     ).fetchone()
     if first is None:
         return []
-    if first[3] > 0:
+    if first[3] > 0 or dependency_pass.for_intents(writer.connection, [(first[0], first[1])]):
         return [_Intent(*first)]
     rows = writer.connection.execute(
         f"SELECT {_INTENT_COLUMNS} FROM store_derivation_queue WHERE {_DUE} "
@@ -692,26 +713,37 @@ def _next_batch(writer: CollectionWriter, from_revision: int = 0) -> list[_Inten
         (_stamp(_now()), from_revision, BATCH_PAGES + 1),
     ).fetchall()
     intents = [_Intent(*row) for row in rows]
-    if len(intents) <= BATCH_PAGES:
-        return intents
-    # Whole revisions only, so that one transaction never derives half of a commit's pages; a single
-    # revision larger than the bound runs whole.
-    last = intents[BATCH_PAGES].revision
-    whole = [intent for intent in intents[:BATCH_PAGES] if intent.revision != last]
-    if whole:
-        return whole
-    rows = writer.connection.execute(
-        f"SELECT {_INTENT_COLUMNS} FROM store_derivation_queue WHERE {_DUE} "
-        "AND attempts = 0 AND revision = ? ORDER BY path",
-        (_stamp(_now()), last),
-    ).fetchall()
-    return [_Intent(*row) for row in rows]
+    if len(intents) > BATCH_PAGES:
+        # Whole revisions only. A single revision larger than the bound still runs whole.
+        last = intents[BATCH_PAGES].revision
+        intents = [intent for intent in intents[:BATCH_PAGES] if intent.revision != last]
+        if not intents:
+            rows = writer.connection.execute(
+                f"SELECT {_INTENT_COLUMNS} FROM store_derivation_queue WHERE {_DUE} "
+                "AND attempts = 0 AND revision = ? ORDER BY path",
+                (_stamp(_now()), last),
+            ).fetchall()
+            intents = [_Intent(*row) for row in rows]
+    cursors = dependency_pass.for_intents(writer.connection, [(it.path, it.revision) for it in intents])
+    if cursors:
+        first_cursor = min(cursor.revision for cursor in cursors.values())
+        ready = [intent for intent in intents if intent.revision < first_cursor]
+        if ready:
+            return ready
+        # A failed page can retry alongside a cursor from the same original revision.
+        return [next(intent for intent in intents if intent.path in cursors)]
+    return intents
 
 
 def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: Drained) -> bool:
     """Derive ``batch`` in one transaction; on failure record it against each intent and return False."""
-    from . import write
+    from . import relationships, write
 
+    if len(batch) == 1:
+        [intent] = batch
+        cursor = dependency_pass.for_intents(writer.connection, [(intent.path, intent.revision)]).get(intent.path)
+        if cursor is not None:
+            return _derive_dependency_pass(root, writer, intent, cursor, result)
     started = False
     try:
         # Close the transaction before releasing capacity, including on rollback, as a commit does. A
@@ -731,6 +763,7 @@ def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: 
             refreshed = [intent.path for intent in batch if intent.operation == REFRESH]
             before = read.vault_triple(tx, row[1])
             metered = {intent.path for intent in batch if intent.metered}
+            relationship_moves = tuple(intent.path for intent in batch if intent.relationship_move)
             prepared, reserve_graph, settle = allocations.enter_context(write.derived_room(
                 writer, tx, [rel for rel in written if rel in metered],
                 tuple(rel for rel in removed if rel in metered),
@@ -738,13 +771,19 @@ def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: 
             delta = derive.derive_paths(
                 tx, root, written=written, removed=removed, refreshed=refreshed,
                 before=before, prepared_lexical=prepared, reserve_graph=reserve_graph,
-                metered=frozenset(metered),
+                metered=frozenset(metered), relationship_moves=frozenset(relationship_moves),
+                dependency_revisions={intent.path: intent.revision for intent in batch},
+                dependency_limit=BATCH_PAGES,
             )
             settle()
+            completed = [intent.path for intent in batch if intent.path not in delta.pending_dependencies]
+            dependency_pass.discard(tx, completed)
             tx.executemany(
-                "DELETE FROM store_derivation_queue WHERE path = ?", [(intent.path,) for intent in batch]
+                "DELETE FROM store_derivation_queue WHERE path = ?", [(path,) for path in completed]
             )
             revision = row[1] + 1
+            if relationship_moves:
+                relationships.reproject_moved(tx, relationship_moves, revision=revision, at=write.timestamp())
             tx.execute("UPDATE store_mode SET revision = ? WHERE id = 1", (revision,))
             after = read.vault_triple(tx, revision)
     except Exception as error:  # noqa: BLE001 - a failed intent is recorded and retried, never lost
@@ -757,6 +796,53 @@ def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: 
     # After the transaction: a reader that meets the advanced catalogue must see this revision.
     resident_catalogue.remember(root, after, delta.catalogue)
     find.on_store_commit(root, before, after, delta.entries, delta.deleted, ())
+    _signal()
+    return True
+
+
+def _derive_dependency_pass(
+    root: Path, writer: CollectionWriter, intent: _Intent,
+    cursor: dependency_pass.DependencyPass, result: Drained,
+) -> bool:
+    """Commit a cursor and its graph rows together. The page's receipt covers both phases."""
+    from . import write
+
+    started = False
+    try:
+        with ExitStack() as allocations, writer.handle.transaction(collection_free=True) as tx:
+            started = True
+            mode_row = tx.execute("SELECT mode, revision FROM store_mode WHERE id = 1").fetchone()
+            if mode_row is None or mode_row[0] != mode.STORE_MODE:
+                result.stopped = True
+                return True
+            before = read.vault_triple(tx, mode_row[1])
+            _, reserve_graph, settle = allocations.enter_context(write.derived_room(
+                writer, tx, [], (), graph_continuation=intent.metered,
+            ))
+            completed = derive.resume_dependencies(
+                tx, root, before, cursor, limit=BATCH_PAGES, reserve_graph=reserve_graph,
+            )
+            settle()
+            if completed:
+                dependency_pass.discard(tx, [intent.path])
+                tx.execute("DELETE FROM store_derivation_queue WHERE path = ?", (intent.path,))
+            elif intent.failed_code is not None:
+                tx.execute(
+                    "UPDATE store_derivation_queue SET attempts = 0, retry_at = NULL, failed_code = NULL WHERE path = ?",
+                    (intent.path,),
+                )
+            revision = mode_row[1] + 1
+            tx.execute("UPDATE store_mode SET revision = ? WHERE id = 1", (revision,))
+            after = read.vault_triple(tx, revision)
+    except Exception as error:  # noqa: BLE001 - Retry the receipt that owns the interrupted cursor.
+        if not started:
+            raise
+        _record_failure(writer, [intent], error, result)
+        return False
+    result.batches += 1
+    resident_catalogue.advance(root, before, after)
+    find.on_store_commit(root, before, after, (), (), ())
+    result.dependency_batches += 1
     _signal()
     return True
 

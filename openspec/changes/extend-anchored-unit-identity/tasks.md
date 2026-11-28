@@ -1,4 +1,4 @@
-This change starts after the owner's vault switches to store mode and stage 2 of `make-vault-store-canonical` ships. A group waits only on what its heading names. Each group from 1 on ends with its highest-level check.
+This change starts after the owner's vault switches to store mode and tasks 5.2, 5.5, and 5.6 of `make-vault-store-canonical` ship. A group waits only on what its heading names. Each group from 1 on ends with its highest-level check.
 
 ## 0. Before the build
 

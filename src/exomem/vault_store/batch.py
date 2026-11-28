@@ -25,7 +25,7 @@ from typing import Any
 from .. import call_spans, mode, vault
 from ..cli_ops import OpError
 from ..collection_store.writer import CollectionWriter
-from . import ownership, read
+from . import ownership, read, relationships
 from . import write as store_write
 from .write import (
     BinaryDelete,
@@ -131,6 +131,7 @@ def commit_batch(
     retained_original: vault.PathGuard | None = None,
     publish_originals: Callable[[], None] | None = None,
     file_commit_witness: vault._BatchFileWitness | None = None,
+    relationship_change: relationships.Change | None = None,
 ) -> list[Path]:
     """Commit one batch to the store of ``vault_root`` in place of the file-mode flip.
 
@@ -146,7 +147,7 @@ def commit_batch(
     root = Path(vault_root)
     caller_writes = list(writes)
     if (
-        lifecycle is None
+        lifecycle is None and relationship_change is None
         and caller_writes
         and all(_holder_of(_relative(root, write.path)) is _Holder.FILE for write in caller_writes)
     ):
@@ -173,7 +174,7 @@ def commit_batch(
                 vocabulary_auxiliaries,
                 prepare,
             )
-    if not caller_writes and lifecycle is None:
+    if not caller_writes and lifecycle is None and relationship_change is None:
         return []
     from .. import trash_metadata
 
@@ -201,6 +202,7 @@ def commit_batch(
             lifecycle,
             retained_original,
             file_commit_witness,
+            relationship_change,
         )
     except BaseException:
         working_set_heat.abandon_commit(heat)
@@ -433,6 +435,7 @@ def _commit(
     lifecycle: Lifecycle | None = None,
     retained_original: vault.PathGuard | None = None,
     file_commit_witness: vault._BatchFileWitness | None = None,
+    relationship_change: relationships.Change | None = None,
 ) -> _Plan:
     from ..writer_lease import (
         log_active_mutation_phase,
@@ -496,6 +499,7 @@ def _commit(
             vacated_folders=plan.lifecycle.vacated_folders,
             refresh=tuple(plan.refresh),
             expect=plan.expectations(),
+            relationship_change=relationship_change,
         )
         try:
             store_write.commit(writer, change)

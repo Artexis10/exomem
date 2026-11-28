@@ -27,8 +27,8 @@ env:
   EXOMEM_TEST_OLDER_READER_SHA256: "a3d18d3abbfcf93b4831950c033197b5ca3f6aecdd89756e6359ca5b51cba626"
   # The newest release one store schema back; move it to the next one with each schema bump.
   # Each pinned release comes with its published wheel's SHA-256 (scripts/ci_install_release.py).
-  EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.200.0"
-  EXOMEM_TEST_PREVIOUS_SCHEMA_SHA256: "722882a877da8e291e4ac46e0f1e062b467e738e49fae15c8b13378e55238111"
+  EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.210.2"
+  EXOMEM_TEST_PREVIOUS_SCHEMA_SHA256: "17b1ddf6b93713245a7499f1dfb627e13365fd49450b86b3ad8f83085eff1f40"
   # The earlier release that full runs qualify as the rollback application on a migrated store,
   # with its published wheel's SHA-256: any published release that reads the current store schema. A store schema bump empties both, because no earlier
   # release reads the new schema; the next release that ships that schema sets them again.
@@ -665,6 +665,7 @@ jobs:
           tests/test_media_preview_recovery.py tests/test_capture_metadata.py
           tests/test_capture_backfill.py tests/test_capture_backfill_store.py tests/test_capture_recovery.py
           tests/test_speech_attach_door.py tests/test_speech_track_containers.py tests/test_speech_track_door.py
+          tests/test_takeout_sidecars.py
           -m frame_codecs -o timeout=120
           --junitxml=test-results/e2e-logs/cloud-frame-junit.xml
       # The harness prints the tail inline; this keeps the whole log for the

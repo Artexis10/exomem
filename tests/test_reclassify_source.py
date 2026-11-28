@@ -106,6 +106,8 @@ def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
             assert not readiness.is_warming()
             assert freshness.generation(vault, "vault") is not None
             await asyncio.to_thread(_until, lambda: not freshness.external_pending(vault))
+            # Prepare the lexical catalogue for the moved tree before testing inbound recovery.
+            assert await asyncio.to_thread(lexstore.ensure_fresh, vault)
             # Withdraw the cache after the move, as an idle quiet-mode service may.
             vault_module.evict_inbound_index(vault)
             monkeypatch.setattr(vault_module, "_build_inbound_index", paused_build)
@@ -128,9 +130,6 @@ def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
             finally:
                 release.set()
             assert await asyncio.to_thread(find.await_recall_resolver_warm)
-            await asyncio.to_thread(_until, lambda: lexstore.search_current_published_substrings(
-                vault, [captured.path.removeprefix(f"{KB}/").lower()]
-            ).readiness.complete)
             async with asyncio.timeout(5):
                 while True:
                     warm = await call("manage_memory_file", **preview)
@@ -243,6 +242,9 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
     stop = threading.Event()
     monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: stop)
     mcp = server.build_server(require_auth=False)
+    # This fixture supplies its own observer and catalogue. Runtime activation
+    # would withdraw them because the test suite disables the real watcher.
+    monkeypatch.setattr(mcp._exomem_local_runtime_activation, "start", lambda: None)
     started, resume = threading.Event(), threading.Event()
     build = reclassification_preview._build
 
@@ -265,7 +267,7 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
                     "manage_memory_file", operation="propose-reclassification", **args, **extra
                 )
 
-            async def ready(run_id, *, allow_stale=False):
+            async def ready(run_id, *, allow_restart=False):
                 async with asyncio.timeout(12):
                     while True:
                         status = await preview(preview_run_id=run_id)
@@ -275,24 +277,25 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
                             break
                         assert "preview_digest" not in status and "result" not in status
                         await asyncio.sleep(0.1)
-                if (allow_stale and status.get("error", {}).get("code")
-                        == "RECLASSIFICATION_PREVIEW_STALE"):
-                    return None
+                if allow_restart:
+                    stale = status.get("error", {}).get("code") == "RECLASSIFICATION_PREVIEW_STALE"
+                    warming = status.get("error_code") == "RECLASSIFICATION_PREVIEW_WARMING"
+                    if stale or warming:
+                        return None
                 assert status.get("state") == "completed", status
                 return status
 
             async def fresh_report():
                 async with asyncio.timeout(12):
                     while True:
-                        job = await preview()
-                        if job.get("error", {}).get("code") != "RECLASSIFICATION_PREVIEW_WARMING":
-                            assert job.get("run_id"), job
-                            report = await ready(job["run_id"], allow_stale=True)
-                            if report is not None:
-                                return report
+                        job = await _start_preview(client, source)
+                        assert job.get("run_id"), job
+                        report = await ready(job["run_id"], allow_restart=True)
+                        if report is not None:
+                            return report
                         await asyncio.sleep(0.05)
 
-            queued = await preview()
+            queued = await _start_preview(client, source)
             assert queued["state"] == "running" and "preview_digest" not in queued, queued
             run_id = queued["run_id"]
             assert await asyncio.to_thread(started.wait, 5)
@@ -509,6 +512,156 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
         resume.set()
         stop.set()
         maintenance_jobs.stop_all(vault)
+
+
+def _served_preview(vault, source_schema, monkeypatch, *, pause_at_referrer):
+    """A served MCP preview of a Source with three referrers whose background build pauses mid-loop.
+
+    ``pause_at_referrer(stop)`` runs on the build thread as it reads its first referrer, with the
+    job's stop event.
+    """
+    from exomem import (
+        file_watcher,
+        foreground_priority,
+        freshness,
+        reclassification_preview,
+        server,
+    )
+    from exomem import vault as vault_module
+
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(reclassification_preview, "_INLINE_CANDIDATES", 1)
+    source = _capture(vault, source_schema, title="Field measurements").path
+    for index in range(3):
+        (vault / f"{KB}/Notes/measurement-{index}.md").write_text(
+            f"See [[{source}]].\n", encoding="utf-8",
+        )
+    for scope, directory in (("vault", vault), ("kb", vault / KB)):
+        freshness.seed(vault, scope, (
+            (str(path), freshness.stat_signature(path))
+            for path in vault_module.walk_vault_md(directory)
+        ))
+    assert vault_module.prime_inbound_index(vault, eager=True)
+    lexstore.ensure_fresh(vault)
+    watcher_stop = threading.Event()
+    monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: watcher_stop)
+    witnessed_read, paused = rc._witnessed_read, []
+
+    def pausing_read(reader, sink, root, page, *rest):
+        # The Source's own read comes first; the pause waits for a referrer.
+        if not paused and Path(page) != vault / source:
+            paused.append(True)
+            pause_at_referrer(foreground_priority.cancellation_event())
+        return witnessed_read(reader, sink, root, page, *rest)
+
+    monkeypatch.setattr(rc, "_witnessed_read", pausing_read)
+    mcp = server.build_server(require_auth=False)
+    monkeypatch.setattr(mcp._exomem_local_runtime_activation, "start", lambda: None)
+    return mcp, source
+
+
+async def _start_preview(client, source):
+    """Retry a preview start while its snapshot is unavailable or changes."""
+    async with asyncio.timeout(12):
+        while True:
+            queued = await _preview_call(client, source)
+            code = queued.get("error", {}).get("code")
+            if code not in {"RECLASSIFICATION_PREVIEW_WARMING", "RECLASSIFICATION_PREVIEW_STALE"}:
+                return queued
+            await asyncio.sleep(0.1)
+
+
+def _preview_call(client, source, **extra):
+    from _public_call import public_call
+    from test_agent_tool_surface import _call
+
+    return _call(client, *public_call("manage_memory_file", {
+        "operation": "propose-reclassification", "path": source.removeprefix(f"{KB}/"),
+        "source_kind": "dataset-export", **extra,
+    }))
+
+
+@pytest.mark.parametrize("write_page", [False, True], ids=["writer admitted", "snapshot changed"])
+def test_a_long_preview_allows_a_writer_and_checks_the_snapshot(
+    vault, source_schema, monkeypatch, write_page,
+):
+    from fastmcp import Client
+
+    from exomem import freshness, request_budget, writer_lease
+
+    monkeypatch.setenv(request_budget.BUDGET_ENV_VAR, "2")
+    midway = threading.Event()
+
+    def outlast_the_request_budget(stop):
+        midway.set()
+        stop.wait(3)
+
+    mcp, source = _served_preview(
+        vault, source_schema, monkeypatch, pause_at_referrer=outlast_the_request_budget,
+    )
+
+    async def exercise():
+        async with Client(mcp, timeout=15) as client:
+            queued = await _start_preview(client, source)
+            assert queued["state"] == "running", queued
+            assert await asyncio.to_thread(midway.wait, 5)
+            manager = writer_lease.get_manager()
+            with manager.mutation_guard(vault, request_id="other-writer", operation="edit"):
+                if write_page:
+                    page = vault / KB / "Notes" / "unrelated.md"
+                    page.write_text("# An unrelated observation\n", encoding="utf-8")
+                    freshness.on_files_changed(vault, changed=[page])
+            async with asyncio.timeout(12):
+                # A poll may itself outlast the short request budget; the transport then asks
+                # for a retry.
+                while True:
+                    status = await _preview_call(client, source, preview_run_id=queued["run_id"])
+                    code = status.get("error", {}).get("code")
+                    warming = code == "RECLASSIFICATION_PREVIEW_WARMING"
+                    if status.get("state") != "running" and not warming:
+                        break
+                    await asyncio.sleep(0.1)
+            if write_page:
+                assert status.get("state") == "failed", status
+                assert status.get("error_code") == "RECLASSIFICATION_PREVIEW_WARMING", status
+                assert {"result", "preview_digest", "entries"}.isdisjoint(status), status
+            else:
+                assert status.get("state") == "completed", status
+                assert status["result"]["preview_digest"], status
+
+    asyncio.run(exercise())
+
+
+def test_a_preview_stopped_mid_build_returns_a_typed_error_and_no_report(
+    vault, source_schema, monkeypatch,
+):
+    from fastmcp import Client
+
+    from exomem import maintenance_jobs
+
+    midway = threading.Event()
+
+    def wait_for_the_stop(stop):
+        midway.set()
+        assert stop.wait(10)
+
+    mcp, source = _served_preview(
+        vault, source_schema, monkeypatch, pause_at_referrer=wait_for_the_stop,
+    )
+
+    async def exercise():
+        async with Client(mcp, timeout=15) as client:
+            queued = await _start_preview(client, source)
+            assert queued.get("state") == "running", queued
+            assert await asyncio.to_thread(midway.wait, 5)
+            await asyncio.to_thread(maintenance_jobs.stop_all, vault, wait=10)
+            stopped = await _preview_call(client, source, preview_run_id=queued["run_id"])
+            assert stopped["error"]["code"] == "RECLASSIFICATION_PREVIEW_INTERRUPTED", stopped
+            leaks = ("result", "references", "preview_digest", "entries", "next_cursor", "state")
+            for leaked in leaks:
+                assert leaked not in stopped, stopped
+
+    asyncio.run(exercise())
 
 
 def test_governed_paging_survives_long_receipt_history_and_concurrent_appends(

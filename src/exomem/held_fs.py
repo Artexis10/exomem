@@ -241,6 +241,11 @@ class SagaRecord:
     identity: StableIdentity
 
 
+def stat_witness(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    """A file version's identity and change times, as held evidence compares them."""
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
 class HeldDirectory:
     """A retained directory handle.  Instances are created by ``parent`` only."""
 
@@ -413,13 +418,20 @@ class HeldFilesystem:
         parent: HeldDirectory,
         *,
         name_filter: Callable[[str], bool] | None = None,
+        names: Iterable[str] | None = None,
     ) -> HeldResult[tuple[SagaRecord, ...]]:
         """Return stable children, omitting unsafe alias objects.
 
-        Filter names before acquiring identities when a caller supplies a filter.
+        Filter names before acquiring identities when a caller supplies a filter. ``names``
+        replaces the listing with those exact names: a caller that already holds a current
+        listing reads only the children it needs, and a name that is gone refuses the call.
         """
 
         raise NotImplementedError
+
+    def directory_version(self, parent: HeldDirectory) -> HeldResult[FileVersion]:
+        """The held directory's identity and change times, which move when its entries change."""
+        return HeldResult(error=HeldFsError("UNSUPPORTED", "held directory versions are unavailable"))
 
     def iter_names(self, parent: HeldDirectory) -> Iterator[str]:
         """Stream unsorted immediate names, including aliases for caller checking.
@@ -802,6 +814,7 @@ def publish_bytes(
     *,
     expected_identity: StableIdentity | None = None,
     expected_sha256: str | None = None,
+    rename_new: bool = False,
     validate_existing: Callable[[HeldFile], None] | None = None,
     prepare: Callable[[HeldFile], None] | None = None,
     custody: TemporaryCustody | None = None,
@@ -816,7 +829,8 @@ def publish_bytes(
     is removed.
 
     With no expected identity the publish is create-only and uses a no-replace
-    hard-link installation. With an expected identity, that exact destination
+    hard-link installation. ``rename_new`` uses a no-replace rename instead. With an expected
+    identity, that exact destination
     stays held while a native relative replacement installs the staged bytes.
     ``validate_existing`` checks that borrowed handle before and after staging;
     the callback must neither close nor mutate it.
@@ -914,9 +928,14 @@ def publish_bytes(
             if before_install is not None:
                 before_install()
             before = staged.version()
-            failure = _link_without_replace(filesystem, parent, staged, leaf, publication_error)
-            if failure is not None:
-                return failure
+            if rename_new:
+                moved = filesystem.rename(staged, parent, leaf, replace=False)
+                if not moved.ok:
+                    return publication_error(moved.error)
+            else:
+                failure = _link_without_replace(filesystem, parent, staged, leaf, publication_error)
+                if failure is not None:
+                    return failure
             installed = True
         else:
             if expected_sha256 is not None:

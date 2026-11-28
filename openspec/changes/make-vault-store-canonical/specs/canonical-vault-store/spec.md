@@ -29,7 +29,7 @@ In store mode, each vault SHALL have one SQLite database, the per-vault collecti
 - **AND** the next write through the served door succeeds
 
 ### Requirement: One transaction per governed write
-A governed write in store mode SHALL commit every file it changes, one audit row per file, one projection intent per file and one derivation intent per file in one `BEGIN IMMEDIATE` transaction, and SHALL acknowledge only after that transaction is durable. That transaction SHALL NOT write lexical, graph, identity, inbound-link, prior-path or page-fact rows; they follow from the derivation intents. The vault mutation boundary of a governed write SHALL hold only the checks that bind the write and that transaction. The number of statements the transaction runs SHALL NOT grow with a page's units or links, with the pages that link to it or with the size of the vault. A request that the store thread serves SHALL acknowledge once that transaction is durable, before the store thread derives its intents. A governed trash or recovery, an upload and a request that the store thread does not serve SHALL derive their own intents after they release the boundary and before they acknowledge; when that derivation fails or passes its deadline, the write SHALL acknowledge with its derived state `pending` or `failed`. The full-detail reply of a store-mode governed write SHALL carry the writer's result under `diagnostics.leaf_result`, the state of its lexical, identity and graph rows under `diagnostics.derived_components` and the derived state as `derived_sync` under `diagnostics.operational`, the shape of file mode's derived acknowledgement; its compact reply SHALL NOT change.
+A governed write in store mode SHALL commit every file it changes, one audit row per file, one projection intent per file and one derivation intent per file in one `BEGIN IMMEDIATE` transaction, and SHALL acknowledge only after that transaction is durable. That transaction SHALL also commit any governed relationship and history changes and their canonical unit IDs. A relationship-only write SHALL audit the change and queue projection for both affected pages. Lexical, graph, derived page identity, inbound-link, prior-path, and page-fact rows SHALL follow the derivation intents. The vault mutation boundary of a governed write SHALL hold only the checks that bind the write and that transaction. The number of statements the transaction runs SHALL NOT grow with a page's units or links, with the pages that link to it or with the size of the vault. A request that the store thread serves SHALL acknowledge once that transaction is durable, before the store thread derives its intents. A governed trash or recovery, an upload and a request that the store thread does not serve SHALL derive their own intents after they release the boundary and before they acknowledge; when that derivation fails or passes its deadline, the write SHALL acknowledge with its derived state `pending` or `failed`. The full-detail reply of a store-mode governed write SHALL carry the writer's result under `diagnostics.leaf_result`, the state of its lexical, identity and graph rows under `diagnostics.derived_components` and the derived state as `derived_sync` under `diagnostics.operational`, the shape of file mode's derived acknowledgement; its compact reply SHALL NOT change.
 
 #### Scenario: The boundary hold does not grow with derivation
 - **WHEN** a governed write runs once with an instant derivation and once with a derivation slowed by seconds
@@ -307,7 +307,7 @@ In store mode, an agent SHALL be able to list every held item and to resolve eac
 - **AND** a resolve refuses with `VAULT_STORE_HELD_TOO_LARGE`
 
 ### Requirement: Semantic units are first-class store rows
-In store mode, once stage 2 ships, the store SHALL hold one row per structural candidate of a page, with its identity facts, its page, its ordinal and its span (code-point offsets into the parsed body), its category, kind and text, its provenance, its verdict and its lifecycle, and a reader SHALL select the units from those rows. The identity SHALL follow the existing semantic unit identity rule: the authored anchor when the page carries one, otherwise the fingerprint-bound reference. The store SHALL derive the identity facts from the page bytes, and a reader SHALL bind the reference from those facts under the page's selected registries. The store itself SHALL write an anchor only into a unit that carries no anchor and becomes either end of its first stored relationship, in the governed write that adds that relationship. For the same bytes, the unit rows SHALL reproduce file mode's lexical semantic-unit rows and graph unit nodes. Typed edges SHALL be able to start or end at a unit as well as at a page. A governed write that changes a unit SHALL change the page bytes and the unit row in the same transaction.
+In store mode, derived unit rows and the page summary SHALL support selection and reference binding. The summary SHALL keep candidate spans as code-point offsets into the parsed body. The identity SHALL follow the existing semantic unit identity rule: the authored anchor when the page carries one, otherwise the fingerprint-bound reference. The store SHALL derive the identity facts from the page bytes, and a reader SHALL bind the reference from those facts under the page's selected registries. The store itself SHALL write an anchor only into a unit that carries no anchor and becomes either end of its first stored relationship, in the governed write that adds that relationship. For the same bytes, the unit rows SHALL reproduce file mode's lexical semantic-unit rows and graph unit nodes. Typed edges SHALL be able to start or end at a unit as well as at a page. A governed write that changes a unit SHALL commit its page bytes with the derivation intent. The derived unit row SHALL follow that intent.
 
 #### Scenario: A link reaches the exact unit
 - **WHEN** a page links to another page's unit by the anchor that unit carries
@@ -315,8 +315,10 @@ In store mode, once stage 2 ships, the store SHALL hold one row per structural c
 
 #### Scenario: Refuting one claim changes one unit
 - **WHEN** a governed write marks one claim on a page as refuted
-- **THEN** the page bytes and that unit's verdict commit in one transaction
-- **AND** the other units on the page keep their identities and verdicts
+- **THEN** the page bytes and derivation intent commit together
+- **AND** a later read sees the new verdict or reports derivation lag
+- **AND** the other units keep their verdicts and anchored identities
+- **AND** anonymous units with the same signature can receive new occurrence-bound references
 
 #### Scenario: A unit without an anchor keeps today's identity
 - **WHEN** a governed write adds a unit that carries no authored anchor and no stored relationship
@@ -324,7 +326,7 @@ In store mode, once stage 2 ships, the store SHALL hold one row per structural c
 - **AND** the committed page bytes are exactly the bytes the write supplied
 
 ### Requirement: Typed relationships are stored rows
-In store mode, once stage 2 ships, a governed operation SHALL be able to add, retire or supersede a typed relationship from a unit to another unit or to a page as a store row, with no line of page text. The relationship type SHALL come from the relation vocabulary registry. A unit SHALL be able to carry any number of stored relationships. A store-mode answer SHALL read them from the stored rows only, in bounded pages with a keyset cursor and an exact total.
+In store mode, a governed operation SHALL add, retire or supersede typed relationships from a unit to a unit or page in stored rows. Types SHALL come from the relation registry. A unit SHALL support any number of relationships. Answers SHALL read only stored rows, in bounded pages with a keyset cursor and an exact visible total. If the count exceeds the read budget or an admitted endpoint is stale, the answer SHALL report unavailable and omit the total.
 
 #### Scenario: A first stored relationship pins the unit's identity
 - **WHEN** a governed operation adds the first stored relationship to a unit that has no anchor
@@ -372,10 +374,24 @@ From stage 2, a page's projection MAY add one managed relations block, the one e
 - **WHEN** a person edits a line inside a page's relations block outside Exomem
 - **THEN** the edit becomes a held correction and the stored page bytes are unchanged
 
+#### Scenario: Fresh migration preserves a verified authored locator
+- **WHEN** a rolled-back page has an authored line that matches a generated relationship locator
+- **THEN** migration preserves the line when the page bytes match the digest in the page's relations file
+- **AND** the same proof applies to a page with incoming relationships only
+
+#### Scenario: Fresh migration preserves a page with an ambiguous locator
+- **WHEN** a line outside the managed block matches a projected relationship line or locator
+- **AND** the page bytes do not match a canonical digest from its relations file
+- **THEN** migration refuses activation and leaves the original files intact
+- **AND** the refusal explains how to retain authored text and remove generated residue
+
 #### Scenario: Stored relationships survive a rollback and a re-migration
 - **WHEN** a store-mode vault with stored relationships reverts to file mode and is migrated back
 - **THEN** the reverted pages carry no relations block and the relationship history is exported
-- **AND** after the re-migration every current stored relationship is present again
+- **AND** the export keeps complete current rows and endpoint IDs when no source relations file can carry them
+- **AND** after re-migration every current stored relationship is present again
+- **AND** a relationship with a missing unit or page endpoint remains orphaned for review
+- **AND** an endpoint with a different stable page reference does not take its place
 
 ### Requirement: Held relations items resolve without leaking or storing the block
 Keep-mine on a held page whose relations block is not valid SHALL remove the block by its markers, and SHALL refuse and name keep-store when the markers are not intact. A held relations file SHALL be listed to, and resolved by, the owner with unrestricted access only. Migration verification SHALL remove one relations block before it compares a projection with its source.
@@ -419,7 +435,8 @@ Until file mode retires (design D15), a migration SHALL be reversible by rollbac
 - **WHEN** an operator reverts a store-mode vault with no queued intents and no held items to file mode
 - **THEN** the audit trail, the canonicity records and the relationship history are exported as files
 - **AND** file mode rebuilds its lexical catalogue and graph from the projected Markdown
-- **AND** search and graph answers match the store's answers for the same pages
+- **AND** search and graph answers match the store's page-derived answers
+- **AND** file-mode graph answers omit canonically stored relationships until re-migration
 
 #### Scenario: Reverting refuses while held edits are unexported
 - **WHEN** an operator reverts a store-mode vault that holds an unreviewed outside edit
@@ -487,7 +504,7 @@ In store mode, a commit that changes a source of the schema overlay (a page unde
 - **AND** after the job finishes, status reports `current`, the tables equal a fresh derivation, and a rollback drops them
 
 ### Requirement: Store-mode graph and link reads answer at the request's snapshot
-In store mode, every reader of graph rows SHALL read the store's rows through the request's one snapshot, and SHALL NOT open the file-built graph sidecar, prove its readiness or schedule a rebuild. The snapshot revision and the registry state SHALL be the whole readiness model. Each derivation SHALL write the inbound-link rows of the pages its commit gave bytes to or removed by the scan rule of file mode's inbound-link index, so `list_inbound_links`, the inbound check of a move or delete, and the commit's guard on the linking pages answer by one rule. A page that only the store holds SHALL count as a linking page and as a link target, whether or not its file exists. While the registry job runs or its state is unknown, a graph or link reader SHALL serve its snapshot's rows with the registry notice, except that a link reader SHALL refuse with `VAULT_STORE_DERIVED_BEHIND` while the store's owner-object version is behind this build's. For the same page bytes, a store-mode graph or link reader SHALL give the answer that file mode gives, for the owner and for a restricted caller; an inbound list SHALL hold the same links, which store mode lists in path order and file mode in the order of its walk. A typed link to a page path that the store holds no page at SHALL derive as unresolved, even while a removed page's file waits for the projector.
+In store mode, every reader of graph rows SHALL read the store's rows through the request's one snapshot, and SHALL NOT open the file-built graph sidecar, prove its readiness or schedule a rebuild. The snapshot revision and the registry state SHALL be the whole readiness model. Each derivation SHALL write the inbound-link rows of the pages its commit gave bytes to or removed by the scan rule of file mode's inbound-link index, so `list_inbound_links`, the inbound check of a move or delete, and the commit's guard on the linking pages answer by one rule. A page that only the store holds SHALL count as a linking page and as a link target, whether or not its file exists. While the registry job runs or its state is unknown, a graph or link reader SHALL serve its snapshot's rows with the registry notice, except that a link reader SHALL refuse with `VAULT_STORE_DERIVED_BEHIND` while the store's owner-object version is behind this build's. For the same page bytes, a store-mode graph or link reader SHALL match file mode's page-derived answers for the owner and for a restricted caller. Stored relationships extend those answers in store mode after Stage 2 activates. For inbound links, an inbound list SHALL hold the same links, which store mode lists in path order and file mode in the order of its walk. A typed link to a page path that the store holds no page at SHALL derive as unresolved, even while a removed page's file waits for the projector.
 
 #### Scenario: A graph read never touches the sidecar or a projected file
 - **WHEN** a store-mode vault's graph sidecar is replaced by unreadable bytes and every projected page is damaged
@@ -572,6 +589,8 @@ For files the store owns, the requirements that keep derived sidecars in step wi
 
 ### Requirement: Store-mode names read the store
 In store mode, the collision check for a new page name SHALL read the store and never the projected files. A name SHALL therefore be taken from the moment its write commits, whether or not projection has run.
+
+The case-collision check SHALL ignore paths a move or deletion in the same commit vacates. The paths that remain SHALL have distinct case-insensitive keys.
 
 #### Scenario: Two quick creates that differ only in case
 - **WHEN** two governed writes create pages whose titles differ only in case, and projection has not yet written the first page

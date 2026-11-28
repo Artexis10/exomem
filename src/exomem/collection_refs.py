@@ -10,12 +10,18 @@ no row id: it names no version, so it guards no edit, and the leaf refuses it an
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
-from . import collection_profiles, memory_refs, page_ids, record_governance, vault
+from . import collection_profiles, memory_refs, page_ids, record_governance, request_budget, vault
+from . import structured_collections as collections
 from .cli_ops import OpError
+
+log = logging.getLogger(__name__)
+
+_Decision = TypeVar("_Decision")
 
 #: Pages of rows read to find one id. A collection larger than this refuses rather than guess.
 _MAX_SCAN_PAGES = 20
@@ -191,3 +197,54 @@ def bind_item(
     return bound_row(
         item_id, [(row[column], row["item_version"]) for row in found], snapshot, profile=profile, stale_ok=stale_ok
     )
+
+
+#: The remediation of a busy save's refusal for a value its collection does not declare.
+RESEND_WITH_A_DECLARED_VALUE = (
+    "Nothing was saved and nothing is held. Send the call again with a value the collection declares. If a change"
+    " that declares this value is still being saved, send the same value again once that change has committed."
+)
+
+
+# The optional proof cannot spend work proportional to a store's holdings.
+_DECLARATION_SQL_STEPS = 16_000
+
+
+def decide_on_declaration(
+    vault_root: Path,
+    collection: str,
+    budget: request_budget.RequestBudget,
+    *,
+    profile: str,
+    decide: Callable[[str, collections.CollectionManifest], _Decision],
+) -> _Decision | None:
+    """`decide` over the manifest that `collection` names, as a request thread reads it now; None where that is unknown.
+
+    A title, path, UUID or reference resolves as a read of `profile` resolves it. A collection that the store
+    owns is read from the store's last commit beside the store thread (`read_served`): it never queues behind
+    that thread and never reads the projected `_collection.md`, which can lag the store. `decide` runs inside the
+    same read, so whatever else it reads comes from that snapshot too. The read stops at `budget` and answers
+    None for any refusal, such as a busy or unserved store or a title that several collections carry. It records
+    no release: a refusal it answers None for reaches no caller, and a mutation's own resolution of its
+    collection records none either. Its decisions go to a collector that nothing emits, which a nested read with
+    its own receipt boundary joins instead of opening one that it would emit.
+    """
+    from .collection_store import runtime as store_runtime
+    from .governance import egress
+
+    def read() -> _Decision:
+        with egress.disclosure_boundary(vault_root, "record_value_check", sink=True):
+            path = resolve_collection(vault_root, collection, profile=profile)
+            return decide(path, record_governance.resolve_collection_without_receipt(vault_root, path))
+
+    try:
+        check = request_budget.ReadCheckpoint(budget, bound_store_reads=True, store_sql_steps=_DECLARATION_SQL_STEPS)
+        with request_budget.checking(check):
+            result = store_runtime.read_served(vault_root, read)
+            check()
+            return result
+    except request_budget.ReadBudgetExhausted:
+        return None
+    except Exception as error:  # noqa: BLE001 - an unknown, withheld or unreadable collection keeps the replay's own refusal
+        log.debug("a busy %s save could not read its collection's declaration: %s", profile, type(error).__name__)
+        return None

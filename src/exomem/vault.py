@@ -67,6 +67,7 @@ from .log_events import log_event
 
 if TYPE_CHECKING:
     from .graph_sync import GraphSyncCheckpoint
+    from .vault_store.relationships import Change as RelationshipChange
 
 if os.name == "nt":  # pragma: no cover - imported only on Windows
     import msvcrt
@@ -4678,6 +4679,7 @@ def _bounded_directory_entries(
     include_internal_state: bool = False,
 ) -> tuple[PathIdentity, ...]:
     """Capture a bounded descriptor-relative directory census."""
+    request_budget.checkpoint()
     try:
         descriptor = _open_directory_path(path)
     except OSError as error:
@@ -4693,6 +4695,7 @@ def _bounded_directory_entries(
         residue_names: list[str] = []
         ordinary_names: list[str] = []
         for entry in iterator:
+            request_budget.checkpoint()
             name = entry.name
             entry_relative = f"{relative}/{name}" if relative else name
             if admission is not None and not admission(entry_relative):
@@ -4712,6 +4715,7 @@ def _bounded_directory_entries(
         iterator = None
 
         for name in sorted(residue_names):
+            request_budget.checkpoint()
             if admission is not None and not admission(f"{relative}/{name}"):
                 raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory admission changed")
             _classify_batch_residue(path, descriptor, name)
@@ -4720,6 +4724,7 @@ def _bounded_directory_entries(
 
         entries: list[PathIdentity] = []
         for name in sorted(ordinary_names):
+            request_budget.checkpoint()
             if admission is not None and not admission(f"{relative}/{name}"):
                 raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory admission changed")
             try:
@@ -6378,6 +6383,7 @@ def batch_atomic_write(
     _retained_original: PathGuard | None = None,
     _payload_custody: _BatchPayloadCustody | None = None,
     _file_commit_witness: _BatchFileWitness | None = None,
+    _relationship_change: RelationshipChange | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Commit one batch while serializing all in-process vault writers.
 
@@ -6417,12 +6423,15 @@ def batch_atomic_write(
                     validate_prepared_bindings=_validate_prepared_bindings, prepare=_prepare,
                     publish_originals=_publish_originals, retained_original=_retained_original,
                     file_commit_witness=_file_commit_witness,
+                    relationship_change=_relationship_change,
                 )
             except store_batch.NoStoreChange:
                 # Only files that the store does not hold (a curation run's JSON): file-mode's.
                 pass
     if _retained_original is not None:
         raise ValueError("retained import original requires its canonical store writer")
+    if _relationship_change is not None:
+        raise ValueError("stored relationships require the canonical store writer")
     with _BATCH_COMMIT_LOCK, ExitStack() as custody_stack:
         if defer_graph_completion and (post_commit_fanout or vault_root is None):
             raise ValueError(

@@ -66,6 +66,7 @@ DEFAULT_ATTENTION_CATEGORIES: tuple[str, ...] = (
     "stale_review",
     "unprocessed_source",
     "relation_debt",
+    audit_module.RELATIONSHIP_ORPHAN,
     "entity_type_unregistered",
     # Last, and deliberately not mid-list: this queue fires on a binding a person
     # authored in a manifest, which is the `prediction_window` argument for being

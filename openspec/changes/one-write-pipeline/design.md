@@ -48,7 +48,7 @@ It reads the current state and writes nothing. It takes neither the mutation bou
 - **Commit** calls the same function under its lock, then runs the checks that only a commit can make.
 - **Store mode.** Validation reads the store's availability, a read-only check. It returns the refusal that a commit would get for a diverged store or a pending takeover. `OFF_THREAD` describes where a commit runs, not the input, so validation never reports it.
 
-**Vocabulary registry writes.** Today the access check defers the registry decision to the commit, because the vocabulary authority decides over staged files and holds a reservation for the batch (`vocabulary_gate.begin_batch`). Validation instead asks the authority for a read-only decision over the planned images, which `vocabulary_auxiliaries.planned_images` already computes. The reservation and its grant stay commit-only. A note create that registers a new project key is therefore decided at validation too.
+**Vocabulary registry writes.** Today the access check defers the registry decision to the commit, because the vocabulary authority decides over staged files and holds a reservation for the batch (`vocabulary_gate.begin_batch`). Validation asks the authority for a read-only decision over the images from `vocabulary_auxiliaries.planned_images`. The access check uses the paths allowed by that decision during validation. Only commit reserves the batch and acquires the grant. This lets validation decide a note create that registers a project key.
 
 A refusal that depends on the input arrives at validation, because both steps run the same code. A refusal that depends on state that changes between the two calls can still arrive at commit, as it does today. Examples are a concurrent write and a reservation lost to a concurrent registry change.
 
@@ -71,7 +71,7 @@ Validation binds the bytes of the pages that the caller writes, as the review ha
 The plan function runs after the leaf has chosen its paths and hashed its draft, so it cannot resolve names without rewriting bound bytes. Instead, one names function runs before the leaf plans, and every surface calls it:
 
 1. Vocabulary resolution (`vocabulary_resolution`), for the surfaces that name a domain or an entity type.
-2. Folder respelling (`respell_new_path`), which steers a new path to an existing sibling folder that differs only by case. A planned change, `reconcile-folder-names-at-write`, not yet written, extends this step to look-alike names.
+2. Folder respelling (`respell_new_path`), which steers a new path to an existing sibling folder with a matching `folder_lookalike_key`. `separator_rule_applies` selects the contexts where separators also match. Folder creation passes `leaf_is_folder=True`. `path_variants.sibling_groups` uses the same rule for the audit.
 
 The batch write never rewrites a path or a byte. The plan function refuses a planned new folder that the names function would still steer, and its error names the registered folder. That refusal catches a surface that skipped the names function.
 
@@ -90,7 +90,7 @@ The check passes the path that a planned move vacates, as `respell_new_path` tak
 
 ### D6. One parity test
 
-For each write command, the test runs one write and records the commit's plan. It then denies each planned path in turn through the access policy, and asserts that validation and commit return the same refusal code. The commands come from the tool registry. Device intake, the one validating surface outside the registry, is named in the test with a one-line reason. The import run is not a parity surface: it files through the note tools, which the test covers.
+For each write command, the test runs one write and records the commit's plan. It then denies each planned path in turn through the access policy, and asserts that validation and commit return the same refusal code. The commands come from the tool registry. Device intake, the one validating surface outside the registry, is named in the test with a one-line reason. The import run has no separate validation call. Its Source imports commit in their own batches through `adopt.commit_import_items`.
 
 For a write that touches the vocabulary registry, the test also denies the registry decision and asserts the same code at both steps. The reservation is not denied in the test, because its refusal depends on a concurrent registry change, not on the input.
 

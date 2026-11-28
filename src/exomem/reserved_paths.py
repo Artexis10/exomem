@@ -17,7 +17,7 @@ import re
 import threading
 import time
 import unicodedata
-from collections import ChainMap
+from collections import ChainMap, OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
@@ -51,6 +51,9 @@ MEDIA_PREVIEWS_DIRNAME = ".media-previews"
 # Closed portable security artifact; its contents carry no connector authority.
 CONNECTOR_BOUNDARY_DESCRIPTOR_ID = "connector-boundary"
 CONNECTOR_BOUNDARY_REQUIREMENT_NAME = ".connector-boundary.json"
+# Fixed suffix for the owner's portable relationship files.
+RELATIONS_FILE_DESCRIPTOR_ID = "store-relationships"
+RELATIONS_FILE_SUFFIX = ".evermatter-relations.jsonl"
 # Face search keeps two databases in one owner-only store: the index is rebuilt by a re-scan, the people store
 # holds the owner's names and corrections, which nothing else records.
 FACES_DIRNAME = "faces"
@@ -545,6 +548,10 @@ _REGISTRY = (
         "compiled-history", "compiled_history", StatePlacement.VAULT_CANONICAL,
         vault_store=True,
         trees=("_compiled",),
+    ),
+    InternalStateDescriptor(
+        RELATIONS_FILE_DESCRIPTOR_ID, "vault_store.relationships", StatePlacement.VAULT_CANONICAL,
+        leaf_patterns=(re.compile(r".+\.md" + re.escape(RELATIONS_FILE_SUFFIX)),),
     ),
     InternalStateDescriptor(
         CONNECTOR_BOUNDARY_DESCRIPTOR_ID,
@@ -1530,6 +1537,100 @@ def _require_literal_source_entries(
                 raise ReservedPathLeafError("IDENTITY_CHANGED")
 
 
+#: Keep the two 10,000-page fixture folders with room for ancestors. Count empty listings
+#: and oversized-folder markers as one name so they also have a bound.
+_FOLDER_NAME_LIMIT = 32_768
+
+
+@dataclass(slots=True)
+class _FolderListing:
+    version: held_fs.FileVersion
+    by_leaf: dict[str, tuple[str, ...]] | None
+    cost: int
+
+
+@dataclass(slots=True)
+class _FolderListingCache:
+    entries: OrderedDict[held_fs.StableIdentity, _FolderListing] = field(default_factory=OrderedDict)
+    cost: int = 0
+
+    def lookup(self, version: held_fs.FileVersion) -> _FolderListing | None:
+        listing = self.entries.pop(version.identity, None)
+        if listing is None:
+            return None
+        if listing.version != version:
+            self.cost -= listing.cost
+            return None
+        self.entries[version.identity] = listing
+        return listing
+
+    def add(self, listing: _FolderListing) -> None:
+        while self.cost + listing.cost > _FOLDER_NAME_LIMIT:
+            _, oldest = self.entries.popitem(last=False)
+            self.cost -= oldest.cost
+        self.entries[listing.version.identity] = listing
+        self.cost += listing.cost
+
+
+_FOLDER_LISTINGS: ContextVar[_FolderListingCache | None] = ContextVar(
+    "reserved_paths_folder_listings", default=None,
+)
+#: A folder changed this recently can change again within one timestamp tick, so its version cannot
+#: prove a listing current. Two seconds covers the coarsest change-time granularity a vault may sit on.
+_SETTLED_FOLDER_NS = 2_000_000_000
+
+
+@contextmanager
+def folder_listing_scope() -> Iterator[None]:
+    """Reuse one listing of each unchanged folder to resolve physical names within this scope.
+
+    A build that resolves thousands of pages in one flat folder would otherwise list the folder once
+    per page. A listing is reused only while the folder keeps the same held identity and change times,
+    and never outside the scope that made it.
+    """
+    token = _FOLDER_LISTINGS.set(_FolderListingCache())
+    try:
+        yield
+    finally:
+        _FOLDER_LISTINGS.reset(token)
+
+
+def _scoped_leaf_names(
+    filesystem: held_fs.HeldFilesystem, parent: held_fs.HeldDirectory, leaf: str,
+) -> tuple[tuple[str, ...], held_fs.FileVersion] | None:
+    """The matching physical names and the version of their scoped listing."""
+    listings = _FOLDER_LISTINGS.get()
+    if listings is None:
+        return None
+    before = filesystem.directory_version(parent)
+    if not before.ok:
+        return None
+    version = before.require()
+    kept = listings.lookup(version)
+    if kept is not None:
+        return None if kept.by_leaf is None else (kept.by_leaf.get(leaf, ()), version)
+    if time.time_ns() - max(version.mtime_ns, version.change_time_ns) < _SETTLED_FOLDER_NS:
+        return None
+    grouped: dict[str, list[str]] = {}
+    count = 0
+    try:
+        for count, name in enumerate(filesystem.iter_names(parent), 1):
+            if count > _FOLDER_NAME_LIMIT:
+                # Never use a partial listing. The marker avoids another cache
+                # fill attempt while calls use the full path at this version.
+                listings.add(_FolderListing(version, None, 1))
+                return None
+            grouped.setdefault(unicodedata.normalize("NFKC", name), []).append(name)
+    except held_fs.HeldFsError:
+        return None
+    after = filesystem.directory_version(parent)
+    if not after.ok or after.require() != version:
+        return None
+    by_leaf = {key: tuple(names) for key, names in grouped.items()}
+    listings.add(_FolderListing(version, by_leaf, max(1, count)))
+    return by_leaf.get(leaf, ()), version
+
+
 def _physical_leaf_candidates(
     filesystem: held_fs.HeldFilesystem,
     parent: held_fs.HeldDirectory,
@@ -1546,10 +1647,18 @@ def _physical_leaf_candidates(
     so a caller can require exactly one before trusting it.
     """
 
-    children = filesystem.children(
-        parent,
-        name_filter=lambda name: unicodedata.normalize("NFKC", name) == leaf,
-    )
+    scoped = _scoped_leaf_names(filesystem, parent, leaf)
+    children = None
+    if scoped is not None:
+        names, version = scoped
+        selected = filesystem.children(parent, names=names)
+        after = filesystem.directory_version(parent)
+        if after.ok and after.require() == version:
+            children = selected
+    if children is None:
+        children = filesystem.children(
+            parent, name_filter=lambda name: unicodedata.normalize("NFKC", name) == leaf,
+        )
     if not children.ok:
         code = children.error.code if children.error is not None else "IO_REFUSED"
         raise ReservedPathLeafError(code)

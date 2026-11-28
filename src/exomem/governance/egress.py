@@ -54,6 +54,7 @@ from .. import (
     call_spans,
     capture_metadata,
     find_corpus,
+    held_fs,
     memory_refs,
     originals,
     request_budget,
@@ -316,23 +317,20 @@ def _collector() -> DisclosureCollector | None:
 
 
 @contextmanager
-def decide_without_receipt() -> Iterator[None]:
+def decide_without_receipt(vault_root: Path) -> Iterator[None]:
     """Decide as the request would, but record no outcome and claim no path outcome.
 
     For a lookup that releases nothing, such as resolving a title to a page. A receipt row claims its
     path once, so a lookup's row would be the one kept and would hide the page's own, later release row
-    with its hash, size and ref.
+    with its hash, size and ref. A nested canonical read joins the same sink.
     """
-    token = _DISCLOSURE_COLLECTOR.set(None)
-    try:
+    with disclosure_boundary(vault_root, "decision_only", sink=True):
         yield
-    finally:
-        _DISCLOSURE_COLLECTOR.reset(token)
 
 
 def _record_outcome(value: Mapping[str, Any]) -> None:
     collector = _collector()
-    if collector is None:
+    if collector is None or collector.sink:
         return
     collector.outcomes.append(DisclosureOutcome(dict(value)))
 
@@ -340,6 +338,8 @@ def _record_outcome(value: Mapping[str, Any]) -> None:
 def _claim_path_outcome(
     collector: DisclosureCollector, identity: str, outcome: str, level: int | None,
 ) -> bool:
+    if collector.sink:
+        return False
     key = (identity, outcome, level)
     if key in collector.path_outcomes:
         return False
@@ -489,7 +489,7 @@ def _outcome_for_decision(
             and not raw_protection.marked(rel_path)):
         return
     # Nothing emits a sink's outcomes, so claiming a path in it would only hash the page for nobody.
-    if collector is None or collector.sink or not _claim_path_outcome(
+    if collector is None or not _claim_path_outcome(
         collector, rel_path, outcome, decision.level if decision is not None else None,
     ):
         return
@@ -552,7 +552,7 @@ def _receipt_bytes(vault_root: Path, rel_path: str) -> bytes | None:
 def emit_boundary_receipt(collector: DisclosureCollector) -> None:
     """Synchronously append evidence after the final representation is fixed."""
     owners = _DISCLOSURE_BOUNDARY_OWNERS.get()
-    if not owners or not owners[-1]:
+    if collector.sink or not owners or not owners[-1]:
         return
     try:
         if collector.credential_redactions:
@@ -1109,6 +1109,7 @@ def direct_text_references_verdict(
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
     resolved_here: Callable[[str], tuple[str, ...]] | None = None,
+    local_page: str | None = None,
 ) -> str:
     """Prove every wikilink in returned direct-read text remains releasable.
 
@@ -1123,14 +1124,21 @@ def direct_text_references_verdict(
     `resolved_here` answers, for a name as the text wrote it that the index does not
     resolve, the paths the caller proved it names (a page the index no longer lists).
     Such a path is still decided like any other, so it must name a page that exists.
+    `local_page` binds fragment-only links in an admitted page image to their parent.
     """
     root = Path(vault_root)
     policy = policy_module.load(root)
     who = principal if principal is not None else effective_principal()
+    targets = []
     for reference in _WIKILINK_ANYWHERE.findall(text):
         target, _ = _unwrap_reference(reference, is_wikilink_target=True)
+        if not target and local_page is not None:
+            page, fragment = vault.split_wikilink_target(reference)
+            if not page and len(fragment) > 1:
+                target = local_page
         if not content_permits(root, target, who):
             return TEXT_REFUSED
+        targets.append(target)
     if _file_policy_empty(root, policy):
         return TEXT_RELEASED
     if policy.blocked or not who.resolved:
@@ -1139,11 +1147,7 @@ def direct_text_references_verdict(
 
     paths: set[str] = set()
     names: set[str] = set()
-    for raw in _WIKILINK_ANYWHERE.findall(text):
-        # `raw` is already bracket-stripped by the regex capture, so the
-        # alias/heading split needs `is_wikilink_target=True` -- see
-        # `_unwrap_reference`'s docstring.
-        target, _explicit = _unwrap_reference(raw, is_wikilink_target=True)
+    for target in targets:
         if not target:
             return TEXT_REFUSED
         if target.endswith(".md"):
@@ -2149,9 +2153,14 @@ def content_permits(vault_root: Path, path: str, who: RequestPrincipal, *,
     if snapshot is None and artifact_copy is None and not derived:
         held = _held_fast_evidence(vault_root, path)
         if held is not None:
-            # A held proof means these exact bytes have no container binding; its scopes replay
-            # against the live ceiling so a connector change still narrows the row.
-            return (connector_boundary.permits_scope_sets(vault_root, path, who, tuple(held.scopes))
+            from .. import document_containers
+
+            # Held scopes replay against the live ceiling so a connector change still narrows the row,
+            # and a container member's current parents meet every content floor first.
+            parents = document_containers.parent_paths(held.parent) or ()
+            return (all(content_permits(vault_root, parent, who, on_unavailable=on_unavailable)
+                        for parent in parents)
+                    and connector_boundary.permits_scope_sets(vault_root, path, who, tuple(held.scopes))
                     and raw_protection.permits(vault_root, path, who))
     return (_container_parents_permit(vault_root, path, who, snapshot=snapshot, artifact_copy=artifact_copy,
                                       on_unavailable=on_unavailable)
@@ -2296,13 +2305,18 @@ _DECIDE_PATH_BATCH = Batch(
 def container_parent_allows(
     vault_root: Path, rel_path: str, *, policy: Policy, principal: RequestPrincipal,
     purpose: str | None, content: bytes | None = None,
-    artifact_copy: reserved_paths.GenericFileCopy | None = None,
+    artifact_copy: reserved_paths.GenericFileCopy | None = None, binding: originals.BinaryBinding | None = None,
 ) -> bool:
-    """Meet current parent authority before any cached child disclosure or model scoring."""
+    """Meet current parent authority before any cached child disclosure or model scoring.
+
+    ``binding`` is a container member's parent that release already validated from held evidence,
+    so the member's own bytes need no second read; it is still rechecked below.
+    """
     from .. import document_containers
 
     try:
-        parent = document_containers.parent_binding_for_path(vault_root, rel_path, content=content, artifact_copy=artifact_copy)
+        parent = binding if binding is not None else document_containers.parent_binding_for_path(
+            vault_root, rel_path, content=content, artifact_copy=artifact_copy)
         if parent is None:
             return True
         # Recheck the validated binding before using its fingerprint without a local inode.
@@ -2395,6 +2409,7 @@ def _stored_admission_many(
     identity: Callable[[], object], scalar: Callable[[str, bool], tuple[bool, bool]],
     purpose: str | None = None, tombstones: frozenset[str] = frozenset(), content_only: bool = False,
     record_outcomes: bool = False, within_request: Callable[[], object] | None = None,
+    minimum_level: int = RELEASE_FLOOR,
 ) -> dict[str, tuple[bool, bool]]:
     """Decide each ordinary scope class once; unknown facts and caller views remain scalar.
 
@@ -2413,7 +2428,7 @@ def _stored_admission_many(
     collector = _collector()
     recording = record_outcomes and collector is not None and not collector.sink
     scope_sets = {} if named is None else page_admission.scopes_many(root, paths, policy)
-    classes = memo.setdefault(("scope-admission", named, content_only), {})
+    classes = memo.setdefault(("scope-admission", named, content_only, minimum_level), {})
     denied = connector_boundary.admission_identity(root, who, policy)[0] if scope_sets else frozenset()
     check_tombstones = bool(tombstones) and not content_only
     answers = {}
@@ -2430,8 +2445,8 @@ def _stored_admission_many(
                     scopes, policy=policy, audience=who.audience_id, purpose=purpose,
                     active_grants=policy.grants,
                 )
-                # A simple page has no bridge; resolving L4 can only lower it below the release floor.
-                permitted = decision.level >= RELEASE_FLOOR
+                # A simple page has no bridge that could change this decision.
+                permitted = decision.level >= minimum_level
             classes[scopes] = (permitted, decision)
         permitted, decision = classes[scopes]
         tombstoned = check_tombstones and lifecycle.is_tombstoned_in(tombstones, path)
@@ -2527,9 +2542,10 @@ def _decide_path(
         note_checked_hash(rel_path, live_content_hash)
         if expected_content_hash is not None and expected_content_hash != live_content_hash:
             return None
-    if held is None and not container_parent_allows(
+    if (held is None or held.parent is not None) and not container_parent_allows(
             vault_root, rel_path, policy=policy, principal=who,
-            purpose=purpose, content=raw, artifact_copy=artifact_copy):
+            purpose=purpose, content=raw, artifact_copy=artifact_copy,
+            binding=held.parent if held is not None else None):
         return Decision(DISCLOSURE_MIN)
     canonical = projection_decision(
         vault_root, rel_path, policy=policy, audience=audience, purpose=purpose,
@@ -6496,12 +6512,15 @@ def exact_report_paths(paths: frozenset[str]) -> Iterator[None]:
 class _HeldEvidenceScope:
     """One request's held release proofs plus its lazily computed release identity."""
 
-    __slots__ = ("evidence", "identity", "identity_ready")
+    __slots__ = ("evidence", "identity", "identity_ready", "parents", "proven")
 
     def __init__(self, evidence: Mapping[str, Any]) -> None:
         self.evidence = evidence
         self.identity: str | None = None
         self.identity_ready = False
+        self.parents = membership_module.ParentSubjects()
+        # Reuse container binding checks. Part and frame proofs share parent subjects instead.
+        self.proven: dict[str, Any] = {}
 
 
 _HELD_REPORT_EVIDENCE: ContextVar[_HeldEvidenceScope | None] = ContextVar(
@@ -6525,8 +6544,9 @@ def _held_fast_evidence(vault_root: Path, rel_path: str) -> Any | None:
     Held evidence is accepted only for an exact report row whose file is byte-identical to the one
     the job proved: not on native Windows, not tombstoned now, the same stat witness as the job
     read, and a release-admission identity recomputed under the current policy, principal, purpose
-    and tombstones that equals the one held. Anything else — and any error — means None, which
-    sends the row down the ordinary full-proof path.
+    and tombstones that equals the one held. A row that inherits scopes gets them again from its
+    parent, never from its own bytes, and a container member's parent binding is validated again.
+    Anything else — and any error — means None, which sends the row down the ordinary full-proof path.
     """
     try:
         scope = _HELD_REPORT_EVIDENCE.get()
@@ -6537,8 +6557,7 @@ def _held_fast_evidence(vault_root: Path, rel_path: str) -> Any | None:
             return None
         if lifecycle.is_tombstoned(vault_root, rel_path):
             return None
-        info = os.stat(Path(vault_root) / rel_path)
-        if (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns) != tuple(held.witness):
+        if held_fs.stat_witness(os.stat(Path(vault_root) / rel_path)) != tuple(held.witness):
             return None
         if not scope.identity_ready:
             scope.identity_ready = True
@@ -6551,7 +6570,19 @@ def _held_fast_evidence(vault_root: Path, rel_path: str) -> Any | None:
             ))
         if scope.identity is None or scope.identity != held.identity:
             return None
-        return held
+        if held.inherits is None:
+            return held
+        if rel_path in scope.proven:
+            membership_module.require_current_held_payload(Path(vault_root), held.inherits)
+            return scope.proven[rel_path]
+        inherited, parent = membership_module.live_inherited_scopes(
+            Path(vault_root), rel_path, held.inherits, policy_module.load(Path(vault_root)),
+            parents=scope.parents,
+        )
+        proof = replace(held, scopes=(held.scopes[0] | inherited,), parent=parent)
+        if parent is not None:
+            scope.proven[rel_path] = proof
+        return proof
     except Exception:  # noqa: BLE001 - any unprovable dependency takes the full path
         return None
 
@@ -7903,6 +7934,34 @@ def release_level_for(
         size=artifact_copy.size if artifact_copy is not None else None,
     )
     return level
+
+
+def full_release_among(vault_root: Path, paths: Iterable[str]) -> frozenset[str]:
+    """Admit unit endpoints through the existing release decision without emitting receipts."""
+    wanted = list(dict.fromkeys(paths))
+    if not wanted:
+        return frozenset()
+    policy = policy_module.load(vault_root)
+    who = effective_principal()
+    tombstones = lifecycle.tombstoned_paths(vault_root)
+    purpose = _declared_purpose(vault_root, who, None)
+    grants_hash = _grants_hash(policy)
+
+    def identity() -> tuple | None:
+        return _release_admission_identity(
+            vault_root, policy, who, purpose, grants_hash, tombstones, within_request=True,
+        )
+
+    def scalar(path: str, _publish: bool) -> tuple[bool, bool]:
+        level = release_level_for(
+            vault_root, path, principal=who, policy=policy, tombstones=tombstones, record=False,
+        )
+        return (level is not None and level >= LEVEL_FULL, False)
+
+    return frozenset(path for path, (allowed, _) in _stored_admission_many(
+        vault_root, wanted, False, policy=policy, who=who, purpose=purpose,
+        tombstones=tombstones, identity=identity, scalar=scalar, minimum_level=LEVEL_FULL,
+    ).items() if allowed)
 
 
 def release_strip_resolver(

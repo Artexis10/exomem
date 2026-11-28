@@ -572,6 +572,7 @@ class _Editable:
     abs_path: Path
     rel_path: str
     original_text: str
+    raw_text: str
     raw_hash: str
     fm_text: str
     body: str
@@ -704,6 +705,7 @@ def load_editable(
                 abs_path=abs_path,
                 rel_path=rel_path,
                 original_text=original_text,
+                raw_text=raw_text,
                 raw_hash=content_hash(raw_text),
                 fm_text="",
                 body=original_text,
@@ -721,6 +723,7 @@ def load_editable(
         abs_path=abs_path,
         rel_path=rel_path,
         original_text=original_text,
+        raw_text=raw_text,
         raw_hash=content_hash(raw_text),
         fm_text=fm_match.group(1),
         body=fm_match.group(2),

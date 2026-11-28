@@ -98,6 +98,9 @@ the recent activity log shows `null`.
 
 Use `query_records`, `add_record` and `edit_record`, and the `records` operations of `inspect_memory` and `manage_memory`, for collection actions:
 
+Read `rows` in a standard `query_records` reply. To include an export, pass a supported format in
+`options.output_format`, such as `json`, `markdown` or `csv`.
+
 | Action | Use it for |
 | --- | --- |
 | `inspect` | Report a collection's contract, direct-edit drift, schema issues, template availability, or bounded audit gaps. It never repairs canonical data. |

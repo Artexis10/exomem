@@ -280,7 +280,7 @@ def _plan_page(
     if facts is None and (gone := _left_volume(root, snapshot)) is not None:
         plan.skip(rel, gone)
         return
-    facts = capture_metadata.with_name_date(root, facts, kind, snapshot.path.name)
+    facts = capture_metadata.with_name_date(root, facts, kind, capture_metadata.given_name(fields, snapshot.path.name))
     if isinstance(copy, str):
         plan.no_match(rel, copy)
     elif recovery is not None and copy is not None:

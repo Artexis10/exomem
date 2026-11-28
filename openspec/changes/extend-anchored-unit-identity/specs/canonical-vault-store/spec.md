@@ -57,7 +57,7 @@ The store itself SHALL write an anchor, in the unit's own anchor form, only into
 - **THEN** the page bytes do not change
 
 ### Requirement: Unit rows reproduce file mode and change with their page
-For the same bytes, the unit rows SHALL reproduce file mode's lexical semantic-unit rows and graph unit nodes. Typed edges SHALL be able to start or end at a unit as well as at a page. A governed write that changes a unit SHALL change the page bytes and the unit row in the same transaction.
+For the same bytes, the unit rows SHALL reproduce file mode's lexical semantic-unit rows and graph unit nodes. Typed edges SHALL be able to start or end at a unit as well as at a page. A governed write that changes a unit SHALL commit the page bytes and its derivation intent together. The derived unit row SHALL follow that intent.
 
 #### Scenario: A link reaches the exact unit
 - **WHEN** a page links to another page's unit by the anchor that unit carries
@@ -65,8 +65,10 @@ For the same bytes, the unit rows SHALL reproduce file mode's lexical semantic-u
 
 #### Scenario: Refuting one claim changes one unit
 - **WHEN** a governed write marks one claim on a page as refuted
-- **THEN** the page bytes and that unit's verdict commit in one transaction
-- **AND** the other units on the page keep their identities and verdicts
+- **THEN** the page bytes and derivation intent commit together
+- **AND** a later read sees the new verdict or reports derivation lag
+- **AND** the other units keep their verdicts and anchored identities
+- **AND** anonymous units with the same signature can receive new occurrence-bound references
 
 ### Requirement: Agents change a unit by its reference
 A writer SHALL be able to update, insert, retire, move and embed a unit by its reference, as a page write that binds the revision it read, a caller's revision being optional. An operation on an unanchored unit SHALL write its anchor in the same commit and reply with the anchored reference. A stale reference SHALL refuse with `STALE_UNIT_REFERENCE`. A move SHALL keep the unit id and rewrite inbound embeds and unit links up to a configured bound, else refuse with `UNIT_MOVE_TOO_WIDE`.
@@ -267,7 +269,7 @@ Every table and index that this change adds SHALL be an owner object under `vaul
 - **AND** when a build with them returns, the aliases resolve and the requests run
 
 ### Requirement: Aliases survive a rollback to file mode
-Before it projects, rollback to file mode SHALL rewrite, as governed writes, every embed and unit-level link that resolves only through an alias to the unit's current reference. It SHALL refuse when it cannot rewrite one, unless `--export-aliased` exports their list. It SHALL export the aliases beside the vault with its other exports, and a later migration SHALL load them.
+Before it projects, rollback to file mode SHALL rewrite, as governed writes, every embed and unit-level link that resolves only through an alias to the unit's current reference. It SHALL refuse when it cannot rewrite one, unless `--export-aliased` exports their list. It SHALL export aliases and the mapping from anchors to unit IDs. A later migration SHALL restore the unit IDs before it loads the aliases.
 
 #### Scenario: A page left on an alias matches after rollback
 - **WHEN** a restricted move leaves a hidden page's embed on the alias and the vault rolls back to file mode
@@ -285,7 +287,7 @@ Before it projects, rollback to file mode SHALL rewrite, as governed writes, eve
 ## MODIFIED Requirements
 
 ### Requirement: Semantic units are first-class store rows
-In store mode, once stage 2 ships, each semantic unit of a page SHALL be one store row with its identity, its page, its ordinal and exact byte span in the page bytes, its category, kind and text, its provenance, its verdict and its lifecycle. The identity SHALL follow the existing semantic unit identity rule: the authored anchor when the page carries one, otherwise the fingerprint-bound reference. The store SHALL derive the identity from the page bytes.
+In store mode, derived unit rows and the page summary SHALL support selection and reference binding. The summary SHALL keep candidate spans as code-point offsets into the parsed body. The identity SHALL follow the existing semantic unit identity rule: the authored anchor when the page carries one, otherwise the fingerprint-bound reference. The store SHALL derive identity facts from the page bytes, and the reader SHALL bind the reference under the page's selected registries.
 
 #### Scenario: A unit without an anchor keeps today's identity
 - **WHEN** a governed write adds a unit that carries no authored anchor and no stored relationship

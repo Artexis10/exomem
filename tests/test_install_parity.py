@@ -203,16 +203,16 @@ def test_upgrade_scripts_defer_cli_sync_until_live_version_is_verified() -> None
     assert "Sync-ExomemUvCli" in windows
     assert "Assert-ExomemInstallApplied" in windows_common
     assert windows.index("Install-ExomemPackage") < windows.index("Offline state migration...")
-    assert windows.index("Offline state migration...") < windows.index("Preflight: exomem doctor")
-    assert windows.index("Preflight: exomem doctor") < windows.index("Restarting $ServiceName")
+    assert windows.index("Offline state migration...") < windows.index("& $ServicePy @doctorArgs")
+    assert windows.index("& $ServicePy @doctorArgs") < windows.index("Restarting $ServiceName")
     assert windows.index("Restarting $ServiceName") < windows.index("Serving version:")
     assert windows.index("Serving version:") < windows.index("Sync-ExomemUvCli")
 
     assert "--cli-sync" in unix
     assert 'exomem_sync_uv_cli "$CLI_SYNC" "$SERVED"' in unix
     assert unix.index("exomem_assert_install_applied") < unix.index("Offline state migration...")
-    assert unix.index("Offline state migration...") < unix.index("Preflight: exomem doctor")
-    assert unix.index("Preflight: exomem doctor") < unix.index("Starting $SERVICE_ID...")
+    assert unix.index("Offline state migration...") < unix.index('-m exomem doctor --profile "$PROFILE"')
+    assert unix.index('-m exomem doctor --profile "$PROFILE"') < unix.index("Starting $SERVICE_ID...")
     assert unix.index("Starting $SERVICE_ID...") < unix.index("Serving version:")
     assert unix.index("Serving version:") < unix.index('exomem_sync_uv_cli "$CLI_SYNC" "$SERVED"')
 

@@ -19,8 +19,9 @@ edits and moves; the part after the dot names the version you read.
 
 ## Report only what committed
 
-Only a committed result is a save. A call that could not run, failed in transport or returned no
-committed result saved nothing: say so, and never report it saved.
+Report a save when the result confirms it. If the server says the attempt saved nothing, report
+that refusal. If a transport failure or a missing receipt hides the outcome, say it is unknown
+and follow [Retries and identity](#retries-and-identity).
 
 - Repeat the reply's `user_summary` to the user. It names each page by its title and names the
   store that took the write.
@@ -61,19 +62,23 @@ Retry only the failed items, in a new request.
 
 ## Retries and identity
 
-Every write has an identity. The same identity with the same payload replays the first reply with a
-top-level `replayed: true`, and never writes twice. A reply that defines its own `replayed` field keeps
-that field as it was. A new identity is a new write.
+While the server holds a completed receipt, the same identity and payload replay the first reply
+with a top-level `replayed: true`. A reply that defines its own `replayed` field keeps that field.
+
+For most note edits, the server derives the identity from the call. It keeps the completed receipt
+for 10 minutes on the server replica that handled the call. Outside that window, or on another
+replica, an identical append can write the same line again.
 
 1. When a call-level warming or busy error says nothing committed, wait for its `retry` hint. Then
    retry with the same identity and the same payload.
 2. When a batch stored some files and failed others, the batch is settled. Repeating it replays the
    same outcome. Retry only the failed files in a new call, under a new identity.
-3. When the acknowledgement is pending or the commit is uncertain, never send a new identity or a
-   changed payload. Replay the same call, or read the collection row by its natural key and write
-   only what is missing.
-4. When a lost reply leaves a batch's outcome unknown, repeat the identical call. It returns the
-   recorded result without writing again.
+3. When the acknowledgement is pending, the commit is uncertain or the reply is lost, repeat the
+   identical call only if it is still within its replay window and can reach the original receipt.
+   Otherwise read the page, row or Source first. Wait if the original write is still pending.
+   Once it has settled, write only what is missing.
+4. When a stale-page refusal answers your retry, your own earlier write may have changed the page.
+   Read the page before you edit it again.
 
 A read refused because the collection store is busy committed nothing; retry it later.
 
@@ -91,10 +96,11 @@ On MCP, an expected refusal arrives as normal tool content with an `error`, not 
 failure. Its `message` says what was refused and, for a write, whether anything was saved. Report
 that outcome as the message states it.
 
-When the refusal has a `retry`, it is the exact next call. For the tool you called, merge its
-`arguments` key by key into the arguments you sent: `null` clears one, and a value in angle brackets
-is yours to supply. For another tool, `retry` is the whole call. Wait `after_s` seconds when it
-gives one. With no `retry`, no repeat of the call can succeed; the `message` holds the fix.
+Follow the steps in `message` before applying `retry`. For a stale-page refusal, read the page
+and check whether the earlier edit already landed. If the change is present, skip the retry.
+When you still need the retry, merge its `arguments` into the arguments you sent for the same tool.
+`null` clears a value. Supply any value in angle brackets. For another tool, `retry` is the whole
+call. Wait `after_s` seconds when provided. With no `retry`, follow the fix in `message`.
 
 ### Relations on a write
 

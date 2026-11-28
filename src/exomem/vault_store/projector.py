@@ -29,16 +29,16 @@ import stat
 import threading
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from sqlite3 import Connection
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Protocol, TypeVar
 
 from .. import held_fs, mutation_lock, vault
 from ..collection_store import preview, runtime
-from . import mode, ownership, read, write
+from . import mode, ownership, read, relationship_files, write
 
 if TYPE_CHECKING:
     from ..collection_store.writer import CollectionWriter
@@ -285,6 +285,24 @@ class PassReport:
         return self.projected + self.removed + self.held + self.dropped
 
 
+class RelationFileProjection(Protocol):
+    """Supply the filesystem effects for sidecars during an offline rollback."""
+
+    def publish(
+        self, filesystem: held_fs.HeldFilesystem, rel: str,
+        artifact: relationship_files.PreparedFile, disk: OnDisk | None, check: Callable[[], None],
+    ) -> OnDisk: ...
+
+    def resume(
+        self, filesystem: held_fs.HeldFilesystem, rel: str,
+        artifact: relationship_files.PreparedFile, manifest_sha256: str, check: Callable[[], None],
+    ) -> OnDisk | None: ...
+
+    def remove(
+        self, filesystem: held_fs.HeldFilesystem, rel: str, disk: OnDisk, check: Callable[[], None],
+    ) -> None: ...
+
+
 class Projector:
     """Projects a store-mode vault's queued intents onto its files.
 
@@ -293,10 +311,12 @@ class Projector:
     """
 
     def __init__(
-        self, vault_root: Path, *, run: Runner | None = None, poll_seconds: float | None = None
+        self, vault_root: Path, *, run: Runner | None = None, poll_seconds: float | None = None,
+        relation_files: RelationFileProjection | None = None,
     ) -> None:
         self._root = Path(vault_root)
         self._run = run or store_thread_runner(self._root, operation="vault_store_projection")
+        self._relation_files = relation_files
         self._poll_seconds = POLL_SECONDS if poll_seconds is None else poll_seconds
         #: A temporary older than this process belongs to a publication that died with its owner.
         self._born_ns = time.time_ns()
@@ -495,7 +515,9 @@ class Projector:
             # A write is text the store holds, so only a page path fits.
             allowed = owner is ownership.Ownership.PAGE
         else:
-            allowed = owner is not ownership.Ownership.NONE
+            allowed = owner is not ownership.Ownership.NONE or (
+                intent.operation == "delete" and ownership.relation_source(intent.path) is not None
+            )
         if not allowed:
             raise Deferred("the store does not own this path")
         if intent.operation == "delete":
@@ -515,8 +537,37 @@ class Projector:
         if page is None:
             raise Deferred("a write intent names a path with no stored page")
         disk = observe(filesystem, intent.path)
-        verdict = _judge_write(facts, None if disk is None else disk.sha256)
-        self._apply_write(filesystem, facts, disk, verdict, report)
+        with ExitStack() as staged:
+            body, artifact, obsolete = self._prepare_relationship_projection(page, intent, staged)
+            projected = hashlib.sha256(body).hexdigest() if body is not None else None
+            verdict = _judge_write(facts, None if disk is None else disk.sha256, projected=projected)
+            self._apply_write(filesystem, facts, disk, verdict, report, body, artifact, obsolete)
+
+    def _prepare_relationship_projection(
+        self, page: read.PageMeta, intent: Intent, staged: ExitStack,
+    ) -> tuple[bytes | None, relationship_files.PreparedFile | None, str | None]:
+        if not ownership.is_markdown(page.path):
+            return None, None, None
+        related_path = relationship_files.path_for(page.path)
+        with read.snapshot(self._root) as view:
+            cursor = view.connection.execute(
+                "SELECT revision, EXISTS (SELECT 1 FROM store_manifest WHERE path = ?) "
+                "FROM store_projection_queue WHERE path = ?", (related_path, page.path),
+            ).fetchone()
+            if cursor is None or cursor[0] != intent.revision or view.page_meta(page.path) != page:
+                raise Deferred("the page projection changed while it was prepared")
+            lines = tuple(relationship_files.projection_lines(view.connection, page.path))
+            artifact = staged.enter_context(relationship_files.prepare_file(
+                view.connection, page.path, intent.revision,
+                canonical_sha256=page.sha256 if lines else None,
+            ))
+            if not lines:
+                obsolete = related_path if artifact is None and cursor[1] else None
+                return None, artifact, obsolete
+            stored = view.page(page.path)
+            if stored is None or hashlib.sha256(stored.body).hexdigest() != page.sha256:
+                raise Deferred("the stored page does not match its recorded hash")
+            return relationship_files.splice_block(stored.body, lines), artifact, None
 
     def _apply_write(
         self,
@@ -525,9 +576,13 @@ class Projector:
         disk: OnDisk | None,
         verdict: Judgement,
         report: PassReport,
+        body: bytes | None = None,
+        artifact: relationship_files.PreparedFile | None = None,
+        obsolete: str | None = None,
     ) -> None:
-        page, manifest = facts.page, facts.manifest
+        page, manifest, intent = facts.page, facts.manifest, facts.intent
         assert page is not None
+        assert intent is not None
         if verdict is Judgement.HOLD_DELETE:
             assert manifest is not None
             self._hold(
@@ -546,10 +601,11 @@ class Projector:
             # A retry after a refused flush or install finds the file in place. It cannot know which
             # folders the first attempt made, so every folder up to the root is flushed first.
             _flush_through_root(filesystem, _split(facts.path)[0])
-            self._record_projected(page, disk.size, disk.mtime_ns)
+            related = self._project_relation_file(filesystem, intent, artifact, report)
+            self._record_projected(page, disk, intent.revision, related, obsolete)
             report.projected += 1
         else:
-            body = self._stored_body(page)
+            body = body if body is not None else self._stored_body(page)
             if body is None:
                 return  # a commit changed the page meanwhile; its intent comes up next pass
             installed = self._with_authority(
@@ -558,14 +614,65 @@ class Projector:
                     allocation_root=self._root if facts.intent and facts.intent.media_allocation else None,
                 )
             )
-            self._record_projected(page, installed.size, installed.mtime_ns)
+            related = self._project_relation_file(filesystem, intent, artifact, report)
+            self._record_projected(page, installed, intent.revision, related, obsolete)
             report.projected += 1
+
+    def _project_relation_file(
+        self, filesystem: held_fs.HeldFilesystem, intent: Intent,
+        artifact: relationship_files.PreparedFile | None, report: PassReport,
+    ) -> tuple[str, OnDisk] | None:
+        if artifact is None:
+            return None
+        rel = relationship_files.path_for(intent.path)
+        facts = self._facts(rel)
+        if facts.held:
+            return None
+        disk = observe(filesystem, rel)
+        manifest = facts.manifest
+        relation_files = self._relation_files
+        if disk is not None and disk.sha256 == artifact.sha256:
+            _flush_through_root(filesystem, _split(rel)[0])
+            return rel, disk
+        if manifest is not None and disk is None:
+            if relation_files is not None:
+                restored = self._with_authority(
+                    lambda check: relation_files.resume(filesystem, rel, artifact, manifest.sha256, check),
+                )
+                if restored is not None:
+                    return rel, restored
+            self._hold(
+                report, rel, HELD_DELETE, base_revision=manifest.revision,
+                store_revision=intent.revision, sha256=manifest.sha256, body=None,
+            )
+            return None
+        if disk is not None and (manifest is None or disk.sha256 != manifest.sha256):
+            self._hold_edit(filesystem, report, facts, store_revision=intent.revision)
+            return None
+        if relation_files is not None:
+            installed = self._with_authority(
+                lambda check: relation_files.publish(filesystem, rel, artifact, disk, check),
+            )
+        else:
+            installed = self._with_authority(
+                lambda check: _publish(filesystem, rel, artifact.data, disk, check, sha256=artifact.sha256),
+            )
+        return rel, installed
 
     def _project_delete(
         self, filesystem: held_fs.HeldFilesystem, facts: Facts, report: PassReport
     ) -> None:
         intent = facts.intent
         assert intent is not None
+        if (
+            facts.manifest is not None
+            and facts.manifest.revision > intent.revision
+            and ownership.relation_source(intent.path) is not None
+        ):
+            # A replacement page has projected a new relations file at this path.
+            self._run(lambda writer: _drop_intent(writer, intent.path, intent.revision))
+            report.dropped += 1
+            return
         disk = observe(filesystem, intent.path)
         removed = report.removed
         if self._remove(filesystem, facts, disk, report, store_revision=None):
@@ -595,7 +702,11 @@ class Projector:
             return True
         if verdict is Removal.UNLINK:
             assert disk is not None
-            self._with_authority(lambda check: _unlink(filesystem, facts.path, disk, check))
+            relation_files = self._relation_files
+            if relation_files is not None and ownership.relation_source(facts.path) is not None:
+                self._with_authority(lambda check: relation_files.remove(filesystem, facts.path, disk, check))
+            else:
+                self._with_authority(lambda check: _unlink(filesystem, facts.path, disk, check))
             report.removed += 1
             return True
         if verdict is Removal.LEAVE:
@@ -624,10 +735,26 @@ class Projector:
         old = self._facts(intent.from_path)
         if old.held:
             return
-        old_disk = observe(filesystem, old.path)
+        # An outside rename moves the manifest with the page and queues the relationship artifacts.
+        already_moved = facts.manifest is not None and facts.manifest.revision == intent.revision
+        old_disk = None if already_moved else observe(filesystem, old.path)
         new_disk = observe(filesystem, intent.path)
+        old_relation = relationship_files.path_for(old.path)
+        if ownership.relation_source(old_relation) is not None:
+            related = self._facts(old_relation)
+            if related.manifest is not None and not related.held:
+                related_disk = observe(filesystem, old_relation)
+                if self._remove(filesystem, related, related_disk, report, store_revision=None):
+                    self._record_removed(old_relation, intent.revision)
+        with read.snapshot(self._root) as view:
+            related_page = view.connection.execute(
+                "SELECT 1 FROM store_unit_ids WHERE parent_path=?1"
+                " UNION ALL SELECT 1 FROM store_relationships "
+                "WHERE target_page_path=?1 AND retired_revision IS NULL LIMIT 1", (page.path,),
+            ).fetchone()
         if (
-            old_disk is not None
+            related_page is None
+            and old_disk is not None
             and old.manifest is not None
             and old.manifest.sha256 == page.sha256 == old_disk.sha256
             and new_disk is None
@@ -646,9 +773,10 @@ class Projector:
             # A person's file at the new path is held before the old file goes: the old one stays.
             self._apply_write(filesystem, facts, new_disk, verdict, report)
             return
-        if not self._remove(filesystem, old, old_disk, report, store_revision=None):
-            return
-        self._with_authority(lambda check: _move_parts(filesystem, old.path, intent.path, check))
+        if not already_moved:
+            if not self._remove(filesystem, old, old_disk, report, store_revision=None):
+                return
+            self._with_authority(lambda check: _move_parts(filesystem, old.path, intent.path, check))
         self._record_move_split(intent, old.path)
         self._project(filesystem, intent.path, report)
 
@@ -793,16 +921,34 @@ class Projector:
 
     # -- bookkeeping, each one short transaction on the store thread -----------------------------
 
-    def _record_projected(self, page: read.PageMeta, size: int, mtime_ns: int) -> None:
+    def _record_projected(
+        self, page: read.PageMeta, disk: OnDisk, revision: int,
+        related: tuple[str, OnDisk] | None, obsolete: str | None,
+    ) -> None:
         """The file holds ``page``'s bytes: record it, and drop the intent unless a newer waits."""
 
         def work(writer: CollectionWriter) -> None:
             # The projection manifest and queue are the vault store's own tables.
             with writer.handle.transaction(collection_free=True) as tx:
-                record_file(tx, page.path, page.sha256, size, mtime_ns, page.revision)
+                if disk.sha256 == page.sha256:
+                    record_file(tx, page.path, page.sha256, disk.size, disk.mtime_ns, page.revision)
+                else:
+                    write.record_manifest(
+                        tx, page.path, disk.sha256, disk.size, disk.mtime_ns, page.revision,
+                        canonical_sha256=page.sha256,
+                    )
+                if related is not None:
+                    rel, projected = related
+                    write.record_manifest(tx, rel, projected.sha256, projected.size, projected.mtime_ns, revision)
+                elif obsolete is not None:
+                    tx.execute(
+                        "INSERT OR IGNORE INTO store_projection_queue(path, revision, operation, queued_at) "
+                        "SELECT path, ?, 'delete', ? FROM store_manifest WHERE path = ? AND revision <= ?",
+                        (revision, write.timestamp(), obsolete, revision),
+                    )
                 tx.execute(
                     "DELETE FROM store_projection_queue WHERE path = ? AND revision <= ?",
-                    (page.path, page.revision),
+                    (page.path, revision),
                 )
 
         self._run(work)
@@ -918,7 +1064,7 @@ class Judgement(enum.Enum):
     HOLD_DELETE = enum.auto()
 
 
-def _judge_write(facts: Facts, sha256: str | None) -> Judgement:
+def _judge_write(facts: Facts, sha256: str | None, *, projected: str | None = None) -> Judgement:
     """Whether the file with ``sha256`` at a path (None: no file) may be left, replaced or
     written, or is a person's, held."""
     page, manifest = facts.page, facts.manifest
@@ -931,9 +1077,9 @@ def _judge_write(facts: Facts, sha256: str | None) -> Judgement:
         if manifest is not None and not facts.removed:
             return Judgement.HOLD_DELETE
         return Judgement.PUBLISH
-    if sha256 == page.sha256:
+    if sha256 == (projected or page.sha256):
         return Judgement.IN_PLACE
-    if sha256 not in facts.own_hashes:
+    if sha256 != page.sha256 and sha256 not in facts.own_hashes:
         return Judgement.HOLD_EDIT
     return Judgement.PUBLISH
 
@@ -1350,21 +1496,23 @@ def _retrying(operation: Callable[[], held_fs.HeldResult]) -> None:
 def _publish(
     filesystem: held_fs.HeldFilesystem,
     rel: str,
-    body: bytes,
+    body: bytes | held_fs.Chunks,
     existing: OnDisk | None,
     check: Callable[[], None],
     *,
     allocation_root: Path | None = None,
+    sha256: str | None = None,
+    rename_new: bool = False,
 ) -> OnDisk:
     """Write ``body`` to a new file, or replace ``existing`` only while it is still that exact file.
 
     The held filesystem compares the file's identity and hash again just before the replacing
-    rename and makes the temporary durable before it. A create-only install is a hard link, and a
-    new folder is a bare mkdir, and neither flushes a folder: so this flushes the file's folder
+    rename and makes the temporary durable before it. A create-only install uses a hard link or,
+    with ``rename_new``, a no-replace rename. This flushes the file's folder
     after the install, and the folder above each folder that it made, before it returns.
 
     ``check`` runs after the bytes are staged, at the publication's last hook before it installs
-    them: ``validate_existing`` before a replacing rename, ``prepare`` before a create-only link.
+    them: ``validate_existing`` before a replacement, ``before_install`` before a create-only install.
     """
     folder, leaf = _split(rel)
     opened, created = _open_creating(filesystem, folder)
@@ -1380,6 +1528,7 @@ def _publish(
             try:
                 with capacity as room:
                     if room is not None:
+                        assert isinstance(body, bytes)
                         room.require(len(body))
                     result = held_fs.publish_bytes(
                         filesystem,
@@ -1388,12 +1537,10 @@ def _publish(
                         body,
                         expected_identity=None if existing is None else existing.identity,
                         expected_sha256=None if existing is None else existing.sha256,
+                        rename_new=rename_new,
                         validate_existing=None if existing is None else (lambda _held: check()),
-                        prepare=(
-                            (lambda _staged: check())
-                            if existing is None
-                            else _keep_permissions(existing.permissions)
-                        ),
+                        prepare=None if existing is None else _keep_permissions(existing.permissions),
+                        before_install=check if existing is None else None,
                     )
             except OpError as refused:
                 if refused.code == media_capacity.UPLOAD_SPACE_BUSY:
@@ -1406,7 +1553,10 @@ def _publish(
         _retrying(publish)
         _flush(filesystem, parent)
         _flush_above(filesystem, created)
-        return _installed(filesystem, parent, leaf, published[-1], hashlib.sha256(body).hexdigest())
+        if sha256 is None:
+            assert isinstance(body, bytes)
+            sha256 = hashlib.sha256(body).hexdigest()
+        return _installed(filesystem, parent, leaf, published[-1], sha256)
 
 
 def _open_creating(

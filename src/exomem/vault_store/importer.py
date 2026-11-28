@@ -8,6 +8,8 @@ The importer reads those changes from the disk and settles each one for its path
   hash alone: the projection manifest, the stored page, and the bytes that the audit trail shows
   Evermatter wrote after the manifest. This is the projector's own rule (``Facts.own_hashes``), so
   Evermatter's projections cause no import and no hold.
+* Removing the whole managed relationships block queues a projection of the page. The importer
+  keeps any authored body edit and reprojects a block-only change without an import.
 * A change that the store has not moved past is an audited import. "Not moved past" is one test,
   the ``Expect(revision, projected=True)`` of the commit that adopts the bytes: the manifest
   names the stored revision and bytes, no projection is queued, and nothing is held.
@@ -48,7 +50,7 @@ from .. import held_fs, lexstore, media_capacity, memory_refs, private_state, st
 from ..cli_ops import OpError
 from ..collection_store import ownership as collection_ownership
 from ..media_store import DEFER, SUPPRESS
-from . import media, ownership, projector, read, write
+from . import media, ownership, projector, read, relationship_files, write
 from .projector import HELD_DELETE, HELD_EDIT, Facts, OnDisk, Runner
 
 if TYPE_CHECKING:
@@ -96,6 +98,8 @@ class Verdict(enum.Enum):
 
     #: Nothing to settle: the file holds bytes of Evermatter's, or the store expects it missing.
     OWN = enum.auto()
+    #: The file holds the stored page without its managed relationships block.
+    REPROJECT = enum.auto()
     #: A person's bytes are at the path: import them, or hold them.
     ADOPT = enum.auto()
     #: A projected file is missing and Evermatter did not remove it: a person deleted it.
@@ -112,6 +116,15 @@ def judge(facts: Facts, disk: OnDisk | None) -> Verdict:
     of a delete is the exception that clears, because the file is back and nothing was lost. A
     binary's hold keeps no bytes, so it settles nothing.
     """
+    if ownership.relation_source(facts.path) is not None:
+        if disk is None:
+            if facts.intent is not None and facts.intent.operation == "delete":
+                return Verdict.OWN
+            return Verdict.GONE if facts.manifest is not None and not facts.held else Verdict.OWN
+        recorded = None if facts.manifest is None else facts.manifest.sha256
+        if disk.sha256 == recorded:
+            return Verdict.CLEAR if facts.held_kind == HELD_DELETE else Verdict.OWN
+        return Verdict.OWN if disk.sha256 == facts.held_sha256 else Verdict.ADOPT
     page = ownership.classify(facts.path) is ownership.Ownership.PAGE
     if not page and facts.moves_away and not facts.held:
         # The file at a queued binary move's source is the projector's to move: the writer renames
@@ -131,9 +144,22 @@ def judge(facts: Facts, disk: OnDisk | None) -> Verdict:
         return Verdict.CLEAR
     if page and _orphaned_manifest(facts):
         return Verdict.ADOPT
+    if (
+        disk.sha256 == facts.stored_sha256 and facts.intent is None and not facts.held
+        and _had_managed_block(facts)
+    ):
+        return Verdict.REPROJECT
     if disk.sha256 in facts.own_hashes or disk.sha256 in (facts.stored_sha256, facts.held_sha256):
         return Verdict.OWN
     return Verdict.ADOPT
+
+
+def _had_managed_block(facts: Facts) -> bool:
+    page, manifest = facts.page, facts.manifest
+    return (
+        page is not None and manifest is not None and page.revision == manifest.revision
+        and page.sha256 != manifest.sha256
+    )
 
 
 def _orphaned_manifest(facts: Facts) -> bool:
@@ -182,7 +208,7 @@ class ImportReport:
     managed: list[str] = field(default_factory=list)
     #: Media binaries that a media store read holds open now, left for the watcher to look at again.
     deferred: list[str] = field(default_factory=list)
-    #: Every path that was examined and carried no change, whatever its kind.
+    #: Paths whose stored content needed no change or hold.
     unchanged: int = 0
     #: What a sweep's walk of the lexical corpus cost: the Markdown files it reached, and the
     #: seconds it took, which include the walk itself. Zero for an import, which walks nothing.
@@ -265,7 +291,7 @@ class Importer:
     @staticmethod
     def takes(rel: str) -> bool:
         """Whether the store owns this path: the importer settles it, not the file-mode watcher."""
-        return ownership.classify(rel) is not ownership.Ownership.NONE
+        return ownership.classify(rel) is not ownership.Ownership.NONE or ownership.relation_source(rel) is not None
 
     # -- the two entry points ---------------------------------------------------------------------
 
@@ -304,7 +330,7 @@ class Importer:
             seen: set[str] = set()
             clean: dict[str, tuple[held_fs.FileVersion, str]] = {}
             differing: list[str] = []
-            for owned in ownership.iter_owned(self._root, on_skip=skipped.append):
+            for owned in ownership.iter_owned(self._root, on_skip=skipped.append, include_relations=True):
                 rel = owned.rel
                 seen.add(rel)
                 binary = ownership.classify(rel) is ownership.Ownership.BINARY
@@ -385,14 +411,20 @@ class Importer:
 
         A manifest row counts only beside its page. With no page it is an Evermatter removal in flight or
         a page that the store lost, which ``judge`` tells apart, so the sweep settles the file.
+        A decorated page's canonical hash also goes to ``judge`` in case its block needs recovery.
         """
         known: dict[str, set[str]] = defaultdict(set)
         with read.snapshot(self._root) as view:
             for meta in view.pages():
                 known[meta.path].add(meta.sha256)
-            for path, sha256 in view.connection.execute(
-                "SELECT path, sha256 FROM store_manifest WHERE path IN (SELECT path FROM store_pages)"
+            for path, sha256, canonical_sha256 in view.connection.execute(
+                "SELECT m.path, m.sha256, CASE WHEN m.revision = p.revision THEN p.sha256 END "
+                "FROM store_manifest AS m LEFT JOIN store_pages AS p ON p.path = m.path "
+                "WHERE p.path IS NOT NULL OR m.path LIKE '%' || ?",
+                (relationship_files.RELATIONS_FILE_SUFFIX,),
             ):
+                if canonical_sha256 is not None:
+                    known[path].discard(canonical_sha256)
                 known[path].add(sha256)
             for path, sha256 in view.connection.execute("SELECT path, sha256 FROM store_binaries"):
                 known[path].add(sha256)
@@ -500,8 +532,10 @@ class Importer:
         with read.snapshot(self._root) as view:
             return {row[0] for row in view.connection.execute(
                 f"WITH pairs(id, src, dst, revision, sha256) AS (VALUES {values}) "
-                "SELECT id FROM pairs WHERE EXISTS (SELECT 1 FROM store_pages "
-                "WHERE path = pairs.src AND revision = pairs.revision AND sha256 = pairs.sha256) "
+                "SELECT id FROM pairs WHERE EXISTS (SELECT 1 FROM store_pages AS p "
+                "JOIN store_manifest AS m ON m.path = p.path "
+                "WHERE p.path = pairs.src AND p.revision = pairs.revision AND m.revision = p.revision "
+                "AND m.sha256 = pairs.sha256) "
                 "AND NOT EXISTS (SELECT 1 FROM store_pages WHERE path = pairs.dst) "
                 "AND NOT EXISTS (SELECT 1 FROM store_binaries WHERE path = pairs.dst) "
                 "AND NOT EXISTS (SELECT 1 FROM store_manifest WHERE path = pairs.dst) "
@@ -590,7 +624,7 @@ class Importer:
                 report.unjudged.setdefault(rel, RENAME_PENDING)
             if rel in report.unjudged:
                 continue
-            if ownership.classify(rel) is ownership.Ownership.NONE:
+            if not self.takes(rel):
                 self._judge_unowned(filesystem, rel, report)
                 continue
             disk = self._observe(filesystem, rel, report)
@@ -602,7 +636,9 @@ class Importer:
                 report.unchanged += 1
             else:
                 looks[rel] = _Look(rel, facts, disk, verdict)
-        renames = _pair_renames(looks, moves)
+        renames = _pair_renames(
+            {rel: look for rel, look in looks.items() if ownership.relation_source(rel) is None}, moves,
+        )
         renamed = {path for rename in renames for path in (rename.src, rename.dst)}
         singles = self._without_media_store_changes(
             [rel for rel in looks if rel not in renamed], report
@@ -632,6 +668,9 @@ class Importer:
         """
         settled: list[str] = []
         for rel in rels:
+            if ownership.relation_source(rel) is not None:
+                settled.append(rel)
+                continue
             answer = media.managed(self._root, rel)
             if answer is None:
                 settled.append(rel)
@@ -651,8 +690,8 @@ class Importer:
         A binary is recorded by hash and size, and a delete or a clearing needs no bytes, so those
         keep the read that judged them. The bytes of a page come from one read with their hash.
         """
-        page = ownership.classify(look.rel) is ownership.Ownership.PAGE
-        if look.verdict is not Verdict.ADOPT or not page:
+        readable = ownership.classify(look.rel) is ownership.Ownership.PAGE or ownership.relation_source(look.rel) is not None
+        if look.verdict is not Verdict.ADOPT or not readable:
             return look.disk
         return self._observe(filesystem, look.rel, report, keep_body=True)
 
@@ -734,9 +773,11 @@ class Importer:
             change = write.StoreChange(
                 write.Origin.OUTSIDE_EDITOR,
                 "an outside rename",
-                moves=(write.PageMove(rename.src, rename.dst, on_disk=True),),
+                moves=(write.PageMove(
+                    rename.src, rename.dst, on_disk=True, on_disk_sha256=rename.disk.sha256,
+                ),),
                 expect={
-                    rename.src: write.Expect(revision=rename.revision, sha256=rename.disk.sha256, projected=True),
+                    rename.src: write.Expect(revision=rename.revision),
                     rename.dst: write.Expect(absent=True),
                 },
             )
@@ -818,6 +859,16 @@ class Importer:
             return
         if not self._unchanged_since_read(filesystem, rel, disk, report):
             return
+        if verdict is Verdict.REPROJECT:
+            assert facts.page is not None and facts.manifest is not None
+            if write.queue_projection_repair(writer, facts.page, facts.manifest.sha256):
+                report.unchanged += 1
+            else:
+                report.unjudged[rel] = "the page's projection changed before it could be repaired"
+            return
+        if ownership.relation_source(rel) is not None:
+            self._settle_relation_file(writer, rel, facts, disk, verdict, report)
+            return
         page = ownership.classify(rel) is ownership.Ownership.PAGE
         if verdict is Verdict.CLEAR:
             self._clear_held_delete(writer, rel)
@@ -835,6 +886,37 @@ class Importer:
                 self._import_page(writer, rel, facts, disk, report)
             else:
                 self._import_binary(writer, rel, facts, disk, report)
+
+    def _settle_relation_file(
+        self, writer: CollectionWriter, rel: str, facts: Facts, disk: OnDisk | None,
+        verdict: Verdict, report: ImportReport,
+    ) -> None:
+        if verdict is Verdict.CLEAR:
+            self._clear_held_delete(writer, rel)
+            report.cleared.append(rel)
+            return
+        if disk is None:
+            assert facts.manifest is not None
+            self._hold(writer, rel, HELD_DELETE, facts, facts.manifest.sha256, None, report)
+            return
+        if disk.body is not None and not facts.held:
+            try:
+                decoded = relationship_files.parse(disk.body.splitlines(keepends=True))
+                change = relationship_files.plan_import(
+                    writer.connection, rel, decoded, actor=write.Origin.OUTSIDE_EDITOR.value,
+                    allowed_type=relationship_files.type_admission(self._root, writer.connection, decoded.source),
+                )
+                write.commit(writer, write.StoreChange(
+                    write.Origin.OUTSIDE_EDITOR, "an edited relations file",
+                    relationship_change=change,
+                    files_seen=(write.FileSeen(rel, disk.sha256, disk.size, disk.mtime_ns),),
+                ))
+            except (OpError, sqlite3.IntegrityError):
+                pass  # Keep the exact external bytes for the owner to resolve.
+            else:
+                report.imported.append(rel)
+                return
+        self._hold(writer, rel, HELD_EDIT, facts, disk.sha256, disk.body, report)
 
     @staticmethod
     def _unchanged_since_read(
@@ -875,9 +957,16 @@ class Importer:
             if base is None or _orphaned_manifest(facts)
             else write.Expect(revision=base.revision, projected=True)
         )
-        put = write.PagePut(rel, disk.body, on_disk_mtime_ns=disk.mtime_ns)
+        try:
+            put, seen = write.outside_page(
+                writer.connection, rel, disk.body, disk.sha256, disk.mtime_ns,
+            )
+        except OpError:
+            self._hold(writer, rel, HELD_EDIT, facts, disk.sha256, disk.body, report)
+            return
         change = write.StoreChange(
-            write.Origin.OUTSIDE_EDITOR, "an outside change", puts=(put,), expect={rel: expect}
+            write.Origin.OUTSIDE_EDITOR, "an outside change", puts=(put,),
+            expect={rel: expect}, files_seen=seen,
         )
         try:
             write.commit(writer, change)
@@ -965,13 +1054,16 @@ class Importer:
         report: ImportReport,
     ) -> None:
         stored = facts.page or facts.binary
+        revision = stored.revision if stored is not None else None
+        if ownership.relation_source(rel) is not None and facts.manifest is not None:
+            revision = facts.manifest.revision
         with writer.handle.transaction() as tx:
             projector.record_held(
                 tx,
                 rel,
                 kind,
                 None if facts.manifest is None else facts.manifest.revision,
-                None if stored is None else stored.revision,
+                revision,
                 sha256,
                 body,
             )
@@ -1207,11 +1299,13 @@ def _pair_renames(looks: Mapping[str, _Look], hints: Mapping[str, str]) -> list[
     only one in the batch with those bytes, so that two copies of one file cannot swap identities.
     A page pairs with a page and a binary with a binary.
     """
-    gone = {
-        rel: look
-        for rel, look in looks.items()
-        if look.verdict is Verdict.GONE and look.facts.stored_sha256 is not None
-    }
+    gone = {}
+    for rel, look in looks.items():
+        if look.verdict is Verdict.GONE:
+            facts = look.facts
+            recorded = facts.manifest if facts.page is not None else facts.binary
+            if recorded is not None:
+                gone[rel] = recorded
     created = {
         rel: look
         for rel, look in looks.items()
@@ -1225,7 +1319,7 @@ def _pair_renames(looks: Mapping[str, _Look], hints: Mapping[str, str]) -> list[
         disk = created[dst].disk
         return (
             disk is not None
-            and gone[src].facts.stored_sha256 == disk.sha256
+            and gone[src].sha256 == disk.sha256
             and ownership.classify(src) is ownership.classify(dst)
         )
 
@@ -1234,9 +1328,9 @@ def _pair_renames(looks: Mapping[str, _Look], hints: Mapping[str, str]) -> list[
         if dst in created and src in gone and src not in pairs.values() and same_bytes(src, dst):
             pairs[dst] = src
     by_stored: dict[tuple[ownership.Ownership, str], list[str]] = defaultdict(list)
-    for rel, look in gone.items():
-        if rel not in pairs.values() and look.facts.stored_sha256 is not None:
-            by_stored[(ownership.classify(rel), look.facts.stored_sha256)].append(rel)
+    for rel, recorded in gone.items():
+        if rel not in pairs.values():
+            by_stored[(ownership.classify(rel), recorded.sha256)].append(rel)
     by_disk: dict[tuple[ownership.Ownership, str], list[str]] = defaultdict(list)
     for rel, look in created.items():
         if rel not in pairs and look.disk is not None:
@@ -1248,9 +1342,7 @@ def _pair_renames(looks: Mapping[str, _Look], hints: Mapping[str, str]) -> list[
     renames = []
     for dst, src in sorted(pairs.items()):
         disk = created[dst].disk
-        source = gone[src].facts
         page = ownership.classify(dst) is ownership.Ownership.PAGE
-        stored = source.manifest if page else source.binary
-        if disk is not None and stored is not None:
-            renames.append(_Rename(src, dst, disk, page, stored.revision))
+        if disk is not None:
+            renames.append(_Rename(src, dst, disk, page, gone[src].revision))
     return renames

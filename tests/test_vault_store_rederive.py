@@ -65,6 +65,38 @@ def revision(root):
     return rows(root, "SELECT revision FROM store_mode")[0][0]
 
 
+def test_unit_links_report_lag_until_the_older_store_finishes_backfill(
+    stored, writer, monkeypatch,  # noqa: F811
+):
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "relationship evidence", puts=(
+            write.PagePut(ALPHA, b"# Alpha\n\nRefer to [[Beta#^signal]].\n"),
+            write.PagePut(BETA, b"# Beta\n\n- [rule] A signal. ^signal\n"),
+        ),
+    ))
+    graph = epistemic_graph.EpistemicGraphIndex(stored)
+    assert graph.unit_links(ALPHA).total == 1
+
+    with writer.handle.transaction() as tx:
+        tx.execute("UPDATE store_meta SET value = '5' WHERE key = ?", (rederive.OWNER_SCHEMA,))
+        tx.execute("DROP TABLE graph_unit_links")
+    monkeypatch.setattr(rederive, "BATCH_PAGES", 1)
+    assert graph.unit_links(ALPHA).state == "lag"
+    assert rederive.settle(stored, writer) == rederive.ADVANCED
+    assert graph.unit_links(ALPHA).total is None
+    settle_to_the_end(stored, writer)
+    assert graph.unit_links(ALPHA).total == 1
+
+    # An older writer advances the ordinary graph generation without proving the new projection.
+    with writer.handle.transaction() as tx:
+        tx.execute("UPDATE graph_meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'generation'")
+    assert graph.unit_links(ALPHA).state == "lag"
+    assert mode.status(stored)["registry"] == mode.UNKNOWN
+    settle_to_the_end(stored, writer)
+    assert graph.unit_links(ALPHA).total == 1
+    assert mode.status(stored)["registry"] == rederive.CURRENT
+
+
 @contextmanager
 def store_writer(root):
     """A second store writer, once a fixture's is closed, as a restarted service opens one."""
@@ -883,19 +915,9 @@ def served_store(tmp_path, monkeypatch):
                 "VALUES (1, 'store', 5, 'now', 'test')"
             )
             migrate.create_owner_schema(tx)
-            for key in (rederive.OVERLAY_REVISION, rederive.REGISTRY_REVISION):
-                tx.execute("INSERT INTO store_meta(key, value) VALUES (?, '5')", (key,))
-            # As this build's migration records it: the store holds this build's owner objects.
-            tx.execute(
-                "INSERT INTO store_meta(key, value) VALUES (?, ?)",
-                (rederive.OWNER_SCHEMA, str(rederive.OWNER_SCHEMA_VERSION)),
-            )
-            tx.execute(
-                "INSERT INTO store_meta(key, value) VALUES (?, ?)",
-                (rederive.PARSER_VERSION, str(semantic_index.PARSER_VERSION)),
-            )
             lexstore.create_catalogue_schema(tx)
             lexstore.stamp_catalogue_schema(tx)
+            rederive.record_derived_from_files(tx, 5)
     monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
     # The state manifest of a real migration is another suite's subject; this one needs the answer.
     monkeypatch.setattr(mode, "store_mode_for_reads", lambda _root: True)

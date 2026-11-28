@@ -14,7 +14,7 @@ The owner decided on 2026-11-27 that every surface writes through one validate-t
 
 - **Validation and commit share one plan function.** The part of the batch write that needs no lock moves into one function. It completes the plan, including log, navigation index, trash metadata and curation witness writes, and runs the access check on every planned write. Validation calls it and stays read-only. Commit calls it under its lock. Both storage modes use it, and the hand copy in the store path is deleted.
 - **Validation binds the caller's page bytes.** The other planned writes are planned again and checked again at commit, so a concurrent write never makes a commit stale through them.
-- **Names are resolved once.** One names function runs vocabulary resolution and folder respelling before each surface plans its write. A planned change, `reconcile-folder-names-at-write`, extends its folder step. The batch write refuses a new folder that the function would still steer, and never rewrites it. The access check in the plan function is the one place where sensitivity governance hooks in; this change adds no classifier.
+- **Names are resolved once.** One names function runs vocabulary resolution and folder respelling before each surface plans its write. The folder step reuses the look-alike rules from `reconcile-folder-names-at-write`. The batch write refuses a new folder that the function would still steer, and never rewrites it. The access check in the plan function is the one place where sensitivity governance hooks in; this change adds no classifier.
 - **Every surface joins.** The note tools, `save_source`, `save_evidence`, Records, Planning, the episode store and device intake validate through the plan function, and the import run calls the names function. Each new refusal is listed per surface in the design.
 - **One parity test.** For each write command, the test records the commit's plan, denies each planned path in turn and asserts the same refusal at validation and at commit.
 
@@ -34,7 +34,7 @@ None.
   - The plan function and its steps: `vault.py` (the batch write, the access check and folder respelling), `vault_store/batch.py`, `trash_metadata.py`, `curation_witness.py`.
   - Write leaves that move to the plan function: `records.py`, `planning.py`, `add.py`, `preserve.py`, `note.py`, `edit.py`, `replace.py`, `link.py`, `set_frontmatter_field.py`, `semantic_writes.py`, `episode_store.py`, `adoption_run.py`, `source_imports.py`, `server_transfer.py`.
 - **Depends on.** Nothing. It applies in file mode and in store mode.
-- **Works with.** The planned `reconcile-folder-names-at-write` extends the folder step. Sensitivity governance hooks into the plan function's access check.
+- **Works with.** The shipped `reconcile-folder-names-at-write` extends the folder step. Sensitivity governance hooks into the plan function's access check.
 - **Users.**
   - A write that commit refuses today is refused at validation instead, with the same code.
   - Validation stays read-only: it never waits for a writer.

@@ -1257,6 +1257,8 @@ class SemanticCorpusContext:
     #: page state here (a file that cannot be read as text, a stored page that the identity walk prunes,
     #: such as one in the trash). None when that set is not known: the writer then builds from the disk.
     unparsed_titles: Any = field(default=None, repr=False, compare=False)
+    # One transition's admitted canonical relationships, kept apart from authored Markdown facts.
+    stored_relation_facts: tuple[RelationFact, ...] = field(default=(), repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -5759,20 +5761,70 @@ def _derive_relation_facts(
                         "reverse": False,
                     }
                 )
+    return _relation_facts_from_rows(root, raw_facts, resolver, registry, resolved_states, writer_view)
+
+
+def stored_relationship_fact(
+    corpus: SemanticCorpusContext,
+    *,
+    relationship_id: str,
+    source: SemanticPageState,
+    source_unit: semantic_units.SemanticUnit,
+    relation_type: str,
+    target: SemanticPageState,
+    target_unit: semantic_units.SemanticUnit | None,
+) -> RelationFact:
+    """Judge an already bound relationship with the same registry rules as a unit's Markdown."""
+    fragment = target_unit.anchor if target_unit is not None else None
+    address = target.path + (f"#{fragment}" if fragment else "")
+    row = {
+        "authored": source,
+        "raw_relation": relation_type,
+        "raw_target": address,
+        "line": None,
+        "anchor": source_unit.anchor,
+        "element_identity": source_unit.unit_ref or source_unit.fingerprint,
+        "source_kind": source_unit.kind,
+        # This is the registry origin for relationships authored by a semantic unit operation.
+        "origin": "semantic_relation",
+        "reverse": False,
+        "bound_target": (address, fragment),
+        "bound_target_unit": target_unit,
+        "stored_identity": relationship_id,
+    }
+    [fact] = _relation_facts_from_rows(
+        corpus.vault_root, (row,), None, corpus.registry, corpus.pages, None,
+    )
+    return fact
+
+
+def _relation_facts_from_rows(
+    root: Path,
+    raw_facts: Iterable[Mapping[str, Any]],
+    resolver: vault.WikilinkResolver | None,
+    registry: relation_registry.RelationRegistry,
+    resolved_states: Mapping[str, SemanticPageState],
+    writer_view: tuple[str, Callable[[str], bool]] | None,
+) -> tuple[RelationFact, ...]:
     occurrences: Counter[tuple[str, str, str, str, str, str]] = Counter()
     facts: list[RelationFact] = []
     for raw in raw_facts:
         state = raw["authored"]
         selected_registry = _authored_relations(state, registry)
-        target_status, resolved_target, target_anchor, target_alias = _resolve_target(
-            root,
-            raw["raw_target"],
-            resolver,
-            writer_view[1]
-            if writer_view is not None and state.path == writer_view[0]
-            else None,
-            source_path=state.path,
-        )
+        if bound := raw.get("bound_target"):
+            resolved_target, target_anchor = bound
+            target_status, target_alias = "resolved", None
+        else:
+            assert resolver is not None
+            target_status, resolved_target, target_anchor, target_alias = _resolve_target(
+                root,
+                raw["raw_target"],
+                resolver,
+                writer_view[1]
+                if writer_view is not None and state.path == writer_view[0]
+                else None,
+                source_path=state.path,
+            )
         resolved_base = resolved_target.split("#", 1)[0] if resolved_target else None
         target_state = resolved_states.get(resolved_base or "")
         target_kind = "file" if target_state is not None else "unresolved"
@@ -5782,16 +5834,21 @@ def _derive_relation_facts(
         target_unit_status = None
         target_unit_fingerprint = None
         if target_anchor and target_state is not None:
-            unit_resolution = target_state.document.resolve_fragment(target_anchor)
-            target_unit_status = (
-                "unavailable" if target_state.definitions_unavailable
-                and unit_resolution.status == "missing" else unit_resolution.status
-            )
+            target_unit = raw.get("bound_target_unit")
+            if target_unit is None:
+                unit_resolution = target_state.document.resolve_fragment(target_anchor)
+                target_unit = unit_resolution.unit
+                target_unit_status = (
+                    "unavailable" if target_state.definitions_unavailable
+                    and unit_resolution.status == "missing" else unit_resolution.status
+                )
+            else:
+                target_unit_status = "found"
             target_ref = None
-            if unit_resolution.unit is not None:
-                target_ref = unit_resolution.unit.unit_ref
-                target_unit_fingerprint = unit_resolution.unit.fingerprint
-                target_kind = unit_resolution.unit.kind
+            if target_unit is not None:
+                target_ref = target_unit.unit_ref
+                target_unit_fingerprint = target_unit.fingerprint
+                target_kind = target_unit.kind
         resolution = _registry_resolution(
             selected_registry,
             raw["raw_relation"],
@@ -5835,7 +5892,7 @@ def _derive_relation_facts(
             identity_payload["registry_instance"] = registry_instance
         facts.append(
             RelationFact(
-                identity=_fact_identity(identity_payload),
+                identity=raw.get("stored_identity") or _fact_identity(identity_payload),
                 logical_source_path=logical_source,
                 logical_target_path=logical_target,
                 logical_source_ref=target_ref if raw["reverse"] else source_ref,
@@ -6113,8 +6170,11 @@ def writer_view_relations(
         visible = corpus.writer_visibility
     if visible is _DECIDE:
         visible = vault.writer_link_visibility(corpus.vault_root)
+    stored = _stored_facts_in_view(corpus, visible)
+    extra_out = tuple(fact for fact in stored if fact.logical_source_path == page.path)
+    extra_in = tuple(fact for fact in stored if fact.logical_target_path == page.path)
     if visible is None or not callable(visible) or not visible(page.path):
-        return outbound, inbound, None
+        return (*outbound, *extra_out), (*inbound, *extra_in), None
     if resolver is None:
         resolver = corpus.link_resolver()
     own = _derive_relation_facts(
@@ -6134,13 +6194,13 @@ def writer_view_relations(
     return (
         tuple(
             sorted(
-                (*_kept(outbound), *(f for f in own if f.logical_source_path == page.path)),
+                (*_kept(outbound), *(f for f in own if f.logical_source_path == page.path), *extra_out),
                 key=lambda item: item.identity,
             )
         ),
         tuple(
             sorted(
-                (*_kept(inbound), *(f for f in own if f.logical_target_path == page.path)),
+                (*_kept(inbound), *(f for f in own if f.logical_target_path == page.path), *extra_in),
                 key=lambda item: item.identity,
             )
         ),
@@ -6170,21 +6230,29 @@ def writer_authored_facts(
     visible = corpus.writer_visibility
     if visible is _DECIDE:
         visible = vault.writer_link_visibility(corpus.vault_root)
+    stored = tuple(
+        fact for fact in _stored_facts_in_view(corpus, visible) if fact.authored_path == page.path
+    )
     if visible is None or not visible(page.path):
-        return tuple(fact for fact in corpus.relation_facts if fact.authored_path == page.path)
-    resolver = corpus.link_resolver()
+        authored = tuple(fact for fact in corpus.relation_facts if fact.authored_path == page.path)
+        return (*authored, *stored)
+    authored = _derive_relation_facts(
+        corpus.vault_root,
+        {page.path: page},
+        corpus.link_resolver(),
+        corpus.registry,
+        target_states=corpus.pages,
+        writer_view=(page.path, visible),
+    )
+    return tuple(sorted((*authored, *stored), key=lambda item: item.identity))
+
+
+def _stored_facts_in_view(corpus: SemanticCorpusContext, visible: Any) -> tuple[RelationFact, ...]:
+    if not callable(visible):
+        return corpus.stored_relation_facts
     return tuple(
-        sorted(
-            _derive_relation_facts(
-                corpus.vault_root,
-                {page.path: page},
-                resolver,
-                corpus.registry,
-                target_states=corpus.pages,
-                writer_view=(page.path, visible),
-            ),
-            key=lambda item: item.identity,
-        )
+        fact for fact in corpus.stored_relation_facts
+        if visible(fact.logical_source_path) and visible(fact.logical_target_path)
     )
 
 

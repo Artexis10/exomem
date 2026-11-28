@@ -24,4 +24,4 @@
   - A synthetic payment-card photo: the agent keeps no card number and asks for a covered copy.
   - A synthetic identity scan with a text layer: a later owner session reads the document number back. Reading a number from a photo needs server OCR, which this change does not add.
 - [x] 4.3 Prove classify and revert change only the page's `sensitivity` field and restore its exact bytes (`tests/test_sensitivity_classification.py`). Classify writes only the `.md` page, never a stored binary.
-- [ ] 4.2 Run the full suite, `openspec validate --all --strict` and the privacy gate. Obtain two independent reviews, merge, and verify the ordinary release.
+- [x] 4.2 Run the full suite, `openspec validate --all --strict` and the privacy gate. Obtain two independent reviews, merge, and verify the ordinary release. Evidence: two blind review passes approved the merged head; the merge queue run passed on main; release v0.209.0 (2026-11-28) contains the merge commit.

@@ -1,0 +1,137 @@
+# Design: read Google Takeout sidecars, keep their captions and hold their dates
+
+## Context
+
+Google Photos in Takeout holds the media files with one sidecar per item. Each sidecar is a JSON object that carries:
+- `title`, the item's name in Google Photos;
+- `description`, the caption the owner typed;
+- `photoTakenTime.timestamp` and `creationTime.timestamp`, both in epoch seconds UTC;
+- `geoData` and `geoDataExif`.
+
+Google publishes no specification of this format. Community tools document the facts below, and each fact names its source. The sources were read on 2026-11-27, at the commits named:
+- **README**: the TakeoutExtractor README at commit `3b6c274`, sections "Some Notes on Takeout's Image File Naming", "File Name Uniqueness" and "EXIF Metadata": https://github.com/andyjohnson0/TakeoutExtractor/blob/3b6c274caea5e85d1226f3981689f22e737c80d1/README.md
+- **Matcher**: the sidecar matcher of GooglePhotosTakeoutHelper Neo (GPTH Neo) at commit `ab1e56d`: https://github.com/Xentraxx/GooglePhotosTakeoutHelper_Neo/blob/ab1e56d03c51fbc6d12fcf04799bd54ebe2531a7/lib/common/services/json_metadata_services/json_metadata_matcher_service.dart
+- **Date extractor**: GPTH Neo's `json_date_extractor.dart`, lines 165-167: https://github.com/Xentraxx/GooglePhotosTakeoutHelper_Neo/blob/ab1e56d03c51fbc6d12fcf04799bd54ebe2531a7/lib/steps/step_04_extract_dates/date_extractors/json_date_extractor.dart#L165-L167
+- **Issues 123, 133 and 139** of GPTH Neo: https://github.com/Xentraxx/GooglePhotosTakeoutHelper_Neo/issues/123, https://github.com/Xentraxx/GooglePhotosTakeoutHelper_Neo/issues/133 and https://github.com/Xentraxx/GooglePhotosTakeoutHelper_Neo/issues/139
+
+No exiftool forum thread is cited: the forum could not be fetched from the build environment, so none was read, and no fact here rests on one.
+
+Facts and their sources:
+- A sidecar is named `<media name>.json`, or `<media name>.supplemental-metadata.json` in newer exports. Long names are cut, and the cut can fall inside the suffix (`.supplemental-me.json`, `.suppl(1).json`). Sources: Matcher, lines 107-145 (`#L107-L145`); issue 123.
+- The media file's own name is cut to 47 characters before the extension, and the sidecar's name to 46 when the original is that long. `&` and `?` in a title become `_` in the file name. An image's extension can differ between archives (`.jpeg` against `.jpg`). Source: README, "Some Notes on Takeout's Image File Naming" and "File Name Uniqueness".
+- A duplicate's copy number follows the suffix in the sidecar's name (`IMG.jpg(1).json`, `IMG.jpg.supplemental-metadata(1).json`), while the media file holds it inside its name (`IMG(1).jpg`). The matcher also tries the number inside the sidecar's media name (`IMG(1).jpg.supplemental-metadata.json`), the form that task 1.1 tests. Its `title` keeps the plain name. Sources: README, "File Name Uniqueness"; issue 123; Matcher, lines 252-331.
+- `geoDataExif` is the position that Google read from the file. `geoData` may be Google's own inference. Source: Date extractor, lines 165-167.
+- An edit that the owner makes on the Google Photos website appears only in the sidecar, not in the file. Source: README, "EXIF Metadata".
+- An album folder can hold sidecars with no photo, because Takeout keeps the photo once, in a `Photos from <year>` folder. Source: issue 133. Decision 5 counts such a sidecar as an album entry.
+- A live photo's video has no sidecar of its own: `IMG_1976.HEIC` and `IMG_1976.MP4` share `IMG_1976.HEIC.supplemental-metadata.json`. Source: issue 123.
+- A photo and its sidecar can land in different archive parts, and each uploaded archive becomes its own stage. No source above states the first part. Task 3.2 measures it.
+
+No source says what `photoTakenTime` holds for a file that states no time, or that `creationTime` is the upload time. The Matcher's comments tie issue 139 (cross-photo GPS and mis-dated videos) to a sidecar that matched a file of another extension (Matcher, lines 311-345). Pairing by MIME type, one to one, guards against that failure.
+
+The `recover-media-capture-dates` change added the file-name date, which Decision 4 makes read the name that the owner gave. `import-notes-and-mail-exports` gives each parser its own container and adds the append-only expansion record. No entry in the engineering source roster covers deterministic file-format parsing. No model reads this content.
+
+## Held: no sidecar time dates a page
+
+A paired sidecar gives a newly filed photo its caption and Google's `photoTakenTime` and `creationTime` timestamp strings. The Source labels both as Google Photos provenance. The media worker and backfill continue to use the existing capture-date sources.
+
+The `media-capture-metadata` spec bars a file's modification time as a date source: scanners and editors set it. No source above says that `photoTakenTime` is not that time for a file that states none. A screenshot, a scan or a chat image carries no capture time, so a date that Google derived from the file's modification time would enter the vault as evidence, which the spec forbids.
+
+Task 3.2 measures this on an owner's own Takeout zip, read locally: it compares `photoTakenTime` and `creationTime` with the modification time of the photo's zip member and with the image's EXIF. A follow-up change decides dating on that result. That change would also need a rank among the evidence sources, a name for the source and a rule for an owner's edit in Google Photos. None of them is decided here.
+
+**What holding costs.** A photo that files now can remain undated. Its Source keeps Google's timestamps even after the stage is discarded, so a follow-up can use them without a fresh export. Re-importing still skips a photo that the vault already holds. The README reports inconsistent EXIF coverage, so task 3.2 measures the share without EXIF dates on the owner's Takeout.
+
+## Decision 1: a sidecar parser that pairs in one pass per stage
+
+A `source-formats` entry `google-photos-sidecar` has:
+- `parser: photo-sidecar`;
+- `file_glob: "*.json"`;
+- `item_keys: [title, photoTakenTime]`;
+- the vendor's naming facts: the suffix word (`supplemental-metadata`), the sidecar-name limit (46 characters before `.json`), the media-name limit (47), and the characters that become `_` (`&`, `?`).
+
+These are vendor facts that change as Google changes, so they live in the registry. Like every recognition fact, they are fixed in the shipped pack.
+
+The container is one JSON object of at most 1 MiB, read whole. A larger file is not opened. An album's `metadata.json` has no `photoTakenTime`, so it is not recognised.
+
+The parser derives no files. The first filing scan opens the pass. When filing resumes a saved preview, it opens the pass before selection. The pass uses the expansion slice budget and resumes from its last row. It saves the parser before appending any sidecar rows. A new scan follows the call that ends the pass. Each row holds the sidecar path, name key, redacted caption, and original timestamp strings. It holds no location data.
+
+**The row's caption is redacted first.** The rows live in the stage's state folder (`import-expansion/<id>/rows.jsonl`), which is not the Source page. The pass therefore passes each caption through the same redaction as an upload's description (`preserve.redact_capture_text`) before it writes the row. No row, plan, page or log holds a card number or a credential that the owner typed. The plan redacts the caption again, which changes nothing in a caption that is already redacted.
+
+**Photos wait for the pass.** While the pass runs, the stage's images and videos stay out of selection by their media type, not as a list of paths, the same way an export that is still being read stays out today. The hold lifts when the pass ends in any state, done or partial, so a read fault never holds photos back. A page that held files for the pass records how many, and a new scan files them once the pass has ended.
+
+**A file that cannot be read.** A JSON file that is gone or that the file system refuses gets its own row, `{"unreadable": path}`, and the pass reads on past it. Every other JSON file of the stage is therefore examined, and none of them files unexamined as a JSON Source with its `geoData` as plain text. The unreadable file stays staged. It never files, and the filing view lists it under `IMPORT_SIDECAR_UNREADABLE` for the person to review: nothing is known of what it holds. A photo whose sidecar was unreadable files without a caption from it. The pass ends as `partial`, and its fault names the first unreadable file. The file counts once under `left_out`.
+
+When the pass ends, it decides each pair from its rows and records the result (Decision 2, step 4). The stage scan decodes each row and drops its caption text from the index. The index keeps caption presence and row offsets. Planning reads caption text for selected photos through one stream. Each planned photo carries its paired caption and timestamps. The first photo waits for the pass.
+
+The pass runs once per stage, also for a stage that holds JSON files and no sidecar: it records that it ended, so no later call opens those files again. A sidecar that reaches the stage after the pass ended is not read. It files as an ordinary JSON file, with its position data as plain text, and its photo files without its caption. This change builds no second reading, because the pass keeps no list of the JSON files that it found not to be sidecars: telling a new file from an old one would mean opening every JSON file again at each call. The proposal lists the case under "Not included".
+
+A sidecar row is not a derived file and adds nothing to the stage total. Each sidecar counts once, as a staged member. Its reason is worked out when filing reaches done, from its photo's filing result (Decision 5).
+
+## Decision 2: pair one to one, by name and by title together
+
+Names are compared exactly after NFC normalisation, without their copy numbers, which are compared separately. Candidates are the images and videos in the sidecar's own staged folder.
+
+1. **From the sidecar's name.** Strip `.json`, a copy number `(n)` before it, and the suffix word or any cut form of it. What remains is the base. The base may carry its own copy number before its extension.
+2. **By name.** A media file fits when its stem equals the base's stem and both extensions have the same MIME type, or, when the sidecar name is at the registry's sidecar-name limit, when the base is a prefix of the media name. Step 3 confirms a prefix fit. A copy number must agree too: when the sidecar has one, in either place, the media name has the same one, and when the sidecar has none, the media name has none. A `(n)` that is part of the name itself (`photo (1).jpg`) is read both ways, and the reading that the title confirms is used.
+3. **By title.** The media name without its copy number must agree with `title`. Apply the replaced characters and the media-name limit to the title first, compare the stems, and require that both extensions have the same MIME type.
+   At filing, the index selects candidates by the full title before checking the sidecar name or prefix. Canonically equivalent names share one entry that records whether more than one file has that name.
+   The MIME type comes from the standard library's built-in extension table, never from the host's `mime.types` files, so one Takeout pairs the same way on every machine. `.jpg` and `.jpeg` have one type. `.heic`, a raw file, a PNG and a video each have their own, so a HEIC and a JPG of one shot, or a raw file and its JPG, each pair with their own sidecar, and `S.jpg.json` never pairs with `S.png`. An extension that the table does not know compares as written, in lower case.
+4. **One to one.** When the pass ends, a sidecar pairs only when exactly one file fits it and that file fits no other sidecar in the stage. In every other case, each sidecar involved stays unpaired with a reason: `no-photo` or `ambiguous`.
+
+The copy-number and suffix-cut forms are read with string operations on the registry's suffix word, not with a regex. Task 1.1 tests the forms that TakeoutExtractor and GPTH Neo document, not invented ones: the cut suffixes (`.supplemental-me.json`, `.suppl(1).json`), the cut media name, `&` and `?` replaced by `_`, the copy number in either place, a name with its own `(1)`, and a `.jpeg` title against a `.jpg` file.
+
+Four forms are not read. Each leaves its sidecar unpaired with the reason `no-photo`, so the view counts and lists it:
+- **An extension that Google added.** The title and the sidecar name carry none, and the file name carries one (`IMG_1` with `IMG_1.jpg`).
+- **A Pixel motion photo.** The title ends in `.MP` and the file in `.MP.jpg`.
+- **An `-edited` copy.** Its name carries `-edited` where no title does, so no sidecar fits it. It files with no sidecar and no caption. Its original's sidecar still pairs with the original.
+- **A copy number between the media name and the suffix word** (`IMG.jpg(1).supplemental-metadata.json`). The Matcher tries this form (its second numbered pattern, lines 266-277), and no source shows Google writing it. The sidecar counts as unpaired; the numbered forms of the sources, after the suffix word or inside the media name, pair.
+
+A live photo's video is not one of these cases: it has no sidecar of its own (issue 123), so the one sidecar pairs with the HEIC or the JPG, and the video files without a caption.
+
+## Decision 3: what a paired sidecar carries
+
+- **Caption.** A non-empty `description` goes into the photo Source's description section. It passes through the same redaction as an upload's description (`preserve`, `capture_redaction`), so one caption has one home and search finds it.
+- **Timestamp provenance.** The pass keeps the `timestamp` strings from `photoTakenTime` and `creationTime`. It accepts signed ASCII decimal text of up to 12 digits and keeps the original text. It ignores the formatted display text. The Source labels each retained value with Google Photos and the vendor field name.
+- **Nothing else.** `geoDataExif` is the file's own position, which the camera read already records. `geoData` is not used: it may be Google's inference, not the file's.
+
+## Decision 4: a file-name date reads the name its owner gave
+
+The filer stores an original under a name of its own, which states no date. The media worker and the owner backfill therefore read the name recorded as the page's `original_filename`, and fall back to the stored name when none is recorded (`capture_metadata.given_name`). A photo named for its day files with no date and takes it from its name on the media worker's first read. This holds whether or not a sidecar sits beside it.
+
+## Decision 5: honest counts
+
+When filing reaches done, the view counts each sidecar under one reason from its photo's filing result:
+- `IMPORT_SIDECAR_APPLIED`: the sidecar was paired with its photo, which filed now, and its caption goes to the page;
+- `IMPORT_SIDECAR_EMPTY`: the sidecar was paired with its photo, which filed now, but it has no caption to give;
+- `IMPORT_SIDECAR_PHOTO_ALREADY_IMPORTED`: the photo was skipped as already imported, so a Source in the vault holds it. The sidecar's caption was not applied, and the reason says so ("{n} sidecar whose caption was not applied, because the vault already held its photo"). The sidecar counts as filed, and the person has nothing to review. The first copy's Source keeps the caption that it received. A person who imports the same Takeout again reads this reason for every sidecar;
+- `IMPORT_SIDECAR_PHOTO_NOT_FILED`: the photo did not file (it failed, or adoption did not select it). The person reviews it;
+- `IMPORT_SIDECAR_ALBUM_ENTRY`: no file in the sidecar's folder fits it, and its name key, title, and both Google timestamps match exactly one paired sidecar in another folder. Takeout can store the photo once in its year folder ("{n} sidecar of an album entry, whose photo is in the vault from another folder"). It counts as filed, gives no caption of its own and adds to no `captioned`. One index of the paired keys serves every sidecar, so the work stays linear. When that photo did not file, the sidecar counts as `PHOTO_NOT_FILED`;
+- `IMPORT_SIDECAR_UNPAIRED`: a local match is ambiguous, or no local photo fits and no unique paired sidecar corroborates an album entry. The view lists these by path;
+- `IMPORT_SIDECAR_UNREADABLE`: a JSON file that could be a sidecar and could not be read ("{n} possible sidecar that could not be read"). It stays staged and never files. The person reviews it. The count is of files, not of sidecars: nothing is known of what such a file holds.
+
+The view puts `APPLIED`, `EMPTY`, `PHOTO_ALREADY_IMPORTED`, and `ALBUM_ENTRY` under `sidecars.by_reason`. These count as settled in progress. The other reasons stay under `left_out`, with a bounded list of paths. The window status and the discarded window’s residual use the same filed classification. A filed Takeout clears "keep the source folder" and leaves no sidecar to resend.
+
+The view names what it measures. Over the sidecars of `APPLIED` and `EMPTY`, it counts those that carry a caption (`captioned`). It counts no time, because no time is applied.
+
+## Decision 6: a window keeps a likely sidecar with its photo
+
+The CLI sends a folder larger than one window as a series. `cloud_import_windows` orders the members with artifacts first and text last, and a JSON file is text. Without a rule, a folder that exceeds one window would send its photos in the early windows and its sidecars in the last. Every photo would file with no caption, and every sidecar would count as unpaired. Each window is its own stage, and a sidecar pairs only inside its stage.
+
+A sidecar therefore travels in the window of its photo, as a page's part pages travel with their page: it sorts directly after its photo, takes its photo's class for the order, and forms one unit with it for the window's budget. `export_pairing.likely_photos` decides this from file names and the shipped `google-photos-sidecar` entry (the same name rules as Decision 2, steps 1 and 2, without the title). The planner opens no file and reads no vault, so it knows no overlay. A name that fits several photos (a cut name) goes with the first in path order. A sidecar that no photo of its own folder fits is an album entry (issue 133): the album folder holds the sidecar alone, and the photo sits in a `Photos from <year>` folder, often in another window. It goes with the first photo in path order that its name fits in any folder of the series, which is usually the photo that its twin in the year folder travels with. Without that, it travels last as text and its window holds no photo, so `settle` counts it as unpaired. If the group cannot fit the reachable budget or the upload limit, the sender can split it. Individually admissible files can still land. A sidecar whose photo lands in another window stays unpaired and appears in the review list.
+
+## Scale
+
+The load target is 10,000 tenants, and pairing runs per cell.
+- **Filing.** The cell indexes photos by folder, stem, copy number, and MIME type. The full sidecar title bounds the candidates it checks for each name. Each sidecar read is at most 1 MiB and runs inside the slice budget.
+- **Window order.** The sender sorts candidate names for prefix lookups and caches the first cross-folder match for each distinct key. A 28 November 2026 probe ran `likely_photos` on 4,000 same-named photos and 4,000 album sidecars. The same input took 0.727 s before the cache and 0.080 s with it. This measures one planner operation.
+- **Record.** Each sidecar adds one appended row.
+- **The largest stage.** A window is one import, and the CLI sends at most 500,000 members to one import (`cloud_import.DEFAULT_MAX_MEMBERS`). The window budget also bounds it: a photo counts its bytes, a sidecar twice its bytes (`cloud_import_windows.Member.cost`), and the budget is 80% of the cell volume less what it holds (`import_windows._budget_section`). At the default 4 GiB volume, photos of 3 MB give about 1,100 pairs a window, and a 20 GiB volume gives about 5,700. The member limit caps one stage at 250,000 photo and sidecar pairs when its byte budget can hold them.
+- **Equivalent names.** On 28 November 2026, deciding 8,192 synthetic sidecars for 8,192 canonically equivalent photo names took 4.99 s and peaked at 574 MiB before grouping. With grouping it took 0.073 s and peaked at 60 MiB. At 32,768 of each, the grouped run took 0.36 s and peaked at 78 MiB. Every match stayed ambiguous.
+- **Caption reads.** A 28 November 2026 probe with 1,024 captions of 4,096 characters retained 4,194,304 caption characters in the earlier stage index. The new index retained zero and read one selected caption by its byte offset. The filing page normally selects at most 5,000 members. These probes measure individual operations. The cell allows 3 GiB and the call budget is 50 s (`request_budget.MCP_REQUEST_BUDGET_SECONDS`).
+- **Settling the reasons.** The cell builds an index of paired sidecars by name, title, and both timestamps in one pass over the rows. A second pass classifies each result.
+
+## Risks
+
+- **An album entry is a match on available metadata.** Different photos can share a name, title, and both timestamps. The cell requires a unique matching paired sidecar. An album entry contributes no new caption or provenance. Task 3.2 counts album entries and unpaired sidecars.
+- **Undocumented format.** The pairing rule follows community tools. Task 3.2 counts each sidecar reason on a real Takeout, including duplicates and long names.
+- **The time's meaning for files without camera time** is unconfirmed. It is the reason that no time is applied (see "Held"). Task 3.2 compares `photoTakenTime` and `creationTime` with the zip member's modification time and with the image's EXIF, for screenshots, scans and chat images.
+- **Split archives.** The archive door takes an archive of at most 100 MiB, so a Takeout of many parts does not come through it. The owner extracts the parts into one folder, and the CLI sends that folder in windows. Each window is its own stage, and a sidecar pairs only inside its stage, so the window cut is the boundary where a pair can split. Decision 6 keeps a likely sidecar with its photo across that cut, and the two-window test proves it. A sidecar whose photo the owner did not extract into the folder, or whose name the planner does not read as a sidecar's, still files unpaired, and the view counts and lists it. Task 3.2 measures the share of unpaired sidecars on the owner's own Takeout.

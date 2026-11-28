@@ -200,7 +200,7 @@ if ($migration.ExitCode -ne 0) {
     throw "Offline state migration failed; the service remains stopped."
 }
 Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "migrated"
-Write-Host "Preflight: exomem doctor --profile $Profile..."
+Write-Host "Preflight: evermatter doctor --profile $Profile..."
 & $ServicePy @doctorArgs
 if ($LASTEXITCODE -ne 0) {
     throw "Doctor preflight failed for profile '$Profile'. The target is installed but the service remains stopped; fix the findings and re-run."

@@ -7,8 +7,11 @@ import hashlib
 import json
 import re
 import unicodedata
+from bisect import bisect_left
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from dataclasses import field as _field
 from pathlib import Path
 from typing import Any, Literal, assert_never, get_args
 
@@ -17,11 +20,14 @@ from . import (
     capabilities,
     edit,
     find,
+    markdown_regions,
     note_types,
     origin_bindings,
     page_ids,
     provenance,
     relation_registry,
+    request_budget,
+    semantic_blocks,
     semantic_contract,
     semantic_index,
     semantic_kinds,
@@ -38,10 +44,12 @@ from .cli_ops import OpError
 from .governance import egress
 from .kbdir import managed_form
 from .mutation_timings import MutationTimings, write_timings_enabled
+from .vault_store import mode as store_mode
+from .vault_store import read as store_read
+from .vault_store import relationships as stored_relationships
 
 ObserveOperation = Literal["add", "update", "remove", "validate", "supersede", "assess"]
 _OPERATIONS: tuple[str, ...] = get_args(ObserveOperation)
-_COMPACT_KIND = "observation"
 _HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$")
 _FENCE_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 _UPDATED_RE = re.compile(r"^updated:.*$", re.MULTILINE)
@@ -341,6 +349,10 @@ def observe_memory(
         current_unit = resolution.unit
 
     frontmatter, body, _ = vault.parse_frontmatter(editable.original_text)
+    if current_unit is not None and proposal_mode in {"update", "remove"}:
+        _guard_nested_observation_span(body, current_unit)
+    store_edges = store_mode.store_mode_for_reads(vault_root)
+    stored_arguments: tuple[unit_edges.Edge, ...] = ()
     target_anchor: str | None = None
     removed_unit = None
     dropped_relations: tuple[tuple[str, str], ...] = ()
@@ -349,6 +361,7 @@ def observe_memory(
     lift_resolver: Any = None
     dated_default_kind: str | None = None
     dated_fields: tuple[str, ...] = ()
+    placement_outcome: str | None = None
     link_warnings: list[str] = []
     if proposal_mode == "remove":
         assert current_unit is not None
@@ -379,16 +392,10 @@ def observe_memory(
                 else relation_registry.core_registry()
             )
             superseding = _superseding_unit(
-                current.document, rel_registry, editable.rel_path, resolved.unit
+                vault_root, current.document, rel_registry, editable.rel_path, resolved.unit
             )
             if superseding is not None:
-                raise ObserveMemoryError(
-                    "SUPERSEDE_TARGET_ALREADY_SUPERSEDED",
-                    f"the claim is already superseded by unit "
-                    f"{unit_id(superseding)}",
-                    "Supersede the successor instead, or read the page's units "
-                    "for the current ids.",
-                )
+                raise _already_superseded(superseding)
             if kind is not None:
                 selected_kind = _select_kind(
                     language,
@@ -400,22 +407,7 @@ def observe_memory(
             elif resolved.kind is not None:
                 selected_kind = resolved.kind
             else:
-                admitted = set(
-                    _admitted_kind_keys(
-                        language, projects=page_projects, page_type=page_type
-                    )
-                )
-                replacements = sorted(language.kinds_with("replacement") & admitted)
-                if len(replacements) != 1:
-                    raise ObserveMemoryError(
-                        "REPLACEMENT_KIND_REQUIRED",
-                        f"{len(replacements)} admitted kinds carry the "
-                        "replacement trait; the successor's kind must be named",
-                        "Pass `kind` with one of the replacement kinds: "
-                        + (", ".join(replacements) if replacements else "none admitted")
-                        + ".",
-                    )
-                selected_kind = replacements[0]
+                selected_kind = semantic_kinds.replacement_kind()
             if selected_kind in semantic_kinds.compact_kinds():
                 raise ObserveMemoryError(
                     "UNSUPPORTED_SEMANTIC_KIND",
@@ -436,10 +428,12 @@ def observe_memory(
                 )
             normalized_tags = _canonical_tags(tags or [])
             normalized_context = _canonical_context(context)
-            normalized_relations = unit_edges.add_unit_edges(
+            successor_relations = unit_edges.add_unit_edges(
                 (unit_edges.supersession_edge(rel_registry, resolved.anchor),),
                 _canonical_relations(relations or []),
             )
+            normalized_relations = () if store_edges else successor_relations
+            stored_arguments = successor_relations if store_edges else ()
             normalized_verdict = None
             normalized_check_by = None
             normalized_as_of = _canonical_date(as_of, "as_of") if as_of else None
@@ -471,9 +465,12 @@ def observe_memory(
             normalized_verdict = _resolve_verdict(verdict, resolved.unit, language)
             normalized_check_by = _resolve_check_by(check_by, resolved.unit)
             added_relations = _canonical_relations(relations or [])
+            if store_edges:
+                stored_arguments, added_relations = added_relations, ()
             normalized_category = resolved.category
             normalized_content = resolved.content
             if resolved.unit is not None and resolved.unit.form == "rich":
+                _guard_nested_observation_span(body, resolved.unit)
                 selected_kind = str(resolved.kind)
                 if kind is not None and _select_kind(
                     language,
@@ -488,10 +485,11 @@ def observe_memory(
                     )
                 normalized_tags = tuple(resolved.unit.tags)
                 normalized_context = resolved.unit.context
-                normalized_relations = unit_edges.add_unit_edges(
-                    ((relation.kind, relation.target) for relation in resolved.unit.relations),
-                    added_relations,
+                authored = tuple(
+                    (relation.kind, relation.target) for relation in resolved.unit.relations
                 )
+                normalized_relations = unit_edges.add_unit_edges(authored, added_relations)
+                stored_arguments = tuple(edge for edge in stored_arguments if edge not in authored)
                 normalized_as_of = resolved.unit.as_of
                 normalized_until = resolved.unit.until
                 preserved_metadata = _preserved_metadata(resolved.unit)
@@ -509,6 +507,7 @@ def observe_memory(
                     as_of=normalized_as_of,
                     until=normalized_until,
                     preserved=preserved_metadata,
+                    heading_level=resolved.unit.level or 2,
                 )
                 after_body = _replace_unit(
                     body,
@@ -625,11 +624,12 @@ def observe_memory(
             selected_kind = dated_default_kind
         # add and update both render the unit's whole edge set, which the seam owns.
         normalized_relations = unit_edges.add_unit_edges((), _canonical_relations(relations or []))
+        compact_kinds = semantic_kinds.compact_kinds()
         explicit_rich_kind = dated_default_kind is not None or bool(
             kind is not None
-            and semantic_language_registry.normalize_label(kind) != _COMPACT_KIND
+            and semantic_language_registry.normalize_label(kind) not in compact_kinds
         )
-        if normalized_relations and not explicit_rich_kind:
+        if normalized_relations and not explicit_rich_kind and not store_edges:
             # A rich unit that keeps its kind on update carries its own relations, so only a unit
             # that is compact lifts a provenance link to the page.
             if selected_kind in semantic_kinds.compact_kinds():
@@ -663,6 +663,23 @@ def observe_memory(
             dropped_outcome = _dropped_relations_outcome(
                 dropped_relations, compact=selected_kind in semantic_kinds.compact_kinds()
             )
+        if store_edges:
+            authored = (() if base_unit is None else
+                        tuple((relation.kind, relation.target) for relation in base_unit.relations))
+            supplied = normalized_relations
+            supplied_set = set(supplied)
+            registry = _relationship_registry(current)
+            normalized_relations = tuple(
+                edge for edge in authored
+                if edge in supplied_set or registry.has(edge[0], "replaces")
+            )
+            stored_arguments = tuple(
+                edge for edge in supplied if edge not in normalized_relations
+            )
+            dropped_relations = tuple(edge for edge in authored if edge not in normalized_relations)
+            dropped_outcome = (_dropped_relations_outcome(
+                dropped_relations, compact=selected_kind in semantic_kinds.compact_kinds(),
+            ) if dropped_relations else None)
         preserved_metadata = _preserved_metadata(base_unit)
         governed_passed = _governed_names(
             verdict=normalized_verdict,
@@ -670,7 +687,7 @@ def observe_memory(
             as_of=normalized_as_of,
             until=normalized_until,
         )
-        if selected_kind == _COMPACT_KIND and (governed_passed or preserved_metadata):
+        if selected_kind in compact_kinds and (governed_passed or preserved_metadata):
             if base_unit is None or base_unit.form != "rich":
                 # A compact unit, new or existing, carries no rows, so the only exits that apply
                 # are a rich kind, or leaving the other fields out so a date takes the default kind.
@@ -729,23 +746,52 @@ def observe_memory(
                 existing_anchors,
             )
         )
-        rendered = _render_unit(
-            kind=selected_kind,
-            category=normalized_category,
-            content=normalized_content,
-            tags=normalized_tags,
-            context=normalized_context,
-            relations=normalized_relations,
-            anchor=target_anchor,
-            verdict=normalized_verdict,
-            check_by=normalized_check_by,
-            as_of=normalized_as_of,
-            until=normalized_until,
-            preserved=preserved_metadata,
-        )
-        if proposal_mode == "update":
-            assert current_unit is not None
-            if current_unit.form == "compact" and selected_kind != _COMPACT_KIND:
+
+        def render(heading_level: int) -> str:
+            return _render_unit(
+                kind=selected_kind, category=normalized_category, content=normalized_content,
+                tags=normalized_tags, context=normalized_context, relations=normalized_relations,
+                anchor=target_anchor, verdict=normalized_verdict, check_by=normalized_check_by,
+                as_of=normalized_as_of, until=normalized_until, preserved=preserved_metadata,
+                heading_level=heading_level,
+            )
+
+        compact = selected_kind in semantic_kinds.compact_kinds()
+        if dated_default_kind is not None:
+            insertion_body = body if current_unit is None else _remove_unit(
+                body, current_unit.span.start_offset, current_unit.span.end_offset,
+            )
+            # A vault may use this heading for a rich unit that owns its descendants.
+            page_language = semantic_language_registry.for_attached_projects(
+                language, page_projects,
+            )
+            observation_heading = page_language.resolve_heading("Observations", page_type=page_type)
+            nested_body = (
+                _place_dated_block(insertion_body, render(3))
+                if observation_heading.resolved is None
+                else None
+            )
+            if nested_body is None:
+                after_body = _append_visible_record(insertion_body, render(2))
+                placement_outcome = _end_placement_notice(previewing)
+            else:
+                after_body = nested_body
+        elif current_unit is not None and proposal_mode == "update":
+            start, end = current_unit.span.start_offset, current_unit.span.end_offset
+            depth = current_unit.level or 2
+            section = _observation_section_containing(body, start) if depth > 2 else None
+            if section is not None and compact:
+                after_body = _add_compact(
+                    _remove_unit(body, start, end), render(2), section_start=section.start,
+                )
+            elif section is not None:
+                rendered = render(depth)
+                if _fits_nested_block(rendered, depth):
+                    after_body = _replace_unit(body, start, end, rendered)
+                else:
+                    after_body = _append_visible_record(_remove_unit(body, start, end), render(2))
+                    placement_outcome = _end_placement_notice(previewing)
+            elif current_unit.form == "compact" and not compact:
                 # A promoted compact line cannot become a rich block in place:
                 # the compact lines after it would fall inside the new block.
                 # The line leaves and the block lands at the body end instead.
@@ -755,20 +801,18 @@ def observe_memory(
                         current_unit.span.start_offset,
                         current_unit.span.end_offset,
                     ),
-                    rendered,
+                    render(2),
                 )
             else:
                 after_body = _replace_unit(
                     body,
                     current_unit.span.start_offset,
                     current_unit.span.end_offset,
-                    rendered,
+                    render(2),
                 )
         else:
             after_body = (
-                _add_compact(body, rendered)
-                if selected_kind == _COMPACT_KIND
-                else _append_rich(body, rendered)
+                _add_compact(body, render(2)) if compact else _append_rich(body, render(2))
             )
 
     # What the governed parser must read back for the rendered unit; a remove renders none.
@@ -810,11 +854,32 @@ def observe_memory(
         if dated_default_kind is not None
         else None
     )
-    after_source = _rebuild_source(
-        editable.original_text,
-        fm_text,
-        after_body,
-        today=authored_day,
+    relationship_plan = None
+    replace_stored = proposal_mode == "update" and relations is not None
+    old_unit = resolved.unit if op == "assess" else current_unit
+    unchanged_unit = bool(
+        store_edges and (stored_arguments or proposal_mode == "update")
+        and old_unit is not None and expected_unit is not None
+        and _unchanged_unit(old_unit, expected_unit)
+    )
+    if unchanged_unit:
+        after_body = body
+    if (store_edges and target_anchor is not None
+            and (stored_arguments or replace_stored)):
+        predecessor_anchor = resolved.unit.anchor if op == "supersede" and resolved.unit else None
+        try:
+            after_body, relationship_plan = _plan_stored_relationships(
+                vault_root, editable, current, after_body, target_anchor, stored_arguments,
+                selected_kind=selected_kind, replacing=replace_stored, reason=reason,
+                predecessor_anchor=predecessor_anchor,
+            )
+        except OpError as error:
+            raise ObserveMemoryError(error.code, error.message, error.remediation) from error
+    after_source = (
+        editable.raw_text
+        if (relationship_plan is not None or unchanged_unit) and after_body == body
+        and fm_text == editable.fm_text and origin_block is None
+        else _rebuild_source(editable.original_text, fm_text, after_body, today=authored_day)
     )
     # One collector spans preflight+commit, so the response accounts for the
     # whole governed write rather than two unrelated halves. `validate` never
@@ -843,6 +908,7 @@ def observe_memory(
                     validate_only=previewing,
                     stamp=temporal.stamp(authored_day),
                     timings=timings,
+                    relationship_plan=relationship_plan,
                 )
         except semantic_writes.SemanticWriteError as error:
             raise ObserveMemoryError(error.code, error.reason) from error
@@ -918,7 +984,12 @@ def observe_memory(
                 )
             preflight = replace(preflight, read_dependency_guards=tuple(guards))
 
-        if previewing:
+        relationship_noop = (
+            relationship_plan is not None and relationship_plan.change is None
+            and not relationship_plan.writes and after_source == editable.raw_text
+            and relation_disposition is None and relation_review_hash is None
+        )
+        if previewing or relationship_noop:
             return _result(
                 operation=op,
                 path=editable.rel_path,
@@ -934,10 +1005,12 @@ def observe_memory(
                 lifted_outcome=lifted_outcome,
                 dated_default_kind=dated_default_kind,
                 dated_default_outcome=dated_default_outcome,
+                placement_outcome=placement_outcome,
                 warnings=link_warnings,
             )
 
         try:
+            relation_intent = f"\0{relationship_plan.digest}" if relationship_plan else ""
             log_plan = vault.plan_log_writes(
                 vault_root,
                 date_iso=temporal.stamp(today or temporal.now()),
@@ -948,7 +1021,7 @@ def observe_memory(
                     "observe:"
                     + hashlib.sha256(
                         f"{op}\0{editable.rel_path}\0{preflight.before.source_hash}"
-                        f"\0{preflight.after.source_hash}".encode()
+                        f"\0{preflight.after.source_hash}{relation_intent}".encode()
                     ).hexdigest()
                 ),
             )
@@ -970,6 +1043,12 @@ def observe_memory(
                 )
         except semantic_writes.SemanticWriteError as error:
             raise ObserveMemoryError(error.code, error.reason) from error
+        except OpError as error:
+            if error.code == stored_relationships.ALREADY_SUPERSEDED:
+                successor = _unit_by_anchor(current.document, error.details.get("successor_anchor"))
+                if successor is not None:
+                    raise _already_superseded(successor) from error
+            raise ObserveMemoryError(error.code, error.message, error.remediation) from error
         link_warnings.extend(committed.review_field_warnings())
 
         final = semantic_index.selected_parent_index_state(vault_root, editable.rel_path)
@@ -996,6 +1075,7 @@ def observe_memory(
             lifted_outcome=lifted_outcome,
             dated_default_kind=dated_default_kind,
             dated_default_outcome=dated_default_outcome,
+            placement_outcome=placement_outcome,
             timings=(
                 timings.as_dict() if timings is not None and write_timings_enabled() else None
             ),
@@ -1011,6 +1091,14 @@ def observe_memory(
 def unit_id(unit: Any) -> str:
     """The short id that names one unit and its current version."""
     return page_ids.part_id(str(unit.unit_ref), str(unit.fingerprint))
+
+
+def _already_superseded(successor: semantic_units.SemanticUnit) -> ObserveMemoryError:
+    return ObserveMemoryError(
+        stored_relationships.ALREADY_SUPERSEDED,
+        f"the claim is already superseded by unit {unit_id(successor)}",
+        "Supersede the successor instead, or read the page's units for the current ids.",
+    )
 
 
 def page_units(vault_root: Path, page: dict[str, Any]) -> Any:
@@ -1046,7 +1134,8 @@ def page_units(vault_root: Path, page: dict[str, Any]) -> Any:
     supersedes: dict[str, list[str]] = {}
     superseded_by: dict[str, list[str]] = {}
     for successor, target_unit in working_set_currency.same_page_supersessions(
-        selected.document, path, rel_registry
+        selected.document, path, rel_registry,
+        unit_edges.current_supersessions(vault_root, (path,), rel_registry).get(path, ()),
     ):
         if successor.unit_ref and target_unit.unit_ref:
             supersedes.setdefault(unit_id(successor), []).append(unit_id(target_unit))
@@ -1152,7 +1241,7 @@ def _resolved_claim(
     edits: tuple[tuple[int, int, str], ...] = ()
     if not anchor:
         anchor = _generated_anchor(
-            kind or _COMPACT_KIND,
+            kind or semantic_kinds.compact_kind(),
             category,
             unit.content,
             tuple(unit.tags),
@@ -1271,7 +1360,9 @@ def claim_conversion(
     """
     item = target.item
     category = str(target.category)
-    anchor = _generated_anchor(_COMPACT_KIND, category, item.text, (), None, (), existing_anchors)
+    anchor = _generated_anchor(
+        semantic_kinds.compact_kind(), category, item.text, (), None, (), existing_anchors,
+    )
     existing_anchors.add(anchor)
     return anchor, (item.start, item.end, f"{item.indent}- [{category}] {item.text} ^{anchor}")
 
@@ -1296,6 +1387,7 @@ def _rich_id_edit(body: str, unit: Any, anchor: str) -> tuple[int, int, str]:
 
 
 def _superseding_unit(
+    root: Path,
     document: Any,
     rel_registry: relation_registry.RelationRegistry,
     path: str,
@@ -1305,11 +1397,185 @@ def _superseding_unit(
     if unit is None or unit.unit_ref is None:
         return None
     for successor, target in working_set_currency.same_page_supersessions(
-        document, path, rel_registry
+        document, path, rel_registry,
+        unit_edges.current_supersessions(root, (path,), rel_registry).get(path, ()),
     ):
         if target.unit_ref == unit.unit_ref:
             return successor
     return None
+
+
+def _relationship_registry(
+    state: semantic_index.SemanticParentIndexState,
+) -> relation_registry.RelationRegistry:
+    if state.definitions is not None:
+        return state.definitions.snapshots["relations"].typed
+    return relation_registry.core_registry()
+
+
+@dataclass
+class _RelationshipPage:
+    raw: str
+    state: semantic_index.SemanticParentIndexState
+    guard: vault.PathGuard | None = None
+    anchored: dict[str, str] = _field(default_factory=dict)
+    edits: list[tuple[int, int, str]] = _field(default_factory=list)
+    used: set[str | None] | None = None
+
+    def anchor(self, unit: semantic_units.SemanticUnit) -> str:
+        if unit.anchor is not None:
+            return unit.anchor
+        assert unit.unit_ref is not None
+        if unit.unit_ref not in self.anchored:
+            if self.used is None:
+                self.used = {item.anchor for item in self.state.document.units if item.anchor}
+            resolved = _resolved_claim(self.state.body, unit, self.used)
+            self.edits.extend(resolved.edits)
+            self.anchored[unit.unit_ref] = resolved.anchor
+            self.used.add(resolved.anchor)
+        return self.anchored[unit.unit_ref]
+
+
+def _plan_stored_relationships(
+    root: Path, editable: edit._Editable, current: semantic_index.SemanticParentIndexState,
+    body: str, anchor: str, arguments: tuple[unit_edges.Edge, ...], *,
+    selected_kind: str, replacing: bool, reason: str | None, predecessor_anchor: str | None = None,
+) -> tuple[str, unit_edges.StoredPlan | None]:
+    """Resolve both ends in the writer's view before asking for any far-end write admission."""
+    source_path = editable.rel_path
+    initial_body = current.body
+    original_body = vault.parse_frontmatter(editable.original_text)[1]
+    source = editable.original_text[:len(editable.original_text) - len(original_body)] + body
+    primary = _RelationshipPage(source, current)
+    if body != initial_body and arguments:
+        primary.state = semantic_index.selected_parent_index_state(root, source_path, source=source)
+    pages = {source_path: primary}
+    targets: list[tuple[str, unit_edges.End]] = []
+    registry = _relationship_registry(current)
+    supersession_check = None
+    if predecessor_anchor is not None and current.parent_ref is not None:
+        counts = Counter(unit.anchor for unit in current.document.units if unit.anchor is not None)
+        supersession_check = stored_relationships.SupersessionCheck(
+            source_path, current.parent_ref, predecessor_anchor,
+            tuple(name for name, count in counts.items() if count == 1),
+            tuple(sorted(registry.keys_with("replaces"))),
+        )
+    with store_read.request_snapshot(root):
+        visible = vault.writer_link_visibility(root)
+        resolver = find.writer_resolver_snapshot(root) if arguments else None
+        locators: list[tuple[str, str, str | None]] = []
+        for kind, target in arguments:
+            request_budget.checkpoint()
+            assert resolver is not None
+            status, locator, fragment, _ = semantic_contract._resolve_target(
+                root, target, resolver, visible, source_path=source_path,
+            )
+            if status == "ambiguous":
+                raise ObserveMemoryError(
+                    "AMBIGUOUS_RELATIONSHIP_END", "name one relationship target",
+                )
+            if locator is None:
+                raise _relationship_end_missing()
+            locators.append((kind, locator.partition("#")[0], fragment))
+        unit_paths = {path for _, path, fragment in locators if fragment is not None}
+        if unit_paths and egress.caller_restricted(root):
+            if egress.full_release_among(root, unit_paths) != unit_paths:
+                raise _relationship_end_missing()
+        for kind, path, fragment in locators:
+            request_budget.checkpoint()
+            if path not in pages:
+                pages[path] = _read_relationship_page(root, path)
+            page = pages[path]
+            unit = None if fragment is None else page.state.document.resolve_fragment(fragment).unit
+            if fragment is not None and unit is None:
+                raise _relationship_end_missing()
+            definition = semantic_contract._registry_resolution(
+                registry, kind, projects=_page_projects(current.frontmatter),
+                page_type=_page_type(current.frontmatter), source_kind=selected_kind,
+                target_kind=unit.kind if unit is not None else None, origin="semantic_relation",
+            )
+            if definition.canonical is None or definition.status == "scope_violation":
+                raise ObserveMemoryError(
+                    "INVALID_SEMANTIC_RELATION", "the relation type is unavailable for these ends",
+                )
+            target_anchor = page.anchor(unit) if unit is not None else None
+            targets.append((
+                definition.canonical, unit_edges.End(path, target_anchor, page.state.parent_ref),
+            ))
+
+        writes: list[vault.PlannedWrite] = []
+        guards: list[vault.PathGuard] = []
+        for path, page in pages.items():
+            if page.guard is None:
+                continue
+            guards.append(page.guard)
+            if page.edits:
+                writes.append(vault.PlannedWrite(
+                    root / path, _splice_relationship_anchors(page), guard=page.guard,
+                ))
+        if writes:
+            try:
+                vault._validate_batch_write_access(root, writes)
+            except (ValueError, OSError) as error:
+                raise ObserveMemoryError(
+                    "RELATIONSHIP_END_NOT_WRITABLE",
+                    "a target unit needs an anchor on a read-only page",
+                ) from error
+        plan = unit_edges.plan_change(
+            root, source=unit_edges.End(source_path, anchor, current.parent_ref),
+            targets=tuple(targets), visible=visible, replacing=replacing, reason=reason,
+            writes=tuple(writes), guards=tuple(guards),
+            preserved_types=registry.keys_with("replaces"),
+            supersession_check=supersession_check,
+        )
+    return semantic_units.apply_splices(body, primary.edits), plan
+
+
+def _relationship_end_missing() -> ObserveMemoryError:
+    return ObserveMemoryError(
+        "RELATIONSHIP_END_NOT_FOUND", "the relationship target is unavailable",
+    )
+
+
+def _read_relationship_page(root: Path, path: str) -> _RelationshipPage:
+    try:
+        source, guard = vault.read_guarded_text(root, root / path)
+        state = semantic_index.selected_parent_index_state(root, path, source=source)
+    except (ValueError, OSError) as error:
+        raise _relationship_end_missing() from error
+    return _RelationshipPage(source, state, guard)
+
+
+def _splice_relationship_anchors(page: _RelationshipPage) -> str:
+    """Translate body offsets back to exact source bytes, including CRLF and a leading BOM."""
+    original = page.raw.replace("\r\n", "\n").replace("\r", "\n")
+    _, body, _ = vault.parse_frontmatter(original)
+    offset = len(original) - len(body)
+    crlf = [match.start() - index for index, match in enumerate(re.finditer("\r\n", page.raw))]
+    newline = vault.document_newline(page.raw)
+
+    def raw_position(position: int) -> int:
+        logical = offset + position
+        return logical + bisect_left(crlf, logical)
+
+    return semantic_units.apply_splices(page.raw, (
+        (raw_position(start), raw_position(end), text.replace("\n", newline))
+        for start, end, text in page.edits
+    ))
+
+
+def _unchanged_unit(unit: semantic_units.SemanticUnit, expected: Mapping[str, Any]) -> bool:
+    """Compare parsed fields so a relationship-only edit preserves even noncanonical layout."""
+    relations = tuple((relation.kind, relation.target) for relation in unit.relations)
+    return (
+        unit.anchor == expected["anchor"] and unit.kind == expected["kind"]
+        and unit.category_key == expected["category"] and unit.content == expected["content"]
+        and unit.tags == expected["tags"] and unit.context == expected["context"]
+        and relations == expected["relations"]
+        and unit.verdict == expected["verdict"] and unit.check_by == expected["check_by"]
+        and unit.as_of == expected["as_of"] and unit.until == expected["until"]
+        and _preserved_metadata(unit) == expected["preserved"]
+    )
 
 
 def _legacy_page_given_form(path: str) -> str:
@@ -1350,8 +1616,11 @@ def _select_kind(
     raw = kind
     if raw is None and current_unit is not None and current_unit.form == "rich":
         raw = current_unit.kind
-    if raw is None or semantic_language_registry.normalize_label(raw) == _COMPACT_KIND:
-        return _COMPACT_KIND
+    if (
+        raw is None
+        or semantic_language_registry.normalize_label(raw) in semantic_kinds.compact_kinds()
+    ):
+        return semantic_kinds.compact_kind()
     registry = semantic_language_registry.for_attached_projects(
         language, projects
     )
@@ -1533,7 +1802,8 @@ def _compact_names_passed(arguments: Mapping[str, Any]) -> tuple[str, ...] | Non
     if kind is None:
         compact_kind = mode in {"add", "validate"}
     else:
-        compact_kind = semantic_language_registry.normalize_label(kind) == _COMPACT_KIND
+        key = semantic_language_registry.normalize_label(kind)
+        compact_kind = key in semantic_kinds.compact_kinds()
     if not compact_kind:
         return None
     # A blank value is no value, as `_resolve_governed_value` reads it on an add.
@@ -1989,7 +2259,7 @@ def _generated_anchor(
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    prefix = "obs" if kind == _COMPACT_KIND else "unit"
+    prefix = "obs" if kind in semantic_kinds.compact_kinds() else "unit"
     base = f"{prefix}-{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:12]}"
     candidate = base
     occurrence = 2
@@ -2013,11 +2283,12 @@ def _render_unit(
     as_of: str | None = None,
     until: str | None = None,
     preserved: tuple[tuple[str, str], ...] = (),
+    heading_level: int = 2,
 ) -> str:
     clean_content = content.strip()
     if not clean_content:
         raise ObserveMemoryError("INVALID_OBSERVE_INPUT", "content must not be empty")
-    if kind == _COMPACT_KIND:
+    if kind in semantic_kinds.compact_kinds():
         if "\n" in clean_content or "\r" in clean_content:
             raise ObserveMemoryError(
                 "INVALID_COMPACT_CONTENT",
@@ -2048,7 +2319,7 @@ def _render_unit(
         metadata.append(f"- until: {until}")
     # Rows this command does not own, re-emitted in their authored order.
     metadata.extend(_metadata_row(key, value) for key, value in preserved)
-    return f"## {heading}\n" + "\n".join(metadata) + f"\n\n{clean_content}"
+    return f"{'#' * heading_level} {heading}\n" + "\n".join(metadata) + f"\n\n{clean_content}"
 
 
 def _metadata_row(key: str, value: str) -> str:
@@ -2073,21 +2344,113 @@ def _remove_unit(body: str, start: int, end: int) -> str:
     return body[:start] + body[end:]
 
 
-def _add_compact(body: str, rendered: str) -> str:
-    section_ends = _observation_section_ends(body)
-    if len(section_ends) > 1:
+def _add_compact(body: str, rendered: str, *, section_start: int | None = None) -> str:
+    sections = _observation_sections(body)
+    if section_start is not None:
+        sections = [section for section in sections if section.start == section_start]
+    if len(sections) > 1:
         raise ObserveMemoryError(
             "AMBIGUOUS_OBSERVATIONS_SECTION",
             "parent contains multiple canonical ## Observations sections",
         )
-    if not section_ends:
-        separator = _append_separator(body)
-        return f"{body}{separator}## Observations\n\n{rendered}\n"
-    point = section_ends[0]
+    if not sections:
+        return _append_rich(body, f"## Observations\n\n{rendered}")
+    return _insert_observation(body, sections[0].compact_at, rendered)
+
+
+def _insert_observation(body: str, point: int, rendered: str) -> str:
     before, after = body[:point], body[point:]
     separator = "" if before.endswith("\n\n") else "\n" if before.endswith("\n") else "\n\n"
     tail = "\n" if not after else "\n\n"
     return before + separator + rendered + tail + after
+
+
+def _end_placement_notice(preview: bool) -> str:
+    return ("The observation will go at the end of the note." if preview
+            else "The observation is at the end of the note.")
+
+
+def _fits_nested_block(rendered: str, depth: int) -> bool:
+    """Both readers must keep the block whole and see the section that follows it."""
+    followed = f"{rendered}\n\n# Following section\n"
+    headings = markdown_regions.block_headings(followed)
+    semantic = semantic_blocks.scan_semantic_blocks(followed)
+    boundary = len(rendered) + 2
+    return (
+        len(headings) >= 2 and headings[-1][:2] == (boundary, 1)
+        and all(level > depth for _, level, _ in headings[1:-1])
+        and len(semantic) >= 2 and semantic[0].end_line + 1 == semantic[-1].line
+    )
+
+
+def _place_dated_block(body: str, rendered: str) -> str | None:
+    if not _fits_nested_block(rendered, 3):
+        return None
+    sections = _observation_sections(body)
+    outline = markdown_regions.block_headings(body)
+    visible = [
+        offset for offset, level, title in outline
+        if level == 2 and semantic_language_registry.normalize_label(title) == "observations"
+    ]
+    if not sections and not visible:
+        candidate = _append_rich(body, f"## Observations\n\n{rendered}")
+        point = len(body)
+    elif len(sections) != 1 or visible != [sections[0].start]:
+        return None
+    else:
+        section = sections[0]
+        visible_end = next(
+            (offset for offset, level, _ in outline if offset > section.start and level <= 2),
+            len(body),
+        )
+        if section.end != visible_end:
+            return None
+        point = section.end
+        candidate = _insert_observation(body, point, rendered)
+    return candidate if _shows_rendered_heading(candidate, rendered, point) else None
+
+
+def _shows_rendered_heading(body: str, rendered: str, point: int) -> bool:
+    return any(offset >= point and body.startswith(rendered, offset)
+               for offset, _, _ in markdown_regions.block_headings(body))
+
+
+def _append_visible_record(body: str, rendered: str) -> str:
+    candidate = _append_rich(body, rendered)
+    if not _shows_rendered_heading(candidate, rendered, len(body)):
+        raise _hidden_record_heading()
+    return candidate
+
+
+def _observation_section_containing(body: str, point: int) -> _ObservationSection | None:
+    return next(
+        (section for section in _observation_sections(body) if section.start < point < section.end),
+        None,
+    )
+
+
+def _guard_nested_observation_span(body: str, unit: semantic_units.SemanticUnit) -> None:
+    level = unit.level or 2
+    start, end = unit.span.start_offset, unit.span.end_offset
+    if level <= 2 or _observation_section_containing(body, start) is None:
+        return
+    outline = markdown_regions.block_headings(body)
+    if not any(offset == start and depth == level for offset, depth, _ in outline):
+        raise _hidden_record_heading()
+    if any(start < offset < end and depth <= level for offset, depth, _ in outline):
+        raise ObserveMemoryError(
+            "AMBIGUOUS_SEMANTIC_UNIT_CONTENT",
+            "the record crosses a Markdown section boundary",
+            "Separate the heading from the record with a page edit, then read the unit and retry.",
+        )
+
+
+def _hidden_record_heading() -> ObserveMemoryError:
+    return ObserveMemoryError(
+        "INVALID_SEMANTIC_UNIT",
+        "the note's Markdown hides the record heading",
+        "Close the unfinished Markdown block, then retry.",
+    )
 
 
 def _append_rich(body: str, rendered: str) -> str:
@@ -2101,9 +2464,17 @@ def _append_separator(body: str) -> str:
     return "\n" if body.endswith("\n") else "\n\n"
 
 
-def _observation_section_ends(body: str) -> list[int]:
+@dataclass(frozen=True, slots=True)
+class _ObservationSection:
+    start: int
+    compact_at: int
+    end: int
+
+
+def _observation_sections(body: str) -> list[_ObservationSection]:
+    """The start, compact line insertion point and end of each canonical section."""
     lines = body.splitlines(keepends=True)
-    offsets: list[int] = []
+    sections = []
     offset = 0
     headings: list[tuple[int, int, str]] = []
     fence_char: str | None = None
@@ -2132,16 +2503,21 @@ def _observation_section_ends(body: str) -> list[int]:
         if heading is not None:
             headings.append((offset, len(heading.group(1)), heading.group(2).strip()))
         offset += len(line)
-    for index, (_start, level, title) in enumerate(headings):
+    for index, (start, level, title) in enumerate(headings):
         if level != 2 or semantic_language_registry.normalize_label(title) != "observations":
             continue
         end = len(body)
-        for candidate_start, candidate_level, _ in headings[index + 1 :]:
+        first_child = None
+        for candidate_index in range(index + 1, len(headings)):
+            candidate_start, candidate_level, _ = headings[candidate_index]
             if candidate_level <= level:
                 end = candidate_start
                 break
-        offsets.append(end)
-    return offsets
+            if first_child is None:
+                first_child = candidate_start
+        compact_at = end if first_child is None else first_child
+        sections.append(_ObservationSection(start, compact_at, end))
+    return sections
 
 
 def _rebuild_source(
@@ -2212,7 +2588,7 @@ def _assert_round_trip(
         and unit.anchor == anchor
         and relation_values == relations
     )
-    if kind == _COMPACT_KIND:
+    if kind in semantic_kinds.compact_kinds():
         matches = common_matches and unit.tags == tags and unit.context == context
     else:
         # Preserved rows are part of the expectation, so a reconstruction that
@@ -2308,6 +2684,7 @@ def _result(
     lifted_outcome: str | None = None,
     dated_default_kind: str | None = None,
     dated_default_outcome: str | None = None,
+    placement_outcome: str | None = None,
     timings: dict[str, Any] | None = None,
     warnings: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -2330,6 +2707,10 @@ def _result(
     elif dated_default_kind is not None and dated_default_outcome is not None:
         value["kind_defaulted"] = dated_default_kind
         value["outcome"] = dated_default_outcome
+    if placement_outcome is not None:
+        value["observation_at_end"] = True
+        outcome = value.get("outcome")
+        value["outcome"] = f"{outcome} {placement_outcome}" if outcome else placement_outcome
     if timings is not None:
         value["timings"] = timings
     if warnings:

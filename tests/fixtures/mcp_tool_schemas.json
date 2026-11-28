@@ -1130,7 +1130,7 @@
         },
         "options": {
           "type": "object",
-          "description": "Rare knobs: links, frontmatter_only, include_raw, unit_ref, offset."
+          "description": "Options include links, frontmatter_only, include_raw, unit_ref, offset, relationship_limit and relationship_after."
         }
       },
       "required": [

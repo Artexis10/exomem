@@ -1619,13 +1619,12 @@ def test_windows_installer_gates_remote_and_verifies_before_success() -> None:
     # #578: installing is not deploying. The installer shares this helper, so a
     # fresh venv that ends up with nothing in it has to fail here too.
     assert "Assert-ExomemInstallApplied" in common
-    assert "Preflight: exomem doctor --profile remote" in text
     assert "function Test-McpEndpoint" in text
     assert "-SkipHttpErrorCheck" in text
     assert "OAuth is not enforced" in text
     assert "CHATGPT_PLUGIN_REFRESH_REQUIRED" in text
     assert "connector rollout is incomplete" in text
-    assert text.index("Preflight: exomem doctor --profile remote") < text.index("& $NssmPath install")
+    assert text.index("& $python @remoteDoctorArgs") < text.index("& $NssmPath install")
     assert text.index("Test-McpEndpoint -HostName") < text.index("Granted no-UAC")
     assert text.index("Test-McpEndpoint -HostName") < text.index("CHATGPT_PLUGIN_REFRESH_REQUIRED")
 

@@ -125,6 +125,24 @@ def _receipt_records(vault: Path) -> list[dict[str, object]]:
     ] if root.exists() else []
 
 
+def test_a_candidate_lookup_does_not_emit_a_nested_disclosure_receipt(vault: Path) -> None:
+    """Only the outer command's selected text was released and belongs in the event stream."""
+    from exomem.collection_store.preview import canonical_read
+
+    @canonical_read(receipt_boundary="candidate_lookup")
+    def candidate(root):
+        egress.record_direct_text_release("Candidate text", stable_ref=_MEMORY_REF, representation="page_body")
+
+    with library_scope(), egress.disclosure_boundary(vault, "read_memory") as collector:
+        with egress.decide_without_receipt(vault):
+            candidate(vault)
+        egress.record_direct_text_release("Selected text", stable_ref=_MEMORY_REF, representation="page_body")
+        egress.emit_boundary_receipt(collector)
+
+    records = [entry for entry in _receipt_records(vault) if entry["event_type"] == "disclosure"]
+    assert [outcome["command"] for entry in records for outcome in entry["outcomes"]] == ["read_memory"]
+
+
 def _recursive_snapshot(
     *roots: Path,
     private_coordination_root_indexes: frozenset[int] = frozenset(),

@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from alembic.config import Config
     from sqlalchemy.engine import Connection
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 #: The first schema with the store-mode tables, ``VAULT_STORE_TABLES``.
 VAULT_STORE_SCHEMA_VERSION = 15
 #: The last schema that changed a table that a store-mode page read reads: 16 gave pages their mtime. A store
@@ -101,6 +101,9 @@ VAULT_STORE_TABLES = (
     "store_held",
     "store_audit",
     "store_derivation_queue",
+    "store_relationship_history",
+    "store_relationships",
+    "store_unit_ids",
 )
 
 TABLES = (
@@ -1307,6 +1310,66 @@ def _migrate_to_20(conn: sqlite3.Connection) -> None:
       metered INTEGER NOT NULL DEFAULT 0 CHECK(metered IN (0, 1))
     ) STRICT""")
     conn.execute("CREATE INDEX store_derivation_queue_by_revision ON store_derivation_queue(revision)")
+
+
+def _migrate_to_21(conn: sqlite3.Connection) -> None:
+    """Store relationships and unit identities under the collection-store compatibility fence."""
+    conn.execute("ALTER TABLE store_manifest ADD COLUMN canonical_sha256 TEXT")
+    conn.execute(
+        "ALTER TABLE store_derivation_queue ADD COLUMN relationship_move INTEGER NOT NULL DEFAULT 0"
+        " CHECK(relationship_move IN (0,1))"
+    )
+    # The unit can outlive its page as an orphan. Its page path is deliberately not a foreign key.
+    conn.execute("""CREATE TABLE store_unit_ids(
+      id TEXT PRIMARY KEY,
+      parent_path TEXT NOT NULL,
+      parent_ref TEXT,
+      anchor TEXT NOT NULL
+    ) STRICT""")
+    conn.execute("""CREATE UNIQUE INDEX store_unit_ids_by_locator
+      ON store_unit_ids(parent_path, anchor, COALESCE(parent_ref, ''))""")
+    conn.execute("""CREATE TABLE store_relationships(
+      id TEXT PRIMARY KEY,
+      source_unit_id TEXT NOT NULL REFERENCES store_unit_ids(id),
+      relation_type TEXT NOT NULL,
+      target_unit_id TEXT REFERENCES store_unit_ids(id),
+      target_page_path TEXT,
+      target_page_ref TEXT,
+      created_revision INTEGER NOT NULL,
+      retired_revision INTEGER,
+      CHECK((target_unit_id IS NULL) != (target_page_path IS NULL)),
+      CHECK(target_page_path IS NOT NULL OR target_page_ref IS NULL)
+    ) STRICT""")
+    conn.execute("""CREATE INDEX store_relationships_by_source
+      ON store_relationships(source_unit_id, relation_type, id) WHERE retired_revision IS NULL""")
+    conn.execute("""CREATE INDEX store_relationships_by_target_unit
+      ON store_relationships(target_unit_id, relation_type, id) WHERE retired_revision IS NULL""")
+    conn.execute("""CREATE INDEX store_relationships_by_target_page
+      ON store_relationships(target_page_path, relation_type, id) WHERE retired_revision IS NULL""")
+    conn.execute("""CREATE INDEX store_relationships_retired_keys
+      ON store_relationships(source_unit_id, relation_type, target_unit_id, target_page_path,
+                             target_page_ref, retired_revision DESC) WHERE retired_revision IS NOT NULL""")
+    conn.execute("""CREATE UNIQUE INDEX store_relationships_unique_unit
+      ON store_relationships(source_unit_id, relation_type, target_unit_id)
+      WHERE retired_revision IS NULL AND target_unit_id IS NOT NULL""")
+    conn.execute("""CREATE UNIQUE INDEX store_relationships_unique_page_ref
+      ON store_relationships(source_unit_id, relation_type, target_page_ref)
+      WHERE retired_revision IS NULL AND target_page_ref IS NOT NULL""")
+    conn.execute("""CREATE UNIQUE INDEX store_relationships_unique_page_path
+      ON store_relationships(source_unit_id, relation_type, target_page_path)
+      WHERE retired_revision IS NULL AND target_page_path IS NOT NULL AND target_page_ref IS NULL""")
+    # These actions describe lifecycle transitions fixed by the store protocol.
+    conn.execute("""CREATE TABLE store_relationship_history(
+      relationship_id TEXT NOT NULL REFERENCES store_relationships(id),
+      revision INTEGER NOT NULL,
+      action TEXT NOT NULL CHECK(action IN ('add', 'retire', 'supersede')),
+      actor TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      at TEXT NOT NULL,
+      successor_id TEXT REFERENCES store_relationships(id),
+      PRIMARY KEY(relationship_id, revision, action),
+      CHECK((action = 'supersede') = (successor_id IS NOT NULL))
+    ) STRICT, WITHOUT ROWID""")
 
 
 def compatibility_ids(version: int | None = None) -> tuple[str, ...]:

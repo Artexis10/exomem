@@ -14,14 +14,17 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
+import os
+import time
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from threading import Lock
 from typing import Any, Literal
 
-from .. import document_containers, find_corpus, memory_refs, reserved_paths
+from .. import document_containers, find_corpus, held_fs, memory_refs, originals, reserved_paths
 from ..find_types import ParsedPage
 from ..kbdir import managed_root_rel, managed_split_parts
 from . import companions
@@ -87,7 +90,7 @@ def clear_memo() -> None:
     _MEMO.clear()
     _SNAPSHOT_MEMO.clear()
     _PATH_MEMO.clear()
-    _PARENT_MEMO.clear()
+    _PARENT_SUBJECTS.clear()
     _normalized_refs.cache_clear()
 
 
@@ -561,11 +564,6 @@ def evaluate_path_only(
     return classified(matched)
 
 
-# Parsed parent pages keyed on path, mtime and size, so the frames of one video parse it once.
-_PARENT_MEMO: OrderedDict[tuple[str, int, int], ParsedPage] = OrderedDict()
-_PARENT_MEMO_MAX = 256
-
-
 def _read_parent_path(root: Path, path: str) -> ParsedPage:
     staged = document_containers.staged_page(root, path)
     if staged is not None:
@@ -597,32 +595,6 @@ def _container_membership(page: ParsedPage, policy: Policy) -> frozenset[str] | 
     if dependency is None:
         return None
     return _current_parent_scopes(page.vault_root, dependency[1], policy) | evaluate_path_only(page.vault_root, dependency[0], policy).require_classified()
-
-
-def _read_parent(page: ParsedPage, parent: str) -> ParsedPage:
-    """The parsed page at vault-relative `parent`; an unreadable parent leaves `page` unresolved."""
-    if page.vault_root is None:
-        raise MembershipUnresolved(f"the parent page of {page.rel_path!r} has no vault root")
-    path = page.vault_root / parent
-    try:
-        stat = find_corpus.page_stat(path, page.vault_root)
-    except OSError as exc:
-        raise MembershipUnresolved(f"cannot read the parent page of {page.rel_path!r}: {exc}") from exc
-    key = (str(path), stat.st_mtime_ns, stat.st_size)
-    cached = _PARENT_MEMO.get(key)
-    if cached is not None:
-        _PARENT_MEMO.move_to_end(key)
-        return cached
-    try:
-        parsed = find_corpus.parse_page(path, stat.st_mtime, page.vault_root)
-    except OSError as exc:
-        raise MembershipUnresolved(f"cannot read the parent page of {page.rel_path!r}: {exc}") from exc
-    if parsed is None:
-        raise MembershipUnresolved(f"cannot read the parent page of {page.rel_path!r}")
-    _PARENT_MEMO[key] = parsed
-    while len(_PARENT_MEMO) > _PARENT_MEMO_MAX:
-        _PARENT_MEMO.popitem(last=False)
-    return parsed
 
 
 #: The two page-to-page inheritance edges that membership reads, named for a caller that reports them.
@@ -673,26 +645,206 @@ def _edge_of(page: ParsedPage) -> InheritanceEdge | None:
     )
 
 
-def _part_source(page: ParsedPage) -> ParsedPage | None:
-    """The Source page of an extracted-text part, else None."""
-    edge = _edge_of(page)
-    return None if edge is None or edge.kind != PART_EDGE else _read_parent(page, edge.parent)
+#: A container member's inherited scopes come from its parent's companion page and binary.
+CONTAINER_INHERITANCE = "container"
 
 
-def _frame_video(page: ParsedPage) -> ParsedPage | None:
-    """The video page of a scene frame, else None."""
+class ParentSubjects:
+    """Retain just the selector inputs of parents whose file versions remain current."""
+
+    def __init__(self) -> None:
+        self._subjects: OrderedDict[
+            Path, tuple[tuple[int, int, int, int, int], MarkdownSubject]
+        ] = OrderedDict()
+        self._lock = Lock()
+
+    def clear(self) -> None:
+        with self._lock:
+            self._subjects.clear()
+
+    def scopes(
+        self, root: Path, parent: str, policy: Policy, *, held_only: bool = False,
+    ) -> frozenset[str]:
+        from ..vault import generation_can_bind_bytes
+
+        path = root / parent
+        stored = find_corpus.stored_relative(path, root) is not None
+        if held_only and (os.name == "nt" or stored):
+            raise MembershipUnresolved("parent needs full verification")
+        observed_at = time.time_ns()
+        try:
+            info = None if stored else path.lstat()
+            before = None if info is None else held_fs.stat_witness(info)
+            with self._lock:
+                cached = self._subjects.get(path)
+                if cached is not None and cached[0] == before:
+                    self._subjects.move_to_end(path)
+            if before is not None and cached is not None and cached[0] == before:
+                current = reserved_paths.inspect_generic_file(root, parent, physical=True)
+                if (current.device, current.inode) != before[:2] or current.link_count != 1:
+                    raise MembershipUnresolved("parent file identity changed")
+                scopes = evaluate_subject(root, cached[1], policy)
+                if held_fs.stat_witness(path.lstat()) != before:
+                    raise MembershipUnresolved("parent changed during verification")
+                return scopes
+
+            snapshot = find_corpus.read_page_snapshot(path, root)
+            if snapshot is None:
+                raise MembershipUnresolved("parent page is unreadable")
+            if snapshot.identity is not None and snapshot.generation is not None:
+                observed = (snapshot.identity.device, snapshot.identity.inode, *snapshot.generation)
+                if observed != before:
+                    raise MembershipUnresolved("parent changed during the read")
+            elif held_only or not stored:
+                raise MembershipUnresolved("parent version is unavailable")
+
+            page = find_corpus.parse_page(path, snapshot.mtime, root, content=snapshot.data)
+            if page is None:
+                raise MembershipUnresolved("parent page is unreadable")
+            if (
+                _edge_of(page) is not None
+                or "container_member" in page.frontmatter
+                or document_containers.in_payload_tree(page.rel_path)
+            ):
+                if held_only:
+                    raise MembershipUnresolved("parent has its own inherited scopes")
+                assert page.snapshot_hash is not None
+                scopes = evaluate_snapshot(page, policy, content_hash=page.snapshot_hash)
+            else:
+                subject = markdown_subject(page)
+                scopes = evaluate_subject(root, subject, policy)
+                if (
+                    before is not None and info is not None
+                    and generation_can_bind_bytes(info, observed_at)
+                ):
+                    with self._lock:
+                        self._subjects[path] = before, subject
+                        self._subjects.move_to_end(path)
+                        if len(self._subjects) > _PARENT_SUBJECT_LIMIT:
+                            self._subjects.popitem(last=False)
+            if before is not None and held_fs.stat_witness(path.lstat()) != before:
+                raise MembershipUnresolved("parent changed during verification")
+            return scopes
+        except (OSError, ValueError, reserved_paths.ReservedPathLeafError) as error:
+            raise MembershipUnresolved("parent page is unavailable") from error
+
+
+_PARENT_SUBJECT_LIMIT = 256
+_PARENT_SUBJECTS = ParentSubjects()
+
+
+def _inherited_page_scopes(
+    page: ParsedPage, edge: InheritanceEdge, policy: Policy,
+) -> frozenset[str]:
+    if page.vault_root is None:
+        raise MembershipUnresolved(f"the parent page of {page.rel_path!r} has no vault root")
+    return _PARENT_SUBJECTS.scopes(page.vault_root, edge.parent, policy)
+
+
+def held_scope_basis(
+    page: ParsedPage, policy: Policy, *, content_hash: str, parents: ParentSubjects,
+) -> tuple[frozenset[str], dict[str, Any] | None] | None:
+    """A page's own scopes and where it inherits the rest, checked against `evaluate_snapshot`.
+
+    The split must give the same scopes as the full rule today, so a later change to one rule that
+    misses the other sends the row to full verification instead of a held release.
+    """
+    basis = _split_scope_basis(page, policy, content_hash=content_hash)
+    if basis is None or basis[1] is None or page.vault_root is None:
+        return basis
+    own, inherits = basis
+    try:
+        inherited, _ = live_inherited_scopes(
+            page.vault_root, page.rel_path, inherits, policy, parents=parents,
+        )
+    except MembershipUnresolved:
+        return None
+    if own | inherited != evaluate_snapshot(page, policy, content_hash=content_hash):
+        return None
+    return basis
+
+
+def _split_scope_basis(
+    page: ParsedPage, policy: Policy, *, content_hash: str,
+) -> tuple[frozenset[str], dict[str, Any] | None] | None:
+    """A page's own scopes and, separately, where it inherits the rest, as `evaluate_snapshot` combines them.
+
+    A holder keeps the page's own scopes with its bytes' evidence and rereads only the inherited part,
+    through `live_inherited_scopes`, because a parent can be retagged while the page stays unchanged.
+    A container member also holds the stat witness of its own payload binary. None means the page
+    cannot be held this way.
+    """
+    if policy.empty or not policy.scopes:
+        return frozenset(), None
     edge = _edge_of(page)
-    return None if edge is None or edge.kind != FRAME_EDGE else _read_parent(page, edge.parent)
+    if edge is not None and edge.kind == PART_EDGE:
+        return frozenset(), {"kind": PART_EDGE, "parent": edge.parent}
+    own = _page_membership(page, policy, _registry_assignment(page.vault_root, page.rel_path, policy))
+    if edge is not None and edge.kind == FRAME_EDGE:
+        return own, {"kind": FRAME_EDGE, "parent": edge.parent}
+    claim = page.frontmatter.get("container_member")
+    if claim is not None and page.vault_root is not None:
+        try:
+            payload = page.vault_root / claim["artifact_path"]
+            before = held_fs.stat_witness(os.stat(payload, follow_symlinks=False))
+        except (OSError, TypeError, KeyError):
+            return None  # A payload held elsewhere has no local witness: the full path proves it.
+        if document_containers.parent_for_page(page.vault_root, page.rel_path, page.frontmatter) is not None:
+            # The proof above read these payload bytes only if the version did not move around it.
+            if held_fs.stat_witness(os.stat(payload, follow_symlinks=False)) != before:
+                return None
+            return own, {"kind": CONTAINER_INHERITANCE, "claim": claim, "artifact_witness": list(before)}
+    return evaluate_snapshot(page, policy, content_hash=content_hash), None
+
+
+def require_current_held_payload(root: Path, inherited: Mapping[str, Any]) -> None:
+    """Prove that the artifact a held container record covered still has its file version."""
+    try:
+        payload = root / inherited["claim"]["artifact_path"]
+        current = held_fs.stat_witness(payload.lstat())
+        stored = tuple(inherited["artifact_witness"])
+    except (OSError, KeyError, TypeError) as error:
+        raise MembershipUnresolved("container payload is unavailable") from error
+    if current != stored:
+        raise MembershipUnresolved("container payload changed")
+
+
+def live_inherited_scopes(
+    root: Path, path: str, inherited: Mapping[str, Any], policy: Policy, *, parents: ParentSubjects,
+) -> tuple[frozenset[str], originals.BinaryBinding | None]:
+    """The scopes `path` inherits now, read from its parent alone, and a container member's parent binding.
+
+    Raises `MembershipUnresolved` when the parent cannot be read or no longer validates.
+    """
+    kind = inherited.get("kind")
+    if kind in {PART_EDGE, FRAME_EDGE}:
+        return parents.scopes(root, inherited["parent"], policy, held_only=True), None
+    if kind == CONTAINER_INHERITANCE:
+        try:
+            require_current_held_payload(root, inherited)
+            binding = document_containers._parent_binding_for_page(
+                root, path, {"container_member": inherited["claim"]}, artifact_proven=True,
+            )
+        except (ValueError, OSError, KeyError, TypeError, reserved_paths.ReservedPathLeafError) as error:
+            raise MembershipUnresolved("container parent provenance is unavailable") from error
+        if binding is None:
+            raise MembershipUnresolved("container parent provenance is unavailable")
+        scopes = _current_parent_scopes(root, inherited["claim"]["parent_page"], policy)
+        scopes |= evaluate_path_only(root, binding.path, policy).require_classified()
+        require_current_held_payload(root, inherited)
+        return scopes, binding
+    raise MembershipUnresolved("unknown inheritance")
 
 
 def evaluate(page: ParsedPage, policy: Policy) -> frozenset[str]:
     """Return the set of scope ids `page` belongs to under `policy`, memoized."""
     if policy.empty or not policy.scopes:
         return frozenset()
-    if (source := _part_source(page)) is not None:
-        return evaluate(source, policy)
-    video = _frame_video(page)
-    inherited = (frozenset() if video is None else evaluate(video, policy)) | (_container_membership(page, policy) or frozenset())
+    edge = _edge_of(page)
+    inherited = _inherited_page_scopes(page, edge, policy) if edge is not None else frozenset()
+    if edge is not None and edge.kind == PART_EDGE:
+        return inherited
+    inherited |= _container_membership(page, policy) or frozenset()
     # `st_size` alongside `st_mtime_ns`, not `st_mtime_ns` alone. Two writes
     # in quick succession can share an identical `st_mtime_ns` — the platform
     # timestamp is not always as fine-grained as the field width suggests
@@ -768,13 +920,13 @@ def evaluate_snapshot(
     """
     if policy.empty or not policy.scopes:
         return frozenset()
-    if (source := _part_source(page)) is not None:
-        return evaluate(source, policy)
-    if (video := _frame_video(page)) is not None:
-        own = _page_membership(
-            page, policy, _registry_assignment(page.vault_root, page.rel_path, policy)
+    if (edge := _edge_of(page)) is not None:
+        inherited = _inherited_page_scopes(page, edge, policy)
+        if edge.kind == PART_EDGE:
+            return inherited
+        return inherited | _page_membership(
+            page, policy, _registry_assignment(page.vault_root, page.rel_path, policy),
         )
-        return own | evaluate(video, policy)
     inherited = _container_membership(page, policy)
     if inherited is not None:
         return inherited | _page_membership(page, policy, _registry_assignment(page.vault_root, page.rel_path, policy))

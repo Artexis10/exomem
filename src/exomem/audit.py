@@ -115,7 +115,7 @@ import threading
 import unicodedata
 import weakref
 from collections import deque
-from collections.abc import Callable, Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from functools import lru_cache, wraps
@@ -171,6 +171,7 @@ from .vault import (
 log = logging.getLogger(__name__)
 
 RELATION_GENERIC_SHARE_CATEGORY = "relation_generic_share"
+RELATIONSHIP_ORPHAN = "relationship_orphan"
 #: A Source kept on purpose with no note expected (`custody_only: true`); the unprocessed pass emits it.
 CUSTODY_SOURCE = "custody_source"
 
@@ -193,6 +194,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "stale_review",
     "corpus_contradictions",
     "relation_debt",
+    RELATIONSHIP_ORPHAN,
     RELATION_GENERIC_SHARE_CATEGORY,
     "governance_receipts",
     "bridge_review",
@@ -600,7 +602,9 @@ def audit(
 
     kb = kb_root(vault_root)
     # These read the catalogue's columns and re-read their own members, so none parses the corpus first.
-    projection_checks = _SEMANTIC_AUDIT_CATEGORIES | {RELATION_GENERIC_SHARE_CATEGORY} | set(DUPLICATE_CATEGORIES)
+    projection_checks = _SEMANTIC_AUDIT_CATEGORIES | {
+        RELATION_GENERIC_SHARE_CATEGORY, RELATIONSHIP_ORPHAN,
+    } | set(DUPLICATE_CATEGORIES)
     sense_scope = None
     release = _AUDIT_RELEASE_DEFAULT
     # An explicit entity-recurrence sweep reads only the pages that changed since the last one.
@@ -821,6 +825,9 @@ def audit(
     with stage('relation_debt') as run:
         if run:
             findings.extend(_check_relation_debt(vault_root, pages, status_basis=status_basis))
+    with stage(RELATIONSHIP_ORPHAN) as run:
+        if run:
+            findings.extend(_check_relationship_orphans(vault_root))
     with stage(RELATION_GENERIC_SHARE_CATEGORY) as run:
         if run:
             from . import relation_census
@@ -4512,6 +4519,56 @@ def _check_relation_debt(
         )
 
     return sorted(findings, key=lambda finding: finding.path)
+
+
+def _check_relationship_orphans(vault_root: Path) -> Iterator[AuditFinding]:
+    from . import unit_edges
+    from .governance import egress
+    from .governance.principal import effective_principal
+    from .vault_store import mode, read, relationships
+
+    if not mode.store_mode_for_reads(vault_root) or not egress.unrestricted_content_access(
+        vault_root, effective_principal(),
+    ):
+        return
+
+    @lru_cache(maxsize=read.KEYS_PER_QUERY)
+    def external_parent(path: str) -> unit_edges._RelationshipEndpoint | None:
+        if read.owned_as_page(vault_root, path):
+            return None
+        try:
+            return unit_edges._external_endpoint(vault_root, path)
+        except unit_edges._RelationshipReadUnavailable:
+            return None
+
+    with read.snapshot(vault_root) as view:
+        if not view.connection.execute(
+            "SELECT 1 FROM sqlite_schema WHERE name='store_unit_ids'",
+        ).fetchone():
+            return
+        for unit in relationships.orphaned_units(view.connection):
+            request_budget.checkpoint()
+            external = external_parent(unit.parent_path)
+            if (external is not None and (unit.parent_ref is None or external.parent_ref == unit.parent_ref)
+                    and unit.anchor in external.anchors):
+                continue
+            yield AuditFinding(
+                category=RELATIONSHIP_ORPHAN, severity="warn", path=unit.parent_path,
+                detail=f"Stored relationships still name the missing unit #{unit.anchor}.",
+                proposed_fix="Restore the original anchor or update its stored relationships.",
+                meta={"unit_id": unit.id, "anchor": unit.anchor, "signal_version": unit.id},
+            )
+        for path, reference in relationships.orphaned_pages(view.connection):
+            request_budget.checkpoint()
+            external = external_parent(path)
+            if external is not None and (reference is None or external.parent_ref == reference):
+                continue
+            yield AuditFinding(
+                category=RELATIONSHIP_ORPHAN, severity="warn", path=path,
+                detail="Stored relationships still name the missing page.",
+                proposed_fix="Restore the original page or update its stored relationships.",
+                meta={"page_ref": reference, "signal_version": reference or path},
+            )
 
 
 # ---------------- check: missing_sources ----------------

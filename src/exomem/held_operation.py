@@ -53,7 +53,7 @@ def _may_see(vault_root: Path) -> Callable[[str], bool]:
     from .governance import egress
     from .governance import policy as policy_module
     from .governance.principal import effective_principal
-    from .vault_store import held, read
+    from .vault_store import held, read, relationship_files
 
     who = effective_principal()
     if egress.unrestricted_content_access(vault_root, who):
@@ -61,6 +61,8 @@ def _may_see(vault_root: Path) -> Callable[[str], bool]:
     current = policy_module.load(vault_root)
 
     def may_see(rel: str) -> bool:
+        if relationship_files.source_path(rel) is not None:
+            return False
         try:
             stored = read.owned_page(vault_root, rel)
         except FileNotFoundError:
@@ -115,6 +117,8 @@ def _row(item: Any) -> dict[str, Any]:
 def listing(vault_root: Path, limit: int | None = None) -> dict[str, Any]:
     """Every held item that this caller may read, oldest first, with the choices that resolve it."""
     from .cli_ops import OpError
+    from .governance import egress
+    from .governance.principal import effective_principal
     from .vault_store import held, mode
 
     cap = _DEFAULT_LIMIT if limit is None else limit
@@ -125,8 +129,9 @@ def listing(vault_root: Path, limit: int | None = None) -> dict[str, Any]:
             f"Pass a limit from 1 to {_MAX_LIMIT}, or omit it to list {_DEFAULT_LIMIT}.",
         )
     root = Path(vault_root)
+    unrestricted = egress.unrestricted_content_access(root, effective_principal())
     may_see = _may_see(root)
-    visible = [item for item in held.list_held(root) if may_see(item.path)]
+    visible = held.list_held(root, unrestricted=unrestricted, may_see=may_see)
     shown = visible[:cap]
     # An item the caller may not read is left out without a count, as the release contract omits it.
     if not visible:

@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 from .. import epistemic_graph, lexstore, vault
 from ..cli_ops import OpError
 from ..collection_store import connection
-from . import derivation, derive, mode, ownership, read, rederive
+from . import derivation, derive, mode, ownership, read, rederive, relationships
 from .read import AFTER, NOT_ACTIVE
 
 if TYPE_CHECKING:
@@ -58,9 +58,9 @@ class Expect:
     """What a path must hold in the store when the commit runs, or the whole commit is refused.
 
     ``absent`` says the store holds nothing at the path. Otherwise each field that is set must
-    match the stored page or binary record. ``projected`` says that the file on disk is the stored
-    page: the projection manifest records the page's own revision, no projection intent is queued
-    for the path and no outside change is held for it. ``linked_from`` names every page that may
+    match the stored page or binary record. ``projected`` requires a manifest that records the
+    canonical bytes and revision, with no queued projection or hold at the path.
+    ``linked_from`` names every page that may
     link to the path: a link from a page outside it, in the inbound-link rows at commit time (the
     rule that ``list_inbound_links`` and a move's rewrite use), refuses the commit. A delete reads
     its inbound links and commits on that reading through it.
@@ -137,15 +137,17 @@ class PageDelete:
 class PageMove:
     """A page's bytes moved to a path the store does not hold.
 
-    ``on_disk`` says that the file already moved there. ``body`` gives the page new bytes at its new
-    path, as a move that rewrites the page's own links does; the move is still one life that the
-    trail follows from the old path, and the projector writes the new bytes there.
+    ``on_disk`` says that the file already moved there. ``on_disk_sha256`` binds the observed
+    file's exact bytes when they differ from the canonical bytes.
+    ``body`` gives the page new bytes at its new path, as a move that rewrites the page's own links
+    does. The trail follows one life from the old path, and the projector writes the new bytes.
     """
 
     src: str
     dst: str
     on_disk: bool = False
     body: bytes | None = None
+    on_disk_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if self.on_disk and self.body is not None:
@@ -209,19 +211,40 @@ class FileSeen:
     projection manifest saw there: the projector then replaces that file with the stored page.
 
     ``sha256`` is None when the file was gone, and the commit then drops the manifest entry; the
-    size and modification time then stay None too.
+    size and modification time then stay None too. ``canonical_sha256`` records the hash of the
+    corresponding canonical page if the file carries projection bytes.
     """
 
     rel: str
     sha256: str | None
     size: int | None = None
     mtime_ns: int | None = None
+    canonical_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if (self.sha256 is None) != (self.size is None) or (self.size is None) != (
             self.mtime_ns is None
         ):
             raise ValueError("a seen file has a hash, a size and a time, or none of them")
+
+
+def outside_page(
+    tx: Connection, rel: str, raw: bytes, sha256: str, mtime_ns: int, *, keep_mine: bool = False,
+) -> tuple[PagePut, tuple[FileSeen, ...]]:
+    """Read canonical page bytes and retain the exact projected-file witness for its rewrite."""
+    from . import relationship_files
+
+    if ownership.is_markdown(rel):
+        canonical, reproject = relationship_files.editor_body(tx, rel, raw, keep_mine=keep_mine)
+    else:
+        canonical = relationship_files.strip_block(raw, keep_mine=keep_mine)
+        reproject = False
+    canonical_sha256 = None if canonical == raw else hashlib.sha256(canonical).hexdigest()
+    if canonical_sha256 is None and not reproject:
+        return PagePut(rel, raw, on_disk_mtime_ns=mtime_ns), ()
+    return PagePut(rel, canonical), (
+        FileSeen(rel, sha256, len(raw), mtime_ns, canonical_sha256),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,6 +278,7 @@ class StoreChange:
     #: (``folder_intent``), and the projector removes the folder once nothing queued below it is
     #: left to move and it is empty.
     vacated_folders: tuple[str, ...] = ()
+    relationship_change: relationships.Change | None = None
 
     @property
     def paths(self) -> tuple[str, ...]:
@@ -278,12 +302,15 @@ class StoreChange:
         )
 
     def __post_init__(self) -> None:
-        if not self.paths and not self.refresh:
+        if not self.paths and not self.refresh and self.relationship_change is None:
             raise ValueError("a store change names no file")
         named = (*self.paths, *self.refresh)
         if len(set(named)) != len(named):
             raise ValueError("a store change names a path more than once")
-        if not {seen.rel for seen in self.files_seen} <= set(self.paths):
+        seen_paths = set(self.paths)
+        if self.relationship_change is not None and self.relationship_change.projected_base is not None:
+            seen_paths.add(self.relationship_change.projected_base.path)
+        if not {seen.rel for seen in self.files_seen} <= seen_paths:
             raise ValueError("a store change records a file that it does not change")
 
 
@@ -563,6 +590,7 @@ _LEXICAL_SOURCE_TABLES = (("pages", "path"), ("semantic_units", "parent_path"), 
 _GRAPH_SOURCE_TABLES = (
     ("graph_nodes", "path"), ("graph_parent_refs", "path"), ("graph_edges", "source_path"),
     ("graph_dependencies", "source_path"), ("graph_dependency_coverage", "source_path"),
+    ("graph_unit_links", "source_path"),
 )
 
 
@@ -625,6 +653,8 @@ def _source_layout(tx: Connection, table: str, key: str, usable: int) -> tuple[l
     columns = tuple(name for (name,) in tx.execute(
         "SELECT name FROM pragma_table_xinfo(?) WHERE hidden IN (0, 3)", (table,),
     ))
+    if not columns:
+        return [], [], []  # An older store may still be waiting for this owner projection.
     sizes = [_catalogue_record_size(columns)]
     limits = [table_limit]
     keys: list[tuple[str, ...]] = []
@@ -657,6 +687,8 @@ def _source_derived_pages(
         if table not in layouts:
             layouts[table] = _source_layout(tx, table, key, usable)
         sizes, limits, keys = layouts[table]
+        if not sizes:
+            continue
         # Count each existing row's record separately. A partial index can only omit
         # some of these rows, so including its key gives a safe upper bound.
         quoted = ['"' + name.replace('"', '""') + '"' for placed in keys for name in placed]
@@ -687,7 +719,7 @@ def _source_derived_pages(
 
 def _incoming_graph_pages(
     tx: Connection, rel: str, records: tuple[epistemic_graph.PageGraphRecords, ...], usable: int,
-    *, encoding: str, layouts: dict[str, list[tuple[tuple[int, ...], int]]],
+    *, encoding: str, layouts: dict[str, list[tuple[tuple[int, ...], int]]], replace_source: bool,
 ) -> _CellPages:
     """Size the graph rows that a page's derivation inserts."""
     cells = _CellPages()
@@ -735,7 +767,7 @@ def _incoming_graph_pages(
         for tree, (columns, seen) in enumerate(zip(placed, prefixes, strict=True), start=1):
             names = tuple(table.columns[column] for column in columns)
             cells.runs[(table.table, tree)] = _key_runs(tx, table.table, names, seen,
-                                                        replacing=(source_column, rel))
+                                                        replacing=(source_column, rel) if replace_source else None)
     return cells
 
 
@@ -819,16 +851,17 @@ def _record_page_count(room: Any, database: Path, conn: Connection, page_size: i
 @contextmanager
 def derived_room(
     writer: CollectionWriter, tx: Connection, metered: list[str], sources: tuple[str, ...],
+    *, graph_continuation: bool = False,
 ) -> Iterator[tuple[dict[str, derive._LexicalPage], derive.ReserveGraph | None, Callable[[], None]]]:
     """Protect the derived rows that an original causes on the vault device, for one drain batch.
 
-    The rows of an original's page, of the path that a move of it vacated, and of the pages that link
-    to it draw on the room that this reserves; a batch with no original reserves nothing. It yields
-    the original's prepared lexical rows, the graph reservation callback and the settle step.
+    An original's page, the path its move vacated, and its linking pages draw on this reservation.
+    A continuation reserves room for its graph rows and its receipt. The context yields prepared
+    lexical rows, the graph reservation callback, and the settle step.
     """
     from .. import media_capacity
 
-    if not metered and not sources:
+    if not metered and not sources and not graph_continuation:
         yield {}, None, lambda: None
         return
     database = writer.handle.path
@@ -842,7 +875,7 @@ def derived_room(
         usable = page_size - 4 - 255
         # The drain deletes one queue row per path and moves the revision row.
         trees = _trees(conn, ("store_derivation_queue",))
-        touched = len(metered) + len(sources)
+        touched = len(metered) + len(sources) + int(graph_continuation)
         depth = 1 + max(1, math.ceil(math.log(before + touched + 1, 4)))
         basis = epistemic_graph.producer_type_basis(writer.root)
         prepared: dict[str, derive._LexicalPage] = {}
@@ -904,12 +937,18 @@ def derived_room(
                 room.set_store_pages(database, estimated)
                 recorded = estimated
 
-        def reserve_graph(rel: str, records: tuple[epistemic_graph.PageGraphRecords, ...]) -> None:
-            cells = _incoming_graph_pages(conn, rel, records, usable, encoding=encoding, layouts=graph_layouts)
+        def reserve_graph(
+            rel: str, records: tuple[epistemic_graph.PageGraphRecords, ...], replace_source: bool,
+        ) -> None:
+            cells = _incoming_graph_pages(
+                conn, rel, records, usable, encoding=encoding, layouts=graph_layouts,
+                replace_source=replace_source,
+            )
             graph.merge(cells)
-            # A page that links to an original replaces its existing graph rows; a new page has none.
-            old = _source_derived_pages(conn, (rel,), usable, _GRAPH_SOURCE_TABLES, replaced_layouts)
-            replaced.merge(old)
+            if replace_source:
+                # Appended batches share one replacement of the old graph.
+                old = _source_derived_pages(conn, (rel,), usable, _GRAPH_SOURCE_TABLES, replaced_layouts)
+                replaced.merge(old)
             reserve()
 
         reserve()
@@ -963,7 +1002,11 @@ def commit(
         now = timestamp()
         audit = _Trail(tx, revision, change, now)
         for put in change.puts:
-            _put_page(tx, put, revision, audit, prepared=prepared.get(put.rel))
+            expected = change.expect.get(put.rel) if change.relationship_change is not None else None
+            _put_page(
+                tx, put, revision, audit, prepared=prepared.get(put.rel),
+                unchanged_sha256=expected.sha256 if expected is not None else None,
+            )
         for page in change.deletes:
             _delete_page(tx, page, audit)
         for move in change.moves:
@@ -973,8 +1016,30 @@ def commit(
             _record_binary(tx, record, revision, audit)
         for binary in change.binary_deletes:
             _delete_binary(tx, binary, audit)
-        for move in change.binary_moves:
-            _move_binary(tx, move, revision, audit)
+        for binary_move in change.binary_moves:
+            _move_binary(tx, binary_move, revision, audit)
+        relationship_paths: list[str] = []
+        if change.relationship_change is not None:
+            affected = relationships.apply(
+                tx, change.relationship_change, revision=revision,
+                reason=change.relationship_change.reason or change.reason, at=now,
+            )
+            relationship_paths = [path for (path,) in tx.execute(
+                "SELECT path FROM store_pages WHERE path IN (SELECT value FROM json_each(?)) "
+                "ORDER BY path", (json.dumps(sorted(affected)),),
+            )]
+            new_intents = tuple(path for path in relationship_paths if path not in audit.intents)
+            _degrade_moves(tx, new_intents)
+            audit.intents.update((path, ("write", None)) for path in new_intents)
+            base = change.relationship_change.projected_base
+            # The page projector owns the presence of its relations file.
+            if (
+                base is not None and base.keep_store and base.source not in relationship_paths
+                and not tx.execute(
+                    "SELECT 1 FROM store_unit_ids WHERE parent_path=? LIMIT 1", (base.source,),
+                ).fetchone()
+            ):
+                audit.intents[base.path] = ("delete", None)
         if overlay:
             # The overlay job settles the rows that the registries under ``_Schema`` derive.
             rederive.record_overlay_change(tx, revision)
@@ -986,7 +1051,9 @@ def commit(
             *(path for move in change.moves if move.src in retained_moves for path in (move.src, move.dst)),
         ))
         derivation.enqueue(
-            tx, list(dict.fromkeys(change.page_paths)), list(change.refresh), revision, now, metered
+            tx, list(dict.fromkeys((*change.page_paths, *relationship_paths))),
+            list(change.refresh), revision, now, metered,
+            moved=frozenset(move.dst for move in change.moves),
         )
         for held in change.resolves_held:
             _drop_held(tx, held)
@@ -995,7 +1062,7 @@ def commit(
         tx.execute("UPDATE store_mode SET revision = ? WHERE id = 1", (revision,))
         after = read.vault_triple(tx, revision)
     # A refreshed file is a page of the corpus too (the importer's non-owned Markdown).
-    derivation.committed(writer, before, after, (*change.paths, *change.refresh))
+    derivation.committed(writer, before, after, (*change.paths, *change.refresh, *relationship_paths))
     return CommitResult(revision, tuple(audit.written), tuple(audit.deleted))
 
 
@@ -1011,6 +1078,10 @@ def _refuse_owned_refresh(tx: Connection, refresh: tuple[str, ...]) -> None:
 
 def _require_owned(change: StoreChange) -> None:
     """Refuse, before any write, a path that the store cannot hold as its operation needs."""
+    if change.relationship_change is not None and (base := change.relationship_change.projected_base) is not None:
+        _require_safe(base.path)
+        if ownership.relation_source(base.path) != base.source:
+            raise OpError(NOT_OWNED, "the relations file does not belong to its source page")
     for rel in change.refresh:
         _require_safe(rel)
         # ``PAGE`` is refused inside ``commit``'s transaction, where the store_pages probe and the
@@ -1080,15 +1151,17 @@ def timestamp() -> str:
 
 
 def record_manifest(
-    tx: Connection, rel: str, sha256: str, size: int, mtime_ns: int, revision: int
+    tx: Connection, rel: str, sha256: str, size: int, mtime_ns: int, revision: int,
+    *, canonical_sha256: str | None = None,
 ) -> None:
     """Record that the file at ``rel`` holds these bytes: the one write of a manifest row."""
     tx.execute(
-        "INSERT INTO store_manifest(path, sha256, size, mtime_ns, revision) "
-        "VALUES (?, ?, ?, ?, ?) "
+        "INSERT INTO store_manifest(path, sha256, size, mtime_ns, revision, canonical_sha256) "
+        "VALUES (?, ?, ?, ?, ?, NULLIF(?, ?)) "
         "ON CONFLICT(path) DO UPDATE SET sha256 = excluded.sha256, size = excluded.size, "
-        "mtime_ns = excluded.mtime_ns, revision = excluded.revision",
-        (rel, sha256, size, mtime_ns, revision),
+        "mtime_ns = excluded.mtime_ns, revision = excluded.revision, "
+        "canonical_sha256 = excluded.canonical_sha256",
+        (rel, sha256, size, mtime_ns, revision, canonical_sha256, sha256),
     )
 
 
@@ -1105,7 +1178,10 @@ def _record_seen(tx: Connection, seen: FileSeen, revision: int) -> None:
     if seen.sha256 is None or seen.size is None or seen.mtime_ns is None:
         tx.execute("DELETE FROM store_manifest WHERE path = ?", (seen.rel,))
     else:
-        record_manifest(tx, seen.rel, seen.sha256, seen.size, seen.mtime_ns, revision)
+        record_manifest(
+            tx, seen.rel, seen.sha256, seen.size, seen.mtime_ns, revision,
+            canonical_sha256=seen.canonical_sha256,
+        )
 
 
 def _stored(tx: Connection, rel: str) -> tuple[int, str] | None:
@@ -1189,15 +1265,37 @@ def _check_below(tx: Connection, rel: str, want: Expect) -> None:
             raise StoreConflict(rel, f"the folder holds {count} {kind}, not {bound}")
 
 
-def _projected(tx: Connection, rel: str, revision: int, sha256: str) -> bool:
-    """Whether the file on disk is the stored page: the manifest names the page's revision and bytes,
-    and no projection is queued and no outside change is held for the path."""
+def _projected(
+    tx: Connection, rel: str, revision: int, sha256: str, *, on_disk_sha256: str | None = None,
+) -> bool:
+    """Whether the manifest binds the stored page and any observed file hash with no pending change."""
     manifest = tx.execute(
-        "SELECT revision, sha256 FROM store_manifest WHERE path = ?", (rel,)
+        "SELECT revision, COALESCE(canonical_sha256, sha256), sha256 FROM store_manifest WHERE path = ?",
+        (rel,),
     ).fetchone()
+    if manifest is None or manifest[:2] != (revision, sha256):
+        return False
+    if on_disk_sha256 is not None and manifest[2] != on_disk_sha256:
+        return False
     queued = tx.execute("SELECT 1 FROM store_projection_queue WHERE path = ?", (rel,)).fetchone()
     held = tx.execute("SELECT 1 FROM store_held WHERE path = ?", (rel,)).fetchone()
-    return manifest == (revision, sha256) and queued is None and held is None
+    return queued is None and held is None
+
+
+def queue_projection_repair(writer: CollectionWriter, page: read.PageMeta, projected_sha256: str) -> bool:
+    """Restore a managed block without changing the page or its audit trail."""
+    with writer.handle.transaction(collection_free=True) as tx:
+        row = tx.execute(
+            "SELECT revision FROM store_mode WHERE id = 1 AND mode = ?", (mode.STORE_MODE,),
+        ).fetchone()
+        if (
+            row is None
+            or _stored(tx, page.path) != (page.revision, page.sha256)
+            or not _projected(tx, page.path, page.revision, page.sha256, on_disk_sha256=projected_sha256)
+        ):
+            return False
+        _enqueue(tx, {page.path: ("write", None)}, row[0], timestamp())
+        return True
 
 
 #: Which audit operations open and end a path's life in the store, as ``_Trail`` records them. A
@@ -1264,7 +1362,7 @@ class _Trail:
         self.intents[move.dst] = ("move", move.src)
 
     def moved(
-        self, move: PageMove, old_sha256: str, new_sha256: str, *, media_allocation: bool,
+        self, move: PageMove, old_sha256: str, new_sha256: str, *, media_allocation: bool, project: bool,
     ) -> None:
         # Each side has its own row, so a read of either path's trail meets the move; the new path's
         # row names the old path. Each row holds the bytes that its path held or now holds.
@@ -1273,15 +1371,19 @@ class _Trail:
                     reason=MEDIA_PAYLOAD_WRITE_REASON if media_allocation else None)
         self.deleted.append(move.src)
         self.written.append(move.dst)
-        if not move.on_disk:
+        if project:
             self.intents[move.dst] = ("move", move.src)
 
 
 def _put_page(
     tx: Connection, put: PagePut, revision: int, audit: _Trail, *, prepared: _PreparedOriginal | None,
+    unchanged_sha256: str | None = None,
 ) -> None:
     digest = hashlib.sha256(put.body).hexdigest()
     on_disk = put.on_disk_mtime_ns is not None
+    # Relation-only writes keep an exact logical primary for admission and change no page row.
+    if digest == unchanged_sha256 and not on_disk and not put.media_allocation:
+        return
     mtime_ns = time.time_ns() if put.on_disk_mtime_ns is None else put.on_disk_mtime_ns
     fields = frontmatter_json(put.body) if prepared is None else prepared.fields
     if prepared is not None:
@@ -1342,29 +1444,38 @@ def _move_page(
             frontmatter_json(move.body) if prepared is None else prepared.fields,
             time.time_ns() if prepared is None else prepared.mtime_ns,
         ]
+    project = not move.on_disk
     if move.on_disk:
-        # The file kept its bytes and mtime through the rename, so it must have been the stored page.
-        if not _projected(tx, move.src, stored_revision, page[1]):
+        disk_sha256 = move.on_disk_sha256 if move.on_disk_sha256 is not None else page[1]
+        if not _projected(tx, move.src, stored_revision, page[1], on_disk_sha256=disk_sha256):
             raise StoreConflict(move.src, "its file on disk is not the stored page")
         if tx.execute("SELECT 1 FROM store_manifest WHERE path = ?", (move.dst,)).fetchone():
             raise StoreConflict(move.dst, "the manifest already records a file there")
+        if ownership.is_markdown(move.src):
+            from . import relationship_files
+
+            project = disk_sha256 != page[1] or tx.execute(
+                "SELECT 1 FROM store_manifest WHERE path = ?", (relationship_files.path_for(move.src),),
+            ).fetchone() is not None
     tx.execute("DELETE FROM store_pages WHERE path = ?", (move.src,))
     tx.execute(
         "INSERT INTO store_pages(path, body, sha256, size, frontmatter_json, mtime_ns, revision) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
         (move.dst, *content, revision),
     )
+    relationships.move_page(
+        tx, move.src, move.dst, parent_ref=relationships.page_reference(page[3]),
+    )
     if move.on_disk:
         tx.execute(
             "UPDATE store_manifest SET path = ?, revision = ? WHERE path = ?",
             (move.dst, revision, move.src),
         )
-        # Nothing is left to project at either path; a queued intent at the destination named a file
-        # that this rename replaced.
+        # An older intent at the destination named a file that this rename replaced.
         _clear_queued(tx, move.src, move.dst)
     # The destination's move and its later write share this revision. Retain the
     # admission proved for the exact source, including a guarded lineage change.
-    audit.moved(move, page[1], content[1], media_allocation=media_allocation)
+    audit.moved(move, page[1], content[1], media_allocation=media_allocation, project=project)
 
 
 def _record_binary(tx: Connection, record: BinaryRecord, revision: int, audit: _Trail) -> None:
@@ -1408,48 +1519,67 @@ def _degrade_moves(tx: Connection, paths: tuple[str, ...]) -> None:
     old one must not leave the old file behind, and must not let the projector rename a page that
     now lives at the old path. So a touched move becomes a delete of its old path and a write of
     its new path, and the later change then replaces either row as it would any other.
+    The old relations file keeps its own delete intent so it cannot restore the moved unit IDs.
 
     A binary's move cannot split that way: the store holds no bytes to write, and the delete would
     take away the only copy. Such a change refuses until the move reaches the disk, which the
     writer does right after its commit and the projector after a kill: it prevents the loss of a
     binary's bytes, and a wrong refusal costs the caller one retry.
     """
-    marks = ",".join("?" * len(paths))
+    from . import relationship_files
+
+    if not paths:
+        return
     touched = tx.execute(
         "SELECT path, from_path, revision, queued_at FROM store_projection_queue "
-        f"WHERE operation = 'move' AND (path IN ({marks}) OR from_path IN ({marks}))",
-        (*paths, *paths),
+        "WHERE operation = 'move' AND (path IN (SELECT value FROM json_each(?1)) "
+        "OR from_path IN (SELECT value FROM json_each(?1)))",
+        (json.dumps(paths),),
     ).fetchall()
-    for path, from_path, revision, queued_at in touched:
+    if not touched:
+        return
+    for path, *_ in touched:
         if ownership.classify(path) is ownership.Ownership.BINARY:
             raise StoreConflict(path, "its file has not moved yet; retry once it has")
-        tx.execute(
-            "UPDATE store_projection_queue SET operation = 'write', from_path = NULL WHERE path = ?",
-            (path,),
-        )
-        tx.execute(
-            "INSERT OR IGNORE INTO store_projection_queue(path, revision, operation, queued_at) "
-            "VALUES (?, ?, 'delete', ?)",
-            (from_path, revision, queued_at),
-        )
+    tx.execute(
+        "UPDATE store_projection_queue SET operation = 'write', from_path = NULL "
+        "WHERE path IN (SELECT value FROM json_each(?))",
+        (json.dumps([row[0] for row in touched]),),
+    )
+    deletes = [
+        (old, revision, queued_at,
+         relationship_files.path_for(old) if ownership.is_markdown(old) else None)
+        for _, old, revision, queued_at in touched
+    ]
+    tx.execute(
+        "WITH moves(old,revision,queued_at,relations) AS ("
+        " SELECT value->>0,value->>1,value->>2,value->>3 FROM json_each(?)) "
+        "INSERT OR IGNORE INTO store_projection_queue(path,revision,operation,queued_at) "
+        "SELECT old,revision,'delete',queued_at FROM moves UNION ALL "
+        "SELECT m.path,moves.revision,'delete',moves.queued_at "
+        "FROM moves JOIN store_manifest m ON m.path=moves.relations",
+        (json.dumps(deletes),),
+    )
 
 
 def _enqueue(
     tx: Connection, intents: Mapping[str, tuple[str, str | None]], revision: int, now: str
 ) -> None:
+    if not intents:
+        return
     # A move vacates its old path, so whatever was queued there no longer has a file to act on.
-    tx.executemany(
-        "DELETE FROM store_projection_queue WHERE path = ?",
-        [(from_path,) for operation, from_path in intents.values() if operation == "move"],
-    )
+    vacated = [from_path for operation, from_path in intents.values() if operation == "move"]
+    if vacated:
+        tx.execute(
+            "DELETE FROM store_projection_queue WHERE path IN (SELECT value FROM json_each(?))",
+            (json.dumps(vacated),),
+        )
     # queued_at is left out of the update, so the queue keeps the age of the oldest change.
-    tx.executemany(
+    tx.execute(
         "INSERT INTO store_projection_queue(path, revision, operation, from_path, queued_at) "
-        "VALUES (?, ?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET "
+        "SELECT value->>0, ?1, value->>1, value->>2, ?2 FROM json_each(?3) WHERE 1 "
+        "ON CONFLICT(path) DO UPDATE SET "
         "revision = excluded.revision, operation = excluded.operation, "
         "from_path = excluded.from_path",
-        [
-            (rel, revision, operation, from_path, now)
-            for rel, (operation, from_path) in intents.items()
-        ],
+        (revision, now, json.dumps([(rel, *intent) for rel, intent in intents.items()])),
     )

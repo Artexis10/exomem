@@ -756,13 +756,16 @@ def dispatch(
         if server is not None and server.root == Path(vault_root).resolve():
             return source_dependencies.dispatch_request(server, profile, action, values)
         return False, None
+    # nosemgrep: ep-word-membership -- These are the facade actions bound to the two row writer methods.
+    if action in {"append", "add", "update", "triage"}:
+        save = _prepare_row_save(vault_root, binding, profile, action, values)
+        if save is None:
+            return False, None
+        _writer, method, collection, args = save
+        return True, _mutate(vault_root, method, collection, **args)
     writer = binding[1]
     prove = _prover(vault_root, writer, binding)
-    if binding[2]:
-        from .capability import require_records_summary_route
-
-        require_records_summary_route(vault_root, writer, action, values, prove=prove)
-    args = {name: value for name, value in values.items() if value is not None}
+    args = _dispatch_arguments(vault_root, binding, action, values, prove)
 
     if action == "describe" and profile == "records":
         from ..query_engine import route
@@ -897,17 +900,8 @@ def dispatch(
     collection = args.pop("collection")
     if profile == "planning" and "plan_id" in args:
         args["item_key"] = args.pop("plan_id")
-    if action in {"append", "add"}:
-        return True, _mutate(vault_root, writer.append_record, collection, **args)
     if action == "bulk_upsert" and profile == "records":
         return True, _mutate(vault_root, writer.bulk_upsert_records, collection, **args)
-    if action == "triage":
-        args["changes"] = args.pop("transition")
-        args["operation"] = "triage"
-    if action in {"update", "triage"}:
-        args.setdefault("changes", {})
-        args["refresh_presentation"] = args.get("refresh_presentation") is True
-        return True, _mutate(vault_root, writer.update_record, collection, **args)
     if action == "revise":
         if binding[2] and isinstance(args.get("manifest_text"), str):
             from .admission import require_summary_manifest
@@ -937,3 +931,57 @@ def dispatch(
     raise collections.CollectionError(
         "COLLECTION_STORE_PREVIEW_UNSUPPORTED", "this operation belongs to a later store slice"
     )
+
+
+def _dispatch_arguments(vault_root, binding, action, values, prove, *, released_manifest=None):
+    if binding[2]:
+        from .capability import require_records_summary_route
+
+        require_records_summary_route(vault_root, binding[1], action, values, prove=prove,
+                                      released_manifest=released_manifest)
+    return {name: value for name, value in values.items() if value is not None}
+
+
+def _prepare_row_save(vault_root, binding, profile, action, values, *, released_manifest=None):
+    """Check the route and select its writer call without invoking it."""
+    writer = binding[1]
+    prove = _prover(vault_root, writer, binding)
+    args = _dispatch_arguments(vault_root, binding, action, values, prove, released_manifest=released_manifest)
+    selector = args.get("collection", args.get("manifest_path"))
+    if prove().marker is not None and (selector is None or selected_writer(vault_root, selector, prove=prove) is None):
+        return None
+    writer._require_operation_context()
+    writer._facade_profile = profile
+    collection = args.pop("collection")
+    if profile == "planning" and "plan_id" in args:
+        args["item_key"] = args.pop("plan_id")
+    if action == "append" or action == "add":
+        return writer, writer.append_record, collection, args
+    if action == "triage":
+        args["changes"] = args.pop("transition")
+        args["operation"] = "triage"
+    args.setdefault("changes", {})
+    args["refresh_presentation"] = args.get("refresh_presentation") is True
+    return writer, writer.update_record, collection, args
+
+
+def row_save_refusal(vault_root, profile, action, values, *, released_manifest) -> collections.CollectionError | None:
+    """Read the first refusal of a row save after resolving its manifest in the same snapshot."""
+    from inspect import signature
+
+    from . import record_inputs
+
+    binding = _BOUND.get()
+    if binding is None or not _bound_to(binding, vault_root):
+        return None
+    save = _prepare_row_save(vault_root, binding, profile, action, values, released_manifest=released_manifest)
+    if save is None:
+        return None
+    writer, method, collection, args = save
+    try:
+        collection, arguments = record_inputs.bind_arguments(signature(method), collection, **args)
+        with writer.read_snapshot(mutation=True):
+            candidate, replay = record_inputs.from_snapshot(writer, method.__name__, collection, arguments)
+        return None if replay is not None else candidate.error
+    except collections.CollectionError as error:
+        return error

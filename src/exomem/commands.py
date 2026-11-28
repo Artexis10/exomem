@@ -8733,6 +8733,8 @@ def read_memory_stored(
     offset: int | None = None,
     units: bool = False,
     brief: bool = False,
+    relationship_limit: int | None = None,
+    relationship_after: tuple[str, str] | None = None,
 ) -> dict:
     """Read a page, exact unit, exomem://map view, or topic brief.
 
@@ -8755,7 +8757,12 @@ def read_memory_stored(
         offset: Start, in characters, of a window of a long Source's extracted text; follow `window.next_offset`.
         units: List the page's observation units with the id each edit takes; `unavailable` when the principal sees a released view.
         brief: Read `path` as a topic (a page or free text) and serve its brief: conclusions, sources, open questions, and changes since this principal's last read.
+        relationship_limit: With an exact unit reference, list up to 50 stored relationships.
+        relationship_after: The next_after value from the previous unit relationship page.
     """
+    relationships_requested = relationship_limit is not None or relationship_after is not None
+    if relationships_requested and unit_ref is None:
+        raise ValueError("UNIT_REFERENCE_REQUIRED: relationship pagination requires an exact unit reference")
     if brief:
         # A brief is a derived view over one subject, never a page: it takes none of a page's read options.
         if unit_ref is not None or frontmatter_only or include_history or links or include_raw or units or offset is not None:
@@ -8797,6 +8804,8 @@ def read_memory_stored(
                 continuation=continuation,
                 follow_corrections=follow_corrections,
                 offset=offset,
+                relationship_limit=relationship_limit,
+                relationship_after=relationship_after,
             )
     if continuation is not None:
         return _cited_by_continuation(
@@ -8867,6 +8876,21 @@ def read_memory_stored(
             withheld_spans=withheld_spans,
         )
         out = unit.as_dict()
+        if relationships_requested and unit.status == "found" and unit.unit is not None:
+            from . import unit_edges
+
+            after = relationship_after
+            if after is not None:
+                if (not isinstance(after, (tuple, list)) or len(after) != 2
+                        or not all(isinstance(value, str) for value in after)):
+                    raise ValueError("INVALID_RELATIONSHIP_CURSOR: use next_after from a relationship page")
+                after = (after[0], after[1])
+            relationship_page = unit_edges.relationship_page(
+                vault_root, page.path, unit.unit.anchor,
+                limit=50 if relationship_limit is None else relationship_limit,
+                after=after,
+            )
+            out["stored_relationships"] = relationship_page.as_dict()
         if (
             unit.status == "found"
             and unit.unit is not None
@@ -16197,10 +16221,18 @@ def refusal_before_queueing(command: Command, arguments: Mapping[str, Any]) -> E
     return None
 
 
-#: How long a busy save's declared check may read: the declaration, then the queue. It only buys an earlier
-#: refusal, so a slow read gives the save up to the queue it would have joined, which is what its caller was
-#: already going to wait on.
+#: How long a busy save's declared check may read: the queue's mark, the declaration and, after a refusal, the
+#: queue again, each open included. It only buys an earlier refusal, so a read that answers later gives the save
+#: up to the queue it would have joined, which is what its caller was already going to wait on.
 _DECLARED_REFUSAL_SECONDS = 0.5
+
+
+#: The busy check of each command whose saves carry values that a collection declares: each reads the
+#: declaration within the budget it is given and answers the refusal its own commit would give, or None.
+_DECLARED_VALUE_REFUSALS = MappingProxyType({
+    operation_entries.RECORDS.command: record_memory_module.value_refusal,
+    operation_entries.PLANS.command: plan_memory_module.value_refusal,
+})
 
 
 def declared_refusal_before_queueing(
@@ -16208,30 +16240,37 @@ def declared_refusal_before_queueing(
 ) -> Exception | None:
     """The refusal that a save's values get from what the vault declares, or None.
 
-    `refusal_before_queueing` reads nothing. This one reads a declaration (a collection's manifest),
-    so the intake runs it only for a save that is about to queue. The refusal holds only while no open
-    queued save can change that declaration before this one replays: a save of a command that declares
-    `Command.sets_any_frontmatter_field`, whichever page it names, or a Records save that carries a
-    manifest's text. A declaration change made outside the queue and not committed at this check, such
-    as a direct revise that holds the boundary, is not seen: the check refuses a value that the change
-    adds, and the refusal tells the caller to send it again once that change has committed.
+    `refusal_before_queueing` reads nothing. This one reads a declaration (a collection's manifest, and for
+    Planning the vault's Planning values), so the intake runs it only for a save that is about to queue. The
+    refusal holds only while no queued save can change that declaration before this one replays: a save of a
+    command that declares `Command.sets_any_frontmatter_field`, whichever page it names, or a save that
+    carries a manifest's text (`write_intake.may_change_declaration`, which each queued save keeps). The queue
+    is marked before the declaration is read, and only a refusal looks at it again from that mark, each at a
+    cost that does not grow with the queue (`write_intake.declaration_mark`), so a queued save that commits
+    between the two reads queues this one too. Every read shares one budget, and an answer after it queues the
+    save. A declaration change made outside the queue and not committed at this check, such as a direct revise
+    that holds the boundary or a saved Planning value, is not seen: the check refuses a value that the change
+    adds, and the refusal tells the caller to send it again once that change has committed. A Records update
+    also depends on its current row guards, so any open or newly accepted save leaves it to replay.
     """
-    if command.name != operation_entries.RECORDS.command:
+    value_refusal = _DECLARED_VALUE_REFUSALS.get(command.name)
+    if value_refusal is None:
         return None
     from . import request_budget, write_intake
 
     budget = request_budget.RequestBudget(seconds=_DECLARED_REFUSAL_SECONDS)
-    refusal = record_memory_module.value_refusal(vault_root, arguments, budget)
-    if refusal is None:
+    guard_sensitive = command.name == operation_entries.RECORDS.command and arguments.get("action") == "update"
+    marker = write_intake.declaration_mark(vault_root, seconds=budget.remaining(), guard_sensitive=guard_sensitive)
+    if marker is None:
         return None
-    changing = write_intake.may_change_declaration(
-        vault_root,
-        rewriting=tuple(item.name for item in PRODUCT_COMMANDS if item.sets_any_frontmatter_field),
-        manifest_command=operation_entries.RECORDS.command,
-        manifest_field=operation_entries.MANIFEST_TEXT_FIELD,
-        seconds=budget.remaining(),
+    leaf_arguments, _ = mutation_terminal_module.split_response_detail(arguments)
+    refusal = value_refusal(vault_root, leaf_arguments, budget)
+    if refusal is None or budget.remaining() <= 0:
+        return None
+    changed = write_intake.declaration_changed_since(
+        vault_root, marker, seconds=budget.remaining(), guard_sensitive=guard_sensitive,
     )
-    return refusal if changing is False else None
+    return refusal if changed is False else None
 
 
 _MCRC = frozenset({"mcp", "rest", "cli"})
