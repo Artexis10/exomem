@@ -386,12 +386,13 @@ _READ: ContextVar[ReadScope | None] = ContextVar("collection_ownership_read", de
 
 
 class ReadScope:
-    def __init__(self, root, *, initial=None, verify=None):
+    def __init__(self, root, *, initial=None, verify=None, before_release=None):
         # A decision set's resolution scope resolves the root once; `finish` proves it again.
         self.root = state_paths.resolved_vault_path(root, expanduser=False)
         # A proof the caller made earlier skips this scope's own; `finish` still proves again and compares.
         self.initial = initial
         self.verify = verify
+        self.before_release = before_release
         self.store_enrolled = False
         self.finished = False
 
@@ -451,12 +452,12 @@ class ReadScope:
 
 
 @contextmanager
-def read_scope(root, *, finalize=False, initial=None, verify=None):
+def read_scope(root, *, finalize=False, initial=None, verify=None, before_release=None):
     previous = _READ.get()
     if previous is not None and previous.root == state_paths.resolved_vault_path(root, expanduser=False):
         yield previous
         return
-    scope = ReadScope(root, initial=initial, verify=verify)
+    scope = ReadScope(root, initial=initial, verify=verify, before_release=before_release)
     token = _READ.set(scope)
     try:
         yield scope

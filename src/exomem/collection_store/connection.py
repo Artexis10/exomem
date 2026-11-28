@@ -511,6 +511,12 @@ class SnapshotHandle:
                 "COLLECTION_STORE_WRITER_THREAD", "only the thread that opened a snapshot may read through it"
             )
 
+    def refresh_for_release(self) -> None:
+        """End selection before the release filter checks contributors afresh."""
+        self.require_owner_thread()
+        self.connection.rollback()
+        self._release_cache = None
+
     def require_write_authority(self, *, allow_diverged: bool = False) -> None:
         raise CollectionStoreError("COLLECTION_STORE_SNAPSHOT_READ_ONLY", "a store snapshot cannot write")
 

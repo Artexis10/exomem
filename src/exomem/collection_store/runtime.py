@@ -1834,6 +1834,7 @@ class StoreServer:
             if initial is not None:
                 scope.enter_context(ownership.read_scope(
                     self.root, initial=initial, verify=verify_query_authority if records_query else None,
+                    before_release=snapshot.refresh_for_release if records_query else None,
                 ))
             if records_query:
                 checkout.close()

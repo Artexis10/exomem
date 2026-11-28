@@ -9716,13 +9716,18 @@ def invoke_command(
 
         # The dispatcher's own checks before the body, which the leaf span alone does not separate.
         call_spans.record_span_since("command.leaf_pre", "command.leaf_start")
+        detached = ownership_scope.before_release is not None
         try:
             try:
                 if vault_store_mode.store_mode_for_reads(injected[0]):
-                    snapshot_scope.enter_context(vault_store_read.request_snapshot(injected[0], catch_up=True))
+                    # Like the store thread, a detached query reads the available commit without a derivation wait.
+                    snapshot_scope.enter_context(vault_store_read.request_snapshot(injected[0], catch_up=not detached))
                 # Fixed phase labels carry timing only, never caller or vault data.
                 with body_meter as measured, call_spans.span("command.body", measured):
                     result = _invoke()
+                if detached:
+                    snapshot_scope.close()
+                    ownership_scope.before_release()
                 retained_report = None
                 if preview_checkpoint is not None:
                     from .reclassification_preview import RetainedReport
