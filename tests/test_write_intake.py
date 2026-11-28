@@ -1788,12 +1788,29 @@ def test_an_unknown_outcome_keeps_its_receipt_after_restart_and_the_queue_moves_
 
     monkeypatch.setattr(writer_lease, "invoke_command", real_invoke)
     write_intake.stop(vault)
+    with write_intake._write(vault) as database:
+        database.execute("DROP INDEX intake_retry_deadline")
+        database.execute("DROP INDEX intake_retry_origin")
     write_intake.start(vault)
+    with write_intake._store(vault, mode="read") as database:
+        assert not write_intake._has_retry_index(database)
     resend = _send(remember, vault, arguments)
     assert resend["queued_write"]["ref"] == receipts[0]["queued_write"]["ref"]
     assert resend["queued_write"]["state"] == "failed"
     assert resend["committed"] is None
     assert not _pages_titled(vault, "Queued save 14")
+    with write_intake._store(vault, mode="read") as database:
+        assert write_intake._has_retry_index(database)
+
+    def missing_store(*_args, **_kwargs):
+        raise FileNotFoundError("intake store temporarily unavailable")
+
+    with monkeypatch.context() as unavailable:
+        unavailable.setattr(write_intake, "_store", missing_store)
+        resend = _send(remember, vault, arguments)
+        assert resend["queued_write"]["ref"] == receipts[0]["queued_write"]["ref"]
+        assert resend["committed"] is None
+        assert not _pages_titled(vault, "Queued save 14")
 
     noticed = _send(remember, vault, _remember_kwargs(vault, 16))
     assert noticed["queued_writes_failed"] == 1

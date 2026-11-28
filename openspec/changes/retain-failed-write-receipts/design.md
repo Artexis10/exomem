@@ -8,4 +8,4 @@ If the process cannot read the store at startup and has no loaded index, preserv
 
 Leave full refusal details on the existing governed receipt lookup. If a previously known row cannot be read, return its reference with an unknown commit effect. The failure notice directs the caller to that lookup. Explicitly dismissing a stored failure still follows the existing owner operation.
 
-A derived index bounds the startup lookup to the retry window. On an older store, the first governed acceptance builds the index. An idle start reads legacy receipts without writing. This changes no recorded receipt and a prior release can ignore the index.
+Derived indexes bound startup to the retry window and find surviving receipts by origin after dismissal. On an older store, idle startup uses the existing state index and reads open and applied receipts only. The first eligible save or owner dismissal builds the indexes. Before choosing a new execution, the first eligible save loads the indexed failures. If the service cannot finish this check on a known legacy store, it returns a retryable refusal. A prior release can ignore the indexes.

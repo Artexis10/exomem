@@ -622,6 +622,8 @@ class Drainer:
         #: Open saves, or None while unknown: a store that could not be read counts as non-empty.
         self._open: int | None = None
         self._indexed = False
+        self._retry_indexes_needed = False
+        self._retry_index_upgrade = threading.Lock()
         self._open_origins: dict[str, str] = {}
         self._finished_origins: dict[str, _FinishedOrigin] = {}
         #: Origins with a send in flight (waiting for the boundary or being queued), with a count;
@@ -688,6 +690,26 @@ class Drainer:
     def has_backlog(self) -> bool:
         with self._condition:
             return self._backlog_unsettled()
+
+    def prepare_retained_origins(self, deadline: float) -> None:
+        """Qualify a legacy store on its first save, before choosing a new execution."""
+        if not self._retry_indexes_needed:
+            return
+        try:
+            if not self._retry_index_upgrade.acquire(timeout=max(0.0, deadline - time.monotonic())):
+                raise TimeoutError("another save is preparing legacy receipts")
+            try:
+                if not self._retry_indexes_needed:
+                    return
+                with _write(self.vault_root) as conn:
+                    _add_retry_indexes(conn)
+                self._load(expect_store=True)
+            finally:
+                self._retry_index_upgrade.release()
+        except Exception as error:  # noqa: BLE001 - an unreadable legacy receipt may already own this save
+            raise OpError("MUTATION_BUSY", "the earlier save receipts could not be checked",
+                          "Retry with the same idempotency key once the intake is available.",
+                          details={"status": "retryable", "committed": None}) from error
 
     def enter(self, origin: str) -> tuple[str, str] | None:
         """Admit one send of the save with this origin, atomically.
@@ -770,21 +792,20 @@ class Drainer:
             if origin is not None and expires_at is not None and expires_at > now:
                 self._finished_origins[origin] = _FinishedOrigin(intake_id, state, expires_at)
 
-    def _load(self) -> None:
+    def _load(self, *, expect_store: bool = False) -> None:
         """Read the open count and the origin index in one query."""
         for _attempt in range(_STABLE_READ_ATTEMPTS):
             with self._condition:
                 seen = self._accepts
             now = time.time()
+            retry_indexes_needed = False
             try:
                 with _store(self.vault_root, mode="read") as conn:
-                    rows = conn.execute(
-                        "SELECT seq, id, origin, state, finished_at, origin_ttl FROM intake WHERE state IN (?, ?) "
-                        "UNION ALL SELECT seq, id, origin, state, finished_at, origin_ttl FROM intake "
-                        "WHERE finished_at + origin_ttl > ? AND origin IS NOT NULL",
-                        (*_OPEN_STATES, now),
-                    ).fetchall()
+                    retry_indexes_needed = not _has_retry_index(conn)
+                    rows = _load_origins(conn, now, include_failures=not retry_indexes_needed)
             except FileNotFoundError:
+                if expect_store:
+                    raise
                 rows = []
             open_count = 0
             open_origins: dict[str, str] = {}
@@ -804,6 +825,7 @@ class Drainer:
                     continue
                 self._open, self._indexed = open_count, True
                 self._open_origins, self._finished_origins = open_origins, finished_origins
+                self._retry_indexes_needed = retry_indexes_needed
                 self._condition.notify_all()
                 return
         raise RuntimeError("acceptances kept overlapping the intake index read")
@@ -1195,6 +1217,7 @@ class Admission:
         """
         started = time.monotonic()
         deadline = started + intake_wait_seconds()
+        self.drainer.prepare_retained_origins(deadline)
         in_flight = False
         try:
             known = self.drainer.enter(self.origin)
@@ -1310,37 +1333,37 @@ class Admission:
             return _index_answer(intake_id, state)
 
     def _stored_answer(self, intake_id: str) -> dict[str, Any] | None:
-        try:
-            with _store(self.drainer.vault_root, mode="read") as conn:
-                now = time.time()
+        # A missing database is unreadable, not evidence that the indexed receipt was dismissed.
+        with _store(self.drainer.vault_root, mode="read") as conn:
+            now = time.time()
+            row = conn.execute("SELECT * FROM intake WHERE id = ? AND origin = ?", (intake_id, self.origin)).fetchone()
+            if row is None:
+                # The partial unique index matches these two closed intake states.
                 row = conn.execute(
-                    "SELECT * FROM intake WHERE id = ? AND origin = ?", (intake_id, self.origin)
+                    "SELECT * FROM intake WHERE origin = ? AND state IN ('queued', 'applying')",
+                    (self.origin,),
                 ).fetchone()
-                if row is None:
-                    # Dismissing the latest legacy failure can leave an older receipt for this origin.
-                    matching = conn.execute(
-                        "SELECT * FROM intake WHERE origin = ? AND state IN (?, ?) "
-                        "UNION ALL SELECT * FROM intake WHERE origin = ? AND finished_at + origin_ttl > ?",
-                        (self.origin, *_OPEN_STATES, self.origin, now),
-                    )
-                    row = max(matching, key=lambda receipt: receipt["seq"], default=None)
-                if row is None:
-                    return None
-                if row["state"] in _OPEN_STATES:
-                    return _receipt(conn, row)
-                if row["finished_at"] is None or row["finished_at"] + (row["origin_ttl"] or 0.0) <= now:
-                    return None
-                if row["state"] == APPLIED:
-                    # The original identity never committed; the queued replay did. Answer the
-                    # resend with that outcome, within the original identity's retry window.
-                    outcome = json.loads(row["outcome"]) if row["outcome"] else {}
-                    return {**outcome, "queued_write": {"ref": ref_for(row["id"]), "state": APPLIED}}
-                if row["state"] == FAILED:
-                    failure = json.loads(row["error"]) if row["error"] else {}
-                    committed = failure.get("committed")
-                    return _index_answer(row["id"], FAILED, committed=committed if isinstance(committed, bool) else None)
+            if row is None:
+                # Dismissing the latest legacy failure can leave an older receipt for this origin.
+                row = conn.execute(
+                    "SELECT * FROM intake WHERE origin = ? AND finished_at + origin_ttl > ? ORDER BY seq DESC LIMIT 1",
+                    (self.origin, now),
+                ).fetchone()
+            if row is None:
                 return None
-        except FileNotFoundError:
+            if row["state"] in _OPEN_STATES:
+                return _receipt(conn, row)
+            if row["finished_at"] is None or row["finished_at"] + (row["origin_ttl"] or 0.0) <= now:
+                return None
+            if row["state"] == APPLIED:
+                # The original identity never committed; the queued replay did. Answer the resend
+                # with that outcome within the original identity's retry window.
+                outcome = json.loads(row["outcome"]) if row["outcome"] else {}
+                return {**outcome, "queued_write": {"ref": ref_for(row["id"]), "state": APPLIED}}
+            if row["state"] == FAILED:
+                failure = json.loads(row["error"]) if row["error"] else {}
+                committed = failure.get("committed")
+                return _index_answer(row["id"], FAILED, committed=committed if isinstance(committed, bool) else None)
             return None
 
     def _accept(self, *, reason: str, started: float) -> dict[str, Any]:
@@ -1375,8 +1398,7 @@ class Admission:
                 return _receipt(conn, row), None
             # Only the create path runs the schema, so an existing store from before the marker gains it here.
             _add_declaration_marker(conn)
-            # Old stores gain the derived index on admission. Starting an idle drainer stays read-only.
-            conn.execute("CREATE INDEX IF NOT EXISTS intake_retry_deadline ON intake(finished_at + origin_ttl)")
+            _add_retry_indexes(conn)
             conn.execute(
                 "INSERT INTO intake (id, origin, origin_ttl, command, arguments, principal, surface, state, "
                 "accepted_at, updated_at, next_attempt_at, error_code, declaration_change) "
@@ -1392,6 +1414,30 @@ class Admission:
 
 
 _STORE_RETRIES = 5
+
+
+def _add_retry_indexes(conn: sqlite3.Connection) -> None:
+    # Startup seeks by expiry, while a resend after dismissal seeks by origin first.
+    conn.execute("CREATE INDEX IF NOT EXISTS intake_retry_deadline ON intake(finished_at + origin_ttl)")
+    conn.execute("CREATE INDEX IF NOT EXISTS intake_retry_origin ON intake(origin, finished_at + origin_ttl)")
+
+
+def _has_retry_index(conn: sqlite3.Connection) -> bool:
+    return conn.execute("SELECT 1 FROM sqlite_schema WHERE name = 'intake_retry_deadline'").fetchone() is not None
+
+
+def _load_origins(conn: sqlite3.Connection, now: float, *, include_failures: bool) -> list[sqlite3.Row]:
+    fields = "seq, id, origin, state, finished_at, origin_ttl"
+    terminals = "finished_at + origin_ttl > ? AND origin IS NOT NULL"
+    parameters = (*_OPEN_STATES, now)
+    if not include_failures:
+        # Legacy idle startup uses the state index. Its first save installs the expiry index.
+        terminals = "state = ? AND " + terminals
+        parameters = (*_OPEN_STATES, APPLIED, now)
+    return conn.execute(
+        f"SELECT {fields} FROM intake WHERE state IN (?, ?) "
+        f"UNION ALL SELECT {fields} FROM intake WHERE {terminals}", parameters,
+    ).fetchall()
 
 
 def _with_store_retry(operation: Callable[[], Any]) -> Any:
@@ -1820,6 +1866,7 @@ def dismiss(vault_root: Path, intake_id: str) -> dict[str, Any]:
                     f"save {intake_id} is {row['state']}; only a failed save can be dismissed",
                     "Wait for it to be applied, or list saves with `evermatter intake list`.",
                 )
+            _add_retry_indexes(conn)
             conn.execute("DELETE FROM intake WHERE id = ?", (intake_id,))
     except FileNotFoundError:
         raise OpError(

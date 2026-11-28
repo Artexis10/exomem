@@ -30,6 +30,22 @@ While a save is queued or being applied, a resend with the same identity and pay
 - **THEN** the service returns the latest matching receipt still within the retry window
 - **AND** when the owner dismisses that receipt, a resend can find the surviving receipt before and after restart
 
+### Requirement: The intake stays off the uncontended path
+
+An uncontended save SHALL skip intake storage except for a known retry or the first eligible save on a legacy store without retry indexes. That first save SHALL check retained failures before execution or return a retryable refusal with the earlier effect unknown. An idle drainer SHALL remain read-only and SHALL NOT change vault identities.
+
+#### Scenario: An unreadable intake store does not block an ordinary save
+
+- **WHEN** intake was unreadable at startup and the service knows of no matching receipt or legacy store
+- **AND** an otherwise eligible save does not meet contention
+- **THEN** the save commits as it would without the intake
+
+#### Scenario: An idle legacy store defers the retry index build
+
+- **WHEN** a service starts on a legacy store with retained failures and no open saves
+- **THEN** startup does not scan the failures or write to the intake
+- **AND** the first eligible save prepares the indexes and checks the retained failures before it can execute
+
 ### Requirement: The next save names failed queued saves
 
 When queued saves have failed and no reply has named them, the next successful reply to an owner's eligible save SHALL keep its own outcome first. It SHALL give the failure count, including the `queued_writes_failed` field, and the surface's receipt lookup. It SHALL direct the caller to check the recorded outcomes before resending. Each failure SHALL be named once across restarts. Replays, reads, and other callers' replies SHALL neither carry nor take a notice.
