@@ -13,7 +13,7 @@
 ## 3. Names once (D4)
 
 - [ ] 3.1 Add one names function (vocabulary resolution, then folder respelling) that every surface calls before it plans. Replace the per-leaf calls with it.
-- [ ] 3.2 Give the planned `reconcile-folder-names-at-write` its place in the folder step, and sensitivity governance its place in the plan function's access check.
+- [ ] 3.2 Verify that the folder step uses `reconcile-folder-names-at-write`, and give sensitivity governance its place in the plan function's access check.
 - [ ] 3.3 Make the plan function refuse a planned new folder that the names function would still steer, given the path a planned move vacates, naming the registered folder.
 
 ## 4. Remaining surfaces (D5)

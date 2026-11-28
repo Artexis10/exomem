@@ -34,7 +34,7 @@ None.
   - The plan function and its steps: `vault.py` (the batch write, the access check and folder respelling), `vault_store/batch.py`, `trash_metadata.py`, `curation_witness.py`.
   - Write leaves that move to the plan function: `records.py`, `planning.py`, `add.py`, `preserve.py`, `note.py`, `edit.py`, `replace.py`, `link.py`, `set_frontmatter_field.py`, `semantic_writes.py`, `episode_store.py`, `adoption_run.py`, `source_imports.py`, `server_transfer.py`.
 - **Depends on.** Nothing. It applies in file mode and in store mode.
-- **Works with.** The planned `reconcile-folder-names-at-write` extends the folder step. Sensitivity governance hooks into the plan function's access check.
+- **Works with.** The shipped `reconcile-folder-names-at-write` extends the folder step. Sensitivity governance hooks into the plan function's access check.
 - **Users.**
   - A write that commit refuses today is refused at validation instead, with the same code.
   - Validation stays read-only: it never waits for a writer.

@@ -326,7 +326,7 @@ In store mode, derived unit rows and the page summary SHALL support selection an
 - **AND** the committed page bytes are exactly the bytes the write supplied
 
 ### Requirement: Typed relationships are stored rows
-In store mode, once stage 2 ships, a governed operation SHALL be able to add, retire or supersede a typed relationship from a unit to another unit or to a page as a store row, with no line of page text. The relationship type SHALL come from the relation vocabulary registry. A unit SHALL be able to carry any number of stored relationships. A store-mode answer SHALL read them from the stored rows only, in bounded pages with a keyset cursor and an exact total.
+In store mode, a governed operation SHALL add, retire or supersede typed relationships from a unit to a unit or page in stored rows. Types SHALL come from the relation registry. A unit SHALL support any number of relationships. Answers SHALL read only stored rows, in bounded pages with a keyset cursor and an exact visible total. If the count exceeds the read budget or an admitted endpoint is stale, the answer SHALL report unavailable and omit the total.
 
 #### Scenario: A first stored relationship pins the unit's identity
 - **WHEN** a governed operation adds the first stored relationship to a unit that has no anchor

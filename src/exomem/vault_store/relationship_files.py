@@ -10,10 +10,14 @@ import uuid
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
+from itertools import groupby
+from operator import itemgetter
+from pathlib import Path
 from sqlite3 import Connection, IntegrityError
 
-from ..held_fs import Chunks
+from .. import memory_refs, relation_registry
 from ..cli_ops import OpError
+from ..held_fs import Chunks
 from ..reserved_paths import RELATIONS_FILE_SUFFIX
 from . import relationships as store
 from .relationships import BoundRelationship, Relationship, UnitIdentity
@@ -270,6 +274,40 @@ def plan_import(
         actor, added=tuple(added), retired=tuple(retired),
         projected_base=store.ProjectedBase(path, decoded.source, decoded.revision),
     )
+
+
+def type_admission(root: Path, tx: Connection, source: str) -> Callable[[str], bool]:
+    """Use the registry the canonical source page selects for an editor's change."""
+    row = tx.execute("SELECT frontmatter_json FROM store_pages WHERE path=?", (source,)).fetchone()
+    registry = _source_registry(root, source, row[0] if row is not None else None)
+    return lambda key: registry.definition(key) is not None
+
+
+def validate_restored_types(root: Path, tx: Connection) -> None:
+    """Refuse unknown types for live sources. An absent source has no registry to select."""
+    rows = tx.execute(
+        "SELECT u.parent_path,p.frontmatter_json,u.parent_ref,r.relation_type FROM store_relationships r"
+        " JOIN store_unit_ids u ON u.id=r.source_unit_id JOIN store_pages p ON p.path=u.parent_path"
+        " GROUP BY u.parent_path,p.frontmatter_json,u.parent_ref,r.relation_type"
+        " ORDER BY u.parent_path,u.parent_ref",
+    )
+    for (source, stored_fields, parent_ref), group in groupby(rows, key=itemgetter(0, 1, 2)):
+        frontmatter = json.loads(stored_fields) if stored_fields else {}
+        identity = memory_refs.normalize_id(frontmatter.get(memory_refs.ID_FIELD))
+        if parent_ref is not None and (identity is None or memory_refs.memory_ref(identity) != parent_ref):
+            continue  # A replacement at the same path cannot supply the orphan's registry.
+        registry = relation_registry.load_for_page(root, source, frontmatter)
+        for _, _, _, kind in group:
+            if registry.definition(kind) is None:
+                raise OpError(
+                    "INVALID_RELATIONS_FILE",
+                    f"{json.dumps(path_for(source))} uses unregistered type {json.dumps(kind)}",
+                    "Restore the registry definition or correct the relations file, then migrate again.",
+                )
+
+
+def _source_registry(root: Path, source: str, frontmatter: str | None) -> relation_registry.RelationRegistry:
+    return relation_registry.load_for_page(root, source, json.loads(frontmatter) if frontmatter else {})
 
 
 def restore(tx: Connection, decoded: PortableRelations, *, revision: int) -> None:

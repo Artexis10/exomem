@@ -44,7 +44,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
-from .. import held_fs, lexstore, media_capacity, memory_refs, private_state, relation_registry, state_paths, vault
+from .. import held_fs, lexstore, media_capacity, memory_refs, private_state, state_paths, vault
 from ..cli_ops import OpError
 from ..collection_store import ownership as collection_ownership
 from ..media_store import DEFER, SUPPRESS
@@ -114,6 +114,8 @@ def judge(facts: Facts, disk: OnDisk | None) -> Verdict:
     """
     if ownership.relation_source(facts.path) is not None:
         if disk is None:
+            if facts.intent is not None and facts.intent.operation == "delete":
+                return Verdict.OWN
             return Verdict.GONE if facts.manifest is not None and not facts.held else Verdict.OWN
         recorded = None if facts.manifest is None else facts.manifest.sha256
         if disk.sha256 == recorded:
@@ -508,8 +510,10 @@ class Importer:
         with read.snapshot(self._root) as view:
             return {row[0] for row in view.connection.execute(
                 f"WITH pairs(id, src, dst, revision, sha256) AS (VALUES {values}) "
-                "SELECT id FROM pairs WHERE EXISTS (SELECT 1 FROM store_pages "
-                "WHERE path = pairs.src AND revision = pairs.revision AND sha256 = pairs.sha256) "
+                "SELECT id FROM pairs WHERE EXISTS (SELECT 1 FROM store_pages AS p "
+                "JOIN store_manifest AS m ON m.path = p.path "
+                "WHERE p.path = pairs.src AND p.revision = pairs.revision AND m.revision = p.revision "
+                "AND m.sha256 = pairs.sha256) "
                 "AND NOT EXISTS (SELECT 1 FROM store_pages WHERE path = pairs.dst) "
                 "AND NOT EXISTS (SELECT 1 FROM store_binaries WHERE path = pairs.dst) "
                 "AND NOT EXISTS (SELECT 1 FROM store_manifest WHERE path = pairs.dst) "
@@ -747,9 +751,11 @@ class Importer:
             change = write.StoreChange(
                 write.Origin.OUTSIDE_EDITOR,
                 "an outside rename",
-                moves=(write.PageMove(rename.src, rename.dst, on_disk=True),),
+                moves=(write.PageMove(
+                    rename.src, rename.dst, on_disk=True, on_disk_sha256=rename.disk.sha256,
+                ),),
                 expect={
-                    rename.src: write.Expect(revision=rename.revision, sha256=rename.disk.sha256, projected=True),
+                    rename.src: write.Expect(revision=rename.revision),
                     rename.dst: write.Expect(absent=True),
                 },
             )
@@ -867,10 +873,9 @@ class Importer:
         if disk.body is not None and not facts.held:
             try:
                 decoded = relationship_files.parse(disk.body.splitlines(keepends=True))
-                registry = relation_registry.load_registry(self._root)
                 change = relationship_files.plan_import(
                     writer.connection, rel, decoded, actor=write.Origin.OUTSIDE_EDITOR.value,
-                    allowed_type=lambda key: registry.definition(key) is not None,
+                    allowed_type=relationship_files.type_admission(self._root, writer.connection, decoded.source),
                 )
                 write.commit(writer, write.StoreChange(
                     write.Origin.OUTSIDE_EDITOR, "an edited relations file",
@@ -1263,11 +1268,13 @@ def _pair_renames(looks: Mapping[str, _Look], hints: Mapping[str, str]) -> list[
     only one in the batch with those bytes, so that two copies of one file cannot swap identities.
     A page pairs with a page and a binary with a binary.
     """
-    gone = {
-        rel: look
-        for rel, look in looks.items()
-        if look.verdict is Verdict.GONE and look.facts.stored_sha256 is not None
-    }
+    gone = {}
+    for rel, look in looks.items():
+        if look.verdict is Verdict.GONE:
+            facts = look.facts
+            recorded = facts.manifest if facts.page is not None else facts.binary
+            if recorded is not None:
+                gone[rel] = recorded
     created = {
         rel: look
         for rel, look in looks.items()
@@ -1281,7 +1288,7 @@ def _pair_renames(looks: Mapping[str, _Look], hints: Mapping[str, str]) -> list[
         disk = created[dst].disk
         return (
             disk is not None
-            and gone[src].facts.stored_sha256 == disk.sha256
+            and gone[src].sha256 == disk.sha256
             and ownership.classify(src) is ownership.classify(dst)
         )
 
@@ -1290,9 +1297,9 @@ def _pair_renames(looks: Mapping[str, _Look], hints: Mapping[str, str]) -> list[
         if dst in created and src in gone and src not in pairs.values() and same_bytes(src, dst):
             pairs[dst] = src
     by_stored: dict[tuple[ownership.Ownership, str], list[str]] = defaultdict(list)
-    for rel, look in gone.items():
-        if rel not in pairs.values() and look.facts.stored_sha256 is not None:
-            by_stored[(ownership.classify(rel), look.facts.stored_sha256)].append(rel)
+    for rel, recorded in gone.items():
+        if rel not in pairs.values():
+            by_stored[(ownership.classify(rel), recorded.sha256)].append(rel)
     by_disk: dict[tuple[ownership.Ownership, str], list[str]] = defaultdict(list)
     for rel, look in created.items():
         if rel not in pairs and look.disk is not None:
@@ -1304,9 +1311,7 @@ def _pair_renames(looks: Mapping[str, _Look], hints: Mapping[str, str]) -> list[
     renames = []
     for dst, src in sorted(pairs.items()):
         disk = created[dst].disk
-        source = gone[src].facts
         page = ownership.classify(dst) is ownership.Ownership.PAGE
-        stored = source.manifest if page else source.binary
-        if disk is not None and stored is not None:
-            renames.append(_Rename(src, dst, disk, page, stored.revision))
+        if disk is not None:
+            renames.append(_Rename(src, dst, disk, page, gone[src].revision))
     return renames

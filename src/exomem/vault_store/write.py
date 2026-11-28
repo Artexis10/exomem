@@ -58,9 +58,9 @@ class Expect:
     """What a path must hold in the store when the commit runs, or the whole commit is refused.
 
     ``absent`` says the store holds nothing at the path. Otherwise each field that is set must
-    match the stored page or binary record. ``projected`` says that the file on disk is the stored
-    page: the projection manifest records the page's own revision, no projection intent is queued
-    for the path and no outside change is held for it. ``linked_from`` names every page that may
+    match the stored page or binary record. ``projected`` requires a manifest that records the
+    canonical bytes and revision, with no queued projection or hold at the path.
+    ``linked_from`` names every page that may
     link to the path: a link from a page outside it, in the inbound-link rows at commit time (the
     rule that ``list_inbound_links`` and a move's rewrite use), refuses the commit. A delete reads
     its inbound links and commits on that reading through it.
@@ -137,15 +137,17 @@ class PageDelete:
 class PageMove:
     """A page's bytes moved to a path the store does not hold.
 
-    ``on_disk`` says that the file already moved there. ``body`` gives the page new bytes at its new
-    path, as a move that rewrites the page's own links does; the move is still one life that the
-    trail follows from the old path, and the projector writes the new bytes there.
+    ``on_disk`` says that the file already moved there. ``on_disk_sha256`` binds the observed
+    file's exact bytes when they differ from the canonical bytes.
+    ``body`` gives the page new bytes at its new path, as a move that rewrites the page's own links
+    does. The trail follows one life from the old path, and the projector writes the new bytes.
     """
 
     src: str
     dst: str
     on_disk: bool = False
     body: bytes | None = None
+    on_disk_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if self.on_disk and self.body is not None:
@@ -209,13 +211,15 @@ class FileSeen:
     projection manifest saw there: the projector then replaces that file with the stored page.
 
     ``sha256`` is None when the file was gone, and the commit then drops the manifest entry; the
-    size and modification time then stay None too.
+    size and modification time then stay None too. ``canonical_sha256`` records the hash of the
+    corresponding canonical page if the file carries projection bytes.
     """
 
     rel: str
     sha256: str | None
     size: int | None = None
     mtime_ns: int | None = None
+    canonical_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if (self.sha256 is None) != (self.size is None) or (self.size is None) != (
@@ -233,7 +237,9 @@ def outside_page(
     canonical = relationship_files.strip_block(raw, keep_mine=keep_mine)
     if canonical == raw:
         return PagePut(rel, raw, on_disk_mtime_ns=mtime_ns), ()
-    return PagePut(rel, canonical), (FileSeen(rel, sha256, len(raw), mtime_ns),)
+    return PagePut(rel, canonical), (
+        FileSeen(rel, sha256, len(raw), mtime_ns, hashlib.sha256(canonical).hexdigest()),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1129,15 +1135,17 @@ def timestamp() -> str:
 
 
 def record_manifest(
-    tx: Connection, rel: str, sha256: str, size: int, mtime_ns: int, revision: int
+    tx: Connection, rel: str, sha256: str, size: int, mtime_ns: int, revision: int,
+    *, canonical_sha256: str | None = None,
 ) -> None:
     """Record that the file at ``rel`` holds these bytes: the one write of a manifest row."""
     tx.execute(
-        "INSERT INTO store_manifest(path, sha256, size, mtime_ns, revision) "
-        "VALUES (?, ?, ?, ?, ?) "
+        "INSERT INTO store_manifest(path, sha256, size, mtime_ns, revision, canonical_sha256) "
+        "VALUES (?, ?, ?, ?, ?, NULLIF(?, ?)) "
         "ON CONFLICT(path) DO UPDATE SET sha256 = excluded.sha256, size = excluded.size, "
-        "mtime_ns = excluded.mtime_ns, revision = excluded.revision",
-        (rel, sha256, size, mtime_ns, revision),
+        "mtime_ns = excluded.mtime_ns, revision = excluded.revision, "
+        "canonical_sha256 = excluded.canonical_sha256",
+        (rel, sha256, size, mtime_ns, revision, canonical_sha256, sha256),
     )
 
 
@@ -1154,7 +1162,10 @@ def _record_seen(tx: Connection, seen: FileSeen, revision: int) -> None:
     if seen.sha256 is None or seen.size is None or seen.mtime_ns is None:
         tx.execute("DELETE FROM store_manifest WHERE path = ?", (seen.rel,))
     else:
-        record_manifest(tx, seen.rel, seen.sha256, seen.size, seen.mtime_ns, revision)
+        record_manifest(
+            tx, seen.rel, seen.sha256, seen.size, seen.mtime_ns, revision,
+            canonical_sha256=seen.canonical_sha256,
+        )
 
 
 def _stored(tx: Connection, rel: str) -> tuple[int, str] | None:
@@ -1238,15 +1249,21 @@ def _check_below(tx: Connection, rel: str, want: Expect) -> None:
             raise StoreConflict(rel, f"the folder holds {count} {kind}, not {bound}")
 
 
-def _projected(tx: Connection, rel: str, revision: int, sha256: str) -> bool:
-    """Whether the file on disk is the stored page: the manifest names the page's revision and bytes,
-    and no projection is queued and no outside change is held for the path."""
+def _projected(
+    tx: Connection, rel: str, revision: int, sha256: str, *, on_disk_sha256: str | None = None,
+) -> bool:
+    """Whether the manifest binds the stored page and any observed file hash with no pending change."""
     manifest = tx.execute(
-        "SELECT revision, sha256 FROM store_manifest WHERE path = ?", (rel,)
+        "SELECT revision, COALESCE(canonical_sha256, sha256), sha256 FROM store_manifest WHERE path = ?",
+        (rel,),
     ).fetchone()
+    if manifest is None or manifest[:2] != (revision, sha256):
+        return False
+    if on_disk_sha256 is not None and manifest[2] != on_disk_sha256:
+        return False
     queued = tx.execute("SELECT 1 FROM store_projection_queue WHERE path = ?", (rel,)).fetchone()
     held = tx.execute("SELECT 1 FROM store_held WHERE path = ?", (rel,)).fetchone()
-    return manifest == (revision, sha256) and queued is None and held is None
+    return queued is None and held is None
 
 
 #: Which audit operations open and end a path's life in the store, as ``_Trail`` records them. A
@@ -1313,7 +1330,7 @@ class _Trail:
         self.intents[move.dst] = ("move", move.src)
 
     def moved(
-        self, move: PageMove, old_sha256: str, new_sha256: str, *, media_allocation: bool,
+        self, move: PageMove, old_sha256: str, new_sha256: str, *, media_allocation: bool, project: bool,
     ) -> None:
         # Each side has its own row, so a read of either path's trail meets the move; the new path's
         # row names the old path. Each row holds the bytes that its path held or now holds.
@@ -1322,7 +1339,7 @@ class _Trail:
                     reason=MEDIA_PAYLOAD_WRITE_REASON if media_allocation else None)
         self.deleted.append(move.src)
         self.written.append(move.dst)
-        if not move.on_disk:
+        if project:
             self.intents[move.dst] = ("move", move.src)
 
 
@@ -1395,12 +1412,19 @@ def _move_page(
             frontmatter_json(move.body) if prepared is None else prepared.fields,
             time.time_ns() if prepared is None else prepared.mtime_ns,
         ]
+    project = not move.on_disk
     if move.on_disk:
-        # The file kept its bytes and mtime through the rename, so it must have been the stored page.
-        if not _projected(tx, move.src, stored_revision, page[1]):
+        disk_sha256 = move.on_disk_sha256 if move.on_disk_sha256 is not None else page[1]
+        if not _projected(tx, move.src, stored_revision, page[1], on_disk_sha256=disk_sha256):
             raise StoreConflict(move.src, "its file on disk is not the stored page")
         if tx.execute("SELECT 1 FROM store_manifest WHERE path = ?", (move.dst,)).fetchone():
             raise StoreConflict(move.dst, "the manifest already records a file there")
+        if ownership.is_markdown(move.src):
+            from . import relationship_files
+
+            project = disk_sha256 != page[1] or tx.execute(
+                "SELECT 1 FROM store_manifest WHERE path = ?", (relationship_files.path_for(move.src),),
+            ).fetchone() is not None
     tx.execute("DELETE FROM store_pages WHERE path = ?", (move.src,))
     tx.execute(
         "INSERT INTO store_pages(path, body, sha256, size, frontmatter_json, mtime_ns, revision) "
@@ -1413,12 +1437,11 @@ def _move_page(
             "UPDATE store_manifest SET path = ?, revision = ? WHERE path = ?",
             (move.dst, revision, move.src),
         )
-        # Nothing is left to project at either path; a queued intent at the destination named a file
-        # that this rename replaced.
+        # An older intent at the destination named a file that this rename replaced.
         _clear_queued(tx, move.src, move.dst)
     # The destination's move and its later write share this revision. Retain the
     # admission proved for the exact source, including a guarded lineage change.
-    audit.moved(move, page[1], content[1], media_allocation=media_allocation)
+    audit.moved(move, page[1], content[1], media_allocation=media_allocation, project=project)
 
 
 def _record_binary(tx: Connection, record: BinaryRecord, revision: int, audit: _Trail) -> None:
@@ -1462,12 +1485,15 @@ def _degrade_moves(tx: Connection, paths: tuple[str, ...]) -> None:
     old one must not leave the old file behind, and must not let the projector rename a page that
     now lives at the old path. So a touched move becomes a delete of its old path and a write of
     its new path, and the later change then replaces either row as it would any other.
+    The old relations file keeps its own delete intent so it cannot restore the moved unit IDs.
 
     A binary's move cannot split that way: the store holds no bytes to write, and the delete would
     take away the only copy. Such a change refuses until the move reaches the disk, which the
     writer does right after its commit and the projector after a kill: it prevents the loss of a
     binary's bytes, and a wrong refusal costs the caller one retry.
     """
+    from . import relationship_files
+
     marks = ",".join("?" * len(paths))
     touched = tx.execute(
         "SELECT path, from_path, revision, queued_at FROM store_projection_queue "
@@ -1483,8 +1509,12 @@ def _degrade_moves(tx: Connection, paths: tuple[str, ...]) -> None:
         )
         tx.execute(
             "INSERT OR IGNORE INTO store_projection_queue(path, revision, operation, queued_at) "
-            "VALUES (?, ?, 'delete', ?)",
-            (from_path, revision, queued_at),
+            "SELECT ?1, ?2, 'delete', ?3 UNION ALL "
+            "SELECT path, ?2, 'delete', ?3 FROM store_manifest WHERE path = ?4",
+            (
+                from_path, revision, queued_at,
+                relationship_files.path_for(from_path) if ownership.is_markdown(from_path) else None,
+            ),
         )
 
 

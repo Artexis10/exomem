@@ -220,6 +220,23 @@ def test_assess_anchors_the_far_end_and_later_changes_only_relationships(
     assert rows(served, "SELECT relation_type FROM store_relationships WHERE retired_revision IS NULL") == [
         ("supports",),
     ]
+    [(source_id,)] = rows(served, "SELECT id FROM store_unit_ids WHERE parent_path=?", source_path)
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "Link to the excerpt as a page.",
+        relationship_change=relationships.Change(
+            actor="owner",
+            added=(relationships.Relationship(
+                "page-link", source_id, "supports", None, target_path,
+                "exomem://memory/04e56772-21a9-44ff-b0df-0a51ed0e166b",
+            ),),
+        ),
+    ))
+    rule = served / "Knowledge Base/_Governance/rules/secret-external.yaml"
+    rule.write_text(rule.read_text().replace("ceiling: 0", "ceiling: 5"))
+    with request_scope(EXTERNAL):
+        excerpt_view = unit_edges.relationship_page(served, source_path, "tide")
+    assert excerpt_view.total == 1
+    assert [(edge.target_path, edge.target) for edge in excerpt_view.edges] == [(target_path, None)]
 
 
 def test_relation_file_carries_locators_and_keeps_managed_block_out_of_page_bytes():
@@ -394,7 +411,7 @@ def test_a_relations_file_edit_keeps_history_and_an_edited_block_is_held(served,
 
 
 def test_a_relationship_hub_has_bounded_reads_and_a_complete_portable_file(served, writer):  # noqa: F811
-    count = 500
+    count = 550
     source_id = "e8f840b6-3cf8-44cf-ab95-12d05683a194"
     target_id = "04e56772-21a9-44ff-b0df-0a51ed0e166b"
     source = (f"---\nexomem_id: {source_id}\n---\n# Alpha\n\n- [rule] Check the tide. ^tide\n").encode()
@@ -416,11 +433,16 @@ def test_a_relationship_hub_has_bounded_reads_and_a_complete_portable_file(serve
     with library_scope():
         first = unit_edges.relationship_page(served, ALPHA, "tide", limit=50)
         second = unit_edges.relationship_page(served, ALPHA, "tide", limit=50, after=first.next_after)
-    assert first.total == second.total == count
+        tail = unit_edges.relationship_page(
+            served, ALPHA, "tide", after=("supports", f"edge-{anchors[-2]}"),
+        )
+    assert first.total == second.total == tail.total == count
     assert [edge.relationship.id for edge in first.edges + second.edges] == [
         f"edge-{anchor}" for anchor in anchors[:100]
     ]
     assert first.next_after is not None and second.next_after is not None
+    assert [edge.relationship.id for edge in tail.edges] == [f"edge-{anchors[-1]}"]
+    assert tail.next_after is None
     assert not projector.Projector(served, run=lambda work: work(writer)).run_pass().deferred
     projected = (served / ALPHA).read_bytes()
     assert relationship_files.strip_block(projected) == source

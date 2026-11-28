@@ -183,14 +183,30 @@ def outgoing_for_paths(tx: Connection, paths: Iterable[str]) -> Iterator[BoundRe
         )
 
 
-def outgoing_unit(tx: Connection, source: UnitIdentity) -> Iterator[BoundRelationship]:
+def outgoing_unit(
+    tx: Connection, source: UnitIdentity, *,
+    after: tuple[str, str] | None = None, through: tuple[str, str] | None = None,
+    limit: int | None = None,
+) -> Iterator[BoundRelationship]:
     """Seek a unit's active adjacency in (relation type, edge id) order."""
+    predicates = ["r.source_unit_id=?", "r.retired_revision IS NULL"]
+    values: list[str | int] = [source.id]
+    if after is not None:
+        predicates.append("(r.relation_type,r.id) > (?,?)")
+        values.extend(after)
+    if through is not None:
+        predicates.append("(r.relation_type,r.id) <= (?,?)")
+        values.extend(through)
+    suffix = ""
+    if limit is not None:
+        suffix = " LIMIT ?"
+        values.append(limit)
     for row in tx.execute(
         "SELECT r.id,r.source_unit_id,r.relation_type,r.target_unit_id,r.target_page_path,"
         " r.target_page_ref,t.id,t.parent_path,t.anchor,t.parent_ref"
         " FROM store_relationships r LEFT JOIN store_unit_ids t ON t.id=r.target_unit_id"
-        " WHERE r.source_unit_id=? AND r.retired_revision IS NULL ORDER BY r.relation_type,r.id",
-        (source.id,),
+        " WHERE " + " AND ".join(predicates) + " ORDER BY r.relation_type,r.id" + suffix,
+        values,
     ):
         yield BoundRelationship(
             Relationship(*row[:6]), source,

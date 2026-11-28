@@ -315,7 +315,6 @@ def _resolve_relations(
     root: Path, writer: CollectionWriter, rel: str, source: str, choice: str, why: str,
     row: tuple, stored: StoreFacts | None, disk: _Disk,
 ) -> Resolution:
-    from .. import relation_registry
     from ..governance.principal import effective_principal
     from . import relationship_files, relationships
 
@@ -327,10 +326,9 @@ def _resolve_relations(
         if disk.body is None or revision != row[2]:
             raise write.StoreConflict(rel, "the held relations file cannot replace this revision", _LIST_AGAIN)
         decoded = relationship_files.parse(disk.body.splitlines(keepends=True))
-        registry = relation_registry.load_registry(root)
         change = relationship_files.plan_import(
             writer.connection, rel, decoded, actor=actor,
-            allowed_type=lambda key: registry.definition(key) is not None,
+            allowed_type=relationship_files.type_admission(root, writer.connection, source),
         )
     else:
         exported = _export(root, rel, disk.body)

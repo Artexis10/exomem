@@ -1314,6 +1314,7 @@ def _migrate_to_20(conn: sqlite3.Connection) -> None:
 
 def _migrate_to_21(conn: sqlite3.Connection) -> None:
     """Store relationships and unit identities under the collection-store compatibility fence."""
+    conn.execute("ALTER TABLE store_manifest ADD COLUMN canonical_sha256 TEXT")
     conn.execute(
         "ALTER TABLE store_derivation_queue ADD COLUMN relationship_move INTEGER NOT NULL DEFAULT 0"
         " CHECK(relationship_move IN (0,1))"

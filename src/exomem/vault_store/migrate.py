@@ -249,6 +249,7 @@ def _load_files(vault_root: Path, conn: sqlite3.Connection, staged: Staged, revi
                     (owned.rel, fact.sha256, fact.size, revision),
                 )
                 staged.binaries += 1
+        relationship_files.validate_restored_types(vault_root, conn)
         conn.execute("COMMIT")
     except BaseException:
         conn.execute("ROLLBACK")
@@ -852,6 +853,11 @@ def _install_rows(
         "INSERT INTO store_manifest(path, sha256, size, mtime_ns, revision) VALUES (?, ?, ?, ?, ?)",
         [(rel, fact.sha256, fact.size, fact.mtime_ns, revision) for rel, fact in pages],
     )
+    if staged.projected_pages:
+        conn.execute(
+            "UPDATE store_manifest SET canonical_sha256 = p.sha256 FROM store_pages AS p "
+            "WHERE store_manifest.path = p.path AND store_manifest.sha256 != p.sha256"
+        )
     conn.executemany(
         "INSERT INTO store_manifest(path,sha256,size,mtime_ns,revision) VALUES (?,?,?,?,?)",
         [(rel, fact.sha256, fact.size, fact.mtime_ns, base)

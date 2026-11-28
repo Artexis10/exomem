@@ -626,6 +626,15 @@ class Projector:
     ) -> None:
         intent = facts.intent
         assert intent is not None
+        if (
+            facts.manifest is not None
+            and facts.manifest.revision > intent.revision
+            and ownership.relation_source(intent.path) is not None
+        ):
+            # A replacement page has projected a new relations file at this path.
+            self._run(lambda writer: _drop_intent(writer, intent.path, intent.revision))
+            report.dropped += 1
+            return
         disk = observe(filesystem, intent.path)
         removed = report.removed
         if self._remove(filesystem, facts, disk, report, store_revision=None):
@@ -684,7 +693,9 @@ class Projector:
         old = self._facts(intent.from_path)
         if old.held:
             return
-        old_disk = observe(filesystem, old.path)
+        # An outside rename moves the manifest with the page and queues the relationship artifacts.
+        already_moved = facts.manifest is not None and facts.manifest.revision == intent.revision
+        old_disk = None if already_moved else observe(filesystem, old.path)
         new_disk = observe(filesystem, intent.path)
         old_relation = relationship_files.path_for(old.path)
         if ownership.relation_source(old_relation) is not None:
@@ -718,9 +729,10 @@ class Projector:
             # A person's file at the new path is held before the old file goes: the old one stays.
             self._apply_write(filesystem, facts, new_disk, verdict, report)
             return
-        if not self._remove(filesystem, old, old_disk, report, store_revision=None):
-            return
-        self._with_authority(lambda check: _move_parts(filesystem, old.path, intent.path, check))
+        if not already_moved:
+            if not self._remove(filesystem, old, old_disk, report, store_revision=None):
+                return
+            self._with_authority(lambda check: _move_parts(filesystem, old.path, intent.path, check))
         self._record_move_split(intent, old.path)
         self._project(filesystem, intent.path, report)
 
@@ -877,7 +889,10 @@ class Projector:
                 if disk.sha256 == page.sha256:
                     record_file(tx, page.path, page.sha256, disk.size, disk.mtime_ns, page.revision)
                 else:
-                    write.record_manifest(tx, page.path, disk.sha256, disk.size, disk.mtime_ns, page.revision)
+                    write.record_manifest(
+                        tx, page.path, disk.sha256, disk.size, disk.mtime_ns, page.revision,
+                        canonical_sha256=page.sha256,
+                    )
                 if related is not None:
                     rel, projected = related
                     write.record_manifest(tx, rel, projected.sha256, projected.size, projected.mtime_ns, revision)

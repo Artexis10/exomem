@@ -28,11 +28,23 @@ from hard_kill import KILLED, kill_self
 from test_vault_store_migration import ALPHA, BETA, DIAGRAM, DIAGRAM_BYTES, migrate_apply
 from test_vault_store_projector import NOTES, commit, put, rows
 
-from exomem import file_watcher, server_runtime
+from exomem import extraction_parts, file_watcher, server_runtime
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection, preview
 from exomem.collection_store.writer import CollectionWriter
-from exomem.vault_store import importer, mode, ownership, projector, read, verify, write
+from exomem.vault_store import (
+    derivation,
+    importer,
+    migrate,
+    mode,
+    ownership,
+    projector,
+    read,
+    relationship_files,
+    relationships,
+    verify,
+    write,
+)
 
 # The generated vault and the store fixtures are the sibling suites' own: pytest finds a fixture by
 # its name in this module, and an alias keeps a test's argument from shadowing an import.
@@ -82,6 +94,120 @@ def imports(root, rel=None):
         f"SELECT path, origin FROM store_audit WHERE operation = 'import'{where} ORDER BY seq",
         *arguments,
     )
+
+
+@pytest.fixture
+def related_pages(stored, writer, projecting):
+    source = b"# Alpha\n\n- [rule] Check the tide. ^tide\n"
+    target = b"# Beta\n\n- [rule] Light the lamp. ^lamp\n"
+    commit(
+        writer,
+        puts=(write.PagePut(ALPHA, source), write.PagePut(BETA, target)),
+        relationship_change=relationships.Change(
+            actor="owner",
+            identities=(
+                relationships.UnitIdentity("tide-id", ALPHA, "tide"),
+                relationships.UnitIdentity("lamp-id", BETA, "lamp"),
+            ),
+            added=(relationships.Relationship("link-id", "tide-id", "supports", "lamp-id"),),
+        ),
+    )
+    assert projecting.run_pass().projected == 2
+    return source, target
+
+
+def test_an_outside_body_edit_with_an_intact_relations_block_is_imported(
+    stored, projecting, importing, related_pages,
+):
+    source, _target = related_pages
+    edited_page = source.replace(b"# Alpha", b"# Harbor")
+    path = stored / ALPHA
+    projected = path.read_bytes()
+    assert relationship_files.strip_block(projected) == source
+    edited_file = projected.replace(b"# Alpha", b"# Harbor")
+    path.write_bytes(edited_file)
+
+    importing.import_paths([ALPHA])
+
+    assert imports(stored, ALPHA) == [(ALPHA, "outside editor")]
+    assert rows(stored, "SELECT body FROM store_pages WHERE path = ?", ALPHA) == [(edited_page,)]
+    assert rows(stored, "SELECT sha256, canonical_sha256 FROM store_manifest WHERE path = ?", ALPHA) == [
+        (sha(edited_file), sha(edited_page)),
+    ]
+    assert projecting.run_pass().projected == 1
+    assert relationship_files.strip_block(path.read_bytes()) == edited_page
+    assert rows(stored, "SELECT id FROM store_relationships WHERE retired_revision IS NULL") == [("link-id",)]
+    assert not rows(stored, "SELECT path FROM store_held")
+
+
+def test_an_outside_rename_of_a_projected_target_keeps_the_relation_and_updates_its_locator(
+    stored, writer, projecting, importing, related_pages,
+):
+    _source, target = related_pages
+    moved = f"{NOTES}/Lantern.md"
+    old_artifact = stored / relationship_files.path_for(BETA)
+    assert old_artifact.is_file()
+    assert (stored / BETA).read_bytes() != target
+    old_parts = stored / extraction_parts.folder_for(Path(BETA))
+    old_parts.mkdir()
+    part = old_parts / "editor-note.md"
+    part.write_bytes(PERSON)
+    (stored / BETA).rename(stored / moved)
+
+    importing.import_paths([BETA, moved])
+
+    assert rows(stored, "SELECT body FROM store_pages WHERE path = ?", moved) == [(target,)]
+    assert not rows(stored, "SELECT path FROM store_pages WHERE path = ?", BETA)
+    derivation.drain(stored, writer)
+    assert not projecting.run_pass().deferred
+    assert not old_artifact.exists()
+    assert part.read_bytes() == PERSON
+    assert relationship_files.strip_block((stored / moved).read_bytes()) == target
+    new_artifact = stored / relationship_files.path_for(moved)
+    with new_artifact.open("rb") as encoded:
+        assert relationship_files.parse(encoded).source == moved
+    with (stored / relationship_files.path_for(ALPHA)).open("rb") as encoded:
+        portable = relationship_files.parse(encoded)
+    assert [(unit.id, unit.parent_path) for unit in portable.target_units] == [("lamp-id", moved)]
+    assert [(edge.id, edge.source_unit_id, edge.target_unit_id) for edge in portable.relationships] == [
+        ("link-id", "tide-id", "lamp-id"),
+    ]
+    assert not rows(stored, "SELECT path FROM store_held")
+
+
+@pytest.mark.parametrize("with_relationship", [False, True], ids=["plain", "related"])
+def test_replacing_the_old_page_before_projection_leaves_a_restorable_vault(
+    stored, writer, projecting, importing, related_pages, tmp_path, with_relationship,
+):
+    moved = f"{NOTES}/Lantern.md"
+    (stored / BETA).rename(stored / moved)
+    assert importing.import_paths([BETA, moved]).moved == {moved: BETA}
+
+    replacement = b"# Replacement\n\n- [rule] Check the bells. ^bells\n"
+    relationship_change = None
+    if with_relationship:
+        relationship_change = relationships.Change(
+            actor="owner",
+            identities=(relationships.UnitIdentity("bells-id", BETA, "bells"),),
+            added=(relationships.Relationship("bells-link", "bells-id", "supports", "tide-id"),),
+        )
+    commit(writer, puts=(write.PagePut(BETA, replacement),), relationship_change=relationship_change)
+    derivation.drain(stored, writer)
+    assert not projecting.run_pass().deferred
+
+    assert relationship_files.strip_block((stored / BETA).read_bytes()) == replacement
+    artifact = stored / relationship_files.path_for(BETA)
+    if with_relationship:
+        with artifact.open("rb") as encoded:
+            portable = relationship_files.parse(encoded)
+        assert [unit.id for unit in portable.units] == ["bells-id"]
+    else:
+        assert not artifact.exists()
+    with connection.open_writer(tmp_path / "restored.sqlite", lease_check=lambda: True) as fresh:
+        migrate.stage(stored, fresh.connection, tmp_path / "expected.sqlite")
+        assert fresh.connection.execute(
+            "SELECT parent_path FROM store_unit_ids WHERE id='lamp-id'"
+        ).fetchone() == (moved,)
 
 
 # -- the rehearsal ---------------------------------------------------------------------------------
@@ -231,8 +357,8 @@ def test_the_rehearsal_of_28_outside_edits_ends_as_the_design_promises(
             assert rows(stored, "SELECT body FROM store_pages WHERE path = ?", rel) == [
                 ((stored / rel).read_bytes(),)
             ]
-            assert rows(stored, "SELECT sha256 FROM store_manifest WHERE path = ?", rel) == [
-                (sha((stored / rel).read_bytes()),)
+            assert rows(stored, "SELECT sha256, canonical_sha256 FROM store_manifest WHERE path = ?", rel) == [
+                (sha((stored / rel).read_bytes()), None)
             ]
             assert imports(stored, rel) == [(rel, "outside editor")], "one import for each edit"
         elif expected == "held edit":

@@ -17018,6 +17018,8 @@ class GraphView:
                 return None
             raw = str(row.get("raw_relation") or "")
             registry = parent.relations
+            if metadata.get("stored_relationship") and registry.definition(raw) is None:
+                return None
             if unit is None and not (metadata.get("canonical") or metadata.get("has_colon")) and (
                 raw not in registry.keys and raw not in registry.aliases
             ):
