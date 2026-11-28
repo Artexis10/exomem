@@ -1611,7 +1611,7 @@ class StoreServer:
         entry = time.monotonic()
         accepted_unit, completion_deadline, deadline = self._deadlines(entry, checkpoint, record_request=record_request)
         # Once taken, the save owns its outcome. Only the wait to take it spends the intake budget.
-        take_before = None if read_only or accepted_unit else write_intake.busy_wait_cap()
+        take_before = None if read_only or accepted_unit else write_intake.busy_wait_cap(initial_attempt=True)
         if take_before is not None:
             deadline = min(deadline, take_before)
         # The wait ends at the acceptance deadline, which the queue wait below shares.

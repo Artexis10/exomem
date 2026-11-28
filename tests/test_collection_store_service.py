@@ -2654,6 +2654,29 @@ def test_a_save_waiting_for_the_store_queues_within_the_intake_budget(service, m
         write_intake.stop(root)
 
 
+@pytest.mark.parametrize("intake_unreadable", [False, True], ids=["available", "unreadable"])
+def test_zero_intake_wait_allows_an_idle_store_to_commit(service, monkeypatch, intake_unreadable):
+    """Zero intake wait removes retries, not the first attempt at an idle store."""
+    from exomem import write_intake
+
+    root = service.root
+    monkeypatch.setenv("EXOMEM_BUSY_INTAKE_AFTER_SECONDS", "0")
+    write_intake.start(root)
+
+    def unreadable(*_args, **_kwargs):
+        raise OSError("intake unavailable")
+
+    try:
+        if intake_unreadable:
+            monkeypatch.setattr(write_intake, "_store", unreadable)
+        result = call(root, "record_memory", action="append", collection=CID, item={"title": "New row"},
+                      item_key=LATER, why="record the row", idempotency_key="zero-intake-wait")
+        assert result["outcome"] == "committed"
+        assert titles(root, CID) == ["Canonical", "New row"]
+    finally:
+        write_intake.stop(root)
+
+
 def _save_by_title(service, changes, **guards):
     """The save an agent sends with the collection's title, under the busy intake's own scope."""
     command = next(c for c in commands.product_commands_for("mcp") if c.name == "record_memory")
