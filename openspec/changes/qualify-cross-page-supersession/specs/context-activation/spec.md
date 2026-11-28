@@ -2,7 +2,7 @@
 
 ### Requirement: Readable Cross-Page Unit Replacements Retire Current Context
 
-For callers with unrestricted source access, stance, domain profiles and recorded positions SHALL omit a unit that a valid successor on a governed authoring page names through an exact cross-page relation with replacing behaviour. The original unit SHALL remain readable through its existing reference. If the lookup for admitted claims is incomplete, the affected projection SHALL be unavailable. Shared projections SHALL remain independent of these cross-page edges.
+For callers with unrestricted source access, stance, domain profiles and recorded positions SHALL omit a unit that a valid successor on a live or historical governed authoring page names through an exact cross-page relation with replacing behaviour. The original unit SHALL remain readable through its existing reference. If the lookup for admitted claims is incomplete, the affected projection SHALL be unavailable. Shared projections SHALL remain independent of these cross-page edges.
 
 #### Scenario: The replacement comes from outside the current-context set
 

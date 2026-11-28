@@ -16996,6 +16996,7 @@ class GraphView:
             return frozenset()
         authors: dict[str, Sequence[dict[str, Any]]] = {}
         type_basis = note_types.Basis(self.vault_root)
+        status_basis = lifecycle_statuses.Basis(self.vault_root)
         for path, edges in by_source.items():
             parent = self.parent(path)
             if parent is None:
@@ -17004,10 +17005,17 @@ class GraphView:
                 path=self.vault_root / path, rel_path=path, frontmatter=dict(parent.frontmatter),
                 body="", title="", mtime=0.0,
             )
-            # A later replacement of this author leaves its earlier replacement in history.
-            if activation.structurally_eligible(
+            if not activation.structurally_eligible(
                 self.vault_root, page, selects=note_types.governed_endpoint, type_basis=type_basis,
             ):
+                continue
+            status = status_basis.classify(
+                page.frontmatter.get("status"), path=path, frontmatter=page.frontmatter,
+            )
+            if status.lifecycle_class is None:
+                return None
+            # A later replacement or archival does not undo a historical author's decision.
+            if status.live or status.historical:
                 authors[path] = edges
         if not authors:
             return frozenset()
