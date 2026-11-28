@@ -18,6 +18,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import sqlite3
 import threading
 import time
@@ -27,7 +28,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import held_link_index_warm
+from conftest import FIXTURE_VAULT, held_link_index_warm
 from test_collection_row_references import DIARY, SITE_FIELD, SITES, diary_text, sites_text
 from test_collection_store_importer import ndjson, write_source
 from test_collection_store_s1_gate import (
@@ -2713,6 +2714,51 @@ def _create_release_plan_with_effort(root):
     call(root, "plan_memory", action="create", manifest_path=manifest_path("planning").replace("Work", "Release"),
          manifest_text=text, why="plan the releases")
     return text
+
+
+@pytest.mark.parametrize("service", [pytest.param(INCIDENT_TEXT, id="incident-log")], indirect=True)
+def test_busy_public_adds_refuse_undeclared_values_without_queueing(service, monkeypatch, tmp_path):
+    """MCP can supply reply settings that the store writer does not accept as arguments."""
+    from fastmcp import Client
+    from test_write_intake import _mcp_server
+
+    from exomem import write_intake
+
+    schema_path = Path("Knowledge Base/_Schema")
+    shutil.copytree(FIXTURE_VAULT / schema_path, service.root / schema_path, dirs_exist_ok=True)
+    _create_release_plan_with_effort(service.root)
+    server = _mcp_server(monkeypatch, tmp_path)
+
+    async def check():
+        async with Client(server) as client:
+            with _store_thread_held_with_intake_on(service, monkeypatch):
+                record = await client.call_tool("add_record", {
+                    "collection": INCIDENT_LOG, "why": "record an incident",
+                    "item": {"title": "An incident", "status": "resolved"},
+                }, raise_on_error=False)
+                plan = await client.call_tool("add_plan_item", {
+                    "collection": RELEASE_PLAN, "why": "plan the release",
+                    "item": {"title": "A new release", "kind": "outcome", "status": "resolved",
+                             "commitment": "committed", "horizon": "week"},
+                }, raise_on_error=False)
+                queue = write_intake.read(service.root)["items"]
+                assert queue == []
+                for reply, code in ((record, "SCHEMA_ENUM"), (plan, "INVALID_PLAN")):
+                    error = reply.structured_content["error"]
+                    assert error["code"] == code
+                    assert "nothing is held" in error["message"]
+
+                control = await client.call_tool("add_record", {
+                    "collection": INCIDENT_LOG, "why": "record an incident",
+                    "item": {"title": "An open incident", "status": "open"},
+                }, raise_on_error=False)
+                (queued,) = write_intake.read(service.root)["items"]
+                assert queued["ref"] == control.structured_content["queued_write"]["ref"]
+
+    try:
+        asyncio.run(check())
+    finally:
+        write_intake.stop(service.root)
 
 
 @pytest.mark.parametrize(
