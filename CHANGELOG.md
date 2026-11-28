@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.211.0](https://github.com/substrate-systems/evermatter/compare/v0.210.2...v0.211.0) (2026-11-28)
+
+
+### Features
+
+* **import:** keep captions from Google Photos Takeout ([#3402](https://github.com/substrate-systems/evermatter/issues/3402)) ([75f5b59](https://github.com/substrate-systems/evermatter/commit/75f5b59d66ef3b8f579a0b5521c1e0dec63deb23))
+* **store:** keep observation relationships with the vault ([#3394](https://github.com/substrate-systems/evermatter/issues/3394)) ([3ef4296](https://github.com/substrate-systems/evermatter/commit/3ef42967a2f17eec45d80b7a1403e44221cae3bc))
+
+
+### Bug Fixes
+
+* **mcp:** refuse undeclared values before queueing ([#3405](https://github.com/substrate-systems/evermatter/issues/3405)) ([2d414d0](https://github.com/substrate-systems/evermatter/commit/2d414d021e9808090ea06bab516b80ffb863ad0c))
+* **records:** return queued save receipts at the intake deadline ([#3413](https://github.com/substrate-systems/evermatter/issues/3413)) ([9f90b4d](https://github.com/substrate-systems/evermatter/commit/9f90b4d9c60ce1dccd8df0242033f281f91e6041))
+* **service:** let slow workers finish stopping during upgrades ([#3410](https://github.com/substrate-systems/evermatter/issues/3410)) ([a04b37b](https://github.com/substrate-systems/evermatter/commit/a04b37bb2b6dcdcf9726b3878347329e9fe3efb2))
+* **store:** preserve queued observation saves ([#3412](https://github.com/substrate-systems/evermatter/issues/3412)) ([95a1e04](https://github.com/substrate-systems/evermatter/commit/95a1e04828e7a4fe7aba398528e9cda1587cf2ae))
+
 ## [0.210.2](https://github.com/substrate-systems/evermatter/compare/v0.210.1...v0.210.2) (2026-11-28)
 
 
