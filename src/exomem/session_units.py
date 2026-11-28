@@ -8,16 +8,19 @@ after admission.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
 from typing import Any
 
 from . import (
     currency_boundary,
+    epistemic_graph,
     lifecycle_statuses,
     semantic_contract,
+    semantic_units,
+    unit_corrections,
     vault,
     working_set,
     working_set_currency,
@@ -51,14 +54,19 @@ class Current:
 def admit(
     root: Path, caller: Any, paths: Iterable[str], accepts: Callable[[Any], bool],
     units: Callable[[Any], bool] | None = None,
+    *, release_groups: Mapping[str, str] | None = None,
 ) -> tuple[tuple[working_set.LaneItem, ...], lifecycle_statuses.Basis]:
     """The units that pass unit admission, from the pages `accepts` takes and, when given, the units `units` takes.
 
     A hidden unit changes nothing downstream: it is not counted, hashed or ordered. An index narrows `paths`
-    to marked, admitted pages, so activation never walks the corpus.
+    to marked, admitted pages, so activation never walks the corpus. A block can keep its existing prose
+    admission groups while sharing one currency lookup for their units.
     """
-    candidates = []
+    candidates: dict[str, list[working_set.LaneItem]] = {}
     guards = {}
+    check_replacements = egress.unrestricted_source_access(root, purpose=caller.purpose)
+    node_keys: dict[tuple[str, str], str] = {}
+    source_hashes: dict[str, str] = {}
     for path in sorted(paths):
         source, guard = vault.read_guarded_text(root, root / path)
         guards[path] = guard
@@ -69,12 +77,14 @@ def admit(
         if page.frontmatter.get("superseded_by"):
             continue
         for unit in page.document.units:
-            if not unit.unit_ref or (units is not None and not units(unit)) or any(
-                unit.span.start_line <= error.line <= unit.span.end_line
-                for error in page.document.errors if error.line is not None
-            ):
+            if not unit.unit_ref or (units is not None and not units(unit)) or page.document.has_errors_in(unit):
                 continue
-            candidates.append(working_set.LaneItem(
+            if check_replacements:
+                occurrence = semantic_units.occurrence_key(unit.form, unit.span, unit.source_hash)
+                node_keys[path, unit.unit_ref] = epistemic_graph.unit_node_key(path, occurrence, unit.form)
+                source_hashes[path] = page.source_hash
+            group = release_groups[path] if release_groups is not None else ""
+            candidates.setdefault(group, []).append(working_set.LaneItem(
                 role="", level="unit", ref=unit.unit_ref, path=path, title=page.title,
                 text=working_set.bounded_text(unit.content), lifecycle=page.status or "",
                 # The unit's own authored date, read as the working set's unit lane reads it.
@@ -83,12 +93,28 @@ def admit(
                     unit, registry=page.definitions.snapshots["relations"].typed if page.definitions is not None else None,
                 ),
             ))
-    wire = [working_set._served_unit(item) for item in candidates]  # noqa: SLF001 - exactly the existing unit admission shape
-    verdicts = egress.classify_units(root, wire, purpose=caller.purpose)
-    admitted = tuple(item for item, verdict in zip(candidates, verdicts, strict=True) if verdict == egress.UNIT_KEPT)
+    admitted = []
+    for group_items in candidates.values():
+        wire = [working_set._served_unit(item) for item in group_items]  # noqa: SLF001 - the existing unit admission shape
+        verdicts = egress.classify_units(root, wire, purpose=caller.purpose)
+        admitted.extend(item for item, verdict in zip(group_items, verdicts, strict=True) if verdict == egress.UNIT_KEPT)
     vault.recheck_path_guards(root, (guards[path] for path in {item.path for item in admitted}))
     basis = lifecycle_statuses.Basis(root)
-    return working_set_currency.annotate(admitted, status_basis=basis, visible=caller.visible), basis
+    current = working_set_currency.annotate(admitted, status_basis=basis, visible=caller.visible)
+    if not node_keys:
+        return current, basis
+    predecessors = {
+        node_keys[item.path, item.ref]: (item.path, source_hashes[item.path]) for item in current
+        if (ordering := basis.ordering(item.lifecycle, path=item.path)) is not None and ordering.live
+    }
+    replaced = unit_corrections.replaced_units(root, predecessors)
+    if replaced is None:
+        raise working_set_currency.CurrencyUnavailable("current replacement coverage is unavailable")
+    return tuple(
+        replace(item, lifecycle=working_set_currency.SUPERSEDED)
+        if node_keys[item.path, item.ref] in replaced else item
+        for item in current
+    ), basis
 
 
 def identity(admitted: Iterable[working_set.LaneItem]) -> list[tuple]:

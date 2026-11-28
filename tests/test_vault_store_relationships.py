@@ -421,6 +421,54 @@ def test_supersede_refuses_a_relationship_that_lands_after_preflight(
     ]
 
 
+def test_personal_recall_omits_a_claim_replaced_by_a_stored_link(served, writer, monkeypatch):  # noqa: F811
+    from exomem import lexstore
+    from exomem.collection_store.preview import unbound
+    from exomem.writer_lease import invoke_command
+    from test_context_catalogue import _built
+
+    predecessor = "Knowledge Base/Notes/Observations/Beacon.md"
+    successor = "Knowledge Base/Notes/Observations/Inspection.md"
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "Record the inspections.",
+        puts=(
+            write.PagePut(predecessor, (
+                b"---\ntype: insight\nstatus: active\nstance: true\n"
+                b"exomem_id: 81111111-1111-4111-8111-111111111111\n---\n\n"
+                b"## Claim\n- category: rule\n- id: earlier\n\nThe beacon flashes every eight seconds.\n"
+                b"## Claim\n- category: rule\n- id: relay\n\nThe relay stays at four seconds.\n"
+            )),
+            write.PagePut(successor, (
+                b"---\ntype: insight\nstatus: active\n"
+                b"exomem_id: 82222222-2222-4222-8222-222222222222\n---\n\n"
+                b"## Claim\n- category: rule\n- id: later\n\nThe beacon flashes every five seconds.\n"
+            )),
+        ),
+    ))
+    prior = semantic_index.selected_parent_index_state(served, predecessor).document.units[0]
+    updated = semantic_index.selected_parent_index_state(served, successor).document.units[0]
+    with library_scope():
+        receipt = commands.op_observe_memory(
+            served, path=successor, operation="assess", unit=observe_memory.unit_id(updated),
+            relations=[{"kind": "supersedes", "target": f"[[{predecessor}#earlier]]"}],
+            reason="The second inspection observed the changed interval.",
+            target_fingerprints={prior.unit_ref: prior.fingerprint},
+        )
+        assert receipt["mutated"]
+        assert b"supersedes" not in stored_body(served, successor)
+        with unbound():
+            monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+            lexstore.ensure_fresh(served)
+            _built(served).close()
+            recall = next(command for command in commands.PRODUCT_COMMANDS if command.name == "activate_context")
+            packet = invoke_command(recall, served, turn="Which interval is current?")
+
+    assert packet["stance"]["state"] == "ready"
+    assert [item["text"] for item in packet["stance"]["items"]] == [
+        "The relay stays at four seconds.",
+    ]
+
+
 def test_a_relations_file_edit_keeps_history_and_an_edited_block_is_held(served, writer):  # noqa: F811
     first = b"# Alpha\n\n- [rule] Check the tide. ^tide\n"
     second = b"# Beta\n\n- [rule] Light the lamp. ^lamp\n"

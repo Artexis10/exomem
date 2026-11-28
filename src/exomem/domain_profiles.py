@@ -24,11 +24,13 @@ from . import (
     activation,
     activation_conventions,
     context_catalogue,
+    lifecycle_statuses,
     note_types,
     profile_selection,
     session_units,
     source_taxonomy,
     vocabulary_resolution,
+    working_set,
 )
 from .governance import egress, principal
 
@@ -183,12 +185,27 @@ def compile_block(
         _pin(root, caller, block, [])
         return block
     order = [domain for domain in reading.domains() if domain in by_domain]
+    domain_by_path = {page.path: domain for domain in order for page in by_domain[domain]}
+    note_basis = note_types.Basis(root)
+
+    def accepts(page: Any) -> bool:
+        # The catalogue may be a fold behind the page: decide again from the page's own bytes.
+        scope = vocabulary_resolution.profile_scope(taxonomy, page.frontmatter.get("topics"))
+        return (
+            note_basis.selects(activation.normalized_page_type(page.page_type), note_types.profile)
+            and scope.kind == vocabulary_resolution.SCOPE_DOMAIN and scope.domain == domain_by_path[page.path]
+        )
+
+    admitted, status_basis = session_units.admit(root, caller, domain_by_path, accepts, release_groups=domain_by_path)
+    admitted_by_domain: dict[str, list[working_set.LaneItem]] = {}
+    for item in admitted:
+        admitted_by_domain.setdefault(domain_by_path[item.path], []).append(item)
     block = _empty(selection=reading.evidence)
     pinned: list[dict[str, Any]] = []
     used = 0
     stopped = False
     for domain in order:
-        entry, units = _profile(root, caller, taxonomy, domain, [page.path for page in by_domain[domain]], each, today)
+        entry, units = _profile(root, caller, taxonomy, domain, admitted_by_domain.get(domain, ()), status_basis, each, today)
         if entry is None:
             continue
         # A page the caller sees and whose units were admitted: the agent may read it on demand.
@@ -218,24 +235,13 @@ def compile_block(
 
 
 def _profile(
-    root: Path, caller: Any, taxonomy: source_taxonomy.SourceTaxonomy, domain: str, paths: Sequence[str],
-    limit: int, today: date,
+    root: Path, caller: Any, taxonomy: source_taxonomy.SourceTaxonomy, domain: str,
+    admitted: Sequence[working_set.LaneItem], status_basis: lifecycle_statuses.Basis, limit: int, today: date,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     """One domain's profile entry and the units it was admitted as, or None when it has no admitted line to serve.
 
     An entry with no lines is one whose admitted lines all exceeded `limit`.
     """
-    basis = note_types.Basis(root)
-
-    def accepts(page: Any) -> bool:
-        # The catalogue may be a fold behind the page: decide again from the page's own bytes.
-        scope = vocabulary_resolution.profile_scope(taxonomy, page.frontmatter.get("topics"))
-        return (
-            basis.selects(activation.normalized_page_type(page.page_type), note_types.profile)
-            and scope.kind == vocabulary_resolution.SCOPE_DOMAIN and scope.domain == domain
-        )
-
-    admitted, status_basis = session_units.admit(root, caller, paths, accepts)
     definition = taxonomy.domains.get(domain)
     label = definition.label if definition is not None else source_taxonomy.derive_label(domain)
     key = (str(root), caller.binding, domain, _digest([label, session_units.identity(admitted)]), limit)
