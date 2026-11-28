@@ -1044,10 +1044,11 @@ def observe_memory(
         except semantic_writes.SemanticWriteError as error:
             raise ObserveMemoryError(error.code, error.reason) from error
         except OpError as error:
-            if error.code == stored_relationships.ALREADY_SUPERSEDED:
-                successor = _unit_by_anchor(current.document, error.details.get("successor_anchor"))
-                if successor is not None:
-                    raise _already_superseded(successor) from error
+            if error.code != stored_relationships.ALREADY_SUPERSEDED:
+                raise
+            successor = _unit_by_anchor(current.document, error.details.get("successor_anchor"))
+            if successor is not None:
+                raise _already_superseded(successor) from error
             raise ObserveMemoryError(error.code, error.message, error.remediation) from error
         link_warnings.extend(committed.review_field_warnings())
 

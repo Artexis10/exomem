@@ -20,7 +20,7 @@ from exomem import (
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 from exomem.governance.principal import ClientBinding, OriginSessionBinding, library_scope, request_scope
-from exomem.vault_store import held, importer, projector, relationship_files, relationships, write
+from exomem.vault_store import derivation, held, importer, projector, relationship_files, relationships, write
 from exomem.vault_store import read as store_read
 
 
@@ -472,7 +472,7 @@ def test_a_relations_file_edit_keeps_history_and_an_edited_block_is_held(served,
     assert rows(served, "SELECT path FROM store_held") == []
 
 
-def test_a_relationship_hub_has_bounded_reads_and_a_complete_portable_file(served, writer):  # noqa: F811
+def test_a_relationship_hub_has_bounded_reads_and_a_complete_portable_file(served, writer, monkeypatch):  # noqa: F811
     count = 550
     source_id = "e8f840b6-3cf8-44cf-ab95-12d05683a194"
     target_id = "04e56772-21a9-44ff-b0df-0a51ed0e166b"
@@ -496,7 +496,9 @@ def test_a_relationship_hub_has_bounded_reads_and_a_complete_portable_file(serve
         served, "SELECT edge_key FROM graph_edges WHERE source_path=? AND edge_key LIKE 'stored:%' ORDER BY edge_key",
         ALPHA,
     ) == [(f"stored:edge-{anchor}",) for anchor in anchors]
-    with library_scope():
+    with library_scope(), monkeypatch.context() as patch:
+        # Give the pagination checks time on a loaded runner.
+        patch.setattr(derivation, "READ_WAIT_SECONDS", 10.0)
         first = unit_edges.relationship_page(served, ALPHA, "tide", limit=50)
         second = unit_edges.relationship_page(served, ALPHA, "tide", limit=50, after=first.next_after)
         tail = unit_edges.relationship_page(

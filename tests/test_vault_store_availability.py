@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -41,25 +42,17 @@ def store_mode_vault(vault, monkeypatch):
     return _enter_store_mode(vault)
 
 
-def _enter_store_mode(vault, stored_only=None):
-    """Move ``vault`` into store mode; ``stored_only`` maps a page to bytes that only its store copy holds."""
+def _enter_store_mode(vault):
+    """Move the fixture vault into store mode with the current writer."""
     with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
         with handle.transaction() as tx:
             # A store-mode store holds the owners' tables, and every commit derives rows into them.
             migrate.create_owner_schema(tx)
             tx.execute("INSERT INTO store_mode(id, mode, revision, changed_at, release) "
                        "VALUES (1, 'store', 1, ?, 'test')", (AT,))
-            # A release from before the derivation queue derived each page's rows inside the page's
-            # commit. This release's commit queues them, so the queue stands in until they are derived.
-            queueless = tx.execute(
-                "SELECT 1 FROM sqlite_master WHERE name = 'store_derivation_queue'"
-            ).fetchone() is None
-            if queueless:
-                schema._migrate_to_20(tx)
         # In store mode a page read answers from the store, so the pages must be there.
         pages = tuple(
-            write.PagePut(owned.rel, (stored_only or {}).get(owned.rel, (vault / owned.rel).read_bytes()),
-                          owned.stat.st_mtime_ns)
+            write.PagePut(owned.rel, (vault / owned.rel).read_bytes(), owned.stat.st_mtime_ns)
             for owned in ownership.iter_owned(vault)
             if owned.ownership is ownership.Ownership.PAGE
         )
@@ -67,11 +60,6 @@ def _enter_store_mode(vault, stored_only=None):
             CollectionWriter(vault, handle),
             write.StoreChange(write.Origin.MIGRATION, "test fixture", puts=pages),
         )
-        if queueless:
-            # The earlier release left every row derived and no queue behind.
-            with handle.transaction() as tx:
-                assert tx.execute("SELECT COUNT(*) FROM store_derivation_queue").fetchone() == (0,)
-                tx.execute("DROP TABLE store_derivation_queue")
     state_migration.record_vault_store_compatibility(vault, authority_check=lambda: True, active=True)
     return vault
 
@@ -166,11 +154,30 @@ def test_a_store_mode_vault_that_an_earlier_store_schema_wrote_starts_and_serves
         monkeypatch.delenv(name, raising=False)
     note = "Knowledge Base/Notes/Patterns/retry-with-fixed-interval.md"
     stored = b"---\ntitle: Retry\ntype: note\n---\n# Retry\n\nAn edit that only the store holds.\n"
-    with monkeypatch.context() as earlier_release:
-        # The earlier release built its store through the same migrations, up to its own schema.
-        earlier_release.setattr(schema, "SCHEMA_VERSION", earlier)
-        _enter_store_mode(vault, stored_only={note: stored})
     store = connection.store_path(vault)
+    with monkeypatch.context() as earlier_release:
+        # Seed the persisted page shape that the earlier schema accepts.
+        earlier_release.setattr(schema, "SCHEMA_VERSION", earlier)
+        with connection.open_writer(store, lease_check=lambda: True) as handle, handle.transaction() as tx:
+            migrate.create_owner_schema(tx)
+            tx.execute("INSERT INTO store_mode(id, mode, revision, changed_at, release) "
+                       "VALUES (1, 'store', 1, ?, 'test')", (AT,))
+            for owned in ownership.iter_owned(vault):
+                if owned.ownership is not ownership.Ownership.PAGE:
+                    continue
+                body = stored if owned.rel == note else (vault / owned.rel).read_bytes()
+                digest = hashlib.sha256(body).hexdigest()
+                mtime_ns = owned.stat.st_mtime_ns
+                tx.execute(
+                    "INSERT INTO store_pages(path, body, sha256, size, frontmatter_json, revision, mtime_ns) "
+                    "VALUES (?, ?, ?, ?, ?, 1, ?)",
+                    (owned.rel, body, digest, len(body), write.frontmatter_json(body), mtime_ns),
+                )
+                tx.execute(
+                    "INSERT INTO store_manifest(path, sha256, size, mtime_ns, revision) VALUES (?, ?, ?, ?, 1)",
+                    (owned.rel, digest, len(body), mtime_ns),
+                )
+        state_migration.record_vault_store_compatibility(vault, authority_check=lambda: True, active=True)
     _coordinator(monkeypatch, "http://127.0.0.1:8799", topology="single-host")
 
     started = server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
