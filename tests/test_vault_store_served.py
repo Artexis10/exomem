@@ -46,6 +46,7 @@ from exomem import (
     extraction_parts,
     freshness,
     graph_drain,
+    lexstore,
     media_jobs,
     media_replicas,
     media_store,
@@ -57,6 +58,7 @@ from exomem import (
     scene_frames,
     schema,
     server_runtime,
+    service_standby,
     warmup,
     writer_lease,
 )
@@ -1278,6 +1280,59 @@ def test_a_served_start_runs_no_whole_vault_graph_rebuild_over_file_modes_graph_
     assert [r.getMessage() for r in caplog.records if "graph rebuild" in r.getMessage()] == []
     assert deferred_index.graph_full_rebuild_pending(stored) is None
     assert epistemic_graph.EpistemicGraphIndex(stored).available()
+
+
+def test_store_mode_restart_admits_retrieval_without_a_file_catalogue(stored, monkeypatch):
+    """The canonical store can serve even if its former Markdown catalogue never warms."""
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "auto")
+
+    def file_catalogue_is_stale(*_args, **_kwargs):
+        pytest.fail("store-mode startup tried to rebuild the file catalogue")
+
+    monkeypatch.setattr(freshness, "rebaseline", file_catalogue_is_stale)
+    monkeypatch.setattr(lexstore, "request_lag_repair", file_catalogue_is_stale)
+    readiness.reset()
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    try:
+        assert warmup.warm_retrieval_catalog(stored)
+        assert readiness.retrieval_admission(stored) == {"state": "ready", "admitted": True}
+        assert service_standby.prove_retrieval_catalog(stored)
+    finally:
+        readiness.reset()
+
+
+def test_store_mode_startup_retries_a_temporary_read_failure(stored, monkeypatch):
+    """A quiet worker can recover without a health probe or the file event indexes."""
+    monkeypatch.setenv("EXOMEM_DISABLE_EVENT_INDEXES", "1")
+    monkeypatch.setattr(server_runtime, "CATALOGUE_RECOVERY_FIRST_BACKOFF_SECONDS", 0.01)
+    snapshot = read.snapshot
+    failed = False
+
+    def first_read_fails(root, **kwargs):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("store read temporarily unavailable")
+        return snapshot(root, **kwargs)
+
+    monkeypatch.setattr(read, "snapshot", first_read_fails)
+    activation = server_runtime.LocalRuntimeActivation(stored)
+    readiness.reset()
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    try:
+        with pytest.raises(OSError, match="temporarily unavailable"):
+            warmup.warm_retrieval_catalog(stored)
+        readiness.finish_warm()
+        activation._start_catalogue_recovery(stored)
+        assert readiness.wait("retrieval_catalog", timeout=3)
+        assert readiness.retrieval_admission(stored)["admitted"]
+    finally:
+        activation._catalogue_stop.set()
+        if activation.catalogue_recovery is not None:
+            activation.catalogue_recovery.join(timeout=3)
+        readiness.reset()
 
 
 def test_a_save_after_a_restart_is_not_held_behind_a_graph_snapshot_proof(
