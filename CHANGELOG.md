@@ -222,6 +222,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.202.0](https://github.com/substrate-systems/evermatter/compare/v0.201.0...v0.202.0) (2026-11-24)
 
+[This release](docs/licensing/licence-change.md) renamed Exomem to Evermatter
+and changed the licence for the server, CLI and container images to FSL-1.1-ALv2.
 
 ### ⚠ BREAKING CHANGES
 
