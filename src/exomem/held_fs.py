@@ -241,6 +241,11 @@ class SagaRecord:
     identity: StableIdentity
 
 
+def stat_witness(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    """A file version's identity and change times, as held evidence compares them."""
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
 class HeldDirectory:
     """A retained directory handle.  Instances are created by ``parent`` only."""
 
@@ -413,13 +418,20 @@ class HeldFilesystem:
         parent: HeldDirectory,
         *,
         name_filter: Callable[[str], bool] | None = None,
+        names: Iterable[str] | None = None,
     ) -> HeldResult[tuple[SagaRecord, ...]]:
         """Return stable children, omitting unsafe alias objects.
 
-        Filter names before acquiring identities when a caller supplies a filter.
+        Filter names before acquiring identities when a caller supplies a filter. ``names``
+        replaces the listing with those exact names: a caller that already holds a current
+        listing reads only the children it needs, and a name that is gone refuses the call.
         """
 
         raise NotImplementedError
+
+    def directory_version(self, parent: HeldDirectory) -> HeldResult[FileVersion]:
+        """The held directory's identity and change times, which move when its entries change."""
+        return HeldResult(error=HeldFsError("UNSUPPORTED", "held directory versions are unavailable"))
 
     def iter_names(self, parent: HeldDirectory) -> Iterator[str]:
         """Stream unsorted immediate names, including aliases for caller checking.

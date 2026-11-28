@@ -176,6 +176,147 @@ def test_an_interrupted_source_preview_never_publishes_its_staged_result(server,
     }
 
 
+@pytest.mark.parametrize("phase", ["staging", "publication"])
+def test_a_source_preview_deadline_discards_the_report(server, vault, monkeypatch, phase):
+    reached = threading.Event()
+    original_open = maintenance_jobs._open
+
+    def expire_work_budget():
+        check = request_budget.current_checkpoint()
+        if check is not None:
+            reached.set()
+            check.budget.deadline = 0
+
+    def open_observed(*args, **kwargs):
+        conn = original_open(*args, **kwargs)
+        if maintenance_jobs._JOB.get() is not None:
+            def observe(statement):
+                if statement.lstrip().startswith("INSERT OR REPLACE INTO held_evidence"):
+                    expire_work_budget()
+
+            conn.set_trace_callback(observe)
+        return conn
+
+    if phase == "publication":
+        monkeypatch.setattr(maintenance_jobs, "_open", open_observed)
+
+    def build(_stop):
+        def entries():
+            yield "rewritten", "Notes/staged.md", None
+            if phase == "staging":
+                expire_work_budget()
+            yield "rewritten", "Notes/remaining.md", None
+
+        return {"preview_digest": "unpublished"}, entries(), {"Notes/staged.md": {"private": "proof"}}
+
+    identity = {"binding": "owner-binding", "request_key": "source-request", "snapshot_key": "snapshot"}
+    handle = maintenance_jobs.start_source_preview(vault, **identity, build=build)
+    run_id = handle["run_id"]
+    status = _source_preview_terminal(vault, **identity, run_id=run_id, cursor="0")
+
+    assert reached.is_set()
+    assert status == {"run_id": run_id, "state": "interrupted"}
+    with maintenance_jobs._store(vault, create=False) as conn:
+        for table in ("entries", "held_evidence"):
+            assert conn.execute(f"SELECT COUNT(*) FROM {table} WHERE run_id = ?", (run_id,)).fetchone()[0] == 0
+    next_run = maintenance_jobs.start_source_preview(
+        vault, **identity, build=lambda _stop: ({"preview_digest": "complete"}, ()),
+    )
+    assert _source_preview_terminal(vault, **identity, run_id=next_run["run_id"])["state"] == "completed"
+
+
+def test_source_preview_keeps_an_acknowledged_commit_after_its_deadline(server, vault, monkeypatch):
+    admitted = threading.Event()
+    original_open = maintenance_jobs._open
+
+    def open_observed(*args, **kwargs):
+        conn = original_open(*args, **kwargs)
+        check = request_budget.current_checkpoint()
+        if check is not None and maintenance_jobs._JOB.get() is not None:
+            writing_report = False
+
+            def observe(statement):
+                nonlocal writing_report
+                if statement.lstrip().startswith("INSERT INTO entries"):
+                    writing_report = True
+                if writing_report and statement == "COMMIT":
+                    check.budget.deadline = 0
+                    admitted.set()
+
+            conn.set_trace_callback(observe)
+        return conn
+
+    monkeypatch.setattr(maintenance_jobs, "_open", open_observed)
+    identity = {"binding": "owner-binding", "request_key": "source-request", "snapshot_key": "snapshot"}
+
+    def build(_stop):
+        return {"preview_digest": "complete"}, [("rewritten", "Notes/current.md", None)]
+
+    handle = maintenance_jobs.start_source_preview(vault, **identity, build=build)
+    run_id = handle["run_id"]
+    status = _source_preview_terminal(vault, **identity, run_id=run_id)
+
+    assert admitted.is_set()
+    assert status == {
+        "run_id": run_id, "state": "completed", "result": {"preview_digest": "complete"},
+        "next_cursor": "0", "snapshot_current": True,
+    }
+    assert maintenance_jobs.start_source_preview(vault, **identity, build=build) == {
+        "run_id": run_id, "state": "completed",
+    }
+
+
+def test_source_preview_publication_does_not_wait_on_a_busy_job_store(server, vault):
+    building, can_publish = threading.Event(), threading.Event()
+    identity = {"binding": "owner-binding", "request_key": "source-request", "snapshot_key": "snapshot"}
+
+    def build(_stop):
+        building.set()
+        assert can_publish.wait(_DEADLINE_SECONDS)
+        return {"preview_digest": "unpublished"}, [("rewritten", "Notes/staged.md", None)]
+
+    handle = maintenance_jobs.start_source_preview(vault, **identity, build=build)
+    run_id = handle["run_id"]
+    assert building.wait(_DEADLINE_SECONDS)
+    with maintenance_jobs._LIVE_LOCK, maintenance_jobs._store(vault, create=True) as writer:
+        writer.execute("BEGIN IMMEDIATE")
+        try:
+            live = maintenance_jobs._registered_job(run_id)
+            assert live is not None
+            worker = live.thread
+            can_publish.set()
+            assert worker is not None
+            worker.join(2)
+            assert not worker.is_alive()
+        finally:
+            writer.rollback()
+            can_publish.set()
+
+    status = _source_preview_terminal(vault, **identity, run_id=run_id, cursor="0")
+    assert status == {"run_id": run_id, "state": "interrupted"}
+    next_run = maintenance_jobs.start_source_preview(
+        vault, **identity, build=lambda _stop: ({"preview_digest": "complete"}, ()),
+    )
+    assert _source_preview_terminal(vault, **identity, run_id=next_run["run_id"])["state"] == "completed"
+
+
+def test_a_source_preview_that_refuses_after_its_stop_ends_interrupted(server, vault):
+    building = threading.Event()
+
+    def build(stop):
+        building.set()
+        assert stop.wait(_DEADLINE_SECONDS)
+        raise OpError("NOT_FOUND", "The build noticed its stop.")
+
+    identity = {"binding": "owner-binding", "request_key": "source-request", "snapshot_key": "snapshot"}
+    handle = maintenance_jobs.start_source_preview(vault, **identity, build=build)
+    assert building.wait(_DEADLINE_SECONDS)
+    maintenance_jobs.stop_all(vault, wait=_DEADLINE_SECONDS)
+    assert maintenance_jobs.source_preview_status(vault, **identity, run_id=handle["run_id"]) == {
+        "run_id": handle["run_id"], "state": "interrupted",
+    }
+
+
 def test_a_source_preview_claim_does_not_wait_for_a_busy_job_store(server, vault):
     def unexpected_build(_stop):
         pytest.fail("the busy store must leave the worker unstarted")

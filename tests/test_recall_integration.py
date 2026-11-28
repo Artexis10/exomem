@@ -95,7 +95,7 @@ class _PageReadSentinel:
     removing it, and reports it as a pass.
 
     Every page read on this interpreter bottoms out in
-    `find_corpus._read_page_snapshot` — `CACHE.get`, `_read_page_bytes` and
+    `find_corpus.read_page_snapshot` — `CACHE.get`, `_read_page_bytes` and
     `parse_page` all route through it — so counting that one name catches a
     read regardless of which caller reintroduces it.
 
@@ -159,13 +159,13 @@ class _PageReadSentinel:
                 return
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        real = find_corpus._read_page_snapshot
+        real = find_corpus.read_page_snapshot
 
         def counting_read(path, vault_root):
             self.record(path)
             return real(path, vault_root)
 
-        monkeypatch.setattr(find_corpus, "_read_page_snapshot", counting_read)
+        monkeypatch.setattr(find_corpus, "read_page_snapshot", counting_read)
 
 
 def _page(title: str, *, project: str, updated: str = "2026-08-20") -> str:

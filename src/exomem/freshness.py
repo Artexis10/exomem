@@ -1180,13 +1180,16 @@ def external_pending_epoch(vault_root: Path) -> int | None:
 
 
 def preview_reference_generation(
-    vault_root: Path,
+    vault_root: Path, *, wait: float = 0.0,
 ) -> tuple[str, int | None, int | None, int | None] | None:
-    """Sample both reference generations and pending events without waiting."""
+    """Sample both reference generations and pending events, waiting at most ``wait`` seconds.
+
+    None means the registry lock stayed busy, which says nothing about whether anything changed.
+    """
     root = _canon(vault_root)
     broad = (root, "vault")
     projected = (root, "kb")
-    if not _lock.acquire(blocking=False):
+    if not (_lock.acquire(timeout=wait) if wait > 0 else _lock.acquire(blocking=False)):
         return None
     try:
         enabled = event_indexes_enabled()

@@ -456,3 +456,92 @@ def test_withheld_move_source_is_absent_without_mutation(
     source.unlink()
     egress.clear_decision_memo()
     assert withheld == attempt()
+
+
+def test_a_scoped_folder_listing_still_refuses_a_new_alias_spelling(vault: Path, monkeypatch) -> None:
+    """A build refuses an alias that appears while it uses its retained folder listing."""
+    import os
+
+    from exomem import held_fs, reserved_paths
+
+    directory = vault.joinpath(*_DIRECTORY)
+    _write_page(directory, _DECOMPOSED_NAME)
+    if (directory / _COMPOSED_NAME).exists():
+        pytest.skip("requires distinct NFC and NFD filenames on disk")
+    rel = f"{_DIRECTORY_REL}/{_COMPOSED_NAME}"
+    neighbour = f"{_RELATION_TARGET}.md"
+    with held_fs.acquire(vault).require() as filesystem:
+        backend = type(filesystem)
+    listings: list[object] = []
+    iter_names = backend.iter_names
+
+    def counted(self, parent):
+        listings.append(parent.identity)
+        return iter_names(self, parent)
+
+    def add_alias() -> None:
+        _write_page(directory, _COMPOSED_NAME, body="composed body")
+        os.utime(directory, ns=(1, 1))
+
+    children = backend.children
+
+    def children_after_sync(self, parent, *, name_filter=None, names=None):
+        if names == (_DECOMPOSED_NAME,) and not (directory / _COMPOSED_NAME).exists():
+            add_alias()
+        return children(self, parent, name_filter=name_filter, names=names)
+
+    monkeypatch.setattr(backend, "iter_names", counted)
+    # The folder was written a moment ago; treat it as settled so this scope keeps its listing.
+    monkeypatch.setattr(reserved_paths, "_SETTLED_FOLDER_NS", 0)
+    with reserved_paths.folder_listing_scope():
+        assert reserved_paths.resolve_physical_relative(vault, rel) == f"{_DIRECTORY_REL}/{_DECOMPOSED_NAME}"
+        assert reserved_paths.resolve_physical_relative(vault, neighbour) == neighbour
+        if os.name == "nt":  # Windows lists each time because it has no trusted directory version.
+            add_alias()
+        else:
+            assert len(listings) == 1
+            monkeypatch.setattr(backend, "children", children_after_sync)
+        with pytest.raises(reserved_paths.ReservedPathLeafError) as refused:
+            reserved_paths.resolve_physical_relative(vault, rel)
+    assert refused.value.code == "AMBIGUOUS_PATH"
+
+
+@pytest.mark.parametrize("limit", [1, 2], ids=["oversized folder", "eviction"])
+def test_scoped_folder_listings_keep_a_total_name_budget(vault: Path, monkeypatch, limit: int) -> None:
+    import sys
+
+    from exomem import held_fs, reserved_paths
+
+    if sys.platform != "linux":
+        pytest.skip("only Linux reuses held directory listings")
+    first = vault / "Knowledge Base/Notes/First"
+    second = vault / "Knowledge Base/Notes/Second"
+    _write_page(first, _DECOMPOSED_NAME)
+    _write_page(first, "neighbour.md")
+    _write_page(second, "neighbour.md")
+    _write_page(second, "other.md")
+    with held_fs.acquire(vault).require() as filesystem:
+        backend = type(filesystem)
+    listings: list[object] = []
+    iter_names = backend.iter_names
+
+    def counted(self, parent):
+        listings.append(parent.identity)
+        return iter_names(self, parent)
+
+    monkeypatch.setattr(backend, "iter_names", counted)
+    monkeypatch.setattr(reserved_paths, "_SETTLED_FOLDER_NS", 0)
+    monkeypatch.setattr(reserved_paths, "_FOLDER_NAME_LIMIT", limit)
+    with reserved_paths.folder_listing_scope():
+        first_rel = first.relative_to(vault).as_posix()
+        target = f"{first_rel}/{_COMPOSED_NAME}"
+        expected = f"{first_rel}/{_DECOMPOSED_NAME}"
+        assert reserved_paths.resolve_physical_relative(vault, target) == expected
+        assert reserved_paths.resolve_physical_relative(vault, target) == expected
+        neighbour = f"{first_rel}/neighbour.md"
+        assert reserved_paths.resolve_physical_relative(vault, neighbour) == neighbour
+        assert len(listings) == 1
+        other = (second / "neighbour.md").relative_to(vault).as_posix()
+        assert reserved_paths.resolve_physical_relative(vault, other) == other
+        assert reserved_paths.resolve_physical_relative(vault, target) == expected
+    assert len(listings) == 3

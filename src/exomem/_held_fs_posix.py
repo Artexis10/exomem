@@ -10,7 +10,7 @@ import secrets
 import stat
 import sys
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from ctypes import Structure, byref, c_char_p, c_int, c_long, c_size_t, c_uint, c_uint64
 from pathlib import Path
 
@@ -839,12 +839,13 @@ class PosixHeldFilesystem(HeldFilesystem):
         parent: HeldDirectory,
         *,
         name_filter: Callable[[str], bool] | None = None,
+        names: Iterable[str] | None = None,
     ) -> HeldResult[tuple[SagaRecord, ...]]:
         try:
             checked = self._check_directory(parent)
-            names = sorted(_names(checked.descriptor))
+            listed = sorted(set(names) if names is not None else _names(checked.descriptor))
             records: list[SagaRecord] = []
-            for name in names:
+            for name in listed:
                 if name_filter is not None and not name_filter(name):
                     continue
                 info = _stat(name, dir_fd=checked.descriptor, follow_symlinks=False)
@@ -861,6 +862,13 @@ class PosixHeldFilesystem(HeldFilesystem):
                 finally:
                     _close(child)
             return HeldResult(value=tuple(records))
+        except OSError as error:
+            return HeldResult(error=_error(error))
+
+    def directory_version(self, parent: HeldDirectory) -> HeldResult[FileVersion]:
+        try:
+            info = _fstat(self._check_directory(parent).descriptor)
+            return HeldResult(value=FileVersion(_identity(info), info.st_size, info.st_mtime_ns, info.st_ctime_ns))
         except OSError as error:
             return HeldResult(error=_error(error))
 

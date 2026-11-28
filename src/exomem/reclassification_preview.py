@@ -20,9 +20,10 @@ from . import (
     query_data,
     reclassify_source,
     request_budget,
+    reserved_paths,
 )
 from .cli_ops import OpError
-from .governance import connector_boundary, lifecycle
+from .governance import connector_boundary, lifecycle, policy
 from .governance.principal import (
     RequestPrincipal,
     effective_principal,
@@ -53,6 +54,13 @@ def _not_found() -> OpError:
 def _stale_report() -> OpError:
     return OpError(
         "RECLASSIFICATION_PREVIEW_STALE", "The complete report cannot be released from this snapshot.",
+        "Request a new preview without a run identifier.",
+    )
+
+
+def _interrupted() -> OpError:
+    return OpError(
+        "RECLASSIFICATION_PREVIEW_INTERRUPTED", "The preview stopped before its report was complete.",
         "Request a new preview without a run identifier.",
     )
 
@@ -171,13 +179,11 @@ def _build(
     )
     if command is None:
         raise _not_found()
-    budget = request_budget.RequestBudget(seconds=request_budget.budget_seconds())
-    check = request_budget.ReadCheckpoint(budget, bound_disclosure=True)
     original: dict[str, Any] = {}
     token = _JOB_REPORT.set(original)
     try:
         with (
-            request_scope(who), invocation_scope(), request_budget.checking(check),
+            request_scope(who), invocation_scope(),
             capabilities.active_surface(surface) if surface is not None else nullcontext(),
             reclassify_source.held_evidence_sink() as held,
         ):
@@ -188,7 +194,11 @@ def _build(
                 raise _not_found()
             if _snapshot_key(root) != snapshot_key:
                 raise reclassify_source.preview_warming()
-            result = invoke_command(command, root, operation="propose-reclassification", **args)
+            folder_scope = (
+                reserved_paths.folder_listing_scope() if not policy.load(root).empty else nullcontext()
+            )
+            with folder_scope:
+                result = invoke_command(command, root, operation="propose-reclassification", **args)
             if (not original or _digest({key: result.get(key) for key in original["keys"]}) != original["digest"]
                     or stop.is_set() or _authority_binding(root, who) != authority):
                 raise _not_found()
@@ -197,9 +207,7 @@ def _build(
             if (auth_sessions.origin_revalidates_in_background(who)
                     and auth_sessions.origin_login_state_sync(who) is not auth_sessions.OriginLogin.VALID):
                 raise _not_found()
-            check()
-    except request_budget.ReadBudgetExhausted:
-        raise reclassify_source.preview_warming() from None
+            request_budget.checkpoint()
     finally:
         _JOB_REPORT.reset(token)
     summary = {key: value for key, value in result.items() if key not in {"referrers", "refusals"}}
@@ -255,6 +263,8 @@ def report(
         if (result.get("state") == maintenance_jobs.COMPLETED
                 and result.get("snapshot_current") is not True):
             raise _stale_report()
+        if result.get("state") in {maintenance_jobs.CANCELLED, maintenance_jobs.INTERRUPTED}:
+            raise _interrupted()
         if result.get("error_code") == "RECLASSIFICATION_PREVIEW_UNAVAILABLE":
             raise reclassify_source.preview_unavailable()
         if result.get("error_code") == "RECLASSIFICATION_PREVIEW_WARMING":

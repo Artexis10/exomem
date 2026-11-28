@@ -478,7 +478,7 @@ def test_index_result_equals_the_oracle_for_every_seeded_field(
     from exomem import find_corpus
 
     find_module.reset_page_and_result_caches()
-    monkeypatch.setattr(find_corpus, "_read_page_snapshot", forbid_page_read)
+    monkeypatch.setattr(find_corpus, "read_page_snapshot", forbid_page_read)
 
     divergences: list[str] = []
     covered: set[str] = set()
