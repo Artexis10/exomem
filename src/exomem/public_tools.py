@@ -882,10 +882,9 @@ class QueryRecords(Wire):
     descending: bool | None = None
     limit: int | None = None
     more: str | None = Field(default=None, description="Continuation token.")
-    options: dict[str, Any] | None = Field(default=None, description=(
-        "Rare knobs: aggregate, date_from, date_to, view, query (a typed version-1 query), "
-        "and output_format for a formatted export where supported."
-    ))
+    options: dict[str, Any] | None = Field(
+        default=None, description="Optional aggregate, date_from, date_to, view, query (v1) and output_format for exports.",
+    )
 
 
 def _query_collection(command: str, tool: str, key: str | None):
