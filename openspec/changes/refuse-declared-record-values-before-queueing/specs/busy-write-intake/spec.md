@@ -53,7 +53,7 @@ Before the intake queues a `plan_memory` add, update or triage with an object `i
 
 ### Requirement: The declared value check queues the save when it cannot be certain
 
-The intake SHALL mark the queue before it reads the declaration and, after a refusal, look again from that mark. The check SHALL leave the save queued when a save open at the mark or accepted after it, in whatever state it is now, is of a command that declares `sets_any_frontmatter_field` or may carry a non-null `manifest_text`; when a read fails or its answer is unknown; or when the egress filter faults. A declaration change outside the queue that has not committed at the check is not seen.
+The intake SHALL mark the queue before it reads the declaration and, after a refusal, look again from that mark. The check SHALL leave the save queued when a save open at the mark or accepted after it, in whatever state it is now, may change a declaration as the intake recorded it; when a read fails or its answer is unknown; or when the egress filter faults. A declaration change outside the queue that has not committed at the check is not seen.
 
 #### Scenario: A Records value behind a queued edit of its manifest still queues
 
@@ -76,16 +76,34 @@ The intake SHALL mark the queue before it reads the declaration and, after a ref
 - **THEN** the add is queued
 - **AND** once its replay is applied, the row holds the value
 
+#### Scenario: An ordinary save that commits during the declaration read leaves the refusal
+
+- **WHEN** an owner sends a `plan_memory` add whose value lies outside a field's declared enum
+- **AND** an ordinary queued add is open when the intake marks the queue and is applied while the intake reads the declaration
+- **THEN** the call returns `SCHEMA_ENUM`
+- **AND** the intake holds no copy of the add
+
+### Requirement: The intake records which queued saves may change a declaration
+
+When the intake accepts a save, it SHALL record once whether the save may change a declaration: its command declares `sets_any_frontmatter_field`, or it may carry a non-null `manifest_text`. An intake store without that record SHALL gain it at its next acceptance, which classifies each open save from its stored command and arguments. A declared value check that marked the queue before that upgrade SHALL treat the queue as unknown.
+
+#### Scenario: A store from before the record keeps a save behind its open revision queued
+
+- **WHEN** an intake store without that record holds an open `plan_memory` revise that adds a value to a field's enum
+- **AND** an owner sends a `plan_memory` add with that value, after another busy save or while another acceptance upgrades the store
+- **THEN** the add is queued
+- **AND** once its replay is applied, the row holds the value
+
 ### Requirement: The declared value check stays within its budget whatever the queue holds
 
-A busy save whose values the check accepts SHALL read the queue at a cost that does not grow with the queue. Only a refusal SHALL read the saves open at the mark and those accepted since, and every queue read SHALL use an index. The queue reads and the declaration read SHALL share one 0.5 s budget, which also bounds opening the queue and waiting for its locks. An answer that arrives after the budget SHALL be unknown, so the save queues.
+Each look at the queue, for a value the check accepts and for a refusal alike, SHALL cost the same whatever the queue holds, by an index seek for each part. The queue reads and the declaration read SHALL share one 0.5 s budget, which also bounds opening the queue and waiting for its locks. Each statement SHALL wait only for the time that the budget has left, and none once it is spent. An answer that arrives after the budget SHALL be unknown, so the save queues.
 
-#### Scenario: A valid busy save reads no more of a longer queue
+#### Scenario: A busy save reads no more of a longer queue
 
-- **WHEN** an owner sends a `plan_memory` add whose values the vault declares
+- **WHEN** an owner sends a `plan_memory` add whose values the vault declares, or one whose value lies outside a field's declared enum
 - **AND** earlier saves are still queued
-- **THEN** the add is queued
-- **AND** its reads of the queue cost the same as behind a shorter queue
+- **THEN** the first add is queued and the second is refused with `SCHEMA_ENUM`
+- **AND** the reads of the queue for each cost the same as behind a shorter queue
 
 #### Scenario: A queue that answers after the budget queues the save
 
@@ -93,6 +111,13 @@ A busy save whose values the check accepts SHALL read the queue at a cost that d
 - **AND** earlier saves are still queued
 - **AND** the queue answers the look after the refusal only once the budget has run out
 - **THEN** the add is queued
+- **AND** its replay refuses it with `SCHEMA_ENUM`
+
+#### Scenario: An open that spends most of the budget on a locked queue queues the save within it
+
+- **WHEN** an owner sends a `plan_memory` add whose value lies outside a field's declared enum
+- **AND** another connection locks the queue, and opening the queue spends most of the budget
+- **THEN** the add is queued within about the budget
 - **AND** its replay refuses it with `SCHEMA_ENUM`
 
 ### Requirement: A Planning update is refused before queueing only for an item its store reads by key
@@ -127,11 +152,11 @@ A `plan_memory` update or triage with a value that the Planning check refuses SH
 
 ### Requirement: The Planning check leaves the rest to the replay
 
-The Planning check SHALL leave a governed value to the replay when the caller cannot read the vault's Planning values, and an update's or a triage's null, which deletes its field. Planning's own single-field rules MAY stay at the replay: the title's length, the fixed lifecycle set, window dates, the bound on results and motivation references. Rules that join fields SHALL stay at the replay: the lifecycle rules, and what an item that is or was an area may carry.
+The Planning check SHALL leave to the replay a governed value when the caller cannot read the vault's Planning values, and an update's or a triage's null. Planning's own single-field rules MAY stay there: the title's length, the fixed lifecycle set, window dates, the bound on results and motivation references. Rules that join fields SHALL stay there: the lifecycle rules and what an area may carry, so a save giving an item that is or was an area a field an area may not carry stays there whole.
 
-#### Scenario: A busy area add with a status is refused at the replay for what an area carries
+#### Scenario: A busy area add with fields an area may not carry is refused at the replay for what an area carries
 
-- **WHEN** an owner sends a `plan_memory` add of an area whose `status` is not one of the vault's Planning statuses
+- **WHEN** an owner sends a `plan_memory` add of an area whose `status` is not one of the vault's Planning statuses and whose custom field's value lies outside its declared enum
 - **AND** earlier saves are still queued
 - **THEN** the add is queued
 - **AND** its replay refuses it with `INVALID_PLAN` because an area cannot carry a status

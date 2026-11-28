@@ -80,6 +80,11 @@ def motivation_is_governed(manifest: collections.CollectionManifest) -> bool:
     return field is not None and field.type == "array"
 
 
+def _is_area(item: Mapping[str, Any]) -> bool:
+    """Whether a Planning item is an area, which may carry no delivery state or hierarchy."""
+    return item.get("kind") == "area"  # nosemgrep: ep-word-literal -- mirrors the commit's area rule; the Planning pack declares no area attribute to branch on (old debt, C4)
+
+
 def normalize_item(
     item: Mapping[str, Any],
     *,
@@ -101,7 +106,7 @@ def normalize_item(
     values = dict(item)
     if apply_defaults:
         values.setdefault("kind", "work-item")
-        if values["kind"] != "area":
+        if not _is_area(values):
             values.setdefault("status", "candidate")
             values.setdefault("lifecycle", "active")
             values.setdefault("priority", "none")
@@ -113,7 +118,7 @@ def normalize_item(
     _bounded_string(values.get("title"), "title", 512)
     _governed(planning_values, values, stored, "kind")
     _enum(values.get("lifecycle"), _LIFECYCLES, "lifecycle")
-    area = values["kind"] == "area"
+    area = _is_area(values)
     if area and _AREA_FORBIDDEN & values.keys():
         _invalid(
             "areas cannot carry delivery state or hierarchy: "
@@ -164,17 +169,17 @@ def supplied_value_refusal(
     It runs the commit's own rules over the values that `values` names: `_governed` for each field that the
     Planning values govern, in `normalize_item`'s order, then `records.supplied_value_refusal`. Nothing else
     decides it: not a rule that joins fields, such as the lifecycle rules or what an area may carry, which
-    another field or an earlier write can still change. So where the item is or was an area, the fields that an
-    area may not carry are left to the commit, whose refusal names that rule. The Planning values that this
-    caller cannot read leave their field unrefused.
+    another field or an earlier write can still change. So where the item is or was an area and `values` names a
+    field that an area may not carry, nothing is refused here: the commit's area rule decides that write. The
+    Planning values that this caller cannot read leave their field unrefused.
 
     An add's null is a value that the item is written with, and `_governed` refuses it as the commit does; an
     update's or a triage's null deletes its field, which the commit judges. `stored` is the item that an update
     or a triage names, as the vault holds it: `_governed` keeps a value equal to its stored one even once that
     value is no longer active. Without it, such a value is refused.
     """
-    if values.get("kind") == "area" or (stored is not None and stored.get("kind") == "area"):
-        values = {name: value for name, value in values.items() if name not in _AREA_FORBIDDEN}
+    if (_is_area(values) or (stored is not None and _is_area(stored))) and _AREA_FORBIDDEN & values.keys():
+        return None
     supplied = {name: value for name, value in values.items() if value is not None}
     governed = values if adding else supplied
     planning_values = PlanningValues(vault_root)
@@ -1640,7 +1645,7 @@ def triage(
         if matches:
             raise CollectionError("AMBIGUOUS_RECORD", "plan identity is ambiguous")
         raise CollectionError("PLAN_NOT_FOUND", "plan was not found")
-    if matches[0].values.get("lifecycle") != "active" or matches[0].values.get("kind") == "area":
+    if matches[0].values.get("lifecycle") != "active" or _is_area(matches[0].values):
         raise CollectionError("INVALID_PLAN", "triage requires an active deliverable plan")
     if any(value is None and name not in {"area", "parent"} for name, value in transition.items()):
         raise CollectionError("INVALID_PLAN_ARGUMENTS", "triage transition is invalid")
@@ -1725,7 +1730,7 @@ def _validate_lifecycle(
 
 
 def _require_same_area_side(before: Mapping[str, Any], after: Mapping[str, Any]) -> None:
-    if (before.get("kind") == "area") != (after.get("kind") == "area"):
+    if _is_area(before) != _is_area(after):
         raise CollectionError("INVALID_PLAN", "plans cannot cross the area boundary")
 
 

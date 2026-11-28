@@ -16141,13 +16141,13 @@ def declared_refusal_before_queueing(
     Planning the vault's Planning values), so the intake runs it only for a save that is about to queue. The
     refusal holds only while no queued save can change that declaration before this one replays: a save of a
     command that declares `Command.sets_any_frontmatter_field`, whichever page it names, or a save that
-    carries a manifest's text. The queue is marked before the declaration is read, at a cost that does not
-    grow with the queue, and only a refusal reads it again from that mark (`write_intake.DeclarationWatch`),
-    so a queued save that commits between the two reads queues this one too. Every read shares one budget,
-    and an answer after it queues the save. A declaration change made outside the queue and not committed at
-    this check, such as a direct revise that holds the boundary or a saved Planning value, is not seen: the
-    check refuses a value that the change adds, and the refusal tells the caller to send it again once that
-    change has committed.
+    carries a manifest's text (`write_intake.may_change_declaration`, which each queued save keeps). The queue
+    is marked before the declaration is read, and only a refusal looks at it again from that mark, each at a
+    cost that does not grow with the queue (`write_intake.declaration_mark`), so a queued save that commits
+    between the two reads queues this one too. Every read shares one budget, and an answer after it queues the
+    save. A declaration change made outside the queue and not committed at this check, such as a direct revise
+    that holds the boundary or a saved Planning value, is not seen: the check refuses a value that the change
+    adds, and the refusal tells the caller to send it again once that change has committed.
     """
     value_refusal = _DECLARED_VALUE_REFUSALS.get(command.name)
     if value_refusal is None:
@@ -16155,18 +16155,13 @@ def declared_refusal_before_queueing(
     from . import request_budget, write_intake
 
     budget = request_budget.RequestBudget(seconds=_DECLARED_REFUSAL_SECONDS)
-    watch = write_intake.DeclarationWatch(
-        rewriting=tuple(item.name for item in PRODUCT_COMMANDS if item.sets_any_frontmatter_field),
-        manifest_commands=operation_entries.manifest_text_commands(),
-        manifest_field=operation_entries.MANIFEST_TEXT_FIELD,
-    )
-    marker = watch.mark(vault_root, seconds=budget.remaining())
+    marker = write_intake.declaration_mark(vault_root, seconds=budget.remaining())
     if marker is None:
         return None
     refusal = value_refusal(vault_root, arguments, budget)
     if refusal is None or budget.remaining() <= 0:
         return None
-    changed = watch.changed_since(vault_root, marker, seconds=budget.remaining())
+    changed = write_intake.declaration_changed_since(vault_root, marker, seconds=budget.remaining())
     return refusal if changed is False else None
 
 

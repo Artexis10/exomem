@@ -219,7 +219,8 @@ def _open(
                 "state TEXT NOT NULL, owner TEXT, attempts INTEGER NOT NULL DEFAULT 0, "
                 "accepted_at REAL NOT NULL, updated_at REAL NOT NULL, next_attempt_at REAL NOT NULL, "
                 "error_code TEXT, error TEXT, outcome TEXT, finished_at REAL, "
-                "generation INTEGER NOT NULL DEFAULT 0, commit_reached INTEGER NOT NULL DEFAULT 0, named_at REAL)"
+                "generation INTEGER NOT NULL DEFAULT 0, commit_reached INTEGER NOT NULL DEFAULT 0, named_at REAL, "
+                "may_change_declaration INTEGER NOT NULL DEFAULT 0)"
             )
             conn.execute("CREATE INDEX IF NOT EXISTS intake_state ON intake(state, seq)")
             # One open save per original identity: a resend while it is open gets its receipt.
@@ -227,12 +228,57 @@ def _open(
                 "CREATE UNIQUE INDEX IF NOT EXISTS intake_open_origin ON intake(origin) "
                 "WHERE origin IS NOT NULL AND state IN ('queued', 'applying')"
             )
+            _add_declaration_marker(conn)
             conn.commit()
         reserved_paths._publish_sqlite_owner_family(root, path, STORE_ID, conn)  # noqa: SLF001
     except BaseException:
         conn.close()
         raise
     return conn
+
+
+def may_change_declaration(command: Any, arguments: Any) -> bool:
+    """Whether a queued save of `command` with these JSON `arguments` may change a declaration before a later save
+    replays. It is decided once, when the save is accepted, and kept in `may_change_declaration`, because a replay
+    drops the arguments.
+
+    A command that declares `sets_any_frontmatter_field` may, whichever page it names: only its own resolution,
+    when it applies, decides which page that is. A command of `operation_entries.manifest_text_commands` may when
+    it carries a `MANIFEST_TEXT_FIELD` other than null; MCP stores a field the caller left unset as null. A
+    command or arguments that cannot be read may too.
+    """
+    from . import operation_entries
+
+    if command is None or command.sets_any_frontmatter_field:
+        return True
+    if command.name not in operation_entries.manifest_text_commands():
+        return False
+    return not isinstance(arguments, Mapping) or arguments.get(operation_entries.MANIFEST_TEXT_FIELD) is not None
+
+
+def _add_declaration_marker(conn: sqlite3.Connection) -> None:
+    """Give a store made before `may_change_declaration` existed that column and its index, in the caller's write
+    transaction. Each open save is classified from its command and arguments, as an acceptance classifies a new
+    one. An ended save keeps 0: only a mark that sees the column trusts it (`declaration_mark`), and each save open
+    at such a mark was open at this upgrade or was accepted after it."""
+    if "may_change_declaration" not in {row[1] for row in conn.execute("PRAGMA table_info(intake)")}:
+        conn.execute("ALTER TABLE intake ADD COLUMN may_change_declaration INTEGER NOT NULL DEFAULT 0")
+        rows = conn.execute(
+            "SELECT seq, command, arguments FROM intake WHERE state IN (?, ?)", _OPEN_STATES
+        ).fetchall()
+        conn.executemany(
+            "UPDATE intake SET may_change_declaration = 1 WHERE seq = ?",
+            [(row["seq"],) for row in rows
+             if may_change_declaration(command_named(row["command"]), _stored_arguments(row["arguments"]))],
+        )
+    conn.execute("CREATE INDEX IF NOT EXISTS intake_declaration ON intake(seq) WHERE may_change_declaration = 1")
+
+
+def _stored_arguments(text: str | None) -> Any:
+    try:
+        return None if text is None else json.loads(text)
+    except ValueError:
+        return None
 
 
 # --------------------------------------------------------------------------- identity and eligibility
@@ -1293,13 +1339,16 @@ class Admission:
             ).fetchone()
             if row is not None:
                 return _receipt(conn, row), None
+            # Only the create path runs the schema, so an existing store from before the marker gains it here.
+            _add_declaration_marker(conn)
             conn.execute(
                 "INSERT INTO intake (id, origin, origin_ttl, command, arguments, principal, surface, state, "
-                "accepted_at, updated_at, next_attempt_at, error_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "accepted_at, updated_at, next_attempt_at, error_code, may_change_declaration) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     intake_id, self.origin, self.origin_ttl, self.command.name, self.encoded,
                     _json(self.principal), _json(self.surface) if self.surface else None,
-                    QUEUED, now, now, now, reason,
+                    QUEUED, now, now, now, reason, int(may_change_declaration(self.command, self.arguments)),
                 ),
             )
             row = conn.execute("SELECT * FROM intake WHERE id = ?", (intake_id,)).fetchone()
@@ -1553,78 +1602,58 @@ def _summary_line(state_counts: Mapping[str, int]) -> str:
     return f"{queued} queued save(s) waiting, {failed} failed save(s) to review."
 
 
-#: A queued save that may change a declaration: a save of a `rewriting` command, or a save of a manifest
-#: command whose manifest field is not null. An applied save keeps no arguments, so an applied save of a
-#: manifest command counts: it may have carried one. An open save always keeps its arguments.
-_CHANGES_A_DECLARATION = (
-    "(command IN (SELECT value FROM json_each(?)) OR (command IN (SELECT value FROM json_each(?)) "
-    "AND (arguments IS NULL OR json_extract(arguments, '$.' || ?) IS NOT NULL)))"
-)
+def declaration_mark(vault_root: Path, *, seconds: float) -> int | None:
+    """The lowest `seq` that a save open now, or accepted from now on, holds; None where that is unknown.
 
-
-@dataclass(frozen=True)
-class DeclarationWatch:
-    """The queued saves that may change a declaration before a later save replays.
-
-    A save of a command in `rewriting` may, whichever page it names: only its own resolution, when it
-    applies, decides which page that is. A save of a command in `manifest_commands` may when its
-    `manifest_field` holds a value other than null; MCP stores a field the caller left unset as null.
-
-    A check that reads a declaration takes `mark` before that read and asks `changed_since` after it, only
-    when the read refuses. A save that has ended never reopens, AUTOINCREMENT never reuses a `seq`, and an
+    A check that reads a declaration takes this mark before that read and, only once the read refuses, asks
+    `declaration_changed_since`. A save that has ended never reopens, AUTOINCREMENT never reuses a `seq`, and an
     ended save stays a row until retention or dismissal removes it. So a change that commits between the two
-    reads comes from a save that was open at the mark or was accepted after it, and each holds a `seq` at or
-    above the mark. `mark` costs a few index seeks whatever the queue holds; `changed_since` reads the rows
-    from the mark on by the primary key, so its cost grows with the saves open at the mark and those accepted
-    since. Both are decided inside SQLite, so no queued arguments reach Python. A query that has not answered
-    within `seconds`, opening the store included, answers None, unknown, as for a queue that cannot be read.
-    """
+    reads comes from a save that was open at the mark or was accepted after it, each at or above the mark.
 
-    rewriting: Sequence[str]
-    manifest_commands: Sequence[str]
-    manifest_field: str
+    The mark is the first open save's `seq`, else one more than the last save's, else 1. Each part is one seek:
+    `MAX(seq)` on the primary key and the lowest `seq` of each open state on `intake_state`. The last part reads
+    no row (no `seq` is 0) and only names `may_change_declaration`, so a store from before that column answers
+    unknown: a check marked before the upgrade could otherwise trust the 0 that the upgrade gives a save that it
+    saw open but that ended before the upgrade."""
+    row = _declaration_query(
+        vault_root, seconds,
+        "SELECT COALESCE((SELECT MAX(seq) FROM intake), 0), (SELECT MIN(seq) FROM intake WHERE state = ?), "
+        "(SELECT MIN(seq) FROM intake WHERE state = ?), (SELECT may_change_declaration FROM intake WHERE seq = 0)",
+        _OPEN_STATES, empty=(0, None, None, None),
+    )
+    if row is None:
+        return None
+    last, queued, applying, _marker = row
+    return min((int(seq) for seq in (queued, applying) if seq is not None), default=int(last) + 1)
 
-    def mark(self, vault_root: Path, *, seconds: float) -> int | None:
-        """The lowest `seq` that a save open now, or accepted from now on, holds; None where that is unknown.
 
-        It is the first open save's `seq`, else one more than the last save's, else 1. Each part is one seek:
-        `MAX(seq)` on the primary key and the lowest `seq` of each open state on `intake_state`."""
-        row = _declaration_query(
-            vault_root, seconds,
-            "SELECT COALESCE((SELECT MAX(seq) FROM intake), 0), "
-            "(SELECT MIN(seq) FROM intake WHERE state = ?), (SELECT MIN(seq) FROM intake WHERE state = ?)",
-            _OPEN_STATES, empty=(0, None, None),
-        )
-        if row is None:
-            return None
-        last, *first_open = row
-        return min((int(seq) for seq in first_open if seq is not None), default=int(last) + 1)
-
-    def changed_since(self, vault_root: Path, marker: int, *, seconds: float) -> bool | None:
-        """Whether a save at or after `marker`, in whatever state it is now, may have changed a declaration;
-        None where that is unknown."""
-        row = _declaration_query(
-            vault_root, seconds,
-            f"SELECT EXISTS (SELECT 1 FROM intake WHERE seq >= ? AND {_CHANGES_A_DECLARATION})",
-            (marker, *self._parameters()), empty=(0,),
-        )
-        return None if row is None else bool(row[0])
-
-    def _parameters(self) -> tuple[str, str, str]:
-        return _json(list(self.rewriting)), _json(list(self.manifest_commands)), self.manifest_field
+def declaration_changed_since(vault_root: Path, marker: int, *, seconds: float) -> bool | None:
+    """Whether a save at or after `marker`, in whatever state it is now, may have changed a declaration
+    (`may_change_declaration`); None where that is unknown. It is one seek on `intake_declaration`, which holds
+    only those saves, whatever else the queue holds."""
+    row = _declaration_query(
+        vault_root, seconds,
+        "SELECT EXISTS (SELECT 1 FROM intake WHERE may_change_declaration = 1 AND seq >= ?)",
+        (marker,), empty=(0,),
+    )
+    return None if row is None else bool(row[0])
 
 
 def _declaration_query(
     vault_root: Path, seconds: float, sql: str, parameters: Sequence[Any], *, empty: tuple[Any, ...]
 ) -> tuple[Any, ...] | None:
     """The one row that `sql` answers within `seconds`, `empty` where no save was ever queued, None where it is
-    unknown. The wait to open the store counts: an answer that arrives later is unknown too."""
+    unknown. The wait to open the store counts: the statement gets only the time that the open left, none at all
+    once it is spent, and an answer that arrives later is unknown too."""
     if seconds <= 0:
         return None
     deadline = time.monotonic() + seconds
     try:
         with _store(vault_root, mode="read", deadline=deadline) as conn:
-            # A row costs a handful of steps and only a `manifest_commands` row is parsed, so the deadline is read often.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            conn.execute(f"PRAGMA busy_timeout={math.ceil(remaining * 1000)}")
             conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 100)
             row = tuple(conn.execute(sql, parameters).fetchone())
     except FileNotFoundError:
