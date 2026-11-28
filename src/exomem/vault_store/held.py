@@ -15,8 +15,8 @@ import hashlib
 import json
 import os
 import uuid
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from itertools import count
 from pathlib import Path, PurePosixPath
@@ -141,7 +141,9 @@ class _Disk:
     body: bytes | None = None
 
 
-def list_held(vault_root: Path) -> list[HeldItem]:
+def list_held(
+    vault_root: Path, *, unrestricted: bool = True, may_see: Callable[[str], bool] | None = None,
+) -> list[HeldItem]:
     """The held items of a store-mode vault, oldest first; a file-mode vault holds none."""
     root = Path(vault_root)
     if not mode.store_mode_active(root):
@@ -150,9 +152,38 @@ def list_held(vault_root: Path) -> list[HeldItem]:
         rows = view.connection.execute(
             f"SELECT {_ITEM_COLUMNS} FROM store_held ORDER BY detected_at, path"
         ).fetchall()
+        rows = [row for row in rows if (unrestricted or ownership.relation_source(row[0]) is None)
+                and (may_see is None or may_see(row[0]))]
         stored = {row[0]: _store_facts(view, row[0]) for row in rows}
-    disks = _observe(root, [row[0] for row in rows], keep_body=False)
-    return [_item(row, disks[row[0]].file, stored[row[0]]) for row in rows]
+    by_path = {row[0]: row for row in rows}
+    return [
+        item for rel, disk in _observations(root, tuple(by_path), keep_body=ownership.is_markdown)
+        if (item := _listed_item(by_path[rel], disk, stored[rel], unrestricted)) is not None
+    ]
+
+
+def _listed_item(row: tuple, disk: _Disk, store: StoreFacts | None, unrestricted: bool) -> HeldItem | None:
+    from . import relationship_files
+
+    item = _item(row, disk.file, store)
+    if not ownership.is_markdown(item.path) or disk.file.exists is not True:
+        return item
+    if disk.body is None:
+        if unrestricted:
+            return item
+        return replace(item, held_sha256=None, file=PersonFile(True))
+    try:
+        body = relationship_files.strip_block(disk.body)
+    except OpError:
+        return item if unrestricted else None
+    if body is disk.body:
+        return item
+    digest = hashlib.sha256(body).hexdigest()
+    # Keep the version bound to the actual file so the complete resolution still uses a CAS.
+    return replace(
+        item, file=PersonFile(True, digest, len(body)),
+        held_sha256=digest if item.held_sha256 == disk.file.sha256 else None,
+    )
 
 
 def person_file_bytes(vault_root: Path, rel: str) -> bytes | None:
@@ -422,11 +453,21 @@ def _item(row: tuple, file: PersonFile, store: StoreFacts | None) -> HeldItem:
 
 def _observe(root: Path, rels: Sequence[str], *, keep_body: bool) -> dict[str, _Disk]:
     """The person's file at each path, read through handles that refuse a symlink."""
+    return dict(_observations(root, rels, keep_body=lambda _rel: keep_body))
+
+
+def _observations(
+    root: Path, rels: Sequence[str], *, keep_body: Callable[[str], bool],
+) -> Iterator[tuple[str, _Disk]]:
     try:
-        with held_fs.acquire(projector.anchor(root)).require() as filesystem:
-            return {rel: _observe_file(filesystem, rel, keep_body) for rel in rels}
+        filesystem = held_fs.acquire(projector.anchor(root)).require()
     except held_fs.HeldFsError as error:
-        return {rel: _Disk(PersonFile(None, unreadable=error.code)) for rel in rels}
+        for rel in rels:
+            yield rel, _Disk(PersonFile(None, unreadable=error.code))
+        return
+    with filesystem:
+        for rel in rels:
+            yield rel, _observe_file(filesystem, rel, keep_body(rel))
 
 
 def _observe_file(filesystem: held_fs.HeldFilesystem, rel: str, keep_body: bool) -> _Disk:

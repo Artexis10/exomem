@@ -998,8 +998,8 @@ def commit(
             _record_binary(tx, record, revision, audit)
         for binary in change.binary_deletes:
             _delete_binary(tx, binary, audit)
-        for move in change.binary_moves:
-            _move_binary(tx, move, revision, audit)
+        for binary_move in change.binary_moves:
+            _move_binary(tx, binary_move, revision, audit)
         relationship_paths: list[str] = []
         if change.relationship_change is not None:
             affected = relationships.apply(

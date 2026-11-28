@@ -11,7 +11,6 @@ from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from sqlite3 import Connection, IntegrityError
-from typing import BinaryIO
 
 from ..held_fs import Chunks
 from ..cli_ops import OpError
@@ -128,7 +127,7 @@ def prepare_file(tx: Connection, page: str, revision: int) -> Iterator[PreparedF
         yield PreparedFile(Chunks(lambda: _parts(stream)), digest.hexdigest())
 
 
-def _parts(stream: BinaryIO) -> Iterator[bytes]:
+def _parts(stream: tempfile.SpooledTemporaryFile[bytes]) -> Iterator[bytes]:
     stream.seek(0)
     while part := stream.read(256 * 1024):
         yield part
@@ -259,8 +258,9 @@ def plan_import(
         proposal = wanted.pop(link_id, None)
         if proposal == old:
             continue
-        successor = uuid.uuid4().hex if proposal is not None else None
+        successor = None
         if proposal is not None:
+            successor = uuid.uuid4().hex
             added.append(replace(proposal, id=successor))
         retired.append(store.Retirement(link_id, successor))
     added.extend(wanted.values())

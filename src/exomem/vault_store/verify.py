@@ -170,12 +170,20 @@ def projection_differences(staged: sqlite3.Connection, scratch_root: Path) -> li
 
     It writes through the one projection writer, so the check covers the code that later puts pages on disk.
     """
+    from . import relationship_files
+
     differing = []
     # One page body at a time: the cursor streams the rows, so memory holds a page and not the vault.
     for rel, body, sha256 in staged.execute(
         "SELECT path, body, sha256 FROM store_pages ORDER BY path"
     ):
-        written = projection.write_file(scratch_root, rel, body, durable=False).read_bytes()
+        rendered = (
+            relationship_files.splice_block(body, relationship_files.projection_lines(staged, rel))
+            if rel.casefold().endswith(".md") else body
+        )
+        written = relationship_files.strip_block(
+            projection.write_file(scratch_root, rel, rendered, durable=False).read_bytes()
+        )
         if hashlib.sha256(written).hexdigest() != sha256 or written != body:
             differing.append(rel)
     return differing

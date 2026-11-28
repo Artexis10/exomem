@@ -8,6 +8,7 @@ import json
 import re
 import unicodedata
 from bisect import bisect_left
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from dataclasses import field as _field
@@ -45,6 +46,7 @@ from .kbdir import managed_form
 from .mutation_timings import MutationTimings, write_timings_enabled
 from .vault_store import mode as store_mode
 from .vault_store import read as store_read
+from .vault_store import relationships as stored_relationships
 
 ObserveOperation = Literal["add", "update", "remove", "validate", "supersede", "assess"]
 _OPERATIONS: tuple[str, ...] = get_args(ObserveOperation)
@@ -394,7 +396,7 @@ def observe_memory(
             )
             if superseding is not None:
                 raise ObserveMemoryError(
-                    "SUPERSEDE_TARGET_ALREADY_SUPERSEDED",
+                    stored_relationships.ALREADY_SUPERSEDED,
                     f"the claim is already superseded by unit "
                     f"{unit_id(superseding)}",
                     "Supersede the successor instead, or read the page's units "
@@ -880,13 +882,15 @@ def observe_memory(
         after_body = body
     if (store_edges and target_anchor is not None
             and (stored_arguments or proposal_mode == "update")):
+        predecessor_anchor = resolved.unit.anchor if op == "supersede" and resolved.unit else None
         try:
             after_body, relationship_plan = _plan_stored_relationships(
                 vault_root, editable, current, after_body, target_anchor, stored_arguments,
                 selected_kind=selected_kind, replacing=proposal_mode == "update", reason=reason,
+                predecessor_anchor=predecessor_anchor,
             )
         except OpError as error:
-            raise ObserveMemoryError(error.code, error.reason) from error
+            raise ObserveMemoryError(error.code, error.message, error.remediation) from error
     after_source = (
         editable.raw_text if relationship_plan is not None and after_body == body
         and fm_text == editable.fm_text and origin_block is None
@@ -995,7 +999,12 @@ def observe_memory(
                 )
             preflight = replace(preflight, read_dependency_guards=tuple(guards))
 
-        if previewing:
+        relationship_noop = (
+            relationship_plan is not None and relationship_plan.change is None
+            and not relationship_plan.writes and after_source == editable.raw_text
+            and relation_disposition is None and relation_review_hash is None
+        )
+        if previewing or relationship_noop:
             return _result(
                 operation=op,
                 path=editable.rel_path,
@@ -1049,6 +1058,8 @@ def observe_memory(
                 )
         except semantic_writes.SemanticWriteError as error:
             raise ObserveMemoryError(error.code, error.reason) from error
+        except OpError as error:
+            raise ObserveMemoryError(error.code, error.message, error.remediation) from error
         link_warnings.extend(committed.review_field_warnings())
 
         final = semantic_index.selected_parent_index_state(vault_root, editable.rel_path)
@@ -1412,23 +1423,26 @@ class _RelationshipPage:
     guard: vault.PathGuard | None = None
     anchored: dict[str, str] = _field(default_factory=dict)
     edits: list[tuple[int, int, str]] = _field(default_factory=list)
+    used: set[str | None] | None = None
 
     def anchor(self, unit: semantic_units.SemanticUnit) -> str:
         if unit.anchor is not None:
             return unit.anchor
+        assert unit.unit_ref is not None
         if unit.unit_ref not in self.anchored:
-            used = {item.anchor for item in self.state.document.units if item.anchor}
-            used.update(self.anchored.values())
-            resolved = _resolved_claim(self.state.body, unit, used)
+            if self.used is None:
+                self.used = {item.anchor for item in self.state.document.units if item.anchor}
+            resolved = _resolved_claim(self.state.body, unit, self.used)
             self.edits.extend(resolved.edits)
             self.anchored[unit.unit_ref] = resolved.anchor
+            self.used.add(resolved.anchor)
         return self.anchored[unit.unit_ref]
 
 
 def _plan_stored_relationships(
     root: Path, editable: edit._Editable, current: semantic_index.SemanticParentIndexState,
     body: str, anchor: str, arguments: tuple[unit_edges.Edge, ...], *,
-    selected_kind: str, replacing: bool, reason: str | None,
+    selected_kind: str, replacing: bool, reason: str | None, predecessor_anchor: str | None = None,
 ) -> tuple[str, unit_edges.StoredPlan | None]:
     """Resolve both ends in the writer's view before asking for any far-end write admission."""
     source_path = editable.rel_path
@@ -1441,6 +1455,14 @@ def _plan_stored_relationships(
     pages = {source_path: primary}
     targets: list[tuple[str, unit_edges.End]] = []
     registry = _relationship_registry(current)
+    supersession_check = None
+    if predecessor_anchor is not None and current.parent_ref is not None:
+        counts = Counter(unit.anchor for unit in current.document.units if unit.anchor is not None)
+        supersession_check = stored_relationships.SupersessionCheck(
+            source_path, current.parent_ref, predecessor_anchor,
+            tuple(name for name, count in counts.items() if count == 1),
+            tuple(sorted(registry.keys_with("replaces"))),
+        )
     with store_read.request_snapshot(root):
         visible = vault.writer_link_visibility(root)
         resolver = find.writer_resolver_snapshot(root) if arguments else None
@@ -1484,21 +1506,21 @@ def _plan_stored_relationships(
                 continue
             guards.append(page.guard)
             if page.edits:
-                write = vault.PlannedWrite(
+                writes.append(vault.PlannedWrite(
                     root / path, _splice_relationship_anchors(page), guard=page.guard,
-                )
-                try:
-                    vault._validate_batch_write_access(root, (write,))
-                except (ValueError, OSError) as error:
-                    raise ObserveMemoryError(
-                        "RELATIONSHIP_END_NOT_WRITABLE",
-                        "the target unit needs an anchor on a read-only page",
-                    ) from error
-                writes.append(write)
+                ))
+        if writes:
+            try:
+                vault._validate_batch_write_access(root, writes)
+            except (ValueError, OSError) as error:
+                raise ObserveMemoryError(
+                    "RELATIONSHIP_END_NOT_WRITABLE",
+                    "a target unit needs an anchor on a read-only page",
+                ) from error
         plan = unit_edges.plan_change(
             root, source=unit_edges.End(source_path, anchor, current.parent_ref),
             targets=tuple(targets), visible=visible, replacing=replacing, reason=reason,
-            writes=tuple(writes), guards=tuple(guards),
+            writes=tuple(writes), guards=tuple(guards), supersession_check=supersession_check,
         )
     return semantic_units.apply_splices(body, primary.edits), plan
 

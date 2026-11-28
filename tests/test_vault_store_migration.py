@@ -12,7 +12,9 @@ import hashlib
 import json
 import multiprocessing
 import os
+import shutil
 import sqlite3
+import subprocess
 import sys
 import time
 from contextlib import closing
@@ -475,8 +477,22 @@ def test_a_rollback_returns_every_find_and_graph_answer_that_the_vault_gave_befo
     check_stored_links()
 
 
+def test_a_migration_strips_projected_relationship_text_before_indexing(vault):
+    source = (vault / ALPHA).read_bytes()
+    (vault / ALPHA).write_bytes(relationship_files.splice_block(
+        source, ["### Stored relationships", "luminous decorative trident"],
+    ))
+    build_indexes(vault)
+    assert migrate_apply(vault) == 0
+    with closing(connection.open_reader(connection.store_path(vault))) as store:
+        assert store.execute("SELECT body FROM store_pages WHERE path=?", (ALPHA,)).fetchone() == (source,)
+        assert b"luminous decorative trident" not in str(store.execute(
+            "SELECT * FROM pages WHERE path=?", (ALPHA,),
+        ).fetchone()).encode()
+
+
 def test_a_rollback_and_remigration_preserve_relationship_ids_and_an_unresolved_target(
-    vault, tmp_path, capsys,
+    vault, tmp_path, capsys, monkeypatch, coordinator_url,  # noqa: F811
 ):
     source = (vault / ALPHA).read_bytes() + b"\n- [rule] Check the tide. ^tide\n"
     target = (vault / BETA).read_bytes() + b"\n- [rule] Light the lamp. ^lamp\n"
@@ -494,6 +510,8 @@ def test_a_rollback_and_remigration_preserve_relationship_ids_and_an_unresolved_
                 added=(relationships.Relationship("link-id", "tide-id", "supports", "lamp-id"),),
             ),
         ))
+    if previous := os.environ.get("EXOMEM_TEST_PREVIOUS_SCHEMA_PYTHON"):
+        _previous_release_refuses_relationships(previous, vault, tmp_path)
     export = tmp_path / "export-relations"
     assert rollback_apply(vault, export) == 0, capsys.readouterr().err
     assert (vault / ALPHA).read_bytes() == source
@@ -505,17 +523,54 @@ def test_a_rollback_and_remigration_preserve_relationship_ids_and_an_unresolved_
     assert (export / "relationships" / artifact).read_bytes() == (vault / artifact).read_bytes()
     history = [json.loads(line) for line in (export / "relationship-history.jsonl").read_bytes().splitlines()]
     assert [(row["relationship_id"], row["action"]) for row in history] == [("link-id", "add")]
-    (vault / BETA).write_bytes(target.replace(b" ^lamp", b""))
-    build_indexes(vault)
-
-    assert migrate_apply(vault) == 0, capsys.readouterr().err
-    with closing(connection.open_reader(connection.store_path(vault))) as store:
+    fresh = tmp_path / "restored" / "vault"
+    shutil.copytree(vault, fresh, ignore=shutil.ignore_patterns("_Collections"))
+    (fresh / BETA).write_bytes(target.replace(b" ^lamp", b""))
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(fresh.parent / "state"))
+    for name, value in _lease_environment(fresh.parent, coordinator_url).items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_VAULT_ID", "restored-store-mode")
+    with pytest.MonkeyPatch.context() as shell:
+        shell.setenv(OPERATOR, OPERATOR_SECRET)
+        assert cli._collections_main(["migrate", "--vault", str(fresh), "--apply"]) == 0, capsys.readouterr().err
+    build_indexes(fresh)
+    assert migrate_apply(fresh) == 0, capsys.readouterr().err
+    with connection.open_writer(connection.store_path(fresh), lease_check=lambda: True) as handle:
+        derivation.drain(fresh, CollectionWriter(fresh, handle))
+    with closing(connection.open_reader(connection.store_path(fresh))) as store:
         assert store.execute(
             "SELECT id,source_unit_id,target_unit_id FROM store_relationships",
         ).fetchall() == [("link-id", "tide-id", "lamp-id")]
         assert store.execute(
             "SELECT parent_path,anchor FROM store_unit_ids WHERE id='lamp-id'",
         ).fetchone() == (BETA, "lamp")
+    from exomem import audit
+
+    with library_scope():
+        report = audit.audit(fresh, categories=[audit.RELATIONSHIP_ORPHAN])
+    assert [(entry.path, entry.meta["anchor"]) for entry in report.findings] == [(BETA, "lamp")]
+
+
+def _previous_release_refuses_relationships(previous, vault, tmp_path):
+    env = os.environ | {OPERATOR: OPERATOR_SECRET}
+    launch = subprocess.run(
+        [previous, "-I", "-c", "from pathlib import Path\nimport sys\n"
+         "from exomem import state_migration\n"
+         "root = Path(sys.argv[1])\n"
+         "assert sys.argv[2] in state_migration.unrecognized_compatibility_ids(root)\n"
+         "state_migration.require_vault_state_ready(root)", str(vault), schema.compatibility_ids()[-1]],
+        env=env, capture_output=True, text=True, timeout=30, check=False,
+    )
+    # This predecessor refuses an unknown optional format while validating the manifest.
+    assert launch.returncode and "StateMigrationManifestError" in launch.stderr, launch.stderr
+    refused = tmp_path / "older-rollback"
+    rollback = subprocess.run(
+        [previous, "-I", "-m", "exomem", "store-mode", "rollback", "--apply", "--export-to", str(refused),
+         "--why", "compatibility drill", "--vault", str(vault)],
+        env=env, capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert rollback.returncode and "STATE_MIGRATION_MANIFEST_INVALID" in rollback.stderr, rollback.stderr
+    assert not refused.exists() and mode.store_mode_active(vault)
 
 
 def test_a_rollback_export_names_the_page_that_a_moved_page_came_from(vault, tmp_path):

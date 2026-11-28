@@ -58,6 +58,21 @@ class ProjectedBase:
     keep_store: bool = False
 
 
+RelationshipKey = tuple[str, str | None, str | None, str | None]
+ALREADY_SUPERSEDED = "SUPERSEDE_TARGET_ALREADY_SUPERSEDED"
+
+
+@dataclass(frozen=True, slots=True)
+class SupersessionCheck:
+    """The predecessor and its admitted, current same-page anchors."""
+
+    parent_path: str
+    parent_ref: str
+    anchor: str
+    source_anchors: tuple[str, ...]
+    relation_types: tuple[str, ...]
+
+
 @dataclass(frozen=True, slots=True)
 class Change:
     """A plan with admitted ends, guarded by the same page checks as its bytes."""
@@ -69,6 +84,8 @@ class Change:
     reason: str | None = None
     expected_outgoing: tuple[str, frozenset[str]] | None = None
     projected_base: ProjectedBase | None = None
+    supersession_check: SupersessionCheck | None = None
+    expected_retirement: tuple[str, tuple[RelationshipKey, ...], int] | None = None
 
 
 def incident(tx: Connection, path: str) -> Iterator[BoundRelationship]:
@@ -181,6 +198,38 @@ def outgoing_unit(tx: Connection, source: UnitIdentity) -> Iterator[BoundRelatio
         )
 
 
+def last_retirement(tx: Connection, source_id: str, keys: tuple[RelationshipKey, ...]) -> int:
+    """Find the newest retirement among the operation's visible relationship keys."""
+    if not keys:
+        return 0
+    (revision,) = tx.execute(
+        "SELECT COALESCE(MAX((SELECT retired_revision FROM store_relationships AS r"
+        " WHERE r.source_unit_id=?1 AND r.relation_type=json_extract(wanted.value,'$[0]')"
+        " AND r.target_unit_id IS json_extract(wanted.value,'$[1]')"
+        " AND r.target_page_path IS json_extract(wanted.value,'$[2]')"
+        " AND r.target_page_ref IS json_extract(wanted.value,'$[3]')"
+        " AND r.retired_revision IS NOT NULL ORDER BY r.retired_revision DESC LIMIT 1)),0)"
+        " FROM json_each(?2) AS wanted",
+        (source_id, json.dumps(keys)),
+    ).fetchone()
+    return int(revision)
+
+
+def _require_new_successor(tx: Connection, check: SupersessionCheck) -> None:
+    already = tx.execute(
+        "SELECT 1 FROM store_unit_ids AS prior CROSS JOIN store_relationships AS r ON r.target_unit_id=prior.id"
+        " JOIN store_unit_ids AS successor ON successor.id=r.source_unit_id"
+        " WHERE prior.parent_path=?1 AND prior.parent_ref=?2 AND prior.anchor=?3"
+        " AND successor.parent_path=?1 AND successor.parent_ref=?2 AND successor.id<>prior.id"
+        " AND successor.anchor IN (SELECT value FROM json_each(?4))"
+        " AND r.retired_revision IS NULL AND r.relation_type IN (SELECT value FROM json_each(?5)) LIMIT 1",
+        (check.parent_path, check.parent_ref, check.anchor, json.dumps(check.source_anchors),
+         json.dumps(check.relation_types)),
+    ).fetchone()
+    if already is not None:
+        raise OpError(ALREADY_SUPERSEDED, "the claim already has a successor", "Read the page's current units.")
+
+
 def same_page_pairs(
     tx: Connection, paths: Iterable[str], types: Iterable[str],
 ) -> Iterator[tuple[str, str, str, str, str]]:
@@ -200,6 +249,27 @@ def same_page_pairs(
             raise
         return
     yield from rows
+
+
+def orphaned_units(tx: Connection) -> Iterator[UnitIdentity]:
+    """Read missing active endpoints from current parser rows, without rebinding locators."""
+    bound = tx.execute(
+        "WITH held AS (SELECT DISTINCT parent_path FROM store_unit_ids),"
+        " present AS (SELECT s.parent_path,s.parent_ref,s.anchor FROM held"
+        " CROSS JOIN semantic_units s ON s.parent_path=held.parent_path"
+        " JOIN store_pages p ON p.path=s.parent_path AND p.sha256=s.parent_source_hash"
+        " WHERE s.anchor IS NOT NULL GROUP BY s.parent_path,s.parent_ref,s.anchor HAVING COUNT(*)=1)"
+        " SELECT u.id,u.parent_path,u.anchor,u.parent_ref FROM store_unit_ids u"
+        " LEFT JOIN present ON present.parent_path=u.parent_path"
+        " AND present.anchor=u.anchor AND present.parent_ref IS u.parent_ref"
+        " WHERE present.parent_path IS NULL"
+        " AND NOT EXISTS (SELECT 1 FROM store_derivation_queue q WHERE q.path=u.parent_path)"
+        " AND (EXISTS (SELECT 1 FROM store_relationships r WHERE r.source_unit_id=u.id AND r.retired_revision IS NULL)"
+        "  OR EXISTS (SELECT 1 FROM store_relationships r WHERE r.target_unit_id=u.id AND r.retired_revision IS NULL))"
+        " ORDER BY u.parent_path,u.anchor,u.id",
+    )
+    for row in bound:
+        yield UnitIdentity(*row)
 
 
 _AT_PAGE = (
@@ -250,6 +320,12 @@ def apply(
     The caller owns the transaction and the page guards. A conflicting identity or
     relationship aborts the transaction rather than altering an existing record.
     """
+    if change.supersession_check is not None:
+        _require_new_successor(tx, change.supersession_check)
+    if change.expected_retirement is not None:
+        source_id, keys, revision_read = change.expected_retirement
+        if last_retirement(tx, source_id, keys) != revision_read:
+            raise OpError("RELATIONSHIP_CHANGED", "a relationship changed before the write")
     if (base := change.projected_base) is not None:
         stamp = tx.execute(
             "SELECT revision FROM store_manifest WHERE path = ?", (base.path,),
@@ -298,7 +374,7 @@ def apply(
         ((edge.id, revision, "supersede" if edge.successor_id else "retire", change.actor,
           reason, at, edge.successor_id) for edge in change.retired),
     )
-    ids = [edge.id for edge in (*change.added, *change.retired)]
+    ids = [edge.id for edge in change.added] + [edge.id for edge in change.retired]
     rows = tx.execute(
         "SELECT src.parent_path, COALESCE(dst.parent_path,r.target_page_path) "
         "FROM json_each(?) AS wanted CROSS JOIN store_relationships AS r ON r.id = wanted.value "

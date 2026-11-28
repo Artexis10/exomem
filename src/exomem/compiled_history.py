@@ -44,6 +44,8 @@ from . import (
 )
 from .governance.principal import OWNER_AUDIENCE, effective_principal
 from .kbdir import managed_join
+from .vault_store import mode as store_mode
+from .vault_store import read as store_read
 
 ENTRY_VERSION = 1
 #: The `operation` an episode revision's entry carries; the semantic writer names its own.
@@ -60,6 +62,28 @@ def history_root() -> str:
 
 def history_dir(parent_ref: str) -> str:
     return f"{history_root()}/{hashlib.sha256(parent_ref.encode()).hexdigest()}"
+
+
+def _kept_names(root: Path, directory: str) -> list[str]:
+    if not store_mode.store_mode_for_reads(root):
+        return registry_history.kept_names(root, directory, suffix=".json") or []
+    prefix = f"{directory}/"
+    with store_read.snapshot(root) as view:
+        names = (page.path[len(prefix):] for page in view.pages(prefix))
+        return sorted((name for name in names if "/" not in name and name.endswith(".json")), reverse=True)
+
+
+def _read_kept(root: Path, directory: str, name: str) -> str | None:
+    try:
+        stored = store_read.owned_page(root, f"{directory}/{name}")
+    except FileNotFoundError:
+        return None
+    if stored is None:
+        return registry_history.read_kept(root, directory, name)
+    try:
+        return stored.body.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 def validate_new_write(write: Any, *, path: str) -> None:
@@ -121,7 +145,7 @@ def plan_entry(
     name = registry_history.version_id(moment, token["transition_id"]) + ".json"
     path = root / history_dir(parent_ref) / name
     if preflight.committed_replay:
-        previous = registry_history.read_kept(root, history_dir(parent_ref), name)
+        previous = _read_kept(root, history_dir(parent_ref), name)
         if previous is None:
             return None
         entry = json.loads(previous)
@@ -351,7 +375,7 @@ def _remove_if_empty(root: Path, directory: str) -> None:
 def read_entry(root: Path, *, path: str) -> str | None:
     """The text of one entry as stored, or None when it is missing or unreadable."""
     directory, _, name = path.rpartition("/")
-    return registry_history.read_kept(root, directory, name)
+    return _read_kept(root, directory, name)
 
 
 def _entry_text(entry: dict) -> str:
@@ -387,7 +411,7 @@ def _folded_siblings(
     revisions: list[tuple[str, str | None]] = []
     for name in names:
         try:
-            entry = json.loads(registry_history.read_kept(root, directory, name) or "")
+            entry = json.loads(_read_kept(root, directory, name) or "")
             revision = entry["path"] if entry.get("operation") == FOLD_OPERATION else None
             if not isinstance(revision, str) or not _folded_revision(root, entry["prior"]["source"], revision, head_episode):
                 continue
@@ -500,7 +524,7 @@ def read(
     identity = memory_refs.normalize_id(current["frontmatter"].get(memory_refs.ID_FIELD))
     parent_ref = memory_refs.memory_ref(identity) if identity else context_refs.vault_ref(canonical)
     directory = history_dir(parent_ref)
-    names = registry_history.kept_names(root, directory, suffix=".json") or []
+    names = _kept_names(root, directory)
     cap = _scan_cap(size)
     folded: Callable[[str], tuple[str, ...]] | None = None
 
@@ -512,7 +536,7 @@ def read(
 
     examined = 0
     consumed = None  # The last admitted version this read finished with, touching or not.
-    page = []
+    page: list[tuple[str, dict[str, Any]]] = []
     truncated = False
     for name in names:
         version = name.removesuffix(".json")
@@ -522,7 +546,7 @@ def read(
             continue
         entry = _admitted_entry(
             root,
-            registry_history.read_kept(root, directory, name),
+            _read_kept(root, directory, name),
             path=canonical,
             parent_ref=parent_ref,
             head_episode=current["frontmatter"].get("episode"),

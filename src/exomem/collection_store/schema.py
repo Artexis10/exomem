@@ -1344,6 +1344,9 @@ def _migrate_to_21(conn: sqlite3.Connection) -> None:
       ON store_relationships(target_unit_id, relation_type, id) WHERE retired_revision IS NULL""")
     conn.execute("""CREATE INDEX store_relationships_by_target_page
       ON store_relationships(target_page_path, relation_type, id) WHERE retired_revision IS NULL""")
+    conn.execute("""CREATE INDEX store_relationships_retired_keys
+      ON store_relationships(source_unit_id, relation_type, target_unit_id, target_page_path,
+                             target_page_ref, retired_revision DESC) WHERE retired_revision IS NOT NULL""")
     conn.execute("""CREATE UNIQUE INDEX store_relationships_unique_unit
       ON store_relationships(source_unit_id, relation_type, target_unit_id)
       WHERE retired_revision IS NULL AND target_unit_id IS NOT NULL""")

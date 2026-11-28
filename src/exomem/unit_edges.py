@@ -15,7 +15,7 @@ from . import relation_registry
 from .vault_store import relationships
 
 if TYPE_CHECKING:
-    from . import semantic_contract, vault
+    from . import semantic_contract, semantic_units, vault
 
 Edge = tuple[str, str]
 
@@ -44,9 +44,27 @@ class RelationshipPage:
     total: int | None = None
     next_after: tuple[str, str] | None = None
 
+    def as_dict(self) -> dict:
+        if self.total is None:
+            return {"status": "unavailable"}
+        return {
+            "status": "available",
+            "total": self.total,
+            "next_after": list(self.next_after) if self.next_after is not None else None,
+            "items": [
+                {
+                    "id": edge.relationship.id,
+                    "kind": edge.relationship.relation_type,
+                    "target_path": edge.target_path,
+                    "target_anchor": edge.target.anchor if edge.target is not None else None,
+                }
+                for edge in self.edges
+            ],
+        }
+
 
 def relationship_page(
-    root: Path, path: str, anchor: str, *,
+    root: Path, path: str, anchor: str | None, *,
     limit: int = 50, after: tuple[str, str] | None = None,
 ) -> RelationshipPage:
     """Read an exact visible page and count in one canonical snapshot."""
@@ -58,17 +76,26 @@ def relationship_page(
         raise ValueError("relationship page limit must be between 1 and 50")
     if not mode.store_mode_for_reads(root):
         return RelationshipPage()
-    keep = egress.visible_page_filter(root)
-    with read.request_snapshot(root), read.snapshot(root) as snapshot:
+    if anchor is None:
+        return RelationshipPage(total=0)
+    keep = egress.reader_view(root)
+    restricted = egress.caller_restricted(root)
+    with egress.release_decision_context(root), read.request_snapshot(root), read.snapshot(root) as snapshot:
+        if not snapshot.connection.execute(
+            "SELECT 1 FROM sqlite_schema WHERE name='store_relationships'",
+        ).fetchone():
+            return RelationshipPage()
         identity = relationships.identities_at(snapshot.connection, {(path, anchor)}).get((path, anchor))
         if identity is None:
             return RelationshipPage(total=0)
         source_view = epistemic_graph.GraphView(root, snapshot.connection, keep=keep)
         source = source_view.parent(path)
+        if path in source_view.unavailable:
+            return RelationshipPage()
         if (source is None or source.structure.parent_ref != identity.parent_ref
                 or source.structure.resolve_fragment(anchor).index is None):
             return RelationshipPage(total=0)
-        found = []
+        found: list[relationships.BoundRelationship] = []
         total = 0
         remaining = False
         candidates = relationships.outgoing_unit(snapshot.connection, identity)
@@ -77,6 +104,10 @@ def relationship_page(
             view = epistemic_graph.GraphView(root, snapshot.connection, keep=keep)
             view.prefetch(edge.target_path for edge in batch)
             for edge in batch:
+                if restricted and edge.target is not None:
+                    level = egress.release_level_for(root, edge.target_path, record=False)
+                    if level is None or level < egress.LEVEL_FULL:
+                        continue
                 target = view.parent(edge.target_path)
                 if target is None:
                     continue
@@ -95,6 +126,8 @@ def relationship_page(
                         found.append(edge)
                     else:
                         remaining = True
+            if view.unavailable:
+                return RelationshipPage()
         return RelationshipPage(tuple(found), total, _relationship_key(found[-1]) if remaining else None)
 
 
@@ -106,6 +139,7 @@ def plan_change(
     root: Path, *, source: End, targets: tuple[tuple[str, End], ...],
     visible: Callable[[str], bool] | None, replacing: bool, reason: str | None,
     writes: tuple[vault.PlannedWrite, ...], guards: tuple[vault.PathGuard, ...],
+    supersession_check: relationships.SupersessionCheck | None = None,
 ) -> StoredPlan | None:
     """Bind admitted ends to allocated IDs and compute a guarded change of active edges."""
     from .cli_ops import OpError
@@ -117,8 +151,8 @@ def plan_change(
     locations.update((end.path, end.anchor) for _, end in targets if end.anchor is not None)
     with read.snapshot(root) as view:
         existing = relationships.identities_at(view.connection, locations)
-        outgoing = tuple(edge for edge in relationships.incident(view.connection, source.path)
-                         if edge.source == existing.get((source.path, source.anchor)))
+        current_source = existing.get((source.path, source.anchor))
+        outgoing = () if current_source is None else tuple(relationships.outgoing_unit(view.connection, current_source))
 
     allocated: dict[tuple[str, str], relationships.UnitIdentity] = {}
 
@@ -152,6 +186,9 @@ def plan_change(
     retired = tuple(relationships.Retirement(edge.relationship.id)
                     for item, edge in active.items() if replacing and item not in wanted
                     and (visible is None or visible(edge.target_path)))
+    wanted_keys = tuple(sorted(wanted, key=repr))
+    with read.snapshot(root) as view:
+        last_retired = relationships.last_retirement(view.connection, source_id, wanted_keys)
     # Preview and commit may allocate different IDs for new ends. Pin the locator and guarded
     # versions, plus the exact active edges this operation would retire.
     intent = json.dumps([
@@ -159,11 +196,13 @@ def plan_change(
         sorted(((kind, end.path, end.anchor, end.parent_ref) for kind, end in targets), key=repr),
         sorted(edge.id for edge in retired),
         sorted((guard.target, guard.expected_content_hash) for guard in guards),
+        last_retired,
     ], separators=(",", ":"))
     digest = hashlib.sha256(intent.encode()).hexdigest()
     expected = (source_id, frozenset(edge.relationship.id for edge in outgoing)) if replacing else None
     change = relationships.Change(
         effective_principal().audience_id, tuple(allocated.values()), added, retired, reason, expected,
+        supersession_check=supersession_check, expected_retirement=(source_id, wanted_keys, last_retired),
     )
     retired_ids = {edge.id for edge in retired}
     paths = {end.path for _, end in targets}
@@ -204,17 +243,18 @@ def _facts(
     from . import semantic_contract
 
     facts = []
+    anchors: dict[str, dict[str, semantic_units.SemanticUnit | None]] = {}
     for item in stored:
         source = corpus.pages.get(item.source.parent_path)
         target = corpus.pages.get(item.target_path)
         if source is None or target is None:
             continue
-        source_unit = _bound_unit(source, item.source)
+        source_unit = _bound_unit(source, item.source, anchors)
         if source_unit is None:
             continue
         target_unit = None
         if item.target is not None:
-            target_unit = _bound_unit(target, item.target)
+            target_unit = _bound_unit(target, item.target, anchors)
             if target_unit is None:
                 continue
         elif (reference := item.relationship.target_page_ref) and reference != target.document.parent_ref:
@@ -226,11 +266,20 @@ def _facts(
     return tuple(facts)
 
 
-def _bound_unit(page: semantic_contract.SemanticPageState, identity: relationships.UnitIdentity):
+def _bound_unit(
+    page: semantic_contract.SemanticPageState,
+    identity: relationships.UnitIdentity,
+    anchors: dict[str, dict[str, semantic_units.SemanticUnit | None]],
+) -> semantic_units.SemanticUnit | None:
     if identity.parent_ref is not None and identity.parent_ref != page.document.parent_ref:
         return None
-    unit = page.document.resolve_fragment(identity.anchor).unit
-    return unit if unit is not None and unit.anchor == identity.anchor else None
+    if page.path not in anchors:
+        captured: dict[str, semantic_units.SemanticUnit | None] = {}
+        for unit in page.document.units:
+            if unit.anchor is not None:
+                captured[unit.anchor] = None if unit.anchor in captured else unit
+        anchors[page.path] = captured
+    return anchors[page.path].get(identity.anchor)
 
 
 def current_supersessions(

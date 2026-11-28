@@ -117,6 +117,8 @@ def _row(item: Any) -> dict[str, Any]:
 def listing(vault_root: Path, limit: int | None = None) -> dict[str, Any]:
     """Every held item that this caller may read, oldest first, with the choices that resolve it."""
     from .cli_ops import OpError
+    from .governance import egress
+    from .governance.principal import effective_principal
     from .vault_store import held, mode
 
     cap = _DEFAULT_LIMIT if limit is None else limit
@@ -127,8 +129,9 @@ def listing(vault_root: Path, limit: int | None = None) -> dict[str, Any]:
             f"Pass a limit from 1 to {_MAX_LIMIT}, or omit it to list {_DEFAULT_LIMIT}.",
         )
     root = Path(vault_root)
+    unrestricted = egress.unrestricted_content_access(root, effective_principal())
     may_see = _may_see(root)
-    visible = [item for item in held.list_held(root) if may_see(item.path)]
+    visible = held.list_held(root, unrestricted=unrestricted, may_see=may_see)
     shown = visible[:cap]
     # An item the caller may not read is left out without a count, as the release contract omits it.
     if not visible:

@@ -38,7 +38,7 @@ from ..cli_ops import OpError
 from ..collection_store import admission, authority, capability, connection
 from ..governance import page_admission
 from . import (
-    availability, dependency_pass, graph_state, marker, mode, ownership, rederive,
+    availability, dependency_pass, derive, graph_state, marker, mode, ownership, rederive,
     relationship_files, verify,
 )
 from .write import Origin, frontmatter_json
@@ -176,6 +176,8 @@ def stage(
     staged.timings["copy_sidecars_s"] = time.perf_counter() - started
     started = time.perf_counter()
     _derive_links(vault_root, conn)
+    if staged.projected_pages:
+        _derive_without_projected_blocks(vault_root, conn, expected, sorted(staged.projected_pages))
     staged.timings["derive_links_s"] = time.perf_counter() - started
     return staged
 
@@ -190,6 +192,24 @@ def _derive_links(vault_root: Path, conn: sqlite3.Connection) -> None:
     except BaseException:
         conn.execute("ROLLBACK")
         raise
+
+
+def _derive_without_projected_blocks(
+    root: Path, staged: sqlite3.Connection, expected: Path, paths: list[str],
+) -> None:
+    """Replace affected projections on both sides using the same pinned canonical pages."""
+    (filename,) = staged.execute("SELECT file FROM pragma_database_list WHERE name='main'").fetchone()
+    with closing(sqlite3.connect(expected, isolation_level=None, uri=True)) as comparison:
+        comparison.execute("ATTACH DATABASE ? AS canonical", (Path(filename).as_uri() + "?mode=ro",))
+        comparison.execute("CREATE TEMP VIEW store_pages AS SELECT * FROM canonical.store_pages")
+        for target in (staged, comparison):
+            target.execute("BEGIN IMMEDIATE" if target is staged else "BEGIN")
+            try:
+                derive.rederive_pages(target, root, paths, include_relationships=False)
+                target.execute("COMMIT")
+            except BaseException:
+                target.execute("ROLLBACK")
+                raise
 
 
 def _load_files(vault_root: Path, conn: sqlite3.Connection, staged: Staged, revision: int) -> None:
@@ -675,7 +695,7 @@ def _install(
     revision: int,
     why: str,
 ) -> None:
-    """Install the staged rows in one writer transaction; the vault state records the mode id before it commits.
+    """Install staged rows after recording the mode and schema required to read them.
 
     A refusal or a kill before the commit leaves the store without its mode row, which is file mode, whatever
     the id says. A failure that leaves no store-mode row withdraws the claim and, once the store
@@ -684,6 +704,8 @@ def _install(
     drops it.
     """
     authority_check = lambda: session.require(token)  # noqa: E731 - the one closure both id calls share
+    # A store already created on this schema may never have needed the upgrade guard.
+    state_migration.record_collection_store_schema(root, authority_check=authority_check)
     state_migration.record_vault_store_compatibility(
         root, authority_check=authority_check, active=True
     )

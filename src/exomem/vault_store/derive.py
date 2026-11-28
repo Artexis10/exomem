@@ -219,7 +219,9 @@ def derive_paths(
     ).run()
 
 
-def rederive_pages(tx: Connection, root: Path, rels: list[str]) -> None:
+def rederive_pages(
+    tx: Connection, root: Path, rels: list[str], *, include_relationships: bool = True,
+) -> None:
     """Derive the rows of the stored pages at ``rels`` again from their own bytes.
 
     The registry job calls it once the registries and the access policy that the builders read have
@@ -227,7 +229,8 @@ def rederive_pages(tx: Connection, root: Path, rels: list[str]) -> None:
     re-resolves only the links that name one of its units, as an edit of its bytes would.
     """
     _Derivation(
-        tx, Path(root), written=[], removed=[], refreshed=list(rels), existing=frozenset(rels)
+        tx, Path(root), written=[], removed=[], refreshed=list(rels), existing=frozenset(rels),
+        include_relationships=include_relationships,
     ).run()
 
 
@@ -256,6 +259,7 @@ class _Derivation:
         metered: frozenset[str] = frozenset(),
         dependency_revisions: Mapping[str, int] | None = None,
         dependency_limit: int = 32,
+        include_relationships: bool = True,
     ) -> None:
         self.tx, self.root, self.existing = tx, root, existing
         self.before_triple = before
@@ -270,6 +274,7 @@ class _Derivation:
         # them and derives every page's rows (``rederive``), so a commit before then writes none.
         # Released owner1 stores stay writable before the owner2 job creates its optional projections.
         self.projections = frozenset(name for (name,) in tx.execute("SELECT name FROM sqlite_master WHERE type = 'table'"))
+        self.stored_relationships = include_relationships and "store_relationships" in self.projections
         self.links = "inbound_links" in self.projections
         self.unit_links = "graph_unit_links" in self.projections
         self.stamp_unit_links = self.unit_links and epistemic_graph.unit_links_generation_current(tx)
@@ -525,7 +530,7 @@ class _Derivation:
                 (dependency for _, page in pages if page is not None for dependency in page.dependencies),
             )
             stored: dict[str, list[relationships.BoundRelationship]] = {}
-            if "store_relationships" in self.projections and batch:
+            if self.stored_relationships and batch:
                 for edge in relationships.outgoing_for_paths(self.tx, batch):
                     stored.setdefault(edge.source.parent_path, []).append(edge)
                     if edge.target is not None:
