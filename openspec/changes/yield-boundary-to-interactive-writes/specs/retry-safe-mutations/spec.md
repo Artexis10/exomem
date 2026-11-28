@@ -1,7 +1,9 @@
 ## MODIFIED Requirements
 
 ### Requirement: Prompt MCP retries replay successful mutations
-The system SHALL detect a successful mutation repeated through MCP by the same authenticated principal with the same command and canonical arguments within a bounded retry window, and SHALL return the original result without executing the mutation leaf again. Replay SHALL resolve the persisted terminal even when the original call's derived-state acknowledgement failed after the commit, because the terminal is persisted before that acknowledgement. A replayed reply SHALL carry `replayed: true` in the compact projection and in `full`, and its `mutated`, `request_id` and `receipt_id` SHALL be those of the commit it replays, so the reply says the commit happened earlier. A reply that is not a replay SHALL carry no `replayed` key.
+The system SHALL detect a successful mutation repeated through MCP by the same authenticated principal with the same command and canonical arguments within a bounded retry window. It SHALL resolve the completed write without executing the mutation leaf again. Replay SHALL resolve the persisted terminal even when the original call's derived-state acknowledgement failed after the commit.
+
+The compact and full projections of a replayed terminal SHALL carry `replayed: true`. A cached terminal replay SHALL retain its stored `mutated`, `request_id` and `receipt_id`. A replay terminal built from a verified receipt SHALL report `status="replayed"` and `mutated=false` and retain original identities when available. An original terminal SHALL omit the replay marker. Legacy detail for a versioned terminal SHALL return the compatibility leaf without adding the terminal's replay marker. Pre-versioned results remain replayable under the mutation-terminal contract.
 
 #### Scenario: Lost save acknowledgement is retried
 - **WHEN** an authenticated MCP client repeats an identical successful additive save within the retry window
@@ -16,6 +18,16 @@ The system SHALL detect a successful mutation repeated through MCP by the same a
 - **WHEN** an artifact preservation commits, its derived-state acknowledgement fails, and the client repeats the identical call within the retry window
 - **THEN** the system returns the persisted batch terminal with `derived_sync="pending"` rather than `MUTATION_OUTCOME_UNKNOWN`
 - **AND** no file is fetched or written again
+
+#### Scenario: A verified receipt supplies a replay terminal
+- **WHEN** the system resolves a retry from a verified receipt and the client requests compact or full detail
+- **THEN** the terminal reports `status="replayed"`, `mutated=false` and `replayed: true`
+- **AND** the terminal retains the original identities available for the commit
+
+#### Scenario: A client requests legacy detail for a replayed terminal
+- **WHEN** the client retries a completed versioned mutation with `response_detail="legacy"`
+- **THEN** the system returns the compatibility leaf without adding the terminal's replay marker
+- **AND** the mutation leaf does not execute again
 
 ### Requirement: Implicit retry detection is narrowly scoped and bounded
 The system MUST scope implicit retry detection to the authenticated caller when available, MUST compare canonical command arguments, and MUST expire implicit completed entries after 600 seconds. Canonical arguments SHALL be the schema-validated arguments with defaults applied, with every string in Unicode NFC and with sorted keys, so one text composed in two ways is one request. The digest SHALL NOT depend on vault state. Calls from another authenticated principal or after the window SHALL execute normally.

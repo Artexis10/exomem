@@ -96,7 +96,9 @@ The other phases keep one hold. Their work is bounded by a constant or by second
 
 ### D6. Replay marker and digest
 
-`_replay` returns the stored terminal with `replayed: true`. `mutated`, `request_id` and `receipt_id` stay those of the original commit, so the reply names the write it replays. The marker leaves `mutated` alone because the egress filter binds the parent of a confined unit write on it. The implicit digest hashes the arguments with every string in Unicode NFC. FastMCP has already applied schema defaults to the arguments, so they need no second pass. The window stays 600 s, and the spec is corrected.
+For a cached terminal replay, `_replay` marks the terminal with `replayed: true` and keeps its `mutated`, `request_id` and `receipt_id`. The egress filter uses the original `mutated` field to bind the parent of a confined unit write. For a replay resolved from a verified receipt, the replay terminal reports `status="replayed"` and `mutated=false` and uses the original identities when available. Compact and full project the terminal marker. Legacy detail for a versioned terminal returns the compatibility leaf without adding the terminal marker. A reply cached before terminal versioning can carry the replay marker on the stored mapping itself.
+
+The implicit digest hashes the arguments with every string in Unicode NFC. FastMCP has already applied schema defaults to the arguments, so they need no second pass. The window stays 600 s, and the spec is corrected.
 
 Skipped: `repeat_of`, a field that lets an agent repeat a write on purpose. An agent that repeats on purpose changes the arguments or waits out the window, and the field adds a schema entry to every write tool.
 
