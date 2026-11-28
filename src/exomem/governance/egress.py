@@ -6508,14 +6508,15 @@ def exact_report_paths(paths: frozenset[str]) -> Iterator[None]:
 class _HeldEvidenceScope:
     """One request's held release proofs plus its lazily computed release identity."""
 
-    __slots__ = ("evidence", "identity", "identity_ready", "proven")
+    __slots__ = ("evidence", "identity", "identity_ready", "parents", "proven")
 
     def __init__(self, evidence: Mapping[str, Any]) -> None:
         self.evidence = evidence
         self.identity: str | None = None
         self.identity_ready = False
-        # A dependent row's evidence with its dependencies proven once for this request, or None.
-        self.proven: dict[str, Any | None] = {}
+        self.parents = membership_module.ParentSubjects()
+        # Reuse container binding checks. Part and frame proofs share parent subjects instead.
+        self.proven: dict[str, Any] = {}
 
 
 _HELD_REPORT_EVIDENCE: ContextVar[_HeldEvidenceScope | None] = ContextVar(
@@ -6567,13 +6568,16 @@ def _held_fast_evidence(vault_root: Path, rel_path: str) -> Any | None:
             return None
         if held.inherits is None:
             return held
-        if rel_path not in scope.proven:
-            scope.proven[rel_path] = None
-            inherited, parent = membership_module.live_inherited_scopes(
-                Path(vault_root), rel_path, held.inherits, policy_module.load(Path(vault_root)),
-            )
-            scope.proven[rel_path] = replace(held, scopes=(held.scopes[0] | inherited,), parent=parent)
-        return scope.proven[rel_path]
+        if rel_path in scope.proven:
+            return scope.proven[rel_path]
+        inherited, parent = membership_module.live_inherited_scopes(
+            Path(vault_root), rel_path, held.inherits, policy_module.load(Path(vault_root)),
+            parents=scope.parents,
+        )
+        proof = replace(held, scopes=(held.scopes[0] | inherited,), parent=parent)
+        if parent is not None:
+            scope.proven[rel_path] = proof
+        return proof
     except Exception:  # noqa: BLE001 - any unprovable dependency takes the full path
         return None
 

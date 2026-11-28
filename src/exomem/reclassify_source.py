@@ -65,7 +65,15 @@ from . import (
 )
 from . import move_file as move_file_module
 from .cli_ops import OpError
-from .governance import authorization_session_authority, bridges, egress, lifecycle, policy, store
+from .governance import (
+    authorization_session_authority,
+    bridges,
+    egress,
+    lifecycle,
+    membership,
+    policy,
+    store,
+)
 from .governance.authorization_session_lifecycle import AuthorizationSessionUnavailable
 from .governance.principal import RequestPrincipal, effective_principal
 from .kbdir import managed_form, managed_join, managed_split
@@ -1031,6 +1039,10 @@ class _HeldSink(dict):
     compiled = None
     identity = None
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.parents = membership.ParentSubjects()
+
 
 #: A private preview job's held-evidence sink, set only inside its own thread. Every other
 #: preview sees ``None`` and pays no capture cost.
@@ -1092,7 +1104,6 @@ def _record_held_row(
     text dies with this frame.
     """
     from . import document_containers, find_corpus
-    from .governance import membership
 
     if not rel.lower().endswith(".md") or sink.compiled is None:
         return
@@ -1112,7 +1123,9 @@ def _record_held_row(
     page = find_corpus.parse_page(vault_root / rel, 0, vault_root, content=raw)
     if page is None:
         return
-    basis = membership.held_scope_basis(page, sink.compiled, content_hash=digest)
+    basis = membership.held_scope_basis(
+        page, sink.compiled, content_hash=digest, parents=sink.parents,
+    )
     if basis is None:
         return
     own, inherits = basis

@@ -6018,3 +6018,95 @@ def test_a_dependent_held_row_releases_unread_until_a_dependency_changes(
     assert withheld["entries"] == []
     with pytest.raises(OpError, match="RECLASSIFICATION_PREVIEW_STALE"):
         retained.require_complete_projection(withheld)
+    if change == "part source retagged":
+        # Full verification must also see the new parent without clearing its earlier cache.
+        with request_scope(_external()):
+            assert egress.postfilter("list_directory", {"entries": [{"path": rel}]}, vault) == {
+                "entries": [],
+            }
+
+
+def test_held_parts_share_one_parent_read_per_report_request(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two rows share a settled parent's byte proof and still apply its live scopes."""
+    from exomem import extraction_parts, reclassification_preview, reserved_paths
+    from exomem import vault as vault_module
+
+    parent = vault / "Knowledge Base/Sources/Source.md"
+    parent.parent.mkdir(parents=True, exist_ok=True)
+    parent.write_text(
+        "---\ntype: source\ntags: [general-parent]\n---\n" + "Text. " * 6000, encoding="utf-8",
+    )
+    entries = []
+    for number in (2, 3):
+        child = extraction_parts.part_path(parent, number)
+        child.parent.mkdir(exist_ok=True)
+        child.write_text("---\npart_of: Source\n---\n# Extracted text\n", encoding="utf-8")
+        entries.append({"path": child.relative_to(vault).as_posix()})
+    _tag_scope(vault, "private-parent")
+    # Use the settled-generation path without waiting for the filesystem's racy window.
+    monkeypatch.setattr(vault_module, "GENERATION_RACY_WINDOW_NS", 0)
+    parent_read = reserved_paths.read_generic_bytes
+    reads = 0
+    parent_rel = parent.relative_to(vault).as_posix()
+
+    def count_parent(root, path, **kwargs):
+        nonlocal reads
+        if str(path) == parent_rel:
+            reads += 1
+        return parent_read(root, path, **kwargs)
+
+    with request_scope(_external()):
+        held = {entry["path"]: _recorded_row(vault, entry["path"]) for entry in entries}
+        report = reclassification_preview.RetainedReport(
+            {"entries": entries}, parent_rel, held_evidence=held,
+        )
+        monkeypatch.setattr(reserved_paths, "read_generic_bytes", count_parent)
+        with (
+            egress.exact_report_paths(report.exact_paths),
+            egress.held_report_evidence(report.held_evidence),
+        ):
+            released = egress.postfilter("list_directory", report, vault)
+
+    report.require_complete_projection(released)
+    assert reads == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires distinct Unicode spellings on disk")
+def test_held_part_inherits_from_same_physical_parent_as_ordinary_membership(vault: Path) -> None:
+    """An NFKC twin must not supply a held part's parent scope."""
+    from exomem import extraction_parts, find_corpus
+    from exomem.governance import membership
+
+    source_folder = vault / "Knowledge Base/Sources"
+    source_folder.mkdir(parents=True, exist_ok=True)
+    parent = source_folder / "Cafe\u0301.md"
+    twin = source_folder / "Caf\u00e9.md"
+    parent.write_text("---\ntags: [private-parent]\n---\n# Physical parent\n", encoding="utf-8")
+    if twin.exists():
+        pytest.skip("filesystem folds the spellings")
+    twin.write_text("---\ntags: [general-parent]\n---\n# Other parent\n", encoding="utf-8")
+    _tag_scope(vault, "private-parent")
+    path = extraction_parts.part_path(parent, 2)
+    path.parent.mkdir()
+    path.write_text("---\npart_of: Source\n---\n# Extracted text\n", encoding="utf-8")
+    child = find_corpus.parse_page(path, path.stat().st_mtime, vault)
+    assert child is not None
+    assert child.snapshot_hash is not None
+    compiled = policy.load(vault)
+
+    ordinary = membership.evaluate_snapshot(child, compiled, content_hash=child.snapshot_hash)
+    parents = membership.ParentSubjects()
+    basis = membership.held_scope_basis(
+        child, compiled, content_hash=child.snapshot_hash, parents=parents,
+    )
+
+    assert ordinary == {SCOPE_ID}
+    assert basis is not None
+    own, dependency = basis
+    assert dependency is not None
+    live, _ = membership.live_inherited_scopes(
+        vault, child.rel_path, dependency, compiled, parents=parents,
+    )
+    assert own | live == ordinary

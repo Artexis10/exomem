@@ -18,13 +18,13 @@ A background reclassification preview SHALL run under its own build budget. On L
 
 ### Requirement: A dependent governed referrer is released without rereading its bytes
 
-On Linux, the terminal release SHALL release a referrer that inherits scopes from a container parent, an extraction-part Source, or a scene-frame video from held evidence for its own bytes, plus current proof of each dependency read from that dependency. It SHALL use full verification when the referrer or any dependency changed, for parts and frames with a container binding, for bridge rows, and on native Windows.
+On Linux, the terminal release SHALL use held evidence for the unchanged referrer's bytes and prove its inherited scopes against the current dependencies. Eligible referrers are container members, extraction parts and scene frames. Parts and frames SHALL use the same physical parent as ordinary membership and reuse its selector inputs only while its settled file version matches. Release SHALL use full verification when it cannot prove a dependency, for parts and frames whose parent belongs to the store or inherits its own scopes, for bridge rows, and on native Windows.
 
 #### Scenario: A dependent referrer releases from held evidence
 
 - **WHEN** a report page on Linux holds a governed referrer with a current container parent, extraction-part Source, or scene-frame video
 - **THEN** release reads none of the referrer's bytes
-- **AND** a retagged parent, or a replaced container payload, withholds that row and refuses the page
+- **AND** a parent retag that restricts disclosure, or a replaced container payload, withholds that row and refuses the page
 
 #### Scenario: A bridge row or a changed referrer takes the full path
 

@@ -13,8 +13,8 @@
 
 ## 3. Dependent release
 
-- [x] 3.1 Release a referrer with a container parent or bridge dependency from held evidence plus current proof of each dependency, with zero rereads of the referrer, and fall back when any dependency changes.
-  - Container members, extraction parts and scene frames release this way. Bridge rows keep full verification (see design.md).
+- [x] 3.1 Release an eligible container member, extraction part or scene frame using held evidence and current proof of its dependencies. Read zero referrer bytes at release and use full verification when a dependency cannot be proved.
+  - Parts and frames resolve the same physical parent as ordinary membership. Two parts with one settled parent require one parent byte read per report request. Bridge rows keep full verification.
 
 ## 4. Delivery
 
