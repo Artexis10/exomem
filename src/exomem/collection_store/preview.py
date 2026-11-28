@@ -915,19 +915,20 @@ def dispatch(
     )
 
 
-def _dispatch_arguments(vault_root, binding, action, values, prove):
+def _dispatch_arguments(vault_root, binding, action, values, prove, *, released_manifest=None):
     if binding[2]:
         from .capability import require_records_summary_route
 
-        require_records_summary_route(vault_root, binding[1], action, values, prove=prove)
+        require_records_summary_route(vault_root, binding[1], action, values, prove=prove,
+                                      released_manifest=released_manifest)
     return {name: value for name, value in values.items() if value is not None}
 
 
-def _prepare_row_save(vault_root, binding, profile, action, values):
+def _prepare_row_save(vault_root, binding, profile, action, values, *, released_manifest=None):
     """Check the route and select its writer call without invoking it."""
     writer = binding[1]
     prove = _prover(vault_root, writer, binding)
-    args = _dispatch_arguments(vault_root, binding, action, values, prove)
+    args = _dispatch_arguments(vault_root, binding, action, values, prove, released_manifest=released_manifest)
     selector = args.get("collection", args.get("manifest_path"))
     if prove().marker is not None and (selector is None or selected_writer(vault_root, selector, prove=prove) is None):
         return None
@@ -946,8 +947,8 @@ def _prepare_row_save(vault_root, binding, profile, action, values):
     return writer, writer.update_record, collection, args
 
 
-def row_save_refusal(vault_root, profile, action, values) -> collections.CollectionError | None:
-    """Read the first refusal of a routed row save in the caller's bound snapshot."""
+def row_save_refusal(vault_root, profile, action, values, *, released_manifest) -> collections.CollectionError | None:
+    """Read the first refusal of a row save after resolving its manifest in the same snapshot."""
     from inspect import signature
 
     from . import record_inputs
@@ -955,7 +956,7 @@ def row_save_refusal(vault_root, profile, action, values) -> collections.Collect
     binding = _BOUND.get()
     if binding is None or not _bound_to(binding, vault_root):
         return None
-    save = _prepare_row_save(vault_root, binding, profile, action, values)
+    save = _prepare_row_save(vault_root, binding, profile, action, values, released_manifest=released_manifest)
     if save is None:
         return None
     writer, method, collection, args = save

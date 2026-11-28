@@ -2949,7 +2949,14 @@ class LeaseCoordinatorClient:
             open_request = urllib.request.build_opener(
                 urllib.request.ProxyHandler({}), _SingleHostRedirectHandler()
             ).open
-        return open_request(request, timeout=self.config.timeout_seconds)
+        return open_request(request, timeout=self._request_timeout())
+
+    def _request_timeout(self) -> float:
+        checkpoint = request_budget.store_read_checkpoint()
+        if checkpoint is not None:
+            checkpoint()
+            return min(self.config.timeout_seconds, checkpoint.remaining())
+        return self.config.timeout_seconds
 
     def _get_kept_alive(self, request: urllib.request.Request) -> Any:
         """The JSON of a GET to the loopback coordinator, over this thread's one open connection.
@@ -2972,12 +2979,17 @@ class LeaseCoordinatorClient:
 
     def _exchange(self, request: urllib.request.Request) -> tuple[http.client.HTTPResponse, bytes]:
         connection = getattr(self._kept, "connection", None)
+        timeout = self._request_timeout()
         if connection is None:
             origin = urllib.parse.urlsplit(self.config.url or "")
             connect = http.client.HTTPSConnection if origin.scheme == "https" else http.client.HTTPConnection
             connection = self._kept.connection = connect(
-                origin.hostname, origin.port, timeout=self.config.timeout_seconds)
+                origin.hostname, origin.port, timeout=timeout)
         try:
+            if timeout != connection.timeout:
+                connection.timeout = timeout
+                if connection.sock is not None:
+                    connection.sock.settimeout(timeout)
             connection.request("GET", request.selector, headers=dict(request.header_items()))
             response = connection.getresponse()
             data = response.read()
@@ -5588,12 +5600,14 @@ class LeaseManager:
         except Exception:  # noqa: BLE001 - unknown routing or an unreadable store keeps the process fenced
             return None
 
-    def _store_refused(self) -> bool:
+    def _store_refused(self, *, wait_for_publication=True) -> bool:
         """With the lock held: wait out a coalesced publication, then refuse closure or handoff.
 
         A thread holding a mutation boundary or a store checkout passes a publication
         (which needs both free), so the publication defers itself and never deadlocks.
         """
+        if self._store_publishing and not wait_for_publication:
+            return True
         thread = threading.get_ident()
         exempt = self._store_publishing and (
             thread in self._store_borrowers
@@ -8093,14 +8107,14 @@ class LeaseManager:
         A progress check (``progress_check``) trusts a fresh local grant: an effect that follows
         it validates again here outside one, and a fence change revokes the token at the coordinator.
         """
-        with self._lock:
+        with request_budget.store_read_lock(self._lock):
             if self._fencing_token != fencing_token:
                 self._raise_fenced(fencing_token)
             if _PROGRESS_CHECK.get() and self._grant_fresh():
                 return
         assert self.client is not None
         record = self.client.status()
-        with self._lock:
+        with request_budget.store_read_lock(self._lock):
             still_current = self._fencing_token == fencing_token
             coordinator_current = (
                 record.holder == self.config.replica_id and record.fencing_token == fencing_token
@@ -8249,10 +8263,10 @@ class LeaseManager:
         self._renewer.start()
 
     @contextmanager
-    def _collection_store_checkout(self):
+    def _collection_store_checkout(self, *, wait_for_publication=True):
         thread = threading.get_ident()
-        with self._lock:
-            if self._stop.is_set() or self._store_refused():
+        with request_budget.store_read_lock(self._lock):
+            if self._stop.is_set() or self._store_refused(wait_for_publication=wait_for_publication):
                 from .collection_store import connection as store_connection
 
                 error = store_connection.busy("collection store handoff is in progress")

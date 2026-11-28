@@ -58,6 +58,13 @@ For store-owned Planning saves, the intake SHALL check supplied values, includin
 - **AND** the summary release gate is off and the store is busy
 - **THEN** the save queues for the route's own refusal at replay without disclosing the collection's enum values
 
+#### Scenario: A read-only Cloud cell refuses a save with a backlog
+
+- **WHEN** a Cloud cell is in read-only mode and an earlier save is queued
+- **AND** an owner sends a Planning save with an undeclared value
+- **THEN** the ordinary dispatcher refuses the write with `CLOUD_CELL_READ_ONLY`
+- **AND** the intake holds only the earlier save and discloses no allowed values
+
 #### Scenario: A busy add to a file collection is queued
 
 - **WHEN** an owner sends a `plan_memory` add with an undeclared enum value to a file-backed collection
@@ -99,7 +106,7 @@ The intake SHALL mark the queue before it reads the declaration and, after a ref
 
 ### Requirement: The intake records which queued saves may change a declaration
 
-When the intake accepts a save, it SHALL record whether the save may change a declaration: its command declares `sets_any_frontmatter_field`, or it may carry a non-null `manifest_text`. A save without a record, which an earlier release or a store from before the record wrote, SHALL count as one that may. An intake store without that record SHALL gain it, empty, at its next acceptance, without reading a stored save.
+The intake SHALL mark an accepted save as a possible declaration change when its command declares `sets_any_frontmatter_field` or may carry non-null `manifest_text`. An unmarked legacy save SHALL also count. At the next acceptance, an older store SHALL initialise the last possible change to its highest existing sequence in fixed work without scanning its saves.
 
 #### Scenario: A store from before the record keeps a save behind its open revision queued
 
@@ -122,9 +129,22 @@ When the intake accepts a save, it SHALL record whether the save may change a de
 - **THEN** the save is queued
 - **AND** the upgrade holds none of the stored saves in memory
 
+#### Scenario: The first acceptance does fixed work whatever the old history holds
+
+- **WHEN** a save reaches the intake for the first time after upgrading an older store
+- **THEN** the upgrade records the last legacy sequence without scanning or sorting past saves
+- **AND** the work to add the marker does not grow with the number of past saves
+
 ### Requirement: The declared value check stays within its budget whatever the queue holds
 
-Each look at the queue, for a value the check accepts and for a refusal alike, SHALL cost the same whatever the queue holds, by an index seek for each part. The queue reads and the declaration read SHALL share one 0.5 s budget, which also bounds opening the queue and waiting for its locks. Each statement SHALL wait only for the time that the budget has left, and none once it is spent. An answer that arrives after the budget SHALL be unknown, so the save queues.
+Each queue read SHALL use fixed work. The check SHALL have 0.5 s to decide. Queue lock waits, store admission and coordinator timeouts SHALL use at most the time left. A locked store reader SHALL stop the check. Planning SHALL cap store SQL work. If either budget runs out, the save SHALL queue. The service SHALL release a borrowed checkout before returning the receipt, even after the decision deadline.
+
+#### Scenario: A Planning save queues when its authorisation proof needs too much SQL
+
+- **WHEN** an owner sends a busy Planning save with an undeclared value
+- **AND** the store needs more SQL work than the busy check allows to authorise the save
+- **THEN** the save is queued
+- **AND** its replay follows the normal store checks
 
 #### Scenario: A busy save reads no more of a longer queue
 

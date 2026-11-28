@@ -755,7 +755,8 @@ def test_a_record_value_is_still_refused_when_an_ordinary_queued_save_applies_du
 def _drop_the_declaration_marker(vault: Path) -> None:
     """Make the intake store one from before `declaration_change`."""
     with write_intake._write(vault) as conn:
-        conn.execute("DROP INDEX intake_declaration_change")
+        conn.execute("DROP TRIGGER intake_declaration_on_insert")
+        conn.execute("DROP TABLE intake_declaration_state")
         conn.execute("ALTER TABLE intake DROP COLUMN declaration_change")
 
 
@@ -898,6 +899,29 @@ def test_a_store_from_before_the_declaration_marker_upgrades_without_reading_its
         tracemalloc.stop()
     assert receipt["state"] == "queued"
     assert peak < len(long_text), f"the upgrade held {peak} bytes while 4 saves of {len(long_text)} bytes waited"
+
+
+def test_declaration_marker_upgrade_does_fixed_work_on_a_longer_intake_history() -> None:
+    """The first busy save after upgrade must not scan or sort the old queue while holding its write lock."""
+    import sqlite3
+    from contextlib import closing
+
+    def migration_steps(rows: int) -> int:
+        steps = 0
+
+        def count() -> int:
+            nonlocal steps
+            steps += 1
+            return 0
+
+        with closing(sqlite3.connect(":memory:")) as conn:
+            conn.execute("CREATE TABLE intake (seq INTEGER PRIMARY KEY AUTOINCREMENT, arguments TEXT)")
+            conn.executemany("INSERT INTO intake (arguments) VALUES ('{}')", [() for _ in range(rows)])
+            conn.set_progress_handler(count, 1)
+            write_intake._add_declaration_marker(conn)
+        return steps
+
+    assert migration_steps(30) == migration_steps(30_000)
 
 
 class _CountedQueueReads:

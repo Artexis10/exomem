@@ -260,22 +260,27 @@ def may_change_declaration(command: Any, arguments: Any) -> bool:
 #: one. A writer that does not know the column, such as an earlier release after a rollback, leaves it NULL, and
 #: NULL counts as may change: only a 0 that an acceptance wrote says that a save cannot.
 _DECLARATION_COLUMN = "declaration_change INTEGER"
-#: The saves that may change a declaration. The index and its read share this one predicate, because SQLite uses
-#: a partial index only for a query that implies the index's own condition.
-_DECLARATION_CHANGE = "declaration_change IS NOT 0"
-#: The index holds the column too, so a seek answers from the index and never reads a matched save's arguments.
-_DECLARATION_INDEX = (
-    "CREATE INDEX IF NOT EXISTS intake_declaration_change ON intake(seq, declaration_change) "
-    f"WHERE {_DECLARATION_CHANGE}"
-)
-
-
 def _add_declaration_marker(conn: sqlite3.Connection) -> None:
-    """Give a store made before `declaration_change` existed that column and its index, in the caller's write
-    transaction. Every save already stored keeps NULL, which counts as may change, so the upgrade reads no save."""
+    """Start the declaration marker with a single seek, in the caller's write transaction."""
+    present = conn.execute(
+        "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='intake_declaration_state'"
+    ).fetchone()
+    if present is not None:
+        return
     if "declaration_change" not in {row[1] for row in conn.execute("PRAGMA table_info(intake)")}:
         conn.execute(f"ALTER TABLE intake ADD COLUMN {_DECLARATION_COLUMN}")
-    conn.execute(_DECLARATION_INDEX)
+    conn.execute("CREATE TABLE intake_declaration_state ("
+                 "id INTEGER PRIMARY KEY CHECK(id=1), last_seq INTEGER NOT NULL)")
+    # A legacy save may change a declaration. The primary-key seek covers all legacy saves at once.
+    conn.execute("INSERT INTO intake_declaration_state VALUES (1, COALESCE((SELECT MAX(seq) FROM intake), 0))")
+    # Older writers run this trigger too. Their omitted column is NULL and must count as a possible change.
+    conn.execute("""
+        CREATE TRIGGER intake_declaration_on_insert AFTER INSERT ON intake
+        WHEN NEW.declaration_change IS NOT 0
+        BEGIN
+            UPDATE intake_declaration_state SET last_seq = MAX(last_seq, NEW.seq) WHERE id = 1;
+        END
+    """)
 
 
 # --------------------------------------------------------------------------- identity and eligibility
@@ -1444,6 +1449,11 @@ def admission(command: Any, injected: tuple[Any, ...], kwargs: Mapping[str, Any]
     """The intake admission for one dispatched call, or ``None`` when the intake does not apply."""
     if _REPLAY.get() is not None or not getattr(command, "busy_intake", False) or not injected or not enabled():
         return None
+    from . import cloud_cell
+
+    # Let the ordinary dispatcher refuse a Cloud write before the intake reads or accepts it.
+    if cloud_cell.cloud_read_only_enabled():
+        return None
     drainer = drainer_for(injected[0])
     if drainer is None:
         return None
@@ -1607,11 +1617,11 @@ def declaration_mark(vault_root: Path, *, seconds: float) -> int | None:
     ended save stays a row until retention or dismissal removes it. So a change that commits between the two
     reads comes from a save that was open at the mark or was accepted after it, each at or above the mark.
 
-    The mark is the first open save's `seq`, else one more than the last save's, else 1. Each part is one seek:
-    `MAX(seq)` on the primary key and the lowest `seq` of each open state on `intake_state`."""
+    The mark is the first open save's `seq`, else one more than the last assigned `seq`. SQLite keeps that
+    number even when the save is deleted. The lowest `seq` of each open state is a seek on `intake_state`."""
     row = _declaration_query(
         vault_root, seconds,
-        "SELECT COALESCE((SELECT MAX(seq) FROM intake), 0), "
+        "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'intake'), 0), "
         "(SELECT MIN(seq) FROM intake WHERE state = ?), (SELECT MIN(seq) FROM intake WHERE state = ?)",
         _OPEN_STATES, empty=(0, None, None),
     )
@@ -1623,12 +1633,11 @@ def declaration_mark(vault_root: Path, *, seconds: float) -> int | None:
 
 def declaration_changed_since(vault_root: Path, marker: int, *, seconds: float) -> bool | None:
     """Whether a save at or after `marker`, in whatever state it is now, may have changed a declaration; None
-    where that is unknown. A save counts unless its acceptance recorded 0 (`_DECLARATION_COLUMN`), so a save that
-    a writer without the column stored counts, and a store without the column answers unknown. It is one seek on
-    `intake_declaration_change`, which holds only the saves that count, whatever else the queue holds."""
+    where that is unknown. Read the last possible change from one row. A deleted save can still count until
+    the first open save moves past it. A store that has not added the marker answers unknown."""
     row = _declaration_query(
         vault_root, seconds,
-        f"SELECT EXISTS (SELECT 1 FROM intake WHERE {_DECLARATION_CHANGE} AND seq >= ?)",
+        "SELECT last_seq >= ? FROM intake_declaration_state WHERE id = 1",
         (marker,), empty=(0,),
     )
     return None if row is None else bool(row[0])

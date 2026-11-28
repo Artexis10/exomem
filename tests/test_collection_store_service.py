@@ -2678,6 +2678,14 @@ RELEASE_PLAN = "Release Plan"
 RELEASE_PLAN_ID = "77777777-7777-4777-8777-777777777777"
 
 
+def _create_release_plan_with_effort(root):
+    text = sqlite_text(manifest_text("planning").replace(CID, RELEASE_PLAN_ID).replace("title: Work", f"title: {RELEASE_PLAN}"))
+    text = text.replace("    area: {type: string}\n", "    area: {type: string}\n    effort: {type: enum, enum: [small, large]}\n")
+    call(root, "plan_memory", action="create", manifest_path=manifest_path("planning").replace("Work", "Release"),
+         manifest_text=text, why="plan the releases")
+    return text
+
+
 @pytest.mark.parametrize(
     ("named_by", "status", "refused"),
     [
@@ -2747,10 +2755,7 @@ def test_an_area_update_that_deletes_a_field_it_lacks_is_refused_for_its_value_w
     from exomem import write_intake
 
     root = service.root
-    text = sqlite_text(manifest_text("planning").replace(CID, RELEASE_PLAN_ID).replace("title: Work", f"title: {RELEASE_PLAN}"))
-    text = text.replace("    area: {type: string}\n", "    area: {type: string}\n    effort: {type: enum, enum: [small, large]}\n")
-    call(root, "plan_memory", action="create", manifest_path=manifest_path("planning").replace("Work", "Release"),
-         manifest_text=text, why="plan the releases")
+    _create_release_plan_with_effort(root)
     call(root, "plan_memory", action="add", collection=RELEASE_PLAN, why="plan the platform",
          item={"title": "Platform", "kind": "area"})
     view = call(root, "plan_memory", action="query", collection=RELEASE_PLAN)
@@ -2777,10 +2782,7 @@ def test_a_busy_plan_add_queues_if_a_revision_declares_its_value_during_the_chec
     from exomem import write_intake
 
     root = service.root
-    text = sqlite_text(manifest_text("planning").replace(CID, RELEASE_PLAN_ID).replace("title: Work", f"title: {RELEASE_PLAN}"))
-    text = text.replace("    area: {type: string}\n", "    area: {type: string}\n    effort: {type: enum, enum: [small, large]}\n")
-    call(root, "plan_memory", action="create", manifest_path=manifest_path("planning").replace("Work", "Release"),
-         manifest_text=text, why="plan the releases")
+    text = _create_release_plan_with_effort(root)
     guards = call(root, "plan_memory", action="inspect", collection=RELEASE_PLAN)["lifecycle_guards"]
     command = next(c for c in commands.product_commands_for("mcp") if c.name == "plan_memory")
     resume = threading.Event()
@@ -2851,10 +2853,7 @@ def test_a_busy_planning_save_gets_the_refusal_that_the_same_save_gets_directly(
     from exomem import write_intake
 
     root = service.root
-    text = sqlite_text(manifest_text("planning").replace(CID, RELEASE_PLAN_ID).replace("title: Work", f"title: {RELEASE_PLAN}"))
-    text = text.replace("    area: {type: string}\n", "    area: {type: string}\n    effort: {type: enum, enum: [small, large]}\n")
-    call(root, "plan_memory", action="create", manifest_path=manifest_path("planning").replace("Work", "Release"),
-         manifest_text=text, why="plan the releases")
+    _create_release_plan_with_effort(root)
     target = {}
     if stored_kind is not None:
         item = {"title": "Platform", "kind": "area"} if stored_kind == "area" else {
@@ -2895,10 +2894,7 @@ def test_a_busy_plan_add_does_not_disclose_values_on_a_disabled_summary_route(se
     from exomem import write_intake
 
     root = service.root
-    text = sqlite_text(manifest_text("planning").replace(CID, RELEASE_PLAN_ID).replace("title: Work", f"title: {RELEASE_PLAN}"))
-    text = text.replace("    area: {type: string}\n", "    area: {type: string}\n    effort: {type: enum, enum: [small, large]}\n")
-    call(root, "plan_memory", action="create", manifest_path=manifest_path("planning").replace("Work", "Release"),
-         manifest_text=text, why="plan the releases")
+    _create_release_plan_with_effort(root)
     monkeypatch.setattr(capability, "RELEASED", capability.RELEASED - {capability.RECORDS_SUMMARY_V1})
     save = {"action": "add", "collection": RELEASE_PLAN, "why": "size the release",
             "item": {"title": "Ship it", "kind": "area", "effort": "medium"}}
@@ -2924,6 +2920,98 @@ def test_a_busy_plan_add_does_not_disclose_values_on_a_disabled_summary_route(se
             assert (error["code"], error["message"]) == (direct.value.code, direct.value.message)
     finally:
         write_intake.stop(root)
+
+
+def test_a_cloud_read_only_cell_refuses_a_busy_planning_write_before_intake(service, monkeypatch):
+    """An existing queue must not bypass read-only mode or expose the collection's enum choices."""
+    from exomem import cloud_cell, write_intake
+
+    root = service.root
+    _create_release_plan_with_effort(root)
+    command = next(c for c in commands.product_commands_for("mcp") if c.name == "plan_memory")
+    monkeypatch.setattr(write_intake, "_claim_head", lambda root: 0.05)
+    try:
+        with _store_thread_held_with_intake_on(service, monkeypatch), request_scope(OWNER):
+            first = writer_lease.invoke_command(
+                command, root, implicit_idempotency_scope="principal:session-a", action="add",
+                collection=RELEASE_PLAN_ID, why="size the earlier release",
+                item={"title": "Earlier release", "kind": "area", "effort": "small"})
+        assert first["state"] == "queued"
+        monkeypatch.setenv(cloud_cell.CLOUD_READ_ONLY_ENV, "1")
+        with request_scope(OWNER), pytest.raises(OpError) as refused:
+            writer_lease.invoke_command(
+                command, root, implicit_idempotency_scope="principal:session-b", action="add",
+                collection=RELEASE_PLAN_ID, why="size the release",
+                item={"title": "Ship it", "kind": "area", "effort": "medium"})
+        assert refused.value.code == "CLOUD_CELL_READ_ONLY"
+        assert [item["ref"] for item in write_intake.read(root)["items"]] == [first["queued_write"]["ref"]]
+    finally:
+        write_intake.stop(root)
+
+
+def test_a_busy_plan_add_queues_when_authorisation_needs_to_scan_many_holds(service, monkeypatch):
+    """The busy check cannot spend work proportional to another collection's held candidates."""
+    from exomem import write_intake
+
+    root = service.root
+    _create_release_plan_with_effort(root)
+    # These rows belong to the other collection. The write's release proof must look past them.
+    with closing(sqlite3.connect(connection.store_path(root))) as database, database:
+        database.executemany(
+            "INSERT INTO held_candidates (held_id, collection_id, kind, candidate_json) "
+            "VALUES (?, ?, 'write-refusal', '{}')",
+            ((f"held-{number}", CID) for number in range(10_000)))
+    command = next(c for c in commands.product_commands_for("mcp") if c.name == "plan_memory")
+    try:
+        with _store_thread_held_with_intake_on(service, monkeypatch), request_scope(OWNER):
+            receipt = writer_lease.invoke_command(
+                command, root, implicit_idempotency_scope="principal:session-b", action="add",
+                collection=RELEASE_PLAN_ID, why="size the release",
+                item={"title": "Ship it", "kind": "area", "effort": "medium"})
+            assert receipt["state"] == "queued"
+        ref = receipt["queued_write"]["ref"]
+        _until(lambda: write_intake.read(root, ref=ref)["queued_write"]["state"] == "failed")
+        assert write_intake.read(root, ref=ref)["queued_write"]["error"]["code"] == "SCHEMA_ENUM"
+    finally:
+        write_intake.stop(root)
+
+
+@pytest.mark.parametrize("steps", [None, 16_000], ids=["records", "planning"])
+def test_a_bounded_ownership_read_does_not_wait_for_a_locked_store(tmp_path, steps):
+    """A busy write's passive check must stop at the first locked schema read."""
+    from exomem import request_budget
+
+    path = tmp_path / "locked.sqlite"
+    with closing(sqlite3.connect(path)) as locker:
+        locker.execute("CREATE TABLE store_meta (key TEXT PRIMARY KEY, value TEXT)")
+        locker.execute("BEGIN EXCLUSIVE")
+        checkpoint = request_budget.ReadCheckpoint(request_budget.RequestBudget(seconds=0.5),
+                                                   bound_store_reads=True, store_sql_steps=steps)
+        started = time.monotonic()
+        with request_budget.checking(checkpoint), pytest.raises(sqlite3.OperationalError, match="locked"):
+            with connection.ownership_reader(path):
+                pytest.fail("the locked store admitted a reader")
+        assert time.monotonic() - started < 1
+
+
+def test_a_passive_read_declines_an_active_store_publication(service, monkeypatch):
+    """An ongoing view publication must not make the busy check wait for the writer's timeout."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from exomem import request_budget
+
+    manager = service.manager
+    monkeypatch.setattr(manager, "_mutation_timeout_seconds", 3.0)
+
+    def read_beside_publication():
+        check = request_budget.ReadCheckpoint(request_budget.RequestBudget(seconds=0.5), bound_store_reads=True)
+        with request_budget.checking(check), pytest.raises(OpError) as refused:
+            runtime.read_served(service.root, lambda: pytest.fail("publication admitted a passive reader"))
+        return refused.value.code
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with manager._store_publication_window(manager._fencing_token, patience=5):
+            assert pool.submit(read_beside_publication).result(timeout=1) == "COLLECTION_STORE_BUSY"
 
 
 def counted_appends(monkeypatch):

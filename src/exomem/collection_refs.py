@@ -213,6 +213,7 @@ def decide_on_declaration(
     *,
     profile: str,
     decide: Callable[[str, collections.CollectionManifest], _Decision],
+    store_sql_steps: int | None = None,
 ) -> _Decision | None:
     """`decide` over the manifest that `collection` names, as a request thread reads it now; None where that is unknown.
 
@@ -234,8 +235,11 @@ def decide_on_declaration(
             return decide(path, record_governance.resolve_collection_without_receipt(vault_root, path))
 
     try:
-        with request_budget.checking(request_budget.ReadCheckpoint(budget)):
-            return store_runtime.read_served(vault_root, read)
+        check = request_budget.ReadCheckpoint(budget, bound_store_reads=True, store_sql_steps=store_sql_steps)
+        with request_budget.checking(check):
+            result = store_runtime.read_served(vault_root, read)
+            check()
+            return result
     except request_budget.ReadBudgetExhausted:
         return None
     except Exception as error:  # noqa: BLE001 - an unknown, withheld or unreadable collection keeps the replay's own refusal

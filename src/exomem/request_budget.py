@@ -420,20 +420,37 @@ _READ_CHECKPOINT: ContextVar[ReadCheckpoint | None] = ContextVar(
 class ReadCheckpoint:
     """The same allowance on the caller and its accepted read batches."""
 
-    def __init__(self, budget: RequestBudget, *, bound_disclosure: bool = False) -> None:
+    def __init__(self, budget: RequestBudget, *, bound_disclosure: bool = False,
+                 bound_store_reads: bool = False, store_sql_steps: int | None = None) -> None:
         self.budget = budget
         self.bound_disclosure = bound_disclosure
+        self.bound_store_reads = bound_store_reads
+        self._store_sql_steps = store_sql_steps
 
     def remaining(self) -> float:
         return self.budget.remaining()
 
     def __call__(self) -> None:
-        if self.remaining() <= 0:
+        if self.remaining() <= 0 or (self._store_sql_steps is not None and self._store_sql_steps <= 0):
             raise ReadBudgetExhausted()
+
+    def store_sql_progress(self, steps: int) -> None:
+        if self._store_sql_steps is not None:
+            self._store_sql_steps -= steps
 
 
 def current_checkpoint() -> ReadCheckpoint | None:
     return _READ_CHECKPOINT.get()
+
+
+def store_read_checkpoint() -> ReadCheckpoint | None:
+    check = current_checkpoint()
+    return check if check is not None and check.bound_store_reads else None
+
+
+def store_read_lock(lock):
+    """Keep passive store reads within their allowance when a lock is held."""
+    return locked(lock) if store_read_checkpoint() is not None else lock
 
 
 def checkpoint() -> None:
