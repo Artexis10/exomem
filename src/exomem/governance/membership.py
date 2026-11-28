@@ -797,6 +797,18 @@ def _split_scope_basis(
     return evaluate_snapshot(page, policy, content_hash=content_hash), None
 
 
+def require_current_held_payload(root: Path, inherited: Mapping[str, Any]) -> None:
+    """Prove that the artifact a held container record covered still has its file version."""
+    try:
+        payload = root / inherited["claim"]["artifact_path"]
+        current = held_fs.stat_witness(payload.lstat())
+        stored = tuple(inherited["artifact_witness"])
+    except (OSError, KeyError, TypeError) as error:
+        raise MembershipUnresolved("container payload is unavailable") from error
+    if current != stored:
+        raise MembershipUnresolved("container payload changed")
+
+
 def live_inherited_scopes(
     root: Path, path: str, inherited: Mapping[str, Any], policy: Policy, *, parents: ParentSubjects,
 ) -> tuple[frozenset[str], originals.BinaryBinding | None]:
@@ -809,9 +821,7 @@ def live_inherited_scopes(
         return parents.scopes(root, inherited["parent"], policy, held_only=True), None
     if kind == CONTAINER_INHERITANCE:
         try:
-            payload = root / inherited["claim"]["artifact_path"]
-            if list(held_fs.stat_witness(os.stat(payload, follow_symlinks=False))) != inherited["artifact_witness"]:
-                raise MembershipUnresolved("container payload changed")
+            require_current_held_payload(root, inherited)
             binding = document_containers._parent_binding_for_page(
                 root, path, {"container_member": inherited["claim"]}, artifact_proven=True,
             )
@@ -820,7 +830,9 @@ def live_inherited_scopes(
         if binding is None:
             raise MembershipUnresolved("container parent provenance is unavailable")
         scopes = _current_parent_scopes(root, inherited["claim"]["parent_page"], policy)
-        return scopes | evaluate_path_only(root, binding.path, policy).require_classified(), binding
+        scopes |= evaluate_path_only(root, binding.path, policy).require_classified()
+        require_current_held_payload(root, inherited)
+        return scopes, binding
     raise MembershipUnresolved("unknown inheritance")
 
 

@@ -2,7 +2,7 @@
 
 ### Requirement: A governed reclassification preview completes at the load target
 
-A background reclassification preview SHALL run under its own build budget. On Linux, it SHALL complete the load fixture below and reuse the settled referrer folder's listing. It SHALL use full lookup if a folder's listing exceeds the cache budget. A concurrent Records read SHALL answer within its request budget. An interrupted or cancelled build SHALL return a typed public error and no report facts.
+A background reclassification preview SHALL use one job budget through atomic report publication. On Linux, it SHALL complete the load fixture below and reuse the settled referrer folder's listing. It SHALL use full lookup if a folder's listing exceeds the cache budget. A concurrent Records read SHALL answer within its request budget.
 
 #### Scenario: A large governed preview completes
 
@@ -11,9 +11,9 @@ A background reclassification preview SHALL run under its own build budget. On L
 - **THEN** the background build completes and every report page is released within its request budget
 - **AND** a Records read during the build answers within its request budget
 
-#### Scenario: An interrupted build returns a typed error
+#### Scenario: An interrupted job returns a typed error
 
-- **WHEN** the preview build is interrupted or cancelled
+- **WHEN** the job expires or stops before it commits its report
 - **THEN** a request for its run returns a typed public error with no report, page or digest
 
 ### Requirement: A dependent governed referrer is released without rereading its bytes

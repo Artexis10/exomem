@@ -6569,6 +6569,7 @@ def _held_fast_evidence(vault_root: Path, rel_path: str) -> Any | None:
         if held.inherits is None:
             return held
         if rel_path in scope.proven:
+            membership_module.require_current_held_payload(Path(vault_root), held.inherits)
             return scope.proven[rel_path]
         inherited, parent = membership_module.live_inherited_scopes(
             Path(vault_root), rel_path, held.inherits, policy_module.load(Path(vault_root)),

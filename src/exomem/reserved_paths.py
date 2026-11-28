@@ -1590,8 +1590,8 @@ def folder_listing_scope() -> Iterator[None]:
 
 def _scoped_leaf_names(
     filesystem: held_fs.HeldFilesystem, parent: held_fs.HeldDirectory, leaf: str,
-) -> tuple[str, ...] | None:
-    """The physical names whose NFKC form is ``leaf``, from this scope's current listing, or None."""
+) -> tuple[tuple[str, ...], held_fs.FileVersion] | None:
+    """The matching physical names and the version of their scoped listing."""
     listings = _FOLDER_LISTINGS.get()
     if listings is None:
         return None
@@ -1601,7 +1601,7 @@ def _scoped_leaf_names(
     version = before.require()
     kept = listings.lookup(version)
     if kept is not None:
-        return None if kept.by_leaf is None else kept.by_leaf.get(leaf, ())
+        return None if kept.by_leaf is None else (kept.by_leaf.get(leaf, ()), version)
     if time.time_ns() - max(version.mtime_ns, version.change_time_ns) < _SETTLED_FOLDER_NS:
         return None
     grouped: dict[str, list[str]] = {}
@@ -1621,7 +1621,7 @@ def _scoped_leaf_names(
         return None
     by_leaf = {key: tuple(names) for key, names in grouped.items()}
     listings.add(_FolderListing(version, by_leaf, max(1, count)))
-    return by_leaf.get(leaf, ())
+    return by_leaf.get(leaf, ()), version
 
 
 def _physical_leaf_candidates(
@@ -1640,15 +1640,18 @@ def _physical_leaf_candidates(
     so a caller can require exactly one before trusting it.
     """
 
-    names = _scoped_leaf_names(filesystem, parent, leaf)
-    children = (
-        filesystem.children(
-            parent,
-            name_filter=lambda name: unicodedata.normalize("NFKC", name) == leaf,
+    scoped = _scoped_leaf_names(filesystem, parent, leaf)
+    children = None
+    if scoped is not None:
+        names, version = scoped
+        selected = filesystem.children(parent, names=names)
+        after = filesystem.directory_version(parent)
+        if after.ok and after.require() == version:
+            children = selected
+    if children is None:
+        children = filesystem.children(
+            parent, name_filter=lambda name: unicodedata.normalize("NFKC", name) == leaf,
         )
-        if names is None
-        else filesystem.children(parent, names=names)
-    )
     if not children.ok:
         code = children.error.code if children.error is not None else "IO_REFUSED"
         raise ReservedPathLeafError(code)

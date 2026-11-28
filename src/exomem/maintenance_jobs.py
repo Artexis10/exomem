@@ -85,6 +85,12 @@ _SOURCE_PREVIEW_PUBLIC_ERRORS = frozenset({
     "RECLASSIFICATION_PREVIEW_WARMING", "RECLASSIFICATION_PREVIEW_UNAVAILABLE",
 })
 _SOURCE_PREVIEW_FAILED = "RECLASSIFICATION_PREVIEW_FAILED"
+_SOURCE_PREVIEW_DEADLINE = "PREVIEW_DEADLINE"
+_SOURCE_PREVIEW_SECONDS = 600.0
+# Leave time within the job budget to record a terminal after rolling back a report.
+_SOURCE_PREVIEW_TERMINAL_SECONDS = 1.0
+# A poll can briefly hold the WAL open while the worker switches to its publication connection.
+_SOURCE_PREVIEW_SQLITE_WAIT_SECONDS = 0.25
 _SOURCE_PREVIEW_PAGE_ROWS = 128
 _ENTRY_INSERT = "INSERT INTO entries (run_id, chunk, kind, path, value) VALUES (?, ?, ?, ?, ?)"
 _HELD_INSERT = "INSERT OR REPLACE INTO held_evidence (run_id, path, record) VALUES (?, ?, ?)"
@@ -177,10 +183,11 @@ class _Live:
 
 _JOB: contextvars.ContextVar[_Live | None] = contextvars.ContextVar("exomem_maintenance_job", default=None)
 _LIVE: dict[str, _Live] = {}
-#: Held across claim and registration, and by the sweep, so a row this process
-#: just inserted is never read as an orphan before its thread is registered. A read holds it from
-#: taking a row to classifying it, so a job that ends in between is never read as an orphan either.
+#: Serializes a job's claim, sweep and status read with its registration.
 _LIVE_LOCK = threading.Lock()
+#: A preview must be able to leave the registry while a status read owns the claim lock.
+#: Hold this lock only for in-memory registry access, never for a database operation.
+_LIVE_REGISTRY_LOCK = threading.Lock()
 
 
 # --------------------------------------------------------------------------- store
@@ -191,7 +198,9 @@ def store_path(vault_root: Path) -> Path:
 
 
 @contextmanager
-def _store(vault_root: Path, *, create: bool, bounded: bool = False) -> Iterator[sqlite3.Connection]:
+def _store(
+    vault_root: Path, *, create: bool, bounded: bool = False, busy_seconds: float = 0.0,
+) -> Iterator[sqlite3.Connection]:
     """Open the job store under the private-state ceremony; raise ``FileNotFoundError`` for a read of none."""
     root = Path(vault_root).resolve()
     path = store_path(root)
@@ -208,7 +217,7 @@ def _store(vault_root: Path, *, create: bool, bounded: bool = False) -> Iterator
             ),
             reserved_paths._sqlite_owner_target_scope(root, path, _STORE_ID, create=create) as retained,
         ):
-            conn = _open(root, path, retained, create, check=check)
+            conn = _open(root, path, retained, create, check=check, busy_seconds=busy_seconds)
         yield conn
         if check is not None:
             check()
@@ -230,22 +239,34 @@ def _store(vault_root: Path, *, create: bool, bounded: bool = False) -> Iterator
 
 
 @contextmanager
-def _write(vault_root: Path) -> Iterator[sqlite3.Connection]:
-    """One write transaction on the job store: committed on a clean exit, rolled back on any exception."""
-    with _store(vault_root, create=True) as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            yield conn
-            conn.commit()
-        except BaseException:
-            conn.rollback()
+def _write(vault_root: Path, *, bounded: bool = False) -> Iterator[sqlite3.Connection]:
+    """Commit a clean transaction and roll back before commit on any exception."""
+    committed = False
+    try:
+        with _store(
+            vault_root, create=True, bounded=bounded, busy_seconds=_SOURCE_PREVIEW_SQLITE_WAIT_SECONDS,
+        ) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield conn
+                if bounded:
+                    request_budget.checkpoint()
+                conn.commit()
+                committed = True
+            except BaseException:
+                conn.rollback()
+                raise
+    except request_budget.ReadBudgetExhausted:
+        # A read-budget check on store exit cannot undo an acknowledged commit.
+        if not committed:
             raise
 
 
 def _open(
-    root: Path, path: Path, retained: Path, create: bool, *, check: request_budget.ReadCheckpoint | None,
+    root: Path, path: Path, retained: Path, create: bool, *,
+    check: request_budget.ReadCheckpoint | None, busy_seconds: float,
 ) -> sqlite3.Connection:
-    timeout = 0 if check is not None else 5.0
+    timeout = min(check.remaining(), busy_seconds) if check is not None else 5.0
     if create:
         retained.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(retained, timeout=timeout)
@@ -314,17 +335,26 @@ def _owner() -> tuple[str | None, Path]:
     return store.owner_id, store.state_dir
 
 
-def _owner_gone(row: sqlite3.Row, mine: str | None, state_dir: Path) -> bool:
+def _registered_job(run_id: str) -> _Live | None:
+    with _LIVE_REGISTRY_LOCK:
+        return _LIVE.get(run_id)
+
+
+def _owner_gone(
+    row: sqlite3.Row, mine: str | None, state_dir: Path, *, registered: bool | None = None,
+) -> bool:
     from . import writer_lease
 
     if row["owner"] == mine:
         # The probe cannot tell this process from a dead one; the live registry can.
-        return row["run_id"] not in _LIVE
+        return not registered if registered is not None else _registered_job(row["run_id"]) is None
     return not writer_lease._probe_owner_liveness(state_dir, row["owner"])  # noqa: SLF001
 
 
-def _effective_state(row: sqlite3.Row, mine: str | None, state_dir: Path) -> str:
-    if row["state"] == RUNNING and _owner_gone(row, mine, state_dir):
+def _effective_state(
+    row: sqlite3.Row, mine: str | None, state_dir: Path, *, registered: bool | None = None,
+) -> str:
+    if row["state"] == RUNNING and _owner_gone(row, mine, state_dir, registered=registered):
         return INTERRUPTED
     return str(row["state"])
 
@@ -666,7 +696,7 @@ def request_cancel(vault_root: Path, run_id: str, why: str) -> dict[str, Any]:
                 except BaseException:
                     conn.rollback()
                     raise
-                live = _LIVE.get(run_id)
+                live = _registered_job(run_id)
                 if live is not None and row["state"] == RUNNING:
                     live.reason = live.reason or CANCEL_CODE
                     live.stop.set()
@@ -717,28 +747,32 @@ def source_preview_status(
 ) -> dict[str, Any]:
     """Read the private job under the caller's current admission and request proof."""
     try:
-        with request_budget.locked(_LIVE_LOCK), _store(vault_root, create=False, bounded=True) as conn:
-            conn.execute("BEGIN")
-            row = conn.execute(
-                "SELECT * FROM jobs WHERE run_id = ? AND mode = ? AND flags = ?",
-                (run_id, _SOURCE_PREVIEW, _canonical({"binding": binding, "request": request_key})),
-            ).fetchone()
-            if row is None:
-                raise FileNotFoundError
-            state = _effective_state(row, *_owner())
-            view = {"run_id": run_id, "state": state}
-            if state == FAILED:
-                return {**view, "error_code": _source_preview_error_code(row["error_code"])}
-            if state != COMPLETED:
-                return view
-            snapshot_current = None if snapshot_key is None else row["plan_id"] == snapshot_key
-            if cursor is not None:
-                return {**_page(conn, view, cursor, source_preview=True), "snapshot_current": snapshot_current}
-            outcome = json.loads(row["outcome"])
-            return {
-                **view, "snapshot_current": snapshot_current, "result": outcome["result"],
-                "next_cursor": "0" if outcome["has_entries"] else None,
-            }
+        with request_budget.locked(_LIVE_LOCK):
+            # Capture liveness before the SQLite snapshot. A later commit can retire the
+            # worker while this reader still sees its old RUNNING row.
+            registered = _registered_job(run_id) is not None
+            with _store(vault_root, create=False, bounded=True) as conn:
+                conn.execute("BEGIN")
+                row = conn.execute(
+                    "SELECT * FROM jobs WHERE run_id = ? AND mode = ? AND flags = ?",
+                    (run_id, _SOURCE_PREVIEW, _canonical({"binding": binding, "request": request_key})),
+                ).fetchone()
+                if row is None:
+                    raise FileNotFoundError
+                state = _effective_state(row, *_owner(), registered=registered)
+                view = {"run_id": run_id, "state": state}
+                if state == FAILED:
+                    return {**view, "error_code": _source_preview_error_code(row["error_code"])}
+                if state != COMPLETED:
+                    return view
+                snapshot_current = None if snapshot_key is None else row["plan_id"] == snapshot_key
+                if cursor is not None:
+                    return {**_page(conn, view, cursor, source_preview=True), "snapshot_current": snapshot_current}
+                outcome = json.loads(row["outcome"])
+                return {
+                    **view, "snapshot_current": snapshot_current, "result": outcome["result"],
+                    "next_cursor": "0" if outcome["has_entries"] else None,
+                }
     except FileNotFoundError:
         raise OpError("NOT_FOUND", "No Source preview matches this request.") from None
 
@@ -907,16 +941,17 @@ def _claim(
                 (run_id, mode, flags_json, plan_id, why, surface, audience, mine, RUNNING, time.time()),
             )
             live = _Live(run_id=run_id, vault_root=Path(vault_root).resolve(), mode=mode)
-            _LIVE[run_id] = live
+            with _LIVE_REGISTRY_LOCK:
+                _LIVE[run_id] = live
             conn.commit()
         except BaseException:
             conn.rollback()
-            _LIVE.pop(run_id, None)
+            _forget_live(run_id)
             raise
         try:
             live.thread = launch(live)
         except BaseException:
-            _LIVE.pop(run_id, None)
+            _forget_live(run_id)
             conn.execute(
                 "UPDATE jobs SET state = ?, ended_at = ?, error_code = ? WHERE run_id = ?",
                 (FAILED, time.time(), "JOB_NOT_STARTED", run_id),
@@ -967,49 +1002,78 @@ def _launch_thread(live: _Live, run: Callable[..., None], *args: Any) -> threadi
     return thread
 
 
+def _checked_preview_rows(rows: Iterable[Any]) -> Iterator[Any]:
+    """Check the job allowance while staging rows and while sending them to SQLite."""
+    for row in rows:
+        raise_if_stopped()
+        request_budget.checkpoint()
+        yield row
+
+
 def _run_source_preview(
     live: _Live,
     build: Callable[[threading.Event], tuple[Mapping[str, Any], Iterable[tuple[str, str, str | None]]]],
 ) -> None:
     from . import query_data
 
+    started = time.monotonic()
+    budget = request_budget.RequestBudget(seconds=_SOURCE_PREVIEW_SECONDS, entry=started)
+    work = request_budget.RequestBudget(
+        seconds=_SOURCE_PREVIEW_SECONDS - _SOURCE_PREVIEW_TERMINAL_SECONDS, entry=started,
+    )
+    check = request_budget.ReadCheckpoint(work, bound_disclosure=True)
     state, error_code, outcome = FAILED, _SOURCE_PREVIEW_FAILED, {}
     published = None
     held: list[tuple[str, str]] | None = None
+    _JOB.set(live)
     try:
-        with foreground_priority.background_job(), foreground_priority.bulk(stop=live.stop):
-            _JOB.set(live)
-            built = build(live.stop)
-            summary, entries = built[0], built[1]
-            if len(built) > 2 and built[2]:
-                held = sorted((path, _canonical(record)) for path, record in built[2].items())
-            buffer = []
-            limit = query_data.MAX_RESPONSE_BYTES // 2
-            for kind, path, value in entries:
-                raise_if_stopped()
-                payload = _entry_payload(kind, path, value)
-                if len(_canonical(payload).encode("utf-8")) + 1 > limit:
-                    raise ValueError("Source preview entry exceeds its receipt limit")
-                buffer.append((kind, path, value))
-            result = dict(summary)
-            if len(_canonical(result).encode("utf-8")) > limit:
-                raise ValueError("Source preview summary exceeds its receipt limit")
-            raise_if_stopped()
-        published = buffer
-        state, error_code, outcome = COMPLETED, None, {"result": result, "has_entries": bool(published)}
-    except JobStop as stop:
-        state, error_code = stop.state, stop.code
-    except foreground_priority.BulkCancelled:
-        state, error_code = _stopped(live)
-    except (Exception, request_budget.ReadBudgetExhausted) as error:  # noqa: BLE001 - worker terminal
-        if live.stop.is_set():
-            # A build that notices its stop refuses in its own words; the job still ended by the stop.
-            state, error_code = _stopped(live)
-        else:
-            state = FAILED
-            error_code = _source_preview_error_code(error.code if isinstance(error, OpError) else None)
+        with request_budget.checking(check):
+            try:
+                with foreground_priority.background_job(), foreground_priority.bulk(stop=live.stop):
+                    built = build(live.stop)
+                    summary, entries = built[0], built[1]
+                    if len(built) > 2 and built[2]:
+                        held = [
+                            (path, _canonical(record))
+                            for path, record in _checked_preview_rows(built[2].items())
+                        ]
+                    buffer = []
+                    limit = query_data.MAX_RESPONSE_BYTES // 2
+                    for kind, path, value in _checked_preview_rows(entries):
+                        payload = _entry_payload(kind, path, value)
+                        if len(_canonical(payload).encode("utf-8")) + 1 > limit:
+                            raise ValueError("Source preview entry exceeds its receipt limit")
+                        buffer.append((kind, path, value))
+                    result = dict(summary)
+                    if len(_canonical(result).encode("utf-8")) > limit:
+                        raise ValueError("Source preview summary exceeds its receipt limit")
+                published = buffer
+                state, error_code = COMPLETED, None
+                outcome = {"result": result, "has_entries": bool(published)}
+            except JobStop as stop:
+                state, error_code = stop.state, stop.code
+            except foreground_priority.BulkCancelled:
+                state, error_code = _stopped(live)
+            except Exception as error:  # noqa: BLE001 - worker terminal
+                if live.stop.is_set():
+                    state, error_code = _stopped(live)
+                else:
+                    error_code = _source_preview_error_code(error.code if isinstance(error, OpError) else None)
+            _save_terminal(
+                live, state, error_code, outcome, bounded=True,
+                preview_entries=published, preview_held=held,
+            )
+    except (JobStop, request_budget.ReadBudgetExhausted):
+        state, error_code = _stopped(live) if live.stop.is_set() else (INTERRUPTED, _SOURCE_PREVIEW_DEADLINE)
+        try:
+            with request_budget.checking(request_budget.ReadCheckpoint(budget)):
+                _save_terminal(live, state, error_code, {}, bounded=True, prune_preview=False)
+        except request_budget.ReadBudgetExhausted:
+            # A busy store can still prevent the short update. The next claim or sweep
+            # records the interrupted orphan after this worker leaves the live registry.
+            pass
     finally:
-        _finish(live, state, error_code, outcome, preview_entries=published, preview_held=held)
+        _forget_live(live.run_id)
 
 
 def _stopped(live: _Live) -> tuple[str, str]:
@@ -1106,42 +1170,48 @@ def _bounded(report: Any) -> Any:
     }
 
 
-def _finish(
+def _save_terminal(
     live: _Live, state: str, error_code: str | None, outcome: dict[str, Any],
-    *, preview_entries: list[tuple[str, str, str | None]] | None = None,
+    *, bounded: bool = False, prune_preview: bool = True,
+    preview_entries: list[tuple[str, str, str | None]] | None = None,
     preview_held: list[tuple[str, str]] | None = None,
 ) -> None:
-    """Record the terminal, then leave the live registry, so a sweep never sees a finished job as an orphan."""
-    try:
-        with _write(live.vault_root) as conn:
-            if live.mode == _SOURCE_PREVIEW:
-                _prune(conn)
-            if preview_entries is not None and live.stop.is_set():
-                state, error_code = _stopped(live)
-                outcome, preview_entries, preview_held = {}, None, None
-            saved = conn.execute(
-                "UPDATE jobs SET state = ?, ended_at = ?, error_code = ?, outcome = ? WHERE run_id = ? AND state = ?",
-                (state, time.time(), error_code, _canonical(outcome), live.run_id, RUNNING),
-            )
-            if preview_entries and saved.rowcount:
-                conn.executemany(_ENTRY_INSERT, (
-                    (live.run_id, 0, kind, path, value) for kind, path, value in preview_entries
+    """Record a terminal and any complete report in one job-store transaction."""
+    with _write(live.vault_root, bounded=bounded) as conn:
+        if live.mode == _SOURCE_PREVIEW and prune_preview:
+            _prune(conn)
+        if preview_entries is not None:
+            raise_if_stopped()
+        saved = conn.execute(
+            "UPDATE jobs SET state = ?, ended_at = ?, error_code = ?, outcome = ? WHERE run_id = ? AND state = ?",
+            (state, time.time(), error_code, _canonical(outcome), live.run_id, RUNNING),
+        )
+        if preview_entries and saved.rowcount:
+            conn.executemany(_ENTRY_INSERT, (
+                (live.run_id, 0, kind, path, value)
+                for kind, path, value in _checked_preview_rows(preview_entries)
+            ))
+            if preview_held:
+                conn.executemany(_HELD_INSERT, (
+                    (live.run_id, path, record)
+                    for path, record in _checked_preview_rows(preview_held)
                 ))
-                if preview_held:
-                    conn.executemany(_HELD_INSERT, (
-                        (live.run_id, path, record) for path, record in preview_held
-                    ))
-                if live.stop.is_set():
-                    conn.execute("DELETE FROM entries WHERE run_id = ?", (live.run_id,))
-                    conn.execute("DELETE FROM held_evidence WHERE run_id = ?", (live.run_id,))
-                    state, error_code = _stopped(live)
-                    conn.execute(
-                        "UPDATE jobs SET state = ?, error_code = ?, outcome = ? WHERE run_id = ?",
-                        (state, error_code, "{}", live.run_id),
-                    )
+        if preview_entries is not None:
+            raise_if_stopped()
+
+
+def _forget_live(run_id: str) -> None:
+    with _LIVE_REGISTRY_LOCK:
+        _LIVE.pop(run_id, None)
+
+
+def _finish(live: _Live, state: str, error_code: str | None, outcome: dict[str, Any]) -> None:
+    """Record the terminal before removing the live job."""
+    try:
+        _save_terminal(live, state, error_code, outcome)
     finally:
         with _LIVE_LOCK:
-            _LIVE.pop(live.run_id, None)
+            _forget_live(live.run_id)
 
 
 def stop_all(vault_root: Path, *, wait: float = SHUTDOWN_JOIN_SECONDS) -> None:
@@ -1150,7 +1220,7 @@ def stop_all(vault_root: Path, *, wait: float = SHUTDOWN_JOIN_SECONDS) -> None:
     One process can serve several vault runtimes, so a runtime stops only its own vault's jobs.
     """
     root = Path(vault_root).resolve()
-    with _LIVE_LOCK:
+    with _LIVE_LOCK, _LIVE_REGISTRY_LOCK:
         jobs = [live for live in _LIVE.values() if live.vault_root == root]
     for live in jobs:
         live.reason = live.reason or SHUTDOWN_CODE

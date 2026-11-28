@@ -7,7 +7,7 @@
 
 - [x] 2.1 Resolve physical names from one scoped folder listing per build, keyed by folder identity and change stamp, with a test that a new alias spelling still refuses.
 - [x] 2.2 Give the background build its own budget or checkpointed progress, chosen from the 1.1 measurement, and prove that cancellation and writer liveness still hold.
-  - Chosen: a separate ten-minute build budget. With 2.1 the same governed build takes 28-29 s and is linear in referrers, so checkpointed progress would add machinery for no measured need.
+  - Chosen: a ten-minute job budget that includes report staging and atomic publication. With 2.1 the same governed build takes 28-29 s and is linear in referrers, so checkpointed progress would add machinery for no measured need.
 - 2.3 Deferred. Keep the exact snapshot check. See the design for the evidence needed to revisit narrower invalidation.
 - [x] 2.4 Return a typed public error for an interrupted or cancelled preview job.
 

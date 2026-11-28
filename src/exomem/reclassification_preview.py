@@ -33,9 +33,6 @@ from .governance.principal import (
 
 # Bound work before reading candidates' bodies. Results also meet the normal response-byte bound.
 _INLINE_CANDIDATES = 256
-# A preview build can outlast an interactive request. This budget frees the single preview slot
-# within ten minutes, and the build checks for cancellation between referrers.
-_BUILD_BUDGET_SECONDS = 600.0
 _JOB_REPORT: ContextVar[dict[str, Any] | None] = ContextVar("source_reclassification_job_report", default=None)
 
 
@@ -182,13 +179,11 @@ def _build(
     )
     if command is None:
         raise _not_found()
-    budget = request_budget.RequestBudget(seconds=_BUILD_BUDGET_SECONDS)
-    check = request_budget.ReadCheckpoint(budget, bound_disclosure=True)
     original: dict[str, Any] = {}
     token = _JOB_REPORT.set(original)
     try:
         with (
-            request_scope(who), invocation_scope(), request_budget.checking(check),
+            request_scope(who), invocation_scope(),
             capabilities.active_surface(surface) if surface is not None else nullcontext(),
             reclassify_source.held_evidence_sink() as held,
         ):
@@ -212,9 +207,7 @@ def _build(
             if (auth_sessions.origin_revalidates_in_background(who)
                     and auth_sessions.origin_login_state_sync(who) is not auth_sessions.OriginLogin.VALID):
                 raise _not_found()
-            check()
-    except request_budget.ReadBudgetExhausted:
-        raise reclassify_source.preview_warming() from None
+            request_budget.checkpoint()
     finally:
         _JOB_REPORT.reset(token)
     summary = {key: value for key, value in result.items() if key not in {"referrers", "refusals"}}

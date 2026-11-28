@@ -459,13 +459,15 @@ def test_withheld_move_source_is_absent_without_mutation(
 
 
 def test_a_scoped_folder_listing_still_refuses_a_new_alias_spelling(vault: Path, monkeypatch) -> None:
-    """A build resolves a whole folder from one listing, and a later alias still refuses."""
+    """A build refuses an alias that appears while it uses its retained folder listing."""
     import os
 
     from exomem import held_fs, reserved_paths
 
     directory = vault.joinpath(*_DIRECTORY)
     _write_page(directory, _DECOMPOSED_NAME)
+    if (directory / _COMPOSED_NAME).exists():
+        pytest.skip("requires distinct NFC and NFD filenames on disk")
     rel = f"{_DIRECTORY_REL}/{_COMPOSED_NAME}"
     neighbour = f"{_RELATION_TARGET}.md"
     with held_fs.acquire(vault).require() as filesystem:
@@ -477,19 +479,28 @@ def test_a_scoped_folder_listing_still_refuses_a_new_alias_spelling(vault: Path,
         listings.append(parent.identity)
         return iter_names(self, parent)
 
+    def add_alias() -> None:
+        _write_page(directory, _COMPOSED_NAME, body="composed body")
+        os.utime(directory, ns=(1, 1))
+
+    children = backend.children
+
+    def children_after_sync(self, parent, *, name_filter=None, names=None):
+        if names == (_DECOMPOSED_NAME,) and not (directory / _COMPOSED_NAME).exists():
+            add_alias()
+        return children(self, parent, name_filter=name_filter, names=names)
+
     monkeypatch.setattr(backend, "iter_names", counted)
     # The folder was written a moment ago; treat it as settled so this scope keeps its listing.
     monkeypatch.setattr(reserved_paths, "_SETTLED_FOLDER_NS", 0)
     with reserved_paths.folder_listing_scope():
         assert reserved_paths.resolve_physical_relative(vault, rel) == f"{_DIRECTORY_REL}/{_DECOMPOSED_NAME}"
         assert reserved_paths.resolve_physical_relative(vault, neighbour) == neighbour
-        if os.name != "nt":  # native Windows has no directory change times to trust, so it lists each time
+        if os.name == "nt":  # Windows lists each time because it has no trusted directory version.
+            add_alias()
+        else:
             assert len(listings) == 1
-        _write_page(directory, _COMPOSED_NAME, body="composed body")
-        if (directory / _COMPOSED_NAME).samefile(directory / _DECOMPOSED_NAME):
-            pytest.skip("requires distinct NFC and NFD files on disk")
-        # A later change time, as the settle window guarantees in real time, whatever the clock's tick.
-        os.utime(directory, ns=(1, 1))
+            monkeypatch.setattr(backend, "children", children_after_sync)
         with pytest.raises(reserved_paths.ReservedPathLeafError) as refused:
             reserved_paths.resolve_physical_relative(vault, rel)
     assert refused.value.code == "AMBIGUOUS_PATH"

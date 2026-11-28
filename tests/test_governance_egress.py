@@ -5911,13 +5911,15 @@ def test_held_evidence_scales_a_large_report_without_byte_reads(
     assert elapsed < 30, f"held release took {elapsed:.2f}s for 10 rows"
 
 
-def _recorded_row(vault: Path, rel: str):
+def _recorded_row(vault: Path, rel: str, *, require_held: bool = True):
     """The evidence a preview build records for `rel`, through the build's own guarded read."""
     from exomem import maintenance_jobs, reclassify_source
 
     with reclassify_source.held_evidence_sink() as sink:
         reclassify_source._witnessed_read(reclassify_source.read_guarded_text, sink, vault, vault / rel)
-    assert rel in sink, "the build recorded no evidence for this row"
+    if rel not in sink:
+        assert not require_held, "the build recorded no evidence for this row"
+        return None
     return maintenance_jobs.HeldEvidence.from_record(sink[rel])
 
 
@@ -5925,7 +5927,9 @@ def _release(vault: Path, rel: str, held):
     from exomem import reclassification_preview
 
     result = {"entries": [{"path": rel}]}
-    retained = reclassification_preview.RetainedReport(result, rel, held_evidence={rel: held})
+    retained = reclassification_preview.RetainedReport(
+        result, rel, held_evidence={rel: held} if held is not None else {},
+    )
     with egress.exact_report_paths(retained.exact_paths), egress.held_report_evidence(retained.held_evidence):
         return retained, egress.postfilter("list_directory", result, vault)
 
@@ -5949,8 +5953,12 @@ def _retag(page: Path, tag: str) -> None:
 @pytest.mark.parametrize("change", [
     "container parent retagged", "container payload replaced", "part source retagged", "frame video retagged",
 ])
+@pytest.mark.parametrize("windows_release", [
+    pytest.param(False, id="held", marks=pytest.mark.skipif(os.name == "nt", reason="POSIX witness")),
+    pytest.param(True, id="windows-full"),
+])
 def test_a_dependent_held_row_releases_unread_until_a_dependency_changes(
-    vault: Path, monkeypatch: pytest.MonkeyPatch, change: str,
+    vault: Path, monkeypatch: pytest.MonkeyPatch, change: str, windows_release: bool,
 ) -> None:
     """A row that inherits scopes is released from held evidence plus its dependencies, read live.
 
@@ -5992,29 +6000,41 @@ def test_a_dependent_held_row_releases_unread_until_a_dependency_changes(
         (_, frame), = scene_frames.write_scene_frames(vault, video, [(_scene(10.0), _FakeImg())])
         rel = frame.relative_to(vault).as_posix()
     _tag_scope(vault, "private-parent")
+    monkeypatch.setattr(egress.receipts, "_is_windows", lambda: windows_release)
 
-    with request_scope(_external()):
-        held = _recorded_row(vault, rel)
-        assert held.inherits is not None
+    who = _external()
+    with request_scope(who):
+        held = _recorded_row(vault, rel, require_held=not windows_release)
+        if held is not None:
+            assert held.inherits is not None
         reads = _byte_read_spies(monkeypatch, rel)
         retained, released = _release(vault, rel, held)
-        assert released["entries"] == [{"path": rel}]
-        assert reads == []
         retained.require_complete_projection(released)
+        assert bool(reads) == windows_release
 
         if change == "container payload replaced":
-            (vault / child).write_bytes(b"other document!")
-        elif change == "part source retagged":
-            # A sync can change the Source bytes while keeping its size and mtime.
-            previous = parent.stat()
-            text = parent.read_text(encoding="utf-8")
-            parent.write_text(text.replace("general-parent", "private-parent"), encoding="utf-8")
-            os.utime(parent, ns=(previous.st_atime_ns, previous.st_mtime_ns))
-            updated = parent.stat()
-            assert (updated.st_size, updated.st_mtime_ns) == (previous.st_size, previous.st_mtime_ns)
+            # One terminal request can check the same row at more than one gate.
+            with (
+                egress.exact_report_paths(retained.exact_paths),
+                egress.held_report_evidence(retained.held_evidence),
+            ):
+                assert egress.content_permits(vault, rel, who)
+                (vault / child).write_bytes(b"other document!")
+                withheld = egress.postfilter("list_directory", retained, vault)
         else:
-            _retag(parent, "private-parent")
-        retained, withheld = _release(vault, rel, held)
+            if change == "part source retagged":
+                # A sync can change the Source bytes while keeping its size and mtime.
+                previous = parent.stat()
+                text = parent.read_text(encoding="utf-8")
+                parent.write_text(text.replace("general-parent", "private-parent"), encoding="utf-8")
+                os.utime(parent, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+                updated = parent.stat()
+                assert (updated.st_size, updated.st_mtime_ns) == (
+                    previous.st_size, previous.st_mtime_ns,
+                )
+            else:
+                _retag(parent, "private-parent")
+            retained, withheld = _release(vault, rel, held)
     assert withheld["entries"] == []
     with pytest.raises(OpError, match="RECLASSIFICATION_PREVIEW_STALE"):
         retained.require_complete_projection(withheld)
