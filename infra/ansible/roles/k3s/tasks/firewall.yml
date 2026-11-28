@@ -81,3 +81,18 @@
     comment: "{{ k3s_firewall_comment }}"
   loop: "{{ k3s_firewall_peer_ips }}"
   when: k3s_node_role == 'server'
+
+# The routine reader reaches the API from administrator workstations over
+# NetBird (make-cloud-cells-operator-resistant D6, amendment 2026-11-27). The
+# NetBird account policy picks which peers may connect; this rule admits only
+# wt0, so the public interface stays closed. Its own comment keeps it out of
+# the inter-node prune above, and a node that is not the server drops it.
+- name: Admit the K3s API over NetBird on the server only
+  community.general.ufw:
+    rule: allow
+    direction: in
+    interface: wt0
+    port: "6443"
+    proto: tcp
+    comment: "{{ k3s_api_netbird_comment }}"
+    delete: "{{ k3s_node_role != 'server' }}"

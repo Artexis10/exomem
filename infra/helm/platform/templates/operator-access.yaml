@@ -1,10 +1,9 @@
-# harden-exomem-cloud-operator-access D4: the everyday operator identity, a
-# client certificate in group exomem:operators issued through the CSR API
-# (docs/runbooks/cloud-operator-access.md). It reads workload status, events
-# and the content-free logs cells and controllers emit (D8). It reads no
-# Secret and holds no exec, attach, port-forward, proxy or ephemeral
-# container subresource. pods/log is cluster-wide because RBAC cannot
-# exclude cell namespaces created at runtime.
+# harden-exomem-cloud-operator-access D4: what the everyday identity reads:
+# workload status, events and the content-free logs cells and controllers
+# emit (D8). It reads no Secret and holds no exec, attach, port-forward, proxy
+# or ephemeral container subresource. pods/log is cluster-wide because RBAC
+# cannot exclude cell namespaces created at runtime. Its only subject is the
+# routine reader (routine-reader.yaml).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -31,19 +30,6 @@ rules:
   - apiGroups: ["admissionregistration.k8s.io"]
     resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
     verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: exomem-operator-read
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: exomem-operator-read
-subjects:
-  - kind: Group
-    name: exomem:operators
-    apiGroup: rbac.authorization.k8s.io
 ---
 # D4: break-glass. No standing credential carries this group; a one-hour
 # client certificate minted on demand through an audited, approved CSR does.

@@ -1,0 +1,27 @@
+# make-cloud-cells-operator-resistant D6 (amendment 2026-11-27): the routine
+# reader. Operators and agents read status, events and content-free logs with
+# its token from their own machines (docs/runbooks/cloud-operator-access.md).
+# The admin creates the token Secret at issue time and deletes it to revoke;
+# the chart never creates it, so an upgrade cannot revive a revoked token.
+# This template is plain YAML in the release namespace, so the issue procedure
+# applies the file itself before the next platform upgrade, which adopts both
+# objects.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: exomem-routine-reader
+  namespace: exomem-platform
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: exomem-routine-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: exomem-operator-read
+subjects:
+  - kind: ServiceAccount
+    name: exomem-routine-reader
+    namespace: exomem-platform

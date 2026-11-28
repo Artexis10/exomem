@@ -998,7 +998,7 @@ def test_only_the_edge_namespace_may_request_a_certificate_from_the_cloud_cluste
 
 # --- harden-exomem-cloud-operator-access: operator identities (D4) ---
 
-OPERATOR_GROUP = "exomem:operators"
+RETIRED_OPERATOR_GROUP = "exomem:operators"
 BREAK_GLASS_GROUP = "exomem:break-glass"
 CONNECT_SUBRESOURCES = {"pods/exec", "pods/attach", "pods/portforward", "pods/proxy", "pods/ephemeralcontainers"}
 
@@ -1039,13 +1039,21 @@ def test_the_everyday_operator_reads_status_events_and_logs_but_no_secret_or_con
     for resource in ("nodes", "pods"):
         assert granted[("metrics.k8s.io", resource)] == {"get", "list"}
 
-    (binding,) = _group_bindings(documents, OPERATOR_GROUP)
-    assert binding["kind"] == "ClusterRoleBinding"
-    assert binding["metadata"]["name"] == "exomem-operator-read"
-    assert binding["roleRef"] == {
-        "apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "exomem-operator-read",
-    }
-    assert binding["subjects"] == [{"kind": "Group", "name": OPERATOR_GROUP, "apiGroup": "rbac.authorization.k8s.io"}]
+    # make-cloud-cells-operator-resistant D6 (amendment 2026-11-27): the routine
+    # reader's ServiceAccount is the role's only subject, and the retired group
+    # that any certificate signed into it could join holds nothing.
+    bindings = [
+        doc for doc in documents
+        if doc.get("kind") in {"RoleBinding", "ClusterRoleBinding"} and doc["roleRef"]["name"] == "exomem-operator-read"
+    ]
+    assert [binding["subjects"] for binding in bindings] == [
+        [{"kind": "ServiceAccount", "name": "exomem-routine-reader", "namespace": "exomem-platform"}],
+    ]
+    assert not _group_bindings(documents, RETIRED_OPERATOR_GROUP)
+    reader = _find(documents, "ServiceAccount", "exomem-routine-reader")
+    assert reader["automountServiceAccountToken"] is False
+    # The chart never creates the reader's token: an upgrade must not revive a revoked one.
+    assert not [doc for doc in documents if doc.get("type") == "kubernetes.io/service-account-token"]
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")

@@ -8,7 +8,7 @@ The operator's everyday cluster identity SHALL be able to read:
 - resource use;
 - the content-free logs that cells and controllers emit.
 
-It SHALL NOT be able to read Secrets, or to exec, attach, port-forward, proxy or add ephemeral containers in any cell namespace. The documented operator procedures SHALL use this identity by default. The identity SHALL work from the operator's own machine over the private network, and its credential SHALL NOT be stored on any node. No routine procedure SHALL require a login to a node.
+It SHALL NOT be able to read Secrets, or to exec, attach, port-forward, proxy or add ephemeral containers in any cell namespace. The documented operator procedures SHALL use this identity by default. The identity SHALL work from the operator's own machine over the private network, and no file on any node SHALL hold its credential outside the cluster datastore. No routine procedure SHALL require a login to a node. The admin SHALL be able to revoke the routine credential without waiting for it to expire. From outside the cluster's pods, the cluster API port SHALL be reachable only from cluster nodes and from administrator machines over the private network.
 
 #### Scenario: Operator inspects a failing cell
 
@@ -39,6 +39,16 @@ It SHALL NOT be able to read Secrets, or to exec, attach, port-forward, proxy or
 
 - **WHEN** an operator or an agent checks cell health, resource use or controller errors
 - **THEN** the documented procedure uses the everyday identity from the operator's machine, and no node login occurs
+
+#### Scenario: Revoked routine credential
+
+- **WHEN** the admin revokes the routine credential and a holder sends a new request more than a minute later
+- **THEN** the API server rejects the request
+
+#### Scenario: API reached from outside the private network
+
+- **WHEN** a host that is not a cluster node, and not an administrator machine on the private network, opens a connection to the cluster API port
+- **THEN** the connection does not complete
 
 ### Requirement: Break-glass access is deliberate and audited
 

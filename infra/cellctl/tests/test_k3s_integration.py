@@ -3293,20 +3293,22 @@ def test_the_operator_access_runbook_on_real_k3s(
     (shim / "k3s").chmod(0o755)
     shared_memory = tmp_path / "shm"
     shared_memory.mkdir(mode=0o700)
-    operator_kubeconfig = tmp_path / "root-kube" / "exomem-operator.kubeconfig"
+    reader_kubeconfig = tmp_path / "reader.kubeconfig"
     audit_copy = tmp_path / "audit.log"
     environment = {
         **os.environ,
         "PATH": f"{shim}:{os.environ['PATH']}",
         "ADMIN_KUBECONFIG": str(k3s.kubeconfig),
-        "OPERATOR_KUBECONFIG": str(operator_kubeconfig),
+        "READER_KUBECONFIG": str(reader_kubeconfig),
         "BREAK_GLASS_TMP": str(shared_memory),
         "AUDIT_LOG": str(audit_copy),
     }
     environment.pop("KUBECONFIG", None)
 
-    def _bash(script: str) -> subprocess.CompletedProcess[str]:
-        result = subprocess.run(["bash", "-c", script], env=environment, cwd=tmp_path, capture_output=True, text=True, check=False)
+    def _bash(script: str, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run(
+            ["bash", "-c", script], input=stdin, env=environment, cwd=tmp_path, capture_output=True, text=True, check=False,
+        )
         assert result.returncode == 0, f"{script}\n--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
         return result
 
@@ -3319,26 +3321,54 @@ def test_the_operator_access_runbook_on_real_k3s(
     _apply_server_side(k3s.name, [_probe_pod("runbook-probe", cell, edge_platform.image)])
     _wait_pods_ready(k3s.name, cell, "runbook-probe")
 
-    print("[runbook] issue the 30-day everyday operator certificate")
-    issued = _bash(_runbook_block("issue-operator"))
-    print(f"[runbook] {issued.stdout.strip()}")
-    assert "O = exomem:operators" in issued.stdout and "CN = exomem-operator" in issued.stdout
-    assert (operator_kubeconfig.stat().st_mode & 0o777) == 0o600
-    print("[runbook] the operator identity reads status and logs, and no Secret or connect subresource")
-    checked = _bash(_runbook_block("check-operator"))
-    assert "exomem:operators" in checked.stdout, checked.stdout
+    print("[runbook] issue the routine reader from the chart's template")
+    template = (REPO_ROOT / "infra/helm/platform/templates/routine-reader.yaml").read_text(encoding="utf-8")
+    issued = _bash(_runbook_block("issue-reader"), stdin=template)
+    print(f"[runbook] {issued.stderr.strip().splitlines()[-1]}")
+    (credential,) = issued.stdout.splitlines()
+    token = json.loads(credential)["token"]
+    # The workstation's kubeconfig: the server's address is not the name the
+    # client checks the certificate against, so `kubernetes` must be a SAN.
+    admin_config = yaml.safe_load(k3s.kubeconfig.read_text(encoding="utf-8"))
+    reader_kubeconfig.write_text(json.dumps({
+        "apiVersion": "v1", "kind": "Config",
+        "clusters": [{"name": "exomem", "cluster": {
+            "server": k3s.host, "tls-server-name": "kubernetes",
+            "certificate-authority-data": admin_config["clusters"][0]["cluster"]["certificate-authority-data"],
+        }}],
+        "users": [{"name": "reader", "user": {"token": token}}],
+        "contexts": [{"name": "reader", "context": {"cluster": "exomem", "user": "reader"}}],
+        "current-context": "reader",
+    }), encoding="utf-8")
+    reader_kubeconfig.chmod(0o600)
+    print("[runbook] the reader reads status and logs, and no Secret, connect subresource or write")
+    _bash(_runbook_block("check-reader"))
     # The block's checks are not vacuous: the admin identity passes the same one.
     admin_can = _as(k3s.kubeconfig, "auth", "can-i", "create", "pods", "--subresource=exec", "--all-namespaces")
     assert admin_can.stdout.strip() == "yes", admin_can
-    assert _as(operator_kubeconfig, "get", "pods", "--namespace", cell).returncode == 0
-    assert _as(operator_kubeconfig, "logs", "--namespace", cell, "runbook-probe").returncode == 0
+    assert _as(reader_kubeconfig, "get", "pods", "--namespace", cell).returncode == 0
+    assert _as(reader_kubeconfig, "logs", "--namespace", cell, "runbook-probe").returncode == 0
     for denied in (
         ("get", "secrets", "--namespace", "exomem-cloud"),
         ("exec", "--namespace", cell, "runbook-probe", "--", "true"),
+        ("delete", "pod", "--namespace", cell, "runbook-probe", "--dry-run=server"),
     ):
-        result = _as(operator_kubeconfig, *denied)
-        print(f"[runbook] operator {denied[0]}: exit={result.returncode} {result.stderr.strip()!r}")
+        result = _as(reader_kubeconfig, *denied)
+        print(f"[runbook] reader {denied[0]}: exit={result.returncode} {result.stderr.strip()!r}")
         assert result.returncode != 0 and "forbidden" in result.stderr.lower(), (denied, result.stderr)
+    # The next platform upgrade adopts what the issue applied.
+    adopted = _as(k3s.kubeconfig, "get", "serviceaccount", "--namespace", "exomem-platform", "exomem-routine-reader", "-o", "json")
+    metadata = json.loads(adopted.stdout)["metadata"]
+    assert metadata["annotations"]["meta.helm.sh/release-name"] == "exomem-platform"
+    assert metadata["labels"]["app.kubernetes.io/managed-by"] == "Helm"
+
+    print("[runbook] revoke the reader; new requests fail once the token cache expires")
+    _bash(_runbook_block("revoke-reader"))
+    deadline = time.monotonic() + 15
+    while (after := _as(reader_kubeconfig, "get", "pods", "--namespace", cell)).returncode == 0:
+        assert time.monotonic() < deadline, "the revoked token still reads after 15 s"
+        time.sleep(1)
+    assert "unauthorized" in after.stderr.lower(), after.stderr
 
     print("[runbook] mint a one-hour break-glass identity, use it, end it, then find it in the audit log")
     session = "\n".join((

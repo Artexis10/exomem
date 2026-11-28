@@ -76,9 +76,7 @@ snapshot's client CA:
 cd infra/ansible && ansible k3s_agents --forks 20 -m ansible.builtin.systemd_service -a 'name=k3s-agent state=restarted'
 ```
 
-Then issue a new everyday operator certificate, as in
-[cloud-operator-access.md](cloud-operator-access.md#issue-the-everyday-operator-certificate),
-and rotate the client CA again.
+Then rotate the client CA again.
 
 5. Start K3s: `systemctl start k3s`. Expect the agents to rejoin within a few minutes.
 6. As soon as the API answers, pause cellctl. It restarts with the snapshot's state:
@@ -94,6 +92,8 @@ Then reconcile the volumes, below.
 ## After restoring etcd from an older snapshot
 
 etcd snapshots are taken every 30 minutes. A restore loses the cluster objects of every volume created or relocated since, while the volumes themselves, and the only copy of those writes, are still on the agents' disks. Nothing here may delete a TopoLVM `LogicalVolume` object: on a node whose TopoLVM plugin runs, that destroys the volume, even with its finalizer removed.
+
+First, as soon as the API answers, re-issue the routine reader, as in [cloud-operator-access.md](cloud-operator-access.md#issue-the-routine-reader), and replace the stored credential. The snapshot holds the reader's token Secret as it was then, so a token revoked after the snapshot works again until you do.
 
 1. Check that cellctl is paused, so it neither recreates claims nor records volumes while you work:
 
