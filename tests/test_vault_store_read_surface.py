@@ -477,7 +477,7 @@ def answer(command, root, arguments, source_schema, *, store=False):
     return json.loads(json.dumps(value, default=str))
 
 
-def comparable(value, *, inbound_links=False):
+def comparable(value, *, inbound_links=False, prospective_relationships=False):
     """Normalize response identity fields, retaining the content of a continuity token.
 
     The viewer's observed_at dates one observation. recall_context's
@@ -504,6 +504,13 @@ def comparable(value, *, inbound_links=False):
         generation.pop("index_generation", None)
     if "budget" in result:
         result["budget"].pop("serialized_chars", None)
+    if prospective_relationships and "unit_ref" in result:
+        # Each preview allocates a fresh ID for its proposed row.
+        facts = result["semantic"]["contract_result"]["relation_disposition"]["qualifying_facts"]
+        for fact in facts:
+            if fact["logical_source_ref"] == result["unit_ref"]:
+                fact.pop("identity", None)
+        facts.sort(key=lambda fact: json.dumps(fact, sort_keys=True))
     if inbound_links:
         for container in (result, result.get("links")):
             if isinstance(container, dict) and isinstance(container.get("inbound"), list):
@@ -686,6 +693,22 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
                 with scope():
                     before[caller] = comparable(answer(command, vault, arguments, source_schema), inbound_links=links)
     expected = copy.deepcopy(before)
+    if sample == "observe_memory:supersede":
+        # The store preview binds a stored relationship to its transition token.
+        for caller, scope in callers.items():
+            clear_reader_caches(vault)
+            with scope():
+                value = comparable(
+                    answer(command, vault, arguments, source_schema), inbound_links=links,
+                    prospective_relationships=caller == "owner",
+                )
+            if caller == "owner":
+                assert value["mutated"] is False
+                for field in ("operation", "path", "before_hash"):
+                    assert value[field] == before[caller][field]
+            else:
+                assert value == before[caller]
+            expected[caller] = value
     if name == "coordination_status":
         # Sidecar synchronization does not exist in store mode; assert the canonical revision instead.
         with read.snapshot(vault) as snapshot:
@@ -730,7 +753,10 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
             clear_reader_caches(vault)
             # Only migrated page rows count: a prospective destination or schema folder is no stored projection.
             with scope(), record_store_reads(vault, monkeypatch, page_paths=owned) as events:
-                actual = comparable(answer(command, vault, arguments, source_schema, store=True), inbound_links=links)
+                actual = comparable(
+                    answer(command, vault, arguments, source_schema, store=True), inbound_links=links,
+                    prospective_relationships=sample == "observe_memory:supersede" and caller == "owner",
+                )
             violations = []
             if actual != expected[caller]:
                 violations.append("answer differs")

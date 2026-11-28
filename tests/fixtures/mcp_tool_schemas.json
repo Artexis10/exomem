@@ -1122,7 +1122,7 @@
             "brief"
           ],
           "type": "string",
-          "description": "text (default), history, units: observations with ids, or brief: a topic's brief."
+          "description": "Text by default. Get unit IDs or a topic brief."
         },
         "more": {
           "type": "string",
@@ -1130,7 +1130,7 @@
         },
         "options": {
           "type": "object",
-          "description": "Options include links, frontmatter_only, include_raw, unit_ref, offset, relationship_limit and relationship_after."
+          "description": "links, frontmatter_only, include_raw, unit_ref, offset, relationship_limit and relationship_after."
         }
       },
       "required": [

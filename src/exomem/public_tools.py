@@ -303,11 +303,13 @@ def _search(wire: dict[str, Any], ctx: Context) -> Translated:
 
 class ReadPage(Wire):
     page: Page
-    part: Literal["text", "history", "units", "brief"] | None = Field(default=None, description="text (default), history, units: observations with ids, or brief: a topic's brief.")
+    part: Literal["text", "history", "units", "brief"] | None = Field(
+        default=None, description="Text by default. Get unit IDs or a topic brief.",
+    )
     more: str | None = Field(default=None, description="Continuation token.")
     options: dict[str, Any] | None = Field(
         default=None,
-        description="Options include links, frontmatter_only, include_raw, unit_ref, offset, "
+        description="links, frontmatter_only, include_raw, unit_ref, offset, "
         "relationship_limit and relationship_after.",
     )
 
