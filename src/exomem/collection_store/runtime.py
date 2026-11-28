@@ -1820,6 +1820,7 @@ class StoreServer:
             production = runtime._session is not None and runtime._session.production
             snapshot = connection.SnapshotHandle(runtime.path, reader, handle, derived=derived, query_snapshot=query)
             scope.enter_context(preview_store(self.root, snapshot, production=production))
+
             def verify_query_authority():
                 capability.require_not_disabled(self.root)
                 with request_budget.store_read_lock(manager._lock):
@@ -1835,6 +1836,7 @@ class StoreServer:
                 scope.enter_context(ownership.read_scope(
                     self.root, initial=initial, verify=verify_query_authority if records_query else None,
                     before_release=snapshot.refresh_for_release if records_query else None,
+                    release_checkpoint=lambda: snapshot.release_checkpoint,
                 ))
             if records_query:
                 checkout.close()

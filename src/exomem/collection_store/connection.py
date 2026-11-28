@@ -483,6 +483,8 @@ class SnapshotHandle:
         self.path = path
         self.connection = conn
         self.query_snapshot = query_snapshot
+        self.query_deadline = None
+        self.release_checkpoint = None
         self._owner_thread = threading.get_ident()
         self._closed = False
         self._release_cache = None
@@ -514,6 +516,11 @@ class SnapshotHandle:
     def refresh_for_release(self) -> None:
         """End selection before the release filter checks contributors afresh."""
         self.require_owner_thread()
+        if self.query_deadline is None:
+            from .ownership import unavailable
+
+            raise unavailable()
+        self.release_checkpoint = self.query_deadline.release_checkpoint()
         self.connection.rollback()
         self._release_cache = None
 

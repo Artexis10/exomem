@@ -3056,7 +3056,7 @@ class LeaseCoordinatorClient:
         # deadline, and the in-flight GET keeps the sole slot until it finishes or notices it.
         return request_budget.bounded_blocking_call(
             read, remaining=lambda: deadline - time.monotonic(),
-            slots=_PASSIVE_COORDINATOR_READ, wait_for_slot=False,
+            slots=_PASSIVE_COORDINATOR_READ, wait_for_slot=check.wait_for_store_read_slot,
         )
 
     def _request_json(
@@ -9377,8 +9377,11 @@ def _collection_store_thread(func):
                     command.name, injected[0], kwargs, write=not (read_only or import_status)
                 )
                 server = routing.server
+                # Row lists carry a bounded proof of their contributors. Named bodies,
+                # aggregates and audit history use the ordinary store route.
                 records_query = (command.name == "record_memory" and kwargs.get("action") == "query"
-                                 and kwargs.get("view") is None and kwargs.get("query") is None)
+                                 and all(kwargs.get(key) is None for key in ("view", "query", "item_key", "aggregate"))
+                                 and not kwargs.get("include_agent_history"))
                 if server is not None and records_query and server.has_competing_work():
                     from .governance.egress import unrestricted_source_access
                     from .governance.principal import effective_principal

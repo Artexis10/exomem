@@ -39,6 +39,8 @@ class StoreAdapter:
         from ..query_engine import runtime
 
         self.deadline = runtime.Deadline(runtime.PROFILES["records"]["timeout_ms"])
+        if getattr(self.writer.handle, "query_snapshot", None) is not None:
+            self.writer.handle.query_deadline = self.deadline
 
     def _deadline_scope(self):
         if self.deadline is None:

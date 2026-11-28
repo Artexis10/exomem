@@ -1608,28 +1608,83 @@ def test_import_status_answers_from_a_snapshot_while_a_batch_keeps_the_store_thr
     assert set(done["activity"].values()) == {None} and (done["resumable"], done["cancellable"]) == (False, False)
 
 
+@pytest.mark.query_deadline
 def test_a_records_query_reads_the_last_commit_while_the_store_thread_is_busy(service, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
+
+    from exomem import request_budget
+    from exomem.query_engine.runtime import WALL_BACKSTOP_MS
 
     root = service.root
     query = dict(action="query", collection=CID, limit=10, columns=["title"])
     expected = call(root, "record_memory", **query)
+    with pytest.raises(OpError) as idle_refusal:
+        call(root, "record_memory", **{**query, "columns": ["fixture_unlisted"]})
     entered, release = threading.Event(), threading.Event()
+    server = runtime._server(root)
+    lease_status = service.manager.client.status
+    remaining = []
+
+    def status():
+        check = request_budget.store_read_checkpoint()
+        if check is not None and check.wait_for_store_read_slot:
+            remaining.append(check.remaining())
+        return lease_status()
+
+    monkeypatch.setattr(service.manager.client, "status", status)
 
     def occupy():
         entered.set()
         assert release.wait(10)
 
     with ThreadPoolExecutor(max_workers=1) as worker:
-        busy = worker.submit(runtime._server(root).call, occupy, wake_maintenance=False)
+        busy = worker.submit(server.call, occupy, wake_maintenance=False)
         try:
             assert entered.wait(5)
             with monkeypatch.context() as short:
                 short.setattr(service.manager, "_mutation_timeout_seconds", 0.5)
                 result = call(root, "record_memory", **query)
+                with pytest.raises(OpError) as contended_refusal:
+                    call(root, "record_memory", **{**query, "columns": ["fixture_unlisted"]})
             assert result["rows"] == expected["rows"]
             assert result["snapshot"] == expected["snapshot"]
+            assert contended_refusal.value.code == idle_refusal.value.code == "INVALID_RECORD_QUERY_FIELD"
+            assert len(remaining) >= 2 and all(0 < seconds < WALL_BACKSTOP_MS / 1000 for seconds in remaining)
             assert not busy.done()
+        finally:
+            release.set()
+            busy.result(timeout=5)
+
+
+@pytest.mark.parametrize("selection", [{"item_key": ROW}, {"aggregate": "distinct:title"}, {"include_agent_history": True}, {}])
+def test_contended_records_queries_without_a_qualified_reader_keep_the_store_refusal(
+    service, monkeypatch, selection,
+):
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import ExitStack
+
+    from exomem.query_engine import runtime as query_runtime
+
+    root = service.root
+    entered, release = threading.Event(), threading.Event()
+
+    def occupy():
+        entered.set()
+        assert release.wait(10)
+
+    with ThreadPoolExecutor(max_workers=1) as worker, ExitStack() as readers:
+        if not selection:
+            limits = query_runtime.QueryLimits(profile="records")
+            for _ in range(2):
+                readers.enter_context(query_runtime.query_snapshot(connection.store_path(root), limits=limits))
+        busy = worker.submit(runtime._server(root).call, occupy, wake_maintenance=False)
+        try:
+            assert entered.wait(5)
+            with monkeypatch.context() as short:
+                short.setattr(service.manager, "_mutation_timeout_seconds", 0.2)
+                with pytest.raises(OpError) as refusal:
+                    call(root, "record_memory", action="query", collection=CID, **selection)
+            assert refusal.value.code == "COLLECTION_STORE_BUSY"
         finally:
             release.set()
             busy.result(timeout=5)

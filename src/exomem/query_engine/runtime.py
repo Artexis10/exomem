@@ -95,6 +95,13 @@ class Deadline:
         """CPU milliseconds this deadline's thread has spent since it started."""
         return (time.thread_time() - self._cpu) * 1000
 
+    def release_checkpoint(self):
+        """Bound authority I/O by the wall time left in the query that produced the result."""
+        from .. import request_budget
+
+        budget = request_budget.RequestBudget(seconds=self.wall_ms / 1000, entry=self._wall)
+        return request_budget.ReadCheckpoint(budget, bound_store_reads=True, wait_for_store_read_slot=True)
+
     def expired(self) -> QueryError | None:
         """The refusal naming the bound that has passed, or None while both hold."""
         if self.elapsed_ms() >= self.cpu_ms:
