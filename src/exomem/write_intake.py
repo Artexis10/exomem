@@ -183,16 +183,17 @@ def _limit_sqlite_work(conn: sqlite3.Connection, deadline: float | None) -> None
 
 @contextmanager
 def _write(
-    vault_root: Path, *, create: bool = False, deadline: float | None = None,
+    vault_root: Path, *, create: bool = False, deadline: float | None = None, work_deadline: float | None = None,
 ) -> Iterator[sqlite3.Connection]:
     with _store(vault_root, mode="create" if create else "write", deadline=deadline) as conn:
         _limit_sqlite_work(conn, deadline)
         conn.execute("BEGIN IMMEDIATE")
+        _limit_sqlite_work(conn, work_deadline)
         try:
             yield conn
             conn.commit()
         except BaseException:
-            if deadline is not None:
+            if deadline is not None or work_deadline is not None:
                 conn.set_progress_handler(None, 0)
             conn.rollback()
             raise
@@ -702,7 +703,7 @@ class Drainer:
         with self._condition:
             return self._backlog_unsettled()
 
-    def prepare_retained_origins(self, deadline: float) -> None:
+    def prepare_retained_origins(self, deadline: float, *, work_deadline: float) -> None:
         """Qualify a legacy store on its first save, before choosing a new execution."""
         if not self._retry_indexes_needed:
             return
@@ -710,16 +711,19 @@ class Drainer:
 
         budget = request_budget.current()
         if budget is not None:
-            deadline = min(deadline, budget.deadline - request_budget.DELIVERY_RESERVE_SECONDS)
+            work_deadline = min(work_deadline, budget.deadline - request_budget.DELIVERY_RESERVE_SECONDS)
+        deadline = min(deadline, work_deadline)
         try:
             if not self._retry_index_upgrade.acquire(timeout=max(0.0, deadline - time.monotonic())):
                 raise TimeoutError("another save is preparing legacy receipts")
             try:
                 if not self._retry_indexes_needed:
                     return
-                with _write(self.vault_root, deadline=deadline) as conn:
+                # The intake wait bounds lock contention. A short wait must still allow the
+                # one-time build to finish after SQLite grants the transaction.
+                with _write(self.vault_root, deadline=deadline, work_deadline=work_deadline) as conn:
                     _add_retry_indexes(conn)
-                self._load(expect_store=True, deadline=deadline)
+                self._load(expect_store=True, deadline=work_deadline)
             finally:
                 self._retry_index_upgrade.release()
         except Exception as error:  # noqa: BLE001 - an unreadable legacy receipt may already own this save
@@ -1264,7 +1268,9 @@ class Admission:
             in_flight = True
         try:
             # A known receipt must still answer if the legacy database is temporarily unavailable.
-            self.drainer.prepare_retained_origins(started + (wait or _STORE_TIMEOUT_SECONDS))
+            self.drainer.prepare_retained_origins(
+                started + (wait or _STORE_TIMEOUT_SECONDS), work_deadline=started + _STORE_TIMEOUT_SECONDS,
+            )
             retained = self.drainer.retained_origin(self.origin)
             if retained is not None and retained != known:
                 answer = self._known_answer(*retained)
