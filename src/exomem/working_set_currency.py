@@ -82,6 +82,7 @@ def same_page_supersessions(
     document: semantic_units.SemanticUnitDocument,
     path: str,
     registry: relation_registry.RelationRegistry,
+    stored: Sequence[tuple[str, str]] = (),
 ) -> tuple[tuple[semantic_units.SemanticUnit, semantic_units.SemanticUnit], ...]:
     """Each (successor, target) pair that the page's own `supersedes` relations name.
 
@@ -90,15 +91,25 @@ def same_page_supersessions(
     resolver, so `#anchor`, `#^anchor` and `#unit-<fingerprint>` all name a
     unit. A unit that names itself is no pair.
     """
-    pairs: list[tuple[semantic_units.SemanticUnit, semantic_units.SemanticUnit]] = []
+    pairs: dict[tuple[str | None, str | None], tuple[semantic_units.SemanticUnit, semantic_units.SemanticUnit]] = {}
     for unit in document.units:
         authored = ({"kind": relation.kind, "target": relation.target} for relation in unit.relations)
         for target in relation_targets(authored, registry=registry):
             fragment = _target_fragment(target, path)
             resolved = document.resolve_fragment(fragment).unit if fragment else None
             if resolved is not None and resolved is not unit:
-                pairs.append((unit, resolved))
-    return tuple(pairs)
+                pairs[(unit.unit_ref, resolved.unit_ref)] = (unit, resolved)
+    if stored:
+        current: dict[str, semantic_units.SemanticUnit] = {}
+        for source_ref, target_ref in stored:
+            for reference in (source_ref, target_ref):
+                if reference not in current:
+                    resolved = document.resolve_unit(reference)
+                    if resolved.status == "found" and resolved.unit is not None:
+                        current[reference] = resolved.unit
+            if source_ref != target_ref and source_ref in current and target_ref in current:
+                pairs.setdefault((source_ref, target_ref), (current[source_ref], current[target_ref]))
+    return tuple(pairs.values())
 
 
 def _page_names(path: str) -> frozenset[str]:
@@ -142,7 +153,8 @@ def annotate(
     Units only; pages, records and pointers pass through untouched. Local
     anchors use selected units; qualified names require current resident evidence.
     """
-    from . import find, freshness
+    from . import find, freshness, unit_edges
+    from .vault_store import mode
 
     status_basis = status_basis or lifecycle_statuses.Basis(None)
     resolver = None
@@ -173,6 +185,9 @@ def annotate(
     for index, item in enumerate(items):
         if item.level == "unit" and item.path:
             by_page.setdefault(item.path, []).append(index)
+    root = status_basis.root
+    stored = (unit_edges.current_supersessions(root, by_page, relation_registry.load_registry(root))
+              if root is not None and by_page and mode.store_mode_for_reads(root) else {})
     superseded: set[int] = set()
     for path, indices in by_page.items():
         # Role copies share an exact identity; they are not ambiguous authored anchors.
@@ -180,6 +195,9 @@ def annotate(
         for index in indices:
             if reference := items[index].ref:
                 unit_indices.setdefault(reference, []).append(index)
+        for source, target in stored.get(path, ()):
+            if source in unit_indices:
+                superseded.update(unit_indices.get(target, ()))
         references = tuple(unit_indices)
         if not references:
             continue

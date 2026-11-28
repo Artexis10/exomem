@@ -158,7 +158,20 @@ def list_held(vault_root: Path) -> list[HeldItem]:
 def person_file_bytes(vault_root: Path, rel: str) -> bytes | None:
     """The person's file at ``rel`` as it is now, or None when it is absent, unreadable or above
     the projector's body limit. It is read through handles that refuse a symlink."""
-    return _observe(Path(vault_root), [rel], keep_body=True)[rel].body
+    from ..governance import egress
+    from ..governance.principal import effective_principal
+    from . import relationship_files
+
+    owner = egress.unrestricted_content_access(vault_root, effective_principal())
+    if relationship_files.source_path(rel) is not None and not owner:
+        return None
+    raw = _observe(Path(vault_root), [rel], keep_body=True)[rel].body
+    if raw is None or not ownership.is_markdown(rel):
+        return raw
+    try:
+        return relationship_files.strip_block(raw)
+    except OpError:
+        return raw if owner else None
 
 
 def resolve_held(
@@ -189,7 +202,14 @@ def resolve_held(
             "this vault is not in store mode, so it holds no held items",
             "Resolve held items only in a vault that `evermatter store-mode` has migrated.",
         )
-    if ownership.classify(rel) is not ownership.Ownership.PAGE:
+    relation_source = ownership.relation_source(rel)
+    if relation_source is not None:
+        from ..governance import egress
+        from ..governance.principal import effective_principal
+
+        if not egress.unrestricted_content_access(root, effective_principal()):
+            raise nothing_held(rel)
+    elif ownership.classify(rel) is not ownership.Ownership.PAGE:
         raise OpError(
             write.NOT_OWNED,
             f"{rel}: a held binary cannot be resolved here yet",
@@ -214,16 +234,17 @@ def resolve_held(
         )
     if item.item_version != seen:
         raise write.StoreConflict(rel, "this held item changed after it was listed", _LIST_AGAIN)
+    if relation_source is not None:
+        return _resolve_relations(root, writer, rel, relation_source, choice, why, row, store, disk)
     # The bytes that this resolution commits as the page, or None when the page goes away.
     if choice == KEEP_MINE:
-        written = disk.body if disk.file.exists else None
+        change = _keep_mine(rel, row, disk, why)
+        written = change.puts[0].body if change.puts else None
     else:
         written = None if page is None else page.body
     _require_write(root, rel, written)
     exported: tuple[Path | None, str | None] = (None, None)
-    if choice == KEEP_MINE:
-        change = _keep_mine(rel, row, disk, why)
-    else:
+    if choice == KEEP_STORE:
         exported = _export(root, rel, disk.body)
         change = _keep_store(root, rel, row, page, disk, exported, why)
     try:
@@ -257,6 +278,40 @@ def _require_write(root: Path, rel: str, written: bytes | None) -> None:
             "Leave the item held. Resolve it as the vault owner, or from a connection whose "
             "write access covers this page and the bytes that the choice keeps.",
         ) from None
+
+
+def _resolve_relations(
+    root: Path, writer: CollectionWriter, rel: str, source: str, choice: str, why: str,
+    row: tuple, stored: StoreFacts | None, disk: _Disk,
+) -> Resolution:
+    from .. import relation_registry
+    from ..governance.principal import effective_principal
+    from . import relationship_files, relationships
+
+    _require_write(root, source, None)
+    actor = effective_principal().audience_id
+    exported: tuple[Path | None, str | None] = (None, None)
+    revision = None if stored is None else stored.revision
+    if choice == KEEP_MINE:
+        if disk.body is None or revision != row[2]:
+            raise write.StoreConflict(rel, "the held relations file cannot replace this revision", _LIST_AGAIN)
+        decoded = relationship_files.parse(disk.body.splitlines(keepends=True))
+        registry = relation_registry.load_registry(root)
+        change = relationship_files.plan_import(
+            writer.connection, rel, decoded, actor=actor,
+            allowed_type=lambda key: registry.definition(key) is not None,
+        )
+    else:
+        exported = _export(root, rel, disk.body)
+        change = relationships.Change(
+            actor, projected_base=relationships.ProjectedBase(rel, source, revision, keep_store=True),
+        )
+    seen = write.FileSeen(rel, disk.file.sha256, disk.file.size, disk.mtime_ns)
+    result = write.commit(writer, write.StoreChange(
+        write.Origin.OUTSIDE_EDITOR, f"held {choice}: {why}",
+        relationship_change=change, resolves_held=(_held_row(row),), files_seen=(seen,),
+    ))
+    return Resolution(rel, choice, result.revision, bool(disk.file.exists), *exported)
 
 
 def nothing_held(rel: str) -> write.StoreConflict:
@@ -299,6 +354,11 @@ def _store_facts(view: read.StoreSnapshot, rel: str) -> StoreFacts | None:
     page = view.page_meta(rel)
     if page is not None:
         return StoreFacts(page.revision, page.sha256)
+    if ownership.relation_source(rel) is not None:
+        manifest = view.connection.execute(
+            "SELECT revision,sha256 FROM store_manifest WHERE path=?", (rel,),
+        ).fetchone()
+        return None if manifest is None else StoreFacts(*manifest)
     binary = view.binary(rel)
     return None if binary is None else StoreFacts(binary.revision, binary.sha256)
 
@@ -334,7 +394,8 @@ def _item(row: tuple, file: PersonFile, store: StoreFacts | None) -> HeldItem:
     if store is not None:
         witness += [store.revision, store.sha256]
     version = hashlib.sha256(json.dumps(witness).encode()).hexdigest()[:16]
-    if ownership.classify(rel) is not ownership.Ownership.PAGE:
+    relations_file = ownership.relation_source(rel) is not None
+    if ownership.classify(rel) is not ownership.Ownership.PAGE and not relations_file:
         blocked = BINARY_BLOCK
     elif file.size is not None and file.size > projector.HELD_BODY_LIMIT:
         blocked = LARGE_BLOCK
@@ -355,7 +416,7 @@ def _item(row: tuple, file: PersonFile, store: StoreFacts | None) -> HeldItem:
         store,
         version,
         blocked,
-        blocked is None and unchanged,
+        blocked is None and unchanged and (not relations_file or bool(file.exists)),
     )
 
 
@@ -408,10 +469,13 @@ def _keep_mine(rel: str, row: tuple, disk: _Disk, why: str) -> write.StoreChange
             expect=expect,
             resolves_held=resolves,
         )
-    assert disk.body is not None  # resolve_held refuses a file whose bytes were not read
-    puts = (write.PagePut(rel, disk.body, on_disk_mtime_ns=disk.mtime_ns),)
+    assert disk.body is not None and disk.file.sha256 is not None and disk.mtime_ns is not None
+    put, seen = write.outside_page(
+        rel, disk.body, disk.file.sha256, disk.mtime_ns, keep_mine=True,
+    )
     return write.StoreChange(
-        write.Origin.OUTSIDE_EDITOR, reason, puts=puts, expect=expect, resolves_held=resolves
+        write.Origin.OUTSIDE_EDITOR, reason, puts=(put,), expect=expect,
+        resolves_held=resolves, files_seen=seen,
     )
 
 

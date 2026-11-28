@@ -21,7 +21,10 @@ from pathlib import Path
 from .. import epistemic_graph, held_fs, lexstore, memory_refs, state_migration, vault
 from ..cli_ops import OpError
 from ..collection_store import admission, connection, custody, schema
-from . import marker, migrate, mode, ownership, projection, projector, read, rederive, write
+from . import (
+    marker, migrate, mode, ownership, projection, projector, read, rederive,
+    relationship_files, relationships, write,
+)
 from .write import Origin
 
 #: The store-mode tables a rollback keeps: the mode row that it sets back to file, and the audit trail, which is append-only history.
@@ -51,11 +54,15 @@ class Findings:
     #: removed or moved the page: held, or held once the queue is projected. The store's version
     #: of each is no file, so the rollback moves it into the trash.
     vacated: list[str] = field(default_factory=list)
+    projected_blocks: list[str] = field(default_factory=list)
+    edited_relations: list[str] = field(default_factory=list)
+    deleted_relations: list[str] = field(default_factory=list)
 
     @property
     def unexported(self) -> int:
         return len(
-            {*self.edited, *self.deleted, *self.vacated, *(path for path, _, _ in self.held)}
+            {*self.edited, *self.deleted, *self.vacated, *self.edited_relations, *self.deleted_relations,
+             *(path for path, _, _ in self.held)}
         )
 
 
@@ -113,13 +120,26 @@ def inspect(vault_root: Path, conn: sqlite3.Connection) -> Findings:
                 (found.deleted if on_disk is None else found.edited).append(rel)
         vacated |= held & present.keys()
     # Every stored page that no unheld intent is about to write: its file has the store's bytes.
-    for rel, sha256 in conn.execute(
-        "SELECT p.path, p.sha256 FROM store_pages p WHERE NOT EXISTS (SELECT 1 FROM "
+    for rel, sha256, projected in conn.execute(
+        "SELECT p.path,p.sha256,m.sha256 FROM store_pages p LEFT JOIN store_manifest m"
+        " ON m.path = p.path AND m.revision = p.revision WHERE NOT EXISTS (SELECT 1 FROM "
         f"store_projection_queue q WHERE q.path = p.path AND {mode.UNHELD_INTENT}) ORDER BY p.path"
     ):
         on_disk = _disk_sha256(vault_root, rel)
         if on_disk != sha256:
-            (found.deleted if on_disk is None else found.edited).append(rel)
+            if on_disk is not None and on_disk == projected and _has_projected_block(vault_root, rel, sha256):
+                found.projected_blocks.append(rel)
+            else:
+                (found.deleted if on_disk is None else found.edited).append(rel)
+    for rel, sha256 in conn.execute(
+        "SELECT path,sha256 FROM store_manifest WHERE path LIKE '%' || ? ORDER BY path",
+        (relationship_files.RELATIONS_FILE_SUFFIX,),
+    ):
+        if ownership.relation_source(rel) is None:
+            continue
+        on_disk = _disk_sha256(vault_root, rel)
+        if on_disk != sha256:
+            (found.deleted_relations if on_disk is None else found.edited_relations).append(rel)
     # A held file whose page the store no longer holds.
     for (rel,) in conn.execute(
         "SELECT h.path FROM store_held h "
@@ -131,6 +151,15 @@ def inspect(vault_root: Path, conn: sqlite3.Connection) -> Findings:
     found.deleted.sort()
     found.vacated = sorted(vacated)
     return found
+
+
+def _has_projected_block(root: Path, rel: str, canonical_sha: str) -> bool:
+    try:
+        raw = vault.read_disk_bytes_without_pinning(root / rel)
+        canonical = relationship_files.strip_block(raw)
+    except (OpError, FileNotFoundError):
+        return False
+    return canonical != raw and hashlib.sha256(canonical).hexdigest() == canonical_sha
 
 
 def _page(rel: str) -> bool:
@@ -274,7 +303,8 @@ def _rollback(
         )
     if found.unexported and not export_held:
         paths = sorted(
-            {*found.edited, *found.deleted, *found.vacated, *(p for p, _, _ in found.held)}
+            {*found.edited, *found.deleted, *found.vacated, *found.edited_relations,
+             *found.deleted_relations, *(p for p, _, _ in found.held)}
         )
         raise OpError(
             "VAULT_STORE_HELD_ITEMS",
@@ -374,7 +404,7 @@ def _export(
     )
     kept: dict[str, bytes] = {path: body for path, _, body in found.held if body is not None}
     beside: dict[str, bytes] = {}
-    for rel in (*found.edited, *found.vacated):
+    for rel in (*found.edited, *found.vacated, *found.edited_relations):
         on_disk = vault.read_disk_bytes_without_pinning(root / rel)
         if rel not in kept:
             kept[rel] = on_disk
@@ -384,15 +414,18 @@ def _export(
         projection.write_file(destination / "held", rel, body, durable=True)
     for rel, body in beside.items():
         projection.write_file(destination / "on-disk", rel, body, durable=True)
+    relation_files = _export_relationships(root, conn, destination, revision)
     summary = {
         "exported_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "reason": why,
         "store_revision": revision,
         "audit_rows": len(audit),
+        "relation_files": relation_files,
         "held_edits": sorted(kept),
         "on_disk_beside_held": sorted(beside),
         "held_deletes": sorted(
-            {*found.deleted, *(path for path, kind, _ in found.held if kind == "delete")}
+            {*found.deleted, *found.deleted_relations,
+             *(path for path, kind, _ in found.held if kind == "delete")}
         ),
         # Where each file whose page the store no longer holds goes: a free path in the trash.
         "absent_from_store": _trash_paths(root, found.vacated),
@@ -404,7 +437,7 @@ def _export(
         durable=True,
     )
     # The rebuild starts from the store's state: each file that differs gets the store's bytes, and the edit stays in the export.
-    for rel in (*found.edited, *found.deleted):
+    for rel in (*found.edited, *found.deleted, *found.projected_blocks):
         (body,) = conn.execute("SELECT body FROM store_pages WHERE path = ?", (rel,)).fetchone()
         projection.write_file(root, rel, body, durable=True)
     for rel, trashed in summary["absent_from_store"].items():
@@ -423,11 +456,47 @@ def _export(
     return {
         "directory": str(destination),
         "audit_rows": len(audit),
+        "relation_files": relation_files,
         "held_edits": len(kept),
         "on_disk_beside_held": len(beside),
         "held_deletes": len(summary["held_deletes"]),
         "moved_to_trash": len(summary["absent_from_store"]),
     }
+
+
+def _export_relationships(root: Path, conn: sqlite3.Connection, destination: Path, revision: int) -> int:
+    """Keep each identity and current edge on disk before dropping its canonical rows."""
+    if conn.execute("SELECT 1 FROM store_unit_ids LIMIT 1").fetchone() is None:
+        return 0
+    factory = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        history = conn.execute(
+            "SELECT h.*,r.source_unit_id,r.relation_type,r.target_unit_id,r.target_page_path,r.target_page_ref"
+            " FROM store_relationship_history h JOIN store_relationships r ON r.id=h.relationship_id"
+            " ORDER BY h.revision,h.relationship_id,h.action"
+        )
+        projection.write_file(
+            destination, "relationship-history.jsonl",
+            ((json.dumps(dict(row), sort_keys=True) + "\n").encode() for row in history),
+            durable=True,
+        )
+    finally:
+        conn.row_factory = factory
+    count = 0
+    for (source,) in conn.execute("SELECT DISTINCT parent_path FROM store_unit_ids ORDER BY parent_path"):
+        rel = relationship_files.path_for(source)
+        if ownership.relation_source(rel) != source:
+            raise OpError("INVALID_RELATIONS_FILE", "a stored relationship has an unsafe source path")
+        for target in (destination / "relationships", root):
+            projection.write_file(
+                target, rel, relationship_files.lines(
+                    source, revision, relationships.units_on(conn, source),
+                    relationships.outgoing_on(conn, source),
+                ), durable=True,
+            )
+        count += 1
+    return count
 
 
 def _trash_paths(root: Path, rels: list[str]) -> dict[str, str]:

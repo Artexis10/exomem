@@ -130,6 +130,7 @@ def _stamp(at: datetime) -> str:
 def enqueue(
     tx: Connection, derived: list[str], refreshed: list[str], revision: int, now: str,
     metered: frozenset[str] = frozenset(),
+    moved: frozenset[str] = frozenset(),
 ) -> None:
     """Queue one intent per path in the commit's own transaction.
 
@@ -138,12 +139,13 @@ def enqueue(
     rows the vault's disk floor meters when the drain writes them.
     """
     tx.executemany(
-        "INSERT INTO store_derivation_queue(path, revision, operation, queued_at, metered) "
-        "VALUES (?, ?, ?, ?, ?) "
+        "INSERT INTO store_derivation_queue(path, revision, operation, queued_at, metered, relationship_move) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(path) DO UPDATE SET revision = excluded.revision, operation = excluded.operation, "
+        "relationship_move = MAX(relationship_move, excluded.relationship_move), "
         "metered = excluded.metered, attempts = 0, failed_code = NULL, retry_at = NULL",
-        [*((rel, revision, DERIVE, now, int(rel in metered)) for rel in derived),
-         *((rel, revision, REFRESH, now, 0) for rel in refreshed)],
+        [*((rel, revision, DERIVE, now, int(rel in metered), int(rel in moved)) for rel in derived),
+         *((rel, revision, REFRESH, now, 0, 0) for rel in refreshed)],
     )
 
 
@@ -678,10 +680,11 @@ class _Intent:
     attempts: int
     metered: int
     failed_code: str | None
+    relationship_move: int
 
 
 #: The columns that make an ``_Intent``, in the order of its fields.
-_INTENT_COLUMNS = "path, revision, operation, attempts, metered, failed_code"
+_INTENT_COLUMNS = "path, revision, operation, attempts, metered, failed_code, relationship_move"
 
 
 def _next_batch(writer: CollectionWriter, from_revision: int = 0) -> list[_Intent]:
@@ -727,7 +730,7 @@ def _next_batch(writer: CollectionWriter, from_revision: int = 0) -> list[_Inten
 
 def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: Drained) -> bool:
     """Derive ``batch`` in one transaction; on failure record it against each intent and return False."""
-    from . import write
+    from . import relationships, write
 
     if len(batch) == 1:
         [intent] = batch
@@ -771,6 +774,9 @@ def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: 
                 "DELETE FROM store_derivation_queue WHERE path = ?", [(path,) for path in completed]
             )
             revision = row[1] + 1
+            moved = tuple(intent.path for intent in batch if intent.relationship_move)
+            if moved:
+                relationships.reproject_moved(tx, moved, revision=revision, at=write.timestamp())
             tx.execute("UPDATE store_mode SET revision = ? WHERE id = 1", (revision,))
             after = read.vault_triple(tx, revision)
     except Exception as error:  # noqa: BLE001 - a failed intent is recorded and retried, never lost

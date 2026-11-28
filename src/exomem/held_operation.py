@@ -53,7 +53,7 @@ def _may_see(vault_root: Path) -> Callable[[str], bool]:
     from .governance import egress
     from .governance import policy as policy_module
     from .governance.principal import effective_principal
-    from .vault_store import held, read
+    from .vault_store import held, read, relationship_files
 
     who = effective_principal()
     if egress.unrestricted_content_access(vault_root, who):
@@ -61,6 +61,8 @@ def _may_see(vault_root: Path) -> Callable[[str], bool]:
     current = policy_module.load(vault_root)
 
     def may_see(rel: str) -> bool:
+        if relationship_files.source_path(rel) is not None:
+            return False
         try:
             stored = read.owned_page(vault_root, rel)
         except FileNotFoundError:

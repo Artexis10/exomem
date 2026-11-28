@@ -15354,6 +15354,32 @@ def _page_level_edges(
     return edges
 
 
+def stored_relationship_edge(
+    relationship_id: str, relation_type: str, source: semantic_units.SemanticUnit,
+    path: str, target_path: str, target_key: str, target_parent: str | None,
+    target_anchor: str | None, target_kind: str | None,
+) -> GraphEdge:
+    """Project one canonical relationship as an exact unit relation candidate."""
+    occurrence = semantic_units.occurrence_key(source.form, source.span, source.source_hash)
+    candidate = _edge(
+        _candidate_key(path, occurrence, source.form), target_key, relation_type,
+        "semantic_relation",
+        source_path=path, source_anchor=source.anchor, source_hash=source.source_hash,
+        dst_page_key=_file_key(target_path), source_kind=source.kind, target_kind=target_kind,
+        metadata={
+            "occurrence_key": occurrence, "stored_relationship": relationship_id,
+            "bound_target_path": target_path, "bound_target_parent": target_parent,
+            "bound_source_parent": source.unit_ref.rpartition("#")[0] if source.unit_ref else None,
+            "target_fragment": target_anchor, "target_kind": target_kind,
+            "fragment_resolution": "unit" if target_anchor else None,
+        },
+    )
+    return replace(
+        candidate, edge_key=f"stored:{relationship_id}", relation_type=None,
+        parent_relation=None, registry_status=CANDIDATE_STATUS, resolver_source_kind=None,
+    )
+
+
 def _edges_for_page(
     vault_root: Path,
     page,
@@ -16978,6 +17004,14 @@ class GraphView:
             parent = self.parent(str(row.get("source_path") or ""))
             if parent is None:
                 return None
+            if metadata.get("stored_relationship"):
+                target = self.parent(str(metadata["bound_target_path"]))
+                if (target is None or parent.structure.parent_ref != metadata["bound_source_parent"]
+                        or target.structure.parent_ref != metadata["bound_target_parent"]):
+                    return None
+                fragment = metadata.get("target_fragment")
+                if fragment and target.structure.resolve_fragment(fragment).index is None:
+                    return None
             occurrence = metadata.get("occurrence_key")
             unit = parent.structure.unit(str(occurrence)) if occurrence else None
             if occurrence and unit is None:

@@ -179,7 +179,9 @@ def discover(
                 return
             source_ref, source_hash, authored = source
             metadata = edge.get("metadata") or {}
-            if edge.get("origin") != "semantic_relation" or metadata.get("raw") not in authored:
+            if edge.get("origin") != "semantic_relation" or (
+                not metadata.get("stored_relationship") and metadata.get("raw") not in authored
+            ):
                 return
             candidate = counterpart(str(edge.get("dst_key") or ""))
             if candidate is None:

@@ -1314,6 +1314,10 @@ def _migrate_to_20(conn: sqlite3.Connection) -> None:
 
 def _migrate_to_21(conn: sqlite3.Connection) -> None:
     """Store relationships and unit identities under the collection-store compatibility fence."""
+    conn.execute(
+        "ALTER TABLE store_derivation_queue ADD COLUMN relationship_move INTEGER NOT NULL DEFAULT 0"
+        " CHECK(relationship_move IN (0,1))"
+    )
     # The unit can outlive its page as an orphan. Its page path is deliberately not a foreign key.
     conn.execute("""CREATE TABLE store_unit_ids(
       id TEXT PRIMARY KEY,

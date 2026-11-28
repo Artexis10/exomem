@@ -50,7 +50,7 @@ from exomem import vault as pages
 from exomem.collection_store import capability, connection, custody, replica, schema
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import library_scope
-from exomem.vault_store import derivation, migrate, mode, ownership, verify, write
+from exomem.vault_store import derivation, migrate, mode, ownership, relationship_files, relationships, verify, write
 
 ALPHA = "Knowledge Base/Notes/Alpha.md"
 BETA = "Knowledge Base/Notes/Beta.md"
@@ -473,6 +473,49 @@ def test_a_rollback_returns_every_find_and_graph_answer_that_the_vault_gave_befo
     assert migrate_apply(vault) == 0
     assert mode.store_mode_active(vault)
     check_stored_links()
+
+
+def test_a_rollback_and_remigration_preserve_relationship_ids_and_an_unresolved_target(
+    vault, tmp_path, capsys,
+):
+    source = (vault / ALPHA).read_bytes() + b"\n- [rule] Check the tide. ^tide\n"
+    target = (vault / BETA).read_bytes() + b"\n- [rule] Light the lamp. ^lamp\n"
+    (vault / ALPHA).write_bytes(source)
+    (vault / BETA).write_bytes(target)
+    build_indexes(vault)
+    assert migrate_apply(vault) == 0
+    with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
+        write.commit(CollectionWriter(vault, handle), write.StoreChange(
+            write.Origin.GOVERNED, "Connect two observations.",
+            relationship_change=relationships.Change(
+                actor="owner",
+                identities=(relationships.UnitIdentity("tide-id", ALPHA, "tide"),
+                            relationships.UnitIdentity("lamp-id", BETA, "lamp")),
+                added=(relationships.Relationship("link-id", "tide-id", "supports", "lamp-id"),),
+            ),
+        ))
+    export = tmp_path / "export-relations"
+    assert rollback_apply(vault, export) == 0, capsys.readouterr().err
+    assert (vault / ALPHA).read_bytes() == source
+    assert (vault / BETA).read_bytes() == target
+    artifact = relationship_files.path_for(ALPHA)
+    with (vault / artifact).open("rb") as encoded:
+        recovered = relationship_files.parse(encoded)
+    assert recovered.relationships[0].id == "link-id"
+    assert (export / "relationships" / artifact).read_bytes() == (vault / artifact).read_bytes()
+    history = [json.loads(line) for line in (export / "relationship-history.jsonl").read_bytes().splitlines()]
+    assert [(row["relationship_id"], row["action"]) for row in history] == [("link-id", "add")]
+    (vault / BETA).write_bytes(target.replace(b" ^lamp", b""))
+    build_indexes(vault)
+
+    assert migrate_apply(vault) == 0, capsys.readouterr().err
+    with closing(connection.open_reader(connection.store_path(vault))) as store:
+        assert store.execute(
+            "SELECT id,source_unit_id,target_unit_id FROM store_relationships",
+        ).fetchall() == [("link-id", "tide-id", "lamp-id")]
+        assert store.execute(
+            "SELECT parent_path,anchor FROM store_unit_ids WHERE id='lamp-id'",
+        ).fetchone() == (BETA, "lamp")
 
 
 def test_a_rollback_export_names_the_page_that_a_moved_page_came_from(vault, tmp_path):

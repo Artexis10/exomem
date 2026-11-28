@@ -51,6 +51,9 @@ MEDIA_PREVIEWS_DIRNAME = ".media-previews"
 # Closed portable security artifact; its contents carry no connector authority.
 CONNECTOR_BOUNDARY_DESCRIPTOR_ID = "connector-boundary"
 CONNECTOR_BOUNDARY_REQUIREMENT_NAME = ".connector-boundary.json"
+# Fixed suffix for the owner's portable relationship files.
+RELATIONS_FILE_DESCRIPTOR_ID = "store-relationships"
+RELATIONS_FILE_SUFFIX = ".evermatter-relations.jsonl"
 # Face search keeps two databases in one owner-only store: the index is rebuilt by a re-scan, the people store
 # holds the owner's names and corrections, which nothing else records.
 FACES_DIRNAME = "faces"
@@ -545,6 +548,10 @@ _REGISTRY = (
         "compiled-history", "compiled_history", StatePlacement.VAULT_CANONICAL,
         vault_store=True,
         trees=("_compiled",),
+    ),
+    InternalStateDescriptor(
+        RELATIONS_FILE_DESCRIPTOR_ID, "vault_store.relationships", StatePlacement.VAULT_CANONICAL,
+        leaf_patterns=(re.compile(r".+\.md" + re.escape(RELATIONS_FILE_SUFFIX)),),
     ),
     InternalStateDescriptor(
         CONNECTOR_BOUNDARY_DESCRIPTOR_ID,

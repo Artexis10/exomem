@@ -37,7 +37,10 @@ from .. import (
 from ..cli_ops import OpError
 from ..collection_store import admission, authority, capability, connection
 from ..governance import page_admission
-from . import availability, dependency_pass, graph_state, marker, mode, ownership, rederive, verify
+from . import (
+    availability, dependency_pass, graph_state, marker, mode, ownership, rederive,
+    relationship_files, verify,
+)
 from .write import Origin, frontmatter_json
 
 #: A migration's private directory beside the live store; a run that died leaves one, and the next migrate or rollback removes it.
@@ -70,6 +73,8 @@ class Staged:
 
     pages: int = 0
     binaries: int = 0
+    relation_files: dict[str, tuple[FileFact, int]] = field(default_factory=dict)
+    projected_pages: dict[str, FileFact] = field(default_factory=dict)
     skipped: list[ownership.Skipped] = field(default_factory=list)
     #: Each object the lexical, the graph, the references, then the inbound-link owner created: name -> type, in creation order.
     objects: dict[str, str] = field(default_factory=dict)
@@ -87,9 +92,9 @@ def snapshot(
     vault_root: Path, on_skip=None
 ) -> Iterator[tuple[ownership.OwnedFile, FileFact, bytes | None]]:
     """Read each file the store owns once: its facts, and its bytes when it is a page."""
-    for owned in ownership.iter_owned(vault_root, on_skip=on_skip):
+    for owned in ownership.iter_owned(vault_root, on_skip=on_skip, include_relations=True):
         path = Path(vault_root) / owned.rel
-        if owned.ownership is ownership.Ownership.PAGE:
+        if owned.ownership in (ownership.Ownership.PAGE, ownership.Ownership.RELATIONS):
             body = vault.read_disk_bytes_without_pinning(path)
             digest = hashlib.sha256(body).hexdigest()
         else:
@@ -191,16 +196,28 @@ def _load_files(vault_root: Path, conn: sqlite3.Connection, staged: Staged, revi
     conn.execute("BEGIN IMMEDIATE")
     try:
         for owned, fact, body in snapshot(vault_root, staged.skipped.append):
+            if owned.ownership is ownership.Ownership.RELATIONS:
+                assert body is not None
+                decoded = relationship_files.parse(body.splitlines(keepends=True))
+                if ownership.relation_source(owned.rel) != decoded.source:
+                    raise OpError("INVALID_RELATIONS_FILE", "a relations file names a different source")
+                relationship_files.restore(conn, decoded, revision=revision)
+                staged.relation_files[owned.rel] = (fact, decoded.revision)
+                continue
             if body is not None:
+                canonical = relationship_files.strip_block(body) if ownership.is_markdown(owned.rel) else body
+                if canonical != body:
+                    staged.projected_pages[owned.rel] = fact
+                sha256 = fact.sha256 if canonical == body else hashlib.sha256(canonical).hexdigest()
                 conn.execute(
                     "INSERT INTO store_pages(path, body, sha256, size, frontmatter_json, revision, mtime_ns) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         owned.rel,
-                        body,
-                        fact.sha256,
-                        fact.size,
-                        frontmatter_json(body),
+                        canonical,
+                        sha256,
+                        len(canonical),
+                        frontmatter_json(canonical),
                         revision,
                         fact.mtime_ns,
                     ),
@@ -298,13 +315,19 @@ def _copy_rows_without_triggers(conn: sqlite3.Connection, staged: Staged, copy) 
 
 
 def _copy_table(conn: sqlite3.Connection, source: sqlite3.Connection, table: str) -> None:
-    columns = ", ".join(f'"{row[1]}"' for row in conn.execute(f'PRAGMA main.table_info("{table}")'))
-    marks = ", ".join("?" * (columns.count(",") + 2))
+    names = [f'"{row[1]}"' for row in conn.execute(f'PRAGMA main.table_info("{table}")')]
+    (without_rowid,) = conn.execute(
+        "SELECT wr FROM pragma_table_list WHERE schema='main' AND name=?", (table,),
+    ).fetchone()
+    if not without_rowid:
+        names.insert(0, "rowid")
+    columns = ", ".join(names)
+    marks = ", ".join("?" * len(names))
     # The owners' DDL seeds a few stamp rows; the sidecar's own replace them.
     conn.execute(f'DELETE FROM main."{table}"')
-    rows = source.execute(f'SELECT rowid, {columns} FROM "{table}"')
+    rows = source.execute(f'SELECT {columns} FROM "{table}"')
     while batch := rows.fetchmany(_COPY_BATCH):
-        conn.executemany(f'INSERT INTO main."{table}"(rowid, {columns}) VALUES ({marks})', batch)
+        conn.executemany(f'INSERT INTO main."{table}"({columns}) VALUES ({marks})', batch)
 
 
 def verify_staged(
@@ -794,15 +817,33 @@ def _install_rows(
             *staged.link_tables,
             "store_pages",
             "store_binaries",
+            "store_unit_ids",
+            "store_relationships",
+            "store_relationship_history",
         ):
             _copy_table(conn, source, table)
 
     _copy_rows_without_triggers(conn, staged, copy)
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    pages = _recheck_files(root, source)
+    pages = _recheck_files(root, source, staged)
     conn.executemany(
         "INSERT INTO store_manifest(path, sha256, size, mtime_ns, revision) VALUES (?, ?, ?, ?, ?)",
         [(rel, fact.sha256, fact.size, fact.mtime_ns, revision) for rel, fact in pages],
+    )
+    conn.executemany(
+        "INSERT INTO store_manifest(path,sha256,size,mtime_ns,revision) VALUES (?,?,?,?,?)",
+        [(rel, fact.sha256, fact.size, fact.mtime_ns, base)
+         for rel, (fact, base) in staged.relation_files.items()],
+    )
+    conn.execute(
+        "INSERT INTO store_projection_queue(path,revision,operation,from_path,queued_at)"
+        " SELECT DISTINCT u.parent_path,?,'write',NULL,? FROM store_unit_ids u"
+        " JOIN store_pages p ON p.path=u.parent_path", (revision, now),
+    )
+    conn.execute(
+        "INSERT INTO store_derivation_queue(path,revision,operation,queued_at)"
+        " SELECT DISTINCT u.parent_path,?,'derive',? FROM store_unit_ids u"
+        " JOIN store_pages p ON p.path=u.parent_path", (revision, now),
     )
     # The page's mtime is the manifest's: both come from the recheck, which is the last read before the commit.
     conn.execute(
@@ -826,13 +867,15 @@ def _install_rows(
     rederive.record_derived_from_files(conn, revision)
 
 
-def _recheck_files(root: Path, source: sqlite3.Connection) -> list[tuple[str, FileFact]]:
+def _recheck_files(root: Path, source: sqlite3.Connection, staged: Staged) -> list[tuple[str, FileFact]]:
     """Read every owned file again and refuse when any differs from the staged bytes; return the pages' facts."""
     stored = dict(
         source.execute(
             "SELECT path, sha256 FROM store_pages UNION ALL SELECT path, sha256 FROM store_binaries"
         )
     )
+    stored.update((rel, fact.sha256) for rel, fact in staged.projected_pages.items())
+    stored.update((rel, fact.sha256) for rel, (fact, _) in staged.relation_files.items())
     changed, seen, pages = [], set(), []
     for owned, fact, _ in snapshot(root):
         seen.add(owned.rel)

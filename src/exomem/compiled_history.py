@@ -23,7 +23,7 @@ import datetime as dt
 import hashlib
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -152,7 +152,9 @@ def plan_entry(
     # bytes stand unchanged: the transition changed its derived superseded
     # state, which is exactly what the entry must answer for later.
     supersession_touched = _supersession_touched_refs(
-        preflight.before, preflight.after, preflight.path
+        preflight.before, preflight.after, preflight.path,
+        preflight.before_corpus.stored_relation_facts,
+        preflight.after_corpus.stored_relation_facts,
     )
     affected = [
         {
@@ -188,9 +190,9 @@ def plan_entry(
     return _new_entry_write(root, path, entry)
 
 
-def _superseded_refs(state: Any, path: str) -> set[str]:
+def _superseded_refs(state: Any, path: str, stored: Sequence[Any]) -> set[str]:
     """The unit_refs a page's own units mark superseded, read in the page's selected relation registry."""
-    from . import relation_registry, working_set_currency
+    from . import relation_registry, unit_edges, working_set_currency
 
     registry = (
         state.definitions.snapshots["relations"].typed
@@ -200,15 +202,17 @@ def _superseded_refs(state: Any, path: str) -> set[str]:
     return {
         target.unit_ref
         for _successor, target in working_set_currency.same_page_supersessions(
-            state.document, path, registry
+            state.document, path, registry, unit_edges.planned_supersessions(stored, path, registry),
         )
         if target.unit_ref
     }
 
 
-def _supersession_touched_refs(before: Any, after: Any, path: str) -> set[str]:
+def _supersession_touched_refs(
+    before: Any, after: Any, path: str, before_edges: Sequence[Any], after_edges: Sequence[Any],
+) -> set[str]:
     """Units whose derived superseded state the transition changed."""
-    return _superseded_refs(before, path) ^ _superseded_refs(after, path)
+    return _superseded_refs(before, path, before_edges) ^ _superseded_refs(after, path, after_edges)
 
 
 def plan_episode_entry(

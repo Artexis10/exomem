@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from collections.abc import Iterable
 from pathlib import Path
 
 from .. import vault
@@ -20,7 +21,7 @@ from .. import vault
 TEMP_PREFIX = ".exomem-projecting-"
 
 
-def write_file(target_root: Path, rel: str, body: bytes, *, durable: bool) -> Path:
+def write_file(target_root: Path, rel: str, body: bytes | Iterable[bytes], *, durable: bool) -> Path:
     """Write ``body`` to ``target_root/rel`` and return the path; ``durable`` makes it survive a power loss.
 
     The file replaces any file at ``rel`` in one rename, so a reader sees the old bytes or the new ones.
@@ -31,7 +32,8 @@ def write_file(target_root: Path, rel: str, body: bytes, *, durable: bool) -> Pa
     temp = target.parent / f"{TEMP_PREFIX}{uuid.uuid4().hex}"
     try:
         with open(temp, "wb") as handle:
-            handle.write(body)
+            for part in (body,) if isinstance(body, bytes) else body:
+                handle.write(part)
             handle.flush()
             if durable:
                 os.fsync(handle.fileno())

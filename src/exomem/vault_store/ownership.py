@@ -24,6 +24,8 @@ class Ownership(StrEnum):
     PAGE = "page"
     #: A file whose bytes stay on disk; the store records its path, hash and size.
     BINARY = "binary"
+    #: An owner projection, included only when a migration or import asks for it.
+    RELATIONS = "relations"
     #: Not the store's: a read-only input, or the file of another owner.
     NONE = "none"
 
@@ -148,6 +150,16 @@ def classify_many(rels: Iterable[str]) -> dict[str, Ownership]:
     return {rel: _classified(rel, *key) for rel in dict.fromkeys(rels)}
 
 
+def relation_source(rel: str) -> str | None:
+    """Which managed Markdown page owns this reserved artifact, if any."""
+    from . import relationship_files
+
+    source = relationship_files.source_path(rel)
+    if source is not None and classify(source) is Ownership.PAGE:
+        return source
+    return None
+
+
 def owns_folder(rel: str) -> bool:
     """Whether the store owns the files that a folder holds, by the rules ``iter_owned`` walks by.
 
@@ -164,6 +176,7 @@ def owns_folder(rel: str) -> bool:
 
 def iter_owned(
     vault_root: Path, *, on_skip: Callable[[Skipped], None] | None = None,
+    include_relations: bool = False,
 ) -> Iterator[OwnedFile]:
     """Yield every regular file that the store owns below the Knowledge Base folder.
 
@@ -175,7 +188,7 @@ def iter_owned(
     so a caller can tell a partial walk from a whole one. Without ``on_skip`` the walk stays silent.
     """
     report = on_skip or (lambda _skipped: None)
-    yield from _walk(managed_root(Path(vault_root)), managed_root_rel(), report)
+    yield from _walk(managed_root(Path(vault_root)), managed_root_rel(), report, include_relations)
 
 
 # Both enums are closed sets that code implements. A directory and a regular file never reach this map.
@@ -187,7 +200,9 @@ _SKIP_FOR_KIND = {
 }
 
 
-def _walk(directory: Path, rel_dir: str, report: Callable[[Skipped], None]) -> Iterator[OwnedFile]:
+def _walk(
+    directory: Path, rel_dir: str, report: Callable[[Skipped], None], include_relations: bool,
+) -> Iterator[OwnedFile]:
     try:
         with os.scandir(directory) as scanned:
             entries = sorted(scanned, key=lambda entry: entry.name)
@@ -198,19 +213,20 @@ def _walk(directory: Path, rel_dir: str, report: Callable[[Skipped], None]) -> I
         if _is_dot_name(entry.name):
             continue
         rel = f"{rel_dir}/{entry.name}"
+        relation_file = include_relations and relation_source(rel) is not None
         try:
             # The directory entry's own stat has no link count on Windows, so the entry is stat'ed here.
             info = os.lstat(entry.path)
         except OSError:
-            if classify(rel) is not Ownership.NONE:
+            if relation_file or classify(rel) is not Ownership.NONE:
                 report(Skipped(rel, SkipReason.UNREADABLE))
             continue
         kind = entry_kind(entry.path, info)
         if kind is EntryKind.DIRECTORY:
             if _claimed(rel) is not Ownership.NONE:
-                yield from _walk(Path(entry.path), rel, report)
+                yield from _walk(Path(entry.path), rel, report, include_relations)
             continue
-        owner = classify(rel)
+        owner = Ownership.RELATIONS if relation_file else classify(rel)
         if owner is Ownership.NONE:
             continue
         if kind is EntryKind.REGULAR:

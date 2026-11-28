@@ -224,6 +224,18 @@ class FileSeen:
             raise ValueError("a seen file has a hash, a size and a time, or none of them")
 
 
+def outside_page(
+    rel: str, raw: bytes, sha256: str, mtime_ns: int, *, keep_mine: bool = False,
+) -> tuple[PagePut, tuple[FileSeen, ...]]:
+    """Read canonical page bytes and retain the exact projected-file witness for its rewrite."""
+    from . import relationship_files
+
+    canonical = relationship_files.strip_block(raw, keep_mine=keep_mine)
+    if canonical == raw:
+        return PagePut(rel, raw, on_disk_mtime_ns=mtime_ns), ()
+    return PagePut(rel, canonical), (FileSeen(rel, sha256, len(raw), mtime_ns),)
+
+
 @dataclass(frozen=True, slots=True)
 class StoreChange:
     """Everything one commit changes. A path appears in at most one of the operations.
@@ -284,7 +296,10 @@ class StoreChange:
         named = (*self.paths, *self.refresh)
         if len(set(named)) != len(named):
             raise ValueError("a store change names a path more than once")
-        if not {seen.rel for seen in self.files_seen} <= set(self.paths):
+        seen_paths = set(self.paths)
+        if self.relationship_change is not None and self.relationship_change.projected_base is not None:
+            seen_paths.add(self.relationship_change.projected_base.path)
+        if not {seen.rel for seen in self.files_seen} <= seen_paths:
             raise ValueError("a store change records a file that it does not change")
 
 
@@ -969,7 +984,11 @@ def commit(
         now = timestamp()
         audit = _Trail(tx, revision, change, now)
         for put in change.puts:
-            _put_page(tx, put, revision, audit, prepared=prepared.get(put.rel))
+            expected = change.expect.get(put.rel) if change.relationship_change is not None else None
+            _put_page(
+                tx, put, revision, audit, prepared=prepared.get(put.rel),
+                unchanged_sha256=expected.sha256 if expected is not None else None,
+            )
         for page in change.deletes:
             _delete_page(tx, page, audit)
         for move in change.moves:
@@ -984,7 +1003,8 @@ def commit(
         relationship_paths: list[str] = []
         if change.relationship_change is not None:
             affected = relationships.apply(
-                tx, change.relationship_change, revision=revision, reason=change.reason, at=now,
+                tx, change.relationship_change, revision=revision,
+                reason=change.relationship_change.reason or change.reason, at=now,
             )
             relationship_paths = [path for (path,) in tx.execute(
                 "SELECT path FROM store_pages WHERE path IN (SELECT value FROM json_each(?)) "
@@ -993,6 +1013,11 @@ def commit(
             new_intents = tuple(path for path in relationship_paths if path not in audit.intents)
             _degrade_moves(tx, new_intents)
             audit.intents.update((path, ("write", None)) for path in new_intents)
+            base = change.relationship_change.projected_base
+            if base is not None and base.keep_store and not tx.execute(
+                "SELECT 1 FROM store_unit_ids WHERE parent_path=? LIMIT 1", (base.source,),
+            ).fetchone():
+                audit.intents[base.path] = ("delete", None)
         if overlay:
             # The overlay job settles the rows that the registries under ``_Schema`` derive.
             rederive.record_overlay_change(tx, revision)
@@ -1006,6 +1031,7 @@ def commit(
         derivation.enqueue(
             tx, list(dict.fromkeys((*change.page_paths, *relationship_paths))),
             list(change.refresh), revision, now, metered,
+            moved=frozenset(move.dst for move in change.moves),
         )
         for held in change.resolves_held:
             _drop_held(tx, held)
@@ -1030,6 +1056,10 @@ def _refuse_owned_refresh(tx: Connection, refresh: tuple[str, ...]) -> None:
 
 def _require_owned(change: StoreChange) -> None:
     """Refuse, before any write, a path that the store cannot hold as its operation needs."""
+    if change.relationship_change is not None and (base := change.relationship_change.projected_base) is not None:
+        _require_safe(base.path)
+        if ownership.relation_source(base.path) != base.source:
+            raise OpError(NOT_OWNED, "the relations file does not belong to its source page")
     for rel in change.refresh:
         _require_safe(rel)
         # ``PAGE`` is refused inside ``commit``'s transaction, where the store_pages probe and the
@@ -1298,9 +1328,13 @@ class _Trail:
 
 def _put_page(
     tx: Connection, put: PagePut, revision: int, audit: _Trail, *, prepared: _PreparedOriginal | None,
+    unchanged_sha256: str | None = None,
 ) -> None:
     digest = hashlib.sha256(put.body).hexdigest()
     on_disk = put.on_disk_mtime_ns is not None
+    # Relation-only writes keep an exact logical primary for admission and change no page row.
+    if digest == unchanged_sha256 and not on_disk and not put.media_allocation:
+        return
     mtime_ns = time.time_ns() if put.on_disk_mtime_ns is None else put.on_disk_mtime_ns
     fields = frontmatter_json(put.body) if prepared is None else prepared.fields
     if prepared is not None:

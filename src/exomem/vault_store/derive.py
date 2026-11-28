@@ -43,7 +43,7 @@ from .. import (
 from ..find_types import ParsedPage
 from ..governance import page_admission
 from ..semantic_index import SemanticParentIndexState
-from . import dependency_pass, read, resident_catalogue
+from . import dependency_pass, read, relationships, resident_catalogue
 
 #: A page's parse and its parent state: what ``page_rows`` and ``page_graph_rows`` both take.
 _Parsed = tuple[ParsedPage | None, SemanticParentIndexState | None]
@@ -524,12 +524,19 @@ class _Derivation:
                 self.root, graph.resolver,
                 (dependency for _, page in pages if page is not None for dependency in page.dependencies),
             )
+            stored: dict[str, list[relationships.BoundRelationship]] = {}
+            if "store_relationships" in self.projections and batch:
+                for edge in relationships.outgoing_for_paths(self.tx, batch):
+                    stored.setdefault(edge.source.parent_path, []).append(edge)
+                    if edge.target is not None:
+                        targets.add(edge.target.parent_path)
             self.fragment_landing.prime(targets)
             for rel, page in pages:
-                self._write_graph(rel, page, graph, charge=rel in charge)
+                self._write_graph(rel, page, graph, charge=rel in charge, stored=stored.get(rel))
 
     def _write_graph(
         self, rel: str, page: _GraphPage | None, graph: _GraphInputs, *, charge: bool,
+        stored: list[relationships.BoundRelationship] | None = None,
     ) -> None:
         """Replace the graph rows of ``rel`` with the ones its bytes derive, or drop them."""
         rows = None
@@ -545,6 +552,8 @@ class _Derivation:
                 prepared_unit_rows=lexical.unit_rows if lexical else None,
                 prepared_dependencies=page.dependencies, unit_links=self.unit_links,
             )
+            if rows is not None and stored:
+                rows = replace(rows, edges=(*rows.edges, *self._relationship_edges(rel, page, graph, stored)))
         if rows is None:
             if charge and self.reserve_graph is not None:
                 self.reserve_graph(rel, ())  # the page's own rows go; their leaves draw on the reservation
@@ -557,6 +566,34 @@ class _Derivation:
                 # graph rows draw on the same reservation as the original's own.
                 before_write=self.reserve_graph if charge else None,
             )
+
+    def _relationship_edges(
+        self, rel: str, page: _GraphPage, graph: _GraphInputs,
+        stored: list[relationships.BoundRelationship],
+    ) -> list[epistemic_graph.GraphEdge]:
+        bound = {
+            unit.anchor: unit for unit in page.state.document.units
+            if unit.anchor is not None and unit.unit_ref is not None
+        }
+        found = []
+        for item in stored:
+            source = bound.get(item.source.anchor)
+            if source is None or item.source.parent_ref != page.state.parent_ref:
+                continue
+            anchor = item.target.anchor if item.target is not None else None
+            parent_ref = item.target.parent_ref if item.target is not None else item.relationship.target_page_ref
+            target_key = epistemic_graph._file_key(item.target_path)
+            target_kind = None
+            if anchor is not None:
+                target_key, _, details = graph.landing(item.target_path, anchor)
+                if details["fragment_resolution"] != "unit":
+                    continue
+                target_kind = details.get("target_kind")
+            found.append(epistemic_graph.stored_relationship_edge(
+                item.relationship.id, item.relationship.relation_type, source, rel,
+                item.target_path, target_key, parent_ref, anchor, target_kind,
+            ))
+        return found
 
     # ------------------------------------------------------------------ dependents
 
