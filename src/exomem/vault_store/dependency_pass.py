@@ -28,23 +28,29 @@ class DependencyPass:
     after: str = ""
 
     def batch(
-        self, conn: Connection, limit: int,
+        self, conn: Connection, limit: int, *, covered: set[str] | frozenset[str] = frozenset(),
     ) -> tuple[list[str], DependencyPass | None]:
         """Seek at most `limit` source paths across the target's indexed dependency names."""
-        found = []
+        found: list[str] = []
+        found_paths: set[str] = set()
         after = self.after
         filter_fragment = " AND instr(raw_target, '#') > 0" if self.fragments_only else ""
         for index in range(self.key_offset, len(self.keys)):
-            remaining = limit - len(found)
-            paths = [path for (path,) in conn.execute(
+            rows = conn.execute(
                 "SELECT DISTINCT source_path FROM graph_dependencies "
                 f"WHERE lookup_key = ? AND source_path > ?{filter_fragment} "
                 "ORDER BY source_path LIMIT ?",
-                (self.keys[index], after, remaining + 1),
-            )]
-            found.extend(paths[:remaining])
-            if len(paths) > remaining:
-                return found, replace(self, key_offset=index, after=found[-1] if remaining else after)
+                (self.keys[index], after, limit + len(covered) + 1),
+            )
+            for (path,) in rows:
+                if path in covered or path in found_paths:
+                    after = path
+                    continue
+                if len(found) == limit:
+                    return found, replace(self, key_offset=index, after=after)
+                found.append(path)
+                found_paths.add(path)
+                after = path
             after = ""
         return found, None
 

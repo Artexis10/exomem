@@ -601,6 +601,8 @@ class _Derivation:
             self.tx, self._paths_and_priors(edited - chunked), resolvers, fragments_only=True,
         )
         previous = dependency_pass.for_paths(self.tx, sorted(chunked))
+        covered = set(self.written) | set(self.refreshed) | set(self.removed)
+        scheduled = covered | found
         remaining = self.dependency_limit
         for target in sorted(chunked):
             keys = epistemic_graph._dependency_changed_keys(
@@ -614,9 +616,12 @@ class _Derivation:
             cursor = dependency_pass.DependencyPass(
                 target, self.dependency_revisions[target], tuple(sorted(keys)), fragments_only,
             )
-            paths, following = cursor.batch(self.tx, remaining)
+            # A folder restore already derived its own links against all restored pages.
+            # Spend the continuation budget only on sources that still need to run.
+            paths, following = cursor.batch(self.tx, remaining, covered=scheduled)
             remaining -= len(paths)
             found.update(paths)
+            scheduled.update(paths)
             if following is not None:
                 dependency_pass.save(self.tx, following)
                 self.pending_dependencies.add(target)
@@ -632,5 +637,5 @@ class _Derivation:
             )
         # A page of the commit is derived already; the rest follow in path order, so a kill-free
         # replay of the same commit writes the same rows.
-        return sorted(found - set(self.written) - set(self.refreshed) - set(self.removed)), linking
+        return sorted(found - covered), linking
 

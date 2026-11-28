@@ -172,7 +172,7 @@ def clear(tx: Connection) -> None:
     tx.executemany("DELETE FROM store_meta WHERE key = ?", [(key,) for key in KEYS])
 
 
-def read(conn: Connection) -> Registry:
+def read(conn: Connection, *, include_link_proof: bool = False) -> Registry:
     """The registry state that the store's own records show.
 
     ``unknown`` is a store that records no reflected revision, and one whose record of the last
@@ -190,10 +190,11 @@ def read(conn: Connection) -> Registry:
     # No overlay change on record is a revision of 0: every reflected revision is at or past it.
     changed = 0 if OVERLAY_REVISION not in meta else _revision(meta[OVERLAY_REVISION])
     owner = _revision(meta.get(OWNER_SCHEMA))
-    behind = (
-        _owners_behind(meta.get(OWNER_SCHEMA)) or not lexstore.catalogue_schema_current(conn)
-        or not epistemic_graph.unit_links_generation_current(conn)
-    )
+    behind = _owners_behind(meta.get(OWNER_SCHEMA)) or not lexstore.catalogue_schema_current(conn)
+    # Only the rebuild worker and the claim-link reader need the graph proof. Ordinary search
+    # can use its cached result without consulting the graph, even while link rows rebuild.
+    if include_link_proof and not behind:
+        behind = not epistemic_graph.unit_links_generation_current(conn)
     parser = _revision(meta.get(PARSER_VERSION))
     parser_behind = parser != semantic_index.PARSER_VERSION
     if reflected is None or changed is None or behind or parser_behind:
@@ -231,7 +232,7 @@ def owner_schema_behind(conn: Connection, *, required_version: int | None = None
     row = conn.execute("SELECT value FROM store_meta WHERE key = ?", (OWNER_SCHEMA,)).fetchone()
     if _owners_behind(None if row is None else row[0], required_version=required_version):
         return True
-    if required_version is None or required_version >= UNIT_LINKS_OWNER_VERSION:
+    if required_version is not None and required_version >= UNIT_LINKS_OWNER_VERSION:
         if not epistemic_graph.unit_links_generation_current(conn):
             return True
     return required_version is None and not lexstore.catalogue_schema_current(conn)
@@ -375,7 +376,7 @@ def adopt_change_journal(tx: Connection) -> None:
 
 
 def _due(conn: Connection, root: Path) -> tuple[str, Registry]:
-    registry = read(conn)
+    registry = read(conn, include_link_proof=True)
     if registry.state == CURRENT or registry.target is None:
         # No mode row means not a store-mode vault: there is nothing to derive.
         return IDLE, registry
