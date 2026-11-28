@@ -1,0 +1,42 @@
+{
+  "branch": "release-cuts/b0e2816685fae55369db7f8758a8d6435d1e21a7",
+  "evidence": {
+    "artifact_id": 15268369488,
+    "event": "workflow_dispatch",
+    "package_checks": "release-packages-v1",
+    "repository": "substrate-systems/evermatter",
+    "run_attempt": "2",
+    "run_id": "46156908167",
+    "scope": "full",
+    "source_commit": "b0e2816685fae55369db7f8758a8d6435d1e21a7",
+    "successful_attempt": "2",
+    "tested_commit": "b0e2816685fae55369db7f8758a8d6435d1e21a7",
+    "tested_tree": "845299461a9fc5584391cf6a718701f5da87f8bd",
+    "workflow": ".github/workflows/ci.yml"
+  },
+  "head": "0b92ddae346c6736165c36f3ae22560882db2428",
+  "head_tree": "843ab9db8af606e7c7c95c3791250b242eab2c32",
+  "predecessor": {
+    "reconciliation_commit": "4cf930c78c28d1751734bf24a05eaf2d5e43432f",
+    "source": "c4b07a26e85f5eff29436624d8efe342d22b6422",
+    "tag": "v0.210.1",
+    "version": "0.210.1"
+  },
+  "release": "84431e54c8bb08f18d316ad27c9504d1ea484ea9",
+  "release_tree": "843ab9db8af606e7c7c95c3791250b242eab2c32",
+  "required_checks": [
+    {
+      "app_id": 15368,
+      "context": "Conventional Commit title"
+    },
+    {
+      "app_id": 15368,
+      "context": "required CI gate"
+    }
+  ],
+  "schema": 1,
+  "source": "b0e2816685fae55369db7f8758a8d6435d1e21a7",
+  "source_tree": "845299461a9fc5584391cf6a718701f5da87f8bd",
+  "tag": "v0.210.2",
+  "version": "0.210.2"
+}
