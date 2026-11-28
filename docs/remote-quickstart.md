@@ -296,7 +296,8 @@ evermatter setup --vault "/path/to/vault" \
   --replace-client-registration
 ```
 
-Then use `/mcp` in Claude Code and `codex mcp login evermatter` for native OAuth.
+In Claude Code, use `/mcp` to sign in. In Codex, run the `codex mcp login`
+command that setup prints.
 After updating an older Evermatter Claude plugin, run `/reload-plugins` or restart
 Claude Code so its former stdio process does not survive in the live session.
 
