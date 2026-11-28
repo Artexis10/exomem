@@ -16118,9 +16118,9 @@ def refusal_before_queueing(command: Command, arguments: Mapping[str, Any]) -> E
     return None
 
 
-#: How long a busy save's declared check may read: the queue, the declaration, then the queue again. It only
-#: buys an earlier refusal, so a slow read gives the save up to the queue it would have joined, which is what
-#: its caller was already going to wait on.
+#: How long a busy save's declared check may read: the queue's mark, the declaration and, after a refusal, the
+#: queue again, each open included. It only buys an earlier refusal, so a read that answers later gives the save
+#: up to the queue it would have joined, which is what its caller was already going to wait on.
 _DECLARED_REFUSAL_SECONDS = 0.5
 
 
@@ -16141,11 +16141,13 @@ def declared_refusal_before_queueing(
     Planning the vault's Planning values), so the intake runs it only for a save that is about to queue. The
     refusal holds only while no queued save can change that declaration before this one replays: a save of a
     command that declares `Command.sets_any_frontmatter_field`, whichever page it names, or a save that
-    carries a manifest's text. The queue is read before the declaration and again after it
-    (`write_intake.DeclarationWatch`), so a queued save that commits between the two reads queues this one
-    too. A declaration change made outside the queue and not committed at this check, such as a direct
-    revise that holds the boundary or a saved Planning value, is not seen: the check refuses a value that
-    the change adds, and the refusal tells the caller to send it again once that change has committed.
+    carries a manifest's text. The queue is marked before the declaration is read, at a cost that does not
+    grow with the queue, and only a refusal reads it again from that mark (`write_intake.DeclarationWatch`),
+    so a queued save that commits between the two reads queues this one too. Every read shares one budget,
+    and an answer after it queues the save. A declaration change made outside the queue and not committed at
+    this check, such as a direct revise that holds the boundary or a saved Planning value, is not seen: the
+    check refuses a value that the change adds, and the refusal tells the caller to send it again once that
+    change has committed.
     """
     value_refusal = _DECLARED_VALUE_REFUSALS.get(command.name)
     if value_refusal is None:
@@ -16162,7 +16164,7 @@ def declared_refusal_before_queueing(
     if marker is None:
         return None
     refusal = value_refusal(vault_root, arguments, budget)
-    if refusal is None:
+    if refusal is None or budget.remaining() <= 0:
         return None
     changed = watch.changed_since(vault_root, marker, seconds=budget.remaining())
     return refusal if changed is False else None

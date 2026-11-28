@@ -715,18 +715,23 @@ def test_a_plan_value_the_vault_declares_is_still_queued_behind_the_queue_and_la
     _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
 
 
-def test_a_plan_value_only_a_planning_single_field_rule_refuses_is_left_to_the_replay(
+def test_an_area_add_with_a_status_it_may_not_carry_is_refused_at_the_replay_for_what_an_area_carries(
     vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The check runs the Planning values and the declared fields only, so a title over Planning's bound still queues."""
+    """Defect: a busy area add with an unknown status was refused for that status, while the commit refuses an area
+    for carrying a status at all. What an area may carry joins two fields, so the replay judges it."""
     _writer, holder = managers
+    plan = _command("plan_memory")
     collection = _planning_collection(vault)
+    call = {"action": "add", "collection": collection, "why": "plan the platform",
+            "item": {"title": "Platform", "kind": "area", "status": "bogus"}}
     first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
-    receipt = _send(_command("plan_memory"), vault, _plan_call(collection, "add", "x" * 600),
-                    scope="principal:session-b")
+    receipt = _send(plan, vault, call, scope="principal:session-b")
     assert receipt["state"] == "queued"
     paused.set()
-    _wait_for_state(vault, receipt["queued_write"]["ref"], "failed")
+    failed = _wait_for_state(vault, receipt["queued_write"]["ref"], "failed")
+    assert failed["error"]["code"] == "INVALID_PLAN"
+    assert failed["error"]["message"] == "areas cannot carry delivery state or hierarchy: status"
 
 
 def test_a_plan_value_a_queued_manifest_revision_declares_is_queued_behind_it_and_saved(
@@ -773,12 +778,15 @@ def test_a_file_plan_edit_with_an_undeclared_value_is_left_to_the_replay(
     assert row["status"] == "active"
 
 
-@pytest.mark.parametrize("revision_is", ["queued-before-the-read", "queued-during-the-read"])
+@pytest.mark.parametrize(
+    "revision_is", ["open-through-the-read", "queued-during-the-read", "open-at-the-mark-and-applied-during-the-read"])
 def test_a_plan_value_a_revision_declares_while_the_intake_reads_the_old_manifest_is_queued_and_saved(
     vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch, revision_is: str
 ) -> None:
     """Defect: the intake read the manifest, then looked for an open queued revision. A revision that committed
-    between the two reads was no longer open, so the add was refused with the old options although it was valid."""
+    between the two reads was no longer open, so the add was refused with the old options although it was valid.
+    The revision is still open after the read, or is accepted and applied during it, or is open when the queue is
+    marked and applied during the read."""
     from types import MappingProxyType
 
     _writer, holder = managers
@@ -790,7 +798,7 @@ def test_a_plan_value_a_revision_declares_while_the_intake_reads_the_old_manifes
                   "[small, large]", "[small, medium, large]")}
     first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
     revision: dict = {}
-    if revision_is == "queued-before-the-read":
+    if revision_is != "queued-during-the-read":
         revision.update(_send(plan, vault, revise, scope="principal:session-b"))
 
     def commit_the_revision():
@@ -806,7 +814,7 @@ def test_a_plan_value_a_revision_declares_while_the_intake_reads_the_old_manifes
 
     def read_then_commit(vault_root, arguments, budget):
         refusal = read_the_declaration(vault_root, arguments, budget)
-        if arguments.get("action") == "add":
+        if arguments.get("action") == "add" and revision_is != "open-through-the-read":
             commit_the_revision()
         return refusal
 
@@ -819,6 +827,88 @@ def test_a_plan_value_a_revision_declares_while_the_intake_reads_the_old_manifes
     _wait_for_state(vault, add["queued_write"]["ref"], "applied")
     (row,) = _send(plan, vault, {"action": "query", "collection": collection})["rows"]
     assert row["effort"] == "medium"
+
+
+class _CountedQueueReads:
+    """An intake connection that counts the SQLite steps of each query that a progress handler bounds."""
+
+    def __init__(self, conn, steps: list[int]) -> None:
+        self._conn, self._steps = conn, steps
+
+    def set_progress_handler(self, handler, _every: int) -> None:
+        def count() -> int:
+            self._steps[0] += 1
+            return handler()
+
+        self._conn.set_progress_handler(count, 1)
+
+    def __getattr__(self, name: str):
+        return getattr(self._conn, name)
+
+
+def test_a_valid_busy_save_reads_no_more_of_the_queue_behind_a_longer_backlog(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect: a busy save with a valid value scanned every open save before it read the declaration, so the cost of
+    every busy save grew with the queue exactly while the vault was busy. Only a refusal reads the open saves."""
+    from contextlib import contextmanager
+
+    _writer, holder = managers
+    plan = _command("plan_memory")
+    collection = _planning_collection(vault)
+    first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
+    steps = [0]
+    real_store = write_intake._store
+
+    @contextmanager
+    def counted_store(vault_root, **options):
+        with real_store(vault_root, **options) as conn:
+            yield _CountedQueueReads(conn, steps) if options.get("mode") == "read" else conn
+
+    monkeypatch.setattr(write_intake, "_store", counted_store)
+
+    def queue_reads_of_a_valid_add(title: str) -> int:
+        steps[0] = 0
+        receipt = _send(plan, vault, _plan_call(collection, "add", title, effort="small"), scope="principal:session-b")
+        assert receipt["state"] == "queued"
+        return steps[0]
+
+    behind_one = queue_reads_of_a_valid_add("Ship the release")
+    for number in range(25):
+        _send(plan, vault, _plan_call(collection, "add", f"Backlog item {number}"), scope="principal:session-c")
+    assert len(write_intake.read(vault)["items"]) == 27
+    assert queue_reads_of_a_valid_add("Ship the patch") == behind_one
+
+
+def test_a_refusal_whose_queue_answers_after_the_budget_queues_the_save(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect: the budget bounded only the query, not the wait to open the queue, so a slow open still gave a definite
+    answer after the budget had run out, and the save was refused late."""
+    _writer, holder = managers
+    plan = _command("plan_memory")
+    collection = _planning_collection(vault)
+    first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
+    real_open = write_intake._open
+    request_thread = threading.current_thread()
+    slow = threading.Event()
+
+    def slow_open(root, path, retained, mode, **options):
+        if mode == "read" and slow.is_set() and threading.current_thread() is request_thread:
+            time.sleep(1.2)
+        return real_open(root, path, retained, mode, **options)
+
+    monkeypatch.setattr(write_intake, "_open", slow_open)
+    # Each look at the queue waits 1.2 s to open: the mark answers within the budget, and the look after the
+    # refusal answers after it.
+    monkeypatch.setattr(commands, "_DECLARED_REFUSAL_SECONDS", 2.0)
+    slow.set()
+    receipt = _send(plan, vault, _plan_call(collection, "add", effort="medium"), scope="principal:session-b")
+    slow.clear()
+    assert receipt["state"] == "queued"
+    paused.set()
+    failed = _wait_for_state(vault, receipt["queued_write"]["ref"], "failed")
+    assert failed["error"]["code"] == "SCHEMA_ENUM"
 
 
 def test_a_record_value_its_collection_declares_is_still_queued_behind_the_queue_and_lands(

@@ -146,25 +146,29 @@ def _report_json(value: Any) -> str:
 
 
 @contextmanager
-def _store(vault_root: Path, *, mode: StoreMode) -> Iterator[sqlite3.Connection]:
+def _store(
+    vault_root: Path, *, mode: StoreMode, deadline: float | None = None
+) -> Iterator[sqlite3.Connection]:
     """Open the intake store under the private-state ceremony.
 
     ``create`` makes the store and may change the vault's private identities, so it advances
     the identity generation; only the first acceptance on a vault needs it. ``write`` opens
     the existing store read-write and ``read`` opens it read-only; neither changes an identity,
-    and both raise ``FileNotFoundError`` when no store exists yet.
+    and both raise ``FileNotFoundError`` when no store exists yet. A ``deadline`` (a
+    ``time.monotonic()`` value) bounds the waits for the identity coordination and for SQLite's
+    locks: a wait that would pass it raises instead.
     """
     root = Path(vault_root).resolve()
     path = store_path(root)
     create = mode == "create"
     with reserved_paths._subsystem_authority_scope(OWNER):  # noqa: SLF001
         with reserved_paths._identity_coordination_scope(  # noqa: SLF001
-            root, descriptor_ids=(STORE_ID,), identity_may_change=create
+            root, descriptor_ids=(STORE_ID,), identity_may_change=create, deadline=deadline
         ):
             with reserved_paths._sqlite_owner_target_scope(  # noqa: SLF001
                 root, path, STORE_ID, create=create
             ) as retained:
-                conn = _open(root, path, retained, mode)
+                conn = _open(root, path, retained, mode, deadline=deadline)
     try:
         yield conn
     finally:
@@ -183,22 +187,25 @@ def _write(vault_root: Path, *, create: bool = False) -> Iterator[sqlite3.Connec
             raise
 
 
-def _open(root: Path, path: Path, retained: Path, mode: StoreMode) -> sqlite3.Connection:
+def _open(
+    root: Path, path: Path, retained: Path, mode: StoreMode, *, deadline: float | None = None
+) -> sqlite3.Connection:
+    wait = 5.0 if deadline is None else min(5.0, max(0.0, deadline - time.monotonic()))
     if mode == "create":
         retained.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(retained, timeout=5.0, check_same_thread=False)
+        conn = sqlite3.connect(retained, timeout=wait, check_same_thread=False)
     else:
         if not retained.exists():
             raise FileNotFoundError(retained)
         # `mode=rw` opens the existing file and never creates one.
         # A replay's connection is used by the commit gate on the store thread, under the replay's lock.
         conn = sqlite3.connect(
-            f"{retained.as_uri()}?mode={'rw' if mode == 'write' else 'ro'}", uri=True, timeout=5.0,
+            f"{retained.as_uri()}?mode={'rw' if mode == 'write' else 'ro'}", uri=True, timeout=wait,
             check_same_thread=False,
         )
     try:
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute(f"PRAGMA busy_timeout={int(wait * 1000)}")
         if mode != "read":
             # A queued receipt promises custody: it must survive a power loss, not only a kill.
             conn.execute("PRAGMA synchronous=FULL")
@@ -1563,12 +1570,14 @@ class DeclarationWatch:
     applies, decides which page that is. A save of a command in `manifest_commands` may when its
     `manifest_field` holds a value other than null; MCP stores a field the caller left unset as null.
 
-    A check that reads a declaration takes `mark` before that read and asks `changed_since` after it. A save
-    that has ended never reopens, and AUTOINCREMENT never reuses a `seq`. So a change that commits between
-    the two reads was either open at the mark, which `mark` reports, or accepted after it, which
-    `changed_since` reports in whatever state it is now. Each is one query decided inside SQLite, so no queued
-    arguments reach Python. A query that has not answered within `seconds` stops: None, unknown, as for a
-    queue that cannot be read.
+    A check that reads a declaration takes `mark` before that read and asks `changed_since` after it, only
+    when the read refuses. A save that has ended never reopens, AUTOINCREMENT never reuses a `seq`, and an
+    ended save stays a row until retention or dismissal removes it. So a change that commits between the two
+    reads comes from a save that was open at the mark or was accepted after it, and each holds a `seq` at or
+    above the mark. `mark` costs a few index seeks whatever the queue holds; `changed_since` reads the rows
+    from the mark on by the primary key, so its cost grows with the saves open at the mark and those accepted
+    since. Both are decided inside SQLite, so no queued arguments reach Python. A query that has not answered
+    within `seconds`, opening the store included, answers None, unknown, as for a queue that cannot be read.
     """
 
     rewriting: Sequence[str]
@@ -1576,23 +1585,27 @@ class DeclarationWatch:
     manifest_field: str
 
     def mark(self, vault_root: Path, *, seconds: float) -> int | None:
-        """The `seq` of the last save accepted, 0 for none, where no open save may change a declaration;
-        None where one may, or where that is unknown."""
+        """The lowest `seq` that a save open now, or accepted from now on, holds; None where that is unknown.
+
+        It is the first open save's `seq`, else one more than the last save's, else 1. Each part is one seek:
+        `MAX(seq)` on the primary key and the lowest `seq` of each open state on `intake_state`."""
         row = _declaration_query(
             vault_root, seconds,
-            f"SELECT EXISTS (SELECT 1 FROM intake WHERE state IN (?, ?) AND {_CHANGES_A_DECLARATION}), "
-            "COALESCE((SELECT MAX(seq) FROM intake), 0)",
-            (*_OPEN_STATES, *self._parameters()), empty=(0, 0),
+            "SELECT COALESCE((SELECT MAX(seq) FROM intake), 0), "
+            "(SELECT MIN(seq) FROM intake WHERE state = ?), (SELECT MIN(seq) FROM intake WHERE state = ?)",
+            _OPEN_STATES, empty=(0, None, None),
         )
-        return None if row is None or row[0] else int(row[1])
+        if row is None:
+            return None
+        last, *first_open = row
+        return min((int(seq) for seq in first_open if seq is not None), default=int(last) + 1)
 
     def changed_since(self, vault_root: Path, marker: int, *, seconds: float) -> bool | None:
-        """Whether a save accepted after `marker` may have changed a declaration; None where that is unknown.
-
-        It reads only the rows after `marker`, by the primary key."""
+        """Whether a save at or after `marker`, in whatever state it is now, may have changed a declaration;
+        None where that is unknown."""
         row = _declaration_query(
             vault_root, seconds,
-            f"SELECT EXISTS (SELECT 1 FROM intake WHERE seq > ? AND {_CHANGES_A_DECLARATION})",
+            f"SELECT EXISTS (SELECT 1 FROM intake WHERE seq >= ? AND {_CHANGES_A_DECLARATION})",
             (marker, *self._parameters()), empty=(0,),
         )
         return None if row is None else bool(row[0])
@@ -1602,22 +1615,24 @@ class DeclarationWatch:
 
 
 def _declaration_query(
-    vault_root: Path, seconds: float, sql: str, parameters: Sequence[Any], *, empty: tuple[int, ...]
+    vault_root: Path, seconds: float, sql: str, parameters: Sequence[Any], *, empty: tuple[Any, ...]
 ) -> tuple[Any, ...] | None:
-    """The one row that `sql` answers, `empty` where no save was ever queued, None where it is unknown."""
+    """The one row that `sql` answers within `seconds`, `empty` where no save was ever queued, None where it is
+    unknown. The wait to open the store counts: an answer that arrives later is unknown too."""
     if seconds <= 0:
         return None
     deadline = time.monotonic() + seconds
     try:
-        with _store(vault_root, mode="read") as conn:
+        with _store(vault_root, mode="read", deadline=deadline) as conn:
             # A row costs a handful of steps and only a `manifest_commands` row is parsed, so the deadline is read often.
             conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 100)
-            return tuple(conn.execute(sql, parameters).fetchone())
+            row = tuple(conn.execute(sql, parameters).fetchone())
     except FileNotFoundError:
-        return empty
+        row = empty
     except Exception:  # noqa: BLE001 - a queue that cannot be read is an unknown, never an empty one
         log.debug("write intake could not read its queued saves", exc_info=True)
         return None
+    return row if time.monotonic() < deadline else None
 
 
 def read(vault_root: Path, ref: str | None = None, limit: int | None = None) -> dict[str, Any]:

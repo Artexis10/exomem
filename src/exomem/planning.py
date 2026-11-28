@@ -164,14 +164,17 @@ def supplied_value_refusal(
     It runs the commit's own rules over the values that `values` names: `_governed` for each field that the
     Planning values govern, in `normalize_item`'s order, then `records.supplied_value_refusal`. Nothing else
     decides it: not a rule that joins fields, such as the lifecycle rules or what an area may carry, which
-    another field or an earlier write can still change. The Planning values that this caller cannot read leave
-    their field unrefused.
+    another field or an earlier write can still change. So where the item is or was an area, the fields that an
+    area may not carry are left to the commit, whose refusal names that rule. The Planning values that this
+    caller cannot read leave their field unrefused.
 
     An add's null is a value that the item is written with, and `_governed` refuses it as the commit does; an
     update's or a triage's null deletes its field, which the commit judges. `stored` is the item that an update
     or a triage names, as the vault holds it: `_governed` keeps a value equal to its stored one even once that
     value is no longer active. Without it, such a value is refused.
     """
+    if values.get("kind") == "area" or (stored is not None and stored.get("kind") == "area"):
+        values = {name: value for name, value in values.items() if name not in _AREA_FORBIDDEN}
     supplied = {name: value for name, value in values.items() if value is not None}
     governed = values if adding else supplied
     planning_values = PlanningValues(vault_root)
