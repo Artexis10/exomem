@@ -825,7 +825,7 @@ wheels = [
 
 [[package]]
 name = "evermatter"
-version = "0.210.0" # x-release-please-version
+version = "0.210.1" # x-release-please-version
 source = { editable = "." }
 dependencies = [
     { name = "aiofile" },
