@@ -26,6 +26,7 @@ from . import (
     duplicates,
     evidence_reuse,
     memory_refs,
+    request_budget,
     sensitivity_classes,
     source_result_attribution,
 )
@@ -249,35 +250,12 @@ def _bounded_retrieval_call(
         return SafeFetchError("SAFE_FETCH_FAILED", "download retrieval timed out")
 
     try:
-        timeout = remaining_retrieval_timeout(deadline)
-    except SafeFetchError as error:
+        return request_budget.bounded_blocking_call(
+            operation, remaining=lambda: min(_TIMEOUT_SECONDS, deadline - _monotonic()),
+            slots=_RETRIEVAL_WORKERS,
+        )
+    except TimeoutError as error:
         raise timed_out() from error
-    if not _RETRIEVAL_WORKERS.acquire(timeout=timeout):
-        raise timed_out()
-    result: Queue[tuple[bool, object]] = Queue(maxsize=1)
-
-    def _run() -> None:
-        try:
-            result.put((True, operation()))
-        except Exception as error:  # noqa: BLE001 - preserved for the caller
-            result.put((False, error))
-        finally:
-            _RETRIEVAL_WORKERS.release()
-
-    threading.Thread(target=_run, daemon=True).start()
-    try:
-        timeout = remaining_retrieval_timeout(deadline)
-        succeeded, value = result.get(timeout=timeout)
-    except SafeFetchError as error:
-        raise timed_out() from error
-    except Empty as error:
-        raise timed_out() from error
-    if not succeeded:
-        assert isinstance(value, Exception)
-        if isinstance(value, TimeoutError):
-            raise timed_out() from value
-        raise value
-    return value
 
 
 def validate_download_url(value: object):

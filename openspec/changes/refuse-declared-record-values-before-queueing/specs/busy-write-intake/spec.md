@@ -137,7 +137,7 @@ The intake SHALL mark an accepted save as a possible declaration change when its
 
 ### Requirement: The declared value check stays within its budget whatever the queue holds
 
-Each queue read SHALL use fixed work. The check SHALL have 0.5 s to decide. Queue lock waits, store admission and coordinator timeouts SHALL use at most the time left. A locked store reader SHALL stop the check. Planning SHALL cap store SQL work. If either budget runs out, the save SHALL queue. The service SHALL release a borrowed checkout before returning the receipt, even after the decision deadline.
+Each queue read SHALL use fixed work. The check SHALL have 0.5 s to decide. Queue lock waits, store admission and the wait for a full coordinator reply SHALL use at most the time left. A locked store reader SHALL stop the check. Planning SHALL cap store SQL work. If either budget runs out, the save SHALL queue. The service SHALL release a borrowed checkout before returning the receipt, even after the decision deadline.
 
 #### Scenario: A Planning save queues when its authorisation proof needs too much SQL
 

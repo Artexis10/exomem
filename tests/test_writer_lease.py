@@ -1034,6 +1034,56 @@ def test_single_host_status_read_reconnects_once_when_the_coordinator_dropped_th
     assert len(connections) == 2
 
 
+@pytest.mark.parametrize("topology", ["single-host", "multi-host"])
+def test_passive_coordinator_read_stops_while_the_response_is_still_arriving(topology):
+    """A responding socket can keep a regular body read alive after the busy-check decision deadline."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from exomem import request_budget
+
+    started = threading.Event()
+    finish = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b'{"holder":null,"expires_at":null,"fencing_token":1}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            started.set()
+            try:
+                for byte in body:
+                    if finish.wait(0.03):
+                        return
+                    self.wfile.write(bytes([byte]))
+            except OSError:
+                pass
+
+        def log_message(self, *_args):
+            pass
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server, ThreadPoolExecutor(max_workers=2) as pool:
+        serve = pool.submit(server.serve_forever, poll_interval=0.05)
+        client = writer_lease_module.LeaseCoordinatorClient(LeaseConfig(
+            url=f"http://127.0.0.1:{server.server_port}", vault_id="main", replica_id="local", topology=topology))
+
+        def lookup():
+            check = request_budget.ReadCheckpoint(request_budget.RequestBudget(seconds=0.25), bound_store_reads=True)
+            with request_budget.checking(check):
+                return client.status()
+
+        try:
+            passive_read = pool.submit(lookup)
+            assert started.wait(timeout=1)
+            with pytest.raises(OpError) as refused:
+                passive_read.result(timeout=1)
+            assert refused.value.code == "WRITER_COORDINATOR_UNAVAILABLE"
+        finally:
+            finish.set()
+            server.shutdown()
+            serve.result(timeout=3)
+
+
 def test_readiness_measures_each_status_over_one_kept_coordinator_connection(tmp_path: Path):
     """Fresh readiness threads discarded the client's thread-local connection after every poll."""
     from exomem import runtime_readiness

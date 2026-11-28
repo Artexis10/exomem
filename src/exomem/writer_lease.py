@@ -2646,6 +2646,10 @@ class _SingleHostRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(request, response, code, message, headers, new_url)
 
 
+# A slow coordinator cannot accumulate workers for optional busy-save decisions.
+_PASSIVE_COORDINATOR_READ = threading.BoundedSemaphore(1)
+
+
 class LeaseCoordinatorClient:
     """Small stdlib HTTP client for the provider-neutral lease contract."""
 
@@ -2992,7 +2996,7 @@ class LeaseCoordinatorClient:
                     connection.sock.settimeout(timeout)
             connection.request("GET", request.selector, headers=dict(request.header_items()))
             response = connection.getresponse()
-            data = response.read()
+            data = self._read_response(response)
         except BaseException as error:
             self._drop_kept_connection()
             # A protocol error is no OSError, which the caller maps; a reset is one, and stays one to retry.
@@ -3019,6 +3023,42 @@ class LeaseCoordinatorClient:
             headers["Authorization"] = f"Bearer {self.config.token}"
         return urllib.request.Request(url, data=data, headers=headers, method=method)
 
+    @staticmethod
+    def _read_response(response) -> bytes:
+        checkpoint = request_budget.store_read_checkpoint()
+        if checkpoint is None:
+            return response.read()
+        data = bytearray()
+        while True:
+            checkpoint()
+            chunk = response.read1(64 * 1024)
+            if not chunk:
+                if missing := getattr(response, "length", None):
+                    raise http.client.IncompleteRead(bytes(data), missing)
+                return bytes(data)
+            data.extend(chunk)
+
+    def _read_json(self, request: urllib.request.Request):
+        if request.get_method() == "GET" and self.config.topology == "single-host":
+            return self._get_kept_alive(request)
+        with self._open_request(request) as response:
+            return json.loads(self._read_response(response).decode("utf-8"))
+
+    def _read_passive_json(self, request: urllib.request.Request, check: request_budget.ReadCheckpoint):
+        check()
+        deadline = min(check.budget.deadline, time.monotonic() + self.config.timeout_seconds)
+
+        def read():
+            with request_budget.checking(check):
+                return self._read_json(request)
+
+        # A socket timeout restarts as bytes arrive. The caller stops waiting at the absolute
+        # deadline, and the in-flight GET keeps the sole slot until it finishes or notices it.
+        return request_budget.bounded_blocking_call(
+            read, remaining=lambda: deadline - time.monotonic(),
+            slots=_PASSIVE_COORDINATOR_READ, wait_for_slot=False,
+        )
+
     def _request_json(
         self,
         method: str,
@@ -3029,11 +3069,10 @@ class LeaseCoordinatorClient:
     ) -> dict[str, Any]:
         request = self._json_request(method, route, body)
         try:
-            if method == "GET" and self.config.topology == "single-host":
-                payload = self._get_kept_alive(request)
+            if method == "GET" and (check := request_budget.store_read_checkpoint()) is not None:
+                payload = self._read_passive_json(request, check)
             else:
-                with self._open_request(request) as response:
-                    payload = json.loads(response.read().decode("utf-8"))
+                payload = self._read_json(request)
             if not isinstance(payload, dict):
                 raise ValueError("response is not an object")
             return payload
