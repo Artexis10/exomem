@@ -2654,6 +2654,21 @@ def test_a_save_waiting_for_the_store_queues_within_the_intake_budget(service, m
         write_intake.stop(root)
 
 
+def test_a_records_query_reads_the_last_commit_while_the_store_thread_is_busy(service, monkeypatch):
+    from exomem import write_intake
+
+    root = service.root
+    query = dict(action="query", collection=CID, limit=10, columns=["title"])
+    expected = call(root, "record_memory", **query)
+    try:
+        with _store_thread_held_with_intake_on(service, monkeypatch, store_wait=0.5):
+            actual = call(root, "record_memory", **query)
+    finally:
+        write_intake.stop(root)
+    assert actual["rows"] == expected["rows"]
+    assert actual["snapshot"] == expected["snapshot"]
+
+
 @pytest.mark.parametrize("intake_unreadable", [False, True], ids=["available", "unreadable"])
 def test_zero_intake_wait_allows_an_idle_store_to_commit(service, monkeypatch, intake_unreadable):
     """Zero intake wait removes retries, not the first attempt at an idle store."""

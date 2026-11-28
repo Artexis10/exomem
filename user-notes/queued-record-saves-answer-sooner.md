@@ -1,4 +1,4 @@
 ---
-title: Queued record saves answer sooner
+title: Records replies sooner during busy periods
 ---
-When another operation keeps Records busy, your assistant gets a receipt for your queued save sooner.
+When Records is busy, your assistant can still read the last saved rows and gets a tracking receipt sooner for a queued save.
