@@ -76,7 +76,7 @@ Cache the stance block separately from conversation-dependent packets. Its key S
 
 Every admitted line SHALL pass the existing currency step with typed date rules. Superseded or archived lines SHALL never serve. Expired lines SHALL be withheld and counted; passed `check_by` SHALL keep a line served with its review marker. No stance date SHALL be inferred from prose.
 
-A replacement unit SHALL use the same-page unit supersession supported by current currency. A replacement on another page SHALL use the existing page-supersession route. This increment SHALL NOT promise cross-page unit supersession.
+Same-page unit and page supersession retain their existing rules. The context-activation requirements govern cross-page unit replacements.
 
 #### Scenario: A same-page replacement removes the earlier line
 

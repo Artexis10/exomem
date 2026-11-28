@@ -16935,6 +16935,35 @@ class GraphView:
         """Serve one row selected as `EDGE_COLUMNS`."""
         return self.edge(_edge_row_to_dict(row))
 
+    def replaced_units(
+        self, predecessors: Mapping[str, str], *, edge_limit: int, source_limit: int,
+    ) -> frozenset[str] | None:
+        """Find exact predecessor keys through incoming unit relations in an unrestricted view."""
+        rows = self.conn.execute(
+            f"SELECT {EDGE_COLUMNS} FROM json_each(?) AS predecessor "
+            "CROSS JOIN graph_edges AS e ON e.dst_key = predecessor.key "
+            "WHERE e.origin = 'semantic_relation' AND e.source_path <> predecessor.value "
+            "LIMIT ?",
+            (json.dumps(dict(predecessors)), edge_limit + 1),
+        ).fetchall()
+        sources = {str(row[10]) for row in rows}
+        if len(rows) > edge_limit or len(sources) > source_limit:
+            return None
+        self._node_paths.update(predecessors)
+        self.prefetch(sources | {predecessors[row[2]] for row in rows})
+        replaced = set()
+        for row in rows:
+            edge = self.edge_row(row)
+            if (
+                edge is not None
+                and edge["dst_key"] == row[2]
+                and (edge.get("metadata") or {}).get("unit_ref")
+                and relation_registry.traversable_resolution_status(edge.get("registry_status"))
+                and self.has(edge, "replaces")
+            ):
+                replaced.add(row[2])
+        return None if self.unavailable else frozenset(replaced)
+
     def node_row(self, row: tuple[Any, ...]) -> dict[str, Any] | None:
         """Serve one row selected as `NODE_SELECT`."""
         return self.serve(_node_row_to_dict(row))

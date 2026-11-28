@@ -9,15 +9,18 @@ after admission.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
 from typing import Any
 
 from . import (
     currency_boundary,
+    epistemic_graph,
     lifecycle_statuses,
     semantic_contract,
+    semantic_units,
+    unit_corrections,
     vault,
     working_set,
     working_set_currency,
@@ -59,6 +62,8 @@ def admit(
     """
     candidates = []
     guards = {}
+    check_replacements = egress.unrestricted_source_access(root, purpose=caller.purpose)
+    node_keys: dict[tuple[str, str], str] = {}
     for path in sorted(paths):
         source, guard = vault.read_guarded_text(root, root / path)
         guards[path] = guard
@@ -74,6 +79,9 @@ def admit(
                 for error in page.document.errors if error.line is not None
             ):
                 continue
+            if check_replacements:
+                occurrence = semantic_units.occurrence_key(unit.form, unit.span, unit.source_hash)
+                node_keys[path, unit.unit_ref] = epistemic_graph.unit_node_key(path, occurrence, unit.form)
             candidates.append(working_set.LaneItem(
                 role="", level="unit", ref=unit.unit_ref, path=path, title=page.title,
                 text=working_set.bounded_text(unit.content), lifecycle=page.status or "",
@@ -88,7 +96,21 @@ def admit(
     admitted = tuple(item for item, verdict in zip(candidates, verdicts, strict=True) if verdict == egress.UNIT_KEPT)
     vault.recheck_path_guards(root, (guards[path] for path in {item.path for item in admitted}))
     basis = lifecycle_statuses.Basis(root)
-    return working_set_currency.annotate(admitted, status_basis=basis, visible=caller.visible), basis
+    current = working_set_currency.annotate(admitted, status_basis=basis, visible=caller.visible)
+    if not node_keys:
+        return current, basis
+    predecessors = {
+        node_keys[item.path, item.ref]: item.path for item in current
+        if (ordering := basis.ordering(item.lifecycle, path=item.path)) is not None and ordering.live
+    }
+    replaced = unit_corrections.replaced_units(root, predecessors)
+    if replaced is None:
+        raise working_set_currency.CurrencyUnavailable("current replacement coverage is unavailable")
+    return tuple(
+        replace(item, lifecycle=working_set_currency.SUPERSEDED)
+        if node_keys[item.path, item.ref] in replaced else item
+        for item in current
+    ), basis
 
 
 def identity(admitted: Iterable[working_set.LaneItem]) -> list[tuple]:

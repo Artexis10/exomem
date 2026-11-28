@@ -39,9 +39,9 @@ def stance_vault(tmp_path):
 
 
 def _stance(root, *, today=date(2026, 11, 2), limit=800, who=None):
+    _reset_caches()
     lexstore.ensure_fresh(root)
     _built(root)
-    _reset_caches()
     with principal.request_scope(who or principal.owner_principal(surface="library")), principal.invocation_scope():
         caller = context_views.CallerView.current(root)
         block = stance.compile_block(root, caller, limit, today=today)
@@ -238,6 +238,72 @@ def test_same_page_and_page_supersession_stop_global_lines(stance_vault):
     assert block["omitted"] == block["expired"] == 0
     _page(stance_vault, "global", "stance: true\nsuperseded_by: [successor]\n", body="- [rule] Old operating rule. ^old\n")
     assert _stance(stance_vault)["items"] == []
+
+
+@pytest.mark.parametrize("identified", [False, True], ids=["path-backed", "uuid-backed"])
+def test_cross_page_supersession_retires_only_the_linked_global_claim(stance_vault, identified, monkeypatch):
+    from exomem import commands, working_set_runtime
+    from exomem.writer_lease import invoke_command
+
+    predecessor_identity = "exomem_id: 21111111-1111-4111-8111-111111111111\n" if identified else ""
+    successor_identity = "exomem_id: 22222222-2222-4222-8222-222222222222\n" if identified else ""
+    predecessor = _page(
+        stance_vault, "global", f"stance: true\n{predecessor_identity}",
+        body=(
+            "## Claim\n- id: interval\n- as_of: 2026-01-01\n\n"
+            "The east beacon flashes every eight seconds.\n\n"
+            "## Claim\n- id: reserve\n- as_of: 2026-01-01\n\n"
+            "The west beacon flashes every eight seconds.\n"
+        ),
+    )
+    inspection_heading = "## Claim\n- id: measured\n- as_of: 2026-02-01\n"
+    observation = "\nThe east beacon flashes every five seconds.\n"
+    _page(stance_vault, "inspection", successor_identity, body=inspection_heading + observation)
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    lexstore.ensure_fresh(stance_vault)
+    _built(stance_vault).close()
+    working_set_runtime.reset_caches_for_tests()
+    recall = next(command for command in commands.PRODUCT_COMMANDS if command.name == "activate_context")
+    turn = "How often do the beacons flash?"
+    before = invoke_command(recall, stance_vault, turn=turn)
+    assert [item["text"] for item in before["stance"]["items"]] == [
+        "The east beacon flashes every eight seconds.",
+        "The west beacon flashes every eight seconds.",
+    ]
+
+    successor = _page(stance_vault, "inspection", successor_identity, body=(
+        inspection_heading + "- relations: supersedes: [[Notes/Insights/global#interval]]\n" + observation
+    ))
+    lexstore.ensure_fresh(stance_vault)
+    _built(stance_vault).close()
+    after = invoke_command(recall, stance_vault, turn=turn, continuity=before["continuity"])
+    block = after["stance"]
+    original = commands.op_read_memory(stance_vault, path=str(predecessor), units=True)
+    assert any(unit["text"] == "The east beacon flashes every eight seconds." for unit in original["units"])
+    assert block["state"] == "ready" and block["generation"] != before["stance"]["generation"]
+    assert [item["text"] for item in block["items"]] == [
+        "The west beacon flashes every eight seconds.",
+    ]
+    assert block["omitted"] == block["expired"] == 0
+
+    _withhold(stance_vault, str(successor), ceiling=0)
+    with principal.request_scope(_external()):
+        shared = _stance(stance_vault, who=_external())
+    assert shared["items"] == before["stance"]["items"]
+
+
+def test_unavailable_replacement_lookup_does_not_reuse_held_stance(stance_vault, monkeypatch):
+    from exomem import commands
+    from exomem.writer_lease import invoke_command
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    recall = next(command for command in commands.PRODUCT_COMMANDS if command.name == "activate_context")
+    before = invoke_command(recall, stance_vault, turn="Keep a source")
+    assert before["stance"]["state"] == "ready"
+    monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_INDEX", "1")
+    after = invoke_command(recall, stance_vault, turn="Keep a source", continuity=before["continuity"])
+    assert after["stance"]["state"] == "unavailable"
+    assert after["stance"]["items"] == [] and after["stance"]["generation"] is None
 
 
 def test_hook_uses_supplied_or_generated_moves_and_stance_generation():
@@ -523,9 +589,9 @@ def test_identified_stance_page_is_served_on_a_store_enrolled_vault(stance_vault
     state_migration.record_collection_store_compatibility(stance_vault, authority_check=lambda: True)
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     working_set_runtime.reset_caches_for_tests()
+    _reset_caches()
     lexstore.ensure_fresh(stance_vault)
     _built(stance_vault)
-    _reset_caches()
     command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "activate_context")
     packet = invoke_command(command, stance_vault, turn="Keep a source", max_chars=2000)
     assert packet["stance"]["state"] == "ready"

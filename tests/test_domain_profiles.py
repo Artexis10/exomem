@@ -169,9 +169,9 @@ def _rule(name: str, text: str | None = None) -> str:
 
 
 def _refresh(root: Path) -> None:
+    _reset_caches()
     lexstore.ensure_fresh(root)
     _built(root).close()
-    _reset_caches()
     working_set_runtime.reset_caches_for_tests()
 
 
@@ -221,6 +221,7 @@ def _plant_profile_chunks(root: Path) -> int:
 
     Returns the number of anchors that carry a vector, which decides whether the turn slice encodes the turn.
     """
+    _reset_caches()
     recall = embeddings.get_embedding_index(root)
     for domain in ("global", "media", "games", "music", "cooking"):
         rel = f"{PROFILES}/{domain}.md"
@@ -233,7 +234,6 @@ def _plant_profile_chunks(root: Path) -> int:
     anchors = len(index.vector_matrix(FINGERPRINT)[0])
     index.close()
     _built(root).close()
-    _reset_caches()
     working_set_runtime.reset_caches_for_tests()
     return anchors
 
