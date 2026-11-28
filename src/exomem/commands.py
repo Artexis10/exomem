@@ -1863,11 +1863,13 @@ def op_bootstrap(
                 "reuse bootstrap policy; load only if missing or stale",
                 f"{tools_text('adopt_vault', 'read')} or browse_memory when first seeing an existing vault",
                 *([
-                    "When needed, recall_context with the user's turn first unless context was injected."
+                    "when recall is needed and context is not injected, "
+                    "recall_context with the user's turn before extra recall"
                 ] if "recall_context" in active_product_names else []),
                 "search_memory only for gaps in current evidence",
-                "read_memory. Name and date conflicting claims, including host memory. Check validity.",
+                "read_memory for selected result refs",
                 MEMORY_CITATION_GUIDANCE,
+                "reason in the agent",
                 (
                     "Before saving: vocabulary_workflow (section vocabulary); resolve "
                     "recurring identities/relations, enrich entities. Add types only if "

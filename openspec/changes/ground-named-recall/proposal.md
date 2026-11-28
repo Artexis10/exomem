@@ -6,7 +6,7 @@ A turn can name an ordinary note and a peripheral in the same request. The perip
 
 ## What Changes
 
-- Give a released note's existing title evidence precedence over incidental matches in the default task results.
+- Give a current released note's existing title evidence precedence over incidental matches in the default task results.
 
 ## Capabilities
 
@@ -14,7 +14,7 @@ A turn can name an ordinary note and a peripheral in the same request. The perip
 
 ### Modified Capabilities
 
-- `context-activation` gives directly named compiled notes precedence in the default task block.
+- `context-activation` gives current named compiled notes precedence in the default task block.
 
 ## Impact
 

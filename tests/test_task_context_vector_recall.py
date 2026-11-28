@@ -72,17 +72,26 @@ def test_an_unrelated_turn_gets_no_dense_candidates(vault: Path, planted: str, m
     assert block["state"] == keyword_block["state"]
 
 
-def test_a_named_workstation_note_leads_incidental_matches_in_a_mixed_turn(
-    vault: Path, monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("retired", [False, True])
+def test_only_a_current_named_workstation_note_gets_title_precedence(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, retired: bool,
 ) -> None:
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "on")
+    successor = 'superseded_by: "[[Upgrade selection]]"\n' if retired else ""
     _write(vault, "Knowledge Base/Notes/Research/Maple workstation.md", (
         "---\ntype: research-note\nstatus: active\ntitle: Maple workstation (custom build)\n"
+        f"{successor}"
         "tags: [cpu, gpu, maple-workstation]\n---\n\n# Maple workstation (custom build)\n\n"
         "- [decision] The desktop CPU and motherboard upgrade waits for the Helix 7 platform. ^cpu\n"
         "- [decision] Keep the current GPU until the motherboard and power supply are confirmed. ^gpu\n"
     ))
+    if retired:
+        _write(vault, "Knowledge Base/Notes/Research/Upgrade selection.md", (
+            "---\ntype: research-note\nstatus: active\n---\n\n# Upgrade selection\n\n"
+            "- [decision] Buy Helix 7 now for the Maple workstation plan. ^current\n"
+            "The Maple workstation plan and the Raven microphone need no compatibility changes.\n"
+        ))
     _write(vault, "Knowledge Base/Entities/Equipment/Raven microphone.md", (
         "---\ntype: entity\nentity_type: equipment\nstatus: active\n---\n\n# Raven microphone\n\n"
         "USB sound accessory used beside the Maple workstation for games. The microphone needs no CPU or GPU upgrade.\n"
@@ -113,7 +122,8 @@ def test_a_named_workstation_note_leads_incidental_matches_in_a_mixed_turn(
     )
 
     assert packet["turn_slice"]["items"][0]["title"] == "Raven microphone"
-    assert packet["task_context"]["candidates"][0]["title"] == "Maple workstation (custom build)"
+    expected_lead = "Upgrade selection" if retired else "Maple workstation (custom build)"
+    assert packet["task_context"]["candidates"][0]["title"] == expected_lead
 
 
 def test_a_cold_matrix_in_a_running_service_is_reported_and_reloaded_in_the_background(
