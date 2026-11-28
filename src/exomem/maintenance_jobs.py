@@ -239,7 +239,9 @@ def _store(
 
 
 @contextmanager
-def _write(vault_root: Path, *, bounded: bool = False) -> Iterator[sqlite3.Connection]:
+def _write(
+    vault_root: Path, *, bounded: bool = False, before_commit: Callable[[], None] | None = None,
+) -> Iterator[sqlite3.Connection]:
     """Commit a clean transaction and roll back before commit on any exception."""
     committed = False
     try:
@@ -251,6 +253,9 @@ def _write(vault_root: Path, *, bounded: bool = False) -> Iterator[sqlite3.Conne
                 yield conn
                 if bounded:
                     request_budget.checkpoint()
+                if before_commit is not None:
+                    before_commit()
+                # Once admitted, SQLite owns the atomic commit and its acknowledgement.
                 conn.commit()
                 committed = True
             except BaseException:
@@ -1177,7 +1182,8 @@ def _save_terminal(
     preview_held: list[tuple[str, str]] | None = None,
 ) -> None:
     """Record a terminal and any complete report in one job-store transaction."""
-    with _write(live.vault_root, bounded=bounded) as conn:
+    before_commit = raise_if_stopped if preview_entries is not None else None
+    with _write(live.vault_root, bounded=bounded, before_commit=before_commit) as conn:
         if live.mode == _SOURCE_PREVIEW and prune_preview:
             _prune(conn)
         if preview_entries is not None:
@@ -1196,8 +1202,6 @@ def _save_terminal(
                     (live.run_id, path, record)
                     for path, record in _checked_preview_rows(preview_held)
                 ))
-        if preview_entries is not None:
-            raise_if_stopped()
 
 
 def _forget_live(run_id: str) -> None:

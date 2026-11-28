@@ -2,7 +2,7 @@
 
 ### Requirement: A governed reclassification preview completes at the load target
 
-A background reclassification preview SHALL use one job budget through atomic report publication. On Linux, it SHALL complete the load fixture below and reuse the settled referrer folder's listing. It SHALL use full lookup if a folder's listing exceeds the cache budget. A concurrent Records read SHALL answer within its request budget.
+A background reclassification preview SHALL use one job budget through admission of its atomic report commit. On Linux, it SHALL complete the load fixture below and reuse the settled referrer folder's listing. It SHALL use full lookup if a folder's listing exceeds the cache budget. A concurrent Records read SHALL answer within its request budget.
 
 #### Scenario: A large governed preview completes
 
@@ -13,8 +13,14 @@ A background reclassification preview SHALL use one job budget through atomic re
 
 #### Scenario: An interrupted job returns a typed error
 
-- **WHEN** the job expires or stops before it commits its report
+- **WHEN** the deadline expires or the job stops before commit admission
 - **THEN** a request for its run returns a typed public error with no report, page or digest
+
+#### Scenario: An admitted commit completes
+
+- **WHEN** the deadline and cancellation checks admit the report's atomic commit
+- **AND** the store acknowledges the commit
+- **THEN** the run keeps the completed report even if the deadline expires during the commit
 
 ### Requirement: A dependent governed referrer is released without rereading its bytes
 

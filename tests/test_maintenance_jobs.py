@@ -225,6 +225,47 @@ def test_a_source_preview_deadline_discards_the_report(server, vault, monkeypatc
     assert _source_preview_terminal(vault, **identity, run_id=next_run["run_id"])["state"] == "completed"
 
 
+def test_source_preview_keeps_an_acknowledged_commit_after_its_deadline(server, vault, monkeypatch):
+    admitted = threading.Event()
+    original_open = maintenance_jobs._open
+
+    def open_observed(*args, **kwargs):
+        conn = original_open(*args, **kwargs)
+        check = request_budget.current_checkpoint()
+        if check is not None and maintenance_jobs._JOB.get() is not None:
+            writing_report = False
+
+            def observe(statement):
+                nonlocal writing_report
+                if statement.lstrip().startswith("INSERT INTO entries"):
+                    writing_report = True
+                if writing_report and statement == "COMMIT":
+                    check.budget.deadline = 0
+                    admitted.set()
+
+            conn.set_trace_callback(observe)
+        return conn
+
+    monkeypatch.setattr(maintenance_jobs, "_open", open_observed)
+    identity = {"binding": "owner-binding", "request_key": "source-request", "snapshot_key": "snapshot"}
+
+    def build(_stop):
+        return {"preview_digest": "complete"}, [("rewritten", "Notes/current.md", None)]
+
+    handle = maintenance_jobs.start_source_preview(vault, **identity, build=build)
+    run_id = handle["run_id"]
+    status = _source_preview_terminal(vault, **identity, run_id=run_id)
+
+    assert admitted.is_set()
+    assert status == {
+        "run_id": run_id, "state": "completed", "result": {"preview_digest": "complete"},
+        "next_cursor": "0", "snapshot_current": True,
+    }
+    assert maintenance_jobs.start_source_preview(vault, **identity, build=build) == {
+        "run_id": run_id, "state": "completed",
+    }
+
+
 def test_source_preview_publication_does_not_wait_on_a_busy_job_store(server, vault):
     building, can_publish = threading.Event(), threading.Event()
     identity = {"binding": "owner-binding", "request_key": "source-request", "snapshot_key": "snapshot"}
