@@ -722,7 +722,7 @@ class LocalRuntimeActivation:
             self.catalogue_recovery = thread
 
     def _recover_catalogue(self, vault_key: Path) -> None:
-        from . import lexstore
+        from . import find_corpus, lexstore, readiness, warmup
 
         backoff = CATALOGUE_RECOVERY_FIRST_BACKOFF_SECONDS
         while not self._catalogue_stop.wait(backoff):
@@ -730,7 +730,14 @@ class LocalRuntimeActivation:
                 if self._shutdown.is_set() or self._catalogue_stop.is_set():
                     return
                 try:
-                    pending = lexstore.retry_pending_repair(vault_key)
+                    if find_corpus.store_serves(vault_key):
+                        pending = (
+                            readiness.warm_started()
+                            and not readiness.is_ready("retrieval_catalog")
+                            and not warmup.prove_store_retrieval(vault_key)
+                        )
+                    else:
+                        pending = lexstore.retry_pending_repair(vault_key)
                 except Exception:  # noqa: BLE001 - retry ownership must survive transient failure
                     log.warning("catalogue recovery retry failed", exc_info=True)
                     pending = True
