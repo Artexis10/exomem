@@ -52,6 +52,18 @@ class DetachedResume:
     error: Exception | None = None
 
 
+def bind_arguments(signature, *args, **kwargs):
+    """Bind the writer's own defaults and validate its arguments before reading a candidate."""
+    bound = signature.bind(*args, **kwargs)
+    bound.apply_defaults()
+    arguments = dict(bound.arguments)
+    arguments.pop("self", None)
+    collection = arguments.pop("collection")
+    records._validate_why(arguments["why"])
+    records._validate_hold(arguments["hold"])
+    return collection, arguments
+
+
 def from_snapshot(writer, name, collection, arguments):
     """Read a candidate in the controller's passive snapshot; return no live resource."""
     action = "append" if name == "append_record" else arguments["operation"]

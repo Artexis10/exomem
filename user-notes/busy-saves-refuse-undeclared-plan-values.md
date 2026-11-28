@@ -1,4 +1,4 @@
 ---
 title: Wrong plan values refused when busy
 ---
-While Evermatter is busy, a new plan item with a value that the vault does not define is now refused at once, unless a note edit or collection change is still waiting to save.
+In Evermatter Cloud, a new plan item with a value your workspace disallows can be refused right away, even while another save is waiting.

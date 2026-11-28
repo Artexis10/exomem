@@ -212,7 +212,7 @@ def decide_on_declaration(
     budget: request_budget.RequestBudget,
     *,
     profile: str,
-    decide: Callable[[collections.CollectionManifest], _Decision],
+    decide: Callable[[str, collections.CollectionManifest], _Decision],
 ) -> _Decision | None:
     """`decide` over the manifest that `collection` names, as a request thread reads it now; None where that is unknown.
 
@@ -231,7 +231,7 @@ def decide_on_declaration(
     def read() -> _Decision:
         with egress.disclosure_boundary(vault_root, "record_value_check", sink=True):
             path = resolve_collection(vault_root, collection, profile=profile)
-            return decide(record_governance.resolve_collection_without_receipt(vault_root, path))
+            return decide(path, record_governance.resolve_collection_without_receipt(vault_root, path))
 
     try:
         with request_budget.checking(request_budget.ReadCheckpoint(budget)):

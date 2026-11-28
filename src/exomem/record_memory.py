@@ -990,7 +990,8 @@ def value_refusal(
         return None
     refusal = collection_refs.decide_on_declaration(
         Path(vault_root), collection, budget, profile="records",
-        decide=lambda manifest: records.supplied_value_refusal(record_governance.require_records_profile(manifest), values),
+        decide=lambda _selector, manifest: records.supplied_value_refusal(
+            record_governance.require_records_profile(manifest), values),
     )
     if refusal is None:
         return None

@@ -344,10 +344,11 @@ def value_refusal(
     manifest and the Planning values. An update or a triage is refused only once its values are refused
     without the item it names and again with that item as the store holds it, read by its key at the caller's
     version (`row_binding.edited_row_values`): the commit finds that item before it judges a value, and a
-    store's commit checks its version first too. A file collection has no read of one item by its key, so
-    where no such read answers, the save queues. A value's refusal is given only where it is the commit's
-    first refusal of the save (`_first_refusal`); any other first refusal is the replay's to give.
+    store's commit checks its version first too. File-backed saves queue for their own checks at replay.
+    A value's refusal is given only where the store route is open and it is the commit's first refusal.
     """
+    from .collection_store import preview
+
     action = arguments.get("action")
     values = (
         arguments.get("item") if action == "add"
@@ -360,16 +361,21 @@ def value_refusal(
         return None
     root = Path(vault_root)
 
-    def decide(manifest: structured_collections.CollectionManifest) -> CollectionError | None:
+    def decide(selector: str, manifest: structured_collections.CollectionManifest) -> CollectionError | None:
+        writer = preview.selected_writer(root, manifest)
+        if writer is None:
+            return None
         planning.require_planning_profile(manifest)
         refusal = planning.supplied_value_refusal(root, manifest, values, adding=action == "add")
         if refusal is not None and action != "add":
-            stored = _edited_item(root, manifest, arguments)
+            stored = _edited_item(writer, manifest, arguments)
             refusal = None if stored is None else planning.supplied_value_refusal(
                 root, manifest, values, stored=stored)
         if refusal is None:
             return None
-        first = _first_refusal(root, manifest, arguments)
+        dispatch_values = {name: value for name, value in arguments.items() if name != "action"}
+        dispatch_values["collection"] = selector
+        first = preview.row_save_refusal(root, "planning", action, dispatch_values)
         same = first is not None and (first.code, first.reason) == (refusal.code, refusal.reason)
         return refusal if same else None
 
@@ -380,60 +386,19 @@ def value_refusal(
     return OpError(code, _public_error_message(refusal, code), collection_refs.RESEND_WITH_A_DECLARED_VALUE)
 
 
-def _first_refusal(
-    vault_root: Path, manifest: structured_collections.CollectionManifest, arguments: Mapping[str, Any]
-) -> CollectionError | None:
-    """The refusal that the commit of this add, update or triage gives first, from the commit's own checks in its
-    order; None where they all pass or the store answers it as a replay of a save it committed.
-
-    A store prepares the save as its writer does, in the same snapshot; a file collection's add runs `planning.add`'s
-    checks and the shared writer's before its write boundary. Only a store answers an update or a triage here."""
-    from . import records
-    from .collection_store import preview, record_inputs
-
-    action, why, body = arguments["action"], arguments.get("why"), arguments.get("body")
-    item_key, container = arguments.get("plan_id"), arguments.get("expected_container_hash")
-    writer = preview.selected_writer(vault_root, manifest)
-    try:
-        if writer is None:
-            item = planning.checked_file_add(
-                vault_root, manifest, arguments["item"], plan_id=item_key, why=why, body=body)
-            records.checked_append(vault_root, manifest, item, item_key=item_key, why=why, hold=True, held=None)
-            return None
-        # What `preview.dispatch` hands the writer for this save, with the writer's defaults for the rest.
-        records._validate_why(why)
-        saved = {"item_key": item_key, "expected_container_hash": container, "why": why, "body": body,
-                 "hold": True, "held": None, "sources": [], "request_id": None}
-        if action == "add":
-            name, saved = "append_record", {**saved, "item": arguments["item"], "delivery": None}
-        else:
-            name, saved = "update_record", {
-                **saved, "changes": arguments["transition" if action == "triage" else "changes"],
-                "expected_item_version": arguments.get("expected_item_version"), "operation": action,
-                "delete_fields": [], "refresh_presentation": False}
-        with writer.read_snapshot(mutation=True):
-            candidate, replay = record_inputs.from_snapshot(writer, name, manifest, saved)
-        return None if replay is not None else candidate.error
-    except CollectionError as error:
-        return error
-
-
 def _edited_item(
-    vault_root: Path, manifest: structured_collections.CollectionManifest, arguments: Mapping[str, Any]
+    writer, manifest: structured_collections.CollectionManifest, arguments: Mapping[str, Any]
 ) -> Mapping[str, Any] | None:
     """The values of the item that an update or a triage names by its plan id and both guards, where the store that
     owns the collection reads it by its key at that version; None otherwise.
 
     An `item_id` answers None: only the store thread's head map binds one without a collection scan, and the commit
     refuses a stale or ambiguous one before it judges a value, so its save queues."""
-    from .collection_store import preview, row_binding
+    from .collection_store import row_binding
 
     plan_id, version, container = (
         arguments.get(name) for name in ("plan_id", "expected_item_version", "expected_container_hash"))
     if not all(type(value) is str for value in (plan_id, version, container)):
-        return None
-    writer = preview.selected_writer(vault_root, manifest)
-    if writer is None:
         return None
     return row_binding.edited_row_values(
         writer, manifest, item_key=plan_id, expected_item_version=version, expected_container_hash=container)

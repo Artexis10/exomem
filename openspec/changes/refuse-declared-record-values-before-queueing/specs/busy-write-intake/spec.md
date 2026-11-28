@@ -41,15 +41,29 @@ Before the intake queues a `record_memory` append with an object `item`, or an u
 
 ### Requirement: A Planning value that the vault does not define is refused before queueing
 
-Before the intake queues a `plan_memory` add, update or triage with an object `item`, `changes` or `transition` and a string `collection`, the serving process SHALL check each supplied value, an add's null one included: a governed field with the Planning commit's own rule, then every field with the declared per-field rules. An add with a refused value SHALL be refused at once, not queued. An update or a triage with one SHALL be refused only as the store read below allows.
+For store-owned Planning saves, the intake SHALL check supplied values, including an add's explicit null, against Planning and field rules. It SHALL give a value refusal only if the normal route is open, this is the writer's first refusal, and any required store read below succeeds. Otherwise it SHALL queue.
 
 #### Scenario: A Planning status outside the Planning values behind the queue is refused at once
 
 - **WHEN** an owner sends a `plan_memory` add whose `status` is null or not one of the vault's Planning statuses
+- **AND** the collection is store-owned and its save route is open
 - **AND** earlier saves are still queued
 - **AND** there is no open queued save of a command that declares `sets_any_frontmatter_field`, and no open `record_memory` or `plan_memory` save carrying `manifest_text`
 - **THEN** the call returns `INVALID_PLAN` with the statuses that the vault defines
 - **AND** the intake holds only the earlier saves
+
+#### Scenario: The busy check honours a disabled summary route
+
+- **WHEN** an owner sends a `plan_memory` add with an undeclared enum value to a store-owned summary collection
+- **AND** the summary release gate is off and the store is busy
+- **THEN** the save queues for the route's own refusal at replay without disclosing the collection's enum values
+
+#### Scenario: A busy add to a file collection is queued
+
+- **WHEN** an owner sends a `plan_memory` add with an undeclared enum value to a file-backed collection
+- **AND** earlier saves are still queued
+- **THEN** the save is queued
+- **AND** its replay gives the same refusal as a direct add
 
 ### Requirement: The declared value check queues the save when it cannot be certain
 
@@ -78,10 +92,10 @@ The intake SHALL mark the queue before it reads the declaration and, after a ref
 
 #### Scenario: An ordinary save that commits during the declaration read leaves the refusal
 
-- **WHEN** an owner sends a `plan_memory` add whose value lies outside a field's declared enum
-- **AND** an ordinary queued add is open when the intake marks the queue and is applied while the intake reads the declaration
+- **WHEN** an owner sends an append or add whose value lies outside a field's declared enum
+- **AND** an ordinary queued save is open when the intake marks the queue and is applied while the intake reads the declaration
 - **THEN** the call returns `SCHEMA_ENUM`
-- **AND** the intake holds no copy of the add
+- **AND** the intake holds no copy of the refused save
 
 ### Requirement: The intake records which queued saves may change a declaration
 
@@ -89,16 +103,16 @@ When the intake accepts a save, it SHALL record whether the save may change a de
 
 #### Scenario: A store from before the record keeps a save behind its open revision queued
 
-- **WHEN** an intake store without that record holds an open `plan_memory` revise that adds a value to a field's enum
-- **AND** an owner sends a `plan_memory` add with that value, after another busy save or while another acceptance upgrades the store
-- **THEN** the add is queued
+- **WHEN** an intake store without that record holds an open revise that adds a value to a field's enum
+- **AND** an owner sends an append or add with that value, after another busy save or while another acceptance upgrades the store
+- **THEN** the save is queued
 - **AND** once its replay is applied, the row holds the value
 
 #### Scenario: A revision that an earlier release queues keeps a save with its value queued
 
-- **WHEN** an earlier release, after a rollback, queues a `plan_memory` revise that adds a value to a field's enum, without a record
-- **AND** an owner then sends a `plan_memory` add with that value
-- **THEN** the add is queued
+- **WHEN** an earlier release, after a rollback, queues a revise that adds a value to a field's enum, without a record
+- **AND** an owner then sends an append or add with that value
+- **THEN** the save is queued
 - **AND** once its replay is applied, the row holds the value
 
 #### Scenario: The upgrade reads no stored save
@@ -114,24 +128,24 @@ Each look at the queue, for a value the check accepts and for a refusal alike, S
 
 #### Scenario: A busy save reads no more of a longer queue
 
-- **WHEN** an owner sends a `plan_memory` add whose values the vault declares, or one whose value lies outside a field's declared enum
+- **WHEN** an owner sends an append or add whose values the vault declares, or one whose value lies outside a field's declared enum
 - **AND** earlier saves are still queued
-- **THEN** the first add is queued and the second is refused with `SCHEMA_ENUM`
+- **THEN** the first save is queued and the second is refused with `SCHEMA_ENUM`
 - **AND** the reads of the queue for each cost the same as behind a shorter queue
 
 #### Scenario: A queue that answers after the budget queues the save
 
-- **WHEN** an owner sends a `plan_memory` add whose value lies outside a field's declared enum
+- **WHEN** an owner sends an append or add whose value lies outside a field's declared enum
 - **AND** earlier saves are still queued
 - **AND** the queue answers the look after the refusal only once the budget has run out
-- **THEN** the add is queued
+- **THEN** the save is queued
 - **AND** its replay refuses it with `SCHEMA_ENUM`
 
 #### Scenario: An open that spends most of the budget on a locked queue queues the save within it
 
-- **WHEN** an owner sends a `plan_memory` add whose value lies outside a field's declared enum
+- **WHEN** an owner sends an append or add whose value lies outside a field's declared enum
 - **AND** another connection locks the queue, and opening the queue spends most of the budget
-- **THEN** the add is queued within about the budget
+- **THEN** the save is queued within about the budget
 - **AND** its replay refuses it with `SCHEMA_ENUM`
 
 ### Requirement: A Planning update is refused before queueing only for an item its store reads by key
@@ -171,6 +185,7 @@ The Planning check SHALL leave to the replay a governed value when the caller ca
 #### Scenario: A busy area add with fields an area may not carry is refused at the replay for what an area carries
 
 - **WHEN** an owner sends a `plan_memory` add of an area whose `status` is not one of the vault's Planning statuses and whose custom field's value lies outside its declared enum
+- **AND** the collection is store-owned
 - **AND** earlier saves are still queued
 - **THEN** the add is queued
 - **AND** its replay refuses it with `INVALID_PLAN` because an area cannot carry a status

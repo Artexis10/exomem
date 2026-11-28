@@ -303,20 +303,28 @@ def _with_row_sensitivity(
     return {**result, "sensitivity": sensitivity_classes.report(root, found, rel_path=rel_path)}
 
 
-def checked_append(
-    root: Path,
+def append_record(
+    vault_root: Path,
     collection: str | Path | collections.CollectionManifest,
-    item: Mapping[str, Any] | None,
     *,
-    item_key: str | None,
+    item: Mapping[str, Any] | None = None,
+    item_key: str | None = None,
+    expected_container_hash: str | None = None,
     why: str,
-    hold: bool,
-    held: str | None,
-) -> tuple[bool, str | None, Mapping[str, Any], collections.CollectionManifest, str | None]:
-    """`append_record`'s checks of its item before its write boundary, in their order; its hold flag, held
-    reference, item, collection and item key.
-
-    Planning's busy intake runs them too (`plan_memory.value_refusal`), so a refusal that it gives keeps this order."""
+    body: str | None = None,
+    delivery: ArtifactDelivery | None = None,
+    hold: bool = True,
+    held: str | None = None,
+    validate_snapshot: Callable[
+        [collections.CollectionManifest, record_formats.AdapterSnapshot, str, Mapping[str, Any], str],
+        None,
+    ]
+    | None = None,
+    _prepare: Callable[[dict[str, Any]], None] | None = None,
+    _validate_inputs: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    """Append one structured item, or return a content-identical replay."""
+    root = Path(vault_root)
     _validate_why(why)
     hold = _validate_hold(hold)
     held_id = _validate_held_reference(held)
@@ -344,34 +352,6 @@ def checked_append(
                 error.code not in _CANDIDATE_CONTENT_CODES
             ):
                 raise
-    return hold, held_id, overrides, supplied_manifest, key
-
-
-def append_record(
-    vault_root: Path,
-    collection: str | Path | collections.CollectionManifest,
-    *,
-    item: Mapping[str, Any] | None = None,
-    item_key: str | None = None,
-    expected_container_hash: str | None = None,
-    why: str,
-    body: str | None = None,
-    delivery: ArtifactDelivery | None = None,
-    hold: bool = True,
-    held: str | None = None,
-    validate_snapshot: Callable[
-        [collections.CollectionManifest, record_formats.AdapterSnapshot, str, Mapping[str, Any], str],
-        None,
-    ]
-    | None = None,
-    _prepare: Callable[[dict[str, Any]], None] | None = None,
-    _validate_inputs: Callable[[], None] | None = None,
-) -> dict[str, Any]:
-    """Append one structured item, or return a content-identical replay."""
-    root = Path(vault_root)
-    hold, held_id, overrides, supplied_manifest, key = checked_append(
-        root, collection, item, item_key=item_key, why=why, hold=hold, held=held
-    )
     if body is not None:
         _validate_body(body)
         if body and supplied_manifest.storage.strategy == "markdown-log":

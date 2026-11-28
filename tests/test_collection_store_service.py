@@ -2770,6 +2770,55 @@ def test_an_area_update_that_deletes_a_field_it_lacks_is_refused_for_its_value_w
         write_intake.stop(root)
 
 
+def test_a_busy_plan_add_queues_if_a_revision_declares_its_value_during_the_check(service, monkeypatch):
+    """A queued Planning revision that commits after the declaration read can make the add valid."""
+    from types import MappingProxyType
+
+    from exomem import write_intake
+
+    root = service.root
+    text = sqlite_text(manifest_text("planning").replace(CID, RELEASE_PLAN_ID).replace("title: Work", f"title: {RELEASE_PLAN}"))
+    text = text.replace("    area: {type: string}\n", "    area: {type: string}\n    effort: {type: enum, enum: [small, large]}\n")
+    call(root, "plan_memory", action="create", manifest_path=manifest_path("planning").replace("Work", "Release"),
+         manifest_text=text, why="plan the releases")
+    guards = call(root, "plan_memory", action="inspect", collection=RELEASE_PLAN)["lifecycle_guards"]
+    command = next(c for c in commands.product_commands_for("mcp") if c.name == "plan_memory")
+    resume = threading.Event()
+    claim = write_intake._claim_head
+    monkeypatch.setattr(write_intake, "_claim_head", lambda root: claim(root) if resume.is_set() else 0.05)
+    try:
+        with _store_thread_held_with_intake_on(service, monkeypatch), request_scope(OWNER):
+            revision = writer_lease.invoke_command(
+                command, root, implicit_idempotency_scope="principal:session-b", action="revise",
+                collection=RELEASE_PLAN, manifest_text=text.replace("[small, large]", "[small, medium, large]"),
+                why="declare medium effort", **guards)
+        assert revision["state"] == "queued"
+        revision_ref = revision["queued_write"]["ref"]
+        check = commands._DECLARED_VALUE_REFUSALS["plan_memory"]
+
+        def check_then_apply(*args):
+            refusal = check(*args)
+            assert refusal is not None and refusal.code == "SCHEMA_ENUM"
+            resume.set()
+            _until(lambda: write_intake.read(root, ref=revision_ref)["queued_write"]["state"] == "applied")
+            return refusal
+
+        monkeypatch.setattr(commands, "_DECLARED_VALUE_REFUSALS",
+                            MappingProxyType({**commands._DECLARED_VALUE_REFUSALS, "plan_memory": check_then_apply}))
+        monkeypatch.setattr(commands, "_DECLARED_REFUSAL_SECONDS", 10.0)
+        with request_scope(OWNER):
+            add = writer_lease.invoke_command(
+                command, root, implicit_idempotency_scope="principal:session-c", action="add", collection=RELEASE_PLAN,
+                item={"title": "Ship it", "kind": "area", "effort": "medium"}, why="size the release")
+        assert add["state"] == "queued"
+        add_ref = add["queued_write"]["ref"]
+        _until(lambda: write_intake.read(root, ref=add_ref)["queued_write"]["state"] == "applied")
+        (row,) = call(root, "plan_memory", action="query", collection=RELEASE_PLAN)["rows"]
+        assert row["effort"] == "medium"
+    finally:
+        write_intake.stop(root)
+
+
 @pytest.mark.parametrize(
     ("action", "stored_kind", "sent", "at_once"),
     [
@@ -2780,11 +2829,18 @@ def test_an_area_update_that_deletes_a_field_it_lacks_is_refused_for_its_value_w
         ("update", "outcome", {"changes": {"kind": "unregistered-kind"}, "why": "size it\nthen ship it"}, False),
         ("add", None, {"item": {"title": "x" * 513, "kind": "unregistered-kind"}}, False),
         ("add", None, {"item": {"title": "Ship it", "lifecycle": "paused", "effort": "medium"}}, False),
+        ("add", None, {"item": {"title": "Ship it", "kind": "area", "effort": "medium"}}, True),
+        ("add", None, {"item": {"title": "Ship it", "kind": "area", "status": "bogus", "effort": "medium"}}, False),
+        ("add", None, {"item": {"title": "Ship it", "kind": "outcome", "status": "resolved",
+                                "commitment": "committed", "horizon": "week"}}, True),
+        ("add", None, {"item": {"title": "Ship it", "kind": "outcome", "status": None,
+                                "commitment": "committed", "horizon": "week"}}, True),
         ("triage", "outcome", {"transition": {"parent": None, "kind": "unregistered-kind"}}, True),
     ],
     ids=["triage-with-a-null-status", "triage-with-an-unsupported-field", "triage-of-an-area",
          "update-with-an-undeclared-field", "update-with-a-two-line-why", "add-with-a-long-title",
-         "add-with-an-unknown-lifecycle", "triage-that-deletes-a-parent"],
+         "add-with-an-unknown-lifecycle", "add-with-an-undeclared-effort", "area-with-a-status",
+         "add-with-an-undeclared-status", "add-with-a-null-status", "triage-that-deletes-a-parent"],
 )
 def test_a_busy_planning_save_gets_the_refusal_that_the_same_save_gets_directly(
         service, monkeypatch, action, stored_kind, sent, at_once):
@@ -2832,6 +2888,42 @@ def test_a_busy_planning_save_gets_the_refusal_that_the_same_save_gets_directly(
     with pytest.raises(OpError) as direct:
         call(root, "plan_memory", **save)
     assert busy == (direct.value.code, direct.value.message)
+
+
+def test_a_busy_plan_add_does_not_disclose_values_on_a_disabled_summary_route(service, monkeypatch):
+    """A disabled summary route must not disclose its enum when a Planning add would queue."""
+    from exomem import write_intake
+
+    root = service.root
+    text = sqlite_text(manifest_text("planning").replace(CID, RELEASE_PLAN_ID).replace("title: Work", f"title: {RELEASE_PLAN}"))
+    text = text.replace("    area: {type: string}\n", "    area: {type: string}\n    effort: {type: enum, enum: [small, large]}\n")
+    call(root, "plan_memory", action="create", manifest_path=manifest_path("planning").replace("Work", "Release"),
+         manifest_text=text, why="plan the releases")
+    monkeypatch.setattr(capability, "RELEASED", capability.RELEASED - {capability.RECORDS_SUMMARY_V1})
+    save = {"action": "add", "collection": RELEASE_PLAN, "why": "size the release",
+            "item": {"title": "Ship it", "kind": "area", "effort": "medium"}}
+    with pytest.raises(OpError) as direct:
+        call(root, "plan_memory", **save)
+    assert direct.value.code == capability.UNAVAILABLE
+
+    command = next(c for c in commands.product_commands_for("mcp") if c.name == "plan_memory")
+    queued_ref = None
+    try:
+        with _store_thread_held_with_intake_on(service, monkeypatch), request_scope(OWNER):
+            try:
+                receipt = writer_lease.invoke_command(command, root, implicit_idempotency_scope="principal:session-b", **save)
+            except OpError as refused:
+                assert (refused.code, refused.message) == (direct.value.code, direct.value.message)
+                assert write_intake.read(root)["items"] == []
+            else:
+                assert receipt["state"] == "queued"
+                queued_ref = receipt["queued_write"]["ref"]
+        if queued_ref is not None:
+            _until(lambda: write_intake.read(root, ref=queued_ref)["queued_write"]["state"] == "failed")
+            error = write_intake.read(root, ref=queued_ref)["queued_write"]["error"]
+            assert (error["code"], error["message"]) == (direct.value.code, direct.value.message)
+    finally:
+        write_intake.stop(root)
 
 
 def counted_appends(monkeypatch):

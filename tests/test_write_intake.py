@@ -577,8 +577,8 @@ def _ledger_declaring_a_status(vault: Path, values: str = "draft, published") ->
 def _status_call(collection: str, action: str, status: str, **target: str) -> dict:
     """An append of a new entry, or an update of the entry that `target` names by its key and guards or its id."""
     if action == "append":
-        return {"action": "append", "collection": collection, "item": ledger_item(status=status),
-                "why": "record a published entry"}
+        return {"action": "append", "collection": collection, "item": ledger_item(status=status, **target),
+                "why": "record an entry"}
     return {"action": "update", "collection": collection, **target, "changes": {"status": status},
             "why": "correct an entry"}
 
@@ -647,168 +647,33 @@ def _planning_collection(vault: Path) -> str:
     return _PLANNING_COLLECTION_PATH
 
 
-def _plan_call(collection: str, action: str, title: str = "Ship the release", **values: str | None) -> dict:
-    """An add of a committed outcome with `values`, or an update or triage of the item `values` names by its plan id."""
-    if action == "add":
-        return {"action": "add", "collection": collection, "why": "plan the release",
-                "item": {"title": title, "kind": "outcome", "status": "active", "commitment": "committed",
-                         "horizon": "week", **values}}
-    target = {name: values.pop(name) for name in ("plan_id", "expected_container_hash", "expected_item_version")}
-    changed = "changes" if action == "update" else "transition"
-    return {"action": action, "collection": collection, **target, changed: values, "why": "correct the release"}
-
-
-def _planned_outcome(vault: Path, collection: str, title: str = "Ship the release") -> dict:
-    """The plan id and both guards of the item titled `title`, as a query reports them."""
-    view = _send(_command("plan_memory"), vault, {"action": "query", "collection": collection, "lifecycle": "all"})
-    (row,) = [row for row in view["rows"] if row["title"] == title]
-    return {"plan_id": row["plan_id"], "expected_container_hash": view["snapshot"],
-            "expected_item_version": row["item_version"]}
-
-
-@pytest.mark.parametrize(
-    ("field", "value", "code", "message"),
-    [
-        ("status", "resolved", "INVALID_PLAN",
-         "status must be one of: candidate, planned, active, blocked, completed, cancelled"),
-        ("status", None, "INVALID_PLAN",
-         "status must be one of: candidate, planned, active, blocked, completed, cancelled"),
-        ("effort", "medium", "SCHEMA_ENUM", 'field is outside its enum: effort; allowed: "small", "large"'),
-    ],
-    ids=["planning-value", "null-planning-value", "declared-field"],
-)
-def test_a_plan_add_with_a_value_the_vault_never_declares_is_refused_behind_the_queue_and_never_queued(
-    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch, field: str, value: str | None, code: str,
-    message: str,
+def test_a_file_plan_add_with_an_undeclared_value_queues_and_its_replay_refuses_it(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Defect: a Planning status outside the Planning values, or an explicit null one, came back "Queued, not saved
-    yet" and failed only at the replay, while the same add sent directly was refused at once."""
+    """A file-backed save leaves the commit's collection checks to the replay."""
     _writer, holder = managers
     plan = _command("plan_memory")
     collection = _planning_collection(vault)
-    call = _plan_call(collection, "add", **{field: value})
-    first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
-    with pytest.raises(OpError) as refused:
-        _send(plan, vault, call, scope="principal:session-b")
-    assert (refused.value.code, refused.value.message) == (code, message)
-    assert "nothing is held" in refused.value.remediation
-    assert [item["ref"] for item in write_intake.read(vault)["items"]] == [first]
-    paused.set()
-    _wait_for_state(vault, first, "applied")
-    # The same call sent directly reaches the commit, which refuses it the same way.
-    with request_scope(local_owner_principal(surface="mcp")), pytest.raises(OpError) as direct:
-        plan_memory(vault, **call)
-    assert (direct.value.code, direct.value.message) == (code, message)
-
-
-@pytest.mark.parametrize(
-    ("why", "parent"),
-    [("size it\nthen ship it", {}),
-     ("plan the release", {"parent": "exomem://plan/2db90f18-70df-4e41-986e-2d7d7db1caca/"
-                                     "77777777-7777-4777-8777-777777777777"})],
-    ids=["two-line-why", "missing-parent"],
-)
-def test_a_busy_file_plan_add_that_its_commit_refuses_for_something_else_first_is_refused_so_at_its_replay(
-    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch, why: str, parent: dict
-) -> None:
-    """Defect: a busy add with an undeclared effort was refused for that effort and told to resend another value,
-    while a file collection's commit first refuses its two-line why or its missing parent. The add queues, and its
-    replay refuses it as the same add sent directly is refused."""
-    _writer, holder = managers
-    plan = _command("plan_memory")
-    collection = _planning_collection(vault)
-    call = {**_plan_call(collection, "add", effort="medium", **parent), "why": why}
+    call = {
+        "action": "add", "collection": collection, "why": "plan the release",
+        "item": {"title": "Ship the release", "kind": "outcome", "status": "active",
+                 "commitment": "committed", "horizon": "week", "effort": "medium"},
+    }
     first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
     receipt = _send(plan, vault, call, scope="principal:session-b")
     assert receipt["state"] == "queued"
     paused.set()
+    _wait_for_state(vault, first, "applied")
     failed = _wait_for_state(vault, receipt["queued_write"]["ref"], "failed")
     with request_scope(local_owner_principal(surface="mcp")), pytest.raises(OpError) as direct:
         plan_memory(vault, **call)
+    assert direct.value.code == "SCHEMA_ENUM"
     assert (failed["error"]["code"], failed["error"]["message"]) == (direct.value.code, direct.value.message)
-
-
-def test_a_plan_value_the_vault_declares_is_still_queued_behind_the_queue_and_lands(
-    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _writer, holder = managers
-    collection = _planning_collection(vault)
-    first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
-    receipt = _send(_command("plan_memory"), vault, _plan_call(collection, "add", effort="large"),
-                    scope="principal:session-b")
-    assert receipt["state"] == "queued"
-    paused.set()
-    _wait_for_state(vault, first, "applied")
-    _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
-
-
-def test_an_area_add_with_fields_an_area_may_not_carry_is_refused_at_the_replay_for_what_an_area_carries(
-    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Defect: a busy area add with an unknown status and an undeclared effort was refused for the effort, while the
-    commit refuses an area for carrying a status at all. What an area may carry joins fields, so the replay judges
-    the whole add."""
-    _writer, holder = managers
-    plan = _command("plan_memory")
-    collection = _planning_collection(vault)
-    call = {"action": "add", "collection": collection, "why": "plan the platform",
-            "item": {"title": "Platform", "kind": "area", "status": "bogus", "effort": "medium"}}
-    first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
-    receipt = _send(plan, vault, call, scope="principal:session-b")
-    assert receipt["state"] == "queued"
-    paused.set()
-    failed = _wait_for_state(vault, receipt["queued_write"]["ref"], "failed")
-    assert failed["error"]["code"] == "INVALID_PLAN"
-    assert failed["error"]["message"] == "areas cannot carry delivery state or hierarchy: status"
-
-
-def test_a_plan_value_a_queued_manifest_revision_declares_is_queued_behind_it_and_saved(
-    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The queued Planning revision declares the value before the add replays, so refusing it at once would be wrong."""
-    _writer, holder = managers
-    plan = _command("plan_memory")
-    collection = _planning_collection(vault)
-    lifecycle = _send(plan, vault, {"action": "inspect", "collection": collection})["lifecycle_guards"]
-    manifest_text = (vault / collection).read_text(encoding="utf-8").replace("[small, large]", "[small, medium, large]")
-    first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
-    revision = _send(plan, vault, {
-        "action": "revise", "collection": collection, "manifest_text": manifest_text, **lifecycle,
-        "why": "declare a medium effort",
-    }, scope="principal:session-b")
-    assert revision["state"] == "queued"
-    add = _send(plan, vault, _plan_call(collection, "add", effort="medium"), scope="principal:session-c")
-    assert add["state"] == "queued"
-    paused.set()
-    _wait_for_state(vault, add["queued_write"]["ref"], "applied")
-    (row,) = _send(plan, vault, {"action": "query", "collection": collection})["rows"]
-    assert row["effort"] == "medium"
-
-
-@pytest.mark.parametrize("action", ["update", "triage"])
-def test_a_file_plan_edit_with_an_undeclared_value_is_left_to_the_replay(
-    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch, action: str
-) -> None:
-    """Defect: a busy update or triage read the whole collection to judge one item's status. A file collection has no
-    read of one item by its key, and the commit finds that item first, so the edit queues and its replay refuses it."""
-    _writer, holder = managers
-    plan = _command("plan_memory")
-    collection = _planning_collection(vault)
-    _send(plan, vault, _plan_call(collection, "add"))
-    call = _plan_call(collection, action, **_planned_outcome(vault, collection), status="resolved")
-    first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
-    receipt = _send(plan, vault, call, scope="principal:session-b")
-    assert receipt["state"] == "queued"
-    paused.set()
-    failed = _wait_for_state(vault, receipt["queued_write"]["ref"], "failed")
-    assert failed["error"]["code"] == "INVALID_PLAN"
-    (row,) = _send(plan, vault, {"action": "query", "collection": collection})["rows"]
-    assert row["status"] == "active"
 
 
 @pytest.mark.parametrize(
     "revision_is", ["open-through-the-read", "queued-during-the-read", "open-at-the-mark-and-applied-during-the-read"])
-def test_a_plan_value_a_revision_declares_while_the_intake_reads_the_old_manifest_is_queued_and_saved(
+def test_a_record_value_a_revision_declares_while_the_intake_reads_the_old_manifest_is_queued_and_saved(
     vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch, revision_is: str
 ) -> None:
     """Defect: the intake read the manifest, then looked for an open queued revision. A revision that committed
@@ -818,59 +683,59 @@ def test_a_plan_value_a_revision_declares_while_the_intake_reads_the_old_manifes
     from types import MappingProxyType
 
     _writer, holder = managers
-    plan = _command("plan_memory")
-    collection = _planning_collection(vault)
-    lifecycle = _send(plan, vault, {"action": "inspect", "collection": collection})["lifecycle_guards"]
-    revise = {"action": "revise", "collection": collection, **lifecycle, "why": "declare a medium effort",
+    record = _command("record_memory")
+    collection = _ledger_declaring_a_status(vault)
+    lifecycle = _send(record, vault, {"action": "inspect", "collection": collection})["lifecycle_guards"]
+    revise = {"action": "revise", "collection": collection, **lifecycle, "why": "declare a resolved status",
               "manifest_text": (vault / collection).read_text(encoding="utf-8").replace(
-                  "[small, large]", "[small, medium, large]")}
+                  "[draft, published]", "[draft, published, resolved]")}
     first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
     revision: dict = {}
     if revision_is != "queued-during-the-read":
-        revision.update(_send(plan, vault, revise, scope="principal:session-b"))
+        revision.update(_send(record, vault, revise, scope="principal:session-b"))
 
     def commit_the_revision():
         if not revision:
             sender = threading.Thread(target=lambda: revision.update(
-                _send(plan, vault, revise, scope="principal:session-b")))
+                _send(record, vault, revise, scope="principal:session-b")))
             sender.start()
             sender.join(_LAND_SECONDS)
         paused.set()
         _wait_for_state(vault, revision["queued_write"]["ref"], "applied")
 
-    read_the_declaration = commands._DECLARED_VALUE_REFUSALS["plan_memory"]
+    read_the_declaration = commands._DECLARED_VALUE_REFUSALS["record_memory"]
 
     def read_then_commit(vault_root, arguments, budget):
         refusal = read_the_declaration(vault_root, arguments, budget)
-        if arguments.get("action") == "add" and revision_is != "open-through-the-read":
+        if arguments.get("action") == "append" and revision_is != "open-through-the-read":
             commit_the_revision()
         return refusal
 
     monkeypatch.setattr(commands, "_DECLARED_VALUE_REFUSALS",
-                        MappingProxyType({**commands._DECLARED_VALUE_REFUSALS, "plan_memory": read_then_commit}))
+                        MappingProxyType({**commands._DECLARED_VALUE_REFUSALS, "record_memory": read_then_commit}))
     monkeypatch.setattr(commands, "_DECLARED_REFUSAL_SECONDS", _LAND_SECONDS)  # the budget must not hide the race
-    add = _send(plan, vault, _plan_call(collection, "add", effort="medium"), scope="principal:session-c")
+    add = _send(record, vault, _status_call(collection, "append", "resolved"), scope="principal:session-c")
     assert add["state"] == "queued"
     paused.set()
     _wait_for_state(vault, add["queued_write"]["ref"], "applied")
-    (row,) = _send(plan, vault, {"action": "query", "collection": collection})["rows"]
-    assert row["effort"] == "medium"
+    (row,) = _send(record, vault, {"action": "query", "collection": collection})["rows"]
+    assert row["status"] == "resolved"
 
 
-def test_a_plan_value_is_still_refused_when_an_ordinary_queued_save_applies_during_the_read(
+def test_a_record_value_is_still_refused_when_an_ordinary_queued_save_applies_during_the_read(
     vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Defect: any Planning save that applied between the two reads counted as a possible declaration change, because
-    an applied save keeps no arguments. An ordinary add declares nothing, so the value it cannot carry is refused."""
+    """Defect: any Records save that applied between the two reads counted as a possible declaration change, because
+    an applied save keeps no arguments. An ordinary append declares nothing, so the value it cannot carry is refused."""
     from types import MappingProxyType
 
     _writer, holder = managers
-    plan = _command("plan_memory")
-    collection = _planning_collection(vault)
+    record = _command("record_memory")
+    collection = _ledger_declaring_a_status(vault)
     first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
-    ordinary = _send(plan, vault, _plan_call(collection, "add", "Ship the patch"), scope="principal:session-b")
+    ordinary = _send(record, vault, _status_call(collection, "append", "published", slug="ship-the-patch"), scope="principal:session-b")
     assert ordinary["state"] == "queued"
-    read_the_declaration = commands._DECLARED_VALUE_REFUSALS["plan_memory"]
+    read_the_declaration = commands._DECLARED_VALUE_REFUSALS["record_memory"]
 
     def read_then_apply(vault_root, arguments, budget):
         refusal = read_the_declaration(vault_root, arguments, budget)
@@ -879,10 +744,10 @@ def test_a_plan_value_is_still_refused_when_an_ordinary_queued_save_applies_duri
         return refusal
 
     monkeypatch.setattr(commands, "_DECLARED_VALUE_REFUSALS",
-                        MappingProxyType({**commands._DECLARED_VALUE_REFUSALS, "plan_memory": read_then_apply}))
+                        MappingProxyType({**commands._DECLARED_VALUE_REFUSALS, "record_memory": read_then_apply}))
     monkeypatch.setattr(commands, "_DECLARED_REFUSAL_SECONDS", _LAND_SECONDS)
     with pytest.raises(OpError) as refused:
-        _send(plan, vault, _plan_call(collection, "add", effort="medium"), scope="principal:session-c")
+        _send(record, vault, _status_call(collection, "append", "resolved"), scope="principal:session-c")
     assert refused.value.code == "SCHEMA_ENUM"
     assert write_intake.read(vault)["items"] == []
 
@@ -904,21 +769,21 @@ def test_a_store_from_before_the_declaration_marker_keeps_a_save_behind_its_open
     from types import MappingProxyType
 
     _writer, holder = managers
-    plan = _command("plan_memory")
-    collection = _planning_collection(vault)
-    lifecycle = _send(plan, vault, {"action": "inspect", "collection": collection})["lifecycle_guards"]
-    revise = {"action": "revise", "collection": collection, **lifecycle, "why": "declare a medium effort",
+    record = _command("record_memory")
+    collection = _ledger_declaring_a_status(vault)
+    lifecycle = _send(record, vault, {"action": "inspect", "collection": collection})["lifecycle_guards"]
+    revise = {"action": "revise", "collection": collection, **lifecycle, "why": "declare a resolved status",
               "manifest_text": (vault / collection).read_text(encoding="utf-8").replace(
-                  "[small, large]", "[small, medium, large]")}
+                  "[draft, published]", "[draft, published, resolved]")}
     first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
-    revision = _send(plan, vault, revise, scope="principal:session-b")
+    revision = _send(record, vault, revise, scope="principal:session-b")
     assert revision["state"] == "queued"
     _drop_the_declaration_marker(vault)
     if upgraded == "by-an-earlier-save":
-        earlier = _send(plan, vault, _plan_call(collection, "add", "Ship the patch"), scope="principal:session-d")
+        earlier = _send(record, vault, _status_call(collection, "append", "published", slug="ship-the-patch"), scope="principal:session-d")
         assert earlier["state"] == "queued"
     else:
-        read_the_declaration = commands._DECLARED_VALUE_REFUSALS["plan_memory"]
+        read_the_declaration = commands._DECLARED_VALUE_REFUSALS["record_memory"]
 
         def read_then_upgrade(vault_root, arguments, budget):
             refusal = read_the_declaration(vault_root, arguments, budget)
@@ -929,14 +794,14 @@ def test_a_store_from_before_the_declaration_marker_keeps_a_save_behind_its_open
             return refusal
 
         monkeypatch.setattr(commands, "_DECLARED_VALUE_REFUSALS",
-                            MappingProxyType({**commands._DECLARED_VALUE_REFUSALS, "plan_memory": read_then_upgrade}))
+                            MappingProxyType({**commands._DECLARED_VALUE_REFUSALS, "record_memory": read_then_upgrade}))
         monkeypatch.setattr(commands, "_DECLARED_REFUSAL_SECONDS", _LAND_SECONDS)
-    add = _send(plan, vault, _plan_call(collection, "add", effort="medium"), scope="principal:session-c")
+    add = _send(record, vault, _status_call(collection, "append", "resolved"), scope="principal:session-c")
     assert add["state"] == "queued"
     paused.set()
     _wait_for_state(vault, add["queued_write"]["ref"], "applied")
-    rows = _send(plan, vault, {"action": "query", "collection": collection})["rows"]
-    assert [row["effort"] for row in rows if row["title"] == "Ship the release"] == ["medium"]
+    rows = _send(record, vault, {"action": "query", "collection": collection})["rows"]
+    assert [row["status"] for row in rows if row["slug"] == ledger_item()["slug"]] == ["resolved"]
 
 
 def _store_again_as_a_writer_without_the_marker(vault: Path, ref: str) -> None:
@@ -958,22 +823,22 @@ def test_a_revision_that_an_earlier_release_queues_still_queues_a_save_with_the_
     """Defect: after a rollback, an earlier release queued a revision without the marker, the store gave it 0, and a
     busy add with the value that the revision declares was refused. A save that no acceptance classified counts."""
     _writer, holder = managers
-    plan = _command("plan_memory")
-    collection = _planning_collection(vault)
-    lifecycle = _send(plan, vault, {"action": "inspect", "collection": collection})["lifecycle_guards"]
+    record = _command("record_memory")
+    collection = _ledger_declaring_a_status(vault)
+    lifecycle = _send(record, vault, {"action": "inspect", "collection": collection})["lifecycle_guards"]
     first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
-    revision = _send(plan, vault, {
-        "action": "revise", "collection": collection, **lifecycle, "why": "declare a medium effort",
-        "manifest_text": (vault / collection).read_text(encoding="utf-8").replace("[small, large]", "[small, medium, large]"),
+    revision = _send(record, vault, {
+        "action": "revise", "collection": collection, **lifecycle, "why": "declare a resolved status",
+        "manifest_text": (vault / collection).read_text(encoding="utf-8").replace("[draft, published]", "[draft, published, resolved]"),
     }, scope="principal:session-b")
     assert revision["state"] == "queued"
     _store_again_as_a_writer_without_the_marker(vault, revision["queued_write"]["ref"])
-    add = _send(plan, vault, _plan_call(collection, "add", effort="medium"), scope="principal:session-c")
+    add = _send(record, vault, _status_call(collection, "append", "resolved"), scope="principal:session-c")
     assert add["state"] == "queued"
     paused.set()
     _wait_for_state(vault, add["queued_write"]["ref"], "applied")
-    (row,) = _send(plan, vault, {"action": "query", "collection": collection})["rows"]
-    assert row["effort"] == "medium"
+    (row,) = _send(record, vault, {"action": "query", "collection": collection})["rows"]
+    assert row["status"] == "resolved"
 
 
 def test_a_store_from_an_earlier_marker_build_keeps_a_save_behind_its_open_revision_queued(
@@ -983,13 +848,13 @@ def test_a_store_from_an_earlier_marker_build_keeps_a_save_behind_its_open_revis
     revision there, so its marker read 0, and a busy add with the value that the revision declares was refused. The
     marker now has a column of its own, which starts NULL on every save that the store already holds."""
     _writer, holder = managers
-    plan = _command("plan_memory")
-    collection = _planning_collection(vault)
-    lifecycle = _send(plan, vault, {"action": "inspect", "collection": collection})["lifecycle_guards"]
+    record = _command("record_memory")
+    collection = _ledger_declaring_a_status(vault)
+    lifecycle = _send(record, vault, {"action": "inspect", "collection": collection})["lifecycle_guards"]
     first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
-    revision = _send(plan, vault, {
-        "action": "revise", "collection": collection, **lifecycle, "why": "declare a medium effort",
-        "manifest_text": (vault / collection).read_text(encoding="utf-8").replace("[small, large]", "[small, medium, large]"),
+    revision = _send(record, vault, {
+        "action": "revise", "collection": collection, **lifecycle, "why": "declare a resolved status",
+        "manifest_text": (vault / collection).read_text(encoding="utf-8").replace("[draft, published]", "[draft, published, resolved]"),
     }, scope="principal:session-b")
     assert revision["state"] == "queued"
     _drop_the_declaration_marker(vault)
@@ -997,14 +862,14 @@ def test_a_store_from_an_earlier_marker_build_keeps_a_save_behind_its_open_revis
         conn.execute("ALTER TABLE intake ADD COLUMN may_change_declaration INTEGER NOT NULL DEFAULT 0")
         conn.execute("CREATE INDEX intake_declaration ON intake(seq) WHERE may_change_declaration = 1")
     _store_again_as_a_writer_without_the_marker(vault, revision["queued_write"]["ref"])
-    earlier = _send(plan, vault, _plan_call(collection, "add", "Ship the patch"), scope="principal:session-d")
+    earlier = _send(record, vault, _status_call(collection, "append", "published", slug="ship-the-patch"), scope="principal:session-d")
     assert earlier["state"] == "queued"
-    add = _send(plan, vault, _plan_call(collection, "add", effort="medium"), scope="principal:session-c")
+    add = _send(record, vault, _status_call(collection, "append", "resolved"), scope="principal:session-c")
     assert add["state"] == "queued"
     paused.set()
     _wait_for_state(vault, add["queued_write"]["ref"], "applied")
-    rows = _send(plan, vault, {"action": "query", "collection": collection})["rows"]
-    assert [row["effort"] for row in rows if row["title"] == "Ship the release"] == ["medium"]
+    rows = _send(record, vault, {"action": "query", "collection": collection})["rows"]
+    assert [row["status"] for row in rows if row["slug"] == ledger_item()["slug"]] == ["resolved"]
 
 
 def test_a_store_from_before_the_declaration_marker_upgrades_without_reading_its_queued_saves(
@@ -1061,8 +926,8 @@ def test_a_busy_save_reads_no_more_of_the_queue_behind_a_longer_backlog(
     from contextlib import contextmanager
 
     _writer, holder = managers
-    plan = _command("plan_memory")
-    collection = _planning_collection(vault)
+    record = _command("record_memory")
+    collection = _ledger_declaring_a_status(vault)
     first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
     steps = [0]
     real_store = write_intake._store
@@ -1074,26 +939,26 @@ def test_a_busy_save_reads_no_more_of_the_queue_behind_a_longer_backlog(
 
     monkeypatch.setattr(write_intake, "_store", counted_store)
 
-    def queue_reads_of_a_valid_add(title: str) -> int:
+    def queue_reads_of_a_valid_append(slug: str) -> int:
         steps[0] = 0
-        receipt = _send(plan, vault, _plan_call(collection, "add", title, effort="small"), scope="principal:session-b")
+        receipt = _send(record, vault, _status_call(collection, "append", "draft", slug=slug), scope="principal:session-b")
         assert receipt["state"] == "queued"
         return steps[0]
 
-    def queue_reads_of_a_refused_add() -> int:
+    def queue_reads_of_a_refused_append() -> int:
         steps[0] = 0
         with pytest.raises(OpError) as refused:
-            _send(plan, vault, _plan_call(collection, "add", "Ship the fix", effort="medium"), scope="principal:session-d")
+            _send(record, vault, _status_call(collection, "append", "resolved", slug="ship-the-fix"), scope="principal:session-d")
         assert refused.value.code == "SCHEMA_ENUM"
         return steps[0]
 
-    behind_one = queue_reads_of_a_valid_add("Ship the release")
-    refused_behind_two = queue_reads_of_a_refused_add()
+    behind_one = queue_reads_of_a_valid_append("ship-the-release")
+    refused_behind_two = queue_reads_of_a_refused_append()
     for number in range(25):
-        _send(plan, vault, _plan_call(collection, "add", f"Backlog item {number}"), scope="principal:session-c")
+        _send(record, vault, _status_call(collection, "append", "draft", slug=f"backlog-{number}"), scope="principal:session-c")
     assert len(write_intake.read(vault)["items"]) == 27
-    assert queue_reads_of_a_valid_add("Ship the patch") == behind_one
-    assert queue_reads_of_a_refused_add() == refused_behind_two
+    assert queue_reads_of_a_valid_append("ship-the-patch") == behind_one
+    assert queue_reads_of_a_refused_append() == refused_behind_two
 
 
 def test_a_refusal_whose_queue_answers_after_the_budget_queues_the_save(
@@ -1102,8 +967,8 @@ def test_a_refusal_whose_queue_answers_after_the_budget_queues_the_save(
     """Defect: the budget bounded only the query, not the wait to open the queue, so a slow open still gave a definite
     answer after the budget had run out, and the save was refused late."""
     _writer, holder = managers
-    plan = _command("plan_memory")
-    collection = _planning_collection(vault)
+    record = _command("record_memory")
+    collection = _ledger_declaring_a_status(vault)
     first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
     real_open = write_intake._open
     request_thread = threading.current_thread()
@@ -1119,7 +984,7 @@ def test_a_refusal_whose_queue_answers_after_the_budget_queues_the_save(
     # refusal answers after it.
     monkeypatch.setattr(commands, "_DECLARED_REFUSAL_SECONDS", 2.0)
     slow.set()
-    receipt = _send(plan, vault, _plan_call(collection, "add", effort="medium"), scope="principal:session-b")
+    receipt = _send(record, vault, _status_call(collection, "append", "resolved"), scope="principal:session-b")
     slow.clear()
     assert receipt["state"] == "queued"
     paused.set()
@@ -1135,8 +1000,8 @@ def test_a_refusal_whose_queue_open_spends_most_of_the_budget_queues_the_save_wi
     import sqlite3
 
     _writer, holder = managers
-    plan = _command("plan_memory")
-    collection = _planning_collection(vault)
+    record = _command("record_memory")
+    collection = _ledger_declaring_a_status(vault)
     first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
     real_open = write_intake._open
     request_thread = threading.current_thread()
@@ -1169,7 +1034,7 @@ def test_a_refusal_whose_queue_open_spends_most_of_the_budget_queues_the_save_wi
     locker.execute("PRAGMA locking_mode=EXCLUSIVE")
     locker.execute("BEGIN EXCLUSIVE")  # every look at the queue waits on this lock until the check ends
     slow.set()
-    receipt = _send(plan, vault, _plan_call(collection, "add", effort="medium"), scope="principal:session-b")
+    receipt = _send(record, vault, _status_call(collection, "append", "resolved"), scope="principal:session-b")
     assert receipt["state"] == "queued"
     assert elapsed[0] < 2.9
     paused.set()
