@@ -446,7 +446,7 @@ def test_a_page_without_a_finish_count_leaves_its_unconsumed_files_unknown_not_z
 
 
 def test_a_deadline_that_stops_filing_still_reports_the_calls_made():
-    """Catches the report that lost every page because the deadline check came before the pages were recorded."""
+    """Keep observed page rates and the expired projection when the deadline stops filing."""
     agent = Scripted({"file": [_working("r1", filed=40, token="a"), _working("r1", filed=90, token="b")]})
     folder = _folder(name="media")
     plan = _plan()
@@ -455,6 +455,7 @@ def test_a_deadline_that_stops_filing_still_reports_the_calls_made():
     def require_time(what, *, seconds=0):
         checks.append(what)
         if len(checks) == 3:
+            plan.deadline = time.monotonic()
             raise large_import.OutOfTime(f"the scenario's deadline came before {what}")
 
     plan.require_time = require_time
@@ -464,7 +465,9 @@ def test_a_deadline_that_stops_filing_still_reports_the_calls_made():
 
     (page,) = folder.report["pages"]
     assert [step["files"] for step in page["file_steps"]] == [40, 50]
-    assert folder.report["file_projection"]["files_filed"] == 90  # kept current before the deadline check, as the pages are
+    assert page["files_per_second"] == 90.0
+    assert folder.report["file_projection"]["files_filed"] == 90
+    assert folder.report["file_projection"]["deadline_seconds_left"] == 0
     assert folder.report["file_seconds_by_page"] == [
         {"page": 1, "calls": 2, "file_seconds": 1.0, "longest_call_seconds": 0.5}]
 
