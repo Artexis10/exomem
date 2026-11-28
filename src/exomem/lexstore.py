@@ -3045,7 +3045,14 @@ def _admit_if_current(vault_root: Path) -> bool:
     from . import freshness as freshness_module
 
     if _is_configured_runtime_vault(vault_root):
-        return _mark_runtime_retrieval_ready_if_current(vault_root)
+        from . import readiness
+
+        proof: dict[str, object] = {}
+        if _mark_runtime_retrieval_ready_if_current(vault_root, proof_out=proof):
+            return True
+        # A completed proof can lose publication to another admission. A
+        # revocation clears the readiness event, so it still needs repair.
+        return bool(proof) and readiness.is_ready("retrieval_catalog")
     existing = runtime_retrieval_catalog_proof(
         vault_root,
         require_live_projection=freshness_module.event_indexes_enabled(),
@@ -3104,11 +3111,6 @@ def _caught_up_without_rebuild(vault_root: Path, store) -> bool:
             return True
         if lagging_again is None:
             return False  # the refusal that keeps the full pass is already logged
-        # A competing proof can advance the admission generation without
-        # changing any catalogue row. Prove the current state once more before
-        # treating a lost admission race as a reason to rebuild.
-        if _admit_if_current(vault_root):
-            return True
         return _log_catch_up_decline(store, CatchUpDecline.NOT_CURRENT)
     except Exception as error:  # noqa: BLE001 - a failed catch-up must still rebuild
         if _is_repair_contention(error):

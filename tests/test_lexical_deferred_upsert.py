@@ -432,21 +432,26 @@ def test_a_caught_up_catalogue_that_still_fails_its_proof_without_lag_is_rebuilt
     freshness.on_files_changed(tmp_path, changed=[changed])
     real_admit = lexstore._admit_if_current
     real_rebuild = store.rebuild_atomic
+    refusals = []
     rebuilds = []
 
-    def refuse_until_rebuilt(root):
-        return bool(rebuilds) and real_admit(root)
+    def refuse_once(root):
+        if not refusals:
+            refusals.append(True)
+            return False
+        return real_admit(root)
 
     def rebuild():
         rebuilds.append(True)
         return real_rebuild()
 
-    monkeypatch.setattr(lexstore, "_admit_if_current", refuse_until_rebuilt)
+    monkeypatch.setattr(lexstore, "_admit_if_current", refuse_once)
     monkeypatch.setattr(store, "rebuild_atomic", rebuild)
 
     lexstore.request_lag_repair(tmp_path)
     assert _wait_for_flight_end(tmp_path)
 
+    assert refusals == [True]
     assert rebuilds == [True], "a proof that no lag explains was answered with another catch-up"
     assert lexstore.search_bm25(tmp_path, "firstsave", k=3, scope="kb")
 

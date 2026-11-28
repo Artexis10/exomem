@@ -302,6 +302,7 @@ class SemanticPageState:
     # Candidates are derived from the body and path. Corpus states can discard
     # them without changing equality at the write boundary.
     candidates: semantic_units.SemanticUnitCandidates | None = field(default=None, repr=False, compare=False)
+    audit_occurrence_keys: frozenset[str] | None = field(default=None, repr=False, compare=False)
     definitions: instances.PageDefinitions | None = field(default=None, repr=False)
     # An explicit operation witness retains staged definitions in an unarmed corpus.
     definitions_explicit: bool = False
@@ -1779,6 +1780,9 @@ def _parse_page_state(
         body_wikilinks=tuple(body_links),
         body=body,
         candidates=candidates if retain_candidates else None,
+        audit_occurrence_keys=(
+            None if retain_candidates else semantic_units.candidate_occurrence_keys(candidates)
+        ),
         neutral_document=document,
         prose_carriers=prose_carriers,
     )
