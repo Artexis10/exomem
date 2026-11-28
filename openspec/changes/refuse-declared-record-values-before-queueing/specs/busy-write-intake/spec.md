@@ -78,7 +78,7 @@ The intake SHALL mark the queue before it reads the declaration and look again a
 
 ### Requirement: A Planning update is refused before queueing only for an item its store reads by key
 
-A `plan_memory` update or triage with a value that the Planning check refuses SHALL be refused before queueing only when it names its item by `plan_id` and both guards, the store that owns the collection reads that item by its key, the guards equal the collection's container hash and the item's version, the caller reads the item whole, and the item does not store that value in that field. Otherwise the save SHALL be queued.
+A `plan_memory` update or triage with a value that the Planning check refuses SHALL be refused before queueing only when it names its item by `plan_id` and both guards, the store that owns the collection reads that item by its key, the guards equal the collection's container hash and the item's version, the caller reads the item whole, and, for a field the Planning values govern, the item does not store that value. Otherwise the save SHALL be queued.
 
 #### Scenario: A busy Planning update that keeps a removed status is queued
 
