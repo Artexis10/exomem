@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.210.1](https://github.com/substrate-systems/evermatter/compare/v0.210.0...v0.210.1) (2026-11-28)
+
+
+### Bug Fixes
+
+* **retrieval:** admit store-mode search after restart ([#3396](https://github.com/substrate-systems/evermatter/issues/3396)) ([c4b07a2](https://github.com/substrate-systems/evermatter/commit/c4b07a26e85f5eff29436624d8efe342d22b6422))
+* **writes:** refuse a plan value the vault never defines before queueing it ([#3373](https://github.com/substrate-systems/evermatter/issues/3373)) ([7ceef9b](https://github.com/substrate-systems/evermatter/commit/7ceef9b732cb765013a810fcdb904e78b51eb16c))
+
 ## [0.210.0](https://github.com/substrate-systems/evermatter/compare/v0.209.0...v0.210.0) (2026-11-28)
 
 
