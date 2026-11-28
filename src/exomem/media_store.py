@@ -1284,7 +1284,9 @@ def enqueue_offloads(vault: Path) -> int:
         rows, _coverage = _status_candidates(vault, "media_offload_refusals",
             f"SELECT binary_rel FROM media_offload_refusals WHERE code IN ({placeholders}) LIMIT ?",
             media_allowance.ALLOWANCE_REFUSAL_CODES)
-        usage = media_allowance.reference_usage(vault) if rows else None
+        # With no allowance each refusal stays unknown whatever the census counts (`_refusal_code`).
+        allowance = media_allowance.configured((originals.configuration(vault) or {}).get("allowance_bytes"))
+        usage = media_allowance.reference_usage(vault) if rows and allowance is not None else None
     # The walk reads every companion page, so it holds no boundary: one hold around it kept every save
     # waiting for minutes on a large vault. Each enqueue re-reads its original under a brief hold, and a
     # census older than the walk only decides what is queued: offload admission takes its own census.
@@ -1613,6 +1615,10 @@ def _offload_admission(
     binary = _binding_of(vault, snapshot)
     with get_manager().consistency_guard(vault, operation="media_offload_admission", holder_kind="background"):
         config = originals.configuration(vault) or {}
+        if usage is None and media_allowance.configured(config.get("allowance_bytes")) is None:
+            # No allowance admits no new version, whatever the census counts, so the reuse it would select
+            # serves no offload: a whole-vault census here would only hold the boundary.
+            return media_allowance.unset_decision(), None
         # A caller shares one census while its enclosing consistency guard holds, as an `OffloadBatch`, or
         # across the offload scan's per-item holds, where admission re-checks with its own census.
         if usage is None:
@@ -2118,8 +2124,9 @@ def _refusal_code(
     if row["code"] in media_allowance.ALLOWANCE_REFUSAL_CODES:
         if snapshot.reference is not None:
             return None
-        if usage is None and not census:
+        if usage is None and not census and media_allowance.configured(config.get("allowance_bytes")) is not None:
             return row["code"]  # the caller may not take a census: the refusal stands until one is taken
+        # With no allowance the admission below reads no census and the code is the current unknown one.
         decision, _reuse = _offload_admission(vault, snapshot, usage=usage)
         return decision.code
     return row["code"]
@@ -2175,8 +2182,11 @@ def offload_refusals(vault: Path, *, path: str | None = None) -> tuple[list[dict
     config = originals.configuration(vault) or {}
     result = []
     with get_manager().consistency_guard(vault, operation="media_refusal_status", holder_kind="background"):
+        # With no allowance a refusal is unknown for that reason alone, so no census names notes behind it.
+        counted = media_allowance.configured(config.get("allowance_bytes")) is not None
         usage = (media_allowance.reference_usage(vault)
-                 if any(row["code"] in media_allowance.ALLOWANCE_REFUSAL_CODES for row in rows) else None)
+                 if counted and any(row["code"] in media_allowance.ALLOWANCE_REFUSAL_CODES for row in rows)
+                 else None)
         for row in rows:
             try:
                 snapshot = original_state(vault, row["binary_rel"])
@@ -2342,6 +2352,10 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch, *,
             _refuse(ledger, snapshot, MediaStoreError(RESIDENT_CODE, "the original stays on the volume"),
                     media_capacity.age_ciphertext_size(snapshot.binary_size))
             return None
+        if media_allowance.configured(config.get("allowance_bytes")) is None:
+            # No allowance refuses a fresh copy and a reused version alike, so no census or reuse probe is read.
+            decision, _none = _offload_admission(vault, snapshot, select_reuse=False)
+            _require_allowance(ledger, snapshot, decision.code)
         # One bounded slice from the current census. A fresh copy still needs room under the allowance.
         usage, candidates, damaged = _reuse_walk_inputs(vault, snapshot, census, str(config["key_version"]))
         reuse = None

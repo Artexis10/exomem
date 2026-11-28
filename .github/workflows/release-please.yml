@@ -444,11 +444,13 @@ jobs:
   # The user notes of each release: `release-notes.json` for the digest that reads it, and a What's new
   # section at the top of the release page for the people who read it (scripts/release_notes_asset.py).
   # Nothing waits for this job: when it fails it turns itself and the run red and stops no package, image or
-  # rollout. Every real run gives its notes to each release published since the start of the previous UTC month
-  # that lacks the file (the release list, 100 a page, until a page holds only releases older than that start),
-  # at most 40 a run, oldest first, and to the release a `workflow_dispatch` run names in its `tag` input, however
-  # old, so the operator can heal one named release. The notes come from each release's tag tree; the file is
-  # written with the code of the run that builds it, so a healed file has that run's schema.
+  # rollout. A real run on main gives its notes to each release published since the start of the previous UTC
+  # month that lacks the file (the release list, 100 a page, until a page holds only releases older than that
+  # start), at most 40 a run, oldest first, and to the release a `workflow_dispatch` run names in its `tag` input,
+  # however old, so the operator can heal one named release. A real run on a release tag serves that tag alone and
+  # never sweeps: its code may be older than main's, and the file and the page section it writes are permanent (the
+  # upload never replaces a file and the marker blocks a rewrite). The notes come from each release's tag tree; the
+  # file is written with the code of the run that builds it, so a healed file has that run's schema.
   # It runs after `build-artifacts` whatever that job's result. Only a real run writes to GitHub: the plan
   # decides that (`notes_publish`: not a dry run, and on main or the release tag). Any other run builds the
   # notes of its own tag and writes nothing.
@@ -458,8 +460,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # One real run at a time, so two runs never upload the same file together; a run that waits is replaced by
-    # a newer one, which checks the same releases again. Runs that write nothing have their own group, so one
-    # never displaces a real run.
+    # a newer one. The window is checked again by that newer run, but a named dispatch tag can be dropped with the
+    # run that named it: the operator dispatches again when this job shows cancelled. Runs that write nothing have
+    # their own group, so one never displaces a real run.
     concurrency:
       group: release-notes-${{ needs.plan.outputs.notes_publish == 'true' && 'publish' || 'dry-run' }}
       cancel-in-progress: false
@@ -491,8 +494,14 @@ jobs:
             tags="$TAG"
           else
             arguments=()
-            # A dispatch's tag is the one release this run was asked to serve; it joins the sweep whatever its age.
-            [[ "$EVENT" == workflow_dispatch ]] && arguments+=(--also "$TAG")
+            if [[ "$GITHUB_REF" == refs/heads/main ]]; then
+              # A dispatch's tag is the one release this run was asked to serve; it joins the sweep whatever its age.
+              [[ "$EVENT" == workflow_dispatch ]] && arguments+=(--also "$TAG")
+            else
+              # A real run off main is a run on the release tag (the plan allows no other): it serves that tag alone,
+              # and only when the tag lacks the file, because its older code must not write a newer release's file.
+              arguments+=(--only "$TAG")
+            fi
             tags=$(python3 scripts/release_notes_asset.py missing "${arguments[@]}" | tr '\n' ' ')
           fi
           echo "tags=${tags% }" >> "$GITHUB_OUTPUT"

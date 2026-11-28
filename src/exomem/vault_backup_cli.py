@@ -75,7 +75,7 @@ def _vault(raw: str | None) -> Path:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="exomem backup",
+        prog="evermatter backup",
         description=(
             "Back up this vault and its machine-local state to the restic repository that "
             f"{vault_backup.CONFIG_ENV} names, check the repository, and restore into a separate directory."

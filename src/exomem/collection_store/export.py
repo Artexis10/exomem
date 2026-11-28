@@ -387,7 +387,7 @@ def preview(vault_root) -> dict:
     if ownership.current(root).marker is None:
         return _report("preview", "nothing_to_export", **(
             {"local_store": "this host keeps a store the vault no longer routes to; retire it with "
-                            "`exomem collections export --retire-local`"}
+                            "`evermatter collections export --retire-local`"}
             if connection.store_path(root).exists() else {}))
     if not connection.store_path(root).exists():
         raise CollectionStoreError(takeover.SYNC_PENDING, "this vault routes collections to a store not opened "
@@ -904,14 +904,14 @@ def abandon(session, manager, fence_client, *, plan_id, why) -> dict:
         if authority.read_marker(root) != expected:
             # Past the marker retire only renames remain, and no host routes to the store any more.
             raise CollectionStoreError("COLLECTION_STORE_MARKER_CONFLICT", "the export already retired the marker; "
-                                       "run `exomem collections export --plan-id ID --why REASON` to finish it")
+                                       "run `evermatter collections export --plan-id ID --why REASON` to finish it")
         fence = fence_client.collection_store_fence()
         if not fence.enrolled:
             # Serving the store again would need its fence enrolled again, which no step does
             # yet. A false refusal costs nothing: the apply goes forward from a retired fence.
             raise CollectionStoreError("COLLECTION_STORE_RETIRED", (
                 "the coordinator retired this store's fence, so the export can only go forward: run "
-                "`exomem collections export --plan-id ID --why REASON` with the service stopped"))
+                "`evermatter collections export --plan-id ID --why REASON` with the service stopped"))
         admission._require_fence(fence, marker)
         runtime = session.runtime()
         with manager.writer_authority_guard(vault_root=root):

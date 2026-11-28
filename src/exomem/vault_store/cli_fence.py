@@ -39,7 +39,7 @@ class Declaration:
 
 _NONE = Declaration(VaultAccess.NONE)
 _SELF_FENCED = Declaration(VaultAccess.SELF_FENCED)
-_ROLLBACK = "Run `exomem store-mode rollback` to return the pages to files, then run this command again."
+_ROLLBACK = "Run `evermatter store-mode rollback` to return the pages to files, then run this command again."
 
 
 def _pages(remedy: str = _ROLLBACK) -> Declaration:
@@ -64,7 +64,7 @@ ACCESS: dict[str, Declaration] = {
     "personalize": _pages(),
     "install-hook": _NONE,
     # With --vault it runs doctor, find, get and audit on that vault; without, on a bundled sample.
-    "demo": _pages("Run `exomem ask_memory QUERY` or `exomem read_memory PAGE` to read from the store."),
+    "demo": _pages("Run `evermatter ask_memory QUERY` or `evermatter read_memory PAGE` to read from the store."),
     # Prints a URL.
     "studio": _NONE,
     # The terminal UI backend calls require_servable when it starts its runtime.
@@ -78,7 +78,7 @@ ACCESS: dict[str, Declaration] = {
     # Reports resource posture and the store's own mode record.
     "status": _NONE,
     # With --vault it warms the vault's lexical caches, which are file-mode projections.
-    "warm": _pages("Run `exomem` to start the service. It reads the store's rows directly."),
+    "warm": _pages("Run `evermatter` to start the service. It reads the store's rows directly."),
     # Per-machine settings.
     "mode": _NONE,
     "dreamer": _NONE,
@@ -189,6 +189,6 @@ def require(command: str, vault_root: Path) -> None:
     if in_store_mode:
         raise StoreFenceRefusal(
             REFUSED,
-            f"`exomem {command}` works on pages, projections or file-mode indexes outside the service, "
+            f"`evermatter {command}` works on pages, projections or file-mode indexes outside the service, "
             f"and this vault keeps its pages in the collection store. {declared.remedy}",
         )

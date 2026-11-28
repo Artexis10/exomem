@@ -106,7 +106,7 @@ excluded:          # hidden from search and embeddings, and unwritable
   genuinely private material.
 - The server reloads the file on the next call, so no restart is needed.
 - `init` does not ship the file. Without it, only `Sources/` and `Evidence/` (append-only) differ from
-  ordinary read-write. `exomem personalize` (CLI only) generates a starter policy from a scan of the vault.
+  ordinary read-write. `evermatter personalize` (CLI only) generates a starter policy from a scan of the vault.
 - Resolution order for any path: `excluded`, then `readonly`, then append-only (`Sources/`, `Evidence/`), then
   read-write.
 

@@ -20,6 +20,7 @@ from .asr_facts import AsrFacts
 from .capture_metadata import CaptureFacts
 from .extraction_parts import Layout
 from .ocr_facts import OcrFacts
+from .speech_tracks import Track
 from .vault import MISSING_CONTENT_HASH, PathGuard, PlannedWrite, parse_frontmatter, with_newline, yaml_scalar
 
 
@@ -249,6 +250,7 @@ def extraction_writes(
     reprocessing: bool,
     attached_digest: str | None = None,
     given_names: list[dict[str, str]] | None = None,
+    speech_tracks: tuple[Track, ...] | None = None,
 ) -> tuple[tuple[PlannedWrite, ...], tuple[Path, ...]]:
     """The writes for a finished extraction, and the part pages to retire once they commit.
 
@@ -261,6 +263,7 @@ def extraction_writes(
     `given_names` are the names the caller already put on the labels of `text`. A reprocess
     carries the replaced extraction's other names to the new labels by overlap, and the page
     lists the names that no label took (`speaker_names.carry`).
+    `speech_tracks` is the declaration of tracks that a request gave this extraction; the sidecar records it.
     """
     from . import media_processing
 
@@ -272,6 +275,7 @@ def extraction_writes(
         ocr=ocr,
         capture=capture,
         attached_digest=attached_digest,
+        speech_tracks=speech_tracks,
         # Both callers have just revalidated the original; a page stored with it records these.
         binary_hints=media_processing.read_timestamp_hints(media_processing.held_path(vault_root, binary_path)),
     )

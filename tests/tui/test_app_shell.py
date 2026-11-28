@@ -34,7 +34,7 @@ async def test_chrome_rows_name_the_screen_and_the_vault(make_app):
         header = app.screen.query_one(AppHeader)
         left = str(header.query_one(".header-left").render())
         right = str(header.query_one(".header-right").render())
-        assert left.startswith("exomem") and "Home" in left
+        assert left.startswith("evermatter") and "Home" in left
         assert "sample-vault" in right and "normal" in right
         footer = str(app.screen.query_one(AppFooter).query_one(".footer-left").render())
         assert "? help" in footer, "help is always reachable from the footer"

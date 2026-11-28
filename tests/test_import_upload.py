@@ -460,7 +460,7 @@ def test_the_import_lane_is_refused_on_exomem_cloud(agent):
     with principal.request_scope(cloud), pytest.raises(ValueError) as refused:
         upload_handoff.prepare_upload(agent.vault, lane="import", expected_sha256="0" * 64)
 
-    assert "UPLOAD_LANE_UNAVAILABLE" in str(refused.value) and "exomem cloud import" in str(refused.value)
+    assert "UPLOAD_LANE_UNAVAILABLE" in str(refused.value) and "evermatter cloud import" in str(refused.value)
 
 
 @pytest.mark.parametrize("lane", ["source", "evidence"])

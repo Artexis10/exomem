@@ -1682,17 +1682,17 @@ def dismiss(vault_root: Path, intake_id: str) -> dict[str, Any]:
             row = conn.execute("SELECT state FROM intake WHERE id = ?", (intake_id,)).fetchone()
             if row is None:
                 raise OpError(
-                    "QUEUED_WRITE_NOT_FOUND", f"no queued save {intake_id}", "List saves with `exomem intake list`."
+                    "QUEUED_WRITE_NOT_FOUND", f"no queued save {intake_id}", "List saves with `evermatter intake list`."
                 )
             if row["state"] != FAILED:
                 raise OpError(
                     "QUEUED_WRITE_NOT_FAILED",
                     f"save {intake_id} is {row['state']}; only a failed save can be dismissed",
-                    "Wait for it to be applied, or list saves with `exomem intake list`.",
+                    "Wait for it to be applied, or list saves with `evermatter intake list`.",
                 )
             conn.execute("DELETE FROM intake WHERE id = ?", (intake_id,))
     except FileNotFoundError:
         raise OpError(
-            "QUEUED_WRITE_NOT_FOUND", f"no queued save {intake_id}", "List saves with `exomem intake list`."
+            "QUEUED_WRITE_NOT_FOUND", f"no queued save {intake_id}", "List saves with `evermatter intake list`."
         ) from None
     return {"dismissed": ref_for(intake_id)}

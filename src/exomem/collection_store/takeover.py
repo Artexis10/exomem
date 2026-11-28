@@ -29,7 +29,7 @@ RECHECK_SECONDS = 10.0
 ATTENTION_SECONDS = 15 * 60.0
 REMEDY = ("wait for vault sync to deliver Knowledge Base/_Collections/collections.sqlite, or "
           "continue from this host's copy with adopt-local: maintain_memory(mode=\"collections-store-adopt-local\") "
-          "while the service runs, `exomem collections adopt-local` once it is stopped")
+          "while the service runs, `evermatter collections adopt-local` once it is stopped")
 SYNC_PENDING = "COLLECTION_STORE_SYNC_PENDING"
 DIVERGED = "COLLECTION_STORE_DIVERGED"
 # Transient: the store was borrowed or changed while the takeover settled; rechecked next use.
@@ -298,7 +298,7 @@ def replica_adoptability(metadata, raw_marker, *, intent_only=False):
     intent = None if metadata.get(authority.PENDING_CREATE) is None else json.loads(metadata[authority.PENDING_CREATE])
     if intent is not None and intent.get("kind") == authority.EXPORT:
         # Only the owner's export may finish the collections' departure from this store.
-        return EXPORTING, "the vault replica carries an unfinished export; finish it with `exomem collections export`"
+        return EXPORTING, "the vault replica carries an unfinished export; finish it with `evermatter collections export`"
     if intent is not None and intent["target_marker"].encode() != raw_marker:
         return SYNC_PENDING, "the vault replica carries an unfinished create"
     return None

@@ -796,7 +796,7 @@ def test_a_busy_record_refusal_blocks_a_credential_in_the_declared_values_as_the
         assert _CREDENTIAL not in _reply_text(reply)
         error = reply.structured_content["error"]
         assert error["code"] == "SCHEMA_ENUM"
-        assert 'allowed: "draft", "[credential blocked by exomem egress policy]"' in error["message"]
+        assert 'allowed: "draft", "[credential blocked by Evermatter egress policy]"' in error["message"]
 
 
 def test_an_undeclared_record_value_by_title_over_mcp_is_refused_behind_an_ordinary_queued_add_record(

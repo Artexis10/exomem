@@ -2521,7 +2521,7 @@ def test_status_only_block_renders_one_line() -> None:
     packet["upkeep"] = {"status": "failed", "since": "2026-09-20T08:00:00Z"}
     block = hook._format_working_set_block(packet, 4000)
     assert _upkeep_lines(block) == [
-        "- upkeep: the background pass is failing since 2026-09-20T08:00:00Z; see exomem status."
+        "- upkeep: the background pass is failing since 2026-09-20T08:00:00Z; see evermatter status."
     ]
     both = {**_packet(), "upkeep": {"status": "failed", "since": "x", "items": [_upkeep_item()]}}
     assert len(_upkeep_lines(hook._format_working_set_block(both, 4000))) == 2

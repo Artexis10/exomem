@@ -352,4 +352,4 @@ def test_the_class_b_remediation_keeps_the_runnable_reconcile_command() -> None:
 
     assert graph_sync._RECONCILE_HINT in remediation
     assert 'maintain_memory(mode="reconcile")' in remediation
-    assert "exomem maintain --reconcile" in remediation
+    assert "evermatter maintain --reconcile" in remediation

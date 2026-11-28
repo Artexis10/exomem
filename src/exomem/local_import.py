@@ -571,7 +571,7 @@ def _closing_lines(result: dict) -> list[str]:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem import",
+        prog="evermatter import",
         description="Copy a folder from outside the vault into the vault's _Imports/ folder, verified, "
         "so adoption can scan it. The original folder is never changed.")
     parser.add_argument("folder", type=Path)

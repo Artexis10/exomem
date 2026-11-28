@@ -127,7 +127,7 @@ _LATENCY_COLUMNS: tuple[tuple[str, str], ...] = (
 
 # Rendered in this order when present in `meta`; unknown extra keys are appended.
 _META_FIELDS: tuple[tuple[str, str], ...] = (
-    ("exomem version", "exomem_version"),
+    ("Evermatter version", "exomem_version"),
     ("Embedding model", "embedding_model"),
     ("Reranker model", "reranker_model"),
     ("Hardware", "hardware"),

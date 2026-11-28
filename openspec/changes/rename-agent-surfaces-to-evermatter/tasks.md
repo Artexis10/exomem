@@ -35,6 +35,7 @@
   - A directory marketplace loads the renamed plugin in place. A Git-hosted marketplace drops the old install. The plugin then stays "not cached" until the person runs `/plugin install evermatter@exomem` once, as the Claude Code marketplace docs state. The release notes for C1 and C2 must say so.
   - The plugin-shaped tool names (`mcp__plugin_evermatter_evermatter__*`) were seen only in `claude mcp list`, because a session against the real HTTP service needs its OAuth setup.
 - [x] 3.9 Run skill activation on real Claude models with "Exomem" and "Evermatter" prompts, old names against new. Done on 2026-11-25 with `claude plugin eval` (Claude Code 2.1.332, claude-sonnet-5-5, one draw, a deterministic Skill-call grader) on 10 prompts, half naming each product: 10 of 10 activated with the old skills and 10 of 10 with the new.
+- [ ] 3.10 Before archiving, refresh the MODIFIED requirement "A folder outside the vault imports through local staging" against the canonical spec: `scale-agent-led-imports` modifies the same requirement, and whichever change archives second replaces the whole block.
 
 ## 4. Listings
 

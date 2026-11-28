@@ -94,7 +94,7 @@ procedure instead of `kubectl`.
 Expected result: the canary's pod restarts once, every other cell keeps its pod, and
 the canary reads and writes media through the edge.
 
-The owner's download of one original (`exomem cloud download`, and ranged playback) has a
+The owner's download of one original (`evermatter cloud download`, and ranged playback) has a
 separate switch: the cell must be in `cloudGateway.uploadCellIds` ("Configuration" in
 `cloud-upload-handoff.md`). While that list is empty, the chart renders no `/download` route,
 and `GET /download` answers Traefik's `404 page not found`. With `cloudIngress.enabled`, the chart

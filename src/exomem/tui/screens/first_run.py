@@ -62,7 +62,7 @@ WELCOME_OPTIONS = (
 NEXT_OPTIONS = (
     ("home", "Go to Home", ""),
     ("ask", "Ask something else", ""),
-    ("hooks", "Install agent hooks", "checkpoints and continuation for your agents — exomem install-hook"),
+    ("hooks", "Install agent hooks", "checkpoints and continuation for your agents — evermatter install-hook"),
 )
 
 CLOSE = (
@@ -931,7 +931,7 @@ class FirstRunScreen(ExomemScreen):
                 Text(""),
                 receipt(skin, "fail", "not installed", error.message, budget=self.content_budget()),
                 Text(
-                    "     run `exomem install-hook` in a terminal to see the full report",
+                    "     run `evermatter install-hook` in a terminal to see the full report",
                     style=skin.secondary,
                 ),
             ],

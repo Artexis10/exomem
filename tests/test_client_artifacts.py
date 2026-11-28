@@ -113,6 +113,7 @@ def test_preserve_artifacts_has_openai_file_parameter_contract(
         "mime_type",
         "file_name",
         "diarize",
+        "tracks",
     ]
     assert files["items"]["required"] == ["download_url", "file_id"]
     assert files["items"]["properties"]["file_id"]["minLength"] == 1

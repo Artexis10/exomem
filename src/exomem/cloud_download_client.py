@@ -151,7 +151,7 @@ async def download_original(
 
 def main(argv=None, *, api=None) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem cloud download",
+        prog="evermatter cloud download",
         description="Download one preserved original from your Cloud, verified against its recorded size and digest.")
     parser.add_argument("path", help="Vault-relative path of the preserved original.")
     parser.add_argument("--out", type=Path, default=Path("."), help="Folder that receives the file (default: current folder).")

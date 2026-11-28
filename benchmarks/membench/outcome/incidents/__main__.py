@@ -1148,11 +1148,12 @@ def play_claude(
     }
     if case.get("files"):
         # What the documented handoff needs from a client: a digest, a descriptor file, and a send. The upload
-        # reply names a multipart POST as the send, so `curl` is allowed beside `exomem attach`; the server is
+        # reply names a multipart POST as the send, so `curl` is allowed beside `evermatter attach` (and the older
+        # `exomem attach`, which an arm built before the rename names); the server is
         # loopback and its bearer dies with the run. A case with no file to hand over gets none of it.
         tools += ["Bash", "Write"]
         # An `Edit` rule covers the Write tool, and the descriptor goes into the work directory.
-        allowed += ["Bash(exomem attach:*)", "Bash(sha256sum:*)", "Bash(curl:*)", "Edit(./**)"]
+        allowed += ["Bash(evermatter attach:*)", "Bash(exomem attach:*)", "Bash(sha256sum:*)", "Bash(curl:*)", "Edit(./**)"]
         env["PATH"] = f"{lay_exomem_command(root, arm, arm_env)}{os.pathsep}{env['PATH']}"
     actor = Arm(
         arm_id="incident",

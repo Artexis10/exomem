@@ -31,11 +31,11 @@ DISCLOSURE = (
     "Only you, the owner, can read it or search by person. The names you give, with each named group's "
     "averaged face vector, go into this account's backups, and a backup made before a delete keeps them "
     "until its retention expires it. "
-    "`exomem faces off` stops it and keeps what is stored; `exomem faces delete` erases it."
+    "`evermatter faces off` stops it and keeps what is stored; `evermatter faces delete` erases it."
 )
 #: The text a person types at a terminal to turn faces on.
 CONFIRMATION = "turn faces on"
-TURN_ON_COMMAND = "exomem faces on"
+TURN_ON_COMMAND = "evermatter faces on"
 #: What a delete cannot reach on every deployment (design D11). `residues()` adds the backups this deployment keeps.
 _FREED_BLOCKS = {
     "residue": "freed disk blocks",
@@ -148,7 +148,7 @@ def _unreadable(error: sqlite3.DatabaseError) -> dict[str, Any]:
     # The face step skips every picture and a removal keeps its CLIP rows until the store goes, so the owner
     # must learn the fix here.
     newer = isinstance(error, face_store.NewerStore)
-    cause = "a newer release of Exomem wrote it" if newer else "it is damaged"
+    cause = "a newer release of Evermatter wrote it" if newer else "it is damaged"
     return {
         "outcome": f"The face data cannot be read: {cause}. No picture is scanned for faces until it is fixed.",
         "state": "unreadable",
@@ -410,7 +410,7 @@ def delete(vault_root: Path) -> dict[str, Any]:
         # On Windows a media child keeps its store connections, and so the files, open until it exits idle.
         minutes = max(1, math.ceil(media_worker.idle_seconds_setting() / 60))
         sentence = (f"Faces are off, but the delete is partial: {', '.join(remaining)} could not be removed. "
-                    "Repeat faces.delete to finish it. If it stays partial, a running Exomem process still holds "
+                    "Repeat faces.delete to finish it. If it stays partial, a running Evermatter process still holds "
                     f"the files: repeat it once no picture has been processed for {minutes} "
                     f"minute{'s' if minutes != 1 else ''}, when the media worker closes them, or after the "
                     "service restarts if it still stays partial.")

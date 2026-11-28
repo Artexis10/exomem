@@ -1166,7 +1166,7 @@ def test_doctor_warns_on_deferred_queue_fraction(
 def test_full_queue_status_names_a_runnable_action(vault: Path) -> None:
     deferred_index.add_full(vault, ["Knowledge Base/deferred.md"])
     status = deferred_index.full_status(vault)
-    assert status["next_action"] == f'exomem index --vault "{vault}" --scope vault'
+    assert status["next_action"] == f'evermatter index --vault "{vault}" --scope vault'
 
 
 @pytest.mark.parametrize("error_type", [PermissionError, OSError])

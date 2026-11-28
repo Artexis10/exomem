@@ -34,6 +34,7 @@ from . import (
     rename_journal,
     reserved_paths,
     sensitivity_classes,
+    speech_tracks,
     temporal,
 )
 from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, LANGUAGE_MODE_SINGLE
@@ -145,6 +146,7 @@ class ExtractionRequest:
     mode: str | None
     reprocess: bool
     diarize: bool | None = None
+    tracks: tuple[speech_tracks.Track, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -1467,7 +1469,10 @@ def _enqueue(
     if request is None:
         return store.enqueue(job), False
     row_id = store.request_extraction(
-        replace(job, diarize=request.diarize), request.language, request.mode, reprocess=request.reprocess
+        replace(job, diarize=request.diarize, tracks=request.tracks),
+        request.language,
+        request.mode,
+        reprocess=request.reprocess,
     )
     if row_id is None:
         raise MediaProcessingError(
@@ -1513,6 +1518,7 @@ def reprocess_media(
     language: str | None = None,
     multilingual: bool = False,
     diarize: bool | None = None,
+    tracks: tuple[speech_tracks.Track, ...] | None = None,
     commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
     queue_guard: Callable[[], AbstractContextManager[object]] | None = None,
 ) -> ReconcileResult:
@@ -1525,7 +1531,7 @@ def reprocess_media(
     """
     return _queue_extraction(
         vault_root, binary_path, language, multilingual, commit_guard, reprocess=True,
-        queue_guard=queue_guard, diarize=diarize,
+        queue_guard=queue_guard, diarize=diarize, tracks=tracks,
     )
 
 
@@ -1536,6 +1542,7 @@ def process_declared_media(
     language: str | None = None,
     multilingual: bool = False,
     diarize: bool | None = None,
+    tracks: tuple[speech_tracks.Track, ...] | None = None,
     commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
 ) -> ReconcileResult:
     """Process a media file with declared extraction preferences before its transcript completes.
@@ -1544,8 +1551,22 @@ def process_declared_media(
     and a declaration that was ignored would read as one that was applied.
     """
     return _queue_extraction(
-        vault_root, binary_path, language, multilingual, commit_guard, reprocess=False, diarize=diarize
+        vault_root, binary_path, language, multilingual, commit_guard, reprocess=False, diarize=diarize, tracks=tracks
     )
+
+
+def unapplied_tracks(
+    vault_root: Path, binary: Path, tracks: tuple[speech_tracks.Track, ...] | None
+) -> tuple[speech_tracks.Track, ...] | None:
+    """A request's declaration of tracks, or None when the recording's Source already records that declaration.
+
+    A repeat of the declaration then asks for nothing new, so it writes and queues nothing the first did not.
+    """
+    if tracks is None:
+        return None
+    content = _read_sidecar_text(Path(vault_root).resolve(), originals.sidecar_path(binary))
+    held = None if content is None else _preserve_module().declared_speech_tracks(content)
+    return None if held == tracks else tracks
 
 
 def _queue_extraction(
@@ -1557,6 +1578,7 @@ def _queue_extraction(
     *,
     reprocess: bool,
     diarize: bool | None = None,
+    tracks: tuple[speech_tracks.Track, ...] | None = None,
     queue_guard: Callable[[], AbstractContextManager[object]] | None = None,
 ) -> ReconcileResult:
     vault = Path(vault_root).resolve()
@@ -1573,6 +1595,8 @@ def _queue_extraction(
             )
         if diarize is not None:
             raise MediaProcessingError("DIARIZE_NOT_APPLICABLE", "speaker labels apply to audio and video only")
+        if tracks is not None:
+            raise MediaProcessingError("TRACKS_NOT_APPLICABLE", "a declaration of tracks applies to audio and video only")
     if media_type is not None and not media_engines.stage_enabled(media_type):
         raise MediaProcessingError(
             "MEDIA_ENGINE_DISABLED",
@@ -1581,7 +1605,7 @@ def _queue_extraction(
     unavailable = _runtime_unavailable(vault)
     if unavailable is not None:  # retry_media queues nothing in this state either
         raise MediaProcessingError("MEDIA_RUNTIME_UNAVAILABLE", f"{unavailable[0]}; {unavailable[1]}")
-    request = ExtractionRequest(hint, mode, reprocess, diarize)
+    request = ExtractionRequest(hint, mode, reprocess, diarize, tracks)
     result = reconcile_media(
         vault, binary, commit_guard=commit_guard, request=request, queue_guard=queue_guard
     )
@@ -1602,7 +1626,7 @@ def _queue_extraction(
         job_id = store.request_extraction(
             media_jobs.MediaJob(
                 binary_path=binary, sidecar_path=result.sidecar_path, media_type=result.media_type,
-                diarize=request.diarize,
+                diarize=request.diarize, tracks=request.tracks,
             ),
             hint,
             mode,
@@ -1907,6 +1931,8 @@ def _render_pending_sidecar(
         rendered = preserve._set_frontmatter_field(rendered, "exomem_id", existing_id)
     if original is not None:
         rendered = preserve.set_diarize_pin(rendered, preserve.diarize_pin(original))
+        # The tracks are a declaration, not an extraction fact: new bytes keep them, as an upload does.
+        rendered = preserve.set_speech_tracks_pin(rendered, preserve.declared_speech_tracks(original))
     rendered = _set_fields(rendered, _pending_fields(provenance))
     if preserved_notes:
         rendered = (

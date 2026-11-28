@@ -13,7 +13,7 @@ definition, hooks and fixtures are maintained by their own channel contracts.
 | Claude Code plugin | This Git repository's Claude Code plugin marketplace | `substrate-systems/evermatter` plugin (skills and hooks), plus a configured remote or stdio MCP route |
 | Claude.ai, Desktop, Mobile, Code, and Cowork | Claude Connector Directory plus the independent public Claude plugin channel | The hosted connector; the plugin bundle adds skills where the client supports them |
 | Hosted ChatGPT and Codex | One universal OpenAI Plugin Directory entry | The hosted OpenAI plugin and its MCP connection |
-| Self-hosted/local Claude Code and Codex | `exomem setup` (or explicit `codex mcp add`) | A local or remote MCP route plus disk-installed skills and hooks |
+| Self-hosted/local Claude Code and Codex | `evermatter setup` (or explicit `codex mcp add`) | A local or remote MCP route plus disk-installed skills and hooks |
 | Cursor and generic MCP clients | Client MCP configuration | A local stdio or remote HTTP MCP route; `read_instructions()` supplies the portable contract when skills are unavailable |
 
 This repository does not claim a public directory listing until the provider
@@ -39,16 +39,16 @@ The plugin does not create a usable server route when `mcp_url` is blank. After
 installing it, configure one of the supported routes:
 
 ```bash
-exomem setup --mcp-url https://<host>/mcp
+evermatter setup --mcp-url https://<host>/mcp
 # or, for a local server
-exomem setup --stdio
+evermatter setup --stdio
 ```
 
 The plugin tree under `plugins/claude-code/` is generated. Rebuild it when the
 scaffold changes:
 
 ```bash
-exomem package-skills --plugin-root plugins/claude-code
+evermatter package-skills --plugin-root plugins/claude-code
 ```
 
 ## Hosted Claude and OpenAI channels
@@ -67,7 +67,7 @@ Plugin Directory entry.
 ## Self-hosted and generic MCP clients
 
 Self-hosted routes are supported channels, not directory fallbacks. Run
-`exomem setup` for Claude Code or Codex, or register Codex explicitly with
+`evermatter setup` for Claude Code or Codex, or register Codex explicitly with
 `codex mcp add` as described in the
 [AI assistant guide](ai-assistant-guide.md#codex-cli). Cursor and other generic
 MCP clients can use either a local stdio command or a remote HTTP endpoint; see
@@ -79,8 +79,8 @@ Use manual skill archives or custom instructions when a client has no supported
 skill channel. Generate archives with:
 
 ```bash
-exomem package-skills
-exomem package-skills --vault "/path/to/vault"
+evermatter package-skills
+evermatter package-skills --vault "/path/to/vault"
 ```
 
 Pair the client with the remote connector as described in
