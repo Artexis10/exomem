@@ -7,9 +7,11 @@ import html
 import json
 import tempfile
 import uuid
+from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
+from io import BytesIO
 from itertools import groupby
 from operator import itemgetter
 from pathlib import Path
@@ -28,6 +30,9 @@ _MARKER = b"<!-- evermatter:relations"
 _OPEN = _MARKER + b" sha256="
 _CLOSE = b"<!-- evermatter:relations-end -->"
 _END = b" -->"
+# These tokens delimit the locator rows emitted by projection_lines.
+_LOCATOR_SEPARATOR = " · "
+_LOCATOR_DIRECTIONS = ("to", "from")
 MAX_BLOCK_BYTES = 64 * 1024
 MAX_RECORD_BYTES = 64 * 1024
 
@@ -59,8 +64,13 @@ def splice_block(source: bytes, lines: Iterable[str]) -> bytes:
 
 def strip_block(source: bytes, *, keep_mine: bool = False) -> bytes:
     """Remove a valid block, or an edited block with intact markers on keep-mine."""
+    return _split_block(source, keep_mine=keep_mine)[0]
+
+
+def _split_block(source: bytes, *, keep_mine: bool) -> tuple[bytes, bytes, bytes]:
+    """Return the authored body, exact projection block and its rendered lines."""
     if _MARKER not in source:
-        return source
+        return source, b"", b""
     opens = []
     closes = []
     offset = 0
@@ -73,7 +83,7 @@ def strip_block(source: bytes, *, keep_mine: bool = False) -> bytes:
             opens.append((offset, end, marker))
         offset = end
     if not opens and not closes:
-        return source
+        return source, b"", b""
     if len(opens) != 1 or len(closes) != 1:
         raise _damaged_markers()
     start, inner_start, marker = opens[0]
@@ -89,7 +99,8 @@ def strip_block(source: bytes, *, keep_mine: bool = False) -> bytes:
         or hashlib.sha256(source[inner_start:inner_end]).hexdigest().encode("ascii") != expected
     ):
         raise OpError("RELATIONS_BLOCK_EDITED", "the managed relations block was edited")
-    return source[:start - len(separator)] + source[end:]
+    cut = start - len(separator)
+    return source[:cut] + source[end:], source[cut:end], source[inner_start:inner_end]
 
 
 def _damaged_markers() -> OpError:
@@ -97,6 +108,112 @@ def _damaged_markers() -> OpError:
         "RELATIONS_BLOCK_DAMAGED", "the managed relations block markers are damaged",
         "Choose keep-store to regenerate the relations block.",
     )
+
+
+def editor_body(
+    tx: Connection, page: str, source: bytes, *, keep_mine: bool = False,
+) -> tuple[bytes, bool]:
+    """Remove a marked block and refuse surviving projection text with no reliable boundary."""
+    body, block, rendered_body = _split_block(source, keep_mine=keep_mine)
+    locator_rows = Counter(_locator_rows(body))
+    prior = tx.execute(
+        "SELECT p.body, m.sha256, m.canonical_sha256, p.sha256 "
+        "FROM (SELECT ? AS path) AS item "
+        "LEFT JOIN store_pages AS p ON p.path = item.path "
+        "LEFT JOIN store_manifest AS m ON m.path = item.path "
+        "WHERE m.canonical_sha256 IS NOT NULL OR (? AND p.path IS NOT NULL)",
+        (page, bool(locator_rows)),
+    ).fetchone()
+    before = b"" if prior is None or prior[0] is None else prior[0]
+    had_block = prior is not None and prior[2] is not None
+    if body == before:
+        return body, had_block
+    if locator_rows - Counter(_locator_rows(before)):
+        raise _damaged_markers()
+    if not had_block:
+        return body, False
+    assert prior is not None
+    if prior[2] == prior[3]:
+        if block and hashlib.sha256(before + block).hexdigest() == prior[1]:
+            _check_projection_fragments(before, body, rendered_body.splitlines())
+            return body, True
+        rendered = tuple(projection_lines(tx, page))
+        projected = splice_block(before, rendered)
+        if projected != before and hashlib.sha256(projected).hexdigest() == prior[1]:
+            _check_projection_fragments(before, body, (row.encode() for row in rendered))
+            return body, True
+    raise OpError(
+        "RELATIONS_BLOCK_STALE", "the last managed relations block cannot be verified",
+        "Choose keep-store to save the outside file separately and regenerate the block.",
+    )
+
+
+def projection_witness_available(tx: Connection) -> bool:
+    """Standby readers can open a vault before its writer installs the projection witness."""
+    return tx.execute(
+        "SELECT 1 FROM pragma_table_xinfo('store_manifest') WHERE name = 'canonical_sha256'",
+    ).fetchone() is not None
+
+
+def _locator(line: bytes) -> bytes | None:
+    """Read the fixed punctuation and direction of a generated locator row."""
+    anchor, separator, detail = line.partition(_LOCATOR_SEPARATOR.encode())
+    if not separator or not anchor.startswith(b"- "):
+        return None
+    kind, _, reference = detail.partition(b" ")
+    if kind:
+        for direction in _LOCATOR_DIRECTIONS:
+            prefix = f"{direction} ".encode()
+            if reference.startswith(prefix):
+                return reference[len(prefix):]
+    return None
+
+
+def _locator_rows(body: bytes) -> Iterator[bytes]:
+    if _LOCATOR_SEPARATOR.encode() in body:
+        for line in _body_rows(body):
+            if _locator(line):
+                yield line
+
+
+def has_locator_rows(body: bytes) -> bool:
+    return next(_locator_rows(body), None) is not None
+
+
+def body_from_witness(source: bytes, before: bytes, projected_sha256: str) -> bytes:
+    """Release the authored bytes of a held file after authenticating its marked block."""
+    body, block, rendered = _split_block(source, keep_mine=False)
+    if body == before:
+        return body
+    if not block or hashlib.sha256(before + block).hexdigest() != projected_sha256:
+        raise _damaged_markers()
+    if Counter(_locator_rows(body)) - Counter(_locator_rows(before)):
+        raise _damaged_markers()
+    _check_projection_fragments(before, body, rendered.splitlines())
+    return body
+
+
+def _check_projection_fragments(before: bytes, body: bytes, rendered: Iterable[bytes]) -> None:
+    """Compare with the previous authored bytes after proving the rendered projection."""
+    rendered_rows = set(rendered)
+    old_rows = Counter(row for row in _body_rows(before) if row in rendered_rows)
+    new_rows = Counter(row for row in _body_rows(body) if row in rendered_rows)
+    if any(new_rows[row] > old_rows[row] for row in rendered_rows):
+        raise _damaged_markers()
+    for row in rendered_rows:
+        locator = _locator(row)
+        if locator is not None:
+            path, _, anchor = locator.partition(b"#")
+            if (anchor and body.count(locator) > before.count(locator)) or (
+                b"/" in path and body.count(path) > before.count(path)
+            ):
+                raise _damaged_markers()
+
+
+def _body_rows(body: bytes) -> Iterator[bytes]:
+    # Normalize line delimiters for comparison without materializing all the rows.
+    for line in BytesIO(body.replace(b"\r", b"\n")):
+        yield line.strip()
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,8 +286,8 @@ def projection_lines(tx: Connection, page: str) -> Iterator[str]:
         yield "- The relations file carries more relationship groups."
     for anchor, kind, incoming, target, fragment in store.projection_samples(tx, page, parent_ref, 12):
         far = f"{target}#{fragment}" if fragment is not None else target
-        direction = "from" if incoming else "to"
-        yield f"- {_label(anchor or 'page')} · {_label(kind)} {direction} {_label(far)}"
+        direction = _LOCATOR_DIRECTIONS[incoming]
+        yield f"- {_label(anchor or 'page')}{_LOCATOR_SEPARATOR}{_label(kind)} {direction} {_label(far)}"
 
 
 def _label(value: str) -> str:

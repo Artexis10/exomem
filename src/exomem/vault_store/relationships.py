@@ -156,19 +156,13 @@ def bind_additions(tx: Connection, change: Change) -> tuple[BoundRelationship, .
 
 def identities_at(
     tx: Connection, locations: set[UnitLocator],
-    *, with_outgoing: bool = False,
 ) -> dict[UnitLocator, UnitIdentity]:
     """Find the units of these page identities even if the path has an older orphan."""
-    active = (
-        " WHERE EXISTS (SELECT 1 FROM store_relationships r "
-        " WHERE r.source_unit_id=u.id AND r.retired_revision IS NULL)"
-        if with_outgoing else ""
-    )
     rows = tx.execute(
         "SELECT u.id,u.parent_path,u.anchor,u.parent_ref FROM json_each(?) AS location"
         " CROSS JOIN store_unit_ids AS u ON u.parent_path = json_extract(location.value,'$[0]')"
         " AND u.anchor = json_extract(location.value,'$[1]')"
-        " AND COALESCE(u.parent_ref,'') = COALESCE(json_extract(location.value,'$[2]'),'')" + active,
+        " AND COALESCE(u.parent_ref,'') = COALESCE(json_extract(location.value,'$[2]'),'')",
         (json.dumps(sorted(locations, key=repr)),),
     )
     units = (UnitIdentity(*row) for row in rows)
@@ -233,6 +227,27 @@ def outgoing_unit(
     ):
         yield BoundRelationship(
             Relationship(*row[:6]), source,
+            UnitIdentity(*row[6:]) if row[6] is not None else None,
+        )
+
+
+def outgoing_unit_batch(
+    tx: Connection, sources: dict[str, UnitIdentity], *,
+    after: tuple[str, str, str] | None, limit: int,
+) -> Iterator[BoundRelationship]:
+    """Seek one window of a page's active outgoing edges across its live source identities."""
+    cursor = "" if after is None else " AND (r.source_unit_id,r.relation_type,r.id) > (?,?,?)"
+    active_ids = [unit_id for unit_id in sources if after is None or unit_id >= after[0]]
+    for row in tx.execute(
+        "SELECT r.id,r.source_unit_id,r.relation_type,r.target_unit_id,r.target_page_path,"
+        " r.target_page_ref,t.id,t.parent_path,t.anchor,t.parent_ref"
+        " FROM store_relationships r LEFT JOIN store_unit_ids t ON t.id=r.target_unit_id"
+        " WHERE r.source_unit_id IN (SELECT value FROM json_each(?)) AND r.retired_revision IS NULL"
+        + cursor + " ORDER BY r.source_unit_id,r.relation_type,r.id LIMIT ?",
+        (json.dumps(active_ids), *(after or ()), limit),
+    ):
+        yield BoundRelationship(
+            Relationship(*row[:6]), sources[row[1]],
             UnitIdentity(*row[6:]) if row[6] is not None else None,
         )
 
@@ -351,23 +366,16 @@ def orphaned_pages(tx: Connection) -> Iterator[tuple[str, str | None]]:
 
 
 def relanding_sources(
-    tx: Connection, paths: Iterable[str], *, after: str = "", limit: int | None = None,
+    tx: Connection, path: str, *, after: str, limit: int,
 ) -> Iterator[tuple[str]]:
-    """Seek the authors of current relationships independently of authored link aliases."""
-    targets = tuple(sorted(set(paths)))
-    if not targets:
-        return
+    """Seek the sources whose stored unit targets can land on this page."""
     yield from tx.execute(
-        "WITH targets AS (SELECT value AS path FROM json_each(?1)), related AS ("
-        " SELECT s.parent_path AS path FROM targets CROSS JOIN store_unit_ids t ON t.parent_path=targets.path"
+        "SELECT DISTINCT s.parent_path FROM store_unit_ids t"
         " CROSS JOIN store_relationships r ON r.target_unit_id=t.id"
         " JOIN store_unit_ids s ON s.id=r.source_unit_id"
-        " WHERE r.retired_revision IS NULL AND s.parent_path>?2 UNION"
-        " SELECT s.parent_path FROM targets CROSS JOIN store_relationships r ON r.target_page_path=targets.path"
-        " JOIN store_unit_ids s ON s.id=r.source_unit_id"
-        " WHERE r.retired_revision IS NULL AND s.parent_path>?2)"
-        " SELECT path FROM related ORDER BY path LIMIT ?3",
-        (json.dumps(targets), after, -1 if limit is None else limit),
+        " WHERE t.parent_path=? AND r.retired_revision IS NULL AND s.parent_path>?"
+        " ORDER BY s.parent_path LIMIT ?",
+        (path, after, limit),
     )
 
 

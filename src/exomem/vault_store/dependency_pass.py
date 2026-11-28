@@ -41,7 +41,7 @@ class DependencyPass:
             if index == len(self.keys):
                 from . import relationships
 
-                rows = relationships.relanding_sources(conn, (self.path,), after=after, limit=size)
+                rows = relationships.relanding_sources(conn, self.path, after=after, limit=size)
             else:
                 rows = conn.execute(
                     "SELECT DISTINCT source_path FROM graph_dependencies "

@@ -28,12 +28,14 @@ from hard_kill import KILLED, kill_self
 from test_vault_store_migration import ALPHA, BETA, DIAGRAM, DIAGRAM_BYTES, migrate_apply
 from test_vault_store_projector import NOTES, commit, put, rows
 
-from exomem import extraction_parts, file_watcher, server_runtime
+from exomem import commands, extraction_parts, file_watcher, held_operation, server_runtime
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection, preview
 from exomem.collection_store.writer import CollectionWriter
+from exomem.governance.principal import library_scope, request_scope
 from exomem.vault_store import (
     derivation,
+    held,
     importer,
     migrate,
     mode,
@@ -188,6 +190,132 @@ def test_managed_block_recovery_preserves_a_later_outside_edit(
     assert path.read_bytes() == later
     assert rows(stored, "SELECT body FROM store_pages WHERE path = ?", ALPHA) == [(source,)]
     assert rows(stored, "SELECT kind, body FROM store_held WHERE path = ?", ALPHA) == [("edit", later)]
+
+
+@pytest.mark.parametrize("survives", ["all rows", "locator row", "bare locator", "one marker"])
+def test_damaged_projection_cannot_put_a_withheld_target_in_the_authored_page(
+    stored, writer, projecting, importing, related_pages, survives,
+):
+    from test_vault_store_readers import EXTERNAL, restrict_external
+
+    source, _target = related_pages
+    restrict_external(stored, 'paths: ["Notes/Beta.md"]')
+    path = stored / ALPHA
+    projection = path.read_bytes()[len(source):].splitlines(keepends=True)
+    locator = f"{BETA}#lamp".encode()
+    sample = next(line for line in projection if locator in line)
+    if survives == "all rows":
+        surviving = b"".join(line for line in projection if not line.startswith(b"<!--"))
+    elif survives == "locator row":
+        surviving = sample
+    elif survives == "bare locator":
+        surviving = locator + b"\n"
+    else:
+        surviving = b"".join(projection[:-1])
+    authored = source + b"\nAn outside edit.\n"
+    damaged = authored + surviving
+    path.write_bytes(damaged)
+
+    importing.import_paths([ALPHA])
+
+    with request_scope(EXTERNAL):
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            commands.op_read_memory(stored, path=BETA)
+        result = commands.op_read_memory(stored, path=ALPHA)
+        assert locator.decode() not in result["body"]
+        assert held.person_file_bytes(stored, ALPHA) is None
+        assert held_operation.listing(stored)["items"] == []
+    assert rows(stored, "SELECT body FROM store_held WHERE path = ?", ALPHA) == [(damaged,)]
+    assert rows(stored, "SELECT body FROM store_pages WHERE path = ?", ALPHA) == [(source,)]
+    with library_scope():
+        [item] = held.list_held(stored)
+        with pytest.raises(OpError, match="managed relations block"):
+            held.resolve_held(
+                stored, ALPHA, "keep-mine", why="Keep the authored edit.",
+                seen=item.item_version, writer=writer,
+            )
+        path.write_bytes(authored)
+        [item] = held.list_held(stored)
+        held.resolve_held(
+            stored, ALPHA, "keep-mine", why="Keep the authored edit.",
+            seen=item.item_version, writer=writer,
+        )
+    assert rows(stored, "SELECT body FROM store_pages WHERE path = ?", ALPHA) == [(authored,)]
+    assert projecting.run_pass().projected == 1
+    assert relationship_files.strip_block(path.read_bytes()) == authored
+
+
+def test_marker_free_recovery_preserves_an_identical_already_authored_row(
+    stored, writer, projecting, importing, related_pages,
+):
+    source, _target = related_pages
+    path = stored / ALPHA
+    locator = f"{BETA}#lamp".encode()
+    sample = next(line for line in path.read_bytes().splitlines(keepends=True) if locator in line)
+    authored = source + b"\nAn example written by the author.\n" + sample
+    commit(writer, puts=(write.PagePut(ALPHA, authored),))
+    assert projecting.run_pass().projected == 1
+    edited = authored + b"\nAn outside edit.\n"
+    path.write_bytes(edited)
+
+    assert importing.import_paths([ALPHA]).imported == [ALPHA]
+    assert rows(stored, "SELECT body FROM store_pages WHERE path = ?", ALPHA) == [(edited,)]
+    assert projecting.run_pass().projected == 1
+    assert relationship_files.strip_block(path.read_bytes()) == edited
+
+
+@pytest.mark.parametrize("changed", ["relationship", "canonical page"])
+def test_keep_mine_leaves_marker_free_bytes_held_if_the_projection_changed(
+    stored, writer, importing, related_pages, changed,
+):
+    source, _target = related_pages
+    path = stored / ALPHA
+    damaged = source + f"\n{BETA}#lamp\n".encode()
+    canonical = source
+    if changed == "canonical page":
+        canonical += b"\nA governed write.\n"
+        commit(writer, puts=(write.PagePut(ALPHA, canonical),))
+    path.write_bytes(damaged)
+    assert importing.import_paths([ALPHA]).held == [ALPHA]
+    if changed == "relationship":
+        commit(writer, relationship_change=relationships.Change(
+            actor="owner",
+            retired=(relationships.Retirement("link-id"),),
+        ))
+
+    with library_scope():
+        [item] = held.list_held(stored)
+        with pytest.raises(OpError, match="last managed relations block cannot be verified"):
+            held.resolve_held(
+                stored, ALPHA, "keep-mine", why="Keep the outside edit.",
+                seen=item.item_version, writer=writer,
+            )
+    assert rows(stored, "SELECT body FROM store_pages WHERE path = ?", ALPHA) == [(canonical,)]
+    assert path.read_bytes() == damaged
+
+
+def test_restricted_hold_listing_keeps_metadata_for_a_proven_block_with_an_authored_edit(
+    stored, writer, importing, related_pages,
+):
+    from test_vault_store_readers import EXTERNAL, restrict_external
+
+    source, _target = related_pages
+    restrict_external(stored, 'paths: ["Notes/Beta.md"]')
+    path = stored / ALPHA
+    projection = path.read_bytes()[len(source):]
+    authored = source + b"\nAn outside edit.\n"
+    commit(writer, relationship_change=relationships.Change(
+        actor="owner",
+        retired=(relationships.Retirement("link-id"),),
+    ))
+    path.write_bytes(authored + projection)
+
+    assert importing.import_paths([ALPHA]).held == [ALPHA]
+    with request_scope(EXTERNAL):
+        [item] = held_operation.listing(stored)["items"]
+        assert item["path"] == ALPHA
+        assert item["file"]["sha256"] == sha(authored)
+        assert held.person_file_bytes(stored, ALPHA) == authored
 
 
 def test_an_outside_rename_of_a_projected_target_keeps_the_relation_and_updates_its_locator(

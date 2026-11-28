@@ -229,13 +229,16 @@ class FileSeen:
 
 
 def outside_page(
-    rel: str, raw: bytes, sha256: str, mtime_ns: int, *, keep_mine: bool = False,
-    reproject: bool = False,
+    tx: Connection, rel: str, raw: bytes, sha256: str, mtime_ns: int, *, keep_mine: bool = False,
 ) -> tuple[PagePut, tuple[FileSeen, ...]]:
     """Read canonical page bytes and retain the exact projected-file witness for its rewrite."""
     from . import relationship_files
 
-    canonical = relationship_files.strip_block(raw, keep_mine=keep_mine)
+    if ownership.is_markdown(rel):
+        canonical, reproject = relationship_files.editor_body(tx, rel, raw, keep_mine=keep_mine)
+    else:
+        canonical = relationship_files.strip_block(raw, keep_mine=keep_mine)
+        reproject = False
     canonical_sha256 = None if canonical == raw else hashlib.sha256(canonical).hexdigest()
     if canonical_sha256 is None and not reproject:
         return PagePut(rel, raw, on_disk_mtime_ns=mtime_ns), ()
@@ -848,16 +851,18 @@ def _record_page_count(room: Any, database: Path, conn: Connection, page_size: i
 @contextmanager
 def derived_room(
     writer: CollectionWriter, tx: Connection, metered: list[str], sources: tuple[str, ...],
+    *, graph_continuation: bool = False,
 ) -> Iterator[tuple[dict[str, derive._LexicalPage], derive.ReserveGraph | None, Callable[[], None]]]:
     """Protect the derived rows that an original causes on the vault device, for one drain batch.
 
     The rows of an original's page, of the path that a move of it vacated, and of the pages that link
     to it draw on the room that this reserves; a batch with no original reserves nothing. It yields
     the original's prepared lexical rows, the graph reservation callback and the settle step.
+    A continuation reserves room for its graph rows and the receipt it still holds.
     """
     from .. import media_capacity
 
-    if not metered and not sources:
+    if not metered and not sources and not graph_continuation:
         yield {}, None, lambda: None
         return
     database = writer.handle.path
@@ -871,7 +876,7 @@ def derived_room(
         usable = page_size - 4 - 255
         # The drain deletes one queue row per path and moves the revision row.
         trees = _trees(conn, ("store_derivation_queue",))
-        touched = len(metered) + len(sources)
+        touched = len(metered) + len(sources) + int(graph_continuation)
         depth = 1 + max(1, math.ceil(math.log(before + touched + 1, 4)))
         basis = epistemic_graph.producer_type_basis(writer.root)
         prepared: dict[str, derive._LexicalPage] = {}

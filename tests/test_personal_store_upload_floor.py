@@ -20,7 +20,7 @@ from exomem import lexstore, media_capacity, move_file, preserve, writer_lease
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection
 from exomem.governance.principal import library_scope
-from exomem.vault_store import derivation, read, write
+from exomem.vault_store import derivation, read, relationships, write
 
 
 def queued(writer, rel):  # noqa: F811
@@ -445,6 +445,59 @@ def test_an_original_needs_room_for_the_pages_that_link_to_it(
         south = file_survey("south-survey")
         assert read.page_exists(served, south)
         assert queued(writer, south) == [(derivation.NO_ROOM,)]
+
+
+def test_stored_links_to_an_original_resume_with_room_for_each_batch(
+    served, writer, tmp_path, monkeypatch,  # noqa: F811
+):
+    """A metered relanding keeps its receipt when a later batch cannot reserve room."""
+    config = tmp_path / "media.json"
+    floor = 1024**2
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": floor}}}))
+    monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    ample = 128 * floor
+    free = [ample]
+    monkeypatch.setattr(media_capacity.shutil, "disk_usage", lambda _path: SimpleNamespace(free=free[0]))
+    original = "Knowledge Base/Evidence/Tests/Surveys/Survey.md"
+    raw = b"# Survey\n\n- [rule] Read the gauge. ^reading\n"
+    targets = [f"Knowledge Base/Notes/Survey review {number}.md" for number in range(5)]
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "File the survey and its reviews.",
+        puts=(write.PagePut(original, raw, media_allocation=True),
+              *(write.PagePut(path, b"# Review\n\n- [rule] Compare the survey. ^review\n") for path in targets)),
+        relationship_change=relationships.Change(
+            "owner",
+            identities=(relationships.UnitIdentity("reading-id", original, "reading"),
+                        *(relationships.UnitIdentity(f"review-{number}", path, "review")
+                          for number, path in enumerate(targets))),
+            added=tuple(relationships.Relationship(f"survey-{number}", f"review-{number}", "supports", "reading-id")
+                        for number in range(len(targets))),
+        ),
+    ))
+    graph_count = "SELECT COUNT(*) FROM graph_edges WHERE edge_key LIKE 'stored:survey-%'"
+    assert writer.connection.execute(graph_count).fetchone() == (len(targets),)
+    monkeypatch.setattr(derivation, "BATCH_PAGES", 2)
+    with monkeypatch.context() as pause:
+        pause.setattr(derivation, "drain", lambda *_args, **_kwargs: None)
+        write.commit(writer, write.StoreChange(
+            write.Origin.GOVERNED, "Remove the anchor from the survey.",
+            puts=(write.PagePut(original, raw.replace(b" ^reading", b""), media_allocation=True),),
+        ))
+    resume = derivation._derive_dependency_pass
+
+    def tighten_floor(*args, **kwargs):
+        free[0] = floor
+        return resume(*args, **kwargs)
+
+    with monkeypatch.context() as pause:
+        pause.setattr(derivation, "_derive_dependency_pass", tighten_floor)
+        derivation.drain(served, writer)
+    assert queued(writer, original) == [(derivation.NO_ROOM,)]
+    assert writer.connection.execute(graph_count).fetchone() == (3,)
+    free[0] = ample
+    derive_again(served, writer)
+    assert queued(writer, original) == []
+    assert writer.connection.execute(graph_count).fetchone() == (0,)
 
 
 def test_an_original_draws_no_room_for_the_other_pages_its_commit_writes(

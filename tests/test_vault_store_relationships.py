@@ -470,15 +470,33 @@ def test_a_relationship_hub_has_bounded_reads_and_a_complete_portable_file(serve
         portable = relationship_files.parse(encoded)
     assert {edge.id for edge in portable.relationships} == {f"edge-{anchor}" for anchor in anchors}
     other_paths = [f"Knowledge Base/Notes/Related {number}.md" for number in range(24)]
+    related_anchors = tuple(f"tide-{number:02d}" for number in range(len(other_paths)))
     page_edges = tuple(
-        relationships.Relationship(f"page-edge-{number}", "tide-id", "supports", None, path)
-        for number, path in enumerate(other_paths)
+        relationships.Relationship(f"page-edge-{anchor}", anchor, "supports", None, path)
+        for anchor, path in zip(related_anchors, other_paths, strict=True)
     )
-    write.commit(writer, write.StoreChange(
-        write.Origin.GOVERNED, "Populate related pages.",
-        puts=tuple(write.PagePut(path, b"# Related") for path in other_paths),
-        relationship_change=relationships.Change(actor="owner", added=page_edges),
-    ))
+    extra_units = "".join(f"- [rule] Check a tide station. ^{anchor}\n" for anchor in related_anchors).encode()
+    graph_queries = []
+    writer.connection.set_trace_callback(
+        lambda sql: graph_queries.append(sql) if
+        "FROM store_relationships r LEFT JOIN store_unit_ids t ON t.id=r.target_unit_id" in sql else None
+    )
+    try:
+        write.commit(writer, write.StoreChange(
+            write.Origin.GOVERNED, "Populate related pages.",
+            puts=(write.PagePut(ALPHA, source + extra_units),
+                  *(write.PagePut(path, b"# Related") for path in other_paths)),
+            relationship_change=relationships.Change(
+                actor="owner", added=page_edges,
+                identities=tuple(relationships.UnitIdentity(
+                    anchor, ALPHA, anchor, f"exomem://memory/{source_id}",
+                ) for anchor in related_anchors),
+            ),
+        ))
+    finally:
+        writer.connection.set_trace_callback(None)
+    # There are more than 500 edges but fewer than 500 sources. Reads follow edges by window.
+    assert 0 < len(graph_queries) <= 3
     assert not projector.Projector(served, run=lambda work: work(writer)).run_pass().deferred
     write.commit(writer, write.StoreChange(
         write.Origin.GOVERNED, "Move the related pages.",

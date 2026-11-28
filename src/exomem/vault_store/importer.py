@@ -959,7 +959,7 @@ class Importer:
         )
         try:
             put, seen = write.outside_page(
-                rel, disk.body, disk.sha256, disk.mtime_ns, reproject=_had_managed_block(facts),
+                writer.connection, rel, disk.body, disk.sha256, disk.mtime_ns,
             )
         except OpError:
             self._hold(writer, rel, HELD_EDIT, facts, disk.sha256, disk.body, report)

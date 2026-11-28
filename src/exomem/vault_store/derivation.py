@@ -805,16 +805,24 @@ def _derive_dependency_pass(
     cursor: dependency_pass.DependencyPass, result: Drained,
 ) -> bool:
     """Commit a cursor and its graph rows together. The page's receipt covers both phases."""
+    from . import write
+
     started = False
     try:
-        with writer.handle.transaction(collection_free=True) as tx:
+        with ExitStack() as allocations, writer.handle.transaction(collection_free=True) as tx:
             started = True
             mode_row = tx.execute("SELECT mode, revision FROM store_mode WHERE id = 1").fetchone()
             if mode_row is None or mode_row[0] != mode.STORE_MODE:
                 result.stopped = True
                 return True
             before = read.vault_triple(tx, mode_row[1])
-            completed = derive.resume_dependencies(tx, root, before, cursor, limit=BATCH_PAGES)
+            _, reserve_graph, settle = allocations.enter_context(write.derived_room(
+                writer, tx, [], (), graph_continuation=intent.metered,
+            ))
+            completed = derive.resume_dependencies(
+                tx, root, before, cursor, limit=BATCH_PAGES, reserve_graph=reserve_graph,
+            )
+            settle()
             if completed:
                 dependency_pass.discard(tx, [intent.path])
                 tx.execute("DELETE FROM store_derivation_queue WHERE path = ?", (intent.path,))
