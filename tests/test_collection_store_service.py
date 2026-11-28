@@ -2770,35 +2770,68 @@ def test_an_area_update_that_deletes_a_field_it_lacks_is_refused_for_its_value_w
         write_intake.stop(root)
 
 
-def test_a_busy_triage_of_an_area_gets_the_triage_refusal_that_a_direct_triage_gets(service, monkeypatch):
-    """Defect: a busy triage of an area with an undeclared kind was refused for that kind and told to resend another
-    value, while a direct triage refuses it because an area cannot be triaged. Another kind cannot fix that, so the
-    triage queues and its replay answers as the direct triage does."""
+@pytest.mark.parametrize(
+    ("action", "stored_kind", "sent", "at_once"),
+    [
+        ("triage", "outcome", {"transition": {"kind": "unregistered-kind", "status": None}}, False),
+        ("triage", "outcome", {"transition": {"kind": "unregistered-kind", "effort": "large"}}, False),
+        ("triage", "area", {"transition": {"parent": None, "kind": "unregistered-kind"}}, False),
+        ("update", "outcome", {"changes": {"kind": "unregistered-kind", "size": "large"}}, False),
+        ("update", "outcome", {"changes": {"kind": "unregistered-kind"}, "why": "size it\nthen ship it"}, False),
+        ("add", None, {"item": {"title": "x" * 513, "kind": "unregistered-kind"}}, False),
+        ("add", None, {"item": {"title": "Ship it", "lifecycle": "paused", "effort": "medium"}}, False),
+        ("triage", "outcome", {"transition": {"parent": None, "kind": "unregistered-kind"}}, True),
+    ],
+    ids=["triage-with-a-null-status", "triage-with-an-unsupported-field", "triage-of-an-area",
+         "update-with-an-undeclared-field", "update-with-a-two-line-why", "add-with-a-long-title",
+         "add-with-an-unknown-lifecycle", "triage-that-deletes-a-parent"],
+)
+def test_a_busy_planning_save_gets_the_refusal_that_the_same_save_gets_directly(
+        service, monkeypatch, action, stored_kind, sent, at_once):
+    """Defect: a busy triage that the commit refuses as malformed, such as one with a null status or an unsupported
+    field, was refused for its undeclared kind and told to resend another kind, which cannot fix it. A busy save gets
+    a value's refusal at once only where the commit refuses that value first; otherwise it queues, and its replay
+    refuses it as the same save sent directly is refused."""
     from exomem import write_intake
 
     root = service.root
     text = sqlite_text(manifest_text("planning").replace(CID, RELEASE_PLAN_ID).replace("title: Work", f"title: {RELEASE_PLAN}"))
+    text = text.replace("    area: {type: string}\n", "    area: {type: string}\n    effort: {type: enum, enum: [small, large]}\n")
     call(root, "plan_memory", action="create", manifest_path=manifest_path("planning").replace("Work", "Release"),
          manifest_text=text, why="plan the releases")
-    call(root, "plan_memory", action="add", collection=RELEASE_PLAN, why="plan the platform",
-         item={"title": "Platform", "kind": "area"})
-    view = call(root, "plan_memory", action="query", collection=RELEASE_PLAN)
-    (row,) = view["rows"]
+    target = {}
+    if stored_kind is not None:
+        item = {"title": "Platform", "kind": "area"} if stored_kind == "area" else {
+            "title": "Ship the release", "kind": stored_kind, "status": "active", "commitment": "committed",
+            "horizon": "week"}
+        call(root, "plan_memory", action="add", collection=RELEASE_PLAN, why="plan it", item=item)
+        view = call(root, "plan_memory", action="query", collection=RELEASE_PLAN)
+        (row,) = view["rows"]
+        target = {"plan_id": row["plan_id"], "expected_container_hash": view["snapshot"],
+                  "expected_item_version": row["item_version"]}
+    save = {"action": action, "collection": RELEASE_PLAN, "why": "sort the release", **target, **sent}
     command = next(c for c in commands.product_commands_for("mcp") if c.name == "plan_memory")
     try:
         with _store_thread_held_with_intake_on(service, monkeypatch), request_scope(OWNER):
-            queued = writer_lease.invoke_command(
-                command, root, implicit_idempotency_scope="principal:session-b", action="triage",
-                collection=RELEASE_PLAN, plan_id=row["plan_id"], expected_container_hash=view["snapshot"],
-                expected_item_version=row["item_version"], transition={"parent": None, "kind": "unregistered-kind"},
-                why="sort the platform")
-            assert queued["state"] == "queued"
-        ref = queued["queued_write"]["ref"]
-        _until(lambda: write_intake.read(root, ref=ref)["queued_write"]["state"] == "failed")
-        error = write_intake.read(root, ref=ref)["queued_write"]["error"]
-        assert (error["code"], error["message"]) == ("INVALID_PLAN", "triage requires an active deliverable plan")
+            try:
+                queued = writer_lease.invoke_command(
+                    command, root, implicit_idempotency_scope="principal:session-b", **save)
+            except OpError as refused:
+                busy = (refused.code, refused.message)
+                assert write_intake.read(root)["items"] == []
+            else:
+                busy = None
+        assert (busy is not None) == at_once
+        if busy is None:
+            ref = queued["queued_write"]["ref"]
+            _until(lambda: write_intake.read(root, ref=ref)["queued_write"]["state"] == "failed")
+            error = write_intake.read(root, ref=ref)["queued_write"]["error"]
+            busy = (error["code"], error["message"])
     finally:
         write_intake.stop(root)
+    with pytest.raises(OpError) as direct:
+        call(root, "plan_memory", **save)
+    assert busy == (direct.value.code, direct.value.message)
 
 
 def counted_appends(monkeypatch):

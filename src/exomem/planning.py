@@ -475,6 +475,34 @@ def add(
 ) -> dict[str, Any]:
     """Capture one Planning item through the shared Markdown-item writer."""
     manifest = record_governance.resolve_collection_for_mutation(vault_root, collection)
+    values = checked_file_add(vault_root, manifest, item, plan_id=plan_id, why=why, body=body)
+    return records.append_record(
+        vault_root,
+        manifest,
+        item=values,
+        item_key=plan_id,
+        expected_container_hash=expected_container_hash,
+        body=body,
+        why=why,
+        validate_snapshot=partial(_validate_final_relationships, vault_root),
+        hold=_prepare is None,
+        _prepare=_prepare,
+        _validate_inputs=_validate_inputs,
+    )
+
+
+def checked_file_add(
+    vault_root: Path,
+    manifest: collections.CollectionManifest,
+    item: Mapping[str, Any],
+    *,
+    plan_id: str | None,
+    why: str,
+    body: str | None,
+) -> dict[str, Any]:
+    """A file collection's add checks before the shared writer's, in `add`'s order; the item that it writes.
+
+    The busy intake runs them too (`plan_memory.value_refusal`), so a refusal that it gives keeps this order."""
     require_planning_profile(manifest)
     record_governance.require_mutation_visibility(vault_root, manifest)
     _validate_public_text(why, "why")
@@ -489,19 +517,7 @@ def add(
         authorize_path=record_governance.full_release_filter(vault_root),
     ).read()
     _validate_relationships(vault_root, manifest, snapshot.records, plan_id or "__new__", values)
-    return records.append_record(
-        vault_root,
-        manifest,
-        item=values,
-        item_key=plan_id,
-        expected_container_hash=expected_container_hash,
-        body=body,
-        why=why,
-        validate_snapshot=partial(_validate_final_relationships, vault_root),
-        hold=_prepare is None,
-        _prepare=_prepare,
-        _validate_inputs=_validate_inputs,
-    )
+    return values
 
 
 def prepare(vault_root: Path, action: str, args: Mapping[str, Any], *, _validate_inputs=None) -> dict[str, Any]:

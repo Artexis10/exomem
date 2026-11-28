@@ -701,6 +701,33 @@ def test_a_plan_add_with_a_value_the_vault_never_declares_is_refused_behind_the_
     assert (direct.value.code, direct.value.message) == (code, message)
 
 
+@pytest.mark.parametrize(
+    ("why", "parent"),
+    [("size it\nthen ship it", {}),
+     ("plan the release", {"parent": "exomem://plan/2db90f18-70df-4e41-986e-2d7d7db1caca/"
+                                     "77777777-7777-4777-8777-777777777777"})],
+    ids=["two-line-why", "missing-parent"],
+)
+def test_a_busy_file_plan_add_that_its_commit_refuses_for_something_else_first_is_refused_so_at_its_replay(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch, why: str, parent: dict
+) -> None:
+    """Defect: a busy add with an undeclared effort was refused for that effort and told to resend another value,
+    while a file collection's commit first refuses its two-line why or its missing parent. The add queues, and its
+    replay refuses it as the same add sent directly is refused."""
+    _writer, holder = managers
+    plan = _command("plan_memory")
+    collection = _planning_collection(vault)
+    call = {**_plan_call(collection, "add", effort="medium", **parent), "why": why}
+    first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
+    receipt = _send(plan, vault, call, scope="principal:session-b")
+    assert receipt["state"] == "queued"
+    paused.set()
+    failed = _wait_for_state(vault, receipt["queued_write"]["ref"], "failed")
+    with request_scope(local_owner_principal(surface="mcp")), pytest.raises(OpError) as direct:
+        plan_memory(vault, **call)
+    assert (failed["error"]["code"], failed["error"]["message"]) == (direct.value.code, direct.value.message)
+
+
 def test_a_plan_value_the_vault_declares_is_still_queued_behind_the_queue_and_lands(
     vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
