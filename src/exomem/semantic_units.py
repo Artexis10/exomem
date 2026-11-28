@@ -341,6 +341,10 @@ class SemanticUnitDocument:
     def is_valid(self) -> bool:
         return not self.errors
 
+    def has_errors_in(self, unit: SemanticUnit) -> bool:
+        """Whether a parser error lands inside the unit's source span."""
+        return any(error.line is not None and unit.line <= error.line <= unit.end_line for error in self.errors)
+
     @property
     def rich_units(self) -> tuple[SemanticUnit, ...]:
         return tuple(unit for unit in self.units if unit.form == "rich")

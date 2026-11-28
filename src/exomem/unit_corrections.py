@@ -157,6 +157,9 @@ def discover(
             return current
 
         if replacement_nodes is not None:
+            # The canonical store can acknowledge text before it publishes that text's graph rows.
+            if stored is not None and conn.execute("SELECT 1 FROM store_derivation_queue LIMIT 1").fetchone():
+                return result("unavailable")
             replaced = view.replaced_units(
                 replacement_nodes, edge_limit=REPLACEMENT_EDGE_LIMIT, source_limit=REPLACEMENT_SOURCE_LIMIT,
             )

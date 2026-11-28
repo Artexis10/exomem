@@ -26,8 +26,10 @@ from exomem import (
     activation_conventions,
     commands,
     context_catalogue,
+    context_views,
     domain_profiles,
     embeddings,
+    epistemic_graph,
     lexstore,
     note_types,
     profile_selection,
@@ -304,6 +306,40 @@ def test_two_touched_domains_serve_their_shared_ancestor_once(profiles_vault) ->
     domains = [entry["domain"] for entry in packet["domain_profiles"]["profiles"]]
     assert sorted(domains) == ["games", "media", "music"]
     assert domains[-1] != "games" and domains.count("media") == 1
+
+
+def test_replacement_query_count_stays_fixed_across_profile_ancestors(profiles_vault, monkeypatch) -> None:
+    domains = {}
+    pages = []
+    for index in range(12):
+        domain = f"depth-{index}"
+        domains[domain] = {"label": f"Depth {index}"}
+        if index:
+            domains[domain]["parent"] = f"depth-{index - 1}"
+        path = _profile(profiles_vault, domain, [domain], _rule(domain, f"Calibration level {index}."))
+        pages.append(domain_profiles.ProfilePage(path, path, domain))
+    _write(profiles_vault, f"{KB}/_Schema/source-taxonomy.yaml", yaml.safe_dump({"schema_version": 1, "domains": domains}))
+    _refresh(profiles_vault)
+    taxonomy = source_taxonomy.load_taxonomy(profiles_vault)
+    reading = domain_profiles.Reading(taxonomy, tuple(pages), ("depth-11",), profile_selection.LEXICAL)
+    assert len(reading.domains()) == 12
+
+    statements = []
+    open_snapshot = epistemic_graph.EpistemicGraphIndex._open_read_snapshot
+
+    def trace_snapshot(index, **kwargs):
+        connection = open_snapshot(index, **kwargs)
+        if connection is not None:
+            connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "_open_read_snapshot", trace_snapshot)
+    with principal.request_scope(principal.owner_principal(surface="library")), principal.invocation_scope():
+        caller = context_views.CallerView.current(profiles_vault)
+        block = domain_profiles.compile_block(profiles_vault, caller, reading=reading)
+
+    assert block["state"] == "ready"
+    assert len([query for query in statements if "graph_edges" in query]) == 1
 
 
 def test_a_general_turn_touches_no_profile(profiles_vault) -> None:

@@ -16939,30 +16939,75 @@ class GraphView:
         self, predecessors: Mapping[str, str], *, edge_limit: int, source_limit: int,
     ) -> frozenset[str] | None:
         """Find exact predecessor keys through incoming unit relations in an unrestricted view."""
+        pages = {_file_key(path): path for path in predecessors.values()}
+        # The neutral row can land elsewhere. The selected parser owns the exact end.
         rows = self.conn.execute(
-            f"SELECT {EDGE_COLUMNS} FROM json_each(?) AS predecessor "
-            "CROSS JOIN graph_edges AS e ON e.dst_key = predecessor.key "
+            f"SELECT predecessor.value, {EDGE_COLUMNS} FROM json_each(?) AS predecessor "
+            "CROSS JOIN graph_edges AS e ON e.dst_page_key = predecessor.key "
             "WHERE e.origin = 'semantic_relation' AND e.source_path <> predecessor.value "
+            "AND json_extract(e.metadata, '$.target_fragment') IS NOT NULL "
             "LIMIT ?",
-            (json.dumps(dict(predecessors)), edge_limit + 1),
+            (json.dumps(pages), edge_limit + 1),
         ).fetchall()
-        sources = {str(row[10]) for row in rows}
+        sources = {str(row[11]) for row in rows}
         if len(rows) > edge_limit or len(sources) > source_limit:
             return None
-        self._node_paths.update(predecessors)
-        self.prefetch(sources | {predecessors[row[2]] for row in rows})
-        replaced = set()
-        for row in rows:
+        self.prefetch(sources | {str(row[0]) for row in rows})
+        by_source: dict[str, list[dict[str, Any]]] = {}
+        for path, *row in rows:
+            self._node_paths[row[2]] = path
             edge = self.edge_row(row)
             if (
                 edge is not None
-                and edge["dst_key"] == row[2]
+                and edge["dst_key"] in predecessors
                 and (edge.get("metadata") or {}).get("unit_ref")
                 and relation_registry.traversable_resolution_status(edge.get("registry_status"))
                 and self.has(edge, "replaces")
             ):
-                replaced.add(row[2])
-        return None if self.unavailable else frozenset(replaced)
+                by_source.setdefault(edge["source_path"], []).append(edge)
+        if self.unavailable:
+            return None
+        return self._validate_replacement_sources(by_source)
+
+    def _validate_replacement_sources(
+        self, by_source: Mapping[str, Sequence[dict[str, Any]]],
+    ) -> frozenset[str] | None:
+        """Check normal unit diagnostics that the structural graph does not retain."""
+        from .vault_store import read as store_read
+
+        if not by_source:
+            return frozenset()
+        snapshot = store_read.snapshot_for_connection(self.conn)
+        batch = snapshot.prefetch(by_source) if snapshot is not None else nullcontext()
+        replaced: set[str] = set()
+        with batch:
+            if snapshot is not None:
+                total_bytes = sum(meta.size for meta in snapshot.page_metas(by_source).values())
+                if total_bytes > runtime_resources.SEMANTIC_SMALL_RESERVE_BYTES:
+                    return None
+            for path, edges in by_source.items():
+                try:
+                    with runtime_resources.semantic_preparation(
+                        self.vault_root, self.vault_root / path,
+                        limit_bytes=runtime_resources.SEMANTIC_SMALL_RESERVE_BYTES,
+                        check=self._check,
+                    ) as prepared:
+                        state = semantic_index.selected_parent_index_state(
+                            self.vault_root, path, source=prepared.source,
+                        )
+                        wanted = {edge["src_key"] for edge in edges}
+                        validity = {}
+                        for unit in state.document.units:
+                            self._check()
+                            key = _unit_candidate_key(path, unit)
+                            if key in wanted:
+                                validity[key] = not state.document.has_errors_in(unit)
+                except (OSError, ValueError, runtime_resources.PreparationBudgetExceeded):
+                    return None
+                if state.definitions_unavailable or validity.keys() != wanted:
+                    return None
+                replaced.update(edge["dst_key"] for edge in edges if validity[edge["src_key"]])
+        return frozenset(replaced)
 
     def node_row(self, row: tuple[Any, ...]) -> dict[str, Any] | None:
         """Serve one row selected as `NODE_SELECT`."""
