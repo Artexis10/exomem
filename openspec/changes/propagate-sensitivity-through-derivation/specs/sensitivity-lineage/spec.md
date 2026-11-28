@@ -121,7 +121,7 @@ While a `sensitivity` policy is active, a page or row write SHALL require the ow
 
 ### Requirement: Inheritance follows derivation edges and stays current
 
-The vault store SHALL hold a derived `page_sensitivity` object with each page's effective and inherited classes and a generation. Inheritance SHALL follow authorized graph bindings whose relation carries `inherits_sensitivity`, transitively. A commit SHALL mark its affected lineage pending before readers can see it. The generation SHALL increase whenever the effective classes change.
+The vault store SHALL hold a derived `page_sensitivity` object with each page's effective and inherited classes and a generation. Inheritance SHALL follow authorized authored bindings whose relation carries `inherits_sensitivity`, transitively. Independently stored relationship events SHALL remain outside this release's inheritance inputs. The page generation SHALL increase whenever its effective classes change.
 
 #### Scenario: A Source is classified after a note cites it
 
@@ -171,11 +171,11 @@ Capture, classify and a plain edit SHALL refuse a class on a page the graph does
 
 ### Requirement: Uncurrent inheritance answers as missing
 
-Class-policy reads by non-owners SHALL release a page only with proof of current effective classes at the pinned snapshot. Pending pages SHALL answer as missing in shape and timing and be excluded before ranking.
+Restricted class-policy reads SHALL release a page only with proof of current effective classes at the pinned snapshot. Pending pages SHALL answer as missing in shape and timing and be excluded before ranking.
 
 #### Scenario: A page was classified a moment ago
 
-- **WHEN** the owner classifies a note `health` and a restricted caller reads it before the classify's intent derives
+- **WHEN** the owner classifies a note `health` and a restricted caller or fenced owner connector reads it before the intent derives
 - **THEN** the note answers as missing
 
 #### Scenario: A raise is still deriving
@@ -185,12 +185,17 @@ Class-policy reads by non-owners SHALL release a page only with proof of current
 
 ### Requirement: A commit marks affected lineage pending
 
-The store SHALL publish the pending set with the commit, using an index of bound target identities. A change or deletion SHALL mark the target's transitive dependents. Unrelated pages SHALL keep their available proof. Graph resolution or a name collision alone SHALL NOT seed pending work.
+The store SHALL prepare the exact affected set outside the mutation hold. Preparation SHALL use the canonical stable-binding index with the proposed batch's binding delta. The canonical commit SHALL publish the binding delta, its generation and at most one prepared set together, with no dependency walk. An incomplete or stale set SHALL leave the write uncommitted. Graph resolution or a name collision alone SHALL NOT seed pending work.
 
 #### Scenario: A bound target changes before derivation
 
 - **WHEN** a commit changes classes on a bound target before its graph rows refresh
 - **THEN** the citer and its dependents answer as missing until their current lineage is proven
+
+#### Scenario: A binding arrives before its graph row
+
+- **WHEN** a writer commits a binding and a second write raises its source's class before graph derivation
+- **THEN** the second write's affected set includes the committed binding
 
 #### Scenario: An unrelated title collides with a bound target
 
@@ -202,14 +207,47 @@ The store SHALL publish the pending set with the commit, using an index of bound
 - **WHEN** all pages in the changed lineage are withheld from a caller
 - **THEN** unrelated pages that are visible to that caller remain visible while the affected lineage derives
 
-### Requirement: Owner reads do not pay for inheritance
+#### Scenario: Preparing a hub change reaches the work limit
 
-Owner reads SHALL NOT wait on inheritance work or pay the currency check.
+- **WHEN** preparation stops at its work limit before it can prove the exact affected set
+- **THEN** the write stays pending or returns the existing retry outcome, and readers see the previous committed state
+
+### Requirement: Lineage completion advances a canonical intent watermark
+
+Each canonical lineage mutation SHALL append one lineage intent generation. A derived transaction SHALL NOT advance the committed generation. Each publication SHALL activate proven class rows and retire their pending memberships together. The transaction that completes all work for an intent SHALL advance the watermark over the contiguous completed prefix.
+
+#### Scenario: Derivation raises the store revision before completion
+
+- **WHEN** a graph slice advances the store revision without completing a lineage intent
+- **THEN** the lineage watermark remains behind and affected pages still answer as missing
+
+### Requirement: A lineage publication proves its input generations
+
+Publication SHALL prove a current output version and every input class generation against their canonical dependencies. Graph completion SHALL have durable evidence. A superseded receipt SHALL require explicit coverage by a successor that finishes the required work. A pending or transferred dependency SHALL remain pending across a restart.
+
+#### Scenario: A second write replaces an intent during a dependency pass
+
+- **WHEN** a second write supersedes a path intent, a shared lookup has moved to another receipt, and the store restarts
+- **THEN** the old dependency stays pending until the successor proof covers it
+- **AND** a newer class row cannot publish using an older input that is still pending
+
+### Requirement: Pending membership reads are bounded by current work
+
+The read batch SHALL use an index by stable identity for unfinished pending membership. Completed or abandoned sets SHALL add no lookup work. A page with independently current proof SHALL remain available when the watermark is held by unrelated pending work.
+
+#### Scenario: Later work completes behind a stalled intent
+
+- **WHEN** an early intent remains pending while later unrelated intents finish
+- **THEN** unrelated candidate lookups do not inspect the completed sets
+
+### Requirement: Unrestricted owner reads do not pay for inheritance
+
+Unrestricted owner reads SHALL NOT wait on inheritance work or pay the currency check.
 
 #### Scenario: The owner reads during a hub raise
 
 - **WHEN** a hub Source gains a class and its dependents are still pending
-- **THEN** the owner's reads of those dependents return them without waiting on the recompute
+- **THEN** an unrestricted owner's reads of those dependents return them without waiting on the recompute
 
 ### Requirement: A classified read asks the agent to name its sources
 

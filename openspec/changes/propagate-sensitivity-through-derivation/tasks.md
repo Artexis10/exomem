@@ -21,7 +21,7 @@
 
 ## 3. Live inheritance
 
-- [ ] 3.1 Add the `page_sensitivity` owner object. Publish pending lineage with the commit and recompute it in derivation slices.
+- [ ] 3.1 Add `page_sensitivity` at the next free owner version. Stage affected sets from canonical bindings and publish their deltas with the intent.
 - [ ] 3.2 Give episode `about` a graph edge with the behaviour if it has none.
 - [ ] 3.3 Index `item_sources` by source ref for current row versions; join row classes at decision time.
 - [ ] 3.4 Key each entry of `admission_memo`, membership `_MEMO`, `_SNAPSHOT_MEMO`, `_PATH_MEMO`, the store-mode membership map and the collection view decisions on its page's and scope parents' generations.
@@ -32,13 +32,13 @@
 ## 4. Disclosure
 
 - [ ] 4.1 Make membership subjects carry effective classes, `UNRESOLVED` when not current. List every fact released without a path (counts, rollups, aggregates, snippets, titles, link names, suggestions) and decide each for its pages. Decide binaries by their Evidence page.
-- [ ] 4.2 Reuse the snapshot's pending proof across reads. Look up affected dependents through the bound targets' stable identities.
+- [ ] 4.2 Implement indexed pending reads and atomic publication. Prove input generations and durable dependency coverage through supersession and restart.
 - [ ] 4.3 Add the `sensitivity` selector: no other selector in the same scope, refused in `exclude`, never removing the residual scope, refused on a vault without the store.
 - [ ] 4.4 Casefold path selectors and exclusions.
-- [ ] 4.5 Add the behavioural egress test over every registered read operation, MCP resource and prompt with the five synthetic canaries, comparing counts with and without them.
+- [ ] 4.5 Test every registered read operation, MCP resource and prompt with the synthetic canaries. Include a fenced owner before derivation.
 
 ## 5. Proof and delivery
 
-- [ ] 5.1 Measure a restricted first read and a hub raise before and after at the load target. Include commit time.
+- [ ] 5.1 Compare the real hold and restricted first read at the load target. Include unaffected reads, saturated preparation and a stalled intent.
 - [ ] 5.2 Extend the twin-world rig with the direct, cited, episode, uncited copy and unresolved-link cases. Run the blind Opus re-attack before merge.
 - [ ] 5.3 Run the full suite, the strict OpenSpec gate and the privacy gate. Obtain two independent reviews, merge, and verify the ordinary release.

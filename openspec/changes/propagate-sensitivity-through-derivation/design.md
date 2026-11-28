@@ -70,13 +70,14 @@ Rejected:
 
 ### D3. Live inheritance
 
-- **Edges.** Inheritance follows authorized bindings for `graph_edges` whose relation carries a new closed behaviour `inherits_sensitivity`. The core pack assigns it to `derived_from`, `evidenced_by`, `cites`, `refines`, `duplicates` and `supersedes`; an extension relation inherits its parent's behaviours. Episode `about` gets a graph edge with the behaviour if it has none. When stored relationships (`make-vault-store-canonical` D10) land, they can contribute through the same binding rule.
-- **Recompute.** A derivation that changes a page's own classes, floor, mask or one of its derivation edges marks the page's dependents pending in the same transaction. The store then recomputes them in derivation slices, walking dependents through the indexed `dst_page_key`. A cycle terminates because the walk keeps a set. A page's generation increases whenever its `effective` value changes.
+- **Edges.** Inheritance follows authorized authored bindings whose graph relation carries `inherits_sensitivity`. The core pack assigns the behaviour to `derived_from`, `evidenced_by`, `cites`, `refines`, `duplicates` and `supersedes`. An extension relation inherits its parent's behaviours. Episode `about` gets a graph edge with the behaviour if it has none. This release covers authored page and episode bindings and current row source bindings.
+- **D10 integration.** Independently stored relationship events are deferred. A future change must register lineage work in the canonical relationship commit for both addition and retirement, even when no page bytes or page revision change. Its proof must read before the graph drain.
+- **Recompute.** D5 marks changes to own classes, floors, masks or authorized bindings pending at the canonical commit. The store recomputes the affected pages in derivation slices. A cycle terminates because the walk keeps a set. A page's generation increases whenever its `effective` value changes.
 - **Rows.** `item_sources` gains an index on the source ref, restricted to current row versions, so an `effective` change finds the dependent rows.
 - **Caches.** Every cache that holds a scope set or a decision keys each entry on its own page's generation and the generations of its scope parents (parts, frames): `admission_memo`, membership `_MEMO`, `_SNAPSHOT_MEMO` and `_PATH_MEMO`, the store-mode membership map (`make-vault-store-canonical` D13) and the collection view decisions (D14). Read the generations in the existing request batch. Keep the membership map header independent of page generations.
 - **Catalog.** Projected rows carry their page's generation. Before ranking or aggregation, projected retrieval checks the current sensitivity scopes and verifies that the exact representation they authorize exists. If that representation is absent, it withholds that item until republish and continues with the other items.
-- **Owner reads.** Inheritance work is derivation, not a write intent, so owner reads do not wait on it.
-- **Version.** `page_sensitivity` takes the next owner version in `vault_store/rederive.py` (6; owner version is 5 today). Of this change and `make-vault-store-canonical` task 5.2, the second to merge rebases.
+- **Owner reads.** An unrestricted owner does not wait for sensitivity derivation. D5 reuses the existing caller test, including connector restrictions.
+- **Version.** `page_sensitivity` takes the next free owner version in `vault_store/rederive.py` at integration. Task 5.2 of `make-vault-store-canonical` targets version 6.
 - **Pages outside the graph.** The graph indexes only Knowledge Base Markdown outside the scan-excluded folders (`epistemic_graph._is_graph_page`). A class on a page outside the graph would reach no dependent. Capture, classify and a plain edit refuse it with `SENSITIVITY_PAGE_UNTRACKED`. The release check lists already-classified pages outside the graph.
 
 Rejected: inheritance in `page_admission`. That row's currency proof is the page's own sha256, which a source's class change does not move.
@@ -85,16 +86,23 @@ Rejected: inheritance in `page_admission`. That row's currency proof is the page
 
 Clearing a class on a source recomputes inheritance, so dependents that hold the class only by inheritance lose it. A page whose authored write came after the class was set holds the class in its floor and keeps it. This was decided on 2026-11-27.
 
-### D5. The currency proof is one watermark
+### D5. A bounded commit publishes the lineage proof
 
-The store keeps two revisions: the last committed revision, and the revision up to which `page_sensitivity` is complete, including derivation of every committed intent. At a read's pinned snapshot:
+Reuse the canonical write plan and the store thread's bounded derivation work. Before the foreground hold, prepare the exact affected set from the canonical stable-binding index and the proposed batch's binding delta. The derived graph may lag this index. Stage the binding delta and affected set in resumable batches under `BATCH_PAGES` and `SLICE_SECONDS`. Key preparation by the final normalized write and the canonical binding generation.
 
-- When the second equals the first, every page's `effective` is current. The check is O(1).
-- Otherwise the read uses the store's pending set for that snapshot. The commit publishes the affected set before the new snapshot can be read. It uses a batched, indexed lookup of direct and transitive dependents bound to the changed identities, including deleted targets. Unrelated pages keep their available proof. Guessed targets and name collisions cannot affect pending lineage. Derived class recompute runs later in slices. Measure the commit cost as well as the restricted read at the load target.
+The foreground transaction does zero dependency walks and activates at most one staged set for its write batch. It validates the inputs and publishes the binding delta, its generation and the affected set with the canonical changes. An incomplete, stale or unavailable set leaves the write uncommitted, with the existing pending or retry outcome. Readers still have the previous committed state. This restriction applies only to mutations that can change sensitivity lineage.
+
+The canonical writer appends one `lineage_intent_generation` for each commit that changes lineage. The generation names its affected set and the canonical derivation work it depends on. Derived transactions never advance it. `store_mode.revision` also advances during derivation and cannot stand in for this generation.
+
+Each dependency needs a durable completion receipt or an explicit link to a successor that covers its work. If a later commit replaces a path's intent, the missing old queue row proves nothing. A transferred lookup key stays pending until its new owner completes it. Restart uses the same receipts and links.
+
+At the pinned snapshot, the watermark can certify all committed lineage. Otherwise the read batch checks active unfinished memberships by stable identity through an index. The lookup cost follows the batch and its unfinished memberships. Completed and abandoned sets add no work. Unrelated pages retain their proof.
+
+A derivation publication verifies the output version and the canonical generations of every class input it uses. It keeps outputs pending if a required pass or input is incomplete. It publishes each batch's proven rows and retires their pending memberships together. The transaction that finishes the last work for an intent records completion and advances the watermark over the contiguous completed prefix. A failed pass keeps its work pending.
 
 Projected retrieval removes the pending set before ranking, so document frequency and ranks cannot reveal a withheld page.
 
-For non-owners under a `sensitivity` policy, this is an exception to the ordinary wait and lag notice in "A read reflects the writes acknowledged before it, or says what lags" in `make-vault-store-canonical`. The read skips that wait and treats pending pages as absent in shape and timing. Owner and other reads keep the existing waiting rules. Agree this exception with the store owner and reconcile the read-door requirement before implementation.
+For restricted callers under a `sensitivity` policy, this is an exception to the ordinary wait and lag notice in "A read reflects the writes acknowledged before it, or says what lags" in `make-vault-store-canonical`. The read skips that wait and treats pending pages as absent in shape and timing. Reuse `egress.caller_restricted` so an owner using a fenced connector gets the same check. Unrestricted owner and other ordinary reads keep the existing waiting rules.
 
 ### D6. One egress decision, proved by behaviour
 
@@ -127,7 +135,7 @@ A binary from before this change refuses a policy that uses the selector. A proc
 - **Uncited paraphrase.** A write that names no source carries no class. The read-result prompt and the instructions reduce this; the re-attack lane measures it. It remains an agent-judgement risk, as classification is in Phase A.
 - **Existence bits for confined writers.** A confined writer that creates, moves or links onto a path inside its writable scope can learn that a page it cannot read holds that path: `FILE_EXISTS`, `DEST_EXISTS`, `ENTITY_EXISTS`, `ARTIFACT_EXISTS`, a records key conflict, the names step's numbered suffix or a folder respelling. A folder respelling also returns the exact spelling of a withheld folder, and `FILE_EXISTS` or a numbered suffix confirms a guessed title. None reveals content or class. This change does not close them; the re-attack lane rates them, and Phase C decides before any confined writer gets a shared audience.
 - **Mixed versions.** Until every process restarts on this release, an older process keeps the previous policy.
-- **Derivation lag hides pages** from restricted callers during a hub raise. The owner never sees this.
+- **Derivation lag hides affected pages** from restricted callers during a hub raise. An unrestricted owner keeps ordinary reads.
 - **Owner reads are not receipted.** The receipt chain writes nothing for an ungoverned owner read (`disclosure-evidence`), and this change keeps that. Non-owner reads of classified pages are governed, so they are receipted.
 
 ## Migration
@@ -139,5 +147,5 @@ Page bytes stay unchanged. The store derives `page_sensitivity` in slices. It re
 - Task 0.1: the spread measurement.
 - The behavioural egress test from D6.
 - Scoped tests for carry-over, removal, mask, the watermark and the residual rule.
-- A before and after on the latency suite for a restricted first read and a hub raise, on generated data at the load target.
+- Compare the real mutation hold and restricted first read before and after a hub raise. Use 20,000 pages, about 120,000 edges and 10,000 bound dependents. Include unaffected reads, a fenced owner, preparation saturation and a stalled intent with completed work behind it. Use the store's task 2.9 hold bar and D13 first-read target. Record preparation time separately.
 - The twin-world canary rig covers direct, cited, episode, uncited-copy and unresolved-link cases. A fresh Opus security reviewer runs the re-attack. Merge only after it detects no leak or oracle beyond the existence bits listed above.

@@ -8,7 +8,7 @@ So restriction by class is safe only when:
 
 - a page carries the classes of the material it was written from, also when that material is classified later;
 - a page whose classes cannot be proven current answers as missing, never as released;
-- every release to a non-owner goes through the one egress decision, and that decision reads the inherited classes.
+- every release to a restricted caller goes through the one egress decision, and that decision reads the inherited classes.
 
 This change delivers those three properties and the policy selector that uses them. Per-audience policy, its registries and live enablement stay in `restrict-disclosure-per-audience`. That change starts only after an adversarial re-attack passes on this one.
 
@@ -25,7 +25,7 @@ This change delivers those three properties and the policy selector that uses th
 - **Live inheritance.** A new derived store object, `page_sensitivity`, holds each page's effective and inherited classes and a generation. A class added to a Source later reaches pages with authorized derivation bindings to it.
 - **Removals and masks.** Clearing a class on a Source removes it from pages that hold it only by inheritance. A page written after the class was set keeps it in its floor. An owner can mask a floor or inherited contribution with a reason. Dependents still inherit any own class with the same key.
 - **Read results ask for sources.** A read result that releases a classified page tells the agent to name the page in `sources` if a write uses it.
-- **Withheld equals missing.** Under a policy that selects by class, a non-owner caller gets as missing any page whose inherited classes are not current at the read's snapshot.
+- **Withheld equals missing.** Under a policy that selects by class, a restricted caller gets as missing any page whose inherited classes are not current at the read's snapshot. The rule includes fenced owner connectors.
 - **One egress decision.** The existing result postfilter decides on effective classes. A test runs every registered read under a restricted caller over synthetic classified pages and fails on any leak.
 - **A `sensitivity` scope selector.** A scope may select pages by effective class. Such a scope only ever lowers a ceiling: it never takes a page out of the residual scope. A vault without the vault store refuses a policy that uses it.
 - **Case.** Path selectors match regardless of letter case.
@@ -51,4 +51,5 @@ This change delivers those three properties and the policy selector that uses th
   - `governance/policy.py`, `governance/membership.py`, `governance/egress.py`, the projection catalog and collection governance
 - Data: no page bytes change at deploy. The store derives `page_sensitivity` on its next derivation. A page gains a floor on its next authored write.
 - Disclosure: with no policy, nothing changes for any reader. With a policy that selects by class, no page becomes more visible to any audience than it was.
-- Performance: inheritance runs as derivation work in the existing store-thread slices. The restricted first-read target (about one second at 20,000 pages) stays; the change measures it before and after.
+- Scope: authorized page, episode and row bindings carry inherited classes. Independently stored relationship events are a later integration.
+- Performance: the writer prepares the affected set outside the mutation hold. The change measures the real hold and restricted first read against the current store targets.
