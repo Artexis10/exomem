@@ -6,4 +6,4 @@
 
 ## 2. Verify the release
 
-- [ ] 2.1 Install the released wheel in disposable state. Verify the same-reference behaviour against a failure receipt written by the previous version.
+- [x] 2.1 Install the released wheel in disposable state. Verify the same-reference behaviour against a failure receipt written by the previous version.

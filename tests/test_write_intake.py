@@ -13,6 +13,7 @@ import contextvars
 import hashlib
 import json
 import os
+import sqlite3
 import threading
 import time
 import tracemalloc
@@ -52,6 +53,7 @@ from exomem.edit_operations import ReplaceStringOperation
 from exomem.governance import egress
 from exomem.governance import principal as principal_module
 from exomem.governance.principal import (
+    ClientBinding,
     OriginSessionBinding,
     RequestPrincipal,
     local_owner_principal,
@@ -1630,6 +1632,240 @@ def test_only_the_owner_can_read_queued_saves(vault: Path, managers, drainer) ->
         assert commands.op_review_memory(vault, mode="queued-write", ref=ref)["queued_write"]["ref"] == ref
 
 
+def test_personal_receipt_release_uses_the_original_verified_login(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, holder = managers
+    legacy = local_owner_principal(surface="mcp")
+    sender = replace(legacy, client_binding=ClientBinding("https://issuer.invalid", "client-one"),
+                     origin_session=OriginSessionBinding("login-a", "1", "mcp"))
+    other_client = replace(sender, client_binding=ClientBinding("https://issuer.invalid", "client-two"),
+                           origin_session=OriginSessionBinding("login-b", "1", "mcp"))
+    fresh_login = replace(sender, origin_session=OriginSessionBinding("login-c", "1", "mcp"))
+    revoked = set()
+
+    def login_state(who, *, require_owner=False):
+        if require_owner and who.origin_session.session_id in revoked:
+            return auth_sessions.OriginLogin.UNREADABLE
+        return auth_sessions.OriginLogin.VALID
+
+    monkeypatch.setattr(auth_sessions, "origin_login_state_sync", login_state)
+    remember, review = _command("remember"), _command("review_memory")
+    arguments = _remember_kwargs(vault, 965)
+    with _Hold(holder, vault):
+        ref = _send(remember, vault, arguments, principal=sender)["queued_write"]["ref"]
+        scoped = _send(review, vault, {"mode": "queued-write", "ref": ref}, principal=replace(sender), scope=None)
+        assert scoped["queued_write"]["arguments"]["content"] == arguments["content"]
+        for caller in (legacy, other_client, fresh_login):
+            failures = []
+            for named in (ref, write_intake.ref_for("unrecorded")):
+                with pytest.raises(OpError) as refused:
+                    _send(review, vault, {"mode": "queued-write", "ref": named}, principal=caller, scope=None)
+                failures.append(refused.value.as_public_dict())
+            assert failures[0] == failures[1] and failures[0]["code"] == "QUEUED_WRITE_NOT_FOUND"
+            listing = _send(review, vault, {"mode": "queued-write"}, principal=caller, scope=None)
+            assert listing["items"] == [] and sum(listing["counts"].values()) == 0
+        with pytest.raises(OpError) as same_key:
+            _send(remember, vault, arguments, principal=fresh_login)
+        assert same_key.value.code == "QUEUED_WRITE_NOT_FOUND"
+        assert ref not in str(same_key.value.as_public_dict())
+        revoked.add(sender.origin_session.session_id)
+        with pytest.raises(OpError) as stale:
+            _send(review, vault, {"mode": "queued-write", "ref": ref}, principal=sender, scope=None)
+        assert stale.value.code == "QUEUED_WRITE_NOT_FOUND"
+        assert write_intake.read(vault, ref=ref)["queued_write"]["ref"] == ref
+
+
+def test_oauth_refresh_keeps_the_original_receipt_and_retry_identity(vault, tmp_path, managers, drainer, monkeypatch):
+    from fastmcp.server import dependencies
+    from test_session_oauth import _proxy
+
+    from exomem import command_surface, server_auth
+
+    _, holder = managers
+    issuer = "https://memory.example"
+    monkeypatch.setenv("EXOMEM_BASE_URL", issuer)
+    monkeypatch.setenv("EXOMEM_GITHUB_USER_ID", "42")
+    monkeypatch.setenv("EXOMEM_OWNER_OAUTH_SUBJECT", "github:42")
+    authority = auth_sessions.SessionAuthority.local(
+        directory=tmp_path / "receipt-issuer", signing_root="disposable-issuer-key",
+        issuer=issuer, audience=f"{issuer}/mcp", allowed_github_user_id=42,
+    )
+    monkeypatch.setattr(server_auth, "build_session_authority", lambda **_kwargs: authority)
+    proxy = _proxy(authority=authority)
+    scopes = ("offline_access", "exomem:read", "exomem:write")
+
+    async def tokens():
+        identity = auth_sessions.SessionIdentity(42, "fixture-owner")
+        access, original, refresh = await authority.issue_offline(client_id="reader", scopes=scopes, identity=identity)
+        rotated_access, rotated, _ = await authority.rotate_refresh(refresh, client_id="reader", scopes=scopes)
+        other_access, _, _ = await authority.issue_offline(client_id="reader", scopes=scopes, identity=identity)
+        assert original.session_id != rotated.session_id and original.family_id == rotated.family_id
+        return [await proxy.load_access_token(bearer) for bearer in (access, rotated_access, other_access)]
+
+    first, refreshed, different = asyncio.run(tokens())
+
+    def send(token, tool, arguments):
+        with monkeypatch.context() as request:
+            request.setattr(dependencies, "get_access_token", lambda: token)
+            caller = principal_module.resolve_mcp_principal()
+            retry = command_surface.mcp_retry_scope()
+            assert caller.remote_owner and retry is not None
+            return _send(_command(tool), vault, arguments, principal=caller, scope=retry)
+
+    older, now = _remember_kwargs(vault, 971), _remember_kwargs(vault, 973)
+    with _Hold(holder, vault):
+        with monkeypatch.context() as previous:
+            previous.setattr(auth_sessions, "current_receipt_family", lambda _who: None)
+            older_ref = send(first, "remember", older)["queued_write"]["ref"]
+        current_ref = send(first, "remember", now)["queued_write"]["ref"]
+        for args, ref in ((older, older_ref), (now, current_ref)):
+            poll = {"mode": "queued-write", "ref": ref}
+            assert send(refreshed, "review_memory", poll)["queued_write"]["ref"] == ref
+            assert send(refreshed, "remember", args)["queued_write"]["ref"] == ref
+            with pytest.raises(OpError) as refused:
+                send(different, "review_memory", poll)
+            assert refused.value.code == "QUEUED_WRITE_NOT_FOUND"
+        listing = send(refreshed, "review_memory", {"mode": "queued-write"})
+        assert listing["coverage"] == "partial"
+        assert [item["ref"] for item in listing["items"]] == [current_ref]
+    for ref in (older_ref, current_ref):
+        _wait_for_state(vault, ref, "applied")
+
+    with monkeypatch.context() as request:
+        request.setattr(dependencies, "get_access_token", lambda: different)
+        foreign_binding = write_intake.principal_record(principal_module.resolve_mcp_principal())
+    with write_intake._write(vault) as database:
+        database.execute(
+            "INSERT INTO intake (id, origin, origin_ttl, command, principal, state, accepted_at, updated_at, "
+            "next_attempt_at, finished_at) SELECT ?, origin, origin_ttl, command, ?, 'failed', accepted_at, "
+            "updated_at, next_attempt_at, finished_at FROM intake WHERE id = ?",
+            ("b" * 32, json.dumps(foreign_binding), older_ref.removeprefix(write_intake.REF_PREFIX)),
+        )
+    write_intake.stop(vault)
+    write_intake.start(vault)
+    with pytest.raises(OpError) as hidden_retry:
+        send(refreshed, "remember", older)
+    assert hidden_retry.value.code == "QUEUED_WRITE_NOT_FOUND"
+    own = send(refreshed, "review_memory", {"mode": "queued-write", "ref": older_ref})
+    assert own["queued_write"]["ref"] == older_ref
+    assert len(_pages_titled(vault, "Queued save 971")) == 1
+    assert len(_pages_titled(vault, "Queued save 973")) == 1
+
+
+def test_an_unconfirmed_login_cannot_tell_whether_intake_storage_exists(vault, managers, drainer, monkeypatch):
+    _, holder = managers
+    stale = replace(local_owner_principal(surface="mcp"),
+                    client_binding=ClientBinding("https://issuer.invalid", "client-one"),
+                    origin_session=OriginSessionBinding("login-a", "1", "mcp"))
+    monkeypatch.setattr(auth_sessions, "origin_login_state_sync",
+                        lambda _who, **_kwargs: auth_sessions.OriginLogin.UNREADABLE)
+    status, review = _command("coordination_status"), _command("review_memory")
+    assert _send(status, vault, {}, principal=stale, scope=None)["write_intake"] == {"state": "unknown"}
+    with pytest.raises(OpError) as missing:
+        _send(review, vault, {"mode": "queued-write"}, principal=stale, scope=None)
+
+    monkeypatch.setattr(write_intake.write_intake_access, "ensure_index", lambda _conn: None)
+    with _Hold(holder, vault):
+        _send(_command("remember"), vault, _remember_kwargs(vault, 975))
+        assert _send(status, vault, {}, principal=stale, scope=None)["write_intake"] == {"state": "unknown"}
+        with pytest.raises(OpError) as legacy_store:
+            _send(review, vault, {"mode": "queued-write"}, principal=stale, scope=None)
+        assert legacy_store.value.as_public_dict() == missing.value.as_public_dict()
+
+
+def test_a_busy_save_does_not_build_the_legacy_scope_index(vault, managers, drainer, monkeypatch):
+    _, holder = managers
+    remember = _command("remember")
+    monkeypatch.setattr(write_intake, "_claim_head", lambda _root: 0.05)
+    with _Hold(holder, vault), monkeypatch.context() as previous:
+        previous.setattr(write_intake.write_intake_access, "ensure_index", lambda _conn: None)
+        older_ref = _send(remember, vault, _remember_kwargs(vault, 976))["queued_write"]["ref"]
+    write_intake.stop(vault)
+    write_intake.start(vault)
+    attempts = []
+
+    def spent(_conn):
+        attempts.append(True)
+        raise TimeoutError("legacy scope work budget ended")
+
+    monkeypatch.setattr(write_intake.write_intake_access, "ensure_index", spent)
+    with _Hold(holder, vault):
+        accepted = _send(remember, vault, _remember_kwargs(vault, 977))["queued_write"]
+    assert accepted["ref"] != older_ref and accepted["position"] is None
+    assert not attempts
+
+
+def test_a_save_recovers_scope_after_the_first_acceptance_rolls_back(vault, managers, drainer, monkeypatch):
+    _, holder = managers
+    command, arguments = _command("remember"), _remember_kwargs(vault, 978)
+
+    def interrupted(_conn):
+        raise TimeoutError("scope setup interrupted during first acceptance")
+
+    with _Hold(holder, vault):
+        with monkeypatch.context() as first:
+            first.setattr(write_intake.write_intake_access, "ensure_index", interrupted)
+            with pytest.raises(OpError) as refused:
+                _send(command, vault, arguments)
+            assert refused.value.code == "MUTATION_BUSY"
+        accepted = _send(command, vault, arguments)["queued_write"]
+        assert accepted["position"] == 1
+    _wait_for_state(vault, accepted["ref"], "applied")
+    assert len(_pages_titled(vault, "Queued save 978")) == 1
+
+
+def test_another_login_does_not_consume_a_failure_notice(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, holder = managers
+    sender = replace(local_owner_principal(surface="mcp"),
+                     client_binding=ClientBinding("https://issuer.invalid", "client-one"),
+                     origin_session=OriginSessionBinding("login-a", "1", "mcp"))
+    fresh_login = replace(sender, origin_session=OriginSessionBinding("login-b", "1", "mcp"))
+    monkeypatch.setattr(auth_sessions, "origin_login_state_sync",
+                        lambda _who, **_kwargs: auth_sessions.OriginLogin.VALID)
+    real_claim = write_intake._claim_head
+    monkeypatch.setattr(write_intake, "_claim_head", lambda _root: 0.05)
+    remember = _command("remember")
+    with _Hold(holder, vault), monkeypatch.context() as previous_release:
+        previous_release.setattr(write_intake.write_intake_access, "ensure_index", lambda _conn: None)
+        first = _send(remember, vault, _remember_kwargs(vault, 966), principal=sender)
+        claim = real_claim(vault)
+        write_intake._finish_failed(vault, claim, "MUTATION_OUTCOME_UNKNOWN",
+                                   {"code": "MUTATION_OUTCOME_UNKNOWN", "committed": None})
+    write_intake.stop(vault)
+    monkeypatch.setattr(write_intake, "_claim_head", real_claim)
+    with write_intake._store(vault, mode="read") as database:
+        assert not write_intake.write_intake_access.indexed(database)
+
+    save_thread = threading.get_ident()
+    rebuilt = []
+    ensure_index = write_intake.write_intake_access.ensure_index
+
+    def rebuild(database):
+        rebuilt.append(threading.get_ident())
+        if len(rebuilt) == 1:
+            raise sqlite3.OperationalError("the legacy build was interrupted")
+        ensure_index(database)
+
+    monkeypatch.setattr(write_intake, "_SCOPE_INDEX_RETRY_SECONDS", 0.05)
+    monkeypatch.setattr(write_intake.write_intake_access, "ensure_index", rebuild)
+    restored = write_intake.start(vault)
+    other_result = _send(remember, vault, _remember_kwargs(vault, 967), principal=fresh_login)
+    assert "queued_writes_failed" not in other_result
+    with restored._condition:
+        assert restored._condition.wait_for(lambda: not restored._scope_index_needed, timeout=5)
+    assert len(rebuilt) == 2 and all(worker != save_thread for worker in rebuilt)
+    with write_intake._store(vault, mode="read") as database:
+        assert write_intake.write_intake_access.indexed(database)
+    own_result = _send(remember, vault, _remember_kwargs(vault, 968), principal=sender)
+    assert own_result["queued_writes_failed"] == 1
+    later = _send(remember, vault, _remember_kwargs(vault, 969), principal=sender)
+    assert "queued_writes_failed" not in later
+    assert write_intake.read(vault, ref=first["queued_write"]["ref"])["queued_write"]["state"] == "failed"
+
+
 def test_a_replay_that_stopped_before_its_commit_gate_lands_once_under_a_fresh_identity(
     vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1707,6 +1943,112 @@ def test_a_typed_mcp_edit_during_a_hold_is_queued_and_applied_after_it(
     with hold:
         asyncio.run(send())
     assert "1%, 10%, 50%, 100%" in (vault / page).read_text(encoding="utf-8")
+
+
+def test_http_receipt_delivery_rechecks_authority_before_releasing_or_naming_a_failure(
+    vault, managers, drainer, monkeypatch, tmp_path,
+):
+    import httpx
+    from fastmcp.server.middleware.middleware import Middleware
+    from test_session_oauth import _proxy
+
+    from exomem import server_auth
+
+    _, holder = managers
+    issuer = "https://memory.example"
+    authority = auth_sessions.SessionAuthority.local(
+        directory=tmp_path / "issuer", signing_root="disposable-issuer-key",
+        issuer=issuer, audience=f"{issuer}/mcp", allowed_github_user_id=42,
+    )
+    monkeypatch.setenv("EXOMEM_BASE_URL", issuer)
+    monkeypatch.setenv("EXOMEM_GITHUB_USER_ID", "42")
+    monkeypatch.setenv("EXOMEM_OWNER_OAUTH_SUBJECT", "github:42")
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_CALL_LEDGER_DIR", str(tmp_path / "ledger"))
+    monkeypatch.setattr(server_module, "load_dotenv", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server_module, "build_oauth", lambda **_kwargs: _proxy(authority=authority))
+    monkeypatch.setattr(server_auth, "build_session_authority", lambda **_kwargs: authority)
+    revalidate = authority.revalidate_login
+    unreadable = False
+    withhold_next = False
+
+    async def check_login(**kwargs):
+        if unreadable:
+            raise auth_sessions.SessionStoreUnavailable("the issuer cannot read the login")
+        return await revalidate(**kwargs)
+
+    monkeypatch.setattr(authority, "revalidate_login", check_login)
+
+    class ChangeAuthorityAfterDispatch(Middleware):
+        async def on_call_tool(self, context, call_next):
+            nonlocal unreadable, withhold_next
+            result = await call_next(context)
+            if withhold_next:
+                withhold_next = False
+                unreadable = True
+            return result
+
+    server = server_module.build_server(require_auth=True)
+    server.add_middleware(ChangeAuthorityAfterDispatch())
+    app = server.http_app(stateless_http=True, json_response=True)
+    claim_head = write_intake._claim_head
+    monkeypatch.setattr(write_intake, "_claim_head", lambda _root: 0.05)
+    page = "Knowledge Base/Notes/Insights/percentage-based-feature-flag-rollout.md"
+    original = "1%, 5%, 25%, 100%"
+    changes = [(original, "1%, 10%, 50%, 100%"), (original, "1%, 10%, 25%, 100%"),
+               ("1%, 10%, 25%, 100%", "1%, 10%, 75%, 100%")]
+    writes = [{"note": page, "action": "replace_text", "old_text": before, "new_text": after,
+               "why": "A source corrected the cohort steps."} for before, after in changes]
+
+    async def run():
+        nonlocal unreadable, withhold_next
+        bearer, _ = await authority.issue(
+            client_id="fixture-client", scopes=["exomem:read", "exomem:write"],
+            identity=auth_sessions.SessionIdentity(42, "fixture-owner"),
+        )
+        version = "2026-07-28"
+        request_id = 0
+        async with app.router.lifespan_context(app), httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url=issuer,
+        ) as http:
+            async def call(arguments):
+                nonlocal request_id
+                request_id += 1
+                name, wire = public_call("edit_note", arguments)
+                response = await http.post("/mcp", headers={
+                    "authorization": f"Bearer {bearer}", "accept": "application/json",
+                    "mcp-protocol-version": version, "mcp-method": "tools/call", "mcp-name": name,
+                }, json={"jsonrpc": "2.0", "id": request_id, "method": "tools/call",
+                         "params": {"name": name, "arguments": wire, "_meta": {
+                             "io.modelcontextprotocol/protocolVersion": version,
+                             "io.modelcontextprotocol/clientCapabilities": {},
+                             "io.modelcontextprotocol/clientInfo": {"name": "fixture-client", "version": "1"},
+                         }}})
+                assert response.status_code == 200, response.text
+                return response.json()["result"]
+
+            with _Hold(holder, vault):
+                withhold_next = True
+                withheld = await call(writes[0])
+                assert withheld["isError"] and write_intake.REF_PREFIX not in str(withheld), withheld.get("content")
+                unreadable = False
+                retry = await call(writes[0])
+                ref = retry["structuredContent"]["queued_write"]["ref"]
+                assert [item["ref"] for item in write_intake.read(vault)["items"]] == [ref]
+            claim = claim_head(vault)
+            write_intake._finish_failed(vault, claim, "MUTATION_OUTCOME_UNKNOWN",
+                                       {"code": "MUTATION_OUTCOME_UNKNOWN", "committed": None})
+            drainer._refresh_open()
+
+            withhold_next = True
+            unavailable = await call(writes[1])
+            assert not unavailable["isError"] and "queued_writes_failed" not in str(unavailable), unavailable.get("content")
+            unreadable = False
+            noticed = await call(writes[2])
+            assert noticed["structuredContent"]["queued_writes_failed"] == 1
+            assert "earlier queued save failed" in noticed["content"][0]["text"]
+
+    asyncio.run(run())
 
 
 def test_a_typed_edit_operation_is_stored_as_json_and_replayed(vault: Path, managers, drainer) -> None:
@@ -1809,7 +2151,8 @@ def test_an_unknown_outcome_keeps_its_receipt_after_restart_and_the_queue_moves_
 
     with monkeypatch.context() as unavailable:
         unavailable.setattr(write_intake, "_store", missing_store)
-        resend = _send(remember, vault, arguments)
+        administrator = principal_module.owner_principal(surface="mcp")
+        resend = _send(remember, vault, arguments, principal=administrator)
         assert resend["queued_write"]["ref"] == receipts[0]["queued_write"]["ref"]
         assert resend["committed"] is None
         assert not _pages_titled(vault, "Queued save 14")
@@ -1820,13 +2163,22 @@ def test_an_unknown_outcome_keeps_its_receipt_after_restart_and_the_queue_moves_
     assert "was not saved" not in noticed["user_summary"]
 
 
-def test_a_dismissed_legacy_duplicate_leaves_the_older_receipt_addressable(vault, managers, drainer, monkeypatch):
+@pytest.mark.parametrize("different_login", [False, True])
+def test_a_dismissed_legacy_duplicate_leaves_the_older_receipt_addressable(
+    vault, managers, drainer, monkeypatch, different_login,
+):
     """Legacy repeats could produce several terminal rows for one origin."""
     _writer, holder = managers
     monkeypatch.setattr(write_intake, "_claim_head", lambda _root: 0.05)
+    monkeypatch.setattr(auth_sessions, "origin_login_state_sync",
+                        lambda _who, **_kwargs: auth_sessions.OriginLogin.VALID)
+    sender = replace(local_owner_principal(surface="mcp"),
+                     client_binding=ClientBinding("https://issuer.invalid", "client-one"),
+                     origin_session=OriginSessionBinding("login-a", "1", "mcp"))
+    later = replace(sender, origin_session=OriginSessionBinding("login-b", "1", "mcp")) if different_login else sender
     remember = _command("remember")
     arguments = _remember_kwargs(vault, 17)
-    (receipt,) = _hold_and_queue(holder, vault, lambda: _send(remember, vault, arguments))
+    (receipt,) = _hold_and_queue(holder, vault, lambda: _send(remember, vault, arguments, principal=sender))
     first_ref = receipt["queued_write"]["ref"]
     first_id = first_ref.removeprefix(write_intake.REF_PREFIX)
     later_id = "a" * 32
@@ -1836,20 +2188,22 @@ def test_a_dismissed_legacy_duplicate_leaves_the_older_receipt_addressable(vault
         database.execute(
             "INSERT INTO intake (id, origin, origin_ttl, command, arguments, principal, surface, state, "
             "accepted_at, updated_at, next_attempt_at, finished_at) "
-            "SELECT ?, origin, origin_ttl, command, arguments, principal, surface, state, ?, ?, ?, ? "
+            "SELECT ?, origin, origin_ttl, command, arguments, ?, surface, state, ?, ?, ?, ? "
             "FROM intake WHERE id = ?",
-            (later_id, now, now, now, now, first_id),
+            (later_id, json.dumps(write_intake.principal_record(later)), now, now, now, now, first_id),
         )
 
     write_intake.stop(vault)
     write_intake.start(vault)
     later_ref = write_intake.ref_for(later_id)
-    assert _send(remember, vault, arguments)["queued_write"]["ref"] == later_ref
+    assert _send(remember, vault, arguments, principal=later)["queued_write"]["ref"] == later_ref
+    expected = first_ref if different_login else later_ref
+    assert _send(remember, vault, arguments, principal=sender)["queued_write"]["ref"] == expected
     write_intake.dismiss(vault, later_ref)
-    assert _send(remember, vault, arguments)["queued_write"]["ref"] == first_ref
+    assert _send(remember, vault, arguments, principal=sender)["queued_write"]["ref"] == first_ref
     write_intake.stop(vault)
     write_intake.start(vault)
-    assert _send(remember, vault, arguments)["queued_write"]["ref"] == first_ref
+    assert _send(remember, vault, arguments, principal=sender)["queued_write"]["ref"] == first_ref
     assert not _pages_titled(vault, "Queued save 17")
 
 
@@ -1919,14 +2273,17 @@ def test_a_queued_save_whose_login_has_ended_fails_with_its_arguments(
     _writer, holder = managers
     signed_in = replace(
         local_owner_principal(surface="mcp"),
+        client_binding=ClientBinding("https://issuer.invalid", "client-one"),
         origin_session=OriginSessionBinding(session_id="login-1", generation="1", audience="mcp"),
     )
+    monkeypatch.setattr(auth_sessions, "origin_login_state_sync",
+                        lambda _who, **_kwargs: auth_sessions.OriginLogin.VALID)
     (receipt,) = _hold_and_queue(
         holder, vault,
         lambda: _send(_command("remember"), vault, _remember_kwargs(vault, 19), principal=signed_in),
         monkeypatch=monkeypatch,
         then=lambda: monkeypatch.setattr(
-            auth_sessions, "origin_login_state_sync", lambda _who: auth_sessions.OriginLogin.NOT_VALID
+            auth_sessions, "origin_login_state_sync", lambda _who, **_kwargs: auth_sessions.OriginLogin.NOT_VALID
         ),
     )
     failed = _wait_for_state(vault, receipt["queued_write"]["ref"], "failed")
@@ -1960,7 +2317,8 @@ def test_a_resend_of_a_known_save_is_answered_from_the_index_when_its_row_cannot
     _writer, holder = managers
     remember = _command("remember")
     kwargs = _remember_kwargs(vault, 25)
-    (receipt,) = _hold_and_queue(holder, vault, lambda: _send(remember, vault, kwargs))
+    administrator = principal_module.owner_principal(surface="mcp")
+    (receipt,) = _hold_and_queue(holder, vault, lambda: _send(remember, vault, kwargs, principal=administrator))
     ref = receipt["queued_write"]["ref"]
     _wait_for_state(vault, ref, "applied")
 
@@ -1968,7 +2326,7 @@ def test_a_resend_of_a_known_save_is_answered_from_the_index_when_its_row_cannot
         raise OSError("intake store unreadable")
 
     monkeypatch.setattr(write_intake.Admission, "_stored_answer", unreadable)
-    resend = _send(remember, vault, kwargs)
+    resend = _send(remember, vault, kwargs, principal=administrator)
     assert resend["queued_write"] == {"ref": ref, "state": "applied"}
     assert len(_pages_titled(vault, "Queued save 25")) == 1
 

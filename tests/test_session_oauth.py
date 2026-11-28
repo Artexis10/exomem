@@ -156,6 +156,7 @@ class FakeRecord:
     github_login: str = "person"
     expires_at: float | None = None
     generation: str = "fixture-generation"
+    family_id: str | None = None
 
 
 class FakeAuthority:

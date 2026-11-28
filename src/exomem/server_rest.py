@@ -457,7 +457,7 @@ def register_rest_facade(
                         admission,
                         rule,
                     )
-                    from . import auth_sessions
+                    from . import auth_sessions, write_intake
                     from .governance import connector_boundary
 
                     if not await auth_sessions.origin_session_active(bound_principal):
@@ -505,6 +505,13 @@ def register_rest_facade(
                                 **kwargs,
                             )
 
+                    def release_receipt(delivery: write_intake.ReceiptDelivery, result: Any) -> Any:
+                        with capabilities.active_surface(surface_descriptor), principal_module.request_scope(bound_principal):
+                            notice = delivery.authorized_notice(bound_principal)
+                            return result if notice is None else write_intake.with_failure_notice(
+                                notice, result, at_delivery=True,
+                            )
+
                     try:
                         if _cmd.name == "manage_memory_file":
                             from .reclassify_source import is_preview_call, managed_preview_stop
@@ -535,7 +542,8 @@ def register_rest_facade(
                         boundary_revision, unrestricted = (
                             await run_in_threadpool(boundary_view) if check is not None else boundary_view()
                         )
-                        result = await run_in_threadpool(invoke_bound)
+                        with write_intake.receipt_delivery() as delivery:
+                            result = await run_in_threadpool(invoke_bound)
                         final_revision, final_unrestricted = (
                             await run_in_threadpool(boundary_view) if check is not None else boundary_view()
                         )
@@ -555,6 +563,8 @@ def register_rest_facade(
                             check()
                             preview_response = RestJSONResponse(cli_ops.envelope(True, data=result))
                             check()
+                        if delivery.receipt or delivery.notice is not None:
+                            result = await run_in_threadpool(release_receipt, delivery, result)
                     except request_budget.ReadBudgetExhausted:
                         if check is None:
                             raise

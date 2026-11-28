@@ -58,6 +58,7 @@ class ExomemSessionAccessToken(AccessToken):
     # The authority that verified this bearer, so the request revalidates its
     # origin through the same store and stale-grace cache. Never serialized.
     _verifier: Any = PrivateAttr(default=None)
+    _login_family: str | None = PrivateAttr(default=None)
 
 
 class SessionStoreUnavailableMiddleware:
@@ -207,6 +208,7 @@ class ExomemSessionOAuthProxy(OAuthProxy):
             },
         )
         verified._verifier = self._session_authority
+        verified._login_family = record.family_id
         return verified
 
     @override

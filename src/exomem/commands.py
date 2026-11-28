@@ -11485,14 +11485,15 @@ def op_review_memory(
         from . import write_intake
         from .cli_ops import OpError
 
-        if write_intake.principal_record(principal_module.effective_principal()) is None:
+        principal = principal_module.effective_principal()
+        if write_intake.principal_record(principal) is None:
             # Queued saves hold the owner's unpublished arguments: only a caller whose saves may queue reads them.
             raise OpError(
                 "QUEUED_WRITE_OWNER_ONLY",
                 "queued saves are visible to the vault owner only",
                 "Ask the owner to check the save, or read the page once it is saved.",
             )
-        return write_intake.read(vault_root, ref=ref, limit=limit)
+        return write_intake.read(vault_root, ref=ref, limit=limit, principal=principal)
     if mode == "procedure_approvals":
         return procedure_approval_operation_module.listing(vault_root, limit)
     if mode == held_operation_module.LIST_MODE:
@@ -15675,15 +15676,14 @@ def op_coordination_status(vault_root: Path) -> dict:
     from .writer_lease import coordination_status
 
     status = coordination_status(vault_root)
-    if write_intake.principal_record(principal_module.effective_principal()) is not None:
+    principal = principal_module.effective_principal()
+    if write_intake.principal_record(principal) is not None:
         # Saves held because the boundary was busy; `unknown` when the store cannot be read.
-        status = {**status, "write_intake": write_intake.status(vault_root)}
+        status = {**status, "write_intake": write_intake.status(vault_root, principal=principal)}
     boundary = status.get("mutation_boundary")
     # The contention counters name the last lock holder and how often writers
     # collided. Only the owner needs them, so another caller gets the boundary state alone.
-    if isinstance(boundary, Mapping) and "contention" in boundary and not is_owner(
-        principal_module.effective_principal()
-    ):
+    if isinstance(boundary, Mapping) and "contention" in boundary and not is_owner(principal):
         status = {
             **status,
             "mutation_boundary": {k: v for k, v in boundary.items() if k != "contention"},
