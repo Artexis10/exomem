@@ -46,9 +46,12 @@ A stale claim inside a page, an entity page included, supersedes at unit level w
 3. Expect one new unit that supersedes the old one. The old unit's text stays, and recall, search
    and the graph follow the link.
 
+When superseding a compact claim, omit `kind` to use the shipped replacement kind. Pass a governed
+rich kind to choose another.
+
 Two actions on the same claim keep its text. `action="assess_observation"` records a `verdict`, with
 an optional `check_by` date and evidence `links`. `action="link_observation"` adds typed `links`;
-it never removes one.
+it never removes one. Assessing or linking a compact claim requires a governed rich kind.
 
 ## Downstream pages
 

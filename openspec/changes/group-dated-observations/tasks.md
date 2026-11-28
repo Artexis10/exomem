@@ -11,4 +11,4 @@
 
 ## 2. Compact corrections
 
-- [x] 2.1 Verify that a compact correction uses the shipped replacement kind by default and accepts a custom kind when named. Update the tool's kind help.
+- [x] 2.1 Verify that a compact correction uses the shipped replacement kind by default and accepts a custom kind when named. Teach the choice in the claim guidance.

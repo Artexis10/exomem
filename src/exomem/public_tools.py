@@ -499,10 +499,7 @@ class EditNote(Wire):
     span: str | None = Field(default=None, description="supersede_observation, assess_observation, link_observation: the claim's exact text when its unit id is unknown.")
     verdict: str | None = Field(default=None, description="assess_observation, edit_observation: a governed verdict such as confirmed, qualified, or refuted.")
     check_by: str | None = Field(default=None, description="assess_observation: an ISO date to revisit the claim.")
-    kind: str | None = Field(default=None, description=(
-        "A governed rich kind. Optional for supersede_observation and edit_observation. "
-        "Required to assess or link a compact observation."
-    ))
+    kind: str | None = Field(default=None, description="supersede_observation, assess_observation, link_observation, edit_observation: a governed rich kind; required to promote a compact observation.")
     as_of: str | None = Field(default=None, description="supersede_observation, edit_observation: the ISO date the claim started holding. Dating a compact unit moves it to a dated block.")
     category: str | None = Field(default=None, description="edit_observation, supersede_observation.")
     text: str | None = Field(default=None, description="edit_observation, supersede_observation.")
