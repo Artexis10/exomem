@@ -603,9 +603,9 @@ class _Derivation:
         previous = dependency_pass.for_paths(self.tx, sorted(chunked))
         covered = set(self.written) | set(self.refreshed) | set(self.removed)
         scheduled = covered | found
-        scanned: dict[tuple[str, bool], str | None] = {}
+        assigned: set[tuple[str, bool]] = set()
         remaining = self.dependency_limit
-        for target in sorted(chunked):
+        for target in sorted(chunked, key=lambda path: (self.dependency_revisions[path], path)):
             keys = epistemic_graph._dependency_changed_keys(
                 self._paths_and_priors({target}), *resolvers,
             )
@@ -614,12 +614,16 @@ class _Derivation:
                 # A newer edit keeps the dropped names the earlier receipt still has to re-land.
                 keys.update(older.keys)
                 fragments_only = fragments_only and older.fragments_only
+            # One receipt owns each shared lookup key for the transaction. The oldest receipt
+            # keeps reads of this revision waiting even when later pages share its unfinished key.
+            unassigned = tuple(key for key in sorted(keys) if (key, fragments_only) not in assigned)
+            assigned.update((key, fragments_only) for key in unassigned)
             cursor = dependency_pass.DependencyPass(
-                target, self.dependency_revisions[target], tuple(sorted(keys)), fragments_only,
+                target, self.dependency_revisions[target], unassigned, fragments_only,
             )
             # A folder restore already derived its own links against all restored pages.
             # Spend the continuation budget only on sources that still need to run.
-            paths, following = cursor.batch(self.tx, remaining, covered=scheduled, scanned=scanned)
+            paths, following = cursor.batch(self.tx, remaining, covered=scheduled)
             remaining -= len(paths)
             found.update(paths)
             scheduled.update(paths)
