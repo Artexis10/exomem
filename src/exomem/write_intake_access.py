@@ -64,6 +64,10 @@ def can_release(principal: RequestPrincipal) -> bool:
     return auth_sessions.origin_login_state_sync(principal, require_owner=True) is auth_sessions.OriginLogin.VALID
 
 
+def needs_authoritative_release(principal: RequestPrincipal) -> bool:
+    return principal.origin_session is not None and not cloud_cell.is_cloud_issuer_family(principal.issuer_family)
+
+
 def row_matches(row: sqlite3.Row, allowed: Scopes, *, prior_login=None) -> bool:
     if allowed is None:
         return True
@@ -79,11 +83,35 @@ def row_matches(row: sqlite3.Row, allowed: Scopes, *, prior_login=None) -> bool:
 def same_legacy_family(current: Mapping[str, Any], stored: Mapping[str, Any], *, restore) -> bool:
     """Confirm one older access identifier belongs to the currently verified refresh family."""
     family = current.get("receipt_family")
-    if not family or stored.get("receipt_family") is not None or not isinstance(stored.get("origin_session"), Mapping):
-        return False
-    if any(_path_value(current, field) != _path_value(stored, field) for field in _BINDING_FIELDS):
-        return False
-    return auth_sessions.legacy_receipt_family(restore(stored)) == family
+    return bool(family and _legacy_binding_matches(current, stored)
+                and auth_sessions.legacy_receipt_family(restore(stored)) == family)
+
+
+def _legacy_binding_matches(current: Mapping[str, Any], stored: Mapping[str, Any]) -> bool:
+    return (
+        stored.get("receipt_family") is None
+        and isinstance(_path_value(stored, "origin_session.session_id"), str)
+        and all(_path_value(current, field) == _path_value(stored, field) for field in _BINDING_FIELDS)
+    )
+
+
+def exact_lookup_matches(
+    row: sqlite3.Row | None, current: Mapping[str, Any] | None, allowed: Scopes, *, restore,
+) -> bool:
+    """Use the same number of issuer checks for a missing or withheld reference."""
+    exact = row is not None and row_matches(row, allowed)
+    if allowed is None or current is None or current.get("receipt_family") is None:
+        return exact
+    stored = None
+    if row is not None and not exact:
+        try:
+            candidate = json.loads(row["principal"])
+        except (TypeError, ValueError):
+            candidate = None
+        if isinstance(candidate, Mapping) and _legacy_binding_matches(current, candidate):
+            stored = candidate
+    family = auth_sessions.legacy_receipt_family(restore(stored or current))
+    return exact or (stored is not None and family == current["receipt_family"])
 
 
 def indexed(conn: sqlite3.Connection) -> bool:
@@ -107,6 +135,7 @@ def ensure_index(conn: sqlite3.Connection) -> None:
         ) VIRTUAL
     """)
     conn.execute("CREATE INDEX intake_receipt_scope ON intake(receipt_scope, state, seq)")
+    conn.execute("CREATE INDEX intake_receipt_retry_scope ON intake(origin, receipt_scope, finished_at + origin_ttl)")
     conn.execute("CREATE INDEX intake_receipt_notice ON intake(receipt_scope) "
                  "WHERE state = 'failed' AND named_at IS NULL")
     conn.execute("CREATE TABLE intake_receipt_counts (scope TEXT, state TEXT, n INTEGER, PRIMARY KEY(scope, state))")

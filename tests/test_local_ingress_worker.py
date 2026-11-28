@@ -707,6 +707,38 @@ async def test_rest_on_local_ingress_does_not_need_the_rest_key_configured(
 
 
 @pytest.mark.anyio
+async def test_signed_rest_checks_receipt_authority_at_delivery(
+    real_worker: _RealWorker, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import auth_sessions, write_intake, writer_lease
+
+    ref = write_intake.ref_for("fixture-receipt")
+    unreadable = False
+    revalidate = auth_sessions.origin_login_state_sync
+
+    def authority(who, *, require_owner=False):
+        return (
+            auth_sessions.OriginLogin.UNREADABLE if unreadable and require_owner
+            else revalidate(who, require_owner=require_owner)
+        )
+
+    def completed_read(_command, *_args, **_kwargs):
+        nonlocal unreadable
+        write_intake._check_release(principal_module.effective_principal())
+        unreadable = True
+        return {"queued_write": {"ref": ref}}
+
+    monkeypatch.setattr(auth_sessions, "origin_login_state_sync", authority)
+    monkeypatch.setattr(writer_lease, "invoke_command", completed_read)
+    async with _real_doors(real_worker) as doors:
+        response = await doors.local.post("/api/review_memory", headers={
+            "authorization": f"Bearer {real_worker.local_token}",
+        }, json={"mode": "queued-write", "ref": ref})
+    assert response.json()["error"]["code"] == "AUTHORIZATION_SESSION_UNAVAILABLE"
+    assert ref not in response.text
+
+
+@pytest.mark.anyio
 async def test_a_large_local_body_leaves_no_grant_for_the_next_request_on_its_connection(
     oauth_worker: _Harness,
 ) -> None:

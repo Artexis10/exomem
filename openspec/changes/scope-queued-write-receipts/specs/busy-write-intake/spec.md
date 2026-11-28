@@ -20,12 +20,14 @@ A signed personal receipt SHALL be available only to its originating owner accou
 
 - **WHEN** a connector has cached evidence for a login that the issuer cannot confirm
 - **THEN** the connector receives no receipt reference, arguments, outcome, counts, or failure notice
+- **AND** the next eligible save can name a failure that this reply could not disclose
 
 #### Scenario: A token refresh keeps the same login
 
 - **WHEN** a connector refreshes its token and the issuer confirms the same login
 - **THEN** that login can still check its receipt
-- **AND** a resend using the same original identity returns that receipt and runs no new write
+- **AND** a resend using the same original identity runs no new write
+- **AND** the resend returns the receipt when the service can verify the stored login
 
 #### Scenario: An owner recovers a legacy receipt
 
@@ -39,11 +41,28 @@ A signed personal receipt SHALL be available only to its originating owner accou
 - **THEN** lists, counts, and notices mark their coverage partial and withhold queue position
 - **AND** an exact receipt lookup can recheck an older access identifier with the issuer
 
+#### Scenario: Two older receipts precede a token refresh
+
+- **WHEN** a legacy receipt for a previous access identifier lacks a stored family
+- **AND** the latest retained receipt for that write identity belongs to another login
+- **THEN** the original login can recover the earlier receipt by exact reference
+- **AND** a resend that cannot verify the earlier receipt runs no new write
+
 #### Scenario: A legacy owner ingress asks for a signed receipt
 
 - **WHEN** a legacy owner ingress without a client login asks for a personal connector's receipt
 - **THEN** the lookup matches a missing reference
 - **AND** the local administrative recovery command can still read the receipt
+
+### Requirement: Legacy scope index maintenance stays off the save path
+
+The idle drainer SHALL bound the lock wait and work time of each legacy scope index build. It SHALL delay retries. Saves SHALL NOT start a legacy scope index build.
+
+#### Scenario: A legacy scope index build cannot finish
+
+- **WHEN** the idle drainer cannot finish preparing the scope index within its allowance
+- **THEN** it waits until its next allowed attempt
+- **AND** saves do not start another scope index build
 
 ## MODIFIED Requirements
 
@@ -75,3 +94,21 @@ On a matching resend of an open save or a recognised terminal within its retry w
 - **WHEN** more than one retained terminal receipt matches the originating login's resend
 - **THEN** the service returns the latest matching receipt still within the retry window
 - **AND** when the owner dismisses that receipt, a resend can find the surviving receipt before and after restart
+
+### Requirement: The intake stays off the uncontended path
+
+An uncontended save SHALL skip intake storage except to check retries or notices or prepare legacy retry indexes. If retained failures cannot be checked, that first save SHALL return a retryable refusal with unknown effect.
+
+An idle drainer SHALL poll at most once every few minutes. It SHALL preserve vault identities and SHALL write only to prepare the legacy scope index.
+
+#### Scenario: An unreadable intake store does not block an ordinary save
+
+- **WHEN** intake was unreadable at startup and the service knows of no matching receipt or legacy store
+- **AND** an otherwise eligible save does not meet contention
+- **THEN** the save commits as it would without the intake
+
+#### Scenario: An idle legacy store defers the retry index build
+
+- **WHEN** a service starts on a legacy store with retained failures and no open saves
+- **THEN** startup does not scan the failures or write to the intake
+- **AND** the first eligible save prepares the retry indexes and checks the retained failures before it can execute

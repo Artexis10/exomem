@@ -21,10 +21,11 @@ import anyio
 import mcp.types
 from fastmcp.exceptions import PromptError, ResourceError, ToolError
 from fastmcp.server.middleware.middleware import Middleware, MiddlewareContext
+from fastmcp.tools import ToolResult
 from mcp.shared.message import ServerMessageMetadata, SessionMessage
 from mcp.types import jsonrpc_message_adapter
 
-from .. import auth_sessions, request_budget
+from .. import auth_sessions, request_budget, write_intake
 from ..command_surface import mcp_preview_warming, mcp_request_correlation
 from ..log_events import log_event
 from . import authorization_sessions, connector_boundary
@@ -728,7 +729,7 @@ class AuthorizationSessionMiddleware(Middleware):
                 )
                 entry_ms = (time.perf_counter() - entry_started) * 1000
                 phase = "downstream"
-                with principal_module.request_scope(bound):
+                with principal_module.request_scope(bound), write_intake.receipt_delivery() as delivery:
                     result = await call_next(context.copy(message=sanitized_message))
                 post_started = time.perf_counter()
                 phase = "post"
@@ -751,6 +752,9 @@ class AuthorizationSessionMiddleware(Middleware):
                     ):
                         raise AuthorizationContextUnavailable
                     request_budget.checkpoint()
+                    if delivery.receipt or delivery.notice is not None:
+                        with principal_module.request_scope(bound):
+                            result = await anyio.to_thread.run_sync(_release_receipt_result, bound, delivery, result)
                 except (AuthorizationContextUnavailable, connector_boundary.BoundaryUnavailable):
                     raise ToolError("request authority changed before result consumption") from None
                 phase = "complete"
@@ -805,3 +809,36 @@ class AuthorizationSessionMiddleware(Middleware):
 
     async def on_get_prompt(self, context, call_next):
         return await self._read_content(context, call_next, PromptError)
+
+
+def _release_receipt_result(
+    bound: principal_module.RequestPrincipal, delivery: write_intake.ReceiptDelivery, result: ToolResult,
+) -> ToolResult:
+    notice = delivery.authorized_notice(bound)
+    return result if notice is None else _notice_on_delivery(notice, result)
+
+
+def _notice_on_delivery(admission: write_intake.Admission, result: ToolResult) -> ToolResult:
+    """Update both forms of an ordinary save reply after the issuer confirms its login."""
+    structured = result.structured_content
+    if structured is None or result.is_error or len(result.content) != 1:
+        return result
+    block = result.content[0]
+    if not isinstance(block, mcp.types.TextContent):
+        return result
+    wrapped = bool((result.meta or {}).get("fastmcp", {}).get("wrap_result"))
+    payload = structured.get("result") if wrapped else structured
+    try:
+        if json.loads(block.text) != payload:
+            # Preserve any text projection that intentionally differs from structured content.
+            return result
+    except ValueError:
+        return result
+    updated = write_intake.with_failure_notice(admission, payload, at_delivery=True)
+    if updated is payload:
+        return result
+    return ToolResult(
+        content=[block.model_copy(update={"text": json.dumps(updated, ensure_ascii=False)})],
+        structured_content={**structured, "result": updated} if wrapped else updated,
+        meta=result.meta,
+    )
