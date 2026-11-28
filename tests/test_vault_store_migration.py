@@ -12,7 +12,9 @@ import hashlib
 import json
 import multiprocessing
 import os
+import shutil
 import sqlite3
+import subprocess
 import sys
 import time
 from contextlib import closing
@@ -50,7 +52,17 @@ from exomem import vault as pages
 from exomem.collection_store import capability, connection, custody, replica, schema
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import library_scope
-from exomem.vault_store import derivation, migrate, mode, ownership, verify, write
+from exomem.vault_store import (
+    derivation,
+    migrate,
+    mode,
+    ownership,
+    projector,
+    relationship_files,
+    relationships,
+    verify,
+    write,
+)
 
 ALPHA = "Knowledge Base/Notes/Alpha.md"
 BETA = "Knowledge Base/Notes/Beta.md"
@@ -256,6 +268,23 @@ def test_a_sidecar_row_that_no_longer_matches_its_file_refuses_the_migration_and
     )
 
 
+def test_graph_parity_uses_the_derived_schema_when_a_sidecar_has_extra_columns(tmp_path):
+    expected = tmp_path / "expected.sqlite"
+    with closing(sqlite3.connect(expected)) as derived, derived:
+        derived.execute("CREATE TABLE graph_edges (edge_key TEXT PRIMARY KEY, target TEXT)")
+        derived.execute("INSERT INTO graph_edges VALUES ('edge-a','unit-a')")
+    with closing(sqlite3.connect(":memory:", isolation_level=None)) as sidecar:
+        sidecar.execute(
+            "CREATE TABLE graph_edges (edge_key TEXT PRIMARY KEY, target TEXT, future_column TEXT)"
+        )
+        sidecar.execute("INSERT INTO graph_edges VALUES ('edge-a','unit-a','future value')")
+        assert not verify.compare_tables(sidecar, expected).differences
+        sidecar.execute("UPDATE graph_edges SET target = 'unit-b'")
+        assert verify.compare_tables(sidecar, expected).differences == (
+            verify.Difference("graph_edges", 2, ("edge-a",)),
+        )
+
+
 def test_a_graph_sidecar_edge_to_a_page_that_left_the_catalogue_is_replaced_by_the_files_rows_and_reported(
     vault, capsys, tmp_path
 ):
@@ -458,6 +487,268 @@ def test_a_rollback_returns_every_find_and_graph_answer_that_the_vault_gave_befo
     check_stored_links()
 
 
+def test_a_migration_strips_projected_relationship_text_before_indexing(vault):
+    source = (vault / ALPHA).read_bytes()
+    (vault / ALPHA).write_bytes(relationship_files.splice_block(
+        source, ["### Stored relationships", "luminous decorative trident"],
+    ))
+    build_indexes(vault)
+    assert migrate_apply(vault) == 0
+    with closing(connection.open_reader(connection.store_path(vault))) as store:
+        assert store.execute("SELECT body FROM store_pages WHERE path=?", (ALPHA,)).fetchone() == (source,)
+        assert b"luminous decorative trident" not in str(store.execute(
+            "SELECT * FROM pages WHERE path=?", (ALPHA,),
+        ).fetchone()).encode()
+
+
+def test_fresh_migration_refuses_a_marker_free_projection_with_a_portable_relationship(vault, capsys):
+    from test_vault_store_readers import EXTERNAL, restrict_external
+
+    from exomem import commands
+    from exomem.governance.principal import request_scope
+
+    source = b"# Alpha\n\n- [rule] Check the tide. ^tide\n"
+    target = b"# Beta\n\n- [rule] Light the lamp. ^lamp\n"
+    locator = f"{BETA}#lamp"
+    damaged = source + (
+        "\n### Stored relationships\n- Outgoing supports for tide: 1\n"
+        f"- tide · supports to {locator}\n"
+    ).encode()
+    path = vault / ALPHA
+    path.write_bytes(damaged)
+    (vault / BETA).write_bytes(target)
+    page_target = "Knowledge Base/Notes/Desk.md"
+    desk = vault / page_target
+    desk_body = b"# Desk\n\nA page-only target.\n"
+    desk.write_bytes(desk_body)
+    alpha = relationships.UnitIdentity("tide-id", ALPHA, "tide")
+    beta = relationships.UnitIdentity("lamp-id", BETA, "lamp")
+    edge = relationships.Relationship("edge-id", alpha.id, "supports", beta.id)
+    page_edge = relationships.Relationship("page-edge", alpha.id, "supports", target_page_path=page_target)
+    artifact = vault / relationship_files.path_for(ALPHA)
+    portable = b"".join(relationship_files.lines(
+        ALPHA, 1, (alpha,), (
+            relationships.BoundRelationship(edge, alpha, beta),
+            relationships.BoundRelationship(page_edge, alpha, None),
+        ),
+        canonical_sha256=hashlib.sha256(source).hexdigest(),
+    ))
+    artifact.write_bytes(portable)
+    build_indexes(vault)
+
+    assert migrate_apply(vault) == 1
+    refusal = capsys.readouterr().err
+    assert "RELATIONS_BLOCK_DAMAGED" in refusal
+    assert ALPHA in refusal and "restore the exact page" in refusal
+    assert not mode.store_mode_active(vault)
+    assert path.read_bytes() == damaged
+    assert artifact.read_bytes() == portable
+
+    authored = source + b"\n- Notes \xc2\xb7 refer to section two\n"
+    path.write_bytes(authored)
+    bare_incoming = desk_body + f"\n{ALPHA}#tide\n".encode()
+    desk.write_bytes(bare_incoming)
+    build_indexes(vault)
+    assert migrate_apply(vault) == 1
+    refusal = capsys.readouterr().err
+    assert page_target in refusal and "Use inline code" in refusal
+    assert not mode.store_mode_active(vault)
+    assert desk.read_bytes() == bare_incoming
+    assert not (vault / relationship_files.path_for(page_target)).exists()
+
+    desk.write_bytes(desk_body)
+    build_indexes(vault)
+    assert migrate_apply(vault) == 0, capsys.readouterr().err
+    restrict_external(vault, 'paths: ["Notes/Beta.md"]')
+    with request_scope(EXTERNAL):
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            commands.op_read_memory(vault, path=BETA)
+        released = commands.op_read_memory(vault, path=ALPHA)
+    assert released["body"].encode() == authored
+    assert locator not in released["body"]
+
+
+def test_a_rollback_and_remigration_preserve_relationship_ids_and_an_unresolved_target(
+    vault, tmp_path, capsys, monkeypatch, coordinator_url,  # noqa: F811
+):
+    source = (vault / ALPHA).read_bytes() + f"\n- [rule] Check the tide. ^tide\n\n{BETA}#lamp\n".encode()
+    target = (vault / BETA).read_bytes() + b"\n- [rule] Light the lamp. ^lamp\n"
+    page_target = "Knowledge Base/Notes/Desk.md"
+    page_body = f"# Desk\n\nThe daily log goes here.\n\n{ALPHA}#tide\n".encode()
+    replaced_target = "Knowledge Base/Notes/Spare Desk.md"
+    old_id = "04e56772-21a9-44ff-b0df-0a51ed0e166b"
+    new_id = "e8f840b6-3cf8-44cf-ab95-12d05683a194"
+    replaced_body = f"---\nexomem_id: {new_id}\n---\n# Spare Desk\n\n{ALPHA}#tide\n".encode()
+    reference = "Reference/Manual.md"
+    reference_body = b"# Manual\n\n- [rule] Verify the reading. ^reading\n"
+    (vault / ALPHA).write_bytes(source)
+    (vault / BETA).write_bytes(target)
+    (vault / page_target).write_bytes(page_body)
+    (vault / replaced_target).write_bytes(replaced_body.replace(new_id.encode(), old_id.encode()))
+    (vault / reference).parent.mkdir()
+    (vault / reference).write_bytes(reference_body)
+    build_indexes(vault)
+    assert migrate_apply(vault) == 0
+    with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
+        writer = CollectionWriter(vault, handle)
+        write.commit(writer, write.StoreChange(
+            write.Origin.GOVERNED, "Connect two observations.",
+            relationship_change=relationships.Change(
+                actor="owner",
+                identities=(
+                    relationships.UnitIdentity("tide-id", ALPHA, "tide"),
+                    relationships.UnitIdentity("lamp-id", BETA, "lamp"),
+                    relationships.UnitIdentity("reference-id", reference, "reading"),
+                ),
+                added=(
+                    relationships.Relationship("link-id", "tide-id", "supports", "lamp-id"),
+                    relationships.Relationship(
+                        "orphan-page-link", "tide-id", "supports",
+                        target_page_path=replaced_target, target_page_ref=f"exomem://memory/{old_id}",
+                    ),
+                    relationships.Relationship("page-link", "tide-id", "supports", target_page_path=page_target),
+                    relationships.Relationship("reference-link", "tide-id", "supports", "reference-id"),
+                ),
+            ),
+        ))
+        write.commit(writer, write.StoreChange(
+            write.Origin.GOVERNED, "Replace the desk page with a different identity.",
+            puts=(write.PagePut(replaced_target, replaced_body),),
+        ))
+    if previous := os.environ.get("EXOMEM_TEST_PREVIOUS_SCHEMA_PYTHON"):
+        _previous_release_refuses_relationships(previous, vault, tmp_path)
+    export = tmp_path / "export-relations"
+    assert rollback_apply(vault, export) == 0, capsys.readouterr().err
+    assert (vault / ALPHA).read_bytes() == source
+    assert (vault / BETA).read_bytes() == target
+    assert (vault / page_target).read_bytes() == page_body
+    assert (vault / replaced_target).read_bytes() == replaced_body
+    assert (vault / reference).read_bytes() == reference_body
+    assert not (vault / relationship_files.path_for(reference)).exists()
+    assert json.loads((export / "reference-unit-ids.jsonl").read_text()) == {
+        "id": "reference-id", "parent_path": reference, "anchor": "reading", "parent_ref": None,
+    }
+    artifact = relationship_files.path_for(ALPHA)
+    with (vault / artifact).open("rb") as encoded:
+        recovered = relationship_files.parse(encoded)
+    assert {edge.id for edge in recovered.relationships} == {
+        "link-id", "orphan-page-link", "page-link", "reference-link",
+    }
+    assert recovered.canonical_sha256 == hashlib.sha256(source).hexdigest()
+    assert (export / "relationships" / artifact).read_bytes() == (vault / artifact).read_bytes()
+    page_artifact = relationship_files.path_for(page_target)
+    with (vault / page_artifact).open("rb") as encoded:
+        received_page = relationship_files.parse(encoded)
+    assert received_page.source == page_target
+    assert received_page.canonical_sha256 == hashlib.sha256(page_body).hexdigest()
+    assert received_page.units == () and received_page.relationships == ()
+    assert (export / "relationships" / page_artifact).read_bytes() == (vault / page_artifact).read_bytes()
+    with (vault / relationship_files.path_for(replaced_target)).open("rb") as encoded:
+        assert relationship_files.parse(encoded).canonical_sha256 == hashlib.sha256(replaced_body).hexdigest()
+    history = [json.loads(line) for line in (export / "relationship-history.jsonl").read_bytes().splitlines()]
+    assert [(row["relationship_id"], row["action"]) for row in history] == [
+        ("link-id", "add"), ("orphan-page-link", "add"), ("page-link", "add"), ("reference-link", "add"),
+    ]
+    fresh = tmp_path / "restored" / "vault"
+    shutil.copytree(vault, fresh, ignore=shutil.ignore_patterns("_Collections"))
+    (fresh / BETA).write_bytes(target.replace(b" ^lamp", b""))
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(fresh.parent / "state"))
+    for name, value in _lease_environment(fresh.parent, coordinator_url).items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_VAULT_ID", "restored-store-mode")
+    with pytest.MonkeyPatch.context() as shell:
+        shell.setenv(OPERATOR, OPERATOR_SECRET)
+        assert cli._collections_main(["migrate", "--vault", str(fresh), "--apply"]) == 0, capsys.readouterr().err
+    build_indexes(fresh)
+    restored_relations = fresh / artifact
+    valid = restored_relations.read_bytes()
+    unregistered = valid.replace(b'"supports"', b'"unregistered-example-relation"')
+    assert valid != unregistered
+    restored_relations.write_bytes(unregistered)
+    assert migrate_apply(fresh) == 1
+    refusal = capsys.readouterr().err
+    assert "INVALID_RELATIONS_FILE" in refusal
+    assert artifact in refusal and "unregistered-example-relation" in refusal
+    assert not mode.store_mode_active(fresh)
+    assert restored_relations.read_bytes() == unregistered
+    restored_relations.write_bytes(valid)
+    edited = page_body + b"\nCheck the notebook tomorrow.\n"
+    edited_page = fresh / page_target
+    edited_page.write_bytes(edited)
+    build_indexes(fresh)
+    assert migrate_apply(fresh) == 1
+    refusal = capsys.readouterr().err
+    assert "RELATIONS_BLOCK_DAMAGED" in refusal and page_target in refusal
+    assert "restore the exact page" in refusal and "reapply the edit" in refusal
+    assert "If no verified copy exists, use inline code" in refusal
+    assert not mode.store_mode_active(fresh)
+    assert edited_page.read_bytes() == edited
+    assert (fresh / ALPHA).read_bytes() == source
+    assert restored_relations.read_bytes() == valid
+    edited_page.write_bytes(page_body)
+    build_indexes(fresh)
+    orphan_path = "Knowledge Base/Notes/Absent Source.md"
+    orphan = relationships.UnitIdentity("orphan-id", orphan_path, "lost")
+    orphan_edge = relationships.Relationship("lost-link", orphan.id, "unknown-private-type", "lamp-id")
+    lamp = next(unit for unit in recovered.target_units if unit.id == "lamp-id")
+    orphan_file = fresh / relationship_files.path_for(orphan_path)
+    orphan_file.write_bytes(b"".join(relationship_files.lines(
+        orphan_path, recovered.revision, (orphan,),
+        (relationships.BoundRelationship(orphan_edge, orphan, lamp),),
+    )))
+    assert migrate_apply(fresh) == 0, capsys.readouterr().err
+    with connection.open_writer(connection.store_path(fresh), lease_check=lambda: True) as handle:
+        writer = CollectionWriter(fresh, handle)
+        derivation.drain(fresh, writer)
+        assert not projector.Projector(fresh, run=lambda work: work(writer)).run_pass().deferred
+    projected = (fresh / page_target).read_bytes()
+    assert b"Incoming supports for page: 1" in projected
+    assert relationship_files.strip_block(projected) == page_body
+    assert (fresh / replaced_target).read_bytes() == replaced_body
+    with closing(connection.open_reader(connection.store_path(fresh))) as store:
+        assert store.execute(
+            "SELECT id,source_unit_id,target_unit_id FROM store_relationships ORDER BY id",
+        ).fetchall() == [
+            ("link-id", "tide-id", "lamp-id"),
+            ("lost-link", "orphan-id", "lamp-id"),
+            ("orphan-page-link", "tide-id", None),
+            ("page-link", "tide-id", None),
+            ("reference-link", "tide-id", "reference-id"),
+        ]
+        assert store.execute(
+            "SELECT parent_path,anchor FROM store_unit_ids WHERE id='lamp-id'",
+        ).fetchone() == (BETA, "lamp")
+    from exomem import audit
+
+    with library_scope():
+        report = audit.audit(fresh, categories=[audit.RELATIONSHIP_ORPHAN])
+    assert {(entry.path, entry.meta.get("anchor")) for entry in report.findings} == {
+        (BETA, "lamp"), (orphan_path, "lost"), (replaced_target, None),
+    }
+
+
+def _previous_release_refuses_relationships(previous, vault, tmp_path):
+    env = os.environ | {OPERATOR: OPERATOR_SECRET}
+    launch = subprocess.run(
+        [previous, "-I", "-c", "from pathlib import Path\nimport sys\n"
+         "from exomem import state_migration\n"
+         "root = Path(sys.argv[1])\n"
+         "assert sys.argv[2] in state_migration.unrecognized_compatibility_ids(root)\n"
+         "state_migration.require_vault_state_ready(root)", str(vault), schema.compatibility_ids()[-1]],
+        env=env, capture_output=True, text=True, timeout=30, check=False,
+    )
+    # This predecessor refuses an unknown optional format while validating the manifest.
+    assert launch.returncode and "StateMigrationManifestError" in launch.stderr, launch.stderr
+    refused = tmp_path / "older-rollback"
+    rollback = subprocess.run(
+        [previous, "-I", "-m", "exomem", "store-mode", "rollback", "--apply", "--export-to", str(refused),
+         "--why", "compatibility drill", "--vault", str(vault)],
+        env=env, capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert rollback.returncode and "STATE_MIGRATION_MANIFEST_INVALID" in rollback.stderr, rollback.stderr
+    assert not refused.exists() and mode.store_mode_active(vault)
+
+
 def test_a_rollback_export_names_the_page_that_a_moved_page_came_from(vault, tmp_path):
     """An export that drops the source of a move cannot say where a page came from."""
     assert migrate_apply(vault) == 0
@@ -497,6 +788,406 @@ def test_a_person_edit_made_after_the_migration_blocks_the_rollback_until_it_is_
     assert (tmp_path / "export/held" / ALPHA).read_bytes() == edited
     assert (vault / ALPHA).read_bytes() == stored
     assert not mode.store_mode_active(vault)
+
+
+def test_rollback_exports_an_unrecorded_relations_file_and_refuses_a_later_save(
+    vault, capsys, tmp_path, monkeypatch,
+):
+    from exomem.vault_store import projection
+
+    assert migrate_apply(vault) == 0
+    queue_change(vault, relationship_change=relationships.Change(
+        actor="owner",
+        identities=(relationships.UnitIdentity("canonical-id", ALPHA, "tide"),),
+        added=(relationships.Relationship("canonical-edge", "canonical-id", "supports", target_page_path=BETA),),
+    ))
+    queue_change(vault, deletes=(write.PageDelete(ALPHA),))
+    artifact = relationship_files.path_for(ALPHA)
+    file = vault / artifact
+    outside = b"".join(relationship_files.lines(
+        ALPHA, 1, (relationships.UnitIdentity("outside-id", ALPHA, "tide"),), (),
+    ))
+    file.write_bytes(outside)
+    with closing(connection.open_reader(connection.store_path(vault))) as reader:
+        assert reader.execute("SELECT 1 FROM store_manifest WHERE path = ?", (artifact,)).fetchone() is None
+    capsys.readouterr()
+    assert store_mode(vault, "rollback", "--dry-run", operator=False) == 0
+    assert printed(capsys)["needs_export_held"]
+    assert file.read_bytes() == outside
+
+    refused = tmp_path / "refused"
+    assert rollback_apply(vault, refused) == 1
+    assert "VAULT_STORE_HELD_ITEMS" in capsys.readouterr().err
+    assert mode.store_mode_active(vault) and not refused.exists()
+    assert file.read_bytes() == outside
+
+    racing = tmp_path / "racing"
+    later = outside.replace(b"outside-id", b"later-id")
+    original_write = projection.write_file
+
+    def save_after_the_export(target_root, rel, body, *, durable):
+        result = original_write(target_root, rel, body, durable=durable)
+        if target_root == racing / "relationships" and rel == artifact:
+            summary = json.loads((racing / "export.json").read_bytes())
+            assert artifact in summary["held_edits"]
+            file.write_bytes(later)
+        return result
+
+    with monkeypatch.context() as editor:
+        editor.setattr(projection, "write_file", save_after_the_export)
+        assert rollback_apply(vault, racing, "--export-held") == 1
+    assert "VAULT_STORE_RELATIONS_CHANGED" in capsys.readouterr().err
+    assert mode.store_mode_active(vault)
+    assert file.read_bytes() == later
+    assert (racing / "held" / artifact).read_bytes() == outside
+
+    accepted = tmp_path / "accepted"
+    assert rollback_apply(vault, accepted, "--export-held") == 0, capsys.readouterr().err
+    assert (accepted / "held" / artifact).read_bytes() == later
+    custody_path = json.loads((accepted / "export.json").read_bytes())["relations_custody"][artifact]
+    assert (vault / custody_path).read_bytes() == later
+    with file.open("rb") as encoded:
+        restored = relationship_files.parse(encoded)
+    assert [unit.id for unit in restored.units] == ["canonical-id"]
+    assert [edge.id for edge in restored.relationships] == ["canonical-edge"]
+    assert not mode.store_mode_active(vault)
+
+
+@pytest.mark.parametrize("observe", [False, True], ids=["disk-only", "importer-held"])
+def test_rollback_exports_unadmitted_relations_without_restoring_them(
+    vault, capsys, tmp_path, monkeypatch, coordinator_url, observe,  # noqa: F811
+):
+    from exomem.vault_store import importer
+
+    source_path = ALPHA
+    if not observe:
+        folders = [f"depth-{level}-{'x' * 38}" for level in range(6)]
+        source_path = "/".join(("Knowledge Base", *folders, "Deep.md"))
+        page = vault / source_path
+        page.parent.mkdir(parents=True)
+        page.write_bytes(b"# Deep\n\n- [rule] Check the tide. ^tide\n")
+        build_indexes(vault)
+    assert migrate_apply(vault) == 0
+    artifact = relationship_files.path_for(source_path)
+    source = relationships.UnitIdentity("outside-id", source_path, "tide")
+    edge = relationships.Relationship("outside-edge", source.id, "supports", target_page_path=BETA)
+    outside = b"".join(relationship_files.lines(
+        source_path, 1, (source,), (relationships.BoundRelationship(edge, source, None),),
+    ))
+    file = vault / artifact
+    file.write_bytes(outside)
+    if observe:
+        with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
+            writer = CollectionWriter(vault, handle)
+            report = importer.Importer(vault, run=lambda work: work(writer)).import_paths([artifact])
+        assert report.held == [artifact]
+    on_disk = outside.replace(b"outside-edge", b"later-edge") if observe else outside
+    file.write_bytes(on_disk)
+    capsys.readouterr()
+    assert store_mode(vault, "rollback", "--dry-run", operator=False) == 0
+    dry_run = printed(capsys)
+    assert dry_run["needs_export_held"] and artifact in dry_run["edited_on_disk"]["first"]
+
+    refused = tmp_path / "refused"
+    assert rollback_apply(vault, refused) == 1
+    assert "VAULT_STORE_HELD_ITEMS" in capsys.readouterr().err
+    assert mode.store_mode_active(vault) and not refused.exists()
+    assert file.read_bytes() == on_disk
+
+    if observe and os.name == "posix":
+        from exomem import _held_fs_posix
+
+        racing = tmp_path / "racing"
+        latest = outside.replace(b"outside-edge", b"racing-edge")
+        rename = _held_fs_posix._rename_noreplace
+
+        def save_during_custody(old, new, *, src_dir_fd, dst_dir_fd):
+            if old == file.name and new.endswith(".held"):
+                edited = file.with_name("editor-save")
+                edited.write_bytes(latest)
+                os.replace(edited, file)
+            return rename(old, new, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+        with monkeypatch.context() as editor:
+            editor.setattr(_held_fs_posix, "_rename_noreplace", save_during_custody)
+            assert rollback_apply(vault, racing, "--export-held") == 1
+        (journal,) = (racing / "relation-projections").glob("*.json")
+        custody_path = json.loads(journal.read_bytes())["custody"]
+        error = capsys.readouterr().err
+        assert "VAULT_STORE_RELATIONS_CHANGED" in error and custody_path in error
+        assert mode.store_mode_active(vault)
+        assert (racing / "held" / artifact).read_bytes() == outside
+        assert (racing / "on-disk" / artifact).read_bytes() == on_disk
+        assert (vault / custody_path).read_bytes() == latest
+        file.write_bytes(on_disk)
+
+    exported = tmp_path / "export"
+    assert rollback_apply(vault, exported, "--export-held") == 0, capsys.readouterr().err
+    assert (exported / "held" / artifact).read_bytes() == outside
+    if observe:
+        assert (exported / "on-disk" / artifact).read_bytes() == on_disk
+    custody_path = json.loads((exported / "export.json").read_bytes())["relations_custody"][artifact]
+    assert (vault / custody_path).read_bytes() == on_disk
+    assert (vault / custody_path).parent == file.parent
+    assert not file.exists()
+
+    fresh = tmp_path / "restored" / "vault"
+    shutil.copytree(vault, fresh, ignore=shutil.ignore_patterns("_Collections"))
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(fresh.parent / "state"))
+    for name, value in _lease_environment(fresh.parent, coordinator_url).items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_VAULT_ID", "restored-store-mode")
+    with pytest.MonkeyPatch.context() as shell:
+        shell.setenv(OPERATOR, OPERATOR_SECRET)
+        assert cli._collections_main(["migrate", "--vault", str(fresh), "--apply"]) == 0, capsys.readouterr().err
+    build_indexes(fresh)
+    assert migrate_apply(fresh) == 0, capsys.readouterr().err
+    with closing(connection.open_reader(connection.store_path(fresh))) as reader:
+        assert table_rows(reader, "store_unit_ids") == []
+        assert table_rows(reader, "store_relationships") == []
+        assert reader.execute("SELECT 1 FROM store_manifest WHERE path = ?", (custody_path,)).fetchone() is None
+
+
+@pytest.mark.parametrize("fault", ["interrupted-install", pytest.param(
+    "late-save", marks=pytest.mark.skipif(os.name != "posix", reason="POSIX rename syscall race"),
+)])
+def test_rollback_drains_queued_relationships_with_recoverable_custody(vault, capsys, tmp_path, monkeypatch, fault):
+    source = (vault / ALPHA).read_bytes() + b"\n- [rule] Check the tide. ^tide\n"
+    (vault / ALPHA).write_bytes(source)
+    build_indexes(vault)
+    assert migrate_apply(vault) == 0
+    queue_change(vault, relationship_change=relationships.Change(
+        actor="owner",
+        identities=(relationships.UnitIdentity("canonical-id", ALPHA, "tide"),),
+        added=(relationships.Relationship("canonical-edge", "canonical-id", "supports", target_page_path=BETA),),
+    ))
+    with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
+        writer = CollectionWriter(vault, handle)
+        assert not projector.Projector(vault, run=lambda work: work(writer)).run_pass().deferred
+    artifact = relationship_files.path_for(ALPHA)
+    file = vault / artifact
+    old = file.read_bytes()
+    new_body = source + b"\nCollect another reading.\n"
+    queue_writes(vault, (ALPHA, new_body))
+    capsys.readouterr()
+
+    interrupted = tmp_path / "interrupted"
+    late = old.replace(b"canonical-edge", b"late-edge")
+    with monkeypatch.context() as injection:
+        if fault == "interrupted-install":
+            rename = projector._rename
+
+            def block_install(filesystem, old_path, new_path, expected, check):
+                if old_path.endswith(".stage.held") and new_path == artifact:
+                    raise projector.Deferred("the staged rename was interrupted")
+                return rename(filesystem, old_path, new_path, expected, check)
+
+            injection.setattr(projector, "_rename", block_install)
+        else:
+            from exomem import _held_fs_posix
+
+            rename_noreplace = _held_fs_posix._rename_noreplace
+
+            def save_at_capture(old_name, new_name, *, src_dir_fd, dst_dir_fd):
+                if old_name == file.name and new_name.endswith(".prior.held"):
+                    edited = file.with_name("editor-save")
+                    edited.write_bytes(late)
+                    os.replace(edited, file)
+                return rename_noreplace(old_name, new_name, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+            injection.setattr(_held_fs_posix, "_rename_noreplace", save_at_capture)
+        assert rollback_apply(vault, interrupted) == 1
+
+    (journal,) = (interrupted / "relation-projections").glob("*.json")
+    receipt = json.loads(journal.read_bytes())
+    assert receipt["path"] == artifact
+    prior = vault / receipt["custody"]
+    staged = vault / receipt["stage"]
+    error = capsys.readouterr().err
+    assert "VAULT_STORE_RELATIONS_CHANGED" in error and receipt["custody"] in error
+    assert mode.store_mode_active(vault) and not file.exists()
+    staged_bytes = staged.read_bytes()
+    assert hashlib.sha256(staged_bytes).hexdigest() == receipt["intended_sha256"]
+    assert prior.read_bytes() == (old if fault == "interrupted-install" else late)
+
+    complete = tmp_path / "complete"
+    if fault == "late-save":
+        assert rollback_apply(vault, complete) == 1
+        assert "VAULT_STORE_HELD_ITEMS" in capsys.readouterr().err
+        assert mode.store_mode_active(vault) and prior.read_bytes() == late and not file.exists()
+    else:
+        assert rollback_apply(vault, complete) == 0, capsys.readouterr().err
+        assert not mode.store_mode_active(vault)
+        assert prior.read_bytes() == old and not staged.exists()
+        assert (complete / "relation-projections" / journal.name).read_bytes() == journal.read_bytes()
+        assert (vault / ALPHA).read_bytes() == new_body
+        final_export = json.loads((complete / "export.json").read_bytes())
+        assert (vault / final_export["relations_custody"][artifact]).read_bytes() == staged_bytes
+        with file.open("rb") as encoded:
+            recovered = relationship_files.parse(encoded)
+        assert recovered.canonical_sha256 == hashlib.sha256(new_body).hexdigest()
+        assert [edge.id for edge in recovered.relationships] == ["canonical-edge"]
+
+
+@pytest.mark.parametrize("recreated", [False, True], ids=["clean-resume", "editor-recreated"])
+def test_rollback_retries_an_interrupted_final_export(vault, capsys, tmp_path, monkeypatch, recreated):
+    assert migrate_apply(vault) == 0
+    queue_change(vault, relationship_change=relationships.Change(
+        actor="owner",
+        identities=(relationships.UnitIdentity("canonical-id", ALPHA, "tide"),),
+        added=(relationships.Relationship("canonical-edge", "canonical-id", "supports", target_page_path=BETA),),
+    ))
+    queue_writes(vault, (GAMMA, b"# Gamma\n\nAn unrelated note.\n"))
+    with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
+        writer = CollectionWriter(vault, handle)
+        assert not projector.Projector(vault, run=lambda work: work(writer)).run_pass().deferred
+        assert table_rows(handle.connection, "store_projection_queue") == []
+        assert table_rows(handle.connection, "store_held") == []
+
+    alpha = relationship_files.path_for(ALPHA)
+    beta = relationship_files.path_for(BETA)
+    first = (vault / alpha).read_bytes()
+    previous = (vault / beta).read_bytes()
+    outside = previous.replace(b'"revision":', b'"revision": ')
+    assert outside != previous
+    capsys.readouterr()
+    interrupted = tmp_path / "interrupted-final"
+    rename = projector._rename
+
+    def interrupt_second_install(filesystem, old, new, expected, check):
+        if old.endswith(".stage.held") and new == beta:
+            if recreated:
+                (vault / beta).write_bytes(outside)
+            else:
+                raise projector.Deferred("the final replacement was interrupted")
+        return rename(filesystem, old, new, expected, check)
+
+    with monkeypatch.context() as injection:
+        injection.setattr(projector, "_rename", interrupt_second_install)
+        assert rollback_apply(vault, interrupted) == 1
+    entries = [json.loads(entry.read_bytes()) for entry in (interrupted / "relation-projections").glob("*.json")]
+    receipts = {receipt["path"]: receipt for receipt in entries}
+    assert set(receipts) == {alpha, beta} and all(receipt["phase"] == "export" for receipt in entries)
+    prior = vault / receipts[beta]["custody"]
+    staged = vault / receipts[beta]["stage"]
+    intended_beta = staged.read_bytes()
+    error = capsys.readouterr().err
+    assert "VAULT_STORE_RELATIONS_CHANGED" in error and receipts[beta]["custody"] in error
+    assert mode.store_mode_active(vault)
+    assert prior.read_bytes() == previous
+    assert (vault / receipts[alpha]["custody"]).read_bytes() == first
+
+    assert store_mode(vault, "rollback", "--dry-run", operator=False) == 0
+    assert printed(capsys)["needs_export_held"] is recreated
+    complete = tmp_path / "complete-final"
+    first_installed = (vault / alpha).read_bytes()
+    assert first_installed != first
+    if recreated:
+        assert rollback_apply(vault, tmp_path / "needs-consent") == 1
+        assert "VAULT_STORE_HELD_ITEMS" in capsys.readouterr().err
+        assert mode.store_mode_active(vault) and (vault / beta).read_bytes() == outside
+        assert rollback_apply(vault, complete, "--export-held") == 0, capsys.readouterr().err
+        newer = json.loads((complete / "export.json").read_bytes())["relations_custody"][beta]
+        assert (vault / newer).read_bytes() == outside
+        assert (complete / "held" / beta).read_bytes() == outside
+    else:
+        assert not (vault / beta).exists()
+        assert rollback_apply(vault, complete) == 0, capsys.readouterr().err
+    assert not mode.store_mode_active(vault)
+    assert (vault / alpha).read_bytes() == first_installed
+    assert (vault / beta).read_bytes() == intended_beta
+    assert prior.read_bytes() == previous and not staged.exists()
+
+
+def test_rollback_retries_after_installing_a_canonical_orphan_sidecar(vault, capsys, tmp_path, monkeypatch):
+    from exomem.vault_store import projection
+
+    assert migrate_apply(vault) == 0
+    queue_change(vault, relationship_change=relationships.Change(
+        actor="owner",
+        identities=(relationships.UnitIdentity("canonical-id", ALPHA, "tide"),),
+        added=(relationships.Relationship("canonical-edge", "canonical-id", "supports", target_page_path=BETA),),
+    ))
+    queue_change(vault, deletes=(write.PageDelete(ALPHA),))
+    alpha = relationship_files.path_for(ALPHA)
+    beta = relationship_files.path_for(BETA)
+    with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
+        writer = CollectionWriter(vault, handle)
+        assert not projector.Projector(vault, run=lambda work: work(writer)).run_pass().deferred
+        assert table_rows(handle.connection, "store_projection_queue") == []
+        assert table_rows(handle.connection, "store_held") == []
+        assert not (vault / ALPHA).exists() and not (vault / alpha).exists()
+        assert handle.connection.execute("SELECT 1 FROM store_manifest WHERE path = ?", (alpha,)).fetchone() is None
+
+    interrupted = tmp_path / "interrupted-orphan"
+    write_file = projection.write_file
+
+    def interrupt_later_sidecar(root, rel, body, *, durable):
+        if root == interrupted / "relationships" and rel == beta:
+            assert (vault / alpha).read_bytes() == (interrupted / "relationships" / alpha).read_bytes()
+            raise OSError("the next sidecar was interrupted")
+        return write_file(root, rel, body, durable=durable)
+
+    with monkeypatch.context() as injection:
+        injection.setattr(projection, "write_file", interrupt_later_sidecar)
+        assert rollback_apply(vault, interrupted) == 1
+    assert mode.store_mode_active(vault)
+    installed = (vault / alpha).read_bytes()
+
+    assert store_mode(vault, "rollback", "--dry-run", operator=False) == 0
+    assert printed(capsys)["needs_export_held"] is False
+    complete = tmp_path / "complete-orphan"
+    assert rollback_apply(vault, complete) == 0, capsys.readouterr().err
+    assert not mode.store_mode_active(vault)
+    assert (vault / alpha).read_bytes() == installed == (complete / "relationships" / alpha).read_bytes()
+
+
+def test_rollback_refuses_a_sidecar_recreated_while_finishing_export(vault, capsys, tmp_path, monkeypatch):
+    assert migrate_apply(vault) == 0
+    queue_change(vault, relationship_change=relationships.Change(
+        actor="owner",
+        identities=(relationships.UnitIdentity("canonical-id", ALPHA, "tide"),),
+        added=(relationships.Relationship("canonical-edge", "canonical-id", "supports", target_page_path=BETA),),
+    ))
+    queue_writes(vault, (GAMMA, b"# Gamma\n\n- [rule] Make a record. ^reading\n"))
+    with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
+        writer = CollectionWriter(vault, handle)
+        assert not projector.Projector(vault, run=lambda work: work(writer)).run_pass().deferred
+
+    unexpected = relationship_files.path_for(GAMMA)
+    file = vault / unexpected
+    source = relationships.UnitIdentity("outside-id", GAMMA, "reading")
+    edge = relationships.Relationship("outside-edge", source.id, "supports", target_page_path=BETA)
+    outside = b"".join(relationship_files.lines(
+        GAMMA, 1, (source,), (relationships.BoundRelationship(edge, source, None),),
+    ))
+    file.write_bytes(outside)
+    late = outside.replace(b"outside-edge", b"later-edge")
+    capsys.readouterr()
+
+    export = tmp_path / "race-final-census"
+    summary = export / "export.json"
+    stream_sha256 = projector._stream_sha256
+    recreated = False
+
+    def recreate_during_final_hash(handle):
+        nonlocal recreated
+        if not recreated and summary.exists() and unexpected in json.loads(summary.read_bytes())["relations_custody"]:
+            assert not file.exists()
+            file.write_bytes(late)
+            recreated = True
+        return stream_sha256(handle)
+
+    with monkeypatch.context() as editor:
+        editor.setattr(projector, "_stream_sha256", recreate_during_final_hash)
+        assert rollback_apply(vault, export, "--export-held") == 1
+    assert recreated
+    error = capsys.readouterr().err
+    assert "VAULT_STORE_RELATIONS_CHANGED" in error and unexpected in error
+    assert mode.store_mode_active(vault) and file.read_bytes() == late
+    assert (export / "held" / unexpected).read_bytes() == outside
+    caught = json.loads((export / "export.json").read_bytes())["relations_custody"][unexpected]
+    assert (vault / caught).read_bytes() == outside
 
 
 GAMMA = "Knowledge Base/Notes/Gamma.md"

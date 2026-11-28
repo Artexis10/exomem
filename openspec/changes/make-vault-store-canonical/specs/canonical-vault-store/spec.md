@@ -326,7 +326,7 @@ In store mode, derived unit rows and the page summary SHALL support selection an
 - **AND** the committed page bytes are exactly the bytes the write supplied
 
 ### Requirement: Typed relationships are stored rows
-In store mode, once stage 2 ships, a governed operation SHALL be able to add, retire or supersede a typed relationship from a unit to another unit or to a page as a store row, with no line of page text. The relationship type SHALL come from the relation vocabulary registry. A unit SHALL be able to carry any number of stored relationships. A store-mode answer SHALL read them from the stored rows only, in bounded pages with a keyset cursor and an exact total.
+In store mode, a governed operation SHALL add, retire or supersede typed relationships from a unit to a unit or page in stored rows. Types SHALL come from the relation registry. A unit SHALL support any number of relationships. Answers SHALL read only stored rows, in bounded pages with a keyset cursor and an exact visible total. If the count exceeds the read budget or an admitted endpoint is stale, the answer SHALL report unavailable and omit the total.
 
 #### Scenario: A first stored relationship pins the unit's identity
 - **WHEN** a governed operation adds the first stored relationship to a unit that has no anchor
@@ -374,12 +374,24 @@ From stage 2, a page's projection MAY add one managed relations block, the one e
 - **WHEN** a person edits a line inside a page's relations block outside Exomem
 - **THEN** the edit becomes a held correction and the stored page bytes are unchanged
 
+#### Scenario: Fresh migration preserves a verified authored locator
+- **WHEN** a rolled-back page has an authored line that matches a generated relationship locator
+- **THEN** migration preserves the line when the page bytes match the digest in the page's relations file
+- **AND** the same proof applies to a page with incoming relationships only
+
+#### Scenario: Fresh migration preserves a page with an ambiguous locator
+- **WHEN** a line outside the managed block matches a projected relationship line or locator
+- **AND** the page bytes do not match a canonical digest from its relations file
+- **THEN** migration refuses activation and leaves the original files intact
+- **AND** the refusal explains how to retain authored text and remove generated residue
+
 #### Scenario: Stored relationships survive a rollback and a re-migration
 - **WHEN** a store-mode vault with stored relationships reverts to file mode and is migrated back
 - **THEN** the reverted pages carry no relations block and the relationship history is exported
 - **AND** the export keeps complete current rows and endpoint IDs when no source relations file can carry them
 - **AND** after re-migration every current stored relationship is present again
-- **AND** a relationship with a missing endpoint remains orphaned for review
+- **AND** a relationship with a missing unit or page endpoint remains orphaned for review
+- **AND** an endpoint with a different stable page reference does not take its place
 
 ### Requirement: Held relations items resolve without leaking or storing the block
 Keep-mine on a held page whose relations block is not valid SHALL remove the block by its markers, and SHALL refuse and name keep-store when the markers are not intact. A held relations file SHALL be listed to, and resolved by, the owner with unrestricted access only. Migration verification SHALL remove one relations block before it compares a projection with its source.
@@ -577,6 +589,8 @@ For files the store owns, the requirements that keep derived sidecars in step wi
 
 ### Requirement: Store-mode names read the store
 In store mode, the collision check for a new page name SHALL read the store and never the projected files. A name SHALL therefore be taken from the moment its write commits, whether or not projection has run.
+
+The case-collision check SHALL ignore paths a move or deletion in the same commit vacates. The paths that remain SHALL have distinct case-insensitive keys.
 
 #### Scenario: Two quick creates that differ only in case
 - **WHEN** two governed writes create pages whose titles differ only in case, and projection has not yet written the first page

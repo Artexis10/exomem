@@ -306,7 +306,9 @@ class ReadPage(Wire):
     part: Literal["text", "history", "units", "brief"] | None = Field(default=None, description="text (default), history, units: observations with ids, or brief: a topic's brief.")
     more: str | None = Field(default=None, description="Continuation token.")
     options: dict[str, Any] | None = Field(
-        default=None, description="Rare knobs: links, frontmatter_only, include_raw, unit_ref, offset."
+        default=None,
+        description="Options include links, frontmatter_only, include_raw, unit_ref, offset, "
+        "relationship_limit and relationship_after.",
     )
 
 

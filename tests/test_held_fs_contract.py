@@ -732,6 +732,23 @@ def test_publish_bytes_is_no_replace_or_expected_identity_replace(tmp_path: Path
 
 
 @_requires_native_route
+def test_create_by_rename_preserves_an_editor_file_that_appears_during_install(tmp_path: Path) -> None:
+    held_fs = _module()
+    target = tmp_path / "publish" / "item.txt"
+    with held_fs.acquire(tmp_path).require() as fs:
+        with fs.parent("publish", create=True).require() as parent:
+            blocked = held_fs.publish_bytes(
+                fs, parent, "item.txt", b"store copy", rename_new=True,
+                before_install=lambda: target.write_bytes(b"editor copy"),
+            )
+            assert not blocked.ok
+            assert target.read_bytes() == b"editor copy"
+            assert tuple(target.parent.iterdir()) == (target,)
+            held_fs.publish_bytes(fs, parent, "new.txt", b"canonical", rename_new=True).require()
+            assert target.with_name("new.txt").read_bytes() == b"canonical"
+
+
+@_requires_native_route
 def test_publish_copies_parts_and_removes_a_temporary_a_failed_copy_left(tmp_path: Path) -> None:
     """A large artifact publishes from parts, never whole in memory. A copy that fails
     part-way, as on a full disk, must not leave a hidden temporary in the vault."""

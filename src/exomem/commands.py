@@ -8733,6 +8733,8 @@ def read_memory_stored(
     offset: int | None = None,
     units: bool = False,
     brief: bool = False,
+    relationship_limit: int | None = None,
+    relationship_after: tuple[str, str] | None = None,
 ) -> dict:
     """Read a page, exact unit, exomem://map view, or topic brief.
 
@@ -8755,7 +8757,12 @@ def read_memory_stored(
         offset: Start, in characters, of a window of a long Source's extracted text; follow `window.next_offset`.
         units: List the page's observation units with the id each edit takes; `unavailable` when the principal sees a released view.
         brief: Read `path` as a topic (a page or free text) and serve its brief: conclusions, sources, open questions, and changes since this principal's last read.
+        relationship_limit: With an exact unit reference, list up to 50 stored relationships.
+        relationship_after: The next_after value from the previous unit relationship page.
     """
+    relationships_requested = relationship_limit is not None or relationship_after is not None
+    if relationships_requested and unit_ref is None:
+        raise ValueError("UNIT_REFERENCE_REQUIRED: relationship pagination requires an exact unit reference")
     if brief:
         # A brief is a derived view over one subject, never a page: it takes none of a page's read options.
         if unit_ref is not None or frontmatter_only or include_history or links or include_raw or units or offset is not None:
@@ -8797,6 +8804,8 @@ def read_memory_stored(
                 continuation=continuation,
                 follow_corrections=follow_corrections,
                 offset=offset,
+                relationship_limit=relationship_limit,
+                relationship_after=relationship_after,
             )
     if continuation is not None:
         return _cited_by_continuation(
@@ -8867,6 +8876,21 @@ def read_memory_stored(
             withheld_spans=withheld_spans,
         )
         out = unit.as_dict()
+        if relationships_requested and unit.status == "found" and unit.unit is not None:
+            from . import unit_edges
+
+            after = relationship_after
+            if after is not None:
+                if (not isinstance(after, (tuple, list)) or len(after) != 2
+                        or not all(isinstance(value, str) for value in after)):
+                    raise ValueError("INVALID_RELATIONSHIP_CURSOR: use next_after from a relationship page")
+                after = (after[0], after[1])
+            relationship_page = unit_edges.relationship_page(
+                vault_root, page.path, unit.unit.anchor,
+                limit=50 if relationship_limit is None else relationship_limit,
+                after=after,
+            )
+            out["stored_relationships"] = relationship_page.as_dict()
         if (
             unit.status == "found"
             and unit.unit is not None

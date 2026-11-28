@@ -23,9 +23,10 @@ import datetime as dt
 import hashlib
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import ExitStack
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import (
     context_refs,
@@ -36,6 +37,7 @@ from . import (
     recap_folder,
     record_history,
     registry_history,
+    request_budget,
     retained_inputs,
     semantic_index,
     source_closure,
@@ -44,6 +46,11 @@ from . import (
 )
 from .governance.principal import OWNER_AUDIENCE, effective_principal
 from .kbdir import managed_join
+from .vault_store import mode as store_mode
+from .vault_store import read as store_read
+
+if TYPE_CHECKING:
+    from . import semantic_contract
 
 ENTRY_VERSION = 1
 #: The `operation` an episode revision's entry carries; the semantic writer names its own.
@@ -60,6 +67,58 @@ def history_root() -> str:
 
 def history_dir(parent_ref: str) -> str:
     return f"{history_root()}/{hashlib.sha256(parent_ref.encode()).hexdigest()}"
+
+
+def _read_kept(root: Path, directory: str, name: str) -> str | None:
+    try:
+        stored = store_read.owned_page(root, f"{directory}/{name}")
+    except FileNotFoundError:
+        return None
+    if stored is None:
+        return registry_history.read_kept(root, directory, name)
+    return _decode_kept(stored.body)
+
+
+def _decode_kept(body: bytes) -> str | None:
+    try:
+        return body.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _kept_entries(
+    root: Path, directory: str, names: Sequence[str], view: store_read.StoreSnapshot | None,
+    *, after: str | None, window: int,
+) -> Iterator[tuple[str, str | None]]:
+    if view is None:
+        for name in names:
+            version = name.removesuffix(".json")
+            if after is None or version < after:
+                yield version, _read_kept(root, directory, name)
+        return
+
+    prefix = f"{directory}/"
+    before = None
+    if after is not None:
+        # VERSION_RE accepts a final newline. In that case the canonical version is older.
+        version = after.removesuffix("\n")
+        before = prefix + version + ".json"
+        if version != after:
+            before += "\x00"
+    while True:
+        request_budget.checkpoint()
+        count = 0
+        for path, body in view.page_bodies_before(prefix, before=before, limit=window):
+            request_budget.checkpoint()
+            count += 1
+            before = path
+            name = path[len(prefix):]
+            if "/" not in name and name.endswith(".json"):
+                version = name.removesuffix(".json")
+                if after is None or version < after:
+                    yield version, _decode_kept(body)
+        if count < window:
+            return
 
 
 def validate_new_write(write: Any, *, path: str) -> None:
@@ -108,7 +167,9 @@ def validate_new_entry(
 
 
 def plan_entry(
-    root: Path, *, preflight: Any, token: dict, reason: str | None
+    root: Path, *, preflight: Any, token: dict, reason: str | None,
+    stored_before: Sequence[semantic_contract.RelationFact] = (),
+    stored_after: Sequence[semantic_contract.RelationFact] = (),
 ) -> vault.PlannedWrite | None:
     """Keep one changed interpretation before the lifecycle auxiliary hash seals it."""
     if (
@@ -121,7 +182,7 @@ def plan_entry(
     name = registry_history.version_id(moment, token["transition_id"]) + ".json"
     path = root / history_dir(parent_ref) / name
     if preflight.committed_replay:
-        previous = registry_history.read_kept(root, history_dir(parent_ref), name)
+        previous = _read_kept(root, history_dir(parent_ref), name)
         if previous is None:
             return None
         entry = json.loads(previous)
@@ -152,7 +213,7 @@ def plan_entry(
     # bytes stand unchanged: the transition changed its derived superseded
     # state, which is exactly what the entry must answer for later.
     supersession_touched = _supersession_touched_refs(
-        preflight.before, preflight.after, preflight.path
+        preflight.before, preflight.after, preflight.path, stored_before, stored_after,
     )
     affected = [
         {
@@ -188,9 +249,9 @@ def plan_entry(
     return _new_entry_write(root, path, entry)
 
 
-def _superseded_refs(state: Any, path: str) -> set[str]:
+def _superseded_refs(state: Any, path: str, stored: Sequence[Any]) -> set[str]:
     """The unit_refs a page's own units mark superseded, read in the page's selected relation registry."""
-    from . import relation_registry, working_set_currency
+    from . import relation_registry, unit_edges, working_set_currency
 
     registry = (
         state.definitions.snapshots["relations"].typed
@@ -200,15 +261,17 @@ def _superseded_refs(state: Any, path: str) -> set[str]:
     return {
         target.unit_ref
         for _successor, target in working_set_currency.same_page_supersessions(
-            state.document, path, registry
+            state.document, path, registry, unit_edges.planned_supersessions(stored, path, registry),
         )
         if target.unit_ref
     }
 
 
-def _supersession_touched_refs(before: Any, after: Any, path: str) -> set[str]:
+def _supersession_touched_refs(
+    before: Any, after: Any, path: str, before_edges: Sequence[Any], after_edges: Sequence[Any],
+) -> set[str]:
     """Units whose derived superseded state the transition changed."""
-    return _superseded_refs(before, path) ^ _superseded_refs(after, path)
+    return _superseded_refs(before, path, before_edges) ^ _superseded_refs(after, path, after_edges)
 
 
 def plan_episode_entry(
@@ -347,7 +410,7 @@ def _remove_if_empty(root: Path, directory: str) -> None:
 def read_entry(root: Path, *, path: str) -> str | None:
     """The text of one entry as stored, or None when it is missing or unreadable."""
     directory, _, name = path.rpartition("/")
-    return registry_history.read_kept(root, directory, name)
+    return _read_kept(root, directory, name)
 
 
 def _entry_text(entry: dict) -> str:
@@ -371,7 +434,7 @@ def _folded_revision(root: Path, source: str, path: str, head_episode: Any) -> b
 
 
 def _folded_siblings(
-    root: Path, directory: str, names: list[str], head: str, head_episode: Any
+    root: Path, entries: Iterator[tuple[str, str | None]], head: str, head_episode: Any,
 ) -> Callable[[str], tuple[str, ...]]:
     """Answer, for a wikilink name, `head` when it names a revision that the fold of `head` moved to trash.
 
@@ -381,9 +444,9 @@ def _folded_siblings(
     resolves as every wikilink in the vault does, over the folded paths alone, so it needs no list of spellings.
     """
     revisions: list[tuple[str, str | None]] = []
-    for name in names:
+    for _version, text in entries:
         try:
-            entry = json.loads(registry_history.read_kept(root, directory, name) or "")
+            entry = json.loads(text or "")
             revision = entry["path"] if entry.get("operation") == FOLD_OPERATION else None
             if not isinstance(revision, str) or not _folded_revision(root, entry["prior"]["source"], revision, head_episode):
                 continue
@@ -443,10 +506,10 @@ def _admitted_entry(
         shown = json.dumps(entry, ensure_ascii=False)
         # A revision names its siblings, which the same fold moved to trash, so the index no longer lists them.
         # Under the head's own admission a sibling that this history keeps counts as resolved.
-        if not retained_inputs.exact_text_visible(root, shown) and not (
+        if not retained_inputs.exact_text_visible(root, shown, local_page=path) and not (
             entry.get("operation") == FOLD_OPERATION
             and siblings is not None
-            and retained_inputs.exact_text_visible(root, shown, resolved_here=siblings())
+            and retained_inputs.exact_text_visible(root, shown, resolved_here=siblings(), local_page=path)
         ):
             return None
     except (KeyError, TypeError, ValueError, provenance.OriginError):
@@ -458,6 +521,66 @@ def _scan_cap(size: int) -> int:
     # A unit read opens entries that may not touch its unit; twice a page's lookahead
     # keeps one call near the cost of a page read, and the caller pages on.
     return 2 * (size + 1)
+
+
+def _scan(
+    root: Path, path: str, parent_ref: str, head_episode: Any, *,
+    size: int, after: str | None, unit_ref: str | None,
+) -> tuple[list[tuple[str, dict[str, Any]]], str | None, bool]:
+    directory = history_dir(parent_ref)
+    stored = store_mode.store_mode_for_reads(root)
+    cap = _scan_cap(size)
+    page: list[tuple[str, dict[str, Any]]] = []
+    consumed = None  # The last admitted version this read finished with, touching or not.
+    examined = 0
+    try:
+        with ExitStack() as scope:
+            view = None
+            names: Sequence[str] = ()
+            if stored:
+                budget = scope.enter_context(request_budget.bound_to(None))
+                check = request_budget.current_checkpoint() or request_budget.ReadCheckpoint(budget)
+                scope.enter_context(request_budget.checking(check))
+                view = scope.enter_context(store_read.snapshot(root))
+            else:
+                names = registry_history.kept_names(root, directory, suffix=".json") or []
+
+            def entries(position: str | None) -> Iterator[tuple[str, str | None]]:
+                return _kept_entries(root, directory, names, view, after=position, window=size + 1)
+
+            folded: Callable[[str], tuple[str, ...]] | None = None
+
+            def siblings() -> Callable[[str], tuple[str, ...]]:
+                nonlocal folded
+                if folded is None:
+                    folded = _folded_siblings(root, entries(None), path, head_episode)
+                return folded
+
+            for version, text in entries(after):
+                entry = _admitted_entry(
+                    root, text, path=path, parent_ref=parent_ref,
+                    head_episode=head_episode, siblings=siblings,
+                )
+                if stored:
+                    request_budget.checkpoint()
+                if entry is None:
+                    continue
+                if unit_ref is None or any(u.get("unit_ref") == unit_ref for u in entry["affected_units"]):
+                    if len(page) == size:
+                        return page, consumed, True  # One further admitted entry proves more exist.
+                    page.append((version, entry))
+                consumed = version
+                examined += 1
+                if examined == cap:
+                    return page, consumed, True  # Only the admitted cap can advance the cursor.
+            if stored:
+                request_budget.checkpoint()
+    except request_budget.ReadBudgetExhausted:
+        if not stored:
+            raise
+        # An expired scan cannot say whether unexamined or withheld entries exist.
+        return [], None, False
+    return page, consumed, False
 
 
 def read(
@@ -484,60 +607,22 @@ def read(
     from .governance import egress
 
     size, after = record_history._page_bounds(limit, continuation)
-    current = commands.read_memory_stored(root, path=path)
-    if not isinstance(current.get("content_hash"), str):
-        raise ValueError("NOT_FOUND: page is unavailable")
-    # Only admission that resolves prose names depends on lookup currency.
-    scan_start = working_set_runtime.name_lookup(root) if egress.name_lookup_required(root) else None
-    if scan_start is not None:
-        working_set_runtime.request_lookup_refresh(root, scan_start)
-    canonical = current["path"]
-    # The current read establishes the parent identity, never prior disclosure.
-    identity = memory_refs.normalize_id(current["frontmatter"].get(memory_refs.ID_FIELD))
-    parent_ref = memory_refs.memory_ref(identity) if identity else context_refs.vault_ref(canonical)
-    directory = history_dir(parent_ref)
-    names = registry_history.kept_names(root, directory, suffix=".json") or []
-    cap = _scan_cap(size)
-    folded: Callable[[str], tuple[str, ...]] | None = None
-
-    def siblings() -> Callable[[str], tuple[str, ...]]:
-        nonlocal folded
-        if folded is None:
-            folded = _folded_siblings(root, directory, names, canonical, current["frontmatter"].get("episode"))
-        return folded
-
-    examined = 0
-    consumed = None  # The last admitted version this read finished with, touching or not.
-    page = []
-    truncated = False
-    for name in names:
-        version = name.removesuffix(".json")
-        # Names are newest first and sorted by version: entries not older than the
-        # continuation are skipped without being opened.
-        if after is not None and version >= after:
-            continue
-        entry = _admitted_entry(
-            root,
-            registry_history.read_kept(root, directory, name),
-            path=canonical,
-            parent_ref=parent_ref,
-            head_episode=current["frontmatter"].get("episode"),
-            siblings=siblings,
+    with store_read.request_snapshot(root):
+        current = commands.read_memory_stored(root, path=path)
+        if not isinstance(current.get("content_hash"), str):
+            raise ValueError("NOT_FOUND: page is unavailable")
+        # Only admission that resolves prose names depends on lookup currency.
+        scan_start = working_set_runtime.name_lookup(root) if egress.name_lookup_required(root) else None
+        if scan_start is not None:
+            working_set_runtime.request_lookup_refresh(root, scan_start)
+        canonical = current["path"]
+        # The current read establishes the parent identity, never prior disclosure.
+        identity = memory_refs.normalize_id(current["frontmatter"].get(memory_refs.ID_FIELD))
+        parent_ref = memory_refs.memory_ref(identity) if identity else context_refs.vault_ref(canonical)
+        page, consumed, truncated = _scan(
+            root, canonical, parent_ref, current["frontmatter"].get("episode"),
+            size=size, after=after, unit_ref=unit_ref,
         )
-        if entry is None:
-            continue
-        if unit_ref is None or any(u.get("unit_ref") == unit_ref for u in entry["affected_units"]):
-            if len(page) == size:
-                # One further admitted entry proves more exist; nothing older is opened.
-                truncated = True
-                break
-            page.append((version, entry))
-        consumed = version
-        examined += 1
-        if examined == cap:
-            # Only admitted entries count, so reaching the cap shows nothing about the rest.
-            truncated = True
-            break
     revisions = []
     who = effective_principal()
     for version, entry in page:

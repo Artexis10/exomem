@@ -46,6 +46,7 @@ from . import (
     source_custody,
     temporal,
     trash_metadata,
+    unit_edges,
     vault,
 )
 from . import (
@@ -1155,6 +1156,7 @@ class ExistingPreflight:
     profile: bool = False
     #: Review fields the caller sent for a page that takes no relation review; the write drops them.
     ignored_review_fields: tuple[str, ...] = ()
+    relationship_plan: unit_edges.StoredPlan | None = None
 
     @property
     def before_hash(self) -> str:
@@ -1497,7 +1499,8 @@ RecoveryMutation = Callable[[], None]
 
 
 def _existing_transition_token(
-    *, operation: str, path: str, before_hash: str, after_hash: str, stamp: str | None = None
+    *, operation: str, path: str, before_hash: str, after_hash: str, stamp: str | None = None,
+    relationship_digest: str | None = None,
 ) -> str:
     payload: dict[str, Any] = {
         "version": 1,
@@ -1514,6 +1517,8 @@ def _existing_transition_token(
     # validated ones instead of drifting whenever the clock ticks between calls.
     if stamp is not None:
         payload["stamp"] = stamp
+    if relationship_digest is not None:
+        payload["relationship_digest"] = relationship_digest
     # The release that planned the transition rides in the token, so an exact
     # retry after an upgrade re-plans the same history bytes.
     from . import __version__
@@ -1650,7 +1655,8 @@ def _decode_existing_transition_token(token: str) -> dict[str, Any]:
     }
     # `stamp` is optional so a token minted before this field existed still
     # decodes; a token that omits it simply cannot pin the writer's instant.
-    if type(value) is not dict or (not required <= set(value) or bool(set(value) - required - {"stamp", "history_at", "exomem_version"})):
+    optional = {"stamp", "history_at", "exomem_version", "relationship_digest"}
+    if type(value) is not dict or not required <= set(value) or set(value) - required - optional:
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
         )
@@ -1668,6 +1674,12 @@ def _decode_existing_transition_token(token: str) -> dict[str, Any]:
             "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
         )
     if "stamp" in value and (type(value["stamp"]) is not str or not value["stamp"]):
+        raise SemanticWriteError(
+            "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
+        )
+    if "relationship_digest" in value and (
+        type(value["relationship_digest"]) is not str or len(value["relationship_digest"]) != 64
+    ):
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
         )
@@ -2063,6 +2075,7 @@ def preflight_existing(
     validate_only: bool = False,
     timings: MutationTimings | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    relationship_plan: unit_edges.StoredPlan | None = None,
 ) -> ExistingPreflight:
     """Evaluate an existing-page transition without mutating any shared state.
 
@@ -2089,6 +2102,7 @@ def preflight_existing(
             validate_only=validate_only,
             timings=timings,
             status_basis=status_basis,
+            relationship_plan=relationship_plan,
         )
 
 
@@ -2107,6 +2121,7 @@ def _preflight_existing(
     validate_only: bool = False,
     timings: MutationTimings | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
+    relationship_plan: unit_edges.StoredPlan | None = None,
 ) -> ExistingPreflight:
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     relation_disposition = relation_review.normalize_relation_disposition(relation_disposition)
@@ -2239,6 +2254,19 @@ def _preflight_existing(
             origin_inputs = _prepare_origin_inputs(
                 root, path, after_source, before_source=before_source
             )
+        if relationship_plan is not None and relationship_plan.writes:
+            pages = {}
+            for planned in relationship_plan.writes:
+                rel = planned.path.relative_to(root).as_posix()
+                assert isinstance(planned.content, str)
+                pages[rel] = semantic_contract.build_page_state(
+                    root, rel, planned.content, relation_registry=registry,
+                    language_registry=language, status_basis=status_basis,
+                )
+            after_corpus = after_corpus.with_pages(pages, prior_claims=after_corpus.prior_claims)
+        before_corpus, after_corpus = unit_edges.with_stored_facts(
+            root, path, before_corpus, after_corpus, relationship_plan,
+        )
     if not validate_only:
         require_profile_preview(root, before.page_type, after.page_type, previewed=transition_token is not None)
     before_contracts = memory_schema.resolve_contracts(
@@ -2277,16 +2305,19 @@ def _preflight_existing(
                 root, after, corpus=after_corpus, admission=admission,
             )
 
+    relationship_digest = relationship_plan.digest if relationship_plan is not None else None
     token = transition_token or _existing_transition_token(
         operation=operation,
         path=path,
         before_hash=raw_before_hash,
         after_hash=after.source_hash,
         stamp=stamp,
+        relationship_digest=relationship_digest,
     )
     token_value = _decode_existing_transition_token(token)
     committed_replay = bool(
         transition_token is not None
+        and relationship_plan is None
         and token_value["operation"] == operation
         and token_value["path"] == path
         and token_value["after_hash"] == raw_before_hash
@@ -2296,6 +2327,7 @@ def _preflight_existing(
         token_value["operation"] != operation
         or token_value["path"] != path
         or token_value["after_hash"] != after.source_hash
+        or token_value.get("relationship_digest") != relationship_digest
         or (token_value["before_hash"] != raw_before_hash and not committed_replay)
     ):
         raise SemanticWriteError(
@@ -2475,6 +2507,7 @@ def _preflight_existing(
         provenance_server_at=provenance_server_at,
         profile=_is_profile(root, before.page_type, after.page_type),
         ignored_review_fields=ignored_review_fields,
+        relationship_plan=relationship_plan,
     )
 
 
@@ -2543,6 +2576,8 @@ def _commit_existing_locked(
     history_write = compiled_history.plan_entry(
         root, preflight=preflight, token=_decode_existing_transition_token(preflight.transition_token),
         reason=history_reason,
+        stored_before=preflight.before_corpus.stored_relation_facts,
+        stored_after=preflight.after_corpus.stored_relation_facts,
     )
     if history_write is not None:
         auxiliaries = (*auxiliaries, history_write)
@@ -2621,8 +2656,16 @@ def _commit_existing_locked(
     lifecycle_writes: tuple[vault.PlannedWrite, ...] = ()
     required_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = ()
     lifecycle_state: str | None = None
+    # The relationship transaction carries its own history. A primary lifecycle
+    # receipt cannot distinguish a before and after with the same page hash.
+    relationship_only = (
+        preflight.relationship_plan is not None
+        and preflight.before_hash == preflight.after.source_hash
+        and preflight.requested_decision is None
+    )
     stable_active = (
-        preflight.applicability == "full"
+        not relationship_only
+        and preflight.applicability == "full"
         and preflight.after.identity_kind == "exomem_id"
         and preflight.after.review_fingerprint is not None
         and preflight.after_corpus.identity_census.paths_by_identity.get(preflight.after.identity)
@@ -2682,6 +2725,16 @@ def _commit_existing_locked(
         required_guards = lifecycle.required_guards
 
     writes = [*lifecycle_writes, *auxiliaries]
+    relationship_plan = preflight.relationship_plan
+    relationship_guards = ()
+    if relationship_plan is not None:
+        visible = vault.writer_link_visibility(root)
+        if visible is not None and not all(visible(path) for path in relationship_plan.target_paths):
+            raise SemanticWriteError(
+                "RELATIONSHIP_END_NOT_FOUND", "the relationship target is unavailable",
+            )
+        writes.extend(relationship_plan.writes)
+        relationship_guards = relationship_plan.guards
     primary_write = vault.PlannedWrite(
             root / preflight.path,
             preflight.after_source,
@@ -2747,11 +2800,15 @@ def _commit_existing_locked(
             written = vault.batch_atomic_write(
                 writes,
                 vault_root=root,
-                required_guards=(*required_guards, *origin_guards, *preflight.read_dependency_guards, *source_guards),
+                required_guards=(
+                    *required_guards, *origin_guards, *preflight.read_dependency_guards,
+                    *source_guards, *relationship_guards,
+                ),
                 index_reports=reports,
                 semantic_states={preflight.path: semantic_index.from_semantic_page_state(preflight.after)},
                 _vocabulary_auxiliaries=manifest,
                 _validate_prepared_bindings=validate_bindings,
+                _relationship_change=relationship_plan.change if relationship_plan else None,
             )
     except vault.PathGuardError as error:
         _recheck_origin_guards(root, origin_guards)
@@ -2827,13 +2884,14 @@ def _revalidate_existing_preflight(
                 path=preflight.path,
                 after_source=preflight.after_source,
                 operation=preflight.operation,
-                expected_before_hash=preflight.before.source_hash,
+                expected_before_hash=preflight.before_hash,
                 transition_token=preflight.transition_token,
                 relation_disposition=relation_disposition,
                 relation_review_hash=relation_review_hash,
                 relation_review_reason=relation_review_reason,
                 status_basis=status_basis,
                 timings=nested,
+                relationship_plan=preflight.relationship_plan,
             )
         finally:
             if timings is not None and nested is not None:

@@ -67,6 +67,7 @@ from .log_events import log_event
 
 if TYPE_CHECKING:
     from .graph_sync import GraphSyncCheckpoint
+    from .vault_store.relationships import Change as RelationshipChange
 
 if os.name == "nt":  # pragma: no cover - imported only on Windows
     import msvcrt
@@ -6382,6 +6383,7 @@ def batch_atomic_write(
     _retained_original: PathGuard | None = None,
     _payload_custody: _BatchPayloadCustody | None = None,
     _file_commit_witness: _BatchFileWitness | None = None,
+    _relationship_change: RelationshipChange | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Commit one batch while serializing all in-process vault writers.
 
@@ -6421,12 +6423,15 @@ def batch_atomic_write(
                     validate_prepared_bindings=_validate_prepared_bindings, prepare=_prepare,
                     publish_originals=_publish_originals, retained_original=_retained_original,
                     file_commit_witness=_file_commit_witness,
+                    relationship_change=_relationship_change,
                 )
             except store_batch.NoStoreChange:
                 # Only files that the store does not hold (a curation run's JSON): file-mode's.
                 pass
     if _retained_original is not None:
         raise ValueError("retained import original requires its canonical store writer")
+    if _relationship_change is not None:
+        raise ValueError("stored relationships require the canonical store writer")
     with _BATCH_COMMIT_LOCK, ExitStack() as custody_stack:
         if defer_graph_completion and (post_commit_fanout or vault_root is None):
             raise ValueError(

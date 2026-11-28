@@ -2858,12 +2858,14 @@ def write_page_graph_rows(
     *,
     derived_columns: bool = True,
     unit_links: bool = True,
-    before_write: Callable[[str, tuple[PageGraphRecords, ...]], None] | None = None,
+    relationship_batches: Iterable[tuple[GraphEdge, ...]] = (),
+    before_write: Callable[[str, tuple[PageGraphRecords, ...], bool], None] | None = None,
 ) -> None:
     """Replace the page's graph rows with ``rows`` and store ``registry_stamps`` beside them.
 
     ``registry_stamps`` is `graph_registry_stamps` of the pass. ``before_write`` receives the page
-    and the records that replace its rows, before any row changes. ``derived_columns`` is False for
+    and its records before the write. Its last argument is true for the replacement and false
+    for appended relationship batches. ``derived_columns`` is False for
     a store whose tables lack the columns that the owner pass adds
     (``graph_dependencies.body_link``, ``graph_edges.raw_target``): its rows omit them. The caller
     owns the transaction.
@@ -2911,7 +2913,7 @@ def write_page_graph_rows(
             replace=True,
         )
         records = (nodes, parent, edges, dependencies, coverage)
-        before_write(rel, (*records, link_rows) if unit_links else records)
+        before_write(rel, (*records, link_rows) if unit_links else records, True)
 
     EpistemicGraphIndex._drop_own_rows(conn, rel, unit_links=unit_links)
     for key, value in registry_stamps:
@@ -2929,6 +2931,14 @@ def write_page_graph_rows(
     coverage.write(conn)
     if unit_links:
         link_rows.write(conn)
+    for batch in relationship_batches:
+        stored_edges = PageGraphRecords(
+            "graph_edges", edge_columns,
+            tuple(_edge_values(edge)[: len(edge_columns)] for edge in batch), replace=True,
+        )
+        if before_write is not None:
+            before_write(rel, (stored_edges,), False)
+        stored_edges.write(conn)
     _bump_generation(conn)
 
 
@@ -15354,6 +15364,32 @@ def _page_level_edges(
     return edges
 
 
+def stored_relationship_edge(
+    relationship_id: str, relation_type: str, source: semantic_units.SemanticUnit,
+    path: str, target_path: str, target_key: str, target_parent: str | None,
+    target_anchor: str | None, target_kind: str | None,
+) -> GraphEdge:
+    """Project one canonical relationship as an exact unit relation candidate."""
+    occurrence = semantic_units.occurrence_key(source.form, source.span, source.source_hash)
+    candidate = _edge(
+        _candidate_key(path, occurrence, source.form), target_key, relation_type,
+        "semantic_relation",
+        source_path=path, source_anchor=source.anchor, source_hash=source.source_hash,
+        dst_page_key=_file_key(target_path), source_kind=source.kind, target_kind=target_kind,
+        metadata={
+            "occurrence_key": occurrence, "stored_relationship": relationship_id,
+            "bound_target_path": target_path, "bound_target_parent": target_parent,
+            "bound_source_parent": source.unit_ref.rpartition("#")[0] if source.unit_ref else None,
+            "target_fragment": target_anchor, "target_kind": target_kind,
+            "fragment_resolution": "unit" if target_anchor else None,
+        },
+    )
+    return replace(
+        candidate, edge_key=f"stored:{relationship_id}", relation_type=None,
+        parent_relation=None, registry_status=CANDIDATE_STATUS, resolver_source_kind=None,
+    )
+
+
 def _edges_for_page(
     vault_root: Path,
     page,
@@ -16978,12 +17014,23 @@ class GraphView:
             parent = self.parent(str(row.get("source_path") or ""))
             if parent is None:
                 return None
+            if metadata.get("stored_relationship"):
+                target = self.parent(str(metadata["bound_target_path"]))
+                target_ref = metadata["bound_target_parent"]
+                if (target is None or parent.structure.parent_ref != metadata["bound_source_parent"]
+                        or (target_ref is not None and target.structure.parent_ref != target_ref)):
+                    return None
+                fragment = metadata.get("target_fragment")
+                if fragment and target.structure.resolve_fragment(fragment).index is None:
+                    return None
             occurrence = metadata.get("occurrence_key")
             unit = parent.structure.unit(str(occurrence)) if occurrence else None
             if occurrence and unit is None:
                 return None
             raw = str(row.get("raw_relation") or "")
             registry = parent.relations
+            if metadata.get("stored_relationship") and registry.definition(raw) is None:
+                return None
             if unit is None and not (metadata.get("canonical") or metadata.get("has_colon")) and (
                 raw not in registry.keys and raw not in registry.aliases
             ):

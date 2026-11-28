@@ -704,6 +704,16 @@ def test_batch_completion_guard_hash_work_is_independent_of_write_count(
     assert reads == 2
 
 
+def test_batch_access_refuses_an_outside_target_without_naming_the_host_path(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    root.mkdir()
+    outside = tmp_path / "elsewhere" / "page.md"
+    write = vault.PlannedWrite(outside, "Page content.")
+
+    with pytest.raises(ValueError, match="^WRITE_REFUSED: target is unavailable$"):
+        vault._validate_batch_write_access(root, [write])
+
+
 def test_batch_access_admission_per_write_is_independent_of_write_count(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

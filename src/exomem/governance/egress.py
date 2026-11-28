@@ -1109,6 +1109,7 @@ def direct_text_references_verdict(
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
     resolved_here: Callable[[str], tuple[str, ...]] | None = None,
+    local_page: str | None = None,
 ) -> str:
     """Prove every wikilink in returned direct-read text remains releasable.
 
@@ -1123,14 +1124,21 @@ def direct_text_references_verdict(
     `resolved_here` answers, for a name as the text wrote it that the index does not
     resolve, the paths the caller proved it names (a page the index no longer lists).
     Such a path is still decided like any other, so it must name a page that exists.
+    `local_page` binds fragment-only links in an admitted page image to their parent.
     """
     root = Path(vault_root)
     policy = policy_module.load(root)
     who = principal if principal is not None else effective_principal()
+    targets = []
     for reference in _WIKILINK_ANYWHERE.findall(text):
         target, _ = _unwrap_reference(reference, is_wikilink_target=True)
+        if not target and local_page is not None:
+            page, fragment = vault.split_wikilink_target(reference)
+            if not page and len(fragment) > 1:
+                target = local_page
         if not content_permits(root, target, who):
             return TEXT_REFUSED
+        targets.append(target)
     if _file_policy_empty(root, policy):
         return TEXT_RELEASED
     if policy.blocked or not who.resolved:
@@ -1139,11 +1147,7 @@ def direct_text_references_verdict(
 
     paths: set[str] = set()
     names: set[str] = set()
-    for raw in _WIKILINK_ANYWHERE.findall(text):
-        # `raw` is already bracket-stripped by the regex capture, so the
-        # alias/heading split needs `is_wikilink_target=True` -- see
-        # `_unwrap_reference`'s docstring.
-        target, _explicit = _unwrap_reference(raw, is_wikilink_target=True)
+    for target in targets:
         if not target:
             return TEXT_REFUSED
         if target.endswith(".md"):
@@ -2405,6 +2409,7 @@ def _stored_admission_many(
     identity: Callable[[], object], scalar: Callable[[str, bool], tuple[bool, bool]],
     purpose: str | None = None, tombstones: frozenset[str] = frozenset(), content_only: bool = False,
     record_outcomes: bool = False, within_request: Callable[[], object] | None = None,
+    minimum_level: int = RELEASE_FLOOR,
 ) -> dict[str, tuple[bool, bool]]:
     """Decide each ordinary scope class once; unknown facts and caller views remain scalar.
 
@@ -2423,7 +2428,7 @@ def _stored_admission_many(
     collector = _collector()
     recording = record_outcomes and collector is not None and not collector.sink
     scope_sets = {} if named is None else page_admission.scopes_many(root, paths, policy)
-    classes = memo.setdefault(("scope-admission", named, content_only), {})
+    classes = memo.setdefault(("scope-admission", named, content_only, minimum_level), {})
     denied = connector_boundary.admission_identity(root, who, policy)[0] if scope_sets else frozenset()
     check_tombstones = bool(tombstones) and not content_only
     answers = {}
@@ -2440,8 +2445,8 @@ def _stored_admission_many(
                     scopes, policy=policy, audience=who.audience_id, purpose=purpose,
                     active_grants=policy.grants,
                 )
-                # A simple page has no bridge; resolving L4 can only lower it below the release floor.
-                permitted = decision.level >= RELEASE_FLOOR
+                # A simple page has no bridge that could change this decision.
+                permitted = decision.level >= minimum_level
             classes[scopes] = (permitted, decision)
         permitted, decision = classes[scopes]
         tombstoned = check_tombstones and lifecycle.is_tombstoned_in(tombstones, path)
@@ -7929,6 +7934,34 @@ def release_level_for(
         size=artifact_copy.size if artifact_copy is not None else None,
     )
     return level
+
+
+def full_release_among(vault_root: Path, paths: Iterable[str]) -> frozenset[str]:
+    """Admit unit endpoints through the existing release decision without emitting receipts."""
+    wanted = list(dict.fromkeys(paths))
+    if not wanted:
+        return frozenset()
+    policy = policy_module.load(vault_root)
+    who = effective_principal()
+    tombstones = lifecycle.tombstoned_paths(vault_root)
+    purpose = _declared_purpose(vault_root, who, None)
+    grants_hash = _grants_hash(policy)
+
+    def identity() -> tuple | None:
+        return _release_admission_identity(
+            vault_root, policy, who, purpose, grants_hash, tombstones, within_request=True,
+        )
+
+    def scalar(path: str, _publish: bool) -> tuple[bool, bool]:
+        level = release_level_for(
+            vault_root, path, principal=who, policy=policy, tombstones=tombstones, record=False,
+        )
+        return (level is not None and level >= LEVEL_FULL, False)
+
+    return frozenset(path for path, (allowed, _) in _stored_admission_many(
+        vault_root, wanted, False, policy=policy, who=who, purpose=purpose,
+        tombstones=tombstones, identity=identity, scalar=scalar, minimum_level=LEVEL_FULL,
+    ).items() if allowed)
 
 
 def release_strip_resolver(

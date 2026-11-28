@@ -192,6 +192,32 @@ def test_a_grant_revoked_while_a_publication_stages_its_bytes_installs_nothing(
     assert temporaries(stored) == []
 
 
+def test_create_by_rename_checks_the_grant_after_the_staged_handle_opens(tmp_path, monkeypatch):
+    rel = "Notes/Example.md.evermatter-relations.jsonl"
+    authority = True
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        open_file = filesystem.file
+
+        def revoke_after_open(parent, leaf, **options):
+            nonlocal authority
+            opened = open_file(parent, leaf, **options)
+            if options.get("access") == "mutate" and held_fs.is_publish_temporary(leaf):
+                authority = False
+            return opened
+
+        def check():
+            if not authority:
+                raise connection.CollectionStoreError("COLLECTION_STORE_LEASE_REQUIRED", "grant revoked")
+
+        monkeypatch.setattr(filesystem, "file", revoke_after_open)
+        with pytest.raises(connection.CollectionStoreError) as refused:
+            projector._publish(filesystem, rel, b"canonical", None, check, rename_new=True)
+
+    assert refused.value.code == "COLLECTION_STORE_LEASE_REQUIRED"
+    assert not (tmp_path / rel).exists()
+    assert temporaries(tmp_path) == []
+
+
 def test_a_moved_pages_parts_follow_it_after_the_pass_that_moved_it_met_a_busy_boundary(
     stored, writer, projecting, monkeypatch
 ):

@@ -7,8 +7,11 @@ import hashlib
 import json
 import re
 import unicodedata
+from bisect import bisect_left
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from dataclasses import field as _field
 from pathlib import Path
 from typing import Any, Literal, assert_never, get_args
 
@@ -23,6 +26,7 @@ from . import (
     page_ids,
     provenance,
     relation_registry,
+    request_budget,
     semantic_blocks,
     semantic_contract,
     semantic_index,
@@ -40,6 +44,9 @@ from .cli_ops import OpError
 from .governance import egress
 from .kbdir import managed_form
 from .mutation_timings import MutationTimings, write_timings_enabled
+from .vault_store import mode as store_mode
+from .vault_store import read as store_read
+from .vault_store import relationships as stored_relationships
 
 ObserveOperation = Literal["add", "update", "remove", "validate", "supersede", "assess"]
 _OPERATIONS: tuple[str, ...] = get_args(ObserveOperation)
@@ -344,6 +351,8 @@ def observe_memory(
     frontmatter, body, _ = vault.parse_frontmatter(editable.original_text)
     if current_unit is not None and proposal_mode in {"update", "remove"}:
         _guard_nested_observation_span(body, current_unit)
+    store_edges = store_mode.store_mode_for_reads(vault_root)
+    stored_arguments: tuple[unit_edges.Edge, ...] = ()
     target_anchor: str | None = None
     removed_unit = None
     dropped_relations: tuple[tuple[str, str], ...] = ()
@@ -383,16 +392,10 @@ def observe_memory(
                 else relation_registry.core_registry()
             )
             superseding = _superseding_unit(
-                current.document, rel_registry, editable.rel_path, resolved.unit
+                vault_root, current.document, rel_registry, editable.rel_path, resolved.unit
             )
             if superseding is not None:
-                raise ObserveMemoryError(
-                    "SUPERSEDE_TARGET_ALREADY_SUPERSEDED",
-                    f"the claim is already superseded by unit "
-                    f"{unit_id(superseding)}",
-                    "Supersede the successor instead, or read the page's units "
-                    "for the current ids.",
-                )
+                raise _already_superseded(superseding)
             if kind is not None:
                 selected_kind = _select_kind(
                     language,
@@ -425,10 +428,12 @@ def observe_memory(
                 )
             normalized_tags = _canonical_tags(tags or [])
             normalized_context = _canonical_context(context)
-            normalized_relations = unit_edges.add_unit_edges(
+            successor_relations = unit_edges.add_unit_edges(
                 (unit_edges.supersession_edge(rel_registry, resolved.anchor),),
                 _canonical_relations(relations or []),
             )
+            normalized_relations = () if store_edges else successor_relations
+            stored_arguments = successor_relations if store_edges else ()
             normalized_verdict = None
             normalized_check_by = None
             normalized_as_of = _canonical_date(as_of, "as_of") if as_of else None
@@ -460,6 +465,8 @@ def observe_memory(
             normalized_verdict = _resolve_verdict(verdict, resolved.unit, language)
             normalized_check_by = _resolve_check_by(check_by, resolved.unit)
             added_relations = _canonical_relations(relations or [])
+            if store_edges:
+                stored_arguments, added_relations = added_relations, ()
             normalized_category = resolved.category
             normalized_content = resolved.content
             if resolved.unit is not None and resolved.unit.form == "rich":
@@ -478,10 +485,11 @@ def observe_memory(
                     )
                 normalized_tags = tuple(resolved.unit.tags)
                 normalized_context = resolved.unit.context
-                normalized_relations = unit_edges.add_unit_edges(
-                    ((relation.kind, relation.target) for relation in resolved.unit.relations),
-                    added_relations,
+                authored = tuple(
+                    (relation.kind, relation.target) for relation in resolved.unit.relations
                 )
+                normalized_relations = unit_edges.add_unit_edges(authored, added_relations)
+                stored_arguments = tuple(edge for edge in stored_arguments if edge not in authored)
                 normalized_as_of = resolved.unit.as_of
                 normalized_until = resolved.unit.until
                 preserved_metadata = _preserved_metadata(resolved.unit)
@@ -621,7 +629,7 @@ def observe_memory(
             kind is not None
             and semantic_language_registry.normalize_label(kind) not in compact_kinds
         )
-        if normalized_relations and not explicit_rich_kind:
+        if normalized_relations and not explicit_rich_kind and not store_edges:
             # A rich unit that keeps its kind on update carries its own relations, so only a unit
             # that is compact lifts a provenance link to the page.
             if selected_kind in semantic_kinds.compact_kinds():
@@ -655,6 +663,23 @@ def observe_memory(
             dropped_outcome = _dropped_relations_outcome(
                 dropped_relations, compact=selected_kind in semantic_kinds.compact_kinds()
             )
+        if store_edges:
+            authored = (() if base_unit is None else
+                        tuple((relation.kind, relation.target) for relation in base_unit.relations))
+            supplied = normalized_relations
+            supplied_set = set(supplied)
+            registry = _relationship_registry(current)
+            normalized_relations = tuple(
+                edge for edge in authored
+                if edge in supplied_set or registry.has(edge[0], "replaces")
+            )
+            stored_arguments = tuple(
+                edge for edge in supplied if edge not in normalized_relations
+            )
+            dropped_relations = tuple(edge for edge in authored if edge not in normalized_relations)
+            dropped_outcome = (_dropped_relations_outcome(
+                dropped_relations, compact=selected_kind in semantic_kinds.compact_kinds(),
+            ) if dropped_relations else None)
         preserved_metadata = _preserved_metadata(base_unit)
         governed_passed = _governed_names(
             verdict=normalized_verdict,
@@ -829,11 +854,32 @@ def observe_memory(
         if dated_default_kind is not None
         else None
     )
-    after_source = _rebuild_source(
-        editable.original_text,
-        fm_text,
-        after_body,
-        today=authored_day,
+    relationship_plan = None
+    replace_stored = proposal_mode == "update" and relations is not None
+    old_unit = resolved.unit if op == "assess" else current_unit
+    unchanged_unit = bool(
+        store_edges and (stored_arguments or proposal_mode == "update")
+        and old_unit is not None and expected_unit is not None
+        and _unchanged_unit(old_unit, expected_unit)
+    )
+    if unchanged_unit:
+        after_body = body
+    if (store_edges and target_anchor is not None
+            and (stored_arguments or replace_stored)):
+        predecessor_anchor = resolved.unit.anchor if op == "supersede" and resolved.unit else None
+        try:
+            after_body, relationship_plan = _plan_stored_relationships(
+                vault_root, editable, current, after_body, target_anchor, stored_arguments,
+                selected_kind=selected_kind, replacing=replace_stored, reason=reason,
+                predecessor_anchor=predecessor_anchor,
+            )
+        except OpError as error:
+            raise ObserveMemoryError(error.code, error.message, error.remediation) from error
+    after_source = (
+        editable.raw_text
+        if (relationship_plan is not None or unchanged_unit) and after_body == body
+        and fm_text == editable.fm_text and origin_block is None
+        else _rebuild_source(editable.original_text, fm_text, after_body, today=authored_day)
     )
     # One collector spans preflight+commit, so the response accounts for the
     # whole governed write rather than two unrelated halves. `validate` never
@@ -862,6 +908,7 @@ def observe_memory(
                     validate_only=previewing,
                     stamp=temporal.stamp(authored_day),
                     timings=timings,
+                    relationship_plan=relationship_plan,
                 )
         except semantic_writes.SemanticWriteError as error:
             raise ObserveMemoryError(error.code, error.reason) from error
@@ -937,7 +984,12 @@ def observe_memory(
                 )
             preflight = replace(preflight, read_dependency_guards=tuple(guards))
 
-        if previewing:
+        relationship_noop = (
+            relationship_plan is not None and relationship_plan.change is None
+            and not relationship_plan.writes and after_source == editable.raw_text
+            and relation_disposition is None and relation_review_hash is None
+        )
+        if previewing or relationship_noop:
             return _result(
                 operation=op,
                 path=editable.rel_path,
@@ -958,6 +1010,7 @@ def observe_memory(
             )
 
         try:
+            relation_intent = f"\0{relationship_plan.digest}" if relationship_plan else ""
             log_plan = vault.plan_log_writes(
                 vault_root,
                 date_iso=temporal.stamp(today or temporal.now()),
@@ -968,7 +1021,7 @@ def observe_memory(
                     "observe:"
                     + hashlib.sha256(
                         f"{op}\0{editable.rel_path}\0{preflight.before.source_hash}"
-                        f"\0{preflight.after.source_hash}".encode()
+                        f"\0{preflight.after.source_hash}{relation_intent}".encode()
                     ).hexdigest()
                 ),
             )
@@ -990,6 +1043,12 @@ def observe_memory(
                 )
         except semantic_writes.SemanticWriteError as error:
             raise ObserveMemoryError(error.code, error.reason) from error
+        except OpError as error:
+            if error.code == stored_relationships.ALREADY_SUPERSEDED:
+                successor = _unit_by_anchor(current.document, error.details.get("successor_anchor"))
+                if successor is not None:
+                    raise _already_superseded(successor) from error
+            raise ObserveMemoryError(error.code, error.message, error.remediation) from error
         link_warnings.extend(committed.review_field_warnings())
 
         final = semantic_index.selected_parent_index_state(vault_root, editable.rel_path)
@@ -1034,6 +1093,14 @@ def unit_id(unit: Any) -> str:
     return page_ids.part_id(str(unit.unit_ref), str(unit.fingerprint))
 
 
+def _already_superseded(successor: semantic_units.SemanticUnit) -> ObserveMemoryError:
+    return ObserveMemoryError(
+        stored_relationships.ALREADY_SUPERSEDED,
+        f"the claim is already superseded by unit {unit_id(successor)}",
+        "Supersede the successor instead, or read the page's units for the current ids.",
+    )
+
+
 def page_units(vault_root: Path, page: dict[str, Any]) -> Any:
     """The units of a page just read, each with the id an edit of it takes.
 
@@ -1067,7 +1134,8 @@ def page_units(vault_root: Path, page: dict[str, Any]) -> Any:
     supersedes: dict[str, list[str]] = {}
     superseded_by: dict[str, list[str]] = {}
     for successor, target_unit in working_set_currency.same_page_supersessions(
-        selected.document, path, rel_registry
+        selected.document, path, rel_registry,
+        unit_edges.current_supersessions(vault_root, (path,), rel_registry).get(path, ()),
     ):
         if successor.unit_ref and target_unit.unit_ref:
             supersedes.setdefault(unit_id(successor), []).append(unit_id(target_unit))
@@ -1319,6 +1387,7 @@ def _rich_id_edit(body: str, unit: Any, anchor: str) -> tuple[int, int, str]:
 
 
 def _superseding_unit(
+    root: Path,
     document: Any,
     rel_registry: relation_registry.RelationRegistry,
     path: str,
@@ -1328,11 +1397,185 @@ def _superseding_unit(
     if unit is None or unit.unit_ref is None:
         return None
     for successor, target in working_set_currency.same_page_supersessions(
-        document, path, rel_registry
+        document, path, rel_registry,
+        unit_edges.current_supersessions(root, (path,), rel_registry).get(path, ()),
     ):
         if target.unit_ref == unit.unit_ref:
             return successor
     return None
+
+
+def _relationship_registry(
+    state: semantic_index.SemanticParentIndexState,
+) -> relation_registry.RelationRegistry:
+    if state.definitions is not None:
+        return state.definitions.snapshots["relations"].typed
+    return relation_registry.core_registry()
+
+
+@dataclass
+class _RelationshipPage:
+    raw: str
+    state: semantic_index.SemanticParentIndexState
+    guard: vault.PathGuard | None = None
+    anchored: dict[str, str] = _field(default_factory=dict)
+    edits: list[tuple[int, int, str]] = _field(default_factory=list)
+    used: set[str | None] | None = None
+
+    def anchor(self, unit: semantic_units.SemanticUnit) -> str:
+        if unit.anchor is not None:
+            return unit.anchor
+        assert unit.unit_ref is not None
+        if unit.unit_ref not in self.anchored:
+            if self.used is None:
+                self.used = {item.anchor for item in self.state.document.units if item.anchor}
+            resolved = _resolved_claim(self.state.body, unit, self.used)
+            self.edits.extend(resolved.edits)
+            self.anchored[unit.unit_ref] = resolved.anchor
+            self.used.add(resolved.anchor)
+        return self.anchored[unit.unit_ref]
+
+
+def _plan_stored_relationships(
+    root: Path, editable: edit._Editable, current: semantic_index.SemanticParentIndexState,
+    body: str, anchor: str, arguments: tuple[unit_edges.Edge, ...], *,
+    selected_kind: str, replacing: bool, reason: str | None, predecessor_anchor: str | None = None,
+) -> tuple[str, unit_edges.StoredPlan | None]:
+    """Resolve both ends in the writer's view before asking for any far-end write admission."""
+    source_path = editable.rel_path
+    initial_body = current.body
+    original_body = vault.parse_frontmatter(editable.original_text)[1]
+    source = editable.original_text[:len(editable.original_text) - len(original_body)] + body
+    primary = _RelationshipPage(source, current)
+    if body != initial_body and arguments:
+        primary.state = semantic_index.selected_parent_index_state(root, source_path, source=source)
+    pages = {source_path: primary}
+    targets: list[tuple[str, unit_edges.End]] = []
+    registry = _relationship_registry(current)
+    supersession_check = None
+    if predecessor_anchor is not None and current.parent_ref is not None:
+        counts = Counter(unit.anchor for unit in current.document.units if unit.anchor is not None)
+        supersession_check = stored_relationships.SupersessionCheck(
+            source_path, current.parent_ref, predecessor_anchor,
+            tuple(name for name, count in counts.items() if count == 1),
+            tuple(sorted(registry.keys_with("replaces"))),
+        )
+    with store_read.request_snapshot(root):
+        visible = vault.writer_link_visibility(root)
+        resolver = find.writer_resolver_snapshot(root) if arguments else None
+        locators: list[tuple[str, str, str | None]] = []
+        for kind, target in arguments:
+            request_budget.checkpoint()
+            assert resolver is not None
+            status, locator, fragment, _ = semantic_contract._resolve_target(
+                root, target, resolver, visible, source_path=source_path,
+            )
+            if status == "ambiguous":
+                raise ObserveMemoryError(
+                    "AMBIGUOUS_RELATIONSHIP_END", "name one relationship target",
+                )
+            if locator is None:
+                raise _relationship_end_missing()
+            locators.append((kind, locator.partition("#")[0], fragment))
+        unit_paths = {path for _, path, fragment in locators if fragment is not None}
+        if unit_paths and egress.caller_restricted(root):
+            if egress.full_release_among(root, unit_paths) != unit_paths:
+                raise _relationship_end_missing()
+        for kind, path, fragment in locators:
+            request_budget.checkpoint()
+            if path not in pages:
+                pages[path] = _read_relationship_page(root, path)
+            page = pages[path]
+            unit = None if fragment is None else page.state.document.resolve_fragment(fragment).unit
+            if fragment is not None and unit is None:
+                raise _relationship_end_missing()
+            definition = semantic_contract._registry_resolution(
+                registry, kind, projects=_page_projects(current.frontmatter),
+                page_type=_page_type(current.frontmatter), source_kind=selected_kind,
+                target_kind=unit.kind if unit is not None else None, origin="semantic_relation",
+            )
+            if definition.canonical is None or definition.status == "scope_violation":
+                raise ObserveMemoryError(
+                    "INVALID_SEMANTIC_RELATION", "the relation type is unavailable for these ends",
+                )
+            target_anchor = page.anchor(unit) if unit is not None else None
+            targets.append((
+                definition.canonical, unit_edges.End(path, target_anchor, page.state.parent_ref),
+            ))
+
+        writes: list[vault.PlannedWrite] = []
+        guards: list[vault.PathGuard] = []
+        for path, page in pages.items():
+            if page.guard is None:
+                continue
+            guards.append(page.guard)
+            if page.edits:
+                writes.append(vault.PlannedWrite(
+                    root / path, _splice_relationship_anchors(page), guard=page.guard,
+                ))
+        if writes:
+            try:
+                vault._validate_batch_write_access(root, writes)
+            except (ValueError, OSError) as error:
+                raise ObserveMemoryError(
+                    "RELATIONSHIP_END_NOT_WRITABLE",
+                    "a target unit needs an anchor on a read-only page",
+                ) from error
+        plan = unit_edges.plan_change(
+            root, source=unit_edges.End(source_path, anchor, current.parent_ref),
+            targets=tuple(targets), visible=visible, replacing=replacing, reason=reason,
+            writes=tuple(writes), guards=tuple(guards),
+            preserved_types=registry.keys_with("replaces"),
+            supersession_check=supersession_check,
+        )
+    return semantic_units.apply_splices(body, primary.edits), plan
+
+
+def _relationship_end_missing() -> ObserveMemoryError:
+    return ObserveMemoryError(
+        "RELATIONSHIP_END_NOT_FOUND", "the relationship target is unavailable",
+    )
+
+
+def _read_relationship_page(root: Path, path: str) -> _RelationshipPage:
+    try:
+        source, guard = vault.read_guarded_text(root, root / path)
+        state = semantic_index.selected_parent_index_state(root, path, source=source)
+    except (ValueError, OSError) as error:
+        raise _relationship_end_missing() from error
+    return _RelationshipPage(source, state, guard)
+
+
+def _splice_relationship_anchors(page: _RelationshipPage) -> str:
+    """Translate body offsets back to exact source bytes, including CRLF and a leading BOM."""
+    original = page.raw.replace("\r\n", "\n").replace("\r", "\n")
+    _, body, _ = vault.parse_frontmatter(original)
+    offset = len(original) - len(body)
+    crlf = [match.start() - index for index, match in enumerate(re.finditer("\r\n", page.raw))]
+    newline = vault.document_newline(page.raw)
+
+    def raw_position(position: int) -> int:
+        logical = offset + position
+        return logical + bisect_left(crlf, logical)
+
+    return semantic_units.apply_splices(page.raw, (
+        (raw_position(start), raw_position(end), text.replace("\n", newline))
+        for start, end, text in page.edits
+    ))
+
+
+def _unchanged_unit(unit: semantic_units.SemanticUnit, expected: Mapping[str, Any]) -> bool:
+    """Compare parsed fields so a relationship-only edit preserves even noncanonical layout."""
+    relations = tuple((relation.kind, relation.target) for relation in unit.relations)
+    return (
+        unit.anchor == expected["anchor"] and unit.kind == expected["kind"]
+        and unit.category_key == expected["category"] and unit.content == expected["content"]
+        and unit.tags == expected["tags"] and unit.context == expected["context"]
+        and relations == expected["relations"]
+        and unit.verdict == expected["verdict"] and unit.check_by == expected["check_by"]
+        and unit.as_of == expected["as_of"] and unit.until == expected["until"]
+        and _preserved_metadata(unit) == expected["preserved"]
+    )
 
 
 def _legacy_page_given_form(path: str) -> str:

@@ -216,6 +216,16 @@ class StoreSnapshot:
         for row in rows:
             yield PageMeta(*row)
 
+    def page_bodies_before(
+        self, prefix: str, *, before: str | None, limit: int,
+    ) -> Iterator[tuple[str, bytes]]:
+        """Read a descending window of exact bodies in a prefix range."""
+        upper = prefix + AFTER
+        yield from self.connection.execute(
+            "SELECT path, body FROM store_pages WHERE path >= ? AND path < ? ORDER BY path DESC LIMIT ?",
+            (prefix, min(upper, before) if before is not None else upper, limit),
+        )
+
     def index_folder_counts(self, directories: tuple[str, ...]) -> Iterator[tuple[str, str, int]]:
         """Each area's direct Markdown count per parent, including parents with only indexes."""
         for directory in directories:

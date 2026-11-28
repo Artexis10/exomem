@@ -18,6 +18,7 @@ holds back neither the other intents nor any reader; after ``ATTEMPTS`` status c
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -130,6 +131,7 @@ def _stamp(at: datetime) -> str:
 def enqueue(
     tx: Connection, derived: list[str], refreshed: list[str], revision: int, now: str,
     metered: frozenset[str] = frozenset(),
+    moved: frozenset[str] = frozenset(),
 ) -> None:
     """Queue one intent per path in the commit's own transaction.
 
@@ -137,13 +139,20 @@ def enqueue(
     failure, so the path is derived again. ``metered`` names the paths of an original, whose derived
     rows the vault's disk floor meters when the drain writes them.
     """
-    tx.executemany(
-        "INSERT INTO store_derivation_queue(path, revision, operation, queued_at, metered) "
-        "VALUES (?, ?, ?, ?, ?) "
+    rows = [
+        *((rel, DERIVE, int(rel in metered), int(rel in moved)) for rel in derived),
+        *((rel, REFRESH, 0, 0) for rel in refreshed),
+    ]
+    if not rows:
+        return
+    tx.execute(
+        "INSERT INTO store_derivation_queue(path, revision, operation, queued_at, metered, relationship_move) "
+        "SELECT value->>0, ?1, value->>1, ?2, value->>2, value->>3"
+        " FROM json_each(?3) WHERE 1 ORDER BY key "
         "ON CONFLICT(path) DO UPDATE SET revision = excluded.revision, operation = excluded.operation, "
+        "relationship_move = MAX(relationship_move, excluded.relationship_move), "
         "metered = excluded.metered, attempts = 0, failed_code = NULL, retry_at = NULL",
-        [*((rel, revision, DERIVE, now, int(rel in metered)) for rel in derived),
-         *((rel, revision, REFRESH, now, 0) for rel in refreshed)],
+        (revision, now, json.dumps(rows)),
     )
 
 
@@ -678,10 +687,11 @@ class _Intent:
     attempts: int
     metered: int
     failed_code: str | None
+    relationship_move: int
 
 
 #: The columns that make an ``_Intent``, in the order of its fields.
-_INTENT_COLUMNS = "path, revision, operation, attempts, metered, failed_code"
+_INTENT_COLUMNS = "path, revision, operation, attempts, metered, failed_code, relationship_move"
 
 
 def _next_batch(writer: CollectionWriter, from_revision: int = 0) -> list[_Intent]:
@@ -727,7 +737,7 @@ def _next_batch(writer: CollectionWriter, from_revision: int = 0) -> list[_Inten
 
 def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: Drained) -> bool:
     """Derive ``batch`` in one transaction; on failure record it against each intent and return False."""
-    from . import write
+    from . import relationships, write
 
     if len(batch) == 1:
         [intent] = batch
@@ -753,6 +763,7 @@ def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: 
             refreshed = [intent.path for intent in batch if intent.operation == REFRESH]
             before = read.vault_triple(tx, row[1])
             metered = {intent.path for intent in batch if intent.metered}
+            relationship_moves = tuple(intent.path for intent in batch if intent.relationship_move)
             prepared, reserve_graph, settle = allocations.enter_context(write.derived_room(
                 writer, tx, [rel for rel in written if rel in metered],
                 tuple(rel for rel in removed if rel in metered),
@@ -760,7 +771,7 @@ def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: 
             delta = derive.derive_paths(
                 tx, root, written=written, removed=removed, refreshed=refreshed,
                 before=before, prepared_lexical=prepared, reserve_graph=reserve_graph,
-                metered=frozenset(metered),
+                metered=frozenset(metered), relationship_moves=frozenset(relationship_moves),
                 dependency_revisions={intent.path: intent.revision for intent in batch},
                 dependency_limit=BATCH_PAGES,
             )
@@ -771,6 +782,8 @@ def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: 
                 "DELETE FROM store_derivation_queue WHERE path = ?", [(path,) for path in completed]
             )
             revision = row[1] + 1
+            if relationship_moves:
+                relationships.reproject_moved(tx, relationship_moves, revision=revision, at=write.timestamp())
             tx.execute("UPDATE store_mode SET revision = ? WHERE id = 1", (revision,))
             after = read.vault_triple(tx, revision)
     except Exception as error:  # noqa: BLE001 - a failed intent is recorded and retried, never lost
@@ -792,16 +805,24 @@ def _derive_dependency_pass(
     cursor: dependency_pass.DependencyPass, result: Drained,
 ) -> bool:
     """Commit a cursor and its graph rows together. The page's receipt covers both phases."""
+    from . import write
+
     started = False
     try:
-        with writer.handle.transaction(collection_free=True) as tx:
+        with ExitStack() as allocations, writer.handle.transaction(collection_free=True) as tx:
             started = True
             mode_row = tx.execute("SELECT mode, revision FROM store_mode WHERE id = 1").fetchone()
             if mode_row is None or mode_row[0] != mode.STORE_MODE:
                 result.stopped = True
                 return True
             before = read.vault_triple(tx, mode_row[1])
-            completed = derive.resume_dependencies(tx, root, before, cursor, limit=BATCH_PAGES)
+            _, reserve_graph, settle = allocations.enter_context(write.derived_room(
+                writer, tx, [], (), graph_continuation=intent.metered,
+            ))
+            completed = derive.resume_dependencies(
+                tx, root, before, cursor, limit=BATCH_PAGES, reserve_graph=reserve_graph,
+            )
+            settle()
             if completed:
                 dependency_pass.discard(tx, [intent.path])
                 tx.execute("DELETE FROM store_derivation_queue WHERE path = ?", (intent.path,))

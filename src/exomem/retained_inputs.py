@@ -205,7 +205,8 @@ def resolve_retained_input(
 
 @reader
 def exact_text_verdict(
-    vault_root: Path, value: str, *, resolved_here: Callable[[str], tuple[str, ...]] | None = None
+    vault_root: Path, value: str, *, resolved_here: Callable[[str], tuple[str, ...]] | None = None,
+    local_page: str | None = None,
 ) -> str:
     """Check an exact selected representation without recording unreturned targets.
 
@@ -215,7 +216,7 @@ def exact_text_verdict(
     """
     principal = _principal()
     verdict = egress.direct_text_references_verdict(
-        vault_root, value, principal=principal, resolved_here=resolved_here
+        vault_root, value, principal=principal, resolved_here=resolved_here, local_page=local_page,
     )
     if verdict != egress.TEXT_RELEASED:
         return verdict
@@ -230,10 +231,13 @@ def exact_text_verdict(
 
 
 def exact_text_visible(
-    vault_root: Path, value: str, *, resolved_here: Callable[[str], tuple[str, ...]] | None = None
+    vault_root: Path, value: str, *, resolved_here: Callable[[str], tuple[str, ...]] | None = None,
+    local_page: str | None = None,
 ) -> bool:
     """Whether an exact selected representation is released unchanged."""
-    return exact_text_verdict(vault_root, value, resolved_here=resolved_here) == egress.TEXT_RELEASED
+    return exact_text_verdict(
+        vault_root, value, resolved_here=resolved_here, local_page=local_page,
+    ) == egress.TEXT_RELEASED
 
 
 @reader
