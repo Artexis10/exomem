@@ -75,6 +75,8 @@ The census excludes both kinds from reuse today. The candidates then pass the ex
 
 The offload scan, the refusal check, the refusal status, upload admission and the import window status read the same total, once, before they take their own holds. In store mode `take_census` and `recorded_census` become this read.
 
+**Decision: lag never admits an upload.** Outside offload, upload admission is the only reader that decides on the total. The refusal status and the import window status only report it. In store mode, upload admission follows the trail to the head before it decides (D5), so it decides on a total that is exact at that head, as today's confirmed census is. Ordinary lag therefore never admits an upload that does not fit. Only a genuine unknown admits one: a projection that needs a rebuild, a failure, or an unknown row. In file mode, including a hosted cell in file mode, upload admission keeps today's census path unchanged: the recorded census decides, and a fresh census confirms a refusal (`media_store.py:1673-1678`).
+
 ### D2. The checks under the boundary
 
 Before each of the protection and publication holds, offload runs `follow_store` until the projection lags the store's audit head by 256 rows or fewer. It stops after 8 rounds, which cover a burst of 2,048 writes. A vault that writes faster than that is busy enough that offload yields: the job returns with `MEDIA_STORE_BUSY`.
@@ -198,7 +200,7 @@ When offload reads the total:
 - **A failed rebuild is recorded and not yet due for a retry (D4):** offload refuses with `MEDIA_ALLOWANCE_UNKNOWN` and the blockers, and keeps retryable demand, as the census does today.
 - **The projection is current, and an unknown row or a conflict makes the total unknown:** offload refuses in the same way and names up to five pages.
 - **The projection is not current for another reason:** offload raises `MEDIA_STORE_BUSY`. The worker returns the job without spending an attempt, with the queue's existing backoff (60 s, doubling to 15 minutes). The refusal status reports the total as being counted.
-- **Upload admission** admits the upload, as an unknown record does today (`upload_refusal`, `media_store.py:1637`). Offload checks again before it publishes.
+- **Upload admission** holds no boundary: the upload request runs it on a worker thread (`server_transfer.py:90-91`). In store mode it reads the audit head and follows the trail to that head, round after round, as `recover` does (D4). It needs no round bound, because it holds no boundary while it reads, and the head that it read at the start bounds it. It then decides on the projection's total. An upload that does not fit is refused with `MEDIA_ALLOWANCE_EXCEEDED`, as a confirmed census refuses it today (`media_store.py:1676-1678`). Only a genuine unknown admits the upload, as an unknown figure does today (`media_store.py:1679-1681`): a projection that needs a rebuild (not complete, another policy, or a failed identity check, D8), a recorded failed rebuild, a follow that ends on a race or a read failure of the classes that D3 lists, an unknown row, or a conflict. Upload admission catches the store and ledger read errors that `_policy_ready` catches (`media_bindings.py:987-995`), so such an error admits the upload instead of failing the request. It starts no rebuild: `recover` stays the only path that rebuilds (D4). Offload checks again before it publishes. In file mode, upload admission keeps today's census path (D1).
 
 ### D6. A rebuild publishes at its snapshot's audit position
 
@@ -318,6 +320,8 @@ No note is walked for the allowance. Today each hold can include a walk of every
 - writes two ledger transactions: the withdraw at `synchronous=FULL` (`media_bindings.py:190`), and the apply.
 
 Every save pays this, whether or not it touches a companion, because each audit batch moves the checkpoint.
+
+**Per upload admission in store mode:** one read of the audit head, the follow rounds up to that head, and the D1 read, whose aggregate has a budget of 100 ms at p95 (task 3.4). The custody follow after each save keeps the projection near the head, so an upload usually replays no rows. After a burst of saves it replays the rows that landed, 256 per round, with a brief boundary hold to publish each round. Today an upload reads the recorded census, and walks every note under the consistency guard when that record says the upload does not fit (`media_store.py:1671-1678`).
 
 **Left-out pages:** at each store sweep, one walk on the watcher's reconcile thread, outside the boundary. It lists every entry under the managed root, one directory read per folder, and reads the header of each page that the store does not own. Its time grows with the number of such pages, not with the owned pages. The measured census read about 17,500 headers in 39 s at p50, about 2 ms per header. By that estimate, 1,000 such pages take about 2 s plus the listing. Task 3.4 measures the walk. The sweep already walks every owned file at the same interval, and saves do not wait for either walk.
 

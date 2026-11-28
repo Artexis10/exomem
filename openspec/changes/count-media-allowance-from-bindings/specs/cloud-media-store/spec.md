@@ -33,6 +33,11 @@ In store mode, offload, the offload scan, the refusal status, upload admission a
 - **THEN** offload follows the audit trail until the projection lags by 256 rows or fewer, before it takes the hold
 - **AND** under the hold it replays at most 256 rows and publishes without `MEDIA_STORE_BUSY`
 
+#### Scenario: An upload that does not fit is refused while the projection lags
+
+- **WHEN** in store mode saves bind new versions that the projection has not yet followed, and the owner uploads an original larger than what remains of the allowance after those versions
+- **THEN** upload admission follows the audit trail first and refuses the upload with `MEDIA_ALLOWANCE_EXCEEDED`
+
 ### Requirement: A total that is not current makes offload wait
 
 In store mode, when the binding projection is not current, offload SHALL return the job without spending an attempt, and status SHALL report the total as being counted. A note that the projection cannot count, such as one with a malformed or unbound stored reference, SHALL make the total unknown and be named, while the projection stays published. A failed rebuild SHALL record up to five notes where the media worker reads them. An unrelated save SHALL NOT clear a named note or start a rebuild.
