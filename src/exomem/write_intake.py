@@ -565,11 +565,13 @@ def stop(vault_root: Path, *, worker: Drainer | None = None, timeout: float = 10
     drainer.stop(timeout=timeout)
 
 
-def _note_finished(vault_root: Path, origin: str | None, intake_id: str, expires_at: float | None) -> None:
+def _note_finished(
+    vault_root: Path, origin: str | None, intake_id: str, expires_at: float | None, *, state: str,
+) -> None:
     with _DRAINERS_LOCK:
         drainer = _DRAINERS.get(Path(vault_root).resolve())
     if drainer is not None:
-        drainer.note_finished(origin, intake_id, expires_at)
+        drainer.note_finished(origin, intake_id, expires_at, state=state)
 
 
 def _note_failed(vault_root: Path) -> None:
@@ -596,11 +598,18 @@ def _owner_alive(owner: str | None, mine: str | None, state_dir: Path) -> bool:
     return writer_lease._probe_owner_liveness(state_dir, owner)  # noqa: SLF001
 
 
+@dataclass(frozen=True)
+class _FinishedOrigin:
+    intake_id: str
+    state: str
+    expires_at: float
+
+
 class Drainer:
     """The one thread that applies one vault's queued saves, oldest first.
 
     It also keeps the in-memory index that lets a save that never met contention skip the
-    store: the origins of open saves, and of applied saves while their original identity's
+    store: the origins of open saves, and of finished saves while their original identity's
     retry window lasts. The index is loaded once at start and kept current on acceptance
     and finish.
     """
@@ -614,7 +623,7 @@ class Drainer:
         self._open: int | None = None
         self._indexed = False
         self._open_origins: dict[str, str] = {}
-        self._applied_origins: dict[str, tuple[str, float]] = {}
+        self._finished_origins: dict[str, _FinishedOrigin] = {}
         #: Origins with a send in flight (waiting for the boundary or being queued), with a count;
         #: a resend with one of them waits instead of running.
         self._accepting: dict[str, int] = {}
@@ -684,7 +693,7 @@ class Drainer:
         """Admit one send of the save with this origin, atomically.
 
         While another send of the same save is in flight (waiting for the boundary or being
-        queued), wait for it. Then return the intake id and state (open or applied) when the save
+        queued), wait for it. Then return the intake id and state when the save
         is known, or mark this send in flight and return None; the caller ends that mark with
         `end_accept`. So a resend never runs beside the send it repeats.
         """
@@ -707,17 +716,17 @@ class Drainer:
             return known
 
     def _known(self, origin: str) -> tuple[str, str] | None:
-        """The intake id and state of the open save, or of the applied save still in its retry window."""
+        """The intake id and state of an open save or a finished save still in its retry window."""
         intake_id = self._open_origins.get(origin)
         if intake_id is not None:
             return intake_id, QUEUED
-        applied = self._applied_origins.get(origin)
-        if applied is None:
+        finished = self._finished_origins.get(origin)
+        if finished is None:
             return None
-        if applied[1] <= time.time():
-            del self._applied_origins[origin]
+        if finished.expires_at <= time.time():
+            del self._finished_origins[origin]
             return None
-        return applied[0], APPLIED
+        return finished.intake_id, finished.state
 
     def begin_insert(self) -> None:
         with self._condition:
@@ -750,16 +759,16 @@ class Drainer:
                 self._open_origins[origin] = intake_id
             self._condition.notify_all()
 
-    def note_finished(self, origin: str | None, intake_id: str, expires_at: float | None) -> None:
+    def note_finished(self, origin: str | None, intake_id: str, expires_at: float | None, *, state: str) -> None:
         now = time.time()
         with self._condition:
             if origin is not None and self._open_origins.get(origin) == intake_id:
                 del self._open_origins[origin]
-            self._applied_origins = {
-                key: value for key, value in self._applied_origins.items() if value[1] > now
+            self._finished_origins = {
+                key: value for key, value in self._finished_origins.items() if value.expires_at > now
             }
             if origin is not None and expires_at is not None and expires_at > now:
-                self._applied_origins[origin] = (intake_id, expires_at)
+                self._finished_origins[origin] = _FinishedOrigin(intake_id, state, expires_at)
 
     def _load(self) -> None:
         """Read the open count and the origin index in one query."""
@@ -770,18 +779,22 @@ class Drainer:
             try:
                 with _store(self.vault_root, mode="read") as conn:
                     rows = conn.execute(
-                        "SELECT id, origin, state, finished_at, origin_ttl FROM intake WHERE state IN (?, ?) "
-                        "OR (state = ? AND origin IS NOT NULL AND finished_at + origin_ttl > ?)",
-                        (*_OPEN_STATES, APPLIED, now),
+                        "SELECT seq, id, origin, state, finished_at, origin_ttl FROM intake WHERE state IN (?, ?) "
+                        "UNION ALL SELECT seq, id, origin, state, finished_at, origin_ttl FROM intake "
+                        "WHERE finished_at + origin_ttl > ? AND origin IS NOT NULL",
+                        (*_OPEN_STATES, now),
                     ).fetchall()
             except FileNotFoundError:
                 rows = []
             open_count = 0
             open_origins: dict[str, str] = {}
-            applied_origins: dict[str, tuple[str, float]] = {}
-            for row in rows:
-                if row["state"] == APPLIED:
-                    applied_origins[row["origin"]] = (row["id"], row["finished_at"] + row["origin_ttl"])
+            finished_origins: dict[str, _FinishedOrigin] = {}
+            # Sorting the selected rows preserves the expiry index scan and resolves legacy duplicates.
+            for row in sorted(rows, key=lambda receipt: receipt["seq"]):
+                if row["state"] not in _OPEN_STATES:
+                    finished_origins[row["origin"]] = _FinishedOrigin(
+                        row["id"], row["state"], row["finished_at"] + row["origin_ttl"],
+                    )
                     continue
                 open_count += 1
                 if row["origin"] is not None:
@@ -790,7 +803,7 @@ class Drainer:
                 if self._accepts != seen:
                     continue
                 self._open, self._indexed = open_count, True
-                self._open_origins, self._applied_origins = open_origins, applied_origins
+                self._open_origins, self._finished_origins = open_origins, finished_origins
                 self._condition.notify_all()
                 return
         raise RuntimeError("acceptances kept overlapping the intake index read")
@@ -886,7 +899,7 @@ def _claim_head(vault_root: Path) -> _Claim | float | None:
     """
     mine, state_dir = _owner_identity()
     now = time.time()
-    undecodable: list[tuple[str | None, str]] = []
+    undecodable: list[tuple[str | None, str, float | None]] = []
     claimed: _Claim | float | None = None
     try:
         with _write(vault_root) as conn:
@@ -912,7 +925,7 @@ def _claim_head(vault_root: Path) -> _Claim | float | None:
                         (FAILED, "INTERNAL", _json({"code": "INTERNAL", "message": type(error).__name__}),
                          now, now, row["id"]),
                     )
-                    undecodable.append((row["origin"], row["id"]))
+                    undecodable.append((row["origin"], row["id"], row["origin_ttl"]))
                     continue
                 generation = int(row["generation"])
                 if row["state"] == APPLYING and not row["commit_reached"]:
@@ -943,8 +956,8 @@ def _claim_head(vault_root: Path) -> _Claim | float | None:
                 break
     except FileNotFoundError:
         return None
-    for origin, intake_id in undecodable:
-        _note_finished(vault_root, origin, intake_id, None)
+    for origin, intake_id, ttl in undecodable:
+        _note_finished(vault_root, origin, intake_id, now + ttl if ttl is not None else None, state=FAILED)
     if undecodable:
         _note_failed(vault_root)
     return claimed
@@ -1125,7 +1138,7 @@ def _finish_applied(vault_root: Path, claim: _Claim, result: Any) -> None:
         log.warning("write intake dropped a stale finish of %s", claim.id)
         return
     expires_at = now + claim.origin_ttl if claim.origin_ttl is not None else None
-    _note_finished(vault_root, claim.origin, claim.id, expires_at)
+    _note_finished(vault_root, claim.origin, claim.id, expires_at, state=APPLIED)
     log.info("write intake applied %s", claim.id)
 
 
@@ -1140,7 +1153,8 @@ def _finish_failed(vault_root: Path, claim: _Claim, code: str, refusal: Mapping[
     if not finished:
         log.warning("write intake dropped a stale finish of %s", claim.id)
         return
-    _note_finished(vault_root, claim.origin, claim.id, None)
+    expires_at = now + claim.origin_ttl if claim.origin_ttl is not None else None
+    _note_finished(vault_root, claim.origin, claim.id, expires_at, state=FAILED)
     _note_failed(vault_root)
     log.warning("write intake save %s failed with %s", claim.id, code)
 
@@ -1298,18 +1312,33 @@ class Admission:
     def _stored_answer(self, intake_id: str) -> dict[str, Any] | None:
         try:
             with _store(self.drainer.vault_root, mode="read") as conn:
+                now = time.time()
                 row = conn.execute(
                     "SELECT * FROM intake WHERE id = ? AND origin = ?", (intake_id, self.origin)
                 ).fetchone()
                 if row is None:
+                    # Dismissing the latest legacy failure can leave an older receipt for this origin.
+                    matching = conn.execute(
+                        "SELECT * FROM intake WHERE origin = ? AND state IN (?, ?) "
+                        "UNION ALL SELECT * FROM intake WHERE origin = ? AND finished_at + origin_ttl > ?",
+                        (self.origin, *_OPEN_STATES, self.origin, now),
+                    )
+                    row = max(matching, key=lambda receipt: receipt["seq"], default=None)
+                if row is None:
                     return None
                 if row["state"] in _OPEN_STATES:
                     return _receipt(conn, row)
-                if row["state"] == APPLIED and row["finished_at"] + (row["origin_ttl"] or 0.0) > time.time():
+                if row["finished_at"] is None or row["finished_at"] + (row["origin_ttl"] or 0.0) <= now:
+                    return None
+                if row["state"] == APPLIED:
                     # The original identity never committed; the queued replay did. Answer the
                     # resend with that outcome, within the original identity's retry window.
                     outcome = json.loads(row["outcome"]) if row["outcome"] else {}
                     return {**outcome, "queued_write": {"ref": ref_for(row["id"]), "state": APPLIED}}
+                if row["state"] == FAILED:
+                    failure = json.loads(row["error"]) if row["error"] else {}
+                    committed = failure.get("committed")
+                    return _index_answer(row["id"], FAILED, committed=committed if isinstance(committed, bool) else None)
                 return None
         except FileNotFoundError:
             return None
@@ -1346,6 +1375,8 @@ class Admission:
                 return _receipt(conn, row), None
             # Only the create path runs the schema, so an existing store from before the marker gains it here.
             _add_declaration_marker(conn)
+            # Old stores gain the derived index on admission. Starting an idle drainer stays read-only.
+            conn.execute("CREATE INDEX IF NOT EXISTS intake_retry_deadline ON intake(finished_at + origin_ttl)")
             conn.execute(
                 "INSERT INTO intake (id, origin, origin_ttl, command, arguments, principal, surface, state, "
                 "accepted_at, updated_at, next_attempt_at, error_code, declaration_change) "
@@ -1424,10 +1455,19 @@ def _receipt(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def _index_answer(intake_id: str, state: str) -> dict[str, Any]:
-    """The answer to a resend of a known save when its row cannot be read: its ref, never a rerun."""
+def _index_answer(intake_id: str, state: str, *, committed: bool | None = None) -> dict[str, Any]:
+    """A resend of a known save returns its reference even when the outcome cannot be read."""
     ref = ref_for(intake_id)
     route = {"tool": "review_memory", "args": {"mode": MODE, "ref": ref}}
+    if state == FAILED:
+        return {
+            "success": False,
+            "state": FAILED,
+            "committed": committed,
+            "user_summary": "The earlier queued save failed. Check its receipt before sending it again.",
+            "queued_write": {"ref": ref, "state": FAILED},
+            "route": route,
+        }
     if state == APPLIED:
         return {
             "success": True,
@@ -1560,13 +1600,8 @@ def with_failure_notice(admission: Admission, result: Any) -> Any:
     from . import capabilities
 
     route = capabilities.active_call_text("review_memory", {"mode": MODE})
-    sentence = (
-        f"{count} queued saves sent earlier failed and were not saved; {route} lists them with their "
-        "text to correct and send again."
-        if count > 1 else
-        f"1 queued save sent earlier failed and was not saved; {route} shows it with its text to "
-        "correct and send again."
-    )
+    saves = "save" if count == 1 else "saves"
+    sentence = f"{count} earlier queued {saves} failed. Check the recorded outcomes with {route} before resending."
     return {
         **result,
         "queued_writes_failed": count,
@@ -1703,7 +1738,7 @@ def read(vault_root: Path, ref: str | None = None, limit: int | None = None) -> 
             QUEUED: "Queued, not saved yet.",
             APPLYING: "Being applied now, not confirmed yet.",
             APPLIED: "Saved: the queued save was applied.",
-            FAILED: "Not saved: the queued save failed. Its arguments are below; correct and send it again.",
+            FAILED: "The queued save failed. Check its outcome and the refusal below before sending it again.",
         }
         summary = summaries[view["state"]]
         if view["state"] == FAILED and view.get("error", {}).get("code") == "MUTATION_OUTCOME_UNKNOWN":
