@@ -17,7 +17,14 @@ import time
 import weakref
 from collections import deque
 from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager, ExitStack, closing, contextmanager, suppress
+from contextlib import (
+    AbstractContextManager,
+    ExitStack,
+    closing,
+    contextmanager,
+    nullcontext,
+    suppress,
+)
 from functools import wraps
 from pathlib import Path
 from typing import NamedTuple
@@ -328,7 +335,10 @@ def borrowed_writer(root, handle, manager):
     from ..writer_lease import _ACTIVE_LEASE_MANAGER
     from .writer import CollectionWriter
 
-    with manager._collection_store_checkout():
+    # A dedicated query reader owns its connection, so it does not borrow the write handle.
+    detached = isinstance(handle, connection.SnapshotHandle) and handle.query_snapshot is not None
+    checkout = nullcontext() if detached else manager._collection_store_checkout()
+    with checkout:
         handle.require_owner_thread()
         scope = _Scope()
         manager_context = _ACTIVE_LEASE_MANAGER.set(manager)
@@ -1472,6 +1482,7 @@ class StoreServer:
         self.session = self.runtime = None
         self.refusal = ("COLLECTION_STORE_UNAVAILABLE", "the collection store is opening")
         self._stack = self._scope = None
+        self._maintenance_running = False
         self._retry_at = 0.0
         self._boundary = None  # this vault's mutation boundary, read only to see whether another thread holds it
         self._held_elsewhere_since = None  # when a starved tick began waiting out another thread's hold
@@ -1710,7 +1721,7 @@ class StoreServer:
             raise request.error
         return request.result
 
-    def read_beside(self, work, *, initial, collection=None, progress=True, queue=True):
+    def read_beside(self, work, *, initial, collection=None, progress=True, queue=True, records_query=False):
         """Run a read-only ``work`` on the caller's thread, over a pooled reader of the store's last commit.
 
         For import status, which must answer while a batch keeps the store thread busy. The
@@ -1725,6 +1736,8 @@ class StoreServer:
         skips that file. A background reader passes ``queue`` False: where no admitted writer is
         open it is refused as busy instead, so it never runs on the store thread or takes back a
         lease the store released.
+
+        An ordinary Records query uses its query session for the store snapshot too.
         """
         # The span carries the asking site and the counts `call` records, so a read moved beside the queue
         # stays attributable; a fallback onto the store thread also records its own `store.call` span.
@@ -1734,12 +1747,13 @@ class StoreServer:
                 else "store.read_beside")
         with call_spans.span(name, fields):
             try:
-                return self._read_beside(work, initial=initial, collection=collection, progress=progress, queue=queue)
+                return self._read_beside(work, initial=initial, collection=collection, progress=progress, queue=queue,
+                                         records_query=records_query)
             except BaseException:
                 fields["refused"] = 1
                 raise
 
-    def _read_beside(self, work, *, initial, collection, progress, queue):
+    def _read_beside(self, work, *, initial, collection, progress, queue, records_query):
         from ..cli_ops import OpError
         from ..governance import policy
         from . import capability, derived_rows, ownership
@@ -1751,11 +1765,12 @@ class StoreServer:
             checkpoint = request_budget.current_checkpoint()
             self._await_admission(self._deadlines(time.monotonic(), checkpoint)[2], checkpoint)
         with ExitStack() as scope:
+            checkout = scope.enter_context(ExitStack())
             handle = None
             # A service's runtime that is not yet reporting resolves its takeover in a checkout on the store thread.
             if runtime is not None and not (runtime._bootstrap and not runtime.reporting_ready(manager._fencing_token)):
                 capability.require_not_disabled(self.root)
-                scope.enter_context(manager._collection_store_checkout(
+                checkout.enter_context(manager._collection_store_checkout(
                     wait_for_publication=request_budget.store_read_checkpoint() is None))
                 # A rollback between the first check and borrowing must also refuse this read, as in ``checkout``.
                 capability.require_not_disabled(self.root)
@@ -1776,17 +1791,55 @@ class StoreServer:
                 if not queue:
                     raise connection.busy("the store has no open writer to read beside, and this read never queues")
                 return self.call(work, wake_maintenance=False, read_only=True, initial=initial)
-            reader = scope.enter_context(connection.store_reader(runtime.path, handle.readers))
             entry = None if initial is None or collection is None else initial.selected(self.root, collection)
-            # Read before the snapshot begins; a selection this proof cannot name reads the derived file.
-            derived = progress and (entry is None or derived_rows.is_derived(reader, entry["collection_id"]))
-            production = runtime._session is not None and runtime._session.production
+            if records_query and entry is None:
+                scope.close()
+                return self.call(work, wake_maintenance=False, read_only=True, initial=initial)
             scope.enter_context(state_paths.resolution_scope())
             scope.enter_context(policy.request_policy_snapshot())
-            snapshot = connection.SnapshotHandle(runtime.path, reader, handle, derived=derived)
+            query = None
+            if records_query:
+                from ..query_engine import runtime as query_runtime
+
+                try:
+                    query = scope.enter_context(query_runtime.query_snapshot(
+                        runtime.path, limits=query_runtime.QueryLimits(profile="records")))
+                except query_runtime.QueryError:
+                    # The ordinary route resolves visibility before it asks for a capped query reader.
+                    scope.close()
+                    return self.call(work, wake_maintenance=False, read_only=True, initial=initial)
+                reader = query.connection
+                if derived_rows.is_derived(reader, entry["collection_id"]):
+                    scope.close()
+                    return self.call(work, wake_maintenance=False, read_only=True, initial=initial)
+            else:
+                reader = scope.enter_context(connection.store_reader(runtime.path, handle.readers))
+            # Read before the snapshot begins; a selection this proof cannot name reads the derived file.
+            derived = (not records_query and progress
+                       and (entry is None or derived_rows.is_derived(reader, entry["collection_id"])))
+            production = runtime._session is not None and runtime._session.production
+            snapshot = connection.SnapshotHandle(runtime.path, reader, handle, derived=derived, query_snapshot=query)
             scope.enter_context(preview_store(self.root, snapshot, production=production))
+
+            def verify_query_authority():
+                capability.require_not_disabled(self.root)
+                with request_budget.store_read_lock(manager._lock):
+                    # Publication leaves the detached snapshot valid. A true handoff does not.
+                    if (manager._fencing_token != token or runtime._handle is not handle
+                            or manager._stop.is_set() or manager._store_closed
+                            or (manager._store_handoff and not manager._store_publishing)):
+                        return False
+                runtime._admit(token, reads=True)
+                return True
+
             if initial is not None:
-                scope.enter_context(ownership.read_scope(self.root, initial=initial))
+                scope.enter_context(ownership.read_scope(
+                    self.root, initial=initial, verify=verify_query_authority if records_query else None,
+                    records_snapshot=snapshot if records_query else None,
+                ))
+            if records_query:
+                checkout.close()
+                return work()
             # One read transaction, so the job row and every check of it read the same commit.
             reader.execute("BEGIN")
             try:
@@ -1798,6 +1851,11 @@ class StoreServer:
     def missed_read(self):
         """The retryable refusal of a read that did not finish within its completion deadline."""
         return self._busy_refusal("the collection store did not finish this read within its completion deadline")
+
+    def has_competing_work(self):
+        """Whether an active store operation or queued request would delay a new read."""
+        with self._condition:
+            return self._scope is not None or self._maintenance_running or bool(self._requests)
 
     def _busy_refusal(self, message):
         """The retryable refusal for a request this store thread did not serve in time."""
@@ -1898,7 +1956,7 @@ class StoreServer:
             if not store_mode.store_mode_for_reads(self.root):
                 derivation.settled(self.root)
                 return
-            with (principal.library_scope(), preview_store(self.root, self.runtime) as writer,
+            with (self._competing_maintenance(), principal.library_scope(), preview_store(self.root, self.runtime) as writer,
                   state_paths.outside_resolution_scope(), policy.outside_request_policy_snapshot()):
                 if self._derivation_handle is not writer.handle:
                     with derivation.scope(self.root):
@@ -1994,6 +2052,14 @@ class StoreServer:
                 self._condition.notify_all()
 
     @contextmanager
+    def _competing_maintenance(self):
+        self._maintenance_running = True
+        try:
+            yield
+        finally:
+            self._maintenance_running = False
+
+    @contextmanager
     def _maintaining(self, name):
         """Run one tick whose boundary waits end once a queued store request needs this thread.
 
@@ -2011,7 +2077,7 @@ class StoreServer:
                 return any(not starved or request.thread == holder for request in self._requests)
 
         try:
-            with mutation_lock.ending_waits(waited_on):
+            with self._competing_maintenance(), mutation_lock.ending_waits(waited_on):
                 yield
         except mutation_lock.WaitEnded:
             pass  # the caller's `_ticks` assignment did not run, so the tick keeps its age

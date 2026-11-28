@@ -3056,7 +3056,7 @@ class LeaseCoordinatorClient:
         # deadline, and the in-flight GET keeps the sole slot until it finishes or notices it.
         return request_budget.bounded_blocking_call(
             read, remaining=lambda: deadline - time.monotonic(),
-            slots=_PASSIVE_COORDINATOR_READ, wait_for_slot=False,
+            slots=_PASSIVE_COORDINATOR_READ, wait_for_slot=check.wait_for_store_read_slot,
         )
 
     def _request_json(
@@ -9377,11 +9377,23 @@ def _collection_store_thread(func):
                     command.name, injected[0], kwargs, write=not (read_only or import_status)
                 )
                 server = routing.server
-                if server is not None and import_status and read_only:
-                    # Status answers while a batch keeps the store thread busy: it reads the store's
-                    # last commit on this thread, under the proof that routed it.
+                # Row lists carry a bounded proof of their contributors. Named bodies,
+                # aggregates and audit history use the ordinary store route.
+                records_query = (command.name == "record_memory" and kwargs.get("action") == "query"
+                                 and all(kwargs.get(key) is None for key in ("view", "query", "item_key", "aggregate"))
+                                 and not kwargs.get("include_agent_history"))
+                if server is not None and records_query and server.has_competing_work():
+                    from .governance.egress import unrestricted_source_access
+                    from .governance.principal import effective_principal
+
+                    principal = effective_principal()
+                    records_query = unrestricted_source_access(server.root, purpose=principal.purpose, principal=principal)
+                else:
+                    records_query = False
+                if server is not None and read_only and (import_status or records_query):
+                    # These reads can answer from the last commit while a batch occupies the store thread.
                     return server.read_beside(lambda: func(command, *injected, **kwargs), initial=routing.proof,
-                                              collection=kwargs.get("collection"))
+                                              collection=kwargs.get("collection"), records_query=records_query)
                 if server is not None:
                     if needs_acquisition_request(command.name, kwargs):
                         return server.call_record_request(
@@ -9707,13 +9719,20 @@ def invoke_command(
 
         # The dispatcher's own checks before the body, which the leaf span alone does not separate.
         call_spans.record_span_since("command.leaf_pre", "command.leaf_start")
+        detached = ownership_scope.records_snapshot
+        body_returned = False
         try:
             try:
                 if vault_store_mode.store_mode_for_reads(injected[0]):
-                    snapshot_scope.enter_context(vault_store_read.request_snapshot(injected[0], catch_up=True))
+                    # Like the store thread, a detached query reads the available commit without a derivation wait.
+                    snapshot_scope.enter_context(vault_store_read.request_snapshot(injected[0], catch_up=not detached))
                 # Fixed phase labels carry timing only, never caller or vault data.
                 with body_meter as measured, call_spans.span("command.body", measured):
                     result = _invoke()
+                body_returned = True
+                if detached:
+                    snapshot_scope.close()
+                    detached.refresh_for_release()
                 retained_report = None
                 if preview_checkpoint is not None:
                     from .reclassification_preview import RetainedReport
@@ -9737,6 +9756,10 @@ def invoke_command(
                 # This exact internal terminal contains no content to scan or prove again.
                 if type(error) is _AuditBudgetExhausted:
                     raise
+                if detached is not None and not body_returned and isinstance(error, Exception):
+                    if (timeout := detached.expired_query_refusal()) is not None:
+                        # Drop the reader on unwind without fresh authority I/O for a fixed timeout.
+                        raise timeout from None
                 try:
                     if isinstance(error, request_budget.ReadBudgetExhausted):
                         raise

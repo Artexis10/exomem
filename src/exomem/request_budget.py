@@ -423,10 +423,12 @@ class ReadCheckpoint:
     """The same allowance on the caller and its accepted read batches."""
 
     def __init__(self, budget: RequestBudget, *, bound_disclosure: bool = False,
-                 bound_store_reads: bool = False, store_sql_steps: int | None = None) -> None:
+                 bound_store_reads: bool = False, store_sql_steps: int | None = None,
+                 wait_for_store_read_slot: bool = False) -> None:
         self.budget = budget
         self.bound_disclosure = bound_disclosure
         self.bound_store_reads = bound_store_reads
+        self.wait_for_store_read_slot = wait_for_store_read_slot
         self._store_sql_steps = store_sql_steps
 
     def remaining(self) -> float:

@@ -1608,6 +1608,274 @@ def test_import_status_answers_from_a_snapshot_while_a_batch_keeps_the_store_thr
     assert set(done["activity"].values()) == {None} and (done["resumable"], done["cancellable"]) == (False, False)
 
 
+@pytest.mark.query_deadline
+def test_a_records_query_reads_the_last_commit_while_the_store_thread_is_busy(service, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from exomem import request_budget
+    from exomem.query_engine import runtime as query_runtime
+
+    root = service.root
+    query = dict(action="query", collection=CID, limit=10, columns=["title"])
+    expected = call(root, "record_memory", **query)
+    with pytest.raises(OpError) as idle_refusal:
+        call(root, "record_memory", **{**query, "columns": ["fixture_unlisted"]})
+    entered, release = threading.Event(), threading.Event()
+    server = runtime._server(root)
+    lease_status = service.manager.client.status
+    remaining = []
+    timed_out = False
+    late_calls = []
+    caller = threading.get_ident()
+
+    def status():
+        if timed_out and threading.get_ident() == caller:
+            late_calls.append(True)
+        check = request_budget.store_read_checkpoint()
+        if check is not None and check.wait_for_store_read_slot:
+            remaining.append(check.remaining())
+        return lease_status()
+
+    monkeypatch.setattr(service.manager.client, "status", status)
+
+    def occupy():
+        entered.set()
+        assert release.wait(10)
+
+    with ThreadPoolExecutor(max_workers=1) as worker:
+        busy = worker.submit(server.call, occupy, wake_maintenance=False)
+        try:
+            assert entered.wait(5)
+            with monkeypatch.context() as short:
+                short.setattr(service.manager, "_mutation_timeout_seconds", 0.5)
+                result = call(root, "record_memory", **query)
+                with pytest.raises(OpError) as contended_refusal:
+                    call(root, "record_memory", **{**query, "columns": ["fixture_unlisted"]})
+                expired = query_runtime.Deadline.expired
+
+                def record_expiry(deadline):
+                    nonlocal timed_out
+                    error = expired(deadline)
+                    if error is not None:
+                        timed_out = True
+                    return error
+
+                short.setattr(query_runtime.Deadline, "expired", record_expiry)
+                short.setitem(query_runtime.PROFILES, "records", {**query_runtime.PROFILES["records"], "timeout_ms": 0})
+                with pytest.raises(OpError) as stopped:
+                    call(root, "record_memory", **query)
+            assert result["rows"] == expected["rows"]
+            assert result["snapshot"] == expected["snapshot"]
+            assert contended_refusal.value.code == idle_refusal.value.code == "INVALID_RECORD_QUERY_FIELD"
+            assert stopped.value.code == "QUERY_TIMEOUT" and timed_out and not late_calls
+            assert len(remaining) >= 2 and all(0 < seconds < query_runtime.WALL_BACKSTOP_MS / 1000 for seconds in remaining)
+            assert not busy.done()
+        finally:
+            release.set()
+            busy.result(timeout=5)
+
+
+@pytest.mark.parametrize("selection", [{"item_key": ROW}, {"aggregate": "distinct:title"}, {"include_agent_history": True}, {}])
+def test_contended_records_queries_without_a_qualified_reader_keep_the_store_refusal(
+    service, monkeypatch, selection,
+):
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import ExitStack
+
+    from exomem.query_engine import runtime as query_runtime
+
+    root = service.root
+    entered, release = threading.Event(), threading.Event()
+
+    def occupy():
+        entered.set()
+        assert release.wait(10)
+
+    with ThreadPoolExecutor(max_workers=1) as worker, ExitStack() as readers:
+        if not selection:
+            limits = query_runtime.QueryLimits(profile="records")
+            for _ in range(2):
+                readers.enter_context(query_runtime.query_snapshot(connection.store_path(root), limits=limits))
+        busy = worker.submit(runtime._server(root).call, occupy, wake_maintenance=False)
+        try:
+            assert entered.wait(5)
+            with monkeypatch.context() as short:
+                short.setattr(service.manager, "_mutation_timeout_seconds", 0.2)
+                with pytest.raises(OpError) as refusal:
+                    call(root, "record_memory", action="query", collection=CID, **selection)
+            assert refusal.value.code == "COLLECTION_STORE_BUSY"
+        finally:
+            release.set()
+            busy.result(timeout=5)
+
+
+def test_a_records_query_returns_during_an_active_derivation_slice(service, monkeypatch):
+    from exomem.collection_store import preview
+    from exomem.vault_store import derivation, migrate, mode
+
+    root, server = service.root, runtime._server(service.root)
+    query = dict(action="query", collection=CID, limit=10, columns=["title"])
+    expected = call(root, "record_memory", **query)
+    entered, release = threading.Event(), threading.Event()
+    started = derivation.started
+
+    def defer_derivation(*args, **kwargs):
+        if threading.current_thread() is server.thread and not entered.is_set():
+            entered.set()
+            assert release.wait(10)
+        return started(*args, **kwargs)
+
+    monkeypatch.setattr(derivation, "started", defer_derivation)
+
+    def stage_pending_derivation():
+        with service.manager.mutation_guard(root):
+            writer = preview.bound_writer(root)
+            with writer.handle.transaction() as tx:
+                objects = migrate.create_owner_schema(tx)
+                tx.executemany("INSERT INTO store_mode_objects(name, type) VALUES (?, ?)",
+                               (entry for owner in objects for entry in owner.items()))
+                tx.execute("INSERT INTO store_mode(id, mode, revision, changed_at, release) "
+                           "VALUES (1, 'store', 1, '2026-01-01T00:00:00Z', 'fixture')")
+                derivation.enqueue(tx, ["Knowledge Base/Notes/Fixture.md"], [], 1, "2026-01-01T00:00:00Z")
+            state_migration.record_vault_store_compatibility(root, authority_check=lambda: True, active=True)
+
+    server.call(stage_pending_derivation, wake_maintenance=False)
+    assert mode.store_mode_for_reads(root)
+
+    def wait_for_held_store(*_args, **_kwargs):
+        raise AssertionError("the query waited on the store thread it reads beside")
+
+    monkeypatch.setattr(derivation, "caught_up", wait_for_held_store)
+    derivation.owe(root)
+    with server._condition:
+        server._condition.notify_all()
+    try:
+        assert entered.wait(5)
+        with monkeypatch.context() as short:
+            short.setattr(service.manager, "_mutation_timeout_seconds", 0.5)
+            result = call(root, "record_memory", **query)
+        assert result["rows"] == expected["rows"]
+        assert result["snapshot"] == expected["snapshot"]
+    finally:
+        release.set()
+
+
+def test_records_reader_capacity_keeps_withheld_and_missing_collections_indistinguishable(service):
+    from test_collection_field_admission import GUEST
+    from test_governance_egress import write_rule, write_scope
+
+    from exomem.query_engine.runtime import QueryLimits, query_snapshot
+
+    root = service.root
+    write_scope(root, paths="Records/**", default_deny=True)
+    write_rule(root, ceiling=0, audience=GUEST.audience_id)
+    path = connection.store_path(root)
+    limits = QueryLimits(profile="records")
+    command = next(command for command in commands.product_commands_for("mcp") if command.name == "record_memory")
+    replies = []
+    with query_snapshot(path, limits=limits), query_snapshot(path, limits=limits), request_scope(GUEST):
+        for selector in (CID, "99999999-9999-4999-8999-999999999999"):
+            with pytest.raises(OpError) as error:
+                writer_lease.invoke_command(command, root, action="query", collection=selector, columns=["title"])
+            replies.append(error.value.as_public_dict())
+    assert replies[0] == replies[1] and replies[0]["code"] == "COLLECTION_NOT_FOUND"
+
+
+def test_records_release_rechecks_a_contributor_rewritten_after_selection(service, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from exomem.collection_store.governance import _StaleQueryHistoryProjection
+    from exomem.governance import egress
+
+    root, server = service.root, runtime._server(service.root)
+    query = dict(action="query", collection=CID, columns=["title"])
+    (before,) = call(root, "record_memory", **query)["rows"]
+    container = call(root, "record_memory", action="inspect", collection=CID)["snapshot"]
+    occupied, free_store, selected, release = (threading.Event() for _ in range(4))
+    postfilter = egress.postfilter
+
+    def occupy():
+        occupied.set()
+        assert free_store.wait(10)
+
+    def pause_release(command, result, *args, **kwargs):
+        if command == "record_memory" and kwargs.get("request_kwargs", {}).get("action") == "query":
+            selected.set()
+            assert release.wait(10)
+        return postfilter(command, result, *args, **kwargs)
+
+    monkeypatch.setattr(egress, "postfilter", pause_release)
+    with ThreadPoolExecutor(max_workers=2) as worker:
+        active = worker.submit(server.call, occupy, wake_maintenance=False)
+        assert occupied.wait(5)
+        reading = worker.submit(call, root, "record_memory", **query)
+        try:
+            assert selected.wait(5)
+            free_store.set()
+            active.result(timeout=5)
+            update = call(root, "record_memory", action="update", collection=CID, item_key=ROW,
+                          changes={"title": "Replacement"}, why="correct the row", expected_container_hash=container,
+                          expected_item_version=before["item_version"])
+            assert update["outcome"] == "committed"
+        finally:
+            free_store.set()
+            release.set()
+        with pytest.raises(_StaleQueryHistoryProjection):
+            reading.result(timeout=5)
+    assert call(root, "record_memory", **query)["rows"][0]["title"] == "Replacement"
+
+
+def test_a_sourced_append_commits_while_a_records_query_keeps_its_snapshot(original_service, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from exomem import provenance
+    from exomem.query_engine.runtime import ReadSession
+
+    service, reference, _, payload, _ = original_service
+    root = service.root
+    body = provenance.encode_origin({"inputs": {"original": {"representation": "original",
+        "reference": reference, "version": hashlib.sha256(payload).hexdigest(), "size": len(payload)}},
+        "assessments": [], "bindings": []}) + "\nRetain the observation.\n"
+    query = dict(action="query", collection=CID, limit=10, columns=["title"])
+    expected = call(root, "record_memory", **query)
+    selected, release = threading.Event(), threading.Event()
+    occupied, free_store = threading.Event(), threading.Event()
+    admit = ReadSession.admit
+
+    def occupy():
+        occupied.set()
+        assert free_store.wait(10)
+
+    def pause_selection(session, collection_id, *args, **kwargs):
+        if not selected.is_set():
+            selected.set()
+            assert release.wait(10)
+        return admit(session, collection_id, *args, **kwargs)
+
+    monkeypatch.setattr(ReadSession, "admit", pause_selection)
+    with ThreadPoolExecutor(max_workers=2) as worker:
+        active = worker.submit(runtime._server(root).call, occupy, wake_maintenance=False)
+        assert occupied.wait(5)
+        reading = worker.submit(call, root, "record_memory", **query)
+        try:
+            assert selected.wait(5)
+            free_store.set()
+            active.result(timeout=5)
+            append = call(root, "record_memory", action="append", collection=CID, item={"title": "Later row"},
+                          item_key=LATER, body=body, why="record the later row")
+            assert append["outcome"] == "committed"
+            assert not reading.done()
+        finally:
+            free_store.set()
+            release.set()
+        before = reading.result(timeout=8)
+    after = call(root, "record_memory", **query)
+    assert before["rows"] == expected["rows"]
+    assert before["snapshot"] == expected["snapshot"]
+    assert [row["title"] for row in after["rows"]] == ["Later row"]
+    assert after["snapshot"] != expected["snapshot"]
+
+
 def test_a_file_collection_title_answers_while_the_store_thread_is_held(service, monkeypatch):
     """Defect: a title queued on the store thread to learn which collection it names, so a file
     collection's title waited out whatever held that thread, which the same collection's path never does."""

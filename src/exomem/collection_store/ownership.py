@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
 
-from .. import collection_profiles, held_fs, state_migration, state_paths
+from .. import collection_profiles, held_fs, request_budget, state_migration, state_paths
 from .. import structured_collections as collections
 from ..kbdir import managed_join, managed_root_rel
 from ..planning_values import PlanningValues
@@ -386,11 +386,13 @@ _READ: ContextVar[ReadScope | None] = ContextVar("collection_ownership_read", de
 
 
 class ReadScope:
-    def __init__(self, root, *, initial=None):
+    def __init__(self, root, *, initial=None, verify=None, records_snapshot=None):
         # A decision set's resolution scope resolves the root once; `finish` proves it again.
         self.root = state_paths.resolved_vault_path(root, expanduser=False)
         # A proof the caller made earlier skips this scope's own; `finish` still proves again and compares.
         self.initial = initial
+        self.verify = verify
+        self.records_snapshot = records_snapshot
         self.store_enrolled = False
         self.finished = False
 
@@ -419,17 +421,26 @@ class ReadScope:
             return
         from .preview import bound_writer, production_bound
 
+        check = self.records_snapshot.release_checkpoint() if self.records_snapshot is not None else None
         try:
             # A lend starts with no transaction, and fresh placement bypasses the body's resolution memo,
             # so neither this proof nor the body's WAL snapshot is reused. The binding changes only under the
             # transition guards and each component is written atomically, so an equal re-read is an unchanged
             # binding: the equality check, not exclusion, is the proof, and an unrelated holder never refuses it.
-            with state_paths.outside_resolution_scope(), state_paths.resolution_scope():
+            budget = request_budget.checking(check) if check is not None else nullcontext()
+            with budget, state_paths.outside_resolution_scope(), state_paths.resolution_scope():
+                if check is not None:
+                    check()
                 writer = bound_writer(self.root)
                 private = writer is not None and not production_bound(self.root)
                 current = resolve(self.root, private=private, path=writer.handle.path if private else None)
-            if current.binding == self.initial.binding:
-                return
+                if current.binding == self.initial.binding and (self.verify is None or self.verify()):
+                    if check is not None:
+                        check()
+                    return
+        except request_budget.ReadBudgetExhausted:
+            if check is None:
+                raise
         except Exception:  # noqa: BLE001 - an unresolved final binding cannot release the earlier payload
             pass
         writer = bound_writer(self.root)
@@ -450,12 +461,12 @@ class ReadScope:
 
 
 @contextmanager
-def read_scope(root, *, finalize=False, initial=None):
+def read_scope(root, *, finalize=False, initial=None, verify=None, records_snapshot=None):
     previous = _READ.get()
     if previous is not None and previous.root == state_paths.resolved_vault_path(root, expanduser=False):
         yield previous
         return
-    scope = ReadScope(root, initial=initial)
+    scope = ReadScope(root, initial=initial, verify=verify, records_snapshot=records_snapshot)
     token = _READ.set(scope)
     try:
         yield scope
