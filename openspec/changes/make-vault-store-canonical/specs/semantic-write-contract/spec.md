@@ -19,11 +19,14 @@ each authored or stored supersession once.
   the affected units
 
 #### Scenario: The replacement kind follows the target
-- **WHEN** the caller passes no `kind`
-- **THEN** the replacement uses the target's kind when the target is rich, else the one admitted
-  kind that carries the `replacement` trait (`correction` in the core pack)
-- **AND** when no admitted kind or more than one carries that trait, the operation asks for `kind`
-  and lists the admitted kinds
+- **WHEN** the caller passes no `kind` and the target is rich
+- **THEN** the replacement uses the target's kind
+
+#### Scenario: A compact correction uses the shipped default
+- **WHEN** the caller passes no `kind` for a compact target
+- **THEN** the replacement uses the sole shipped kind with the `replacement` trait, even when an
+  admitted custom kind has the trait
+- **AND** an explicit request for the admitted custom kind still uses it
 
 #### Scenario: An unanchored target gains only an anchor
 - **WHEN** the target has no authored anchor
