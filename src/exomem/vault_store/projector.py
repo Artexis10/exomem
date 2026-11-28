@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from sqlite3 import Connection
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Protocol, TypeVar
 
 from .. import held_fs, mutation_lock, vault
 from ..collection_store import preview, runtime
@@ -285,6 +285,24 @@ class PassReport:
         return self.projected + self.removed + self.held + self.dropped
 
 
+class RelationFileProjection(Protocol):
+    """Supply the filesystem effects for sidecars during an offline rollback."""
+
+    def publish(
+        self, filesystem: held_fs.HeldFilesystem, rel: str,
+        artifact: relationship_files.PreparedFile, disk: OnDisk | None, check: Callable[[], None],
+    ) -> OnDisk: ...
+
+    def resume(
+        self, filesystem: held_fs.HeldFilesystem, rel: str,
+        artifact: relationship_files.PreparedFile, manifest_sha256: str, check: Callable[[], None],
+    ) -> OnDisk | None: ...
+
+    def remove(
+        self, filesystem: held_fs.HeldFilesystem, rel: str, disk: OnDisk, check: Callable[[], None],
+    ) -> None: ...
+
+
 class Projector:
     """Projects a store-mode vault's queued intents onto its files.
 
@@ -293,10 +311,12 @@ class Projector:
     """
 
     def __init__(
-        self, vault_root: Path, *, run: Runner | None = None, poll_seconds: float | None = None
+        self, vault_root: Path, *, run: Runner | None = None, poll_seconds: float | None = None,
+        relation_files: RelationFileProjection | None = None,
     ) -> None:
         self._root = Path(vault_root)
         self._run = run or store_thread_runner(self._root, operation="vault_store_projection")
+        self._relation_files = relation_files
         self._poll_seconds = POLL_SECONDS if poll_seconds is None else poll_seconds
         #: A temporary older than this process belongs to a publication that died with its owner.
         self._born_ns = time.time_ns()
@@ -609,21 +629,34 @@ class Projector:
         if facts.held:
             return None
         disk = observe(filesystem, rel)
+        manifest = facts.manifest
+        relation_files = self._relation_files
         if disk is not None and disk.sha256 == artifact.sha256:
             _flush_through_root(filesystem, _split(rel)[0])
             return rel, disk
-        if facts.manifest is not None and disk is None:
+        if manifest is not None and disk is None:
+            if relation_files is not None:
+                restored = self._with_authority(
+                    lambda check: relation_files.resume(filesystem, rel, artifact, manifest.sha256, check),
+                )
+                if restored is not None:
+                    return rel, restored
             self._hold(
-                report, rel, HELD_DELETE, base_revision=facts.manifest.revision,
-                store_revision=intent.revision, sha256=facts.manifest.sha256, body=None,
+                report, rel, HELD_DELETE, base_revision=manifest.revision,
+                store_revision=intent.revision, sha256=manifest.sha256, body=None,
             )
             return None
-        if disk is not None and (facts.manifest is None or disk.sha256 != facts.manifest.sha256):
+        if disk is not None and (manifest is None or disk.sha256 != manifest.sha256):
             self._hold_edit(filesystem, report, facts, store_revision=intent.revision)
             return None
-        installed = self._with_authority(
-            lambda check: _publish(filesystem, rel, artifact.data, disk, check, sha256=artifact.sha256),
-        )
+        if relation_files is not None:
+            installed = self._with_authority(
+                lambda check: relation_files.publish(filesystem, rel, artifact, disk, check),
+            )
+        else:
+            installed = self._with_authority(
+                lambda check: _publish(filesystem, rel, artifact.data, disk, check, sha256=artifact.sha256),
+            )
         return rel, installed
 
     def _project_delete(
@@ -669,7 +702,11 @@ class Projector:
             return True
         if verdict is Removal.UNLINK:
             assert disk is not None
-            self._with_authority(lambda check: _unlink(filesystem, facts.path, disk, check))
+            relation_files = self._relation_files
+            if relation_files is not None and ownership.relation_source(facts.path) is not None:
+                self._with_authority(lambda check: relation_files.remove(filesystem, facts.path, disk, check))
+            else:
+                self._with_authority(lambda check: _unlink(filesystem, facts.path, disk, check))
             report.removed += 1
             return True
         if verdict is Removal.LEAVE:
@@ -1465,12 +1502,13 @@ def _publish(
     *,
     allocation_root: Path | None = None,
     sha256: str | None = None,
+    rename_new: bool = False,
 ) -> OnDisk:
     """Write ``body`` to a new file, or replace ``existing`` only while it is still that exact file.
 
     The held filesystem compares the file's identity and hash again just before the replacing
-    rename and makes the temporary durable before it. A create-only install is a hard link, and a
-    new folder is a bare mkdir, and neither flushes a folder: so this flushes the file's folder
+    rename and makes the temporary durable before it. A create-only install uses a hard link or,
+    with ``rename_new``, a no-replace rename. This flushes the file's folder
     after the install, and the folder above each folder that it made, before it returns.
 
     ``check`` runs after the bytes are staged, at the publication's last hook before it installs
@@ -1499,6 +1537,7 @@ def _publish(
                         body,
                         expected_identity=None if existing is None else existing.identity,
                         expected_sha256=None if existing is None else existing.sha256,
+                        rename_new=rename_new,
                         validate_existing=None if existing is None else (lambda _held: check()),
                         prepare=(
                             (lambda _staged: check())

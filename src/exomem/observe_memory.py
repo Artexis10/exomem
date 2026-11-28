@@ -876,7 +876,8 @@ def observe_memory(
         except OpError as error:
             raise ObserveMemoryError(error.code, error.message, error.remediation) from error
     after_source = (
-        editable.raw_text if (relationship_plan is not None or unchanged_unit) and after_body == body
+        editable.raw_text
+        if (relationship_plan is not None or unchanged_unit) and after_body == body
         and fm_text == editable.fm_text and origin_block is None
         else _rebuild_source(editable.original_text, fm_text, after_body, today=authored_day)
     )
@@ -1523,7 +1524,8 @@ def _plan_stored_relationships(
         plan = unit_edges.plan_change(
             root, source=unit_edges.End(source_path, anchor, current.parent_ref),
             targets=tuple(targets), visible=visible, replacing=replacing, reason=reason,
-            writes=tuple(writes), guards=tuple(guards), preserved_types=registry.keys_with("replaces"),
+            writes=tuple(writes), guards=tuple(guards),
+            preserved_types=registry.keys_with("replaces"),
             supersession_check=supersession_check,
         )
     return semantic_units.apply_splices(body, primary.edits), plan

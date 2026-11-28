@@ -814,6 +814,7 @@ def publish_bytes(
     *,
     expected_identity: StableIdentity | None = None,
     expected_sha256: str | None = None,
+    rename_new: bool = False,
     validate_existing: Callable[[HeldFile], None] | None = None,
     prepare: Callable[[HeldFile], None] | None = None,
     custody: TemporaryCustody | None = None,
@@ -828,7 +829,8 @@ def publish_bytes(
     is removed.
 
     With no expected identity the publish is create-only and uses a no-replace
-    hard-link installation. With an expected identity, that exact destination
+    hard-link installation. ``rename_new`` uses a no-replace rename instead. With an expected
+    identity, that exact destination
     stays held while a native relative replacement installs the staged bytes.
     ``validate_existing`` checks that borrowed handle before and after staging;
     the callback must neither close nor mutate it.
@@ -926,9 +928,14 @@ def publish_bytes(
             if before_install is not None:
                 before_install()
             before = staged.version()
-            failure = _link_without_replace(filesystem, parent, staged, leaf, publication_error)
-            if failure is not None:
-                return failure
+            if rename_new:
+                moved = filesystem.rename(staged, parent, leaf, replace=False)
+                if not moved.ok:
+                    return publication_error(moved.error)
+            else:
+                failure = _link_without_replace(filesystem, parent, staged, leaf, publication_error)
+                if failure is not None:
+                    return failure
             installed = True
         else:
             if expected_sha256 is not None:

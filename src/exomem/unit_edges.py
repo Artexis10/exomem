@@ -417,7 +417,8 @@ def plan_change(
                 active.update(edge.relationship.key for edge in batch)
                 expected.update(edge.relationship.id for edge in batch)
                 for edge in _write_visible_edges(root, snapshot, batch, visible):
-                    if edge.relationship.relation_type not in preserved_types and edge.relationship.key not in wanted:
+                    if (edge.relationship.relation_type not in preserved_types
+                            and edge.relationship.key not in wanted):
                         retired.append(relationships.Retirement(edge.relationship.id))
                         paths.add(edge.target_path)
                 if len(batch) < read.KEYS_PER_QUERY:
