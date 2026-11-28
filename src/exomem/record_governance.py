@@ -26,6 +26,7 @@ from . import (
     query_compat,
     query_data,
     record_formats,
+    request_budget,
     state_paths,
     structure_promotion,
     vault,
@@ -3672,10 +3673,13 @@ def _require_mutation_visibility(
         raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
     if manifest.storage.strategy != "markdown-items":
         return
+    check = request_budget.current_checkpoint()
     if census is not None and _census_covers_collection(census, manifest.storage.source):
         candidates = 0
         for directory in census:
             for entry in directory.entries:
+                if check is not None:
+                    check()
                 candidates += 1
                 if candidates > _MAX_ITEM_ENTRIES:
                     raise collections.CollectionError(
@@ -3695,6 +3699,8 @@ def _require_mutation_visibility(
     while pending:
         directory = pending.pop()
         for entry in directory.entries:
+            if check is not None:
+                check()
             candidates += 1
             if candidates > _MAX_ITEM_ENTRIES:
                 raise collections.CollectionError(

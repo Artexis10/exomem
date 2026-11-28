@@ -485,7 +485,8 @@ class LocalRuntimeActivation:
 
         # First, so no queued save starts a replay while the workers below stop; a replay in
         # flight is claimed by this process and re-claimed after the restart.
-        write_intake.stop(self.vault_root)
+        if self.write_intake is not None:
+            write_intake.stop(self.vault_root, worker=self.write_intake)
         # Next, so no new filing call starts; a call in flight finishes and is repeated under its identity after a restart.
         import_filing.stop(self.vault_root)
         working_set_runtime.stop_builds(self.vault_root)

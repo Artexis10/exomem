@@ -976,22 +976,40 @@ def _require_one_history_selector(given: Mapping[str, Any]) -> None:
 def value_refusal(
     vault_root: Path, arguments: Mapping[str, Any], budget: request_budget.RequestBudget
 ) -> OpError | None:
-    """The refusal that the collection's declared fields give an append's `item` or an update's `changes`, or None.
+    """The first declared-value refusal of a plain append or update, or None where its order is unknown.
 
     The busy intake raises it instead of queueing a save whose replay would refuse the same value
     (`commands.declared_refusal_before_queueing`, which also decides whether a queued save may change the
     declaration first). It takes no lock and no store writer, and reads within `budget`. Whatever is not
-    certain answers None: a collection this thread cannot read now, or a manifest that the caller may not see.
+    certain answers None, including a disabled route or a row whose guards the writer would refuse first.
     """
+    from .collection_store import preview
+
     action = arguments.get("action")
     values = arguments.get("item") if action == "append" else arguments.get("changes") if action == "update" else None
     collection = arguments.get("collection")
     if not isinstance(values, Mapping) or not values or type(collection) is not str:
         return None
+    if any(arguments.get(name) is not None for name in ("held", "item_id", "new_fields", "new_collection")):
+        return None  # These facade modes prepare a different writer call.
+    root = Path(vault_root)
+
+    def decide(selector, manifest):
+        expected = records.supplied_value_refusal(record_governance.require_records_profile(manifest), values)
+        if expected is None:
+            return None
+        if preview.selected_writer(root, manifest) is None:
+            first = records.file_save_value_refusal(root, manifest, action, arguments)
+        else:
+            call = {**arguments, "collection": selector}
+            del call["action"]
+            first = preview.row_save_refusal(root, "records", action, call, released_manifest=manifest)
+        if first is None or (first.code, first.reason) != (expected.code, expected.reason):
+            return None
+        return first if first.details.get("field") == expected.details.get("field") else None
+
     refusal = collection_refs.decide_on_declaration(
-        Path(vault_root), collection, budget, profile="records",
-        decide=lambda _selector, manifest: records.supplied_value_refusal(
-            record_governance.require_records_profile(manifest), values),
+        root, collection, budget, profile="records", decide=decide,
     )
     if refusal is None:
         return None

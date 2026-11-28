@@ -29,15 +29,28 @@ Before the intake accepts a save, the serving process SHALL apply the argument-o
 
 ### Requirement: A Records value its declared fields refuse is refused before queueing
 
-Before the intake queues a `record_memory` append with an object `item`, or an update with an object `changes`, whose `collection` is a string, the serving process SHALL check the supplied values against the per-field rules of the declared fields they name: type, format, enum and nested values. A value that those rules refuse SHALL get that refusal at once and SHALL NOT be queued. Required fields, undeclared names and keys SHALL stay at the replay.
+Before queueing a `record_memory` append or update, the service SHALL check supplied values against declared types, formats, enums and nested field rules. It SHALL refuse at once only if the route is open and the writer would give that value refusal first. Other saves SHALL queue. A guarded edit SHALL queue if any save is open at the mark or enters the intake during the check. Required fields, undeclared names and keys SHALL stay at replay.
 
 #### Scenario: An undeclared Records value behind the queue is refused at once
 
-- **WHEN** an owner sends a `record_memory` append or update whose value lies outside a field's declared enum
+- **WHEN** an owner sends a `record_memory` append whose value lies outside a field's declared enum
+- **AND** the normal route is open and the writer would refuse that value first
 - **AND** earlier saves are still queued
 - **AND** there is no open queued save of a command that declares `sets_any_frontmatter_field`, and no open `record_memory` or `plan_memory` save carrying `manifest_text`
 - **THEN** the call returns `SCHEMA_ENUM`
 - **AND** the intake holds only the earlier saves
+
+#### Scenario: A stale Records edit keeps its guard refusal
+
+- **WHEN** an owner sends a busy `record_memory` update with an undeclared value and a stale row or container guard
+- **THEN** the update is queued
+- **AND** the replay returns the same stale guard refusal as a direct update
+
+#### Scenario: An earlier save can change the guards of a Records edit
+
+- **WHEN** an owner sends a busy `record_memory` update with an undeclared value and current guards
+- **AND** another save is open at the queue mark or enters the intake during the value check
+- **THEN** the update queues and the writer checks its guards after the earlier save
 
 ### Requirement: A Planning value that the vault does not define is refused before queueing
 
@@ -137,7 +150,7 @@ The intake SHALL mark an accepted save as a possible declaration change when its
 
 ### Requirement: The declared value check stays within its budget whatever the queue holds
 
-Each queue read SHALL use fixed work. The check SHALL have 0.5 s to decide. Queue lock waits, store admission and the wait for a full coordinator reply SHALL use at most the time left. A locked store reader SHALL stop the check. Planning SHALL cap store SQL work. If either budget runs out, the save SHALL queue. The service SHALL release a borrowed checkout before returning the receipt, even after the decision deadline.
+Each queue read SHALL use fixed work. The check SHALL have 0.5 s to decide. Queue lock waits, store admission and full coordinator replies SHALL use only the time left. A locked store reader SHALL stop the check. Store proofs SHALL cap SQL work. File checks SHALL consult the deadline during directory walks and log parsing. If either budget runs out, the save SHALL queue. The service SHALL release any borrowed checkout before returning the receipt, even after the decision deadline.
 
 #### Scenario: A Planning save queues when its authorisation proof needs too much SQL
 

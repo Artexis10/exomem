@@ -2631,14 +2631,19 @@ def _store_thread_held_with_intake_on(service, monkeypatch):
             occupied.result(timeout=10)
 
 
-def _save_by_title(service, changes):
+def _save_by_title(service, changes, **guards):
     """The save an agent sends with the collection's title, under the busy intake's own scope."""
     command = next(c for c in commands.product_commands_for("mcp") if c.name == "record_memory")
     with request_scope(OWNER):
         return writer_lease.invoke_command(
             command, service.root, implicit_idempotency_scope="principal:session-b", action="update",
-            collection=INCIDENT_LOG, item_key=ROW, changes=changes, expected_container_hash="0" * 64,
-            expected_item_version="0" * 64, why="resolve the entry")
+            collection=INCIDENT_LOG, item_key=ROW, changes=changes, why="resolve the entry", **guards)
+
+
+def _incident_guards(root):
+    view = call(root, "record_memory", action="query", collection=INCIDENT_LOG)
+    (record,) = view["rows"]
+    return {"expected_container_hash": view["snapshot"], "expected_item_version": record["item_version"]}
 
 
 @pytest.mark.parametrize("service", [pytest.param(INCIDENT_TEXT, id="incident-log")], indirect=True)
@@ -2648,10 +2653,11 @@ def test_an_undeclared_value_for_a_store_collection_named_by_title_is_refused_wh
     store was busy. The call came back "Queued, not saved yet" and failed only at its replay."""
     from exomem import write_intake
 
+    guards = _incident_guards(service.root)
     try:
         with _store_thread_held_with_intake_on(service, monkeypatch):
             with pytest.raises(OpError) as refused:
-                _save_by_title(service, {"status": "resolved"})
+                _save_by_title(service, {"status": "resolved"}, **guards)
             assert refused.value.code == "SCHEMA_ENUM"
             assert refused.value.message.endswith('allowed: "open", "closed"')
             assert refused.value.details["field"] == "status"
@@ -2666,12 +2672,35 @@ def test_a_declared_value_for_a_store_collection_named_by_title_still_queues_whi
         service, monkeypatch):
     from exomem import write_intake
 
+    guards = _incident_guards(service.root)
     try:
         with _store_thread_held_with_intake_on(service, monkeypatch):
-            queued = _save_by_title(service, {"status": "closed"})
+            queued = _save_by_title(service, {"status": "closed"}, **guards)
             assert queued["state"] == "queued"
     finally:
         write_intake.stop(service.root)
+
+
+@pytest.mark.parametrize("service", [pytest.param(INCIDENT_TEXT, id="incident-log")], indirect=True)
+def test_a_busy_record_with_a_stale_guard_queues_for_the_same_first_refusal(service, monkeypatch):
+    """Resending a declared value cannot repair a stale record guard."""
+    from exomem import write_intake
+
+    root = service.root
+    guards = {**_incident_guards(root), "expected_container_hash": "0" * 64}
+    with pytest.raises(OpError) as direct:
+        call(root, "record_memory", action="update", collection=INCIDENT_LOG, item_key=ROW,
+             changes={"status": "resolved"}, why="resolve the entry", **guards)
+    assert direct.value.code == "STALE_RECORD"
+    try:
+        with _store_thread_held_with_intake_on(service, monkeypatch):
+            receipt = _save_by_title(service, {"status": "resolved"}, **guards)
+        ref = receipt["queued_write"]["ref"]
+        _until(lambda: write_intake.read(root, ref=ref)["queued_write"]["state"] == "failed")
+        error = write_intake.read(root, ref=ref)["queued_write"]["error"]
+        assert (error["code"], error["message"]) == (direct.value.code, direct.value.message)
+    finally:
+        write_intake.stop(root)
 
 
 RELEASE_PLAN = "Release Plan"

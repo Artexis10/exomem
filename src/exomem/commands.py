@@ -16226,7 +16226,8 @@ def declared_refusal_before_queueing(
     between the two reads queues this one too. Every read shares one budget, and an answer after it queues the
     save. A declaration change made outside the queue and not committed at this check, such as a direct revise
     that holds the boundary or a saved Planning value, is not seen: the check refuses a value that the change
-    adds, and the refusal tells the caller to send it again once that change has committed.
+    adds, and the refusal tells the caller to send it again once that change has committed. A Records update
+    also depends on its current row guards, so any open or newly accepted save leaves it to replay.
     """
     value_refusal = _DECLARED_VALUE_REFUSALS.get(command.name)
     if value_refusal is None:
@@ -16234,13 +16235,16 @@ def declared_refusal_before_queueing(
     from . import request_budget, write_intake
 
     budget = request_budget.RequestBudget(seconds=_DECLARED_REFUSAL_SECONDS)
-    marker = write_intake.declaration_mark(vault_root, seconds=budget.remaining())
+    guard_sensitive = command.name == operation_entries.RECORDS.command and arguments.get("action") == "update"
+    marker = write_intake.declaration_mark(vault_root, seconds=budget.remaining(), guard_sensitive=guard_sensitive)
     if marker is None:
         return None
     refusal = value_refusal(vault_root, arguments, budget)
     if refusal is None or budget.remaining() <= 0:
         return None
-    changed = write_intake.declaration_changed_since(vault_root, marker, seconds=budget.remaining())
+    changed = write_intake.declaration_changed_since(
+        vault_root, marker, seconds=budget.remaining(), guard_sensitive=guard_sensitive,
+    )
     return refusal if changed is False else None
 
 
