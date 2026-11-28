@@ -8,6 +8,7 @@
 - [x] 1.6 Prove direct and busy store saves give the same first refusal. Cover an undeclared value, an explicit null status, guarded edits, and a disabled summary route. Prove a file-backed add queues and its replay gives the direct refusal.
 - [x] 1.7 Give the busy decision one budget and cap Planning's store SQL work. Cover upgrade and rollback, a revision that commits during the read, a later ordinary save, slow opens, locked store readers, and a store publication. Cover an authorisation proof that exceeds the SQL allowance.
 - [x] 1.8 Refuse a Cloud read-only write before intake or store routing. Prove the refusal with an existing queue and a busy store.
+- [x] 1.9 Give a Records value refusal only when it is the writer's first. Prove direct and busy parity for current and stale guards in both storage modes.
 
 ## 2. Release
 

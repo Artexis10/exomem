@@ -206,6 +206,10 @@ RESEND_WITH_A_DECLARED_VALUE = (
 )
 
 
+# The optional proof cannot spend work proportional to a store's holdings.
+_DECLARATION_SQL_STEPS = 16_000
+
+
 def decide_on_declaration(
     vault_root: Path,
     collection: str,
@@ -213,7 +217,6 @@ def decide_on_declaration(
     *,
     profile: str,
     decide: Callable[[str, collections.CollectionManifest], _Decision],
-    store_sql_steps: int | None = None,
 ) -> _Decision | None:
     """`decide` over the manifest that `collection` names, as a request thread reads it now; None where that is unknown.
 
@@ -235,7 +238,7 @@ def decide_on_declaration(
             return decide(path, record_governance.resolve_collection_without_receipt(vault_root, path))
 
     try:
-        check = request_budget.ReadCheckpoint(budget, bound_store_reads=True, store_sql_steps=store_sql_steps)
+        check = request_budget.ReadCheckpoint(budget, bound_store_reads=True, store_sql_steps=_DECLARATION_SQL_STEPS)
         with request_budget.checking(check):
             result = store_runtime.read_served(vault_root, read)
             check()

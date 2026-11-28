@@ -634,6 +634,28 @@ def test_a_record_value_its_collection_never_declares_is_refused_behind_the_queu
     assert direct.value.code == "SCHEMA_ENUM"
 
 
+def test_a_file_record_edit_with_a_stale_guard_defers_the_value_refusal(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _writer, holder = managers
+    collection = _ledger_declaring_a_status(vault)
+    guards, _ = _record_a_draft_entry(vault, collection)
+    call = _status_call(collection, "update", "resolved", **{**guards, "expected_item_version": "0" * 64})
+    record = _command("record_memory")
+    with pytest.raises(OpError) as direct:
+        _send(record, vault, call)
+    assert direct.value.code == "STALE_RECORD"
+    first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
+    try:
+        receipt = _send(record, vault, call, scope="principal:session-b")
+        assert receipt["state"] == "queued"
+    finally:
+        paused.set()
+    _wait_for_state(vault, first, "applied")
+    failed = _wait_for_state(vault, receipt["queued_write"]["ref"], "failed")
+    assert (failed["error"]["code"], failed["error"]["message"]) == (direct.value.code, direct.value.message)
+
+
 _PLANNING_COLLECTION_PATH = "Knowledge Base/Planning/Work/_collection.md"
 
 

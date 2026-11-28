@@ -18,7 +18,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Protocol
 
-from . import call_spans, memory_refs, query_data, record_item_cache, vault
+from . import call_spans, memory_refs, query_data, record_item_cache, request_budget, vault
 from .governance import egress
 from . import structured_collections as collections
 from .collection_profiles import profile_for
@@ -443,9 +443,12 @@ class MarkdownItemsAdapter(_BaseAdapter):
         pending = [root_guard]
         candidates = 0
         public_candidates = 0
+        check = request_budget.current_checkpoint()
         while pending:
             directory_guard = pending.pop()
             for entry in directory_guard.entries:
+                if check is not None:
+                    check()
                 candidates += 1
                 if candidates > _MAX_RAW_ITEM_ENTRIES:
                     raise collections.CollectionError(
@@ -480,6 +483,8 @@ class MarkdownItemsAdapter(_BaseAdapter):
                     paths.append(entry.relative_path)
         paths.sort()
         for relative in paths:
+            if check is not None:
+                check()
             # The raw walk ceiling above is deliberately separate from public
             # file/byte limits. Never open an unreleased candidate merely to
             # discover whether it is malformed or large.
