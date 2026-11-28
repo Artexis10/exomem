@@ -1043,6 +1043,7 @@ def test_passive_coordinator_read_stops_while_the_response_is_still_arriving(top
 
     started = threading.Event()
     finish = threading.Event()
+    final_byte_started = threading.Event()
     drip_interval = 0.03
 
     class Handler(BaseHTTPRequestHandler):
@@ -1053,9 +1054,11 @@ def test_passive_coordinator_read_stops_while_the_response_is_still_arriving(top
             self.end_headers()
             started.set()
             try:
-                for byte in body:
+                for offset, byte in enumerate(body):
                     if finish.wait(drip_interval):
                         return
+                    if offset == len(body) - 1:
+                        final_byte_started.set()
                     self.wfile.write(bytes([byte]))
             except OSError:
                 pass
@@ -1079,6 +1082,7 @@ def test_passive_coordinator_read_stops_while_the_response_is_still_arriving(top
             with pytest.raises(OpError) as refused:
                 passive_read.result(timeout=_OBSERVE_SECONDS)
             assert refused.value.code == "WRITER_COORDINATOR_UNAVAILABLE"
+            assert not final_byte_started.is_set()
         finally:
             finish.set()
             server.shutdown()
