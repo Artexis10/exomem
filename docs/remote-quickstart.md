@@ -1,8 +1,8 @@
 <!-- authority:non-specification -->
 
-# exomem — remote connector quickstart
+# Evermatter remote connector quickstart
 
-**What you get:** exomem on your phone and on claude.ai's web app, via a
+**What you get:** Evermatter on your phone and on claude.ai's web app, via a
 remote MCP connector — the same vault you already use locally, reachable from
 anywhere.
 
@@ -36,7 +36,7 @@ internal hostname doesn't work). Pick one:
 > limits, and — the part that actually bites — its shared relay throttles the
 > request bursts claude.ai's connector makes during registration and
 > reconnects. That looks like "the server is down" on claude.ai's side while
-> exomem itself is completely healthy. If you already run Funnel
+> Evermatter itself is completely healthy. If you already run Funnel
 > successfully, nothing forces you to move; new setups should start with
 > ngrok or Cloudflare instead.
 
@@ -222,7 +222,7 @@ curl -i https://<host>/.well-known/oauth-protected-resource
 → `200` JSON with `"resource":"https://<host>/mcp"`. This is the **bare**
 path — claude.ai's gateway probes it before following the standard
 `resource_metadata` pointer, and a `404` here aborts connector registration
-with `mcp_registration_failed`. exomem ships a workaround route for exactly
+with `mcp_registration_failed`. Evermatter ships a workaround route for exactly
 this; this check proves the route is live through your actual tunnel, not
 just importable.
 
@@ -357,7 +357,7 @@ already frozen into that thread.
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| claude.ai connector add fails with `mcp_registration_failed` | Bare `/.well-known/oauth-protected-resource` 404s through the tunnel | Re-run step 5's probe; if it fails, the tunnel isn't forwarding to the right port, or exomem needs updating. |
+| claude.ai connector add fails with `mcp_registration_failed` | Bare `/.well-known/oauth-protected-resource` 404s through the tunnel | Re-run step 5's probe; if it fails, the tunnel isn't forwarding to the right port, or Evermatter needs updating. |
 | ngrok setup stalls, then a `429` shows in the ngrok dashboard | Free-tier burst limit (120 req/min) hit during registration | Wait a minute and retry, or switch to Cloudflare Tunnel. |
 | GitHub OAuth redirect never completes on first ngrok use | The one-time ngrok browser interstitial intercepted the redirect | Open the ngrok URL directly once, click through the interstitial, then retry the connector add. |
 | "Couldn't reach the MCP server" during connector add | OAuth discovery failed | See [deployment.md's troubleshooting table](deployment.md#troubleshooting) — the rest of the fixes there apply regardless of ingress profile. |

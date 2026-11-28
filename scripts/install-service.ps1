@@ -425,7 +425,7 @@ if ($existingService) {
 & $NssmPath set $ServiceName Start SERVICE_AUTO_START
 & $NssmPath set $ServiceName AppRestartDelay 5000
 & $NssmPath set $ServiceName AppThrottle 10000
-& $NssmPath set $ServiceName Description "exomem: Obsidian Knowledge Base MCP server for mobile claude.ai"
+& $NssmPath set $ServiceName Description "Evermatter MCP server"
 Set-NssmEnvironment -Map (ConvertTo-ExomemPublishedSettings -Map $serviceEnv -Source ".env")
 
 if ($existingTransition) {
