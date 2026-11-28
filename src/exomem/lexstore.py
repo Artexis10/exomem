@@ -2605,7 +2605,17 @@ def runtime_retrieval_catalog_current(
     require_live_projection: bool = True,
     schedule_repair: bool = True,
 ) -> bool:
-    """Whether :func:`runtime_retrieval_catalog_proof` can bind both scopes."""
+    """Whether retrieval can bind both scopes to the vault's serving catalogue."""
+    from . import find_corpus
+
+    if find_corpus.store_serves(vault_root):
+        from .vault_store import read
+
+        # Store readers pin these rows to the same snapshot as the pages. They
+        # report derived lag separately, without waiting on the file catalogue.
+        with read.snapshot(vault_root):
+            return True
+
     return (
         runtime_retrieval_catalog_proof(
             vault_root,

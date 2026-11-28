@@ -3,7 +3,7 @@
   "name": "io.github.substrate-systems/evermatter",
   "title": "Evermatter",
   "description": "Local Markdown/Obsidian knowledge substrate for MCP agents with governed memory and hybrid search.",
-  "version": "0.209.0",
+  "version": "0.210.0",
   "websiteUrl": "https://evermatter.ai",
   "repository": {
     "url": "https://github.com/substrate-systems/evermatter",
@@ -13,7 +13,7 @@
     {
       "registryType": "pypi",
       "identifier": "evermatter",
-      "version": "0.209.0",
+      "version": "0.210.0",
       "transport": {
         "type": "stdio"
       }

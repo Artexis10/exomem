@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.210.0](https://github.com/substrate-systems/evermatter/compare/v0.209.0...v0.210.0) (2026-11-28)
+
+
+### Features
+
+* **store:** derive links to individual claims ([#3386](https://github.com/substrate-systems/evermatter/issues/3386)) ([03a9025](https://github.com/substrate-systems/evermatter/commit/03a9025edbedd848f6365b9a2ecda34ae4976a8e))
+
+
+### Bug Fixes
+
+* **cli:** show the current service check command ([#3390](https://github.com/substrate-systems/evermatter/issues/3390)) ([0372a11](https://github.com/substrate-systems/evermatter/commit/0372a11bc0f33292305fc7a947761531b790adf7))
+* **imports:** keep less memory while filing large folders ([#3383](https://github.com/substrate-systems/evermatter/issues/3383)) ([5f16a9e](https://github.com/substrate-systems/evermatter/commit/5f16a9ecb85e1c2feb5b99e1d28ca6196cf46113))
+* **media:** set aside a file that keeps crashing media processing ([#3382](https://github.com/substrate-systems/evermatter/issues/3382)) ([5e15dcf](https://github.com/substrate-systems/evermatter/commit/5e15dcf8b60f5a8f4dddea11f1872862a717f45d))
+* **observations:** keep dated entries with their section ([#3388](https://github.com/substrate-systems/evermatter/issues/3388)) ([23b8a48](https://github.com/substrate-systems/evermatter/commit/23b8a484c8abbaa4ad4fef69cb486a9c9cfd26d9))
+* **recall:** keep recorded positions when another save lands mid-request ([#3372](https://github.com/substrate-systems/evermatter/issues/3372)) ([17d7d1f](https://github.com/substrate-systems/evermatter/commit/17d7d1f0bb5b9fba56546e1760b6f4e23baf6b4e))
+* **records:** send each query row once by default ([#3389](https://github.com/substrate-systems/evermatter/issues/3389)) ([f43ba7d](https://github.com/substrate-systems/evermatter/commit/f43ba7d58745ee4237498fab963e81c80c76bce1))
+* **rehearsal:** report page rates when an import hits its deadline ([#3385](https://github.com/substrate-systems/evermatter/issues/3385)) ([08d4569](https://github.com/substrate-systems/evermatter/commit/08d45691ed27ac8b5c057faa0edfa4b8b0607a20))
+* **release:** publish only its own tag's notes in a run on a release tag ([#3376](https://github.com/substrate-systems/evermatter/issues/3376)) ([e240715](https://github.com/substrate-systems/evermatter/commit/e2407154217ff045663fde7fa9e66627e5b42db0))
+* **upload:** advise covering authenticators and archive the sensitivity capture change ([#3380](https://github.com/substrate-systems/evermatter/issues/3380)) ([2b9c4b2](https://github.com/substrate-systems/evermatter/commit/2b9c4b2c40a7a708b931de065b5c5f5e8b9c34ac))
+
+
+### Performance
+
+* **egress:** decide a packet's store pages on one request, not one per page ([#3381](https://github.com/substrate-systems/evermatter/issues/3381)) ([28c3c4b](https://github.com/substrate-systems/evermatter/commit/28c3c4bea8cca31b7ed99b9518059c46d52026d6))
+
 ## [0.209.0](https://github.com/substrate-systems/evermatter/compare/v0.208.0...v0.209.0) (2026-11-28)
 
 
@@ -222,6 +247,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.202.0](https://github.com/substrate-systems/evermatter/compare/v0.201.0...v0.202.0) (2026-11-24)
 
+[This release](docs/licensing/licence-change.md) renamed Exomem to Evermatter
+and changed the licence for the server, CLI and container images to FSL-1.1-ALv2.
 
 ### ⚠ BREAKING CHANGES
 

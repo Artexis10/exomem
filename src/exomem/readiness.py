@@ -246,9 +246,15 @@ def retrieval_admission(vault_root: Path | None = None) -> dict[str, object]:
     from . import freshness
 
     if not freshness.event_indexes_enabled():
-        # Explicit rollback mode retains its historical request-time polling
-        # fallback.  Startup catalog verification still happens off-thread.
-        return admission
+        from .vault_store import mode
+
+        store_backed, mode_error = mode.store_mode_or_unreadable(vault_root)
+        if mode_error is not None:
+            # A single unknown observation cannot revoke file mode's rollback admission.
+            return {"state": "unavailable", "admitted": False}
+        if not store_backed:
+            # File mode retains its request-time polling fallback.
+            return admission
     proof_current = _shared_catalog_proof(
         vault_root, proof_generation, admitted=bool(admission["admitted"])
     )
