@@ -263,13 +263,7 @@ def record_operation(method):
     def call(writer, *args, **kwargs):
         if kwargs.get("_prepare") is not None or writer._dependency_plan is not None:
             return method(writer, *args, **kwargs)
-        bound = signature.bind(writer, *args, **kwargs)
-        bound.apply_defaults()
-        values = dict(bound.arguments)
-        values.pop("self")
-        collection = values.pop("collection")
-        records._validate_why(values["why"])
-        records._validate_hold(values["hold"])
+        collection, values = record_inputs.bind_arguments(signature, writer, *args, **kwargs)
         phase = _ACQUISITION_PHASE.get()
         if phase == "prepare":
             prepared, plan, replay = _prepare_record(writer, method.__name__, collection, values)

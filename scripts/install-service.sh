@@ -775,11 +775,11 @@ if [[ "$EXISTING_SERVICE" == 1 ]]; then
         "$MANAGED_STATE_ROOT" "$VAULT" "$PORT" migrated
 fi
 
-echo "Preflight: exomem doctor --profile $DOCTOR_PROFILE..."
+echo "Preflight: evermatter doctor --profile $DOCTOR_PROFILE..."
 "$VENV_PYTHON" -m exomem doctor \
     --profile "$DOCTOR_PROFILE" \
     --vault "$RENDERED_VAULT"
-echo "Preflight: exomem doctor --profile remote..."
+echo "Preflight: evermatter doctor --profile remote..."
 "$VENV_PYTHON" -m exomem doctor \
     --profile remote \
     --vault "$RENDERED_VAULT"

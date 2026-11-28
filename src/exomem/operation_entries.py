@@ -1029,6 +1029,14 @@ _OPERATION_TABLE = {operations.command: operations for operations in (RECORDS, P
 OPERATIONS: Mapping[str, CommandOperations] = MappingProxyType(_OPERATION_TABLE)
 
 
+def manifest_text_commands() -> tuple[str, ...]:
+    """The commands with a write that sends `MANIFEST_TEXT_FIELD`: queued, it can change what a collection declares."""
+    return tuple(
+        operations.command for operations in OPERATIONS.values()
+        if any(entry.effect == "write" and MANIFEST_TEXT_FIELD in entry.fields for entry in operations.entries)
+    )
+
+
 def assert_coverage(
     command: str,
     renderings: Sequence[Rendering],

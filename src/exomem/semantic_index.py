@@ -515,6 +515,27 @@ def structural_metadata(state: SemanticParentIndexState) -> dict[str, Any]:
     }
 
 
+def _interpret_summary(
+    path: str, metadata: Mapping[str, Any], frontmatter: Mapping[str, Any],
+    language: semantic_language_registry.LanguageRegistryView,
+    relations: relation_registry.RelationRegistry, *, complete: bool = True,
+) -> semantic_units.SelectedStructure:
+    return semantic_units.interpret_structural_summary(
+        metadata["structure"], path=path, parent_ref=metadata.get("parent_ref"),
+        language_registry=semantic_language_registry.for_attached_projects(language, page_projects(frontmatter)),
+        relation_registry=relations,
+        page_type=str(frontmatter.get("type") or "") or None, definitions_available=complete,
+    )
+
+
+def interpret_neutral_summary(path: str, metadata: Mapping[str, Any]) -> semantic_units.SelectedStructure:
+    """Interpret verified parser facts under the core registries used to build graph rows."""
+    return _interpret_summary(
+        path, metadata, yaml.safe_load(metadata["frontmatter_yaml"]) or {},
+        semantic_language_registry.core_registry(), relation_registry.core_registry(),
+    )
+
+
 #: Registry subjects one page interpretation admits together. The parser reads
 #: exactly these adapters, so a new subject needs parser code, not data.
 INTERPRETATION_SUBJECTS = ("categories", "relations", "entity-types")  # nosemgrep: ep-word-set -- Registry adapter names the parser implements.
@@ -668,19 +689,13 @@ class Interpretations:
             definitions.snapshots["categories"].typed if definitions is not None
             else semantic_language_registry.core_registry()
         )
-        structure = semantic_units.interpret_structural_summary(
-            metadata["structure"],
-            language_registry=semantic_language_registry.for_attached_projects(
-                language, page_projects(frontmatter),
-            ),
-            relation_registry=(
+        structure = _interpret_summary(
+            path, metadata, frontmatter, language,
+            (
                 definitions.snapshots["relations"].typed if definitions is not None
                 else relation_registry.core_registry()
             ),
-            page_type=str(frontmatter.get("type") or "") or None,
-            parent_ref=metadata.get("parent_ref"),
-            path=path,
-            definitions_available=definitions is not None,
+            complete=definitions is not None,
         )
         selected = SelectedParent(path, metadata, frontmatter, structure, definitions)
         self._parents[key] = selected

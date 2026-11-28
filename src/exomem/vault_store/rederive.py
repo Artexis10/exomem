@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from sqlite3 import Connection
 
-from .. import access, lexstore, registry_history, semantic_index, vault
+from .. import access, epistemic_graph, lexstore, registry_history, semantic_index, vault
 from ..kbdir import managed_join
 from . import derive, mode
 
@@ -43,7 +43,7 @@ PASS = "vault_store_registry_pass"
 #: that this build derives; its pass creates the objects and derives every page, and only then
 #: records this version. Version 1 adds inbound links; version 2 adds page admission;
 #: version 3 adds payload hashes for legacy Evidence pages; version 4 adds lineage prior paths;
-#: version 5 adds authored unit row keys and title contact.
+#: version 5 adds authored unit row keys and title contact, and version 6 adds unit links.
 OWNER_SCHEMA = "vault_store_owner_schema"
 # These generations are the closed introduction versions of the owners' derived projections.
 INBOUND_LINKS_OWNER_VERSION = 1
@@ -55,7 +55,8 @@ PAYLOAD_HASHES_OWNER_VERSION = 3
 # ``owner_schema_behind`` count that as behind too.
 UNIT_ROW_KEYS_OWNER_VERSION = 5
 TITLE_CONTACT_OWNER_VERSION = UNIT_ROW_KEYS_OWNER_VERSION
-OWNER_SCHEMA_VERSION = UNIT_ROW_KEYS_OWNER_VERSION
+UNIT_LINKS_OWNER_VERSION = 6
+OWNER_SCHEMA_VERSION = UNIT_LINKS_OWNER_VERSION
 # A parser input change needs new rows, but no owner DDL or collection-schema barrier.
 PARSER_VERSION = "vault_store_parser_version"
 KEYS = (OVERLAY_REVISION, REGISTRY_REVISION, PASS, OWNER_SCHEMA, PARSER_VERSION)
@@ -162,6 +163,7 @@ def record_derived_from_files(tx: Connection, revision: int) -> None:
     _set(tx, REGISTRY_REVISION, str(revision))
     _set(tx, OWNER_SCHEMA, str(OWNER_SCHEMA_VERSION))
     _set(tx, PARSER_VERSION, str(semantic_index.PARSER_VERSION))
+    epistemic_graph.stamp_unit_links_generation(tx)
     tx.execute("DELETE FROM store_meta WHERE key = ?", (PASS,))
 
 
@@ -170,7 +172,7 @@ def clear(tx: Connection) -> None:
     tx.executemany("DELETE FROM store_meta WHERE key = ?", [(key,) for key in KEYS])
 
 
-def read(conn: Connection) -> Registry:
+def read(conn: Connection, *, include_link_proof: bool = False) -> Registry:
     """The registry state that the store's own records show.
 
     ``unknown`` is a store that records no reflected revision, and one whose record of the last
@@ -189,6 +191,10 @@ def read(conn: Connection) -> Registry:
     changed = 0 if OVERLAY_REVISION not in meta else _revision(meta[OVERLAY_REVISION])
     owner = _revision(meta.get(OWNER_SCHEMA))
     behind = _owners_behind(meta.get(OWNER_SCHEMA)) or not lexstore.catalogue_schema_current(conn)
+    # Only the rebuild worker and the claim-link reader need the graph proof. Ordinary search
+    # can use its cached result without consulting the graph, even while link rows rebuild.
+    if include_link_proof and not behind:
+        behind = not epistemic_graph.unit_links_generation_current(conn)
     parser = _revision(meta.get(PARSER_VERSION))
     parser_behind = parser != semantic_index.PARSER_VERSION
     if reflected is None or changed is None or behind or parser_behind:
@@ -226,6 +232,9 @@ def owner_schema_behind(conn: Connection, *, required_version: int | None = None
     row = conn.execute("SELECT value FROM store_meta WHERE key = ?", (OWNER_SCHEMA,)).fetchone()
     if _owners_behind(None if row is None else row[0], required_version=required_version):
         return True
+    if required_version is not None and required_version >= UNIT_LINKS_OWNER_VERSION:
+        if not epistemic_graph.unit_links_generation_current(conn):
+            return True
     return required_version is None and not lexstore.catalogue_schema_current(conn)
 
 
@@ -306,6 +315,7 @@ def settle(root: Path, writer) -> str:
                 # The pass has derived every page under this generation, so the lexical stamp may say so.
                 lexstore.stamp_catalogue_schema(tx)
                 _set(tx, OWNER_SCHEMA, str(OWNER_SCHEMA_VERSION))
+                epistemic_graph.stamp_unit_links_generation(tx)
             _set(tx, PARSER_VERSION, str(semantic_index.PARSER_VERSION))
             tx.execute("DELETE FROM store_meta WHERE key = ?", (PASS,))
             return DONE
@@ -325,8 +335,9 @@ def _create_owner_objects(tx: Connection, root: Path) -> None:
 
     created = dict(item for group in create_owner_schema(tx) for item in group.items())
     _record_objects(tx, created)
-    if "page_admission" in created or "prior_paths" in created:
-        # Earlier batches wrote no page facts or prior paths, so an older cursor cannot skip those pages.
+    # These are schema tables an earlier pass may not have created.
+    if created.keys() & {"page_admission", "prior_paths", "graph_unit_links"}:
+        # Earlier batches wrote no rows for a new table, so the cursor cannot skip those pages.
         tx.execute("DELETE FROM store_meta WHERE key = ?", (PASS,))
     if "inbound_links" in created:
         held = frozenset(row[0] for row in tx.execute("SELECT path FROM store_pages"))
@@ -365,7 +376,7 @@ def adopt_change_journal(tx: Connection) -> None:
 
 
 def _due(conn: Connection, root: Path) -> tuple[str, Registry]:
-    registry = read(conn)
+    registry = read(conn, include_link_proof=True)
     if registry.state == CURRENT or registry.target is None:
         # No mode row means not a store-mode vault: there is nothing to derive.
         return IDLE, registry

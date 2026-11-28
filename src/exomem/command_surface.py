@@ -1093,6 +1093,14 @@ def bind_vault(
                     except Exception:  # noqa: BLE001 - telemetry must not change the response
                         pass
                 if isinstance(result, dict):
+                    if (
+                        current_rendering() == "query_records"
+                        and kwargs.get("output_format") is None
+                        and "rendered" in result
+                    ):
+                        # The structured reply already carries the released rows. An explicit
+                        # export keeps its rendering, as do calls through the grouped command.
+                        result = {key: value for key, value in result.items() if key != "rendered"}
                     # The leaves author a route as a grouped call; the host calls the tool its surface lists.
                     result = capabilities.project_call_routes(result, strict=False)
                 if getattr(command, "names_pages", False) and isinstance(result, dict):

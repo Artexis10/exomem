@@ -2646,6 +2646,10 @@ class _SingleHostRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(request, response, code, message, headers, new_url)
 
 
+# A slow coordinator cannot accumulate workers for optional busy-save decisions.
+_PASSIVE_COORDINATOR_READ = threading.BoundedSemaphore(1)
+
+
 class LeaseCoordinatorClient:
     """Small stdlib HTTP client for the provider-neutral lease contract."""
 
@@ -2949,7 +2953,14 @@ class LeaseCoordinatorClient:
             open_request = urllib.request.build_opener(
                 urllib.request.ProxyHandler({}), _SingleHostRedirectHandler()
             ).open
-        return open_request(request, timeout=self.config.timeout_seconds)
+        return open_request(request, timeout=self._request_timeout())
+
+    def _request_timeout(self) -> float:
+        checkpoint = request_budget.store_read_checkpoint()
+        if checkpoint is not None:
+            checkpoint()
+            return min(self.config.timeout_seconds, checkpoint.remaining())
+        return self.config.timeout_seconds
 
     def _get_kept_alive(self, request: urllib.request.Request) -> Any:
         """The JSON of a GET to the loopback coordinator, over this thread's one open connection.
@@ -2972,15 +2983,20 @@ class LeaseCoordinatorClient:
 
     def _exchange(self, request: urllib.request.Request) -> tuple[http.client.HTTPResponse, bytes]:
         connection = getattr(self._kept, "connection", None)
+        timeout = self._request_timeout()
         if connection is None:
             origin = urllib.parse.urlsplit(self.config.url or "")
             connect = http.client.HTTPSConnection if origin.scheme == "https" else http.client.HTTPConnection
             connection = self._kept.connection = connect(
-                origin.hostname, origin.port, timeout=self.config.timeout_seconds)
+                origin.hostname, origin.port, timeout=timeout)
         try:
+            if timeout != connection.timeout:
+                connection.timeout = timeout
+                if connection.sock is not None:
+                    connection.sock.settimeout(timeout)
             connection.request("GET", request.selector, headers=dict(request.header_items()))
             response = connection.getresponse()
-            data = response.read()
+            data = self._read_response(response)
         except BaseException as error:
             self._drop_kept_connection()
             # A protocol error is no OSError, which the caller maps; a reset is one, and stays one to retry.
@@ -3007,6 +3023,42 @@ class LeaseCoordinatorClient:
             headers["Authorization"] = f"Bearer {self.config.token}"
         return urllib.request.Request(url, data=data, headers=headers, method=method)
 
+    @staticmethod
+    def _read_response(response) -> bytes:
+        checkpoint = request_budget.store_read_checkpoint()
+        if checkpoint is None:
+            return response.read()
+        data = bytearray()
+        while True:
+            checkpoint()
+            chunk = response.read1(64 * 1024)
+            if not chunk:
+                if missing := getattr(response, "length", None):
+                    raise http.client.IncompleteRead(bytes(data), missing)
+                return bytes(data)
+            data.extend(chunk)
+
+    def _read_json(self, request: urllib.request.Request):
+        if request.get_method() == "GET" and self.config.topology == "single-host":
+            return self._get_kept_alive(request)
+        with self._open_request(request) as response:
+            return json.loads(self._read_response(response).decode("utf-8"))
+
+    def _read_passive_json(self, request: urllib.request.Request, check: request_budget.ReadCheckpoint):
+        check()
+        deadline = min(check.budget.deadline, time.monotonic() + self.config.timeout_seconds)
+
+        def read():
+            with request_budget.checking(check):
+                return self._read_json(request)
+
+        # A socket timeout restarts as bytes arrive. The caller stops waiting at the absolute
+        # deadline, and the in-flight GET keeps the sole slot until it finishes or notices it.
+        return request_budget.bounded_blocking_call(
+            read, remaining=lambda: deadline - time.monotonic(),
+            slots=_PASSIVE_COORDINATOR_READ, wait_for_slot=False,
+        )
+
     def _request_json(
         self,
         method: str,
@@ -3017,11 +3069,10 @@ class LeaseCoordinatorClient:
     ) -> dict[str, Any]:
         request = self._json_request(method, route, body)
         try:
-            if method == "GET" and self.config.topology == "single-host":
-                payload = self._get_kept_alive(request)
+            if method == "GET" and (check := request_budget.store_read_checkpoint()) is not None:
+                payload = self._read_passive_json(request, check)
             else:
-                with self._open_request(request) as response:
-                    payload = json.loads(response.read().decode("utf-8"))
+                payload = self._read_json(request)
             if not isinstance(payload, dict):
                 raise ValueError("response is not an object")
             return payload
@@ -5588,12 +5639,14 @@ class LeaseManager:
         except Exception:  # noqa: BLE001 - unknown routing or an unreadable store keeps the process fenced
             return None
 
-    def _store_refused(self) -> bool:
+    def _store_refused(self, *, wait_for_publication=True) -> bool:
         """With the lock held: wait out a coalesced publication, then refuse closure or handoff.
 
         A thread holding a mutation boundary or a store checkout passes a publication
         (which needs both free), so the publication defers itself and never deadlocks.
         """
+        if self._store_publishing and not wait_for_publication:
+            return True
         thread = threading.get_ident()
         exempt = self._store_publishing and (
             thread in self._store_borrowers
@@ -8093,14 +8146,14 @@ class LeaseManager:
         A progress check (``progress_check``) trusts a fresh local grant: an effect that follows
         it validates again here outside one, and a fence change revokes the token at the coordinator.
         """
-        with self._lock:
+        with request_budget.store_read_lock(self._lock):
             if self._fencing_token != fencing_token:
                 self._raise_fenced(fencing_token)
             if _PROGRESS_CHECK.get() and self._grant_fresh():
                 return
         assert self.client is not None
         record = self.client.status()
-        with self._lock:
+        with request_budget.store_read_lock(self._lock):
             still_current = self._fencing_token == fencing_token
             coordinator_current = (
                 record.holder == self.config.replica_id and record.fencing_token == fencing_token
@@ -8249,10 +8302,10 @@ class LeaseManager:
         self._renewer.start()
 
     @contextmanager
-    def _collection_store_checkout(self):
+    def _collection_store_checkout(self, *, wait_for_publication=True):
         thread = threading.get_ident()
-        with self._lock:
-            if self._stop.is_set() or self._store_refused():
+        with request_budget.store_read_lock(self._lock):
+            if self._stop.is_set() or self._store_refused(wait_for_publication=wait_for_publication):
                 from .collection_store import connection as store_connection
 
                 error = store_connection.busy("collection store handoff is in progress")
@@ -8995,13 +9048,37 @@ def _invocation_provenance(
     return wrapped
 
 
+def _cloud_read_only_guard(function: Callable[..., Any]) -> Callable[..., Any]:
+    """Refuse writes before intake or the store can take custody of them."""
+    @wraps(function)
+    def wrapped(command: Any, *injected: Any, **kwargs: Any) -> Any:
+        from . import cloud_cell
+
+        if cloud_cell.cloud_read_only_enabled():
+            from .commands import invocation_writes_outside_writer
+
+            if command.name == "edit_memory":
+                from .edit_operations import normalize_edit_surface_arguments
+
+                kwargs = normalize_edit_surface_arguments(kwargs)
+            if not _invocation_reads_only(command, kwargs) or invocation_writes_outside_writer(command, kwargs):
+                raise OpError(
+                    "CLOUD_CELL_READ_ONLY",
+                    "this Evermatter Cloud cell is serving read-only",
+                    "wait for the cell to leave read-only mode, or read instead of write",
+                )
+        return function(command, *injected, **kwargs)
+
+    return wrapped
+
+
 def _busy_write_intake(
     function: Callable[..., Any],
 ) -> Callable[..., Any]:
     """Queue an eligible save durably instead of refusing it while the boundary is busy.
 
-    Directly inside `_invocation_provenance`, so the contention refusal it accepts has passed
-    the terminal filter and the store-thread routing below. `write_intake.admission` decides
+    The contention refusal it accepts has passed the terminal filter and the store-thread
+    routing below, inside the caller's provenance scope. `write_intake.admission` decides
     eligibility; a call it does not admit runs exactly as before.
     """
     @wraps(function)
@@ -9229,8 +9306,8 @@ def _request_prominence_context(func):
     return wrapped
 
 
-def _store_request_is_read_only(command, kwargs):
-    """Whether a store-routed request changes nothing, as `invoke_command` will classify it."""
+def _invocation_reads_only(command, kwargs):
+    """Whether the dispatcher treats this request as a read before it checks its selector."""
     from .commands import invocation_is_read_only
     from .governance.egress import SelectorCoverageError
 
@@ -9273,7 +9350,7 @@ def _collection_store_thread(func):
             # Import status is a read-only protocol mode; polling must preserve maintenance backoff.
             import_status = (command.name == "record_memory" and kwargs.get("action") == "import"
                              and isinstance(import_request, Mapping) and import_request.get("mode") == "status")
-            read_only = _store_request_is_read_only(command, kwargs)
+            read_only = _invocation_reads_only(command, kwargs)
             # Keep demand visible between the routing proof and queue insertion.
             with foreground_priority.foreground():
                 # A title names a collection that the store may own; the request routes by the one it names.
@@ -9349,6 +9426,7 @@ def _foreground_priority_request(func):
 
 
 @_invocation_provenance
+@_cloud_read_only_guard
 @_busy_write_intake
 @_foreground_command_activity
 @_fixed_projected_command_completion
@@ -9370,7 +9448,6 @@ def invoke_command(
     from .commands import (
         invocation_is_audit,
         invocation_is_read_only,
-        invocation_writes_outside_writer,
         validate_process_media_operation,
         writes_through_superseded_maintenance_leaf,
     )
@@ -9412,16 +9489,6 @@ def invoke_command(
         # future read representation.
         selector_error = error
         read_only = False
-
-    if not read_only or invocation_writes_outside_writer(command, kwargs):
-        from . import cloud_cell
-
-        if cloud_cell.cloud_read_only_enabled():
-            raise OpError(
-                "CLOUD_CELL_READ_ONLY",
-                "this Evermatter Cloud cell is serving read-only",
-                "wait for the cell to leave read-only mode, or read instead of write",
-            )
 
     active_surface = capabilities_module.current_active_surface()
     job_start = False
