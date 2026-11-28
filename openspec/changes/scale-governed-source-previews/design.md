@@ -25,7 +25,7 @@ Task 1.1 measures the wall-time split per phase on one thread before 2.2 chooses
 - **Name resolution.** Memoize one folder listing for one build or request scope, keyed by the folder's held identity and change stamp. Never cache across scopes. A changed folder lists again.
 - **Build budget.** Give the build a ten-minute budget. The job stays cancellable and allows writers to proceed while it runs.
 - **Snapshot check.** Keep the exact generation and authority checks during the build and when releasing a retained report.
-- **Dependent release.** A held row keeps its own scopes and names what it inherits. The build checks this split against full membership. Release reads the parent page again and, for a container member, revalidates the parent binary and checks the witness on the member's payload. Bridge rows keep full verification because release also depends on resolving the bridge reference across the vault.
+- **Dependent release.** A held row keeps its own scopes and names what it inherits. The build checks this split against full membership. Release reads the parent page again and, for a container member, revalidates the parent binary and checks the witness on the member's payload. Parts and frames with a container binding keep full verification. Bridge rows also keep full verification because release depends on resolving the bridge reference across the vault.
 
 In the initial laptop runs, the frozen tree stopped at 50 s on each capped attempt and completed in 118 s without that cap. The scoped listing brought the build down to 28–29 s. Index and governance generations stayed stable during those runs.
 

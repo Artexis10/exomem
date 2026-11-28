@@ -1078,7 +1078,6 @@ def _stat_witness(info: os.stat_result) -> tuple[int, int, int, int, int]:
 def _record_held_row(
     vault_root: Path,
     sink: _HeldSink,
-    who: RequestPrincipal,
     rel: str,
     text: str,
     guard: PathGuard,
@@ -1156,7 +1155,7 @@ def _witnessed_read(
             who = effective_principal()
             _load_held_context(sink, root, who)
             if sink.context_usable:
-                _record_held_row(root, sink, who, rel, text, guard, _stat_witness(before))
+                _record_held_row(root, sink, rel, text, guard, _stat_witness(before))
         except Exception:  # noqa: BLE001 - one unprovable row must not lose the others
             pass
     return text, guard

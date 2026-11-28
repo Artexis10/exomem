@@ -33,10 +33,8 @@ from .governance.principal import (
 
 # Bound work before reading candidates' bodies. Results also meet the normal response-byte bound.
 _INLINE_CANDIDATES = 256
-# A background build has its own budget, not a request's: a request budget is a latency bound for one
-# answer, and a build is one bounded job that holds the single preview slot. On 10,000 governed referrers in
-# one folder the build took about 29 s on a laptop (linear in referrers), so ten minutes bounds a build of
-# about 200,000 referrers and frees the slot within that time. Cancellation still stops it per referrer.
+# A preview build can outlast an interactive request. This budget frees the single preview slot
+# within ten minutes, and the build checks for cancellation between referrers.
 _BUILD_BUDGET_SECONDS = 600.0
 _JOB_REPORT: ContextVar[dict[str, Any] | None] = ContextVar("source_reclassification_job_report", default=None)
 

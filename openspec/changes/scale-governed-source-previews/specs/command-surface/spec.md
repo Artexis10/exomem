@@ -17,7 +17,7 @@ A background reclassification preview on a governed vault SHALL complete for 10,
 
 ### Requirement: A dependent governed referrer is released without rereading its bytes
 
-The terminal release SHALL release a referrer that inherits scopes from a container parent, an extraction-part Source or a scene-frame video from held evidence for its own bytes, plus current proof of each dependency read from the dependency itself. It SHALL take the full path when the referrer or any dependency changed. Bridge rows SHALL keep full verification.
+The terminal release SHALL release a referrer that inherits scopes from a container parent, an extraction-part Source, or a scene-frame video from held evidence for its own bytes, plus current proof of each dependency read from that dependency. It SHALL use full verification when the referrer or any dependency changed, for parts and frames with a container binding, and for bridge rows.
 
 #### Scenario: A dependent referrer releases from held evidence
 

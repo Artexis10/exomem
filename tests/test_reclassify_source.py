@@ -243,6 +243,9 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
     stop = threading.Event()
     monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: stop)
     mcp = server.build_server(require_auth=False)
+    # This fixture supplies its own observer and catalogue. Runtime activation
+    # would withdraw them because the test suite disables the real watcher.
+    monkeypatch.setattr(mcp._exomem_local_runtime_activation, "start", lambda: None)
     started, resume = threading.Event(), threading.Event()
     build = reclassification_preview._build
 
@@ -265,7 +268,7 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
                     "manage_memory_file", operation="propose-reclassification", **args, **extra
                 )
 
-            async def ready(run_id, *, allow_stale=False):
+            async def ready(run_id, *, allow_restart=False):
                 async with asyncio.timeout(12):
                     while True:
                         status = await preview(preview_run_id=run_id)
@@ -275,24 +278,25 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
                             break
                         assert "preview_digest" not in status and "result" not in status
                         await asyncio.sleep(0.1)
-                if (allow_stale and status.get("error", {}).get("code")
-                        == "RECLASSIFICATION_PREVIEW_STALE"):
-                    return None
+                if allow_restart:
+                    stale = status.get("error", {}).get("code") == "RECLASSIFICATION_PREVIEW_STALE"
+                    warming = status.get("error_code") == "RECLASSIFICATION_PREVIEW_WARMING"
+                    if stale or warming:
+                        return None
                 assert status.get("state") == "completed", status
                 return status
 
             async def fresh_report():
                 async with asyncio.timeout(12):
                     while True:
-                        job = await preview()
-                        if job.get("error", {}).get("code") != "RECLASSIFICATION_PREVIEW_WARMING":
-                            assert job.get("run_id"), job
-                            report = await ready(job["run_id"], allow_stale=True)
-                            if report is not None:
-                                return report
+                        job = await _start_preview(client, source)
+                        assert job.get("run_id"), job
+                        report = await ready(job["run_id"], allow_restart=True)
+                        if report is not None:
+                            return report
                         await asyncio.sleep(0.05)
 
-            queued = await preview()
+            queued = await _start_preview(client, source)
             assert queued["state"] == "running" and "preview_digest" not in queued, queued
             run_id = queued["run_id"]
             assert await asyncio.to_thread(started.wait, 5)
@@ -552,15 +556,18 @@ def _served_preview(vault, source_schema, monkeypatch, *, pause_at_referrer):
         return witnessed_read(reader, sink, root, page, *rest)
 
     monkeypatch.setattr(rc, "_witnessed_read", pausing_read)
-    return server.build_server(require_auth=False), source
+    mcp = server.build_server(require_auth=False)
+    monkeypatch.setattr(mcp._exomem_local_runtime_activation, "start", lambda: None)
+    return mcp, source
 
 
 async def _start_preview(client, source):
-    """Start a preview, retrying the WARMING answer a busy snapshot sample may give."""
+    """Retry a preview start while its snapshot is unavailable or changes."""
     async with asyncio.timeout(12):
         while True:
             queued = await _preview_call(client, source)
-            if queued.get("error", {}).get("code") != "RECLASSIFICATION_PREVIEW_WARMING":
+            code = queued.get("error", {}).get("code")
+            if code not in {"RECLASSIFICATION_PREVIEW_WARMING", "RECLASSIFICATION_PREVIEW_STALE"}:
                 return queued
             await asyncio.sleep(0.1)
 
