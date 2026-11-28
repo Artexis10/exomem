@@ -500,6 +500,11 @@ def structural_occurrences(candidates: SemanticUnitCandidates) -> tuple[Structur
     return tuple(sorted((*rich, *compact), key=lambda item: (item.span.start_offset, item.form)))
 
 
+def candidate_occurrence_keys(candidates: SemanticUnitCandidates) -> frozenset[str]:
+    """Keep the neutral sidecar identities without retaining their text."""
+    return frozenset(occurrence.key for occurrence in structural_occurrences(candidates))
+
+
 @dataclass(frozen=True, slots=True)
 class UnitStructure:
     """Selected summary facts and public identity; source text is absent."""

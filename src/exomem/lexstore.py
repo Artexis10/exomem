@@ -3046,7 +3046,14 @@ def _admit_if_current(vault_root: Path) -> bool:
     from . import freshness as freshness_module
 
     if _is_configured_runtime_vault(vault_root):
-        return _mark_runtime_retrieval_ready_if_current(vault_root)
+        from . import readiness
+
+        proof: dict[str, object] = {}
+        if _mark_runtime_retrieval_ready_if_current(vault_root, proof_out=proof):
+            return True
+        # A completed proof can lose publication to another admission. A
+        # revocation clears the readiness event, so it still needs repair.
+        return bool(proof) and readiness.is_ready("retrieval_catalog")
     existing = runtime_retrieval_catalog_proof(
         vault_root,
         require_live_projection=freshness_module.event_indexes_enabled(),
