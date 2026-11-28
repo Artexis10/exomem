@@ -140,7 +140,7 @@ In `require_current`'s reopen of a placement (`trash_metadata.py:484`), `MISSING
 
 `from_page` returns None for an unbound page, also when its reference is malformed (`media_bindings.py:291-294`), so such a page's row has no flag. Nor does a row of a page that the store does not own. `current()`, which eviction and the retained-store drain call, is false while a flagged row exists, so they stop where they stop today. When the drain census stops there (`media_store.py:4786`), it names up to five flagged pages, as it names blockers after a failed rebuild (`media_store.py:4766-4781`).
 
-**Rebuild and deltas.** A rebuild fills the side table. A delta replaces the side rows of each page that it writes or deletes. It touches no other page's row, except for two companions that bind one original (below). A delta that reads a displaced page withdraws the projection until a rebuild, through D7. A delta that reads a page that does not parse deletes that page's binding rows and writes its unknown row with the eviction flag set, with no withdraw. Each delta and rebuild writes the generation that the side table matches. The allowance reads the projection as current only when that generation equals the checkpoint's.
+**Rebuild and deltas.** A rebuild fills the side table. A delta replaces the side rows of each page that it writes or deletes. It touches no other page's row, except for two companions that bind one original (below). A delta that reads a displaced page withdraws the projection until a rebuild, through D7. A delta that reads a page with a deterministic fault, such as one that does not parse, deletes that page's binding rows and writes its unknown row with the eviction flag set, with no withdraw. Each delta and rebuild writes the generation that the side table matches. The allowance reads the projection as current only when that generation equals the checkpoint's.
 
 **Pages the census skips.** The census walk skips reserved families and linked files (`reserved_paths.py:3161-3168`). The store owns some reserved families as pages (`vault_store/ownership.py:57`, `:72`), so the rebuild and the deltas skip every page in a reserved family, as the census does.
 
@@ -185,12 +185,11 @@ Each now gives its page an unknown row. The total is unknown and names the page,
 
   The first three make `follow_store` return early without a withdraw (`media_bindings.py:531-532`). A projection that only lags the head, a flagged unknown row (D3) and a pending-outside mark (D8) never start a rebuild. A round that loses its publication race to another writer of the projection ends the pass without a rebuild, and the next pass follows again. Today `recover` rebuilds whenever the projection is not current (`media_bindings.py:937-942`).
 - **The record of a failed rebuild** moves from process memory (`_failed_census`) to the media ledger, where the media worker process reads it.
-  - A rebuild fails as a whole on a race or a read failure, the classes that D3 lists. It may come from the store snapshot, the media ledger, a Trash placement read (`trash_metadata.py:403-418`), the inspection of a pooled original in `object_key` (`media_bindings.py:231-235`), the walk of pages that the store does not own, or a Trash placement that changed during the walk. Such a failure is recorded and retried, as below. A deterministic fault of one page, a `ValueError` or `UnicodeError` including the displaced handling, is an unknown row instead (D3).
-  - The record holds the generation, the audit position that the failure left, and up to five blockers (`BLOCKERS_SHOWN`). A blocker is a note or file that the rebuild could not read, with its reason cut at `REASON_MAX_CHARS`.
-  - In store mode, `recover` repeats a failed rebuild only when the trail after the recorded position names a blocker or a companion, or when the generation moved. A companion is a page for which the rule answers anything but no reference, or a path that the projection's rows name. `recover` moves the recorded position past the rows that it examined. An unrelated save starts no rebuild.
-  - A failure that names no note, or names only placements in a race, is repeated at the next sweep, because a read failure can pass and the projector that settles a race writes no audit row.
-  - In file mode, `recover` repeats a failed rebuild when the generation moved, as today.
-  - A record written by an earlier service process is retried once after start, as the process-memory record is today. This also holds in file mode.
+  - A rebuild fails as a whole on a race or a read failure, the classes that D3 lists. It may come from the store snapshot, the media ledger, a Trash placement read (`trash_metadata.py:403-418`), the walk of pages that the store does not own, or a Trash placement that changed during the walk. Such a failure is recorded and retried, as below. A deterministic fault of one page, a `ValueError` or `UnicodeError` including the displaced handling, is an unknown row instead (D3).
+  - The record holds the generation and up to five blockers (`BLOCKERS_SHOWN`), which status and offload's refusal name (D5). A blocker is a note or file that the rebuild could not read, with its reason cut at `REASON_MAX_CHARS`.
+  - In store mode, `recover` retries a whole failure at the next sweep, so at most one rebuild runs per sweep interval. It also retries when the generation moved, and once after start for a record that an earlier service process wrote.
+  - A named blocker clears only when a rebuild publishes, and a named unknown row clears only through a rebuild or a delta on its page. An unrelated save does neither and starts no rebuild. In store mode a save reaches the projection only through the follow (`media_bindings.py:735-737`), which leaves a projection that is not complete alone (`:531-532`), so the save does not move the generation.
+  - In file mode, `recover` keeps today's rule: it retries when the generation moved, and once after start.
 
 ### D5. A total that is not current: wait, or unknown
 
@@ -210,7 +209,7 @@ A rebuild holds one store snapshot from its start through `_retire_census` and t
 `repair_paths` (`media_bindings.py:725`) catches the errors that its own derivation raises and returns, instead of raising out of the custody seam:
 
 - **A displaced page:** the trail cannot express the change as binding rows, so the seam withdraws the projection. The rebuild that follows records the page (D3).
-- **A page that does not parse:** the delta deletes the page's binding rows and writes its unknown row with the eviction flag set (D3). The seam withdraws nothing.
+- **A page with a deterministic fault (D3), such as one that does not parse:** the delta deletes the page's binding rows and writes its unknown row with the eviction flag set. The seam withdraws nothing.
 - **A race or a transient read failure, of the classes that D3 lists, such as a Trash placement that changed or a store read error:** the seam withdraws nothing and records nothing. The projection lags and is not current, and the next follow replays the rows (D2, D4).
 
 Today such an error leaves the custody seam, and a seam that raises makes `apply_receipt_paths` invalidate the scope of every seam (`freshness.py:2497-2523`). An error in this optional projection should cost only the projection.
@@ -260,6 +259,7 @@ Within one store database, the audit position never repeats. `seq` is `AUTOINCRE
 
 ## Rejected alternatives
 
+- **Waiting for the trail to name a blocker before a failed rebuild runs again:** dropped, because no remaining blocker can appear in the trail. A fault of a page that the store owns is an unknown row, a snapshot error names no note, a plain binary never touches disk, a placement race settles with no audit row, and a page that the store does not own never appears in the trail (D3).
 - **A walk outside the boundary with a change marker:** correct, but a walk of 39 s to 209 s loses its race to any save, and it still walks once per batch.
 - **A recorded census, confirmed by a walk only near the allowance:** it needs a margin constant, and it still walks under the boundary near the limit.
 - **Lending the boundary between chunks of the walk:** saves still wait for each chunk, and a write in any chunk restarts the census.
@@ -338,13 +338,14 @@ The 0.5 s bound is the Records bound for one boundary hold by import work (`open
 |---|---|---|
 | Projection not current, such as after a migration, a broken trail, a displaced page or a configuration change | Offload waits, the job returns with its attempt refunded, status says the total is being counted | The owner: originals stay local until the rebuild, so volume use stays higher |
 | The follow cannot catch up before a hold | `MEDIA_STORE_BUSY` with the queue's backoff | The owner's volume, while the vault writes faster than 2,048 rows per member |
-| A rebuild cannot read a source | `MEDIA_ALLOWANCE_UNKNOWN`, with up to five notes or files named. The rebuild runs again when the trail names one of them or a companion, or at the next sweep when it names none | The owner, while the source stays unreadable |
+| A rebuild fails as a whole | `MEDIA_ALLOWANCE_UNKNOWN`, with up to five notes or files named. The rebuild runs again at the next sweep, after a generation move, or once after start | The owner, while the source stays unreadable |
+| A placement on disk disagrees with the snapshot, as after a Trash move whose rename the projector still owes | A follow lags and logs the placement's path. A rebuild fails as a whole, names the placement and runs again at the next sweep (D3) | Offload waits until the projector moves the file |
 | A note that the projection cannot count, including the stricter cases (D3) | The projection publishes, and the total is unknown and names the note. Eviction stops where it stops today | The owner repairs the note, and the fix's delta clears it |
 | A page the store does not own changes between two sweeps | An offload can pass the allowance by the versions that the page binds | The operator's storage, bounded by that page, for one interval |
 | Such a page keeps changing during the sweep's walk | The check keeps the projection and runs again at the next sweep | The operator's storage, for one more interval |
 | A displaced version whose ledger confirmation changed | Stays counted until the next rebuild, which then names the page | The owner is refused early |
 | The custody seam meets a displaced page | The projection is withdrawn, and other seams keep their scope (D7) | The owner waits for the rebuild |
-| The custody seam meets a page that does not parse | The page gets a flagged unknown row, and eviction stops as today (D7) | The owner repairs the page, and the fix's delta clears it |
+| The custody seam meets a page with a deterministic fault (D3), such as one that does not parse | The page gets a flagged unknown row, and eviction stops as today (D7) | The owner repairs the page, and the fix's delta clears it |
 | The custody seam meets a transient read failure | The projection lags, and the next follow replays the rows (D7) | Offload waits until that follow |
 | Unreadable ledger | Total unknown | As today |
 | Per-save work | Each save pays up to the per-save budget | Every save |
