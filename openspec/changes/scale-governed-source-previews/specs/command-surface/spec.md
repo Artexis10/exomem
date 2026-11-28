@@ -18,7 +18,7 @@ A background reclassification preview SHALL run under its own build budget. On L
 
 ### Requirement: A dependent governed referrer is released without rereading its bytes
 
-On Linux, the terminal release SHALL use held evidence for the unchanged referrer's bytes and prove its inherited scopes against the current dependencies. Eligible referrers are container members, extraction parts and scene frames. Parts and frames SHALL use the same physical parent as ordinary membership and reuse its selector inputs only while its settled file version matches. Release SHALL use full verification when it cannot prove a dependency, for parts and frames whose parent belongs to the store or inherits its own scopes, for bridge rows, and on native Windows.
+On Linux, terminal release SHALL use held referrer evidence with live proof of inherited scopes for eligible container members, extraction parts and scene frames. It SHALL verify every other dependent row in full.
 
 #### Scenario: A dependent referrer releases from held evidence
 
@@ -26,7 +26,15 @@ On Linux, the terminal release SHALL use held evidence for the unchanged referre
 - **THEN** release reads none of the referrer's bytes
 - **AND** a parent retag that restricts disclosure, or a replaced container payload, withholds that row and refuses the page
 
-#### Scenario: A bridge row or a changed referrer takes the full path
+#### Scenario: Sibling rows share the current physical parent
 
-- **WHEN** a row is a bridge page, a release-grant path or a grant's bridge dependency, or the referrer itself changed after the report was built
+- **WHEN** eligible parts or frames share a settled parent file
+- **THEN** release uses the same physical parent as ordinary membership
+- **AND** release reads that parent once and rechecks its version before reusing its selector inputs
+
+#### Scenario: An ineligible row takes the full path
+
+- **WHEN** a row is a bridge page, a release-grant path or a grant's bridge dependency, or the referrer changed after the report was built
+- **OR** release runs on native Windows
+- **OR** a required proof is unavailable, including a part or frame whose parent belongs to the store or inherits its own scopes
 - **THEN** release proves that row through the full path and refuses the page if its value changes
