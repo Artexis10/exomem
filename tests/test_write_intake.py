@@ -871,9 +871,9 @@ def _drop_the_declaration_marker(vault: Path) -> None:
 def test_a_store_from_before_the_declaration_marker_keeps_a_save_behind_its_open_revision_queued(
     vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch, upgraded: str
 ) -> None:
-    """The upgrade classifies each open save as an acceptance does, so the queued revision still queues the add.
-    When another save upgrades the store during the read, after the revision applied, the check marked the old
-    store and trusts nothing that the upgrade classified."""
+    """The upgrade leaves each save that the store already holds unclassified, which counts as a possible change,
+    so the queued revision still queues the add, whether the store was upgraded before the check or during its
+    read, after the revision applied."""
     from types import MappingProxyType
 
     _writer, holder = managers
@@ -910,6 +910,71 @@ def test_a_store_from_before_the_declaration_marker_keeps_a_save_behind_its_open
     _wait_for_state(vault, add["queued_write"]["ref"], "applied")
     rows = _send(plan, vault, {"action": "query", "collection": collection})["rows"]
     assert [row["effort"] for row in rows if row["title"] == "Ship the release"] == ["medium"]
+
+
+def _store_again_as_a_writer_without_the_marker(vault: Path, ref: str) -> None:
+    """Store the queued save `ref` again as an earlier release's acceptance stores a save: its INSERT names these
+    columns and leaves out `may_change_declaration`, as after a rollback."""
+    columns = ("id", "origin", "origin_ttl", "command", "arguments", "principal", "surface", "state",
+               "accepted_at", "updated_at", "next_attempt_at", "error_code")
+    intake_id = ref.removeprefix(write_intake.REF_PREFIX)
+    with write_intake._write(vault) as conn:
+        row = conn.execute("SELECT * FROM intake WHERE id = ?", (intake_id,)).fetchone()
+        conn.execute("DELETE FROM intake WHERE id = ?", (intake_id,))
+        conn.execute(f"INSERT INTO intake ({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})",
+                     [row[name] for name in columns])
+
+
+def test_a_revision_that_an_earlier_release_queues_still_queues_a_save_with_the_value_it_declares(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect: after a rollback, an earlier release queued a revision without the marker, the store gave it 0, and a
+    busy add with the value that the revision declares was refused. A save that no acceptance classified counts."""
+    _writer, holder = managers
+    plan = _command("plan_memory")
+    collection = _planning_collection(vault)
+    lifecycle = _send(plan, vault, {"action": "inspect", "collection": collection})["lifecycle_guards"]
+    first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
+    revision = _send(plan, vault, {
+        "action": "revise", "collection": collection, **lifecycle, "why": "declare a medium effort",
+        "manifest_text": (vault / collection).read_text(encoding="utf-8").replace("[small, large]", "[small, medium, large]"),
+    }, scope="principal:session-b")
+    assert revision["state"] == "queued"
+    _store_again_as_a_writer_without_the_marker(vault, revision["queued_write"]["ref"])
+    add = _send(plan, vault, _plan_call(collection, "add", effort="medium"), scope="principal:session-c")
+    assert add["state"] == "queued"
+    paused.set()
+    _wait_for_state(vault, add["queued_write"]["ref"], "applied")
+    (row,) = _send(plan, vault, {"action": "query", "collection": collection})["rows"]
+    assert row["effort"] == "medium"
+
+
+def test_a_store_from_before_the_declaration_marker_upgrades_without_reading_its_queued_saves(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect: the upgrade loaded and decoded every open save inside the write transaction, up to 4 MiB each, so the
+    first busy save after it could run the serving process out of memory. The upgrade reads no queued save."""
+    _writer, holder = managers
+    collection = _ledger_declaring_a_status(vault)
+    monkeypatch.setattr(write_intake, "_claim_head", lambda root: 0.05)
+    long_text = "x" * (2 << 20)
+    with _Hold(holder, vault):
+        for number in range(4):
+            receipt = _send(_command("record_memory"), vault, {
+                "action": "append", "collection": collection, "why": "record a long entry",
+                "item": ledger_item(slug=f"long-note-{number}", exact_text=long_text),
+            }, scope=f"principal:session-{number}")
+            assert receipt["state"] == "queued"
+    _drop_the_declaration_marker(vault)
+    tracemalloc.start()
+    try:
+        receipt = _send(_command("record_memory"), vault, _status_call(collection, "append", "published"),
+                        scope="principal:session-b")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert receipt["state"] == "queued"
+    assert peak < len(long_text), f"the upgrade held {peak} bytes while 4 saves of {len(long_text)} bytes waited"
 
 
 class _CountedQueueReads:
@@ -1022,7 +1087,7 @@ def test_a_refusal_whose_queue_open_spends_most_of_the_budget_queues_the_save_wi
     def slow_open(root, path, retained, mode, **options):
         conn = real_open(root, path, retained, mode, **options)
         if mode == "read" and slow.is_set() and threading.current_thread() is request_thread:
-            time.sleep(0.8)
+            time.sleep(1.8)
         return conn
 
     locker = sqlite3.connect(write_intake.store_path(vault), isolation_level=None)
@@ -1040,13 +1105,15 @@ def test_a_refusal_whose_queue_open_spends_most_of_the_budget_queues_the_save_wi
 
     monkeypatch.setattr(write_intake, "_open", slow_open)
     monkeypatch.setattr(commands, "declared_refusal_before_queueing", timed_check)
-    monkeypatch.setattr(commands, "_DECLARED_REFUSAL_SECONDS", 1.0)
+    # The open spends 1.8 s of a 2 s budget. A check that answers within it takes about 2 s, and one whose statement
+    # waits as long as the budget was when the open began takes about 3.8 s.
+    monkeypatch.setattr(commands, "_DECLARED_REFUSAL_SECONDS", 2.0)
     locker.execute("PRAGMA locking_mode=EXCLUSIVE")
     locker.execute("BEGIN EXCLUSIVE")  # every look at the queue waits on this lock until the check ends
     slow.set()
     receipt = _send(plan, vault, _plan_call(collection, "add", effort="medium"), scope="principal:session-b")
     assert receipt["state"] == "queued"
-    assert elapsed[0] < 1.4
+    assert elapsed[0] < 2.9
     paused.set()
     failed = _wait_for_state(vault, receipt["queued_write"]["ref"], "failed")
     assert failed["error"]["code"] == "SCHEMA_ENUM"

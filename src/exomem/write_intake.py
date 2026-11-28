@@ -220,7 +220,7 @@ def _open(
                 "accepted_at REAL NOT NULL, updated_at REAL NOT NULL, next_attempt_at REAL NOT NULL, "
                 "error_code TEXT, error TEXT, outcome TEXT, finished_at REAL, "
                 "generation INTEGER NOT NULL DEFAULT 0, commit_reached INTEGER NOT NULL DEFAULT 0, named_at REAL, "
-                "may_change_declaration INTEGER NOT NULL DEFAULT 0)"
+                f"{_DECLARATION_COLUMN})"
             )
             conn.execute("CREATE INDEX IF NOT EXISTS intake_state ON intake(state, seq)")
             # One open save per original identity: a resend while it is open gets its receipt.
@@ -244,41 +244,40 @@ def may_change_declaration(command: Any, arguments: Any) -> bool:
 
     A command that declares `sets_any_frontmatter_field` may, whichever page it names: only its own resolution,
     when it applies, decides which page that is. A command of `operation_entries.manifest_text_commands` may when
-    it carries a `MANIFEST_TEXT_FIELD` other than null; MCP stores a field the caller left unset as null. A
-    command or arguments that cannot be read may too.
+    it carries a `MANIFEST_TEXT_FIELD` other than null; MCP stores a field the caller left unset as null. Arguments
+    that are not an object may too.
     """
     from . import operation_entries
 
-    if command is None or command.sets_any_frontmatter_field:
+    if command.sets_any_frontmatter_field:
         return True
     if command.name not in operation_entries.manifest_text_commands():
         return False
     return not isinstance(arguments, Mapping) or arguments.get(operation_entries.MANIFEST_TEXT_FIELD) is not None
 
 
+#: The column and the index that keep `may_change_declaration` for each save, one definition for a new store and
+#: an upgraded one. A writer that does not know the column, such as an earlier release after a rollback, leaves it
+#: NULL, and NULL counts as may change: only a 0 that an acceptance wrote says that a save cannot. The index holds
+#: the column too, so a seek answers from the index and never reads a matched save's stored arguments.
+_DECLARATION_COLUMN = "may_change_declaration INTEGER"
+_DECLARATION_INDEX = (
+    "CREATE INDEX intake_declaration ON intake(seq, may_change_declaration) WHERE may_change_declaration IS NOT 0"
+)
+
+
 def _add_declaration_marker(conn: sqlite3.Connection) -> None:
     """Give a store made before `may_change_declaration` existed that column and its index, in the caller's write
-    transaction. Each open save is classified from its command and arguments, as an acceptance classifies a new
-    one. An ended save keeps 0: only a mark that sees the column trusts it (`declaration_mark`), and each save open
-    at such a mark was open at this upgrade or was accepted after it."""
+    transaction. Every save already stored keeps NULL, which counts as may change, so the upgrade reads no save.
+    An index under the same name with another definition, from a build before this one, is replaced."""
     if "may_change_declaration" not in {row[1] for row in conn.execute("PRAGMA table_info(intake)")}:
-        conn.execute("ALTER TABLE intake ADD COLUMN may_change_declaration INTEGER NOT NULL DEFAULT 0")
-        rows = conn.execute(
-            "SELECT seq, command, arguments FROM intake WHERE state IN (?, ?)", _OPEN_STATES
-        ).fetchall()
-        conn.executemany(
-            "UPDATE intake SET may_change_declaration = 1 WHERE seq = ?",
-            [(row["seq"],) for row in rows
-             if may_change_declaration(command_named(row["command"]), _stored_arguments(row["arguments"]))],
-        )
-    conn.execute("CREATE INDEX IF NOT EXISTS intake_declaration ON intake(seq) WHERE may_change_declaration = 1")
-
-
-def _stored_arguments(text: str | None) -> Any:
-    try:
-        return None if text is None else json.loads(text)
-    except ValueError:
-        return None
+        conn.execute(f"ALTER TABLE intake ADD COLUMN {_DECLARATION_COLUMN}")
+    # SQLite keeps the statement that made the index, so an equal text is this definition.
+    index = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'intake_declaration'").fetchone()
+    if index is None or index[0] != _DECLARATION_INDEX:
+        if index is not None:
+            conn.execute("DROP INDEX intake_declaration")
+        conn.execute(_DECLARATION_INDEX)
 
 
 # --------------------------------------------------------------------------- identity and eligibility
@@ -1611,29 +1610,27 @@ def declaration_mark(vault_root: Path, *, seconds: float) -> int | None:
     reads comes from a save that was open at the mark or was accepted after it, each at or above the mark.
 
     The mark is the first open save's `seq`, else one more than the last save's, else 1. Each part is one seek:
-    `MAX(seq)` on the primary key and the lowest `seq` of each open state on `intake_state`. The last part reads
-    no row (no `seq` is 0) and only names `may_change_declaration`, so a store from before that column answers
-    unknown: a check marked before the upgrade could otherwise trust the 0 that the upgrade gives a save that it
-    saw open but that ended before the upgrade."""
+    `MAX(seq)` on the primary key and the lowest `seq` of each open state on `intake_state`."""
     row = _declaration_query(
         vault_root, seconds,
-        "SELECT COALESCE((SELECT MAX(seq) FROM intake), 0), (SELECT MIN(seq) FROM intake WHERE state = ?), "
-        "(SELECT MIN(seq) FROM intake WHERE state = ?), (SELECT may_change_declaration FROM intake WHERE seq = 0)",
-        _OPEN_STATES, empty=(0, None, None, None),
+        "SELECT COALESCE((SELECT MAX(seq) FROM intake), 0), "
+        "(SELECT MIN(seq) FROM intake WHERE state = ?), (SELECT MIN(seq) FROM intake WHERE state = ?)",
+        _OPEN_STATES, empty=(0, None, None),
     )
     if row is None:
         return None
-    last, queued, applying, _marker = row
-    return min((int(seq) for seq in (queued, applying) if seq is not None), default=int(last) + 1)
+    last, *first_open = row
+    return min((int(seq) for seq in first_open if seq is not None), default=int(last) + 1)
 
 
 def declaration_changed_since(vault_root: Path, marker: int, *, seconds: float) -> bool | None:
-    """Whether a save at or after `marker`, in whatever state it is now, may have changed a declaration
-    (`may_change_declaration`); None where that is unknown. It is one seek on `intake_declaration`, which holds
-    only those saves, whatever else the queue holds."""
+    """Whether a save at or after `marker`, in whatever state it is now, may have changed a declaration; None
+    where that is unknown. A save counts unless its acceptance recorded 0 (`_DECLARATION_COLUMN`), so a save that
+    a writer without the column stored counts, and a store without the column answers unknown. It is one seek on
+    `intake_declaration`, which holds only the saves that count, whatever else the queue holds."""
     row = _declaration_query(
         vault_root, seconds,
-        "SELECT EXISTS (SELECT 1 FROM intake WHERE may_change_declaration = 1 AND seq >= ?)",
+        "SELECT EXISTS (SELECT 1 FROM intake WHERE may_change_declaration IS NOT 0 AND seq >= ?)",
         (marker,), empty=(0,),
     )
     return None if row is None else bool(row[0])

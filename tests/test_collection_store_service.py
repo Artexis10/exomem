@@ -2739,6 +2739,37 @@ def test_a_planning_status_for_a_store_collection_is_refused_while_the_store_is_
         write_intake.stop(root)
 
 
+def test_an_area_update_that_deletes_a_field_it_lacks_is_refused_for_its_value_while_the_store_is_busy(
+        service, monkeypatch):
+    """Defect: an update of an area that deleted a parent it never had and set an undeclared effort queued, and its
+    replay refused the effort. A null deletes its field and supplies nothing that an area may not carry, so the
+    effort is refused at once, as a direct update refuses it."""
+    from exomem import write_intake
+
+    root = service.root
+    text = sqlite_text(manifest_text("planning").replace(CID, RELEASE_PLAN_ID).replace("title: Work", f"title: {RELEASE_PLAN}"))
+    text = text.replace("    area: {type: string}\n", "    area: {type: string}\n    effort: {type: enum, enum: [small, large]}\n")
+    call(root, "plan_memory", action="create", manifest_path=manifest_path("planning").replace("Work", "Release"),
+         manifest_text=text, why="plan the releases")
+    call(root, "plan_memory", action="add", collection=RELEASE_PLAN, why="plan the platform",
+         item={"title": "Platform", "kind": "area"})
+    view = call(root, "plan_memory", action="query", collection=RELEASE_PLAN)
+    (row,) = view["rows"]
+    command = next(c for c in commands.product_commands_for("mcp") if c.name == "plan_memory")
+    try:
+        with _store_thread_held_with_intake_on(service, monkeypatch), request_scope(OWNER):
+            with pytest.raises(OpError) as refused:
+                writer_lease.invoke_command(
+                    command, root, implicit_idempotency_scope="principal:session-b", action="update",
+                    collection=RELEASE_PLAN, plan_id=row["plan_id"], expected_container_hash=view["snapshot"],
+                    expected_item_version=row["item_version"], changes={"parent": None, "effort": "medium"},
+                    why="size the platform")
+            assert refused.value.code == "SCHEMA_ENUM"
+            assert write_intake.read(root)["items"] == []
+    finally:
+        write_intake.stop(root)
+
+
 def counted_appends(monkeypatch):
     from exomem.collection_store.writer import CollectionWriter
 
