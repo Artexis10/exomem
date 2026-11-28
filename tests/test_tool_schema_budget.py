@@ -111,13 +111,13 @@ TOOL_CEILINGS: dict[str, int] = {
     "edit_plan_item": 750,
     "edit_record": 850,
     # inspect_name_drift joined the read door on 2026-11-23 (align-names-with-titles); faces.status on 2026-11-27
-    # (add-face-search) took it to 2,265 B.
+    # (add-face-search) took it to 2,265 B. `files.classify` joined the read door's preview enum on 2026-11-25
+    # (classify-sensitive-material-at-capture).
     "inspect_memory": 2300,
     "list_review_items": 750,
     # faces.set, faces.name and faces.delete joined the write door on 2026-11-27 (add-face-search): 2,679 B.
+    # `files.classify` joined the write door on 2026-11-25 (classify-sensitive-material-at-capture).
     "manage_memory": 2700,
-    # inspect_name_drift joined the read door on 2026-11-23 (align-names-with-titles).
-    # `files.classify` joined both doors on 2026-11-25 (classify-sensitive-material-at-capture).
     "query_plan_items": 1050,
     # `options` names `query`, the typed version-1 query that a derived collection also answers, added 32 B on
     # 2026-11-25 (legacy arguments on a derived collection).
