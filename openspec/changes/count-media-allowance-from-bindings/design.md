@@ -105,9 +105,18 @@ Under a hold, offload walks no notes for the allowance, and it replays at most o
 
 A page whose canonical binding row holds the counted reference gets no side row. Every confirmed displaced page gets a counted side row, so D1's reuse slice excludes the displaced binding row by its companion. `from_page` today returns None for a page with `stored_object` but no binding (`media_bindings.py:289-294`), and `_fill_displaced` (`media_bindings.py:871`) keeps one row per original, so either kind would be missed without the side table.
 
-**An unknown row does not stop publication.** The rebuild goes on past the page, records the row and publishes. The allowance then reads the total as unknown and names up to five such pages (D5). A governed fix of the page replaces its row through the delta, with no rebuild. An unknown row also records whether today's rebuild fails on its page. A page that does not parse, a malformed reference and the four stricter cases make it fail. A reference without a binding, an unconfirmed displaced reference and every unknown row of a page that the store does not own do not. `current()`, which eviction and the retained-store drain call, also requires that no row of the first kind exists, so they stop where they stop today.
+**An unknown row does not stop publication.** The rebuild goes on past the page, records the row and publishes. The allowance then reads the total as unknown and names up to five such pages (D5). A governed fix of the page replaces its row through the delta, with no rebuild.
 
-**Rebuild and deltas.** A rebuild fills the side table. A delta replaces the side rows of each page that it writes or deletes. It touches no other page's row, except for two companions that bind one original (below). A delta that reads a displaced page, or a page that does not parse, withdraws the projection until a rebuild, through D7. Each delta and rebuild writes the generation that the side table matches. The allowance reads the projection as current only when that generation equals the checkpoint's.
+**The eviction flag.** An unknown row carries a flag that is set exactly when today's rebuild raises on its page:
+
+- `from_page` raises (`media_bindings.py:289-316`): a page that does not parse, an incomplete identity, an unsafe path, a placement that cannot be resolved (`trash_metadata.py:446-480`), or an incomplete recovery reference on a bound page;
+- `_confirm_displaced` raises on a displaced reference that the media ledger does not record (`media_bindings.py:864-865`);
+- `_retire_census` raises on a Trash retirement whose witness no longer holds (`media_bindings.py:879-916`);
+- the rebuild raises on an extant companion that lost its binding (`media_bindings.py:811-824`), or on two companions that bind one original (`media_bindings.py:834-835`).
+
+`from_page` returns None for an unbound page, also when its reference is malformed (`media_bindings.py:291-294`), so such a page's row has no flag. Nor does a row of a page that the store does not own. `current()`, which eviction and the retained-store drain call, is false while a flagged row exists, so they stop where they stop today. When the drain census stops there (`media_store.py:4786`), it names up to five flagged pages, as it names blockers after a failed rebuild (`media_store.py:4766-4781`).
+
+**Rebuild and deltas.** A rebuild fills the side table. A delta replaces the side rows of each page that it writes or deletes. It touches no other page's row, except for two companions that bind one original (below). A delta that reads a displaced page withdraws the projection until a rebuild, through D7. A delta that reads a page that does not parse deletes that page's binding rows and writes its unknown row with the eviction flag set, with no withdraw. Each delta and rebuild writes the generation that the side table matches. The allowance reads the projection as current only when that generation equals the checkpoint's.
 
 **Pages the census skips.** The census walk skips reserved families and linked files (`reserved_paths.py:3161-3168`). The store owns some reserved families as pages (`vault_store/ownership.py:57`, `:72`), so the rebuild and the deltas skip every page in a reserved family, as the census does.
 
@@ -124,7 +133,7 @@ The rebuild and a check at each store sweep (D4) read these pages on disk, outsi
 3. It ignores a reported change to a path that the store owns, which the audit trail covers.
 4. After the walk, it reads each changed page that the store does not own once more.
 
-The check compares the side rows it read with the published ones. It replaces the rows that differ under the publication guard, as a delta does. A check that fails, because a page kept changing or a read failed, keeps the projection and its residual window, and runs again at the next sweep. A walk race never withdraws the projection. In a rebuild, a page that kept changing gets an unknown row, which the next sweep's check replaces.
+The check compares the side rows it read with the published ones. It replaces the rows that differ under the publication guard, as a delta does. Like a delta, it moves the checkpoint's generation and writes the side table's, so a rebuild that read the pages before it discards its result (`media_bindings.py:831`). A check that fails, because a page kept changing or a read failed, keeps the projection and its residual window, and runs again at the next sweep. A walk race never withdraws the projection. In a rebuild, a page that kept changing gets an unknown row, which the next sweep's check replaces.
 
 Between two sweeps, a change to such a page is not counted. The collection store, which writes the Records and Planning layers, never writes a stored reference (no `collection_store/` module names `stored_object`). So a stored reference on such a page comes from an outside writer, such as a sync tool or a hand copy.
 
@@ -142,7 +151,7 @@ Each now gives its page an unknown row. The total is unknown and names the page,
 - `_tracks_bindings` (`media_bindings.py:102`) is also true in store mode when a valid allowance is configured (`media_allowance.configured`). In file mode it keeps today's rule.
 - **Where recovery runs.** The watcher's reconcile thread runs `media_bindings.recover` after each store sweep's import (`file_watcher.py:2044-2058`), at each reconcile interval (300 s, 900 s when quiet). After the sweep at start, it runs once the seed is published (`file_watcher.py:2829-2833`), so a rebuild never delays activation. In store mode the watcher's media reconcile does not run (`file_watcher.py:1916-1917`), so today `recover` runs only from the start scan and only for a pooled vault. Only the serving process rebuilds. The media worker process never does.
 - **No rebuild in the startup sequence.** In store mode, `enqueue_offloads` (`media_store.py:1280`) follows the trail and no longer runs `recover`. The start scan (`server_runtime.py:1372`) therefore waits for no rebuild, and the first sweep after start rebuilds. In file mode, `enqueue_offloads` keeps today's `recover`.
-- **Follow before rebuild.** In store mode, `recover` first follows the trail. It rebuilds only a projection that is not complete, or that the follow withdrew. Today it rebuilds whenever the projection is not current (`media_bindings.py:937-942`), which in store mode includes a projection that only lags.
+- **Follow before rebuild.** In store mode, `recover` first follows the trail until it reaches the audit head, or for 8 rounds of 256 rows, as in D2. It rebuilds whenever the projection is still not current after that, as today's `recover` does (`media_bindings.py:937-942`). So a projection that only lags costs a follow, not a rebuild. The follow returns early, without a withdraw, on a checkpoint with no audit position or another policy (`media_bindings.py:531-532`). Two cases reach it, and `recover` rebuilds both: a configuration change, because `policy_key` covers the whole media configuration (`media_bindings.py:200-210`), and a pooled vault that migrated from file mode, whose checkpoint has no audit position.
 - **The record of a failed rebuild** moves from process memory (`_failed_census`) to the media ledger, where the media worker process reads it.
   - A rebuild fails as a whole only when it cannot read a source: the store snapshot, the media ledger, a Trash placement or the walk of pages that the store does not own. A failure that the rule ties to one page is an unknown row instead (D3).
   - The record holds the generation, the audit position that the failure left, and up to five blockers (`BLOCKERS_SHOWN`). A blocker is a note or file that the rebuild could not read, with its reason cut at `REASON_MAX_CHARS`.
@@ -164,24 +173,27 @@ When offload reads the total:
 
 A rebuild reads the store pages (`media_bindings.py:597`) and the store's audit head from one snapshot. It publishes at that audit position, and the follow then replays the rows after it. Its race check compares the audit head, not the revision (D8). Today a rebuild gives up when any write or any derivation drain lands during its walk (`media_bindings.py:831`), so on a vault that saves often it can starve.
 
-### D7. The custody seam withdraws only for a change that the trail cannot express
+### D7. The custody seam withdraws only for a displaced page
 
 `repair_paths` (`media_bindings.py:725`) catches the errors that its own derivation raises and returns, instead of raising out of the custody seam:
 
-- **A displaced page or a page that does not parse:** the trail cannot express the change as binding rows, so the seam withdraws the projection. The rebuild that follows records the page (D3).
+- **A displaced page:** the trail cannot express the change as binding rows, so the seam withdraws the projection. The rebuild that follows records the page (D3).
+- **A page that does not parse:** the delta deletes the page's binding rows and writes its unknown row with the eviction flag set (D3). The seam withdraws nothing.
 - **A transient read failure of the media ledger or the store:** the seam withdraws nothing and records nothing. The projection lags and is not current, and the next follow replays the rows (D2, D4).
 
 Today such an error leaves the custody seam, and a seam that raises makes `apply_receipt_paths` invalidate the scope of every seam (`freshness.py:2497-2523`). An error in this optional projection should cost only the projection.
 
 ### D8. The audit head is the store frontier
 
-In store mode, `current()` compares the projection's recorded audit position with the store's audit head, and no longer compares the store revision. It still requires completeness, no pending outside change, the current policy and, for the allowance, the side table's generation. For eviction and the retained-store drain, it also requires no unknown row of the kind that fails today's rebuild (D3). The same comparison replaces the revision in three places:
+In store mode, `current()` compares the projection's recorded audit position with the store's audit head, and no longer compares the store revision. It still requires completeness, no pending outside change, the current policy and, for the allowance, the side table's generation. For eviction and the retained-store drain, it also requires no unknown row with the eviction flag (D3). It also requires that the audit row at the recorded position is the one that the projection followed (below). The same comparison replaces the revision in three places:
 
 - the follow's check at the head (`media_bindings.py:538-539`), which then returns true without recording;
 - the follow's check before it publishes (`media_bindings.py:555`);
 - the rebuild's race check (`media_bindings.py:831`).
 
 The follow still withdraws when the recorded revision or audit position is ahead of the store's (`media_bindings.py:535-537`), as a restore of an older database shows.
+
+**The identity of the last followed row.** Each follow and rebuild also records the audit row at its recorded position: its `seq`, revision, time (`at`) and path. It writes that record in a meta key of its own, in the transaction that writes the checkpoint. The follow, also at the head, reads the row at the recorded `seq`, one primary key lookup in the snapshot that it already holds. It withdraws when that row differs, or when the record names another `seq` than the checkpoint. `current()` makes the same lookup and is false on a difference, so a restored head that lands exactly on the recorded position is not taken as current. A separate key keeps the checkpoint's format, which the old code parses strictly and resets when it meets an unknown field (`media_bindings.py:153`, `:161-162`).
 
 **Why the revision cannot be the frontier.** After each commit's derivation, the derivation drain raises the store revision with no audit row (`vault_store/derivation.py:747-748`). Each commit queues that derivation (`vault_store/write.py:988`). Rederive raises it once per batch (`vault_store/rederive.py:296`). At the audit head, the follow records nothing and returns false unless the revisions are equal (`media_bindings.py:538-539`). So after any save, the projection stays not current until a whole rebuild, and that rebuild publishes nothing when a drain lands during it.
 
@@ -192,7 +204,7 @@ The follow still withdraws when the recorded revision or audit position is ahead
 - A rollback empties the pages and records an audit row without a path in the same transaction (`vault_store/rollback.py:460-467`).
 - Every other write to `store_pages` changes only `mtime_ns`: `vault_store/projector.py:1172`, `vault_store/migrate.py:801` and the schema step at `collection_store/schema.py:1089`. The projection does not read it. The `store_pages` table of `media_capacity.py:95` is another table, in the media capacity ledger.
 
-The audit position never repeats: `seq` is `AUTOINCREMENT` (`collection_store/schema.py:1059`), no code deletes an audit row, and a rollback keeps them (`vault_store/rollback.py:28`). The projection reads only page paths and bodies from the store (`media_bindings.py:548`, `:597`), and no derived row. Task 1.9 proves the invariant.
+Within one store database, the audit position never repeats. `seq` is `AUTOINCREMENT` (`collection_store/schema.py:1059`), triggers refuse to update or delete an audit row (`collection_store/schema.py:367-379`, `:1072`), and a rollback keeps the trail (`vault_store/rollback.py:28`). A restore of an older copy of the store database brings back its `seq` counter, so later commits can reuse values that the projection already followed. While the restored head is below the recorded position, the follow withdraws (`media_bindings.py:535-537`). Once commits pass it, the row at the recorded `seq` is another row, and the identity check withdraws. The projection reads only page paths and bodies from the store (`media_bindings.py:548`, `:597`), and no derived row. Task 1.9 proves the invariant.
 
 **Existing behaviour that this fixes.** Pooled eviction and the retained-store drain call the same `current()`. In store mode, after each save's derivation, eviction keeps every candidate (`media_store.py:3969`) and does not retire a shared cache proof (`media_store.py:3693`). The drain census refuses (`media_store.py:4786`, `:4803`). This lasts until `recover` rebuilds the whole projection (`media_bindings.py:937-942`), which runs only when an offload scan or a protection pass calls it, and the next save starts it again. This finding comes from reading the code. No test or service has shown it yet. Task 3.12 shows it.
 
@@ -220,11 +232,11 @@ Each store-mode change that can add or remove a stored reference reaches the pro
   - an owner's edit through the write tools, including a malformed reference or one without a binding.
 - **Writes in `_trash`, `_archive`, `_attachments` and `_Adoption`.** The store owns these folders (`vault_store/ownership.py:94`), so their writes are in the trail. The follow does not depend on custody calling the seam for such a path, which the index's excluded-folder rule can skip (`index_sync.py:1984`). The audit head check (D8) makes the projection not current until a follow, and offload's own follow (D2) replays the row.
 - **An outside edit of an owned file, an edit made while the service was stopped, and a restore of the vault's files.** The store sweep imports each as an audit row (`file_watcher.py:2044-2058`).
-- **A migration and a rollback** record an audit row without a path (`vault_store/migrate.py:814`, `vault_store/rollback.py:464`). The follow withdraws on it (`media_bindings.py:543-545`).
-- **A restore of the store's database.** The follow withdraws when the store's revision or audit head is behind the checkpoint (`media_bindings.py:535-537`). Otherwise the audit head check makes the projection not current.
+- **A migration and a rollback** record an audit row without a path (`vault_store/migrate.py:814`, `vault_store/rollback.py:464`). The follow withdraws on it (`media_bindings.py:543-545`). A projection that the vault kept in file mode, as a pooled vault does, has no audit position, so the follow never reads that row. `recover` rebuilds it, because it is not current (D4).
+- **A restore of the store's database.** The follow withdraws when the store's revision or audit head is behind the checkpoint (`media_bindings.py:535-537`), or when the row at the recorded position is another row (D8).
 - **A derivation drain and a rederive** raise the store revision and change no page's path or body (D8), so the projection stays current.
 - **Pages the store does not own** follow D3.
-- **A configuration change** changes the policy key, which makes the projection not current until a rebuild.
+- **A configuration change** changes the policy key (`media_bindings.py:200-210`). The follow leaves such a projection alone (`media_bindings.py:531-532`), so it stays not current, and the next `recover` rebuilds it (D4).
 - **Erasures.** Deletion, emptying Trash, `forget_original` and the release paths of offload and eviction are governed writes. Their delta removes rows, and the total falls. A total read before an erasure is higher than the truth, so at worst it refuses. The check under the hold reads the lower total.
 
 Offload's holds and the follow's publication take the same boundary, so a check never sees half a delta. A write between two checks moves the checkpoint, and the second check reads the total again.
@@ -240,7 +252,7 @@ Offload's holds and the follow's publication take the same boundary, so a check 
 
 **Per member, under each of the two holds:**
 
-- reads of the checkpoint, the store's audit head and the mode, which cost the same at any size;
+- reads of the checkpoint, the store's audit head, the audit row at the recorded position and the mode, which cost the same at any size;
 - one aggregate when the checkpoint moved;
 - a replay of at most 256 audit rows when the projection lags: one body parse per changed page and two ledger transactions.
 
@@ -281,7 +293,8 @@ The 0.5 s bound is the Records bound for one boundary hold by import work (`open
 | A page the store does not own changes between two sweeps | An offload can pass the allowance by the versions that the page binds | The operator's storage, bounded by that page, for one interval |
 | Such a page keeps changing during the sweep's walk | The check keeps the projection and runs again at the next sweep | The operator's storage, for one more interval |
 | A displaced version whose ledger confirmation changed | Stays counted until the next rebuild, which then names the page | The owner is refused early |
-| The custody seam meets a displaced page or a page that does not parse | The projection is withdrawn, and other seams keep their scope (D7) | The owner waits for the rebuild |
+| The custody seam meets a displaced page | The projection is withdrawn, and other seams keep their scope (D7) | The owner waits for the rebuild |
+| The custody seam meets a page that does not parse | The page gets a flagged unknown row, and eviction stops as today (D7) | The owner repairs the page, and the fix's delta clears it |
 | The custody seam meets a transient read failure | The projection lags, and the next follow replays the rows (D7) | Offload waits until that follow |
 | Unreadable ledger | Total unknown | As today |
 | Per-save work | Each save pays up to the per-save budget | Every save |
@@ -290,9 +303,9 @@ The 0.5 s bound is the Records bound for one boundary hold by import work (`open
 
 ## Migration and rollback
 
-- No canonical note changes. `media_bindings.initialize` adds the side table, the two indexes and the two meta keys with `CREATE ... IF NOT EXISTS`. The job table gains a nullable column for the time of the first return, added as its other columns are (`media_jobs.py:1100-1145`). Every job insert names its columns, so the old code ignores it.
+- No canonical note changes. `media_bindings.initialize` adds the side table, the two indexes and the two meta keys with `CREATE ... IF NOT EXISTS`, and a third meta key for the identity of the last followed audit row (D8). The job table gains a nullable column for the time of the first return, added as its other columns are (`media_jobs.py:1100-1145`). Every job insert names its columns, so the old code ignores it.
 - On the first start after the upgrade, a vault in store mode with only an allowance has no complete projection. The first store sweep's `recover` rebuilds it from the store on the watcher's reconcile thread, outside the boundary and after the seed is published. Offload waits until the rebuild publishes. A vault that already tracks bindings has no side-table generation yet, so its allowance waits for one rebuild. The side table does not affect its eviction.
-- A vault that migrates from file mode to store mode records an audit row without a path, so the follow withdraws and a rebuild runs. A vault that rolls back to file mode uses the census again.
+- A vault that migrates from file mode to store mode records an audit row without a path. A projection that follows the trail withdraws on it. A projection that the vault kept in file mode, as a pooled vault does, has no audit position, so the follow leaves it alone, and `recover` rebuilds it because it is not current. A vault that rolls back to file mode uses the census again.
 - In store mode `media_owner_census` is no longer written or read. The table stays, because file mode and a downgrade read it.
 - **Revert:** the old code ignores the new table and keys and walks again. It maintains the expression index when it writes `media_bindings`. Its status shows the last recorded figure until its first batch census. Its `current()` compares the store revision again, so its eviction stalls after saves as it does before this change.
 - **Upgrade after a revert:** either the old code followed the trail without the side table's generation, on a vault that tracks bindings, or it followed nothing, on a vault with only an allowance. The side-table generation catches the first case, and the audit head check catches the second. Either way the allowance reads the projection as not current until a rebuild.

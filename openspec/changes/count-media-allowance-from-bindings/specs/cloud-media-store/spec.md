@@ -56,7 +56,7 @@ In store mode, when the binding projection is not current, offload SHALL return 
 
 ### Requirement: The binding projection follows every change to the references in store mode
 
-In store mode, every vault with a valid media allowance SHALL keep the binding projection. It SHALL follow the store's audit trail for every page the store owns, and be current at the trail's head whatever the store revision. A change that the trail cannot express SHALL make it not current. Pages that the census walks but the store does not own SHALL be checked at each store sweep, and a save during that walk SHALL NOT withdraw it. A rebuild SHALL read the pages outside the mutation boundary.
+In store mode, every vault with a valid allowance SHALL keep the binding projection. It SHALL follow the audit trail for each page the store owns, and be current at its head whatever derived-row work raises the revision. A change that the trail cannot express SHALL make it not current. Pages the census walks but the store does not own SHALL be read at each rebuild and checked at each sweep; a save during that walk SHALL NOT withdraw it. A rebuild SHALL read pages outside the mutation boundary.
 
 #### Scenario: An edit made while the service was stopped is counted
 
