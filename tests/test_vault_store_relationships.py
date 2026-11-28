@@ -146,13 +146,18 @@ def test_assess_anchors_the_far_end_and_later_changes_only_relationships(
         host.setenv("EXOMEM_CONNECTOR_BOUNDARY_CONFIG", str(config))
         target_update = {key: value for key, value in update.items() if key != "unit"}
         target_update.update(unit_ref=claim.unit_ref, expected_fingerprint=claim.fingerprint)
-        with pytest.raises(ValueError, match="RELATIONSHIP_END_NOT_FOUND") as hidden:
-            commands.op_observe_memory(served, **target_update)
-        with pytest.raises(ValueError, match="RELATIONSHIP_END_NOT_FOUND") as missing:
-            commands.op_observe_memory(
-                served, **(target_update | {"relations": [{"kind": "supports", "target": "[[No report]]"}]}),
-            )
-        assert str(hidden.value) == str(missing.value)
+        rule = scopes.parent / "rules/secret-external.yaml"
+        original = rule.read_text()
+        for ceiling in (0, 5):
+            rule.write_text(original.replace("ceiling: 0", f"ceiling: {ceiling}"))
+            with pytest.raises(ValueError, match="RELATIONSHIP_END_NOT_FOUND") as hidden:
+                commands.op_observe_memory(served, **target_update)
+            with pytest.raises(ValueError, match="RELATIONSHIP_END_NOT_FOUND") as missing:
+                commands.op_observe_memory(served, **(target_update | {
+                    "relations": [{"kind": "supports", "target": "[[Beta Report#missing]]"}],
+                }))
+            assert str(hidden.value) == str(missing.value)
+        rule.write_text(original)
     (scopes / "source.yaml").unlink()
     (scopes / "residual.yaml").unlink()
     policy = served / "Knowledge Base/_access.yaml"
@@ -243,6 +248,8 @@ def test_relation_file_carries_locators_and_keeps_managed_block_out_of_page_byte
     page = b"\xef\xbb\xbf---\r\ntitle: Tide\r\n---\r\n\r\n# Tide\r\n\r\nThe tide is high."
     projected = relationship_files.splice_block(page, ["### Stored relationships", "- Outgoing: 1"])
     assert relationship_files.strip_block(projected) == page
+    bare_cr = b"# Tide\r"
+    assert relationship_files.strip_block(relationship_files.splice_block(bare_cr, ["Tide"])) == bare_cr
     altered = projected.replace(b"Outgoing: 1", b"Outgoing: 7")
     with pytest.raises(OpError, match="managed relations block was edited"):
         relationship_files.strip_block(altered)
@@ -452,6 +459,26 @@ def test_a_relationship_hub_has_bounded_reads_and_a_complete_portable_file(serve
     with (served / relationship_files.path_for(ALPHA)).open("rb") as encoded:
         portable = relationship_files.parse(encoded)
     assert {edge.id for edge in portable.relationships} == {f"edge-{anchor}" for anchor in anchors}
+    retirement_queries = []
+    for to_retire in (anchors[:1], anchors[1:]):
+        statements: list[str] = []
+        writer.connection.set_trace_callback(statements.append)
+        try:
+            write.commit(writer, write.StoreChange(
+                write.Origin.GOVERNED, "Retire the old links.",
+                relationship_change=relationships.Change(
+                    actor="owner",
+                    retired=tuple(relationships.Retirement(f"edge-{anchor}") for anchor in to_retire),
+                ),
+            ))
+        finally:
+            writer.connection.set_trace_callback(None)
+        retirement_queries.append(sum(
+            statement.startswith(("UPDATE store_relationships", "INSERT INTO store_relationship_history"))
+            for statement in statements
+        ))
+    assert retirement_queries[0] == retirement_queries[1] > 0
+    assert rows(served, "SELECT COUNT(*) FROM store_relationship_history WHERE action='retire'") == [(count,)]
 
 
 def test_moving_a_target_refreshes_other_pages_relations_files(served, writer):  # noqa: F811
@@ -485,3 +512,58 @@ def test_moving_a_target_refreshes_other_pages_relations_files(served, writer): 
     assert relations.target_units[0].parent_path == moved
     assert relations.target_units[0].id == "lamp-id" and relations.relationships[0].id == "link-id"
     assert not beta.exists() and (served / relationship_files.path_for(moved)).exists()
+
+
+def test_a_rename_into_a_vacant_path_preserves_both_old_and_current_targets(served, writer):  # noqa: F811
+    from exomem import audit, memory_refs
+
+    other = "Knowledge Base/Notes/Lantern.md"
+    alpha_id = "e8f840b6-3cf8-44cf-ab95-12d05683a194"
+    beta_id = "04e56772-21a9-44ff-b0df-0a51ed0e166b"
+    other_id = "05e56772-21a9-44ff-b0df-0a51ed0e166b"
+    source = f"---\nexomem_id: {alpha_id}\n---\n\n- [rule] Check the tide. ^tide\n".encode()
+    original = f"---\nexomem_id: {beta_id}\n---\n\n- [rule] Light the lamp. ^lamp\n".encode()
+    replacement = original.replace(beta_id.encode(), other_id.encode())
+    alpha_ref, beta_ref, other_ref = map(memory_refs.memory_ref, (alpha_id, beta_id, other_id))
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "Record two different lamps.",
+        puts=(write.PagePut(ALPHA, source), write.PagePut(BETA, original),
+              write.PagePut(other, replacement)),
+        relationship_change=relationships.Change(
+            actor="owner",
+            identities=(
+                relationships.UnitIdentity("source", ALPHA, "tide", alpha_ref),
+                relationships.UnitIdentity("old-lamp", BETA, "lamp", beta_ref),
+                relationships.UnitIdentity("new-lamp", other, "lamp", other_ref),
+            ),
+            added=(
+                relationships.Relationship("old-page", "source", "supports", None, BETA, beta_ref),
+                relationships.Relationship("new-page", "source", "supports", None, other, other_ref),
+                relationships.Relationship("old-unit", "source", "supports", "old-lamp"),
+                relationships.Relationship("new-unit", "source", "supports", "new-lamp"),
+            ),
+        ),
+    ))
+    projection = projector.Projector(served, run=lambda work: work(writer))
+    assert not projection.run_pass().deferred
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "Remove the obsolete page.", deletes=(write.PageDelete(BETA),),
+    ))
+    assert not projection.run_pass().deferred
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "Move the remaining page.", moves=(write.PageMove(other, BETA),),
+    ))
+    assert not projection.run_pass().deferred
+    assert stored_body(served, BETA) == replacement
+    with library_scope():
+        page = unit_edges.relationship_page(served, ALPHA, "tide")
+        orphaned = audit.audit(served, categories=[audit.RELATIONSHIP_ORPHAN]).findings
+    assert page.total == 2
+    assert {edge.relationship.id for edge in page.edges} == {"new-unit", "new-page"}
+    assert {(item.path, item.meta.get("unit_id"), item.meta.get("page_ref"))
+            for item in orphaned} == {(BETA, "old-lamp", None), (BETA, None, beta_ref)}
+    with (served / relationship_files.path_for(ALPHA)).open("rb") as encoded:
+        portable = relationship_files.parse(encoded)
+    assert {(end.parent_path, end.anchor, end.parent_ref) for end in portable.target_units} == {
+        (BETA, "lamp", beta_ref), (BETA, "lamp", other_ref),
+    }

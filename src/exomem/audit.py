@@ -4543,6 +4543,14 @@ def _check_relationship_orphans(vault_root: Path) -> Iterator[AuditFinding]:
                 proposed_fix="Restore the original anchor or update its stored relationships.",
                 meta={"unit_id": unit.id, "anchor": unit.anchor, "signal_version": unit.id},
             )
+        for path, reference in relationships.orphaned_pages(view.connection):
+            request_budget.checkpoint()
+            yield AuditFinding(
+                category=RELATIONSHIP_ORPHAN, severity="warn", path=path,
+                detail="Stored relationships still name the missing page.",
+                proposed_fix="Restore the original page or update its stored relationships.",
+                meta={"page_ref": reference, "signal_version": reference or path},
+            )
 
 
 # ---------------- check: missing_sources ----------------

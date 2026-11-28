@@ -15,7 +15,7 @@ from operator import itemgetter
 from pathlib import Path
 from sqlite3 import Connection, IntegrityError
 
-from .. import memory_refs, relation_registry
+from .. import relation_registry
 from ..cli_ops import OpError
 from ..held_fs import Chunks
 from ..reserved_paths import RELATIONS_FILE_SUFFIX
@@ -45,7 +45,8 @@ def source_path(path: str) -> str | None:
 
 def splice_block(source: bytes, lines: Iterable[str]) -> bytes:
     """Append a self-verifying projection with a removable leading separator."""
-    newline = b"\r\n" if b"\r\n" in source else b"\n"
+    # An added LF after a bare CR would look like a two-byte separator to the stripper.
+    newline = b"\r\n" if b"\r\n" in source or source.endswith(b"\r") else b"\n"
     content = b"".join(line.encode("utf-8") + newline for line in lines)
     if not content:
         return source
@@ -153,7 +154,11 @@ def lines(
 
 def projection_lines(tx: Connection, page: str) -> Iterator[str]:
     """Describe the highest counts and a small, deterministic sample from one snapshot."""
-    groups = store.projection_groups(tx, page, 41)
+    row = tx.execute("SELECT frontmatter_json FROM store_pages WHERE path=?", (page,)).fetchone()
+    if row is None:
+        return
+    parent_ref = store.page_reference(row[0])
+    groups = store.projection_groups(tx, page, parent_ref, 41)
     if not groups:
         return
     yield "### Stored relationships"
@@ -162,7 +167,7 @@ def projection_lines(tx: Connection, page: str) -> Iterator[str]:
         yield f"- {direction} {_label(kind)} for {_label(anchor or 'page')}: {count}"
     if len(groups) > 40:
         yield "- The relations file carries more relationship groups."
-    for anchor, kind, incoming, target, fragment in store.projection_samples(tx, page, 12):
+    for anchor, kind, incoming, target, fragment in store.projection_samples(tx, page, parent_ref, 12):
         far = f"{target}#{fragment}" if fragment is not None else target
         direction = "from" if incoming else "to"
         yield f"- {_label(anchor or 'page')} · {_label(kind)} {direction} {_label(far)}"
@@ -251,8 +256,8 @@ def plan_import(
     if source_path(path) != decoded.source:
         raise _invalid("the relations file names a different source page")
     units = (*decoded.units, *decoded.target_units)
-    known = store.identities_at(tx, {(unit.parent_path, unit.anchor) for unit in units})
-    if any(known.get((unit.parent_path, unit.anchor)) != unit for unit in units):
+    known = store.identities_at(tx, {unit.locator for unit in units})
+    if any(known.get(unit.locator) != unit for unit in units):
         raise _invalid("a unit locator does not match its stored identity")
     current = {bound.relationship.id: bound.relationship for bound in store.outgoing_on(tx, decoded.source)}
     wanted = {link.id: link for link in decoded.relationships}
@@ -292,11 +297,9 @@ def validate_restored_types(root: Path, tx: Connection) -> None:
         " ORDER BY u.parent_path,u.parent_ref",
     )
     for (source, stored_fields, parent_ref), group in groupby(rows, key=itemgetter(0, 1, 2)):
-        frontmatter = json.loads(stored_fields) if stored_fields else {}
-        identity = memory_refs.normalize_id(frontmatter.get(memory_refs.ID_FIELD))
-        if parent_ref is not None and (identity is None or memory_refs.memory_ref(identity) != parent_ref):
+        if parent_ref is not None and store.page_reference(stored_fields) != parent_ref:
             continue  # A replacement at the same path cannot supply the orphan's registry.
-        registry = relation_registry.load_for_page(root, source, frontmatter)
+        registry = _source_registry(root, source, stored_fields)
         for _, _, _, kind in group:
             if registry.definition(kind) is None:
                 raise OpError(
@@ -312,10 +315,9 @@ def _source_registry(root: Path, source: str, frontmatter: str | None) -> relati
 
 def restore(tx: Connection, decoded: PortableRelations, *, revision: int) -> None:
     """Restore stable locators and edges inside offline staging, including unresolved ends."""
-    locations: dict[tuple[str, str], UnitIdentity] = {}
+    locations: dict[store.UnitLocator, UnitIdentity] = {}
     for unit in (*decoded.units, *decoded.target_units):
-        locator = (unit.parent_path, unit.anchor)
-        if locations.setdefault(locator, unit) != unit:
+        if locations.setdefault(unit.locator, unit) != unit:
             raise _invalid("the file assigns two IDs to one unit anchor")
     known = store.identities_at(tx, set(locations))
     if any(locations[locator] != unit for locator, unit in known.items()):

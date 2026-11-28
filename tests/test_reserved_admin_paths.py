@@ -272,6 +272,7 @@ _PATTERN_SAMPLES = (
     f".exomem-batch-{_HEX32}",
     f".exomem-held-probe-{_HEX32}-directory",
     f".exomem-collection-migration-{_HEX32}",
+    "Observation.md.evermatter-relations.jsonl",
 )
 
 
@@ -417,6 +418,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "source-import-intents",
         "source-imports",
         "served-context",
+        "store-relationships",
         "upload-stage",
         "voice-profile-store",
     }

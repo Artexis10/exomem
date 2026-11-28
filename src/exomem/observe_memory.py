@@ -1472,6 +1472,7 @@ def _plan_stored_relationships(
     with store_read.request_snapshot(root):
         visible = vault.writer_link_visibility(root)
         resolver = find.writer_resolver_snapshot(root) if arguments else None
+        locators: list[tuple[str, str, str | None]] = []
         for kind, target in arguments:
             request_budget.checkpoint()
             assert resolver is not None
@@ -1484,7 +1485,13 @@ def _plan_stored_relationships(
                 )
             if locator is None:
                 raise _relationship_end_missing()
-            path = locator.partition("#")[0]
+            locators.append((kind, locator.partition("#")[0], fragment))
+        unit_paths = {path for _, path, fragment in locators if fragment is not None}
+        if unit_paths and egress.caller_restricted(root):
+            if egress.full_release_among(root, unit_paths) != unit_paths:
+                raise _relationship_end_missing()
+        for kind, path, fragment in locators:
+            request_budget.checkpoint()
             if path not in pages:
                 pages[path] = _read_relationship_page(root, path)
             page = pages[path]

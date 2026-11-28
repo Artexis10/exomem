@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from sqlite3 import Connection, OperationalError
 
+from .. import memory_refs
 from ..cli_ops import OpError
+
+UnitLocator = tuple[str, str, str | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,6 +19,10 @@ class UnitIdentity:
     parent_path: str
     anchor: str
     parent_ref: str | None = None
+
+    @property
+    def locator(self) -> UnitLocator:
+        return self.parent_path, self.anchor, self.parent_ref
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +33,10 @@ class Relationship:
     target_unit_id: str | None = None
     target_page_path: str | None = None
     target_page_ref: str | None = None
+
+    @property
+    def key(self) -> RelationshipKey:
+        return self.relation_type, self.target_unit_id, self.target_page_path, self.target_page_ref
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,25 +99,29 @@ class Change:
     expected_retirement: tuple[str, tuple[RelationshipKey, ...], int] | None = None
 
 
-def incident(tx: Connection, path: str) -> Iterator[BoundRelationship]:
-    """Read active edges touching a page through the unit and relationship indexes."""
+def incident_window(
+    tx: Connection, path: str, *, after: str, limit: int,
+) -> Iterator[BoundRelationship]:
+    """Seek a bounded window of distinct active edges touching the page."""
     try:
         rows = tx.execute(
-            "WITH at_page AS (SELECT id FROM store_unit_ids WHERE parent_path = ?),"
+            "WITH at_page AS (SELECT id FROM store_unit_ids WHERE parent_path = ?1),"
             " edges AS ("
             " SELECT r.id FROM at_page AS unit CROSS JOIN store_relationships AS r"
-            " ON r.source_unit_id = unit.id WHERE r.retired_revision IS NULL"
+            " ON r.source_unit_id = unit.id WHERE r.retired_revision IS NULL AND r.id > ?2"
             " UNION"
             " SELECT r.id FROM at_page AS unit CROSS JOIN store_relationships AS r"
-            " ON r.target_unit_id = unit.id WHERE r.retired_revision IS NULL"
+            " ON r.target_unit_id = unit.id WHERE r.retired_revision IS NULL AND r.id > ?2"
             " UNION"
-            " SELECT id FROM store_relationships WHERE target_page_path = ? AND retired_revision IS NULL"
-            ") SELECT r.id,r.source_unit_id,r.relation_type,r.target_unit_id,r.target_page_path,"
+            " SELECT id FROM store_relationships"
+            " WHERE target_page_path = ?1 AND retired_revision IS NULL AND id > ?2"
+            "), edge_window AS (SELECT id FROM edges ORDER BY id LIMIT ?3)"
+            " SELECT r.id,r.source_unit_id,r.relation_type,r.target_unit_id,r.target_page_path,"
             " r.target_page_ref,s.id,s.parent_path,s.anchor,s.parent_ref,t.id,t.parent_path,t.anchor,t.parent_ref"
-            " FROM edges CROSS JOIN store_relationships AS r ON r.id = edges.id"
+            " FROM edge_window CROSS JOIN store_relationships AS r ON r.id = edge_window.id"
             " JOIN store_unit_ids AS s ON s.id = r.source_unit_id"
-            " LEFT JOIN store_unit_ids AS t ON t.id = r.target_unit_id",
-            (path, path),
+            " LEFT JOIN store_unit_ids AS t ON t.id = r.target_unit_id ORDER BY r.id",
+            (path, after, limit),
         )
     except OperationalError:
         # A reader can open a store before its writer migrates that store to relationship storage.
@@ -140,16 +155,18 @@ def bind_additions(tx: Connection, change: Change) -> tuple[BoundRelationship, .
 
 
 def identities_at(
-    tx: Connection, locations: set[tuple[str, str]],
-) -> dict[tuple[str, str], UnitIdentity]:
-    """Find units by their stored path and anchor, using one indexed lookup per supplied key."""
+    tx: Connection, locations: set[UnitLocator],
+) -> dict[UnitLocator, UnitIdentity]:
+    """Find the units of these page identities even if the path has an older orphan."""
     rows = tx.execute(
         "SELECT u.id,u.parent_path,u.anchor,u.parent_ref FROM json_each(?) AS location"
         " CROSS JOIN store_unit_ids AS u ON u.parent_path = json_extract(location.value,'$[0]')"
-        " AND u.anchor = json_extract(location.value,'$[1]')",
-        (json.dumps(sorted(locations)),),
+        " AND u.anchor = json_extract(location.value,'$[1]')"
+        " AND COALESCE(u.parent_ref,'') = COALESCE(json_extract(location.value,'$[2]'),'')",
+        (json.dumps(sorted(locations, key=repr)),),
     )
-    return {(row[1], row[2]): UnitIdentity(*row) for row in rows}
+    units = (UnitIdentity(*row) for row in rows)
+    return {unit.locator: unit for unit in units}
 
 
 def units_on(tx: Connection, path: str) -> Iterator[UnitIdentity]:
@@ -231,6 +248,28 @@ def last_retirement(tx: Connection, source_id: str, keys: tuple[RelationshipKey,
     return int(revision)
 
 
+def active_keys(tx: Connection, source_id: str, keys: set[RelationshipKey]) -> set[RelationshipKey]:
+    """Probe just the requested active keys through their partial unique indexes."""
+    if not keys:
+        return set()
+    return set(tx.execute(
+        "WITH wanted(kind,unit,path,ref) AS ("
+        " SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]'),"
+        " json_extract(value,'$[2]'),json_extract(value,'$[3]') FROM json_each(?2))"
+        " SELECT kind,unit,path,ref FROM wanted WHERE CASE"
+        " WHEN unit IS NOT NULL THEN EXISTS (SELECT 1 FROM store_relationships r"
+        " WHERE r.source_unit_id=?1 AND r.relation_type=kind AND r.target_unit_id=unit"
+        " AND r.retired_revision IS NULL)"
+        " WHEN ref IS NOT NULL THEN EXISTS (SELECT 1 FROM store_relationships r"
+        " WHERE r.source_unit_id=?1 AND r.relation_type=kind AND r.target_page_ref=ref"
+        " AND r.target_page_path=path AND r.retired_revision IS NULL)"
+        " ELSE EXISTS (SELECT 1 FROM store_relationships r"
+        " WHERE r.source_unit_id=?1 AND r.relation_type=kind AND r.target_page_path=path"
+        " AND r.target_page_ref IS NULL AND r.retired_revision IS NULL) END",
+        (source_id, json.dumps(tuple(keys))),
+    ))
+
+
 def _require_new_successor(tx: Connection, check: SupersessionCheck) -> None:
     already = tx.execute(
         "SELECT successor.anchor FROM store_unit_ids AS prior"
@@ -292,8 +331,22 @@ def orphaned_units(tx: Connection) -> Iterator[UnitIdentity]:
         yield UnitIdentity(*row)
 
 
+def orphaned_pages(tx: Connection) -> Iterator[tuple[str, str | None]]:
+    """Yield each absent or replaced page that an active relationship still names."""
+    rows = tx.execute(
+        "WITH targets AS (SELECT DISTINCT target_page_path AS path,target_page_ref AS ref"
+        " FROM store_relationships WHERE retired_revision IS NULL AND target_page_path IS NOT NULL)"
+        " SELECT targets.path,targets.ref,p.path,p.frontmatter_json FROM targets"
+        " LEFT JOIN store_pages p ON p.path=targets.path ORDER BY targets.path,targets.ref",
+    )
+    for path, reference, live_path, fields in rows:
+        if live_path is None or (reference is not None and page_reference(fields) != reference):
+            yield path, reference
+
+
 _AT_PAGE = (
-    "WITH units AS (SELECT id,anchor FROM store_unit_ids WHERE parent_path = ?1), edges AS ("
+    "WITH units AS (SELECT id,anchor FROM store_unit_ids WHERE parent_path=?1 AND parent_ref IS ?3),"
+    " edges AS ("
     " SELECT u.anchor,r.relation_type,r.id,r.created_revision,0 AS incoming"
     " FROM units AS u CROSS JOIN store_relationships AS r ON r.source_unit_id = u.id"
     " WHERE r.retired_revision IS NULL UNION ALL"
@@ -301,23 +354,26 @@ _AT_PAGE = (
     " FROM units AS u CROSS JOIN store_relationships AS r ON r.target_unit_id = u.id"
     " WHERE r.retired_revision IS NULL UNION ALL"
     " SELECT NULL,r.relation_type,r.id,r.created_revision,1"
-    " FROM store_relationships AS r WHERE r.target_page_path = ?1 AND r.retired_revision IS NULL"
+    " FROM store_relationships AS r WHERE r.target_page_path=?1 AND r.retired_revision IS NULL"
+    " AND (r.target_page_ref IS NULL OR r.target_page_ref=?3)"
     ") "
 )
 
 
-def projection_groups(tx: Connection, path: str, limit: int) -> list[tuple[str | None, str, int, int]]:
+def projection_groups(
+    tx: Connection, path: str, parent_ref: str | None, limit: int,
+) -> list[tuple[str | None, str, int, int]]:
     """Count edges by local anchor, type and direction for the owner projection."""
     return tx.execute(
         _AT_PAGE + "SELECT anchor,relation_type,incoming,COUNT(*) FROM edges"
         " GROUP BY anchor,relation_type,incoming"
         " ORDER BY COUNT(*) DESC,anchor,relation_type,incoming LIMIT ?2",
-        (path, limit),
+        (path, limit, parent_ref),
     ).fetchall()
 
 
 def projection_samples(
-    tx: Connection, path: str, limit: int,
+    tx: Connection, path: str, parent_ref: str | None, limit: int,
 ) -> list[tuple[str | None, str, int, str, str | None]]:
     """Take a bounded sample across active edges whose source or target is on the page."""
     return tx.execute(
@@ -328,7 +384,7 @@ def projection_samples(
         " FROM sample CROSS JOIN store_relationships AS r ON r.id = sample.id"
         " JOIN store_unit_ids AS s ON s.id = r.source_unit_id"
         " LEFT JOIN store_unit_ids AS t ON t.id = r.target_unit_id",
-        (path, limit),
+        (path, limit, parent_ref),
     ).fetchall()
 
 
@@ -358,42 +414,54 @@ def apply(
             raise OpError("RELATIONS_FILE_STALE", "the stored relationships changed since projection")
     if change.expected_outgoing is not None:
         source, expected = change.expected_outgoing
-        current = frozenset(row[0] for row in tx.execute(
-            "SELECT id FROM store_relationships WHERE source_unit_id = ? AND retired_revision IS NULL",
-            (source,),
-        ))
-        if current != expected:
+        (current,) = tx.execute(
+            "SELECT (SELECT COUNT(*) FROM store_relationships"
+            " WHERE source_unit_id=?1 AND retired_revision IS NULL)=?2"
+            " AND NOT EXISTS (SELECT 1 FROM json_each(?3) AS expected"
+            " LEFT JOIN store_relationships r ON r.id=expected.value"
+            " AND r.source_unit_id=?1 AND r.retired_revision IS NULL WHERE r.id IS NULL)",
+            (source, len(expected), json.dumps(tuple(expected))),
+        ).fetchone()
+        if not current:
             raise OpError("RELATIONSHIP_CHANGED", "a relationship changed before the write")
-    tx.executemany(
-        "INSERT INTO store_unit_ids(id,parent_path,parent_ref,anchor) VALUES (?,?,?,?)",
-        ((unit.id, unit.parent_path, unit.parent_ref, unit.anchor) for unit in change.identities),
-    )
-    retired = tx.executemany(
-        "UPDATE store_relationships SET retired_revision = ? "
-        "WHERE id = ? AND retired_revision IS NULL",
-        ((revision, edge.id) for edge in change.retired),
-    )
-    if retired.rowcount != len(change.retired):
-        raise OpError("RELATIONSHIP_CHANGED", "a relationship changed before the write")
-    tx.executemany(
-        "INSERT INTO store_relationships("
-        "id,source_unit_id,relation_type,target_unit_id,target_page_path,target_page_ref,created_revision"
-        ") VALUES (?,?,?,?,?,?,?)",
-        ((edge.id, edge.source_unit_id, edge.relation_type, edge.target_unit_id,
-          edge.target_page_path, edge.target_page_ref, revision) for edge in change.added),
-    )
-    tx.executemany(
-        "INSERT INTO store_relationship_history(relationship_id,revision,action,actor,reason,at) "
-        "VALUES (?,?,'add',?,?,?)",
-        ((edge.id, revision, change.actor, reason, at) for edge in change.added),
-    )
-    tx.executemany(
-        "INSERT INTO store_relationship_history("
-        "relationship_id,revision,action,actor,reason,at,successor_id) "
-        "VALUES (?,?,?,?,?,?,?)",
-        ((edge.id, revision, "supersede" if edge.successor_id else "retire", change.actor,
-          reason, at, edge.successor_id) for edge in change.retired),
-    )
+    if change.identities:
+        tx.execute(
+            "INSERT INTO store_unit_ids(id,parent_path,parent_ref,anchor)"
+            " SELECT value->>'id',value->>'parent_path',value->>'parent_ref',value->>'anchor'"
+            " FROM json_each(?)",
+            (json.dumps([asdict(unit) for unit in change.identities]),),
+        )
+    retirements = json.dumps([asdict(edge) for edge in change.retired])
+    if change.retired:
+        retired = tx.execute(
+            "UPDATE store_relationships SET retired_revision=?1 WHERE retired_revision IS NULL "
+            "AND id IN (SELECT value->>'id' FROM json_each(?2))",
+            (revision, retirements),
+        )
+        if retired.rowcount != len(change.retired):
+            raise OpError("RELATIONSHIP_CHANGED", "a relationship changed before the write")
+    if change.added:
+        additions = json.dumps([asdict(edge) for edge in change.added])
+        tx.execute(
+            "INSERT INTO store_relationships("
+            "id,source_unit_id,relation_type,target_unit_id,target_page_path,target_page_ref,created_revision)"
+            " SELECT value->>'id',value->>'source_unit_id',value->>'relation_type',value->>'target_unit_id',"
+            " value->>'target_page_path',value->>'target_page_ref',?1 FROM json_each(?2)",
+            (revision, additions),
+        )
+        tx.execute(
+            "INSERT INTO store_relationship_history(relationship_id,revision,action,actor,reason,at)"
+            " SELECT value->>'id',?1,'add',?2,?3,?4 FROM json_each(?5)",
+            (revision, change.actor, reason, at, additions),
+        )
+    if change.retired:
+        tx.execute(
+            "INSERT INTO store_relationship_history("
+            "relationship_id,revision,action,actor,reason,at,successor_id)"
+            " SELECT value->>'id',?1,CASE WHEN value->>'successor_id' IS NULL THEN 'retire' ELSE 'supersede' END,"
+            " ?2,?3,?4,value->>'successor_id' FROM json_each(?5)",
+            (revision, change.actor, reason, at, retirements),
+        )
     ids = [edge.id for edge in change.added] + [edge.id for edge in change.retired]
     rows = tx.execute(
         "SELECT src.parent_path, COALESCE(dst.parent_path,r.target_page_path) "
@@ -408,13 +476,23 @@ def apply(
     return affected
 
 
-def move_page(tx: Connection, old: str, new: str) -> None:
+def page_reference(frontmatter_json: str | None) -> str | None:
+    fields = json.loads(frontmatter_json) if frontmatter_json else {}
+    identity = memory_refs.normalize_id(fields.get(memory_refs.ID_FIELD))
+    return memory_refs.memory_ref(identity) if identity is not None else None
+
+
+def move_page(tx: Connection, old: str, new: str, *, parent_ref: str | None) -> None:
     """Move the identity locators without changing the IDs of either their units or edges."""
-    tx.execute("UPDATE store_unit_ids SET parent_path = ? WHERE parent_path = ?", (new, old))
+    tx.execute(
+        "UPDATE store_unit_ids SET parent_path = ? WHERE parent_path = ? AND parent_ref IS ?",
+        (new, old, parent_ref),
+    )
     tx.execute(
         "UPDATE store_relationships SET target_page_path = ? "
-        "WHERE target_page_path = ? AND retired_revision IS NULL",
-        (new, old),
+        "WHERE target_page_path = ? AND (target_page_ref IS NULL OR target_page_ref = ?)"
+        " AND retired_revision IS NULL",
+        (new, old, parent_ref),
     )
 
 

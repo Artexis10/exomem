@@ -9,7 +9,7 @@ import time
 import uuid
 from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -106,7 +106,10 @@ def relationship_page(
                     "SELECT 1 FROM sqlite_schema WHERE name='store_relationships'",
                 ).fetchone():
                     return RelationshipPage()
-                identity = relationships.identities_at(conn, {(path, anchor)}).get((path, anchor))
+                meta = snapshot.page_meta(path)
+                reference = relationships.page_reference(meta.frontmatter_json) if meta else None
+                locator = (path, anchor, reference)
+                identity = relationships.identities_at(conn, {locator}).get(locator)
                 if identity is None:
                     return RelationshipPage(total=0)
                 read.require_current_parser(conn)
@@ -260,6 +263,65 @@ def _relationship_key(edge: relationships.BoundRelationship) -> tuple[str, str]:
     return edge.relationship.relation_type, edge.relationship.id
 
 
+@contextmanager
+def _preflight_relationships(root: Path) -> Iterator[tuple[read.StoreSnapshot, sqlite3.Connection]]:
+    """The governed write must finish its exact relationship proof before it can commit."""
+    from . import request_budget
+    from .cli_ops import OpError
+    from .governance import egress
+    from .vault_store import derivation, read
+
+    unavailable = OpError(
+        "RELATIONSHIP_PREFLIGHT_UNAVAILABLE", "The write could not verify its stored relationships.",
+        "Retry the write after the store finishes its current work.",
+    )
+    with (
+        request_budget.bound_to(derivation.READ_WAIT_SECONDS) as budget,
+        egress.release_decision_context(root),
+        read.request_snapshot(root),
+    ):
+        conn = read.lend(root)
+        if conn is None:
+            raise unavailable
+        outer = request_budget.current_checkpoint()
+        check = request_budget.ReadCheckpoint(
+            budget, bound_disclosure=outer is not None and outer.bound_disclosure,
+        )
+        with closing(conn), read.snapshot(root) as snapshot, request_budget.checking(check):
+            conn.set_progress_handler(lambda: int(check.remaining() <= 0), 1000)
+            try:
+                yield snapshot, conn
+                check()
+            except request_budget.ReadBudgetExhausted:
+                raise unavailable from None
+            except sqlite3.OperationalError as error:
+                error_code = getattr(error, "sqlite_errorcode", None)
+                if error_code == sqlite3.SQLITE_INTERRUPT and check.remaining() <= 0:
+                    raise unavailable from None
+                raise
+
+
+def _write_visible_edges(
+    root: Path, snapshot: read.StoreSnapshot, edges: tuple[relationships.BoundRelationship, ...],
+    visible: Callable[[str], bool] | None,
+) -> tuple[relationships.BoundRelationship, ...]:
+    from .governance import egress
+
+    if visible is None:
+        return edges
+    page_paths = {path for edge in edges for path in (edge.source.parent_path, edge.target_path)}
+    unit_paths = {edge.source.parent_path for edge in edges}
+    unit_paths.update(edge.target_path for edge in edges if edge.target is not None)
+    with snapshot.prefetch(page_paths):
+        kept = egress.admitted(visible, page_paths)
+        full = egress.full_release_among(root, kept.intersection(unit_paths))
+    return tuple(
+        edge for edge in edges
+        if edge.source.parent_path in full
+        and edge.target_path in (full if edge.target is not None else kept)
+    )
+
+
 def plan_change(
     root: Path, *, source: End, targets: tuple[tuple[str, End], ...],
     visible: Callable[[str], bool] | None, replacing: bool, reason: str | None,
@@ -267,33 +329,31 @@ def plan_change(
     supersession_check: relationships.SupersessionCheck | None = None,
 ) -> StoredPlan | None:
     """Bind admitted ends to allocated IDs and compute a guarded change of active edges."""
-    from .cli_ops import OpError
+    from . import request_budget
     from .governance.principal import effective_principal
     from .vault_store import read
 
     assert source.anchor is not None
-    locations = {(source.path, source.anchor)}
-    locations.update((end.path, end.anchor) for _, end in targets if end.anchor is not None)
+    source_locator = (source.path, source.anchor, source.parent_ref)
+    locations = {source_locator}
+    locations.update((end.path, end.anchor, end.parent_ref) for _, end in targets if end.anchor is not None)
     with read.snapshot(root) as view:
         existing = relationships.identities_at(view.connection, locations)
-        current_source = existing.get((source.path, source.anchor))
-        outgoing = () if current_source is None else tuple(relationships.outgoing_unit(view.connection, current_source))
+        current_source = existing.get(source_locator)
 
-    allocated: dict[tuple[str, str], relationships.UnitIdentity] = {}
+    allocated: dict[relationships.UnitLocator, relationships.UnitIdentity] = {}
 
     def identity(end: End) -> str:
         assert end.anchor is not None
-        locator = (end.path, end.anchor)
+        locator = (end.path, end.anchor, end.parent_ref)
         unit = existing.get(locator)
         if unit is not None:
-            if unit.parent_ref != end.parent_ref:
-                raise OpError("UNIT_IDENTITY_CHANGED", "a stored unit's parent identity changed")
             return unit.id
         if locator not in allocated:
-            allocated[locator] = relationships.UnitIdentity(uuid.uuid4().hex, *locator, end.parent_ref)
+            allocated[locator] = relationships.UnitIdentity(uuid.uuid4().hex, *locator)
         return allocated[locator].id
 
-    if not targets and not outgoing:
+    if not targets and (not replacing or current_source is None):
         return None
     source_id = identity(source)
     wanted = {
@@ -301,19 +361,33 @@ def plan_change(
          end.path if end.anchor is None else None, end.parent_ref if end.anchor is None else None)
         for kind, end in targets
     }
-    active = {
-        (edge.relationship.relation_type, edge.relationship.target_unit_id,
-         edge.relationship.target_page_path, edge.relationship.target_page_ref): edge
-        for edge in outgoing
-    }
-    added = tuple(relationships.Relationship(uuid.uuid4().hex, source_id, *item)
-                  for item in sorted(wanted - active.keys(), key=repr))
-    retired = tuple(relationships.Retirement(edge.relationship.id)
-                    for item, edge in active.items() if replacing and item not in wanted
-                    and (visible is None or visible(edge.target_path)))
     wanted_keys = tuple(sorted(wanted, key=repr))
-    with read.snapshot(root) as view:
-        last_retired = relationships.last_retirement(view.connection, source_id, wanted_keys)
+    active: set[relationships.RelationshipKey] = set()
+    expected: set[str] = set()
+    retired: list[relationships.Retirement] = []
+    paths = {end.path for _, end in targets}
+    with _preflight_relationships(root) as (snapshot, conn):
+        if replacing and current_source is not None:
+            cursor = None
+            while True:
+                request_budget.checkpoint()
+                batch = tuple(relationships.outgoing_unit(
+                    conn, current_source, after=cursor, limit=read.KEYS_PER_QUERY,
+                ))
+                active.update(edge.relationship.key for edge in batch)
+                expected.update(edge.relationship.id for edge in batch)
+                for edge in _write_visible_edges(root, snapshot, batch, visible):
+                    if edge.relationship.key not in wanted:
+                        retired.append(relationships.Retirement(edge.relationship.id))
+                        paths.add(edge.target_path)
+                if len(batch) < read.KEYS_PER_QUERY:
+                    break
+                cursor = _relationship_key(batch[-1])
+        else:
+            active = relationships.active_keys(conn, source_id, wanted)
+        last_retired = relationships.last_retirement(conn, source_id, wanted_keys)
+    added = tuple(relationships.Relationship(uuid.uuid4().hex, source_id, *item)
+                  for item in sorted(wanted - active, key=repr))
     # Preview and commit may allocate different IDs for new ends. Pin the locator and guarded
     # versions, plus the exact active edges this operation would retire.
     intent = json.dumps([
@@ -324,14 +398,11 @@ def plan_change(
         last_retired,
     ], separators=(",", ":"))
     digest = hashlib.sha256(intent.encode()).hexdigest()
-    expected = (source_id, frozenset(edge.relationship.id for edge in outgoing)) if replacing else None
     change = relationships.Change(
-        effective_principal().audience_id, tuple(allocated.values()), added, retired, reason, expected,
+        effective_principal().audience_id, tuple(allocated.values()), added, tuple(retired), reason,
+        (source_id, frozenset(expected)) if replacing else None,
         supersession_check=supersession_check, expected_retirement=(source_id, wanted_keys, last_retired),
     )
-    retired_ids = {edge.id for edge in retired}
-    paths = {end.path for _, end in targets}
-    paths.update(edge.target_path for edge in outgoing if edge.relationship.id in retired_ids)
     return StoredPlan(digest, change if added or retired else None, writes, guards, tuple(sorted(paths)))
 
 
@@ -343,33 +414,53 @@ def with_stored_facts(
     plan: StoredPlan | None,
 ) -> tuple[semantic_contract.SemanticCorpusContext, semantic_contract.SemanticCorpusContext]:
     """Read the incident relationships once and bind each side to its own page states."""
+    from . import request_budget, vault
     from .vault_store import mode, read
 
     if not mode.store_mode_for_reads(root):
         return before, after
     change = plan.change if plan is not None else None
-    with read.snapshot(root) as view:
-        committed = tuple(relationships.incident(view.connection, path))
-        added = relationships.bind_additions(view.connection, change) if change is not None else ()
-    if not committed and not added:
-        return before, after
     retired = {edge.id for edge in change.retired} if change is not None else set()
-    retained = tuple(item for item in committed if item.relationship.id not in retired)
+    before_facts: list[semantic_contract.RelationFact] = []
+    after_facts: list[semantic_contract.RelationFact] = []
+    before_anchors: dict[str, dict[str, semantic_units.SemanticUnit | None]] = {}
+    after_anchors: dict[str, dict[str, semantic_units.SemanticUnit | None]] = {}
+    with _preflight_relationships(root) as (snapshot, conn):
+        visible = vault.writer_link_visibility(root)
+        cursor = ""
+        while True:
+            request_budget.checkpoint()
+            batch = tuple(relationships.incident_window(
+                conn, path, after=cursor, limit=read.KEYS_PER_QUERY,
+            ))
+            admitted = _write_visible_edges(root, snapshot, batch, visible)
+            before_facts.extend(_facts(before, admitted, before_anchors))
+            after_facts.extend(_facts(
+                after, (item for item in admitted if item.relationship.id not in retired), after_anchors,
+            ))
+            if len(batch) < read.KEYS_PER_QUERY:
+                break
+            cursor = batch[-1].relationship.id
+        if change is not None:
+            after_facts.extend(_facts(after, relationships.bind_additions(conn, change), after_anchors))
+    if not before_facts and not after_facts:
+        return before, after
     return (
-        replace(before, stored_relation_facts=_facts(before, committed)),
-        replace(after, stored_relation_facts=_facts(after, (*retained, *added))),
+        replace(before, stored_relation_facts=tuple(before_facts)),
+        replace(after, stored_relation_facts=tuple(after_facts)),
     )
 
 
 def _facts(
     corpus: semantic_contract.SemanticCorpusContext,
     stored: Iterable[relationships.BoundRelationship],
+    anchors: dict[str, dict[str, semantic_units.SemanticUnit | None]],
 ) -> tuple[semantic_contract.RelationFact, ...]:
-    from . import semantic_contract
+    from . import request_budget, semantic_contract
 
     facts = []
-    anchors: dict[str, dict[str, semantic_units.SemanticUnit | None]] = {}
     for item in stored:
+        request_budget.checkpoint()
         source = corpus.pages.get(item.source.parent_path)
         target = corpus.pages.get(item.target_path)
         if source is None or target is None:

@@ -17006,8 +17006,9 @@ class GraphView:
                 return None
             if metadata.get("stored_relationship"):
                 target = self.parent(str(metadata["bound_target_path"]))
+                target_ref = metadata["bound_target_parent"]
                 if (target is None or parent.structure.parent_ref != metadata["bound_source_parent"]
-                        or target.structure.parent_ref != metadata["bound_target_parent"]):
+                        or (target_ref is not None and target.structure.parent_ref != target_ref)):
                     return None
                 fragment = metadata.get("target_fragment")
                 if fragment and target.structure.resolve_fragment(fragment).index is None:

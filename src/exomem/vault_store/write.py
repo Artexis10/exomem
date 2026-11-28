@@ -1431,7 +1431,9 @@ def _move_page(
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
         (move.dst, *content, revision),
     )
-    relationships.move_page(tx, move.src, move.dst)
+    relationships.move_page(
+        tx, move.src, move.dst, parent_ref=relationships.page_reference(page[3]),
+    )
     if move.on_disk:
         tx.execute(
             "UPDATE store_manifest SET path = ?, revision = ? WHERE path = ?",

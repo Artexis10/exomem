@@ -1324,9 +1324,10 @@ def _migrate_to_21(conn: sqlite3.Connection) -> None:
       id TEXT PRIMARY KEY,
       parent_path TEXT NOT NULL,
       parent_ref TEXT,
-      anchor TEXT NOT NULL,
-      UNIQUE(parent_path, anchor)
+      anchor TEXT NOT NULL
     ) STRICT""")
+    conn.execute("""CREATE UNIQUE INDEX store_unit_ids_by_locator
+      ON store_unit_ids(parent_path, anchor, COALESCE(parent_ref, ''))""")
     conn.execute("""CREATE TABLE store_relationships(
       id TEXT PRIMARY KEY,
       source_unit_id TEXT NOT NULL REFERENCES store_unit_ids(id),
@@ -1351,9 +1352,12 @@ def _migrate_to_21(conn: sqlite3.Connection) -> None:
     conn.execute("""CREATE UNIQUE INDEX store_relationships_unique_unit
       ON store_relationships(source_unit_id, relation_type, target_unit_id)
       WHERE retired_revision IS NULL AND target_unit_id IS NOT NULL""")
-    conn.execute("""CREATE UNIQUE INDEX store_relationships_unique_page
+    conn.execute("""CREATE UNIQUE INDEX store_relationships_unique_page_ref
+      ON store_relationships(source_unit_id, relation_type, target_page_ref)
+      WHERE retired_revision IS NULL AND target_page_ref IS NOT NULL""")
+    conn.execute("""CREATE UNIQUE INDEX store_relationships_unique_page_path
       ON store_relationships(source_unit_id, relation_type, target_page_path)
-      WHERE retired_revision IS NULL AND target_page_path IS NOT NULL""")
+      WHERE retired_revision IS NULL AND target_page_path IS NOT NULL AND target_page_ref IS NULL""")
     # These actions describe lifecycle transitions fixed by the store protocol.
     conn.execute("""CREATE TABLE store_relationship_history(
       relationship_id TEXT NOT NULL REFERENCES store_relationships(id),

@@ -379,7 +379,8 @@ From stage 2, a page's projection MAY add one managed relations block, the one e
 - **THEN** the reverted pages carry no relations block and the relationship history is exported
 - **AND** the export keeps complete current rows and endpoint IDs when no source relations file can carry them
 - **AND** after re-migration every current stored relationship is present again
-- **AND** a relationship with a missing endpoint remains orphaned for review
+- **AND** a relationship with a missing unit or page endpoint remains orphaned for review
+- **AND** an endpoint with a different stable page reference does not take its place
 
 ### Requirement: Held relations items resolve without leaking or storing the block
 Keep-mine on a held page whose relations block is not valid SHALL remove the block by its markers, and SHALL refuse and name keep-store when the markers are not intact. A held relations file SHALL be listed to, and resolved by, the owner with unrestricted access only. Migration verification SHALL remove one relations block before it compares a projection with its source.

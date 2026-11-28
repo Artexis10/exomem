@@ -5789,6 +5789,7 @@ def stored_relationship_fact(
         "origin": "semantic_relation",
         "reverse": False,
         "bound_target": (address, fragment),
+        "bound_target_unit": target_unit,
         "stored_identity": relationship_id,
     }
     [fact] = _relation_facts_from_rows(
@@ -5833,16 +5834,21 @@ def _relation_facts_from_rows(
         target_unit_status = None
         target_unit_fingerprint = None
         if target_anchor and target_state is not None:
-            unit_resolution = target_state.document.resolve_fragment(target_anchor)
-            target_unit_status = (
-                "unavailable" if target_state.definitions_unavailable
-                and unit_resolution.status == "missing" else unit_resolution.status
-            )
+            target_unit = raw.get("bound_target_unit")
+            if target_unit is None or target_unit.unit_ref is None:
+                unit_resolution = target_state.document.resolve_fragment(target_anchor)
+                target_unit = unit_resolution.unit
+                target_unit_status = (
+                    "unavailable" if target_state.definitions_unavailable
+                    and unit_resolution.status == "missing" else unit_resolution.status
+                )
+            else:
+                target_unit_status = "found"
             target_ref = None
-            if unit_resolution.unit is not None:
-                target_ref = unit_resolution.unit.unit_ref
-                target_unit_fingerprint = unit_resolution.unit.fingerprint
-                target_kind = unit_resolution.unit.kind
+            if target_unit is not None:
+                target_ref = target_unit.unit_ref
+                target_unit_fingerprint = target_unit.fingerprint
+                target_kind = target_unit.kind
         resolution = _registry_resolution(
             selected_registry,
             raw["raw_relation"],
