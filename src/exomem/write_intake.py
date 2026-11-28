@@ -239,7 +239,7 @@ def _open(
 
 def may_change_declaration(command: Any, arguments: Any) -> bool:
     """Whether a queued save of `command` with these JSON `arguments` may change a declaration before a later save
-    replays. It is decided once, when the save is accepted, and kept in `may_change_declaration`, because a replay
+    replays. It is decided once, when the save is accepted, and kept in `declaration_change`, because a replay
     drops the arguments.
 
     A command that declares `sets_any_frontmatter_field` may, whichever page it names: only its own resolution,
@@ -256,28 +256,26 @@ def may_change_declaration(command: Any, arguments: Any) -> bool:
     return not isinstance(arguments, Mapping) or arguments.get(operation_entries.MANIFEST_TEXT_FIELD) is not None
 
 
-#: The column and the index that keep `may_change_declaration` for each save, one definition for a new store and
-#: an upgraded one. A writer that does not know the column, such as an earlier release after a rollback, leaves it
-#: NULL, and NULL counts as may change: only a 0 that an acceptance wrote says that a save cannot. The index holds
-#: the column too, so a seek answers from the index and never reads a matched save's stored arguments.
-_DECLARATION_COLUMN = "may_change_declaration INTEGER"
+#: The column that keeps `may_change_declaration` for each save, one definition for a new store and an upgraded
+#: one. A writer that does not know the column, such as an earlier release after a rollback, leaves it NULL, and
+#: NULL counts as may change: only a 0 that an acceptance wrote says that a save cannot.
+_DECLARATION_COLUMN = "declaration_change INTEGER"
+#: The saves that may change a declaration. The index and its read share this one predicate, because SQLite uses
+#: a partial index only for a query that implies the index's own condition.
+_DECLARATION_CHANGE = "declaration_change IS NOT 0"
+#: The index holds the column too, so a seek answers from the index and never reads a matched save's arguments.
 _DECLARATION_INDEX = (
-    "CREATE INDEX intake_declaration ON intake(seq, may_change_declaration) WHERE may_change_declaration IS NOT 0"
+    "CREATE INDEX IF NOT EXISTS intake_declaration_change ON intake(seq, declaration_change) "
+    f"WHERE {_DECLARATION_CHANGE}"
 )
 
 
 def _add_declaration_marker(conn: sqlite3.Connection) -> None:
-    """Give a store made before `may_change_declaration` existed that column and its index, in the caller's write
-    transaction. Every save already stored keeps NULL, which counts as may change, so the upgrade reads no save.
-    An index under the same name with another definition, from a build before this one, is replaced."""
-    if "may_change_declaration" not in {row[1] for row in conn.execute("PRAGMA table_info(intake)")}:
+    """Give a store made before `declaration_change` existed that column and its index, in the caller's write
+    transaction. Every save already stored keeps NULL, which counts as may change, so the upgrade reads no save."""
+    if "declaration_change" not in {row[1] for row in conn.execute("PRAGMA table_info(intake)")}:
         conn.execute(f"ALTER TABLE intake ADD COLUMN {_DECLARATION_COLUMN}")
-    # SQLite keeps the statement that made the index, so an equal text is this definition.
-    index = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'intake_declaration'").fetchone()
-    if index is None or index[0] != _DECLARATION_INDEX:
-        if index is not None:
-            conn.execute("DROP INDEX intake_declaration")
-        conn.execute(_DECLARATION_INDEX)
+    conn.execute(_DECLARATION_INDEX)
 
 
 # --------------------------------------------------------------------------- identity and eligibility
@@ -1342,7 +1340,7 @@ class Admission:
             _add_declaration_marker(conn)
             conn.execute(
                 "INSERT INTO intake (id, origin, origin_ttl, command, arguments, principal, surface, state, "
-                "accepted_at, updated_at, next_attempt_at, error_code, may_change_declaration) "
+                "accepted_at, updated_at, next_attempt_at, error_code, declaration_change) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     intake_id, self.origin, self.origin_ttl, self.command.name, self.encoded,
@@ -1627,10 +1625,10 @@ def declaration_changed_since(vault_root: Path, marker: int, *, seconds: float) 
     """Whether a save at or after `marker`, in whatever state it is now, may have changed a declaration; None
     where that is unknown. A save counts unless its acceptance recorded 0 (`_DECLARATION_COLUMN`), so a save that
     a writer without the column stored counts, and a store without the column answers unknown. It is one seek on
-    `intake_declaration`, which holds only the saves that count, whatever else the queue holds."""
+    `intake_declaration_change`, which holds only the saves that count, whatever else the queue holds."""
     row = _declaration_query(
         vault_root, seconds,
-        "SELECT EXISTS (SELECT 1 FROM intake WHERE may_change_declaration IS NOT 0 AND seq >= ?)",
+        f"SELECT EXISTS (SELECT 1 FROM intake WHERE {_DECLARATION_CHANGE} AND seq >= ?)",
         (marker,), empty=(0,),
     )
     return None if row is None else bool(row[0])

@@ -85,6 +85,11 @@ def _is_area(item: Mapping[str, Any]) -> bool:
     return item.get("kind") == "area"  # nosemgrep: ep-word-literal -- mirrors the commit's area rule; the Planning pack declares no area attribute to branch on (old debt, C4)
 
 
+def triage_eligible(stored: Mapping[str, Any]) -> bool:
+    """Whether a stored Planning item may be triaged: an active deliverable plan, never an area."""
+    return stored.get("lifecycle") == "active" and not _is_area(stored)  # nosemgrep: ep-word-literal -- lifecycle is Planning's fixed set (`_LIFECYCLES`), not a vocabulary
+
+
 def normalize_item(
     item: Mapping[str, Any],
     *,
@@ -1646,7 +1651,7 @@ def triage(
         if matches:
             raise CollectionError("AMBIGUOUS_RECORD", "plan identity is ambiguous")
         raise CollectionError("PLAN_NOT_FOUND", "plan was not found")
-    if matches[0].values.get("lifecycle") != "active" or _is_area(matches[0].values):
+    if not triage_eligible(matches[0].values):
         raise CollectionError("INVALID_PLAN", "triage requires an active deliverable plan")
     if any(value is None and name not in {"area", "parent"} for name, value in transition.items()):
         raise CollectionError("INVALID_PLAN_ARGUMENTS", "triage transition is invalid")

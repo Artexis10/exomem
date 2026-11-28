@@ -166,7 +166,7 @@ A `plan_memory` update or triage with a value that the Planning check refuses SH
 
 ### Requirement: The Planning check leaves the rest to the replay
 
-The Planning check SHALL leave to the replay a governed value when the caller cannot read the vault's Planning values, and an update's or a triage's null. Planning's own single-field rules MAY stay there: the title's length, the fixed lifecycle set, window dates, the bound on results and motivation references. Rules that join fields SHALL stay there, such as the lifecycle rules and what an area may carry.
+The Planning check SHALL leave to the replay a governed value when the caller cannot read the vault's Planning values, an update's or a triage's null, and a triage of an item that the commit cannot triage, such as an area. Planning's own single-field rules MAY stay there: the title's length, the fixed lifecycle set, window dates, the bound on results and motivation references. Rules that join fields SHALL stay there, such as the lifecycle rules and what an area may carry.
 
 #### Scenario: A busy area add with fields an area may not carry is refused at the replay for what an area carries
 
@@ -174,6 +174,13 @@ The Planning check SHALL leave to the replay a governed value when the caller ca
 - **AND** earlier saves are still queued
 - **THEN** the add is queued
 - **AND** its replay refuses it with `INVALID_PLAN` because an area cannot carry a status
+
+#### Scenario: A busy triage of an area is refused at the replay as a direct triage is
+
+- **WHEN** an item of a store-owned Planning collection is an area
+- **AND** an owner sends a `plan_memory` triage of it, by its `plan_id` and both guards, that sets `parent` to null and `kind` to a value that Planning does not define, while the store is busy
+- **THEN** the triage is queued
+- **AND** its replay refuses it with `INVALID_PLAN` because only an active deliverable plan can be triaged
 
 ### Requirement: The Planning check judges an area save by the fields it gives
 

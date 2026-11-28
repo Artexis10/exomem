@@ -236,7 +236,7 @@ def update(writer, row, manifest, declared, arguments):
             if (not changes or set(changes) - planning.TRIAGE_FIELDS
                     or any(value is None and name not in {"area", "parent"} for name, value in changes.items())):
                 raise collections.CollectionError("INVALID_PLAN_ARGUMENTS", "triage transition is invalid")
-            if old_values["lifecycle"] != "active" or old_values["kind"] == "area":
+            if not planning.triage_eligible(old_values):
                 raise collections.CollectionError("INVALID_PLAN", "triage requires an active deliverable plan")
         changes, deleted = planning._normalize_changes(manifest, changes)
         delete_fields = tuple(set(delete_fields) | set(deleted))

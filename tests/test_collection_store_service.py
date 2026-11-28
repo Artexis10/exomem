@@ -2770,6 +2770,37 @@ def test_an_area_update_that_deletes_a_field_it_lacks_is_refused_for_its_value_w
         write_intake.stop(root)
 
 
+def test_a_busy_triage_of_an_area_gets_the_triage_refusal_that_a_direct_triage_gets(service, monkeypatch):
+    """Defect: a busy triage of an area with an undeclared kind was refused for that kind and told to resend another
+    value, while a direct triage refuses it because an area cannot be triaged. Another kind cannot fix that, so the
+    triage queues and its replay answers as the direct triage does."""
+    from exomem import write_intake
+
+    root = service.root
+    text = sqlite_text(manifest_text("planning").replace(CID, RELEASE_PLAN_ID).replace("title: Work", f"title: {RELEASE_PLAN}"))
+    call(root, "plan_memory", action="create", manifest_path=manifest_path("planning").replace("Work", "Release"),
+         manifest_text=text, why="plan the releases")
+    call(root, "plan_memory", action="add", collection=RELEASE_PLAN, why="plan the platform",
+         item={"title": "Platform", "kind": "area"})
+    view = call(root, "plan_memory", action="query", collection=RELEASE_PLAN)
+    (row,) = view["rows"]
+    command = next(c for c in commands.product_commands_for("mcp") if c.name == "plan_memory")
+    try:
+        with _store_thread_held_with_intake_on(service, monkeypatch), request_scope(OWNER):
+            queued = writer_lease.invoke_command(
+                command, root, implicit_idempotency_scope="principal:session-b", action="triage",
+                collection=RELEASE_PLAN, plan_id=row["plan_id"], expected_container_hash=view["snapshot"],
+                expected_item_version=row["item_version"], transition={"parent": None, "kind": "unregistered-kind"},
+                why="sort the platform")
+            assert queued["state"] == "queued"
+        ref = queued["queued_write"]["ref"]
+        _until(lambda: write_intake.read(root, ref=ref)["queued_write"]["state"] == "failed")
+        error = write_intake.read(root, ref=ref)["queued_write"]["error"]
+        assert (error["code"], error["message"]) == ("INVALID_PLAN", "triage requires an active deliverable plan")
+    finally:
+        write_intake.stop(root)
+
+
 def counted_appends(monkeypatch):
     from exomem.collection_store.writer import CollectionWriter
 

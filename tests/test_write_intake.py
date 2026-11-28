@@ -861,10 +861,10 @@ def test_a_plan_value_is_still_refused_when_an_ordinary_queued_save_applies_duri
 
 
 def _drop_the_declaration_marker(vault: Path) -> None:
-    """Make the intake store one from before `may_change_declaration`."""
+    """Make the intake store one from before `declaration_change`."""
     with write_intake._write(vault) as conn:
-        conn.execute("DROP INDEX intake_declaration")
-        conn.execute("ALTER TABLE intake DROP COLUMN may_change_declaration")
+        conn.execute("DROP INDEX intake_declaration_change")
+        conn.execute("ALTER TABLE intake DROP COLUMN declaration_change")
 
 
 @pytest.mark.parametrize("upgraded", ["by-an-earlier-save", "during-the-read"])
@@ -914,7 +914,7 @@ def test_a_store_from_before_the_declaration_marker_keeps_a_save_behind_its_open
 
 def _store_again_as_a_writer_without_the_marker(vault: Path, ref: str) -> None:
     """Store the queued save `ref` again as an earlier release's acceptance stores a save: its INSERT names these
-    columns and leaves out `may_change_declaration`, as after a rollback."""
+    columns and leaves out `declaration_change`, as after a rollback."""
     columns = ("id", "origin", "origin_ttl", "command", "arguments", "principal", "surface", "state",
                "accepted_at", "updated_at", "next_attempt_at", "error_code")
     intake_id = ref.removeprefix(write_intake.REF_PREFIX)
@@ -947,6 +947,37 @@ def test_a_revision_that_an_earlier_release_queues_still_queues_a_save_with_the_
     _wait_for_state(vault, add["queued_write"]["ref"], "applied")
     (row,) = _send(plan, vault, {"action": "query", "collection": collection})["rows"]
     assert row["effort"] == "medium"
+
+
+def test_a_store_from_an_earlier_marker_build_keeps_a_save_behind_its_open_revision_queued(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect: an unreleased build stored its marker in a column that defaults to 0. An earlier release queued a
+    revision there, so its marker read 0, and a busy add with the value that the revision declares was refused. The
+    marker now has a column of its own, which starts NULL on every save that the store already holds."""
+    _writer, holder = managers
+    plan = _command("plan_memory")
+    collection = _planning_collection(vault)
+    lifecycle = _send(plan, vault, {"action": "inspect", "collection": collection})["lifecycle_guards"]
+    first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
+    revision = _send(plan, vault, {
+        "action": "revise", "collection": collection, **lifecycle, "why": "declare a medium effort",
+        "manifest_text": (vault / collection).read_text(encoding="utf-8").replace("[small, large]", "[small, medium, large]"),
+    }, scope="principal:session-b")
+    assert revision["state"] == "queued"
+    _drop_the_declaration_marker(vault)
+    with write_intake._write(vault) as conn:  # the unreleased build's marker
+        conn.execute("ALTER TABLE intake ADD COLUMN may_change_declaration INTEGER NOT NULL DEFAULT 0")
+        conn.execute("CREATE INDEX intake_declaration ON intake(seq) WHERE may_change_declaration = 1")
+    _store_again_as_a_writer_without_the_marker(vault, revision["queued_write"]["ref"])
+    earlier = _send(plan, vault, _plan_call(collection, "add", "Ship the patch"), scope="principal:session-d")
+    assert earlier["state"] == "queued"
+    add = _send(plan, vault, _plan_call(collection, "add", effort="medium"), scope="principal:session-c")
+    assert add["state"] == "queued"
+    paused.set()
+    _wait_for_state(vault, add["queued_write"]["ref"], "applied")
+    rows = _send(plan, vault, {"action": "query", "collection": collection})["rows"]
+    assert [row["effort"] for row in rows if row["title"] == "Ship the release"] == ["medium"]
 
 
 def test_a_store_from_before_the_declaration_marker_upgrades_without_reading_its_queued_saves(

@@ -365,7 +365,10 @@ def value_refusal(
         if refusal is None or action == "add":
             return refusal
         stored = _edited_item(root, manifest, arguments)
-        return None if stored is None else planning.supplied_value_refusal(root, manifest, values, stored=stored)
+        # The commit refuses a triage of an item it may not triage before it judges a value.
+        if stored is None or (action == "triage" and not planning.triage_eligible(stored)):
+            return None
+        return planning.supplied_value_refusal(root, manifest, values, stored=stored)
 
     refusal = collection_refs.decide_on_declaration(root, collection, budget, profile="planning", decide=decide)
     if refusal is None:
