@@ -11,6 +11,8 @@ read back from the store's rows, never from the importer's own report.
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import io
 import logging
 import os
 import sqlite3
@@ -27,16 +29,19 @@ from test_vault_store_migration import build_indexes, migrate_apply
 from test_vault_store_projector import NOTES
 
 from exomem import (
+    artifact_lifecycle,
     delete_directory,
     delete_file,
     extract,
     file_watcher,
+    media_allowance,
     media_bindings,
     media_jobs,
     media_processing,
     media_store,
     media_worker,
     move_file,
+    original_pool,
     preserve,
     recover_from_trash,
     reserved_paths,
@@ -44,7 +49,7 @@ from exomem import (
 from exomem.collection_store import runtime
 from exomem.governance.principal import library_scope
 from exomem.init import init_vault
-from exomem.vault_store import batch, importer, read
+from exomem.vault_store import batch, derivation, importer, projector, read, write
 from exomem.vault_store import media as store_media
 
 # The generated vault is the importer suite's fixture; the media store's key is the sibling's.
@@ -480,8 +485,49 @@ def test_a_new_original_that_a_store_mode_vault_offloads_can_then_be_evicted_and
     assert before["held"] == []
 
 
+def test_a_pooled_original_can_be_evicted_after_an_unrelated_save_is_derived(
+    stored, selected_store, store_thread, monkeypatch
+):
+    """Derivation advances the store revision without changing the pages eviction checks."""
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(stored)
+    content = b"One original for the recovery store."
+    filings = []
+
+    def file_original(_writer):
+        with library_scope():
+            filings.append(preserve.preserve_stream(
+                stored, scope="Archive", category="documents", filename="pooled.txt", stream=io.BytesIO(content)))
+
+    store_thread.run(file_original)
+    filing, = filings
+    assert media_bindings.recover(stored)
+    assert _offload(stored, stored / filing.path) is not None
+    assert media_bindings.rebuild(stored)
+    physical = original_pool.object_path(stored, hashlib.sha256(content).hexdigest())
+    assert physical.is_file()
+    assert media_store.cache_matches(stored, stored / filing.path)
+
+    note = write.PagePut(f"{NOTES}/Unrelated.md", b"# Unrelated\n\nA new canonical note.\n")
+    with monkeypatch.context() as parked:
+        parked.setattr(derivation, "drain", lambda *_args, **_kwargs: None)
+        store_thread.run(lambda writer: write.commit(
+            writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=(note,))))
+    assert media_bindings.follow_store(stored)
+    revision, audit = media_bindings.source_checkpoint(stored)
+
+    store_thread.run(lambda writer: derivation.drain(stored, writer))
+
+    derived_revision, derived_audit = media_bindings.source_checkpoint(stored)
+    assert derived_revision > revision
+    assert derived_audit == audit
+    assert media_store.evict(stored, stored / filing.path)
+    assert not physical.exists()
+
+
+@pytest.mark.parametrize("disk_source", ["earlier body", "missing"])
 def test_trash_retirement_tracks_the_authoritative_companion_before_markdown_projection(
-    stored, selected_store, store_thread
+    stored, selected_store, store_thread, disk_source
 ):
     """Disk-only retirement validation loses a stored companion or rejects a legitimate stored edit."""
     import json
@@ -495,22 +541,37 @@ def test_trash_retirement_tracks_the_authoritative_companion_before_markdown_pro
     # The watcher's reconcile thread makes the allowance's projection current; this test runs no watcher.
     assert media_bindings.recover(stored)
     assert _offload(stored, stored / PICTURE) is not None
+    companion = originals.sidecar_path(stored / PICTURE)
+    companion_rel = companion.relative_to(stored).as_posix()
+    unretired = read.owned_bytes(stored, companion_rel)
     results = []
     store_thread.run(lambda _writer: results.append(delete_file.delete_file(stored, path=PICTURE, confirm=True)))
     trashed = results[0]
-    companion = originals.sidecar_path(stored / PICTURE)
-    before = read.owned_bytes(stored, companion.relative_to(stored).as_posix()).decode("utf-8")
+    before = read.owned_bytes(stored, companion_rel).decode("utf-8")
     assert not originals.sidecar_path(stored / trashed.trash_path).exists()
     store_thread.run(lambda writer: batch.commit_batch(
         writer, [PlannedWrite(companion, before + "\nAn updated stored observation.\n")], vault_root=stored,
     ))
 
     metadata = json.loads((stored / (trashed.trash_path + trash_metadata.METADATA_SUFFIX)).read_bytes())
-    current = read.owned_bytes(stored, companion.relative_to(stored).as_posix())
+    current = read.owned_bytes(stored, companion_rel)
     assert metadata["original_retirement"]["after"] == sha(current)
     assert media_store.drain_census(stored) == (0, 0)
     with media_store.open_original(stored, trashed.trash_path) as source:
         assert source.stream.read() == PICTURE_BYTES
+
+    if disk_source == "missing":
+        companion.unlink(missing_ok=True)
+    else:
+        companion.write_bytes(unretired)
+    assert media_bindings.rebuild(stored)
+    with sqlite3.connect(media_jobs.job_store_path(stored)) as ledger:
+        assert media_bindings.flagged_pages(ledger, limit=1) == ()
+    assert media_bindings.head_total(stored).used_bytes == len(PICTURE_BYTES)
+
+    projector.Projector(stored, run=store_thread.run).run_pass()
+    usage = media_bindings.head_total(stored).used_bytes
+    assert usage == media_allowance.reference_usage(stored).used_bytes == len(PICTURE_BYTES)
 
 
 def test_a_media_result_that_lands_while_the_store_is_busy_commits_on_the_store_thread(

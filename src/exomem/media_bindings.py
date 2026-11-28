@@ -29,6 +29,7 @@ _STATE = "physical-bindings-v1"
 _SIDE = "physical-bindings-side-v1"
 _IDENTITY = "physical-bindings-identity-v1"
 _FAILED = "physical-bindings-failed-v1"
+_LOST_BINDING = "an extant companion lost its original binding"
 _POLICY_PAGE = 256
 _BINDING_COLUMNS = "binary_rel, companion_rel, companion_hash, object_key, sha256, size, resident_only, reference"
 _SIDE_COLUMNS = ("companion_rel, counted, flagged, displaced, object, version, sha256, size, reference, "
@@ -436,7 +437,7 @@ def coalesce_cache(conn: sqlite3.Connection, keys: Iterable[str] | None = None) 
         conn.executemany("INSERT OR IGNORE INTO cache_objects VALUES (?)", ((key,) for key in keys))
     scope = "" if keys is None else (
         " WHERE c.binary_rel IN (SELECT object_key FROM cache_objects) OR c.binary_rel IN "
-        "(SELECT b.binary_rel FROM media_bindings b JOIN cache_objects k ON k.object_key = b.object_key)")
+        "(SELECT b.binary_rel FROM cache_objects k CROSS JOIN media_bindings b ON b.object_key = k.object_key)")
     conn.execute("DROP TABLE IF EXISTS temp.cache_merge")
     conn.execute(
         "CREATE TEMP TABLE cache_merge AS SELECT c.binary_rel AS previous, "
@@ -752,7 +753,7 @@ def _unknown(rel: str, error: BaseException, *, flagged: bool, owned: bool = Tru
 
 def classify(vault: Path, rel: str, data: bytes, *, selected: Basis,
              placements: trash_metadata.PlacementCensus, include_retired: bool = False,
-             owned: bool = True) -> PageFacts:
+             owned: bool = True, prior_binary: str | None = None) -> PageFacts:
     """The per-page rule that the owner census and the projection share (design D3), for one page's bytes.
 
     A page that the store does not own (``owned`` false) gets no binding row and no eviction flag. Raises a class
@@ -765,7 +766,7 @@ def classify(vault: Path, rel: str, data: bytes, *, selected: Basis,
     except RACES:
         raise
     except (ValueError, UnicodeError) as error:
-        return PageFacts(side=_unknown(rel, error, flagged=True, owned=owned))
+        return PageFacts(side=_unknown(rel, error, flagged=True, owned=owned, binary_rel=prior_binary))
     binding = None
     if owned:
         try:
@@ -778,12 +779,15 @@ def classify(vault: Path, rel: str, data: bytes, *, selected: Basis,
             except RACES:
                 raise
             except (ValueError, UnicodeError) as fault:
-                return PageFacts(side=_unknown(rel, fault, flagged=True))
+                return PageFacts(side=_unknown(rel, fault, flagged=True, binary_rel=prior_binary))
             return PageFacts(displaced=(error, found, found is not None))
         except RACES:
             raise
         except (ValueError, UnicodeError) as error:
-            return PageFacts(side=_unknown(rel, error, flagged=True))
+            return PageFacts(side=_unknown(rel, error, flagged=True, binary_rel=prior_binary))
+        # A witnessed Trash retirement retains the original identity on the source page.
+        if prior_binary is not None and binding is None and originals.bound_path(fields) is None:
+            return PageFacts(side=_unknown(rel, ValueError(_LOST_BINDING), flagged=True, binary_rel=prior_binary))
     try:
         counted = None if selected.store is None else page_reference(rel, fields, selected.store, placements)
     except originals.DisplacedReference as error:
@@ -848,21 +852,22 @@ def _rows_naming(conn: sqlite3.Connection, binaries: Iterable[str]) -> set[str]:
     return found
 
 
-def _published_binaries(conn: sqlite3.Connection, companions: Iterable[str]) -> set[str]:
+def _published_binaries(conn: sqlite3.Connection, companions: Iterable[str]) -> dict[str, str]:
     companions = tuple(companions)
-    found: set[str] = set()
+    found: dict[str, str] = {}
     if not companions or not _created(conn):
         return found
     side = _side_table(conn)
     for start in range(0, len(companions), 256):
         batch = companions[start:start + 256]
         marks = ",".join("?" for _ in batch)
-        found.update(row[0] for row in conn.execute(
-            f"SELECT binary_rel FROM media_bindings WHERE companion_rel IN ({marks})", batch))
+        found.update((companion, binary) for companion, binary in conn.execute(
+            f"SELECT companion_rel, binary_rel FROM media_bindings WHERE companion_rel IN ({marks})", batch))
         if side:
-            found.update(row[0] for row in conn.execute(
-                "SELECT binary_rel FROM media_reference_rows WHERE counted = 0 AND flagged = 1 "
-                f"AND binary_rel IS NOT NULL AND companion_rel IN ({marks})", batch))
+            for companion, binary in conn.execute(
+                    "SELECT companion_rel, binary_rel FROM media_reference_rows WHERE counted = 0 AND flagged = 1 "
+                    f"AND binary_rel IS NOT NULL AND companion_rel IN ({marks})", batch):
+                found.setdefault(companion, binary)
     return found
 
 
@@ -879,16 +884,17 @@ def _derive_round(vault: Path, conn: sqlite3.Connection, view, paths: Iterable[s
     placements = trash_metadata.PlacementCensus(vault)
     pending = {rel for rel in paths if rel.lower().endswith(".md")} | _rows_naming(conn, paths)
     while pending:
+        prior = _published_binaries(conn, pending)
         bodies = view.bodies(sorted(rel for rel in pending if not _skipped(rel)))
         for rel in sorted(pending):
             data = bodies.get(rel)
             facts = PageFacts() if data is None or _skipped(rel) else classify(
-                vault, rel, data, selected=selected, placements=placements)
+                vault, rel, data, selected=selected, placements=placements, prior_binary=prior.get(rel))
             if facts.displaced is not None:
                 raise _Displaced(rel)
             read_pages[rel] = facts
         named = {facts.binding.binary_rel for rel in pending if (facts := read_pages[rel]).binding is not None}
-        named |= _published_binaries(conn, pending)
+        named.update(prior.values())
         pending = _rows_naming(conn, named) - read_pages.keys()
     placements.require_current()
     filings: dict[str, list[str]] = defaultdict(list)
@@ -1340,7 +1346,7 @@ def _rebuild_files(vault: Path, ledger) -> bool | None:
                     if error.code != "MISSING":
                         raise
                 else:
-                    raise ValueError("an extant companion lost its original binding")
+                    raise ValueError(_LOST_BINDING)
             placements.require_current()
             conn.commit()
             from .media_store import _guard
@@ -1369,19 +1375,21 @@ def _rebuild_files(vault: Path, ledger) -> bool | None:
     return False
 
 
-def _census_difference(conn: sqlite3.Connection, *, filings: bool) -> None:
+def _census_difference(conn: sqlite3.Connection, *, filings: bool) -> int:
     """Take the difference between a store-mode census and the published rows, outside the hold (design, 3.4).
 
     A whole replacement under the hold costs one pass over every binding and every index, which measured 1.4 s
     and 3.0 s at 100,000 bindings on 2026-11-28 against a budget of 0.5 s. The temp tables hold the published
     rows that the census drops or replaces, and the census rows that are new or changed. A binding that is
-    replaced drops its policy filing by the cascade, so `filing_touch` names it for writing again.
+    replaced drops its policy filing by the cascade, so `filing_touch` names it for writing again. Return the
+    ledger version that proves the staged cache keys still cover every cache row that could move.
     """
     census_filings = ("SELECT binary_rel, companion_hash, policy_refs FROM binding_census WHERE policy_refs IS NOT NULL"
                       if filings else "SELECT binary_rel, companion_hash, refs FROM media_policy_filings WHERE 0")
     published_filings = "SELECT binary_rel, companion_hash, refs FROM media_policy_filings"
+    ledger_version = conn.execute("PRAGMA main.data_version").fetchone()[0]
     conn.execute("BEGIN")  # one read of the published rows
-    for table in ("binding_gone", "binding_new", "side_gone", "side_new", "filing_touch"):
+    for table in ("binding_gone", "binding_new", "side_gone", "side_new", "filing_touch", "filing_new", "cache_moves"):
         conn.execute(f"DROP TABLE IF EXISTS temp.{table}")
     conn.execute(f"CREATE TEMP TABLE binding_gone AS SELECT binary_rel, object_key FROM (SELECT {_BINDING_COLUMNS} "
                  f"FROM media_bindings EXCEPT SELECT {_BINDING_COLUMNS} FROM binding_census)")
@@ -1394,7 +1402,17 @@ def _census_difference(conn: sqlite3.Connection, *, filings: bool) -> None:
     conn.execute(f"CREATE TEMP TABLE filing_touch AS SELECT binary_rel FROM ({published_filings} EXCEPT {census_filings}) "
                  f"UNION SELECT binary_rel FROM ({census_filings} EXCEPT {published_filings}) "
                  "UNION SELECT binary_rel FROM binding_gone")
+    if filings:
+        conn.execute("CREATE TEMP TABLE filing_new AS "
+                     "SELECT binary_rel, companion_hash, policy_refs FROM binding_census WHERE policy_refs IS NOT NULL "
+                     "AND binary_rel IN (SELECT binary_rel FROM filing_touch)")
+    # An untouched binding can still have a cache row at its legacy filing path.
+    conn.execute("CREATE TEMP TABLE cache_moves AS SELECT DISTINCT b.object_key FROM binding_census b "
+                 "JOIN media_cache c ON c.binary_rel = b.binary_rel "
+                 "WHERE c.binary_rel <> b.object_key AND c.sha256 = b.sha256 "
+                 "AND (c.size IS NULL OR c.size = b.size)")
     conn.commit()
+    return ledger_version
 
 
 def _write_difference(conn: sqlite3.Connection, *, filings: bool) -> None:
@@ -1403,12 +1421,12 @@ def _write_difference(conn: sqlite3.Connection, *, filings: bool) -> None:
     conn.execute("DELETE FROM media_policy_filings WHERE binary_rel IN (SELECT binary_rel FROM filing_touch)")
     conn.execute(f"INSERT INTO media_bindings SELECT {_BINDING_COLUMNS} FROM binding_new")
     if filings:
-        conn.execute("INSERT INTO media_policy_filings SELECT binary_rel, companion_hash, policy_refs "
-                     "FROM binding_census WHERE policy_refs IS NOT NULL "
-                     "AND binary_rel IN (SELECT binary_rel FROM filing_touch)")
+        conn.execute("INSERT INTO media_policy_filings SELECT binary_rel, companion_hash, policy_refs FROM filing_new")
     conn.execute("DELETE FROM media_reference_rows WHERE companion_rel IN (SELECT companion_rel FROM side_gone)")
     conn.execute(f"INSERT INTO media_reference_rows ({_SIDE_COLUMNS}) SELECT {_SIDE_COLUMNS} FROM side_new")
-    coalesce_cache(conn)
+    keys = [row[0] for row in conn.execute("SELECT object_key FROM cache_moves")]
+    if keys:
+        coalesce_cache(conn, keys)
 
 
 def _rebuild_store(vault: Path, ledger) -> bool | None:
@@ -1470,8 +1488,11 @@ def _rebuild_store(vault: Path, ledger) -> bool | None:
             _confirm_pages(vault, conn, displaced, selected)
             _retire_census(vault, conn, placements, fault=fault)
             _fill_displaced(conn)  # A retired filing that a confirmed page still names stays counted.
-            for (companion,) in conn.execute(
-                    "SELECT DISTINCT b.companion_rel FROM media_bindings b "
+            for companion, binary in conn.execute(
+                    "WITH previously_bound AS (SELECT companion_rel, binary_rel FROM media_bindings UNION "
+                    "SELECT companion_rel, binary_rel FROM media_reference_rows "
+                    "WHERE counted = 0 AND flagged = 1 AND binary_rel IS NOT NULL) "
+                    "SELECT b.companion_rel, b.binary_rel FROM previously_bound b "
                     "WHERE NOT EXISTS(SELECT 1 FROM binding_census n "
                     "WHERE n.companion_rel = b.companion_rel AND n.binary_rel = b.binary_rel) "
                     "AND NOT EXISTS(SELECT 1 FROM displaced_census d "
@@ -1481,7 +1502,7 @@ def _rebuild_store(vault: Path, ledger) -> bool | None:
                     "AND NOT EXISTS(SELECT 1 FROM side_census s "
                     "WHERE s.companion_rel = b.companion_rel AND s.counted = 0)").fetchall():
                 if _page_exists(vault, companion):
-                    fault(companion, None, ValueError("an extant companion lost its original binding"))
+                    fault(companion, binary, ValueError(_LOST_BINDING))
             for (binary,) in conn.execute("SELECT binary_rel FROM binding_census GROUP BY binary_rel "
                                           "HAVING COUNT(*) > 1").fetchall():
                 for (companion,) in conn.execute("SELECT companion_rel FROM binding_census WHERE binary_rel = ?",
@@ -1490,12 +1511,20 @@ def _rebuild_store(vault: Path, ledger) -> bool | None:
                 conn.execute("DELETE FROM binding_census WHERE binary_rel = ?", (binary,))
             placements.require_current()
             conn.commit()
-            _census_difference(conn, filings=selected.policy_projection)
+            ledger_version = _census_difference(conn, filings=selected.policy_projection)
+            conn.execute("PRAGMA busy_timeout=0")
             with _guard(vault, "media_binding_census_publish"):
-                conn.execute("BEGIN IMMEDIATE")
-                # Every writer of the rows moves the checkpoint, so an unmoved checkpoint proves that the rows
-                # are still the ones that the difference was taken from.
-                if checkpoint(conn) != before or policy_key(vault) != policy or not _still(vault, reached):
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                except sqlite3.OperationalError as error:
+                    code = getattr(error, "sqlite_errorcode", 0) & 0xFF
+                    if code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                        return None  # Keep the published projection when another ledger writer has the slot.
+                    raise
+                # Cache writers can commit without advancing the checkpoint. A changed ledger makes us stage
+                # the cache destinations again, so publication cannot miss an alias added while staging.
+                if (conn.execute("PRAGMA main.data_version").fetchone()[0] != ledger_version
+                        or checkpoint(conn) != before or policy_key(vault) != policy or not _still(vault, reached)):
                     conn.rollback()
                     return None
                 _write_difference(conn, filings=selected.policy_projection)
@@ -1577,6 +1606,7 @@ def _left_out(vault: Path, reading: list[str]) -> Iterator[tuple[str, bytes | No
     """
     from .kbdir import managed_join, managed_root_rel
     from .runtime_resources import SEMANTIC_SOURCE_MAX_BYTES
+    from .vault import read_frontmatter_header
     from .vault_store import ownership
 
     failed: list[tuple[str, BaseException]] = []
@@ -1617,9 +1647,13 @@ def _left_out(vault: Path, reading: list[str]) -> Iterator[tuple[str, bytes | No
         reading[:] = [rel]
         if kind == "directory":
             raise reserved_paths.ReservedPathLeafError("IDENTITY_CHANGED")
+        header_error: ValueError | None = None
         try:
             with reserved_paths.open_generic_binary(vault, rel, physical=True) as source:
-                data = source.stream.read()
+                try:
+                    data = read_frontmatter_header(source.stream, SEMANTIC_SOURCE_MAX_BYTES)
+                except ValueError as error:
+                    header_error = error
                 source.require_current()
         except reserved_paths.ReservedPathLeafError as error:
             if error.code == "RESERVED_PATH":
@@ -1629,7 +1663,10 @@ def _left_out(vault: Path, reading: list[str]) -> Iterator[tuple[str, bytes | No
             if error.code == "IDENTITY_CHANGED":
                 yield rel, None, _KeptChanging("the page kept changing while it was read")
             continue  # a page that left is no page
-        yield rel, data, None
+        if header_error is not None:
+            yield rel, None, header_error
+        else:
+            yield rel, data, None
 
 
 def check_outside(vault: Path) -> bool:

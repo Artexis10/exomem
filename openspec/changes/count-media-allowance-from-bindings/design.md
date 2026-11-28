@@ -281,7 +281,7 @@ The follow still withdraws when the recorded revision or audit position is ahead
 
 Within one store database, the audit position never repeats. `seq` is `AUTOINCREMENT` (`collection_store/schema.py:1059`), triggers refuse to update or delete an audit row (`collection_store/schema.py:367-379`, `:1072`), and a rollback keeps the trail (`vault_store/rollback.py:28`). A restore of an older copy of the store database brings back its `seq` counter, so later commits can reuse values that the projection already followed. While the restored head is below the recorded position, the follow withdraws (`media_bindings.py:535-537`). Once commits pass it, the row at the recorded `seq` is another row, and the identity check withdraws. The projection reads only page paths and bodies from the store (`media_bindings.py:548`, `:597`), and no derived row. Task 1.9 proves the invariant.
 
-**Existing behaviour that this fixes.** Pooled eviction and the retained-store drain call the same `current()`. In store mode, after each save's derivation, eviction keeps every candidate (`media_store.py:3969`) and does not retire a shared cache proof (`media_store.py:3693`). The drain census refuses (`media_store.py:4786`, `:4803`). This lasts until `recover` rebuilds the whole projection (`media_bindings.py:937-942`), which runs only when an offload scan or a protection pass calls it, and the next save starts it again. This finding comes from reading the code. No test or service has shown it yet. Task 3.12 shows it.
+**Existing behaviour that this fixes.** Pooled eviction and the retained-store drain call the same `current()`. In store mode, after each save's derivation, eviction keeps every candidate (`media_store.py:3969`) and does not retire a shared cache proof (`media_store.py:3693`). The drain census refuses (`media_store.py:4786`, `:4803`). This lasts until `recover` rebuilds the whole projection (`media_bindings.py:937-942`), which runs only when an offload scan or a protection pass calls it, and the next save starts it again. Task 3.12 reproduced the stall on the code before this change. The store revision advanced during derivation and the audit position held. The changed code evicted the original without another rebuild.
 
 ## Rejected alternatives
 
@@ -345,7 +345,7 @@ Every save pays this, whether or not it touches a companion, because each audit 
 
 **Per upload admission in store mode:** one ledger read transaction, with the D1 read and one indexed lookup per touched version, and one store snapshot read of up to 2,048 audit rows and their pages' bodies, with a parse per page. It takes no boundary and writes nothing. The custody follow after each save keeps the projection near the head, so an upload usually reads an empty suffix and pays the D1 read alone. Today an upload reads the recorded census, and walks every note under the consistency guard when that record says the upload does not fit (`media_store.py:1671-1678`).
 
-**Left-out pages:** at each store sweep, one walk on the watcher's reconcile thread, outside the boundary. It lists every entry under the managed root, one directory read per folder, and reads the header of each page that the store does not own. Its time grows with the number of such pages, not with the owned pages. The measured census read about 17,500 headers in 39 s at p50, about 2 ms per header. By that estimate, 1,000 such pages take about 2 s plus the listing. Task 3.4 measures the walk. The sweep already walks every owned file at the same interval, and saves do not wait for either walk.
+**Left-out pages:** at each store sweep, one walk on the watcher's reconcile thread, outside the boundary. It lists every entry under the managed root, one directory read per folder, and reads the header of each page that the store does not own. Its time grows with the number of such pages, not with the owned pages. The installed census held the boundary for 39 s at p50 on a vault with about 17,500 pages. That time covers the whole census. A generated walk of 1,014 pages outside the store took 314 ms at p95 across five runs on SQLite 3.45.1. The sweep already walks every owned file at the same interval, and saves do not wait for either walk.
 
 **Rebuild:** one streaming read of the store's pages and the left-out pages, outside the boundary. Its publication holds the boundary while SQL replaces the rows and merges the cache rows, which costs one pass over the bindings. In store mode a rebuild runs after the upgrade, after a withdrawal and after a configuration change, on the watcher's reconcile thread and never in the startup sequence (D4). While a whole failure persists, the rebuild runs again once per sweep interval, 300 s or 900 s when quiet (D4).
 
@@ -360,6 +360,19 @@ Every save pays this, whether or not it touches a companion, because each audit 
 | Added save p95 under concurrent saves | ≤ 10 ms | A batch whose delta changes no row moves the cursor in one transaction, with no withdraw |
 
 The 0.5 s bound is the Records bound for one boundary hold by import work (`openspec/specs/records/spec.md:790`), used here for a background hold.
+
+The generated-ledger runs on SQLite 3.45.1 used 105,000 binding rows, including a second filing for every twentieth version. The owner-total query plan is `CO-ROUTINE (subquery-1)`, `SCAN media_bindings USING COVERING INDEX media_bindings_version`, then `SCAN (subquery-1)`. The aggregate scans the index once with no table lookup.
+
+| Measure | Initial run | Concurrent test run | Repeat with fewer concurrent tests |
+|---|---|---|---|
+| Owner-total aggregate, 60 reads | p95 93.9 ms | p95 117.6 ms | p95 146.1 ms |
+| Upload admission, 20 reads | p95 827 ms at 2,040 rows | p95 1,038 ms at 2,048 rows | p95 939 ms at 2,048 rows |
+| Replay of 256 audit rows under a hold, 30 reads | p99 216 ms | p99 1,334 ms | p99 251 ms |
+| Follow publication, 24 rounds of 256 rows | p99 47 ms | Not measured | p99 2,301 ms |
+
+The initial cold rebuild held the boundary for 1.4 s and 3.0 s. The diff publication's SQL alone took 727–1,376 ms for 100,000 new bindings. Remapping 100,000 legacy cache aliases took 942 ms. The warm diff SQL measured 0.2 ms with no changes and 140–218 ms with 1% changed.
+
+At exactly 100,000 bindings, 40 paired reads put the covering-index aggregate at 121 ms p95 and a variant that checks conflicts only for duplicate versions at 114 ms p95. Both exceeded the 100 ms budget. In a separate follow probe, both revisions spent most of their slow holds off CPU while writing bindings. The same-host timings establish the query and cold rebuild misses. The follow needs a repeat on the target storage.
 
 ## Failure modes and who pays
 
