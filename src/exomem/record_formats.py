@@ -12,7 +12,7 @@ import json
 import math
 import re
 import stat
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
@@ -323,6 +323,7 @@ class MarkdownLogAdapter(_BaseAdapter):
         )
         entries: list[_Heading] = []
         for item in headings:
+            request_budget.checkpoint()
             if (
                 section_heading.end <= item.start < section_end
                 and item.level == grammar.level
@@ -336,6 +337,7 @@ class MarkdownLogAdapter(_BaseAdapter):
         records: list[Record] = []
         child_count = 0
         for index, item in enumerate(entries):
+            request_budget.checkpoint()
             end = entries[index + 1].start if index + 1 < len(entries) else section_end
             block = data[item.start : end]
             values = _log_values(item.title, grammar)
@@ -3114,11 +3116,24 @@ class _Heading:
     end: int
 
 
+def _budgeted_log_lines(data: bytes) -> Iterator[bytes]:
+    """Yield the original lines, checking the current budget during long parse passes."""
+    check = request_budget.current_checkpoint()
+    lines = data.splitlines(keepends=True)
+    if check is None:
+        yield from lines
+        return
+    for index, line in enumerate(lines):
+        if index % request_budget.CHECKPOINT_EVERY == 0:
+            check()
+        yield line
+
+
 def _headings_outside_fences(data: bytes) -> list[_Heading]:
     headings: list[_Heading] = []
     offset = 0
     fence: tuple[bytes, int] | None = None
-    for line in data.splitlines(keepends=True):
+    for line in _budgeted_log_lines(data):
         if fence is not None:
             if _closes_fence(line, fence):
                 fence = None
@@ -3472,7 +3487,7 @@ def _child_rows(
     rows: list[ChildRow] = []
     offset = block_start
     fence: tuple[bytes, int] | None = None
-    for raw in block.splitlines(keepends=True):
+    for raw in _budgeted_log_lines(block):
         try:
             line = raw.decode("utf-8").strip()
         except UnicodeDecodeError as error:
@@ -3505,7 +3520,9 @@ def _marker_outside_fences(block: bytes) -> re.Match[bytes] | None:
     fence: tuple[bytes, int] | None = None
     marker: re.Match[bytes] | None = None
     seen_content = False
-    for raw in block.splitlines(keepends=True)[1:]:
+    lines = _budgeted_log_lines(block)
+    next(lines, None)
+    for raw in lines:
         if fence is not None:
             if _closes_fence(raw, fence):
                 fence = None
@@ -3573,17 +3590,18 @@ def _mark_ambiguous(
     records: list[Record],
 ) -> tuple[list[Record], tuple[collections.CollectionDiagnostic, ...]]:
     counts: dict[str, int] = {}
+    inferred_keys: set[str] = set()
     for record in records:
-        counts[record.identity.key] = counts.get(record.identity.key, 0) + 1
+        request_budget.checkpoint()
+        key = record.identity.key
+        counts[key] = counts.get(key, 0) + 1
+        if record.identity.inferred:
+            inferred_keys.add(key)
     ambiguous = {key for key, count in counts.items() if count > 1}
     diagnostics = tuple(
         collections.CollectionDiagnostic(
-            "AMBIGUOUS_RECORD_KEY"
-            if any(record.identity.inferred and record.identity.key == key for record in records)
-            else "DUPLICATE_RECORD_ID",
-            "legacy natural key is not unique"
-            if any(record.identity.inferred and record.identity.key == key for record in records)
-            else "explicit record key is duplicated",
+            "AMBIGUOUS_RECORD_KEY" if key in inferred_keys else "DUPLICATE_RECORD_ID",
+            "legacy natural key is not unique" if key in inferred_keys else "explicit record key is duplicated",
         )
         for key in sorted(ambiguous)
     )

@@ -1607,7 +1607,7 @@ def _summary_line(state_counts: Mapping[str, int]) -> str:
     return f"{queued} queued save(s) waiting, {failed} failed save(s) to review."
 
 
-def declaration_mark(vault_root: Path, *, seconds: float) -> int | None:
+def declaration_mark(vault_root: Path, *, seconds: float, guard_sensitive: bool = False) -> int | None:
     """The lowest `seq` that a save open now, or accepted from now on, holds; None where that is unknown.
 
     A check that reads a declaration takes this mark before that read and, only once the read refuses, asks
@@ -1616,7 +1616,9 @@ def declaration_mark(vault_root: Path, *, seconds: float) -> int | None:
     reads comes from a save that was open at the mark or was accepted after it, each at or above the mark.
 
     The mark is the first open save's `seq`, else one more than the last assigned `seq`. SQLite keeps that
-    number even when the save is deleted. The lowest `seq` of each open state is a seek on `intake_state`."""
+    number even when the save is deleted. The lowest `seq` of each open state is a seek on `intake_state`.
+    A refusal that depends on current row guards gives up when any save is open. Its replay can change a guard.
+    """
     row = _declaration_query(
         vault_root, seconds,
         "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'intake'), 0), "
@@ -1626,18 +1628,23 @@ def declaration_mark(vault_root: Path, *, seconds: float) -> int | None:
     if row is None:
         return None
     last, *first_open = row
-    return min((int(seq) for seq in first_open if seq is not None), default=int(last) + 1)
+    marker = min((int(seq) for seq in first_open if seq is not None), default=int(last) + 1)
+    return None if guard_sensitive and marker <= last else marker
 
 
-def declaration_changed_since(vault_root: Path, marker: int, *, seconds: float) -> bool | None:
+def declaration_changed_since(
+    vault_root: Path, marker: int, *, seconds: float, guard_sensitive: bool = False,
+) -> bool | None:
     """Whether a save at or after `marker`, in whatever state it is now, may have changed a declaration; None
     where that is unknown. Read the last possible change from one row. A deleted save can still count until
-    the first open save moves past it. A store that has not added the marker answers unknown."""
-    row = _declaration_query(
-        vault_root, seconds,
-        "SELECT last_seq >= ? FROM intake_declaration_state WHERE id = 1",
-        (marker,), empty=(0,),
+    the first open save moves past it. A store that has not added the marker answers unknown.
+    For a refusal that depends on row guards, any acceptance since the mark can change the guard.
+    """
+    sql = (
+        "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'intake'), 0) >= ?"
+        if guard_sensitive else "SELECT last_seq >= ? FROM intake_declaration_state WHERE id = 1"
     )
+    row = _declaration_query(vault_root, seconds, sql, (marker,), empty=(0,))
     return None if row is None else bool(row[0])
 
 

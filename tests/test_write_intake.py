@@ -12,6 +12,7 @@ import asyncio
 import contextvars
 import hashlib
 import json
+import os
 import threading
 import time
 import tracemalloc
@@ -57,6 +58,7 @@ from exomem.governance.principal import (
     request_scope,
 )
 from exomem.plan_memory import plan_memory
+from exomem.record_memory import value_refusal
 
 _HOLD_SECONDS = 30.0
 _LAND_SECONDS = 30.0
@@ -609,51 +611,140 @@ def _queue_one_save_and_hold_the_replay(vault: Path, holder, monkeypatch: pytest
     return first["queued_write"]["ref"], paused
 
 
-@pytest.mark.parametrize("action", ["append", "update"])
-def test_a_record_value_its_collection_never_declares_is_refused_behind_the_queue_and_never_queued(
-    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch, action: str
-) -> None:
-    """Defect: a value outside a declared enum came back "Queued, not saved yet" and failed only at the replay."""
-    _writer, holder = managers
-    collection = _ledger_declaring_a_status(vault)
-    target = _record_a_draft_entry(vault, collection)[0] if action == "update" else {}
-    call = _status_call(collection, action, "resolved", **target)
-    first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
-    with pytest.raises(OpError) as refused:
-        _send(_command("record_memory"), vault, call, scope="principal:session-b")
-    assert refused.value.code == "SCHEMA_ENUM"
-    assert refused.value.message.endswith('allowed: "draft", "published"')
-    assert refused.value.details["field"] == "status"
-    assert "held" not in refused.value.details
-    assert [item["ref"] for item in write_intake.read(vault)["items"]] == [first]
-    paused.set()
-    _wait_for_state(vault, first, "applied")
-    # Sent directly, the same call reaches the commit's own value check: its key and guards are the row's.
-    with pytest.raises(Exception) as direct:
-        _send(_command("record_memory"), vault, call, scope="principal:session-b")
-    assert direct.value.code == "SCHEMA_ENUM"
-
-
-def test_a_file_record_edit_with_a_stale_guard_defers_the_value_refusal(
+def test_an_undeclared_record_append_is_refused_behind_an_ordinary_save(
     vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _writer, holder = managers
     collection = _ledger_declaring_a_status(vault)
-    guards, _ = _record_a_draft_entry(vault, collection)
-    call = _status_call(collection, "update", "resolved", **{**guards, "expected_item_version": "0" * 64})
-    record = _command("record_memory")
-    with pytest.raises(OpError) as direct:
-        _send(record, vault, call)
-    assert direct.value.code == "STALE_RECORD"
+    call = _status_call(collection, "append", "resolved")
     first, paused = _queue_one_save_and_hold_the_replay(vault, holder, monkeypatch)
     try:
-        receipt = _send(record, vault, call, scope="principal:session-b")
-        assert receipt["state"] == "queued"
+        with pytest.raises(OpError) as refused:
+            _send(_command("record_memory"), vault, call, scope="principal:session-b")
+        assert refused.value.code == "SCHEMA_ENUM"
+        assert refused.value.message.endswith('allowed: "draft", "published"')
+        assert refused.value.details["field"] == "status"
+        assert "held" not in refused.value.details
+        assert [item["ref"] for item in write_intake.read(vault)["items"]] == [first]
     finally:
         paused.set()
     _wait_for_state(vault, first, "applied")
+
+
+@pytest.mark.parametrize("stale", [False, True], ids=["current-guard", "stale-guard"])
+def test_a_busy_file_record_edit_with_an_empty_queue_checks_the_writer_order(
+    vault: Path, managers, drainer, stale: bool,
+) -> None:
+    _writer, holder = managers
+    collection = _ledger_declaring_a_status(vault)
+    guards, _ = _record_a_draft_entry(vault, collection)
+    if stale:
+        guards["expected_item_version"] = "0" * 64
+    call = _status_call(collection, "update", "resolved", **guards)
+    record = _command("record_memory")
+    with pytest.raises(OpError) as direct:
+        _send(record, vault, call)
+    assert direct.value.code == ("STALE_RECORD" if stale else "SCHEMA_ENUM")
+    with _Hold(holder, vault):
+        if not stale:
+            with pytest.raises(OpError) as busy:
+                _send(record, vault, call, scope="principal:session-b")
+            assert (busy.value.code, busy.value.message) == (direct.value.code, direct.value.message)
+            assert write_intake.read(vault)["items"] == []
+            return
+        receipt = _send(record, vault, call, scope="principal:session-b")
+        assert receipt["state"] == "queued"
     failed = _wait_for_state(vault, receipt["queued_write"]["ref"], "failed")
     assert (failed["error"]["code"], failed["error"]["message"]) == (direct.value.code, direct.value.message)
+
+
+def test_a_busy_record_edit_keeps_its_guard_order_after_an_earlier_append(
+    vault: Path, managers, drainer,
+) -> None:
+    _writer, holder = managers
+    collection = _ledger_declaring_a_status(vault)
+    guards, _ = _record_a_draft_entry(vault, collection)
+    record = _command("record_memory")
+    edit = _status_call(collection, "update", "resolved", **guards)
+    with _Hold(holder, vault):
+        first = _send(record, vault, _status_call(collection, "append", "draft", slug="another-note"))
+        later = _send(record, vault, edit, scope="principal:session-b")
+        assert first["state"] == later["state"] == "queued"
+    _wait_for_state(vault, first["queued_write"]["ref"], "applied")
+    failed = _wait_for_state(vault, later["queued_write"]["ref"], "failed")
+    with pytest.raises(OpError) as direct:
+        _send(record, vault, edit)
+    assert direct.value.code == "STALE_RECORD"
+    assert (failed["error"]["code"], failed["error"]["message"]) == (direct.value.code, direct.value.message)
+
+
+def test_a_record_edit_queues_when_another_save_enters_during_its_proof(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import MappingProxyType
+
+    _writer, holder = managers
+    collection = _ledger_declaring_a_status(vault)
+    guards, _ = _record_a_draft_entry(vault, collection)
+    record = _command("record_memory")
+    earlier: dict = {}
+    read = commands._DECLARED_VALUE_REFUSALS["record_memory"]
+
+    def read_and_admit(root, arguments, budget):
+        refusal = read(root, arguments, budget)
+        if arguments["action"] == "update":
+            assert refusal is not None and refusal.code == "SCHEMA_ENUM"
+            append = _status_call(collection, "append", "draft", slug="another-note")
+            sender = threading.Thread(target=lambda: earlier.update(_send(record, vault, append)))
+            sender.start()
+            sender.join(_LAND_SECONDS)
+            assert earlier["state"] == "queued"
+        return refusal
+
+    monkeypatch.setattr(commands, "_DECLARED_VALUE_REFUSALS",
+                        MappingProxyType({**commands._DECLARED_VALUE_REFUSALS, "record_memory": read_and_admit}))
+    monkeypatch.setattr(commands, "_DECLARED_REFUSAL_SECONDS", _LAND_SECONDS)
+    with _Hold(holder, vault):
+        assert write_intake.read(vault)["items"] == []
+        later = _send(record, vault, _status_call(collection, "update", "resolved", **guards),
+                      scope="principal:session-b")
+        assert later["state"] == "queued"
+    _wait_for_state(vault, earlier["queued_write"]["ref"], "applied")
+    failed = _wait_for_state(vault, later["queued_write"]["ref"], "failed")
+    assert failed["error"]["code"] == "STALE_RECORD"
+
+
+@pytest.mark.parametrize("stat_allowance", [2, 10], ids=["capture", "recheck"])
+def test_busy_file_update_stops_a_directory_census_at_its_deadline(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, stat_allowance: int,
+) -> None:
+    collection = _ledger_declaring_a_status(vault)
+    entries = (vault / collection).parent / "Entries"
+    for index in range(8):
+        (entries / f"budget-item-{index}.txt").touch()
+    inspected = 0
+
+    def count_item_stat(read):
+        def stat_item(path, *args, **kwargs):
+            nonlocal inspected
+            if isinstance(path, (str, Path)) and Path(path).name.startswith("budget-item-"):
+                inspected += 1
+            return read(path, *args, **kwargs)
+
+        return stat_item
+
+    class CensusBudget(request_budget.RequestBudget):
+        def remaining(self) -> float:
+            return 0.0 if inspected >= stat_allowance else self.seconds
+
+    monkeypatch.setattr(os, "stat", count_item_stat(os.stat))
+    monkeypatch.setattr(os, "lstat", count_item_stat(os.lstat))
+    call = _status_call(collection, "update", "resolved", item_key="a9e7b9e3-38a8-4b5d-90e7-9b68946db899")
+    with request_scope(local_owner_principal(surface="mcp")):
+        refusal = value_refusal(vault, call, CensusBudget(seconds=0.5))
+
+    assert refusal is None
+    assert inspected == stat_allowance
 
 
 _PLANNING_COLLECTION_PATH = "Knowledge Base/Planning/Work/_collection.md"
