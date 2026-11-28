@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.211.1](https://github.com/substrate-systems/evermatter/compare/v0.211.0...v0.211.1) (2026-11-28)
+
+
+### Bug Fixes
+
+* **intake:** keep failed saves under their original receipt ([#3415](https://github.com/substrate-systems/evermatter/issues/3415)) ([0427c2f](https://github.com/substrate-systems/evermatter/commit/0427c2fa8f375cf9a31b381ad94cf820375377c9))
+* **recall:** keep named notes ahead of incidental matches ([#3417](https://github.com/substrate-systems/evermatter/issues/3417)) ([a286e02](https://github.com/substrate-systems/evermatter/commit/a286e023dc50f42b03122aa687fd6a7456974cc0))
+
 ## [0.211.0](https://github.com/substrate-systems/evermatter/compare/v0.210.2...v0.211.0) (2026-11-28)
 
 
