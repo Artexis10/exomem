@@ -491,7 +491,7 @@ def _write_walk(vault_root: Path, import_id: str, record: dict) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="exomem cell-import")
+    parser = argparse.ArgumentParser(prog="evermatter cell-import")
     parser.add_argument("operation", choices=("prepare", "import", "discard"))
     parser.add_argument("--vault", type=Path, default=Path("/data/vault"))
     parser.add_argument("--import-id", required=True)

@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, Never
 
-from . import collection_refs, operation_entries, planning
+from . import collection_refs, operation_entries, planning, request_budget, structured_collections
 from .cli_ops import OpError, action_argument_contract
 from .query_compat import public_filter_annotation
 from .structured_collections import CollectionError, collection_remediation
@@ -15,6 +15,10 @@ _QueryFilters = public_filter_annotation()
 
 #: The Planning spec caps every Planning refusal message at 512 UTF-8 bytes.
 _REFUSAL_MESSAGE_MAX_BYTES = 512
+
+# A busy save may spend this much SQL proving its first refusal. Full collection authorisation
+# can grow with held candidates. If it needs more work, leave the refusal to the normal writer.
+_REFUSAL_STORE_SQL_STEPS = 16_000
 
 # The operation entries are the one table of what each action accepts and requires.
 ACTIONS = operation_entries.PLANS.actions()
@@ -113,6 +117,14 @@ def plan_memory(
     absent = [name for name in ("plan_id", "expected_container_hash", "expected_item_version") if values[name] is None]
     if action in {"update", "triage"} and absent:
         _invalid_arguments("update and triage need item_id, or plan_id with both guards; missing: " + ", ".join(absent))
+    assigned_id = None
+    if action in {"create", "validate"} and collection is None and isinstance(manifest_text, str):
+        manifest_text, assigned_id = structured_collections.assign_missing_id(manifest_text)
+        values["manifest_text"] = manifest_text
+    elif action in {"validate", "revise"} and isinstance(manifest_text, str):
+        selected = collection_refs.selected_collection_id(vault_root, collection)
+        manifest_text = structured_collections.fill_collection_id(manifest_text, selected)
+        values["manifest_text"] = manifest_text
     try:
         # nosemgrep: ep-word-membership -- plan_memory's closed write actions (see ACTIONS).
         if action in {"add", "update", "triage"}:
@@ -125,18 +137,22 @@ def plan_memory(
 
         selected, result = preview.dispatch(vault_root, "planning", action, values)
         if selected:
-            return result
+            return structured_collections.note_assigned_id(result, action, assigned_id)
         if action == "inspect":
             assert collection is not None
             return planning.inspect(vault_root, collection)
         if action == "validate":
             assert manifest_text is not None
-            return planning.validate(
-                vault_root,
-                mode="revision" if collection is not None else "create",
-                manifest_text=manifest_text,
-                manifest_path=manifest_path,
-                collection=collection,
+            return structured_collections.note_assigned_id(
+                planning.validate(
+                    vault_root,
+                    mode="revision" if collection is not None else "create",
+                    manifest_text=manifest_text,
+                    manifest_path=manifest_path,
+                    collection=collection,
+                ),
+                action,
+                assigned_id,
             )
         if action == "create":
             assert manifest_path is not None and manifest_text is not None and why is not None
@@ -318,6 +334,79 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
     if action == "query" and values["plan_id"] is not None and supplied - {"collection", "plan_id"}:
         _invalid_arguments("a query with plan_id reads that one item and its body, so it takes only collection; "
                            "remove " + ", ".join(sorted(supplied - {"collection", "plan_id"})))
+
+
+def value_refusal(
+    vault_root: Path, arguments: Mapping[str, Any], budget: request_budget.RequestBudget
+) -> OpError | None:
+    """The refusal that an add's `item`, an update's `changes` or a triage's `transition` gets from what the vault
+    declares: its Planning values and the collection's declared fields. None where that is not certain.
+
+    The busy intake raises it instead of queueing a save whose replay would refuse the same value
+    (`commands.declared_refusal_before_queueing`, which also decides whether a queued save may change the
+    declaration first). It takes no lock, never waits on the store thread, and reads within `budget`: the
+    manifest and the Planning values. An update or a triage is refused only once its values are refused
+    without the item it names and again with that item as the store holds it, read by its key at the caller's
+    version (`row_binding.edited_row_values`): the commit finds that item before it judges a value, and a
+    store's commit checks its version first too. File-backed saves queue for their own checks at replay.
+    A value's refusal is given only where the store route is open and it is the commit's first refusal.
+    """
+    from .collection_store import preview
+
+    action = arguments.get("action")
+    values = (
+        arguments.get("item") if action == "add"
+        else arguments.get("changes") if action == "update"
+        else arguments.get("transition") if action == "triage"
+        else None
+    )
+    collection = arguments.get("collection")
+    if not isinstance(values, Mapping) or not values or type(collection) is not str:
+        return None
+    root = Path(vault_root)
+
+    def decide(selector: str, manifest: structured_collections.CollectionManifest) -> CollectionError | None:
+        writer = preview.selected_writer(root, manifest)
+        if writer is None:
+            return None
+        planning.require_planning_profile(manifest)
+        refusal = planning.supplied_value_refusal(root, manifest, values, adding=action == "add")
+        if refusal is not None and action != "add":
+            stored = _edited_item(writer, manifest, arguments)
+            refusal = None if stored is None else planning.supplied_value_refusal(
+                root, manifest, values, stored=stored)
+        if refusal is None:
+            return None
+        dispatch_values = {name: value for name, value in arguments.items() if name != "action"}
+        dispatch_values["collection"] = selector
+        first = preview.row_save_refusal(root, "planning", action, dispatch_values, released_manifest=manifest)
+        same = first is not None and (first.code, first.reason) == (refusal.code, refusal.reason)
+        return refusal if same else None
+
+    refusal = collection_refs.decide_on_declaration(
+        root, collection, budget, profile="planning", decide=decide, store_sql_steps=_REFUSAL_STORE_SQL_STEPS)
+    if refusal is None:
+        return None
+    code = _public_error_code(refusal)
+    return OpError(code, _public_error_message(refusal, code), collection_refs.RESEND_WITH_A_DECLARED_VALUE)
+
+
+def _edited_item(
+    writer, manifest: structured_collections.CollectionManifest, arguments: Mapping[str, Any]
+) -> Mapping[str, Any] | None:
+    """The values of the item that an update or a triage names by its plan id and both guards, where the store that
+    owns the collection reads it by its key at that version; None otherwise.
+
+    An `item_id` answers None: only the store thread's head map binds one without a collection scan, and the commit
+    refuses a stale or ambiguous one before it judges a value, so its save queues."""
+    from .collection_store import row_binding
+
+    plan_id, version, container = (
+        arguments.get(name) for name in ("plan_id", "expected_item_version", "expected_container_hash"))
+    if not all(type(value) is str for value in (plan_id, version, container)):
+        return None
+    return row_binding.edited_row_values(
+        writer, manifest, item_key=plan_id, expected_item_version=version, expected_container_hash=container)
 
 
 def refuse_arguments(detail: str) -> Never:

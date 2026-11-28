@@ -563,6 +563,7 @@ _LEXICAL_SOURCE_TABLES = (("pages", "path"), ("semantic_units", "parent_path"), 
 _GRAPH_SOURCE_TABLES = (
     ("graph_nodes", "path"), ("graph_parent_refs", "path"), ("graph_edges", "source_path"),
     ("graph_dependencies", "source_path"), ("graph_dependency_coverage", "source_path"),
+    ("graph_unit_links", "source_path"),
 )
 
 
@@ -625,6 +626,8 @@ def _source_layout(tx: Connection, table: str, key: str, usable: int) -> tuple[l
     columns = tuple(name for (name,) in tx.execute(
         "SELECT name FROM pragma_table_xinfo(?) WHERE hidden IN (0, 3)", (table,),
     ))
+    if not columns:
+        return [], [], []  # An older store may still be waiting for this owner projection.
     sizes = [_catalogue_record_size(columns)]
     limits = [table_limit]
     keys: list[tuple[str, ...]] = []
@@ -657,6 +660,8 @@ def _source_derived_pages(
         if table not in layouts:
             layouts[table] = _source_layout(tx, table, key, usable)
         sizes, limits, keys = layouts[table]
+        if not sizes:
+            continue
         # Count each existing row's record separately. A partial index can only omit
         # some of these rows, so including its key gives a safe upper bound.
         quoted = ['"' + name.replace('"', '""') + '"' for placed in keys for name in placed]

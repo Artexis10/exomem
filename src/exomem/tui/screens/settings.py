@@ -119,8 +119,8 @@ class SettingsScreen(ExomemScreen):
             if not state.initialized:
                 text.append("  not initialized yet\n", style=skin.dim)
         for line in wrap(
-            "Change it with `exomem tui --vault <path>` or the EXOMEM_VAULT_PATH "
-            "environment variable; `exomem setup` guides a fresh install.",
+            "Change it with `evermatter tui --vault <path>` or the EXOMEM_VAULT_PATH "
+            "environment variable; `evermatter setup` guides a fresh install.",
             self.content_budget() - 2,
         ):
             text.append(f"  {line}\n", style=skin.dim)

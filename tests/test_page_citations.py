@@ -400,6 +400,21 @@ def test_a_withheld_row_never_moves_where_the_count_limit_cuts_the_count(world, 
     assert (alpha["count"], alpha["count_complete"]) == (beta["count"], beta["count_complete"]) == expected
 
 
+def test_an_unlisted_field_is_counted_and_leaves_the_hit_s_citations_to_the_other_fields(world, monkeypatch):
+    """The log sorts first and its rows are decided one by one, so listing it would fill all three places."""
+    world.create_collection(path("Other"), collection_text(OTHER_LOG, "Other", "label", "    label: {type: string, required: true}\n"
+                                                           "    page: {type: link}\n"),
+                            why="declare", scaffold=False)
+    with request_scope(owner_principal()):
+        world.append_record(OTHER_LOG, item={"label": "o", "page": ALPHA_REF}, item_key=K2, why="record")
+    _ready(world, OTHER_LOG)
+    _cite_one_by_one(world, monkeypatch)
+    with request_scope(_external()):
+        hit = page_citations.for_hits([ALPHA_REF], world.root, unlisted={ALPHA_REF: {(LOG, "page")}})[ALPHA_REF]
+    assert hit["cited_by_count"] == 4
+    assert [item["ref"] for item in hit["cited_by"]] == [collections.record_ref(OTHER_LOG, K2)]
+
+
 @pytest.mark.query_deadline
 def test_thousands_of_withheld_citing_rows_answer_as_a_page_that_has_none(world):
     """Under the shipped deadline, Alpha's 5,000 withheld citing rows leave its reply equal to Beta's.

@@ -1109,7 +1109,7 @@ def test_orphan_remediation_names_the_command_that_actually_reclaims(
     assert "--reconcile" in check.remediation
     # Order matters as much as the verb: reclaiming under a live rebuild would
     # delete a temporary that is still being written.
-    assert "Stop the exomem service" in check.remediation
+    assert "Stop the Evermatter service" in check.remediation
 
 
 def test_a_fresh_rebuild_temporary_is_not_reported_as_an_orphan(
@@ -1449,7 +1449,7 @@ def test_runtime_process_check_recommends_a_lever_the_reader_can_pull(
     check = doctor_module._check_runtime_processes()
 
     assert check is not None
-    assert "exomem mode quiet" in check.message
+    assert "evermatter mode quiet" in check.message
     assert check.details["mode"] == "performance"
     # Service mode may still be mentioned, but never without its precondition:
     # naming it bare is what sent a laptop user after a public hostname.
@@ -1480,7 +1480,7 @@ def test_runtime_process_check_does_not_recommend_the_mode_already_in_use(
     check = doctor_module._check_runtime_processes()
 
     assert check is not None
-    assert "exomem mode quiet" not in check.message
+    assert "evermatter mode quiet" not in check.message
     assert "already" in check.message
     assert check.details["mode"] == "quiet"
 

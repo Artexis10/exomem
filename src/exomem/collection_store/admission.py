@@ -887,7 +887,7 @@ def export_route(vault_root, *, plan_id=None, why=None, retire_local=False, aban
         # Retiring the fence revokes the lease this service writes under.
         raise CollectionStoreError(
             "COLLECTION_STORE_SERVICE_ACTIVE",
-            "an export applies only offline: stop the service, then run `exomem collections export --plan-id ID "
+            "an export applies only offline: stop the service, then run `evermatter collections export --plan-id ID "
             "--why REASON` with EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set")
     step = export.abandon if abandon else export.apply
     # Abandon queues view recovery, so its closing owner must not publish those views.
@@ -930,11 +930,11 @@ def require_summary_manifest(root, manifest_path, manifest_text):
             "manifest, or declare \"storage.strategy: sqlite\", whose view mode is summary")
 
 
-ENROLLMENT_COMMAND = ("exomem collections create --manifest-path PATH --manifest-file FILE --why REASON, "
+ENROLLMENT_COMMAND = ("evermatter collections create --manifest-path PATH --manifest-file FILE --why REASON, "
                       "with the service stopped and EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set")
 
 
-ADOPTION_COMMAND = ("exomem collections adopt-local --why REASON --dry-run, then again with --preview-id ID "
+ADOPTION_COMMAND = ("evermatter collections adopt-local --why REASON --dry-run, then again with --preview-id ID "
                     "instead of --dry-run, with the service stopped and EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set")
 
 
@@ -942,14 +942,14 @@ def migration_pending():
     """The refusal for a store an unfinished migration owns: only the owner's apply finishes it."""
     return CollectionStoreError(
         "COLLECTION_STORE_LEASE_REQUIRED",
-        "an unfinished migration owns this store; finish it with `exomem collections migrate --apply`")
+        "an unfinished migration owns this store; finish it with `evermatter collections migrate --apply`")
 
 
 def export_pending():
     """The refusal for a store an unfinished reverse export owns: only the owner's export finishes it."""
     return CollectionStoreError(
         takeover.EXPORTING,
-        "an unfinished export to files owns this store; finish it with `exomem collections export --plan-id ID "
+        "an unfinished export to files owns this store; finish it with `evermatter collections export --plan-id ID "
         "--why REASON`, with the service stopped and EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set")
 
 

@@ -17,7 +17,8 @@ from collections.abc import Mapping
 from typing import Any
 
 from ..governance import egress
-from . import governance, related_pages
+from . import related_pages
+from .row_binding import whole_row_at
 
 #: Longest row label a sentence carries. A bound on one sentence's size, not a vocabulary.
 LABEL_CHARS = 80
@@ -54,11 +55,7 @@ def receipt_names(writer, collection_id: str, item_key: str, after_item_hash: st
     with writer.read_collection(collection_id) as manifest:
         released = operation.decision(operation.manifest_subject(collection_id)).level >= egress.LEVEL_FULL
         title = manifest.title if released else None
-        row = writer._item(collection_id, item_key)
-        if row is None or after_item_hash is None or writer._version(row) != after_item_hash:
-            return title, None
-        subject = next(iter(governance.iter_subjects(
-            writer.connection, collection_id, operation.logical_vault_id, row_key=item_key)), None)
-        if not operation.reads_whole_row(collection_id, subject):
+        row = None if after_item_hash is None else whole_row_at(writer, collection_id, item_key, after_item_hash)
+        if row is None:
             return title, None
         return title, row_label(manifest, json.loads(row["values_json"]))

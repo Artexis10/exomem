@@ -194,7 +194,7 @@ def test_the_cloud_tool_returns_a_descriptor_and_a_command_but_no_link(cell):
     assert handed["artifact"] == {"path": path, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data),
                                   "file_name": "sample.txt", "mime_type": "text/plain",
                                   "mime_type_source": "filename"}
-    assert handed["next_step"] == "exomem cloud download -- " + shlex.quote(path)
+    assert handed["next_step"] == "evermatter cloud download -- " + shlex.quote(path)
     assert "deliveries" not in result and "http" not in json.dumps(result)
 
 

@@ -454,7 +454,7 @@ def test_start_refuses_a_path_outside_the_vault_and_names_the_route_to_import(tm
     with pytest.raises(ValueError, match="IMPORT_PATH_OUTSIDE_VAULT") as refused:
         commands.op_adoption_studio(vault, action="start", path=outside, initialize_kb=True)
 
-    assert "exomem import" in str(refused.value)
+    assert "evermatter import" in str(refused.value)
 
 
 @pytest.mark.parametrize("spelling", ["server share", "absolute"])
@@ -483,7 +483,7 @@ def test_start_gives_the_route_not_a_vault_path_for_a_windows_spelling_when_the_
     with pytest.raises(ValueError, match="IMPORT_PATH_OUTSIDE_VAULT") as refused:
         commands.op_adoption_studio(vault, action="start", path="C:" + "\\Notes", initialize_kb=True)
 
-    assert "exomem import" in str(refused.value) and "use '" not in str(refused.value)
+    assert "evermatter import" in str(refused.value) and "use '" not in str(refused.value)
 
 
 def test_start_given_the_absolute_path_of_a_vault_folder_names_the_vault_relative_path(tmp_path):

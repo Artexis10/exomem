@@ -2646,7 +2646,7 @@ class FileWatcher:
                 log.warning(
                     "file watcher: live import/sync burst has %d admitted semantic file(s), above "
                     "EXOMEM_WATCHER_MAX_EMBED_FILES=%d; lexical indexes updated but "
-                    "semantic indexing deferred. Run `exomem index --scope vault` "
+                    "semantic indexing deferred. Run `evermatter index --scope vault` "
                     "after the import.",
                     len(semantic_kb_ups),
                     max_files,

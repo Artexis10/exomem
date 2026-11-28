@@ -96,6 +96,61 @@ def test_record_memory_saved_view_validation_create_inspect_and_query_share_norm
     assert queried["view"]["definition"]["query"]["filters"] == []
 
 
+def test_a_manifest_without_an_id_creates_and_the_receipt_names_the_assigned_id(tmp_path: Path) -> None:
+    """A client with no shell cannot mint a UUID; refusing its manifest left it writing blank rows instead."""
+    from exomem import vault
+    from exomem.record_memory import record_memory
+
+    _activity_log(tmp_path)
+    manifest_path = "Knowledge Base/Records/New/_collection.md"
+    manifest_text = _records_manifest().replace("exomem_id: 44444444-4444-4444-8444-444444444444\n", "")
+
+    validated = record_memory(
+        tmp_path, action="validate", manifest_path=manifest_path, manifest_text=manifest_text
+    )
+    created = record_memory(
+        tmp_path, action="create", manifest_path=manifest_path, manifest_text=manifest_text, why="new table"
+    )
+
+    assert "COLLECTION_ID_ASSIGNED_AT_CREATE" in [warning["code"] for warning in validated["warnings"]]
+    written, _body, _raw = vault.parse_frontmatter((tmp_path / manifest_path).read_text(encoding="utf-8"))
+    assert created["collection_id"] == written["exomem_id"]
+
+
+def test_a_collection_created_without_an_id_revises_with_the_same_text(tmp_path: Path) -> None:
+    """An agent keeps the id-less text it created from; revising with it must not ask for an id it never had."""
+    from exomem.record_memory import record_memory
+
+    _activity_log(tmp_path)
+    manifest_path = "Knowledge Base/Records/New/_collection.md"
+    manifest_text = _records_manifest().replace("exomem_id: 44444444-4444-4444-8444-444444444444\n", "")
+    created = record_memory(
+        tmp_path, action="create", manifest_path=manifest_path, manifest_text=manifest_text, why="new table"
+    )
+
+    validated = record_memory(tmp_path, action="validate", collection=created["collection_id"], manifest_text=manifest_text)
+
+    assert validated["valid"] is True
+
+
+def test_a_malformed_manifest_id_is_refused_not_replaced(tmp_path: Path) -> None:
+    from exomem.cli_ops import OpError
+    from exomem.record_memory import record_memory
+
+    _activity_log(tmp_path)
+    manifest_text = _records_manifest().replace("44444444-4444-4444-8444-444444444444", "not-a-uuid")
+
+    with pytest.raises(OpError) as refused:
+        record_memory(
+            tmp_path,
+            action="create",
+            manifest_path="Knowledge Base/Records/New/_collection.md",
+            manifest_text=manifest_text,
+            why="new table",
+        )
+    assert refused.value.as_public_dict()["code"] == "INVALID_COLLECTION_ID"
+
+
 def test_record_memory_rejects_invalid_saved_view_before_create(tmp_path: Path) -> None:
     from exomem.cli_ops import OpError
     from exomem.record_memory import record_memory

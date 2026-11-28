@@ -17,6 +17,7 @@ from . import (
     record_governance,
     record_history,
     records,
+    request_budget,
     structured_collections,
     writer_lease,
 )
@@ -265,6 +266,14 @@ def record_memory(
         _invalid_arguments(f"{action} requires item_id, or item_key with expected_container_hash and expected_item_version")
     from .query_engine.errors import QueryError
 
+    assigned_id = None
+    if action in {"create", "validate"} and collection is None and isinstance(manifest_text, str):
+        manifest_text, assigned_id = structured_collections.assign_missing_id(manifest_text)
+        values["manifest_text"] = manifest_text
+    elif action in {"validate", "revise"} and isinstance(manifest_text, str):
+        selected = collection_refs.selected_collection_id(vault_root, collection)
+        manifest_text = structured_collections.fill_collection_id(manifest_text, selected)
+        values["manifest_text"] = manifest_text
     try:
         from .collection_store import preview
 
@@ -276,7 +285,7 @@ def record_memory(
             return _append_creating(vault_root, values, new_collection)
         selected, result = preview.dispatch(vault_root, "records", action, values)
         if selected:
-            return result
+            return structured_collections.note_assigned_id(result, action, assigned_id)
         if action in {"import", "retract"} or query is not None or (action == "query" and item_key is not None):
             # Resolve under the caller's authority first: an absent or withheld selector
             # answers exactly as a sealed store-routed collection does, so the refusal
@@ -308,11 +317,15 @@ def record_memory(
             if collection is not None:
                 return records.validate_collection_revision(vault_root, collection, manifest_text)
             assert manifest_path is not None
-            return records.validate_collection_create(
-                vault_root,
-                manifest_path,
-                manifest_text,
-                scaffold=True if scaffold is None else scaffold,
+            return structured_collections.note_assigned_id(
+                records.validate_collection_create(
+                    vault_root,
+                    manifest_path,
+                    manifest_text,
+                    scaffold=True if scaffold is None else scaffold,
+                ),
+                action,
+                assigned_id,
             )
         if action == "inspect":
             if collection is None:
@@ -958,6 +971,34 @@ def _require_one_history_selector(given: Mapping[str, Any]) -> None:
             "history takes exactly one of " + ", ".join(operation_entries.HISTORY_SELECTORS)
             + (f"; got {', '.join(chosen)}" if chosen else "")
         )
+
+
+def value_refusal(
+    vault_root: Path, arguments: Mapping[str, Any], budget: request_budget.RequestBudget
+) -> OpError | None:
+    """The refusal that the collection's declared fields give an append's `item` or an update's `changes`, or None.
+
+    The busy intake raises it instead of queueing a save whose replay would refuse the same value
+    (`commands.declared_refusal_before_queueing`, which also decides whether a queued save may change the
+    declaration first). It takes no lock and no store writer, and reads within `budget`. Whatever is not
+    certain answers None: a collection this thread cannot read now, or a manifest that the caller may not see.
+    """
+    action = arguments.get("action")
+    values = arguments.get("item") if action == "append" else arguments.get("changes") if action == "update" else None
+    collection = arguments.get("collection")
+    if not isinstance(values, Mapping) or not values or type(collection) is not str:
+        return None
+    refusal = collection_refs.decide_on_declaration(
+        Path(vault_root), collection, budget, profile="records",
+        decide=lambda _selector, manifest: records.supplied_value_refusal(
+            record_governance.require_records_profile(manifest), values),
+    )
+    if refusal is None:
+        return None
+    return OpError(
+        refusal.code, refusal.reason, collection_refs.RESEND_WITH_A_DECLARED_VALUE,
+        details=_json_safe_details(refusal.details),
+    )
 
 
 def refuse_arguments(detail: str) -> Never:

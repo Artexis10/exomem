@@ -158,7 +158,7 @@ def build(vault: Path) -> Manifest:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="exomem cell-media-manifest")
+    parser = argparse.ArgumentParser(prog="evermatter cell-media-manifest")
     parser.add_argument("--vault", type=Path, default=Path("/data/vault"))
     args = parser.parse_args(argv)
     status = 0

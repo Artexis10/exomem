@@ -165,7 +165,7 @@ def _plan_project_registrations(
         close = project_keys_module._closest_existing_key(candidate, list(folders))
         if close is not None:
             raise project_keys_module.ProjectKeyTypoError(candidate, close[0], close[1])
-        research_dir = kb_root(vault_root) / "Notes" / "Research"
+        research_dir = kb_root(vault_root).joinpath(*project_keys_module.RESEARCH_PARENT)
         folder = project_keys_module._title_case_slug(
             candidate, [*folders.values(), *project_keys_module.child_folder_names(research_dir)]
         )
@@ -179,7 +179,7 @@ def _plan_project_registrations(
         )
         folders[candidate] = folder
         categories[candidate] = category
-        required_project_dirs.append(kb_root(vault_root) / "Notes" / "Research" / folder)
+        required_project_dirs.append(kb_root(vault_root).joinpath(*project_keys_module.RESEARCH_PARENT, folder))
         changed = True
         warnings.append(
             f"Auto-registered project key {candidate!r} (folder: {folder!r}"
@@ -1439,7 +1439,7 @@ def _resolve_path(
         predecessor=predecessor,
     )
     folder = vault_root / respell_new_path(
-        vault_root, placement.folder.relative_to(vault_root).as_posix()
+        vault_root, placement.folder.relative_to(vault_root).as_posix(), leaf_is_folder=True
     )
     stem = placement.stem
     from .governance import connector_boundary
@@ -1451,7 +1451,7 @@ def _resolve_path(
         )
         if inbox is not None:
             # The inbox is another tree, so its folders take their existing spellings too.
-            folder = vault_root / respell_new_path(vault_root, inbox)
+            folder = vault_root / respell_new_path(vault_root, inbox, leaf_is_folder=True)
         connector_boundary.require_create(vault_root, (folder / f"{stem}.md").relative_to(vault_root).as_posix())
     except ValueError as error:
         raise NoteError("WRITE_REFUSED", [], "target is unavailable") from error

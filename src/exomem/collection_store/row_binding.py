@@ -8,10 +8,12 @@ withheld row binds exactly as an absent one (OpenSpec ``harden-records-import-an
 
 from __future__ import annotations
 
+import json
 from array import array
+from typing import Any
 
 from .. import page_ids
-from . import tokens
+from . import governance, tokens
 
 #: The largest collection whose head map is kept. Above it the generic scan answers, as it did before.
 ROW_HEAD_MAX_ROWS = 100_000
@@ -93,3 +95,35 @@ def readable_matches(writer, manifest, head: str) -> tuple[list[tuple[str, str]]
         for row_id, key, version, payload_hash in found
         if page_ids.part_head(key) == head and readable(row_id, key)
     ], snapshot
+
+
+def whole_row_at(writer, cid: str, key: str, version: str) -> dict[str, Any] | None:
+    """Row ``key`` of ``cid`` while it is at ``version`` and this caller reads it whole; None otherwise.
+
+    One read on the ``(collection_id, item_key)`` index and one release decision on that row, so a
+    withheld row answers as an absent one. Call it inside ``read_collection``.
+    """
+    row = writer._item(cid, key)
+    if row is None or writer._version(row) != version:
+        return None
+    subject = next(iter(governance.iter_subjects(
+        writer.connection, cid, writer._operation.logical_vault_id, row_key=key)), None)
+    return row if writer._operation.reads_whole_row(cid, subject) else None
+
+
+def edited_row_values(
+    writer, manifest, *, item_key: str, expected_item_version: str, expected_container_hash: str
+) -> dict[str, Any] | None:
+    """The stored values of row ``item_key`` while an edit's guards hold and this caller reads it whole; None otherwise.
+
+    The guards hold while they equal the collection's container hash and the row's version, the edit's first
+    checks (``record_inputs.update``). Two reads on a primary or a unique key, whatever the collection's size.
+    """
+    with writer.read_collection(manifest) as current:
+        cid = current.collection_id
+        container = writer.connection.execute(
+            "SELECT generation,audit_head FROM collections WHERE collection_id=?", (cid,)).fetchone()
+        if container is None or tokens.container_hash(cid, *container) != expected_container_hash:
+            return None
+        row = whole_row_at(writer, cid, item_key, expected_item_version)
+        return None if row is None else json.loads(row["values_json"])

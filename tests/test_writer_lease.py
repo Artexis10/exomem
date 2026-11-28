@@ -1034,6 +1034,61 @@ def test_single_host_status_read_reconnects_once_when_the_coordinator_dropped_th
     assert len(connections) == 2
 
 
+@pytest.mark.parametrize("topology", ["single-host", "multi-host"])
+def test_passive_coordinator_read_stops_while_the_response_is_still_arriving(topology):
+    """A responding socket can keep a regular body read alive after the busy-check decision deadline."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from exomem import request_budget
+
+    started = threading.Event()
+    finish = threading.Event()
+    final_byte_started = threading.Event()
+    drip_interval = 0.03
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b'{"holder":null,"expires_at":null,"fencing_token":1}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            started.set()
+            try:
+                for offset, byte in enumerate(body):
+                    if finish.wait(drip_interval):
+                        return
+                    if offset == len(body) - 1:
+                        final_byte_started.set()
+                    self.wfile.write(bytes([byte]))
+            except OSError:
+                pass
+
+        def log_message(self, *_args):
+            pass
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server, ThreadPoolExecutor(max_workers=2) as pool:
+        serve = pool.submit(server.serve_forever, poll_interval=0.05)
+        client = writer_lease_module.LeaseCoordinatorClient(LeaseConfig(
+            url=f"http://127.0.0.1:{server.server_port}", vault_id="main", replica_id="local", topology=topology))
+
+        def lookup():
+            check = request_budget.ReadCheckpoint(request_budget.RequestBudget(seconds=0.25), bound_store_reads=True)
+            with request_budget.checking(check):
+                return client.status()
+
+        try:
+            passive_read = pool.submit(lookup)
+            assert started.wait(timeout=_OBSERVE_SECONDS)
+            with pytest.raises(OpError) as refused:
+                passive_read.result(timeout=_OBSERVE_SECONDS)
+            assert refused.value.code == "WRITER_COORDINATOR_UNAVAILABLE"
+            assert not final_byte_started.is_set()
+        finally:
+            finish.set()
+            server.shutdown()
+            serve.result(timeout=_OBSERVE_SECONDS)
+
+
 def test_readiness_measures_each_status_over_one_kept_coordinator_connection(tmp_path: Path):
     """Fresh readiness threads discarded the client's thread-local connection after every poll."""
     from exomem import runtime_readiness

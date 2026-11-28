@@ -13,9 +13,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
 from . import duplicates, frontmatter_update, preserve, sensitivity_classes
-from .held_fs import vault_name_key
 from .preserve import DuplicateArtifact
-from .vault import kb_root
+from .vault import folder_lookalike_key, kb_root
 
 Family = tuple[str, str]
 
@@ -29,7 +28,8 @@ class EvidenceLookup:
 
 
 def same_family(left: Family, right: Family) -> bool:
-    return tuple(map(vault_name_key, left)) == tuple(map(vault_name_key, right))
+    # Folder identity, as writes steer it: `garden_tools` and `garden-tools` are one family.
+    return tuple(map(folder_lookalike_key, left)) == tuple(map(folder_lookalike_key, right))
 
 
 def folder_family(vault_root: Path, rel: str) -> Family | None:

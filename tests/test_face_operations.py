@@ -79,7 +79,7 @@ def test_an_agent_asking_to_turn_faces_on_gets_the_disclosure_and_faces_stay_off
     """Catches biometric processing enabled by an agent call that no person confirmed."""
     reply = doors("manage_memory", "faces.set", {"state": "on"})
 
-    assert "exomem faces on" in reply["outcome"], reply
+    assert "evermatter faces on" in reply["outcome"], reply
     assert "face vector" in reply["disclosure"]
     assert not face_store.enabled(vault)
     assert not face_store.store_dir(vault).exists()

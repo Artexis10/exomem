@@ -52,6 +52,18 @@ class DetachedResume:
     error: Exception | None = None
 
 
+def bind_arguments(signature, *args, **kwargs):
+    """Bind the writer's own defaults and validate its arguments before reading a candidate."""
+    bound = signature.bind(*args, **kwargs)
+    bound.apply_defaults()
+    arguments = dict(bound.arguments)
+    arguments.pop("self", None)
+    collection = arguments.pop("collection")
+    records._validate_why(arguments["why"])
+    records._validate_hold(arguments["hold"])
+    return collection, arguments
+
+
 def from_snapshot(writer, name, collection, arguments):
     """Read a candidate in the controller's passive snapshot; return no live resource."""
     action = "append" if name == "append_record" else arguments["operation"]
@@ -236,7 +248,7 @@ def update(writer, row, manifest, declared, arguments):
             if (not changes or set(changes) - planning.TRIAGE_FIELDS
                     or any(value is None and name not in {"area", "parent"} for name, value in changes.items())):
                 raise collections.CollectionError("INVALID_PLAN_ARGUMENTS", "triage transition is invalid")
-            if old_values["lifecycle"] != "active" or old_values["kind"] == "area":
+            if not planning.triage_eligible(old_values):
                 raise collections.CollectionError("INVALID_PLAN", "triage requires an active deliverable plan")
         changes, deleted = planning._normalize_changes(manifest, changes)
         delete_fields = tuple(set(delete_fields) | set(deleted))

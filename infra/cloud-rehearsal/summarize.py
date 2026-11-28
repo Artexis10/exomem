@@ -97,6 +97,9 @@ def large_import(report: dict) -> None:
             print(f"- **stage {stage} failed:** {(record.get('failure') or {}).get('message', '')[:600]}")
     for finding in run.get("findings", []):
         print(f"- **finding** in {finding.get('phase')}: {finding.get('message', '')[:600]}")
+    if run.get("hang_evidence"):
+        # Who held the cell's write boundary when the deadline ended a call; the report holds the rest.
+        print(f"- **cell at the deadline** (write boundary): {json.dumps(run['hang_evidence'].get('boundary'), default=str)[:600]}")
     for problem in (run.get("volume") or {}).get("problems", []):
         print(f"- **volume:** {problem}")
     print("\n| folder | criterion | passed | problems |\n|---|---|---|---|")

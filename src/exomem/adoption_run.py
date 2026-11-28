@@ -1710,7 +1710,7 @@ def _refuse_outside_vault(root: Path, path: str) -> None:
     raw = path or ""
     route = (
         "start scans folders inside the vault; stage a folder elsewhere with "
-        "`exomem import <folder>`, then start on the path it prints"
+        "`evermatter import <folder>`, then start on the path it prints"
     )
     # Both spellings, whatever the host: a drive letter or UNC share is absolute on Windows
     # and an ordinary relative name on POSIX, and either one means "not a vault path".

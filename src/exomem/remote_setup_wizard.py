@@ -203,7 +203,7 @@ def render_oauth_fields(base_url: str) -> str:
         "Create a GitHub OAuth App — https://github.com/settings/developers",
         "  → OAuth Apps → New OAuth App — with these EXACT fields:",
         "",
-        "    Application name             exomem",
+        "    Application name             Evermatter",
         f"    Homepage URL                 {base_url}",
         f"    Authorization callback URL   {callback_url(base_url)}",
         "",
@@ -292,7 +292,7 @@ def run_remote_setup(
             print_fn(f"  {name:<12} {status}")
         return 1 if any("[failed" in s for _, s in steps) else 0
 
-    print_fn("exomem setup --remote")
+    print_fn("evermatter setup --remote")
     print_fn("")
 
     from .dotenv_guard import dotenv_load_guard
@@ -569,8 +569,8 @@ def run_remote_setup(
         report("doctor", "[failed: remote preflight reported failures]")
         print_fn("")
         print_fn(
-            "Fix the FAIL rows above and re-run `exomem setup --remote`. The most "
-            "common causes: the server isn't running (`exomem --transport http`), or "
+            "Fix the FAIL rows above and re-run `evermatter setup --remote`. The most "
+            "common causes: the server isn't running (`evermatter --transport http`), or "
             "the tunnel isn't up / forwarding to 127.0.0.1:8765 yet."
         )
         return finish()
@@ -614,7 +614,7 @@ def run_remote_setup(
 
 def remote_setup_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem setup --remote",
+        prog="evermatter setup --remote",
         description=(
             "Guided remote-connector setup: pick a tunnel, generate a stable JWT "
             "signing key, write/patch .env (validating EVERMATTER_BASE_URL), print the "

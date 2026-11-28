@@ -31,7 +31,7 @@ if [[ -n "$SERVICE_PY" && -x "$SERVICE_PY" ]]; then
     VAULT="$(exomem_dotenv_value "$REPO_ROOT" EXOMEM_VAULT_PATH)"
     [[ -z "$VAULT" ]] && VAULT="$(exomem_process_setting EXOMEM_VAULT_PATH)"
     [[ -n "$VAULT" ]] && DOCTOR_ARGS+=(--vault "$VAULT")
-    echo "Preflight: exomem doctor --profile $PROFILE..."
+    echo "Preflight: evermatter doctor --profile $PROFILE..."
     if ! "$SERVICE_PY" "${DOCTOR_ARGS[@]}"; then
         echo "Doctor preflight failed for profile '$PROFILE'; service NOT restarted." >&2
         echo "Fix the findings, or set EVERMATTER_PROFILE to the profile this box runs." >&2

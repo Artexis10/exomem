@@ -252,6 +252,17 @@ class LocalLink:
 _LINK_PARSER = MarkdownIt("commonmark")
 
 
+def block_headings(text: str) -> tuple[tuple[int, int, str], ...]:
+    """The offset, depth and inline text of each top-level CommonMark heading."""
+    offsets, _ = line_bounds(text)
+    tokens = _LINK_PARSER.parse(text)
+    return tuple(
+        (offsets[token.map[0]], int(token.tag[1:]), tokens[index + 1].content)
+        for index, token in enumerate(tokens)
+        if token.type == "heading_open" and token.level == 0 and token.map is not None
+    )
+
+
 def inline_code(text: str) -> tuple[str, ...]:
     """The text of each inline code span in `text`, in source order, as CommonMark reads it."""
     if "`" not in text:

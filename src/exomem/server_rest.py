@@ -35,6 +35,7 @@ from . import commands as commands_module
 from .command_surface import canonical_request_id, compact_input_schema
 from .governance import authorization_request, authorization_transport, projection_timing
 from .server_transfer import TransferConfig
+from .speech_tracks import MAX_TRACKS
 
 _log = logging.getLogger(__name__)
 
@@ -102,6 +103,7 @@ _OPENAPI_TYPES = {
                 "mime_type": {"type": "string", "maxLength": 255},
                 "file_name": {"type": "string"},
                 "diarize": {"type": "boolean"},
+                "tracks": {"type": "array", "maxItems": MAX_TRACKS, "items": {"type": "object"}},
             },
             "required": ["download_url", "file_id"],
         },
@@ -703,7 +705,7 @@ def register_rest_facade(
         return JSONResponse(
             {
                 "openapi": "3.1.0",
-                "info": {"title": "exomem personal REST facade", "version": "1.0.0"},
+                "info": {"title": "Evermatter personal REST facade", "version": "1.0.0"},
                 "components": {
                     "securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}},
                     "schemas": {

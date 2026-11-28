@@ -1271,6 +1271,8 @@ def summary_create(root, arguments):
     path, text = arguments.get("manifest_path"), arguments.get("manifest_text")
     if not isinstance(path, str) or not isinstance(text, str):
         return False
+    # A manifest that names no id gets one at create, so classify it as create will see it.
+    text = collections.assign_missing_id(text)[0]
     try:
         return collections.parse_manifest_bytes(Path(root), path, text.encode()).view_mode == "summary"
     except Exception:  # noqa: BLE001 - classification only
@@ -1348,7 +1350,7 @@ def served(root):
 
 
 def _server(root):
-    with _SERVERS_LOCK:
+    with request_budget.store_read_lock(_SERVERS_LOCK):
         server, manager = _SERVERS.get(root), _serving_manager(root)
         if server is None and manager is not None:
             server = _SERVERS[root] = StoreServer(root, manager)
@@ -1742,10 +1744,11 @@ class StoreServer:
             # A service's runtime that is not yet reporting resolves its takeover in a checkout on the store thread.
             if runtime is not None and not (runtime._bootstrap and not runtime.reporting_ready(manager._fencing_token)):
                 capability.require_not_disabled(self.root)
-                scope.enter_context(manager._collection_store_checkout())
+                scope.enter_context(manager._collection_store_checkout(
+                    wait_for_publication=request_budget.store_read_checkpoint() is None))
                 # A rollback between the first check and borrowing must also refuse this read, as in ``checkout``.
                 capability.require_not_disabled(self.root)
-                with manager._lock:
+                with request_budget.store_read_lock(manager._lock):
                     token = manager._fencing_token
                 handle = runtime._handle
                 if token is None or handle is None or handle._closed or runtime._writer_token != token:

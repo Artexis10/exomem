@@ -50,6 +50,7 @@ from . import (
     semantic_units,
     source_custody,
     structured_filters,
+    unit_rows,
     view_lag,
 )
 from . import ranking_config as _ranking_config
@@ -6063,16 +6064,17 @@ def _managed_page_metadata(
                         if include_occurrences:
                             selected_by_key = {unit.occurrence_key: unit for unit in parent.structure.units}
                             values = []
-                            for order, raw in enumerate(semantic_units.candidate_units(state.candidates)):
-                                key = semantic_units.occurrence_key(raw.form, raw.span, raw.source_hash)
+                            candidates = semantic_units.candidate_units(state.candidates)
+                            for raw, built in zip(candidates, unit_rows.build(rel, state, candidates=candidates), strict=True):
+                                key = built.occurrence_key
                                 selected_unit = selected_by_key.get(key)
                                 if selected_unit is None or selected_unit.unit_ref is None:
                                     continue
                                 row = (
-                                    key, rel, state.parent_ref, state.parent_generation, state.parent_source_hash,
-                                    state.parser_version, raw.form, raw.category_raw, raw.category_key, raw.content,
-                                    json.dumps(raw.tags), raw.context, raw.source_hash, raw.anchor,
-                                    raw.line, raw.end_line, order,
+                                    key, built.path, built.parent_ref, built.parent_generation, built.parent_source_hash,
+                                    built.parser_version, built.form, built.category_raw, built.category_key, built.content,
+                                    built.tags_json, built.context, built.unit_source_hash, built.anchor,
+                                    built.line, built.end_line, built.ordinal,
                                     # `lexstore._OCCURRENCE_COLUMNS` order; the stored page date the index keeps.
                                     page.updated or lexstore.UNDATED,
                                 )

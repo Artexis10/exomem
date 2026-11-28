@@ -200,8 +200,30 @@ def test_a_dated_observation_with_no_kind_is_kept_as_a_record(build, vault) -> N
     assert (stored["category"], stored["as_of"]) == ("operating_constraint", "2026-11-25"), units
     text = _vault_text(vault, "Jitter policy")
     # A record is the neutral kind: it carries no assertion trait, so it takes no inference mode.
-    assert "## Record" in text and "- as_of: 2026-11-25" in text
+    assert text.index("\n## Observations\n") < text.index("\n### Record\n")
+    assert "- as_of: 2026-11-25" in text
     assert "- until: 2027-01-31" in text and "Retries stay under five" in text
+
+
+def test_dated_observation_reply_reports_end_placement(build, vault) -> None:
+    async def scenario(client):
+        await _new_note(client, "Jitter policy")
+        added = await _call(client, "add_observation", {
+            "note": "Jitter policy", "category": "finding", "as_of": "2026-11-25",
+            "text": "Retries stay under five.",
+        })
+        assert "error" not in added, added
+        return await _call(client, "edit_note", {
+            "note": "Jitter policy", "why": "Include the rollout", "action": "edit_observation",
+            "observation": added["unit_id"], "category": "finding",
+            "text": "Retries stay under five.\n\n### Rollout details\n\nRead the run log.",
+        })
+
+    edited = _session(build(), scenario)
+
+    assert "The observation is at the end of the note." in edited["user_summary"], edited
+    text = _vault_text(vault, "Jitter policy")
+    assert text.endswith("### Rollout details\n\nRead the run log.\n"), edited
 
 
 def test_a_dated_observation_with_a_verdict_and_no_kind_is_refused_without_offering_to_drop_the_date(
@@ -226,7 +248,7 @@ def test_a_dated_observation_with_a_verdict_and_no_kind_is_refused_without_offer
     assert "Retries stay under five" not in _vault_text(vault, "Jitter policy")
 
 
-def test_dating_a_compact_observation_moves_it_to_a_dated_record_block_at_the_end_of_the_page(
+def test_dating_a_compact_observation_keeps_it_in_observations(
     build, vault
 ) -> None:
     async def scenario(client):
@@ -253,8 +275,7 @@ def test_dating_a_compact_observation_moves_it_to_a_dated_record_block_at_the_en
     assert [unit["id"] for unit in dated] == [edited["unit_id"]], units
     text = _vault_text(vault, "Jitter policy")
     assert text.count("First wording") == 1 and "- [finding] First wording" not in text, text
-    # The compact line leaves the observation list, and the dated block closes the page body.
-    assert text.index("Original wording") < text.index("## Record"), text
+    assert text.index("\n## Observations\n") < text.index("Original wording") < text.index("\n### Record\n"), text
     assert text.rstrip().endswith("- as_of: 2026-11-25\n\nFirst wording"), text
 
 
@@ -449,17 +470,22 @@ def test_an_agent_adds_queries_and_edits_a_record_by_its_id(build, vault) -> Non
             "manifest_text": record_fixtures.LEDGER_MANIFEST_TEXT, "why": "Track published entries", "scaffold": True}})
         added = await _call(client, "add_record", {
             "collection": "Publications ledger", "item": record_fixtures.ledger_item(), "why": "Log the first entry"})
-        rows = await _call(client, "query_records", {"collection": "Publications ledger", "columns": ["slug"]})
+        query = {"collection": "Publications ledger", "columns": ["slug"]}
+        rows = await _call(client, "query_records", query)
+        export = await _call(client, "query_records", {**query, "options": {"output_format": "json"}})
         row = rows["rows"][0]
         edit = {"collection": "Publications ledger", "record": row.get("id"), "why": "Corrected count"}
         edited = await _call(client, "edit_record", {**edit, "changes": {"word_count": 50}})
         stale = await _call(client, "edit_record", {**edit, "changes": {"word_count": 60}})
-        return created, added, row, edited, stale
+        return created, added, rows, export, edited, stale
 
-    created, added, row, edited, stale = _session(build(), scenario)
+    created, added, rows, export, edited, stale = _session(build(), scenario)
 
     assert "error" not in created and "error" not in added and "error" not in edited, (created, added, edited)
-    assert row["slug"] == "quarterly-note" and row["id"]
+    assert rows["rows"][0]["slug"] == "quarterly-note" and rows["rows"][0]["id"]
+    assert "rendered" not in rows, rows
+    assert {key: value for key, value in export.items() if key != "rendered"} == rows
+    assert "quarterly-note" in export["rendered"]
     assert stale.get("error", {}).get("code") == "STALE_ITEM", stale
     items = _item_files(vault, "Knowledge Base/Records/Publications")
     assert "word_count: 50" in items and "word_count: 60" not in items

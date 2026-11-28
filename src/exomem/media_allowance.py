@@ -155,11 +155,24 @@ class AllowanceDecision:
     code: str | None
 
 
+def configured(allowance_bytes: object) -> int | None:
+    """The allowance that a store policy sets, or None when it sets none or no byte count."""
+    return allowance_bytes if type(allowance_bytes) is int and allowance_bytes >= 0 else None
+
+
+def unset_decision() -> AllowanceDecision:
+    """The decision under a policy that sets no allowance.
+
+    It is unknown whatever the owner census counts, so a caller with no census in hand reads none.
+    """
+    return decide(None, None, None, datetime.now(UTC).isoformat())
+
+
 def decide(
     used_bytes: int | None, projected: int | None, allowance_bytes: object, observed_at: str,
 ) -> AllowanceDecision:
     """Judge a projected total against the allowance; an unknown total or allowance is unknown, never 0."""
-    allowance = allowance_bytes if type(allowance_bytes) is int and allowance_bytes >= 0 else None
+    allowance = configured(allowance_bytes)
     code = None
     if allowance is None or projected is None:
         code = MEDIA_ALLOWANCE_UNKNOWN

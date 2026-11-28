@@ -489,10 +489,75 @@ it with the current path on the reference corpus.
   boundary; no connection survives into another request.
 
   Activation uses two optional selection phases: initial lexical evidence,
-  then resolution, carry and role queries after semantic evidence. Neither
-  phase holds a transaction across query encoding. Failed capture preserves
-  the existing optional lexical outcome. The compiler closes its selection
-  on every return and exception, before final evidence checks.
+  then resolution, carry and role queries after semantic evidence. In the
+  anchors packet neither phase holds a transaction across query encoding; the
+  maps packet holds one request view across both (below). Failed capture
+  preserves the existing optional lexical outcome. The compiler closes its
+  selection on every return and exception, before final evidence checks.
+
+  The maps packet holds one request read view. Exact reads pin the request's
+  lexical checkpoint and refuse a catalogue at any other state. A save that
+  another request publishes mid-activation therefore made the positions,
+  task-text and methods lanes answer stale, and the map lost what the request
+  had already read. `request_catalogue_view` opens a slot around the map's
+  compilation. The first bind at the request's checkpoint, or the bind in
+  `pin_lexical_checkpoint` at the checkpoint it pinned, captures one SQL
+  snapshot whose stored checkpoint has that state. A bind that finds another
+  state is recorded, and a second bind at that state captures nothing. Exact
+  reads borrow the snapshot only on a matching explicit checkpoint, and the
+  lexical selections read it without closing it. The request accounted for
+  the view's lag when it bound, so those selections report none: a later
+  publication is the view's age, not catalogue lag, and revokes no readiness.
+  The request closes the view after compilation, then dispatches any lag that
+  it showed. The final evidence checks run after it closes, on live state.
+  Lexical selections admit the view: inside each one it is the admitted
+  catalogue that the selection's reads use. Find never borrows it: find's
+  selections capture their own view.
+
+  The first bind runs at the start of the map's compilation, not at the
+  request's freshness snapshot. Binding at the snapshot would hold the reader
+  through the index warm wait, where it could make a repair's publish decline,
+  so a publication between the snapshot and the bind still makes the exact
+  reads stale. A catalogue that already trails the request's checkpoint, other
+  than by pages withheld from the reader, binds no view; that case is out of
+  scope here.
+
+  A foreground delta cannot replace the held view. The catalogue keeps only
+  each page's newest rows, so once a later save has published, no read of
+  the live catalogue can return the rows at the request's checkpoint.
+
+  A Source erasure fences the view. The view reads the Source retirement
+  generation before its snapshot pins, and a view with no readable
+  generation is not bound. The eraser advances the generation when it
+  starts and again after it drops the rows. Readiness rejects the view once
+  the generation has advanced, and a query that completes after an advance
+  answers stale; neither schedules a catalogue repair, because the eraser
+  drops the rows from the catalogue itself. So the fence retires every view
+  bound before the erasure started. A view bound after the start keeps the
+  guarantee reads had before it existed: every lane it serves checks what it
+  serves against the page's own bytes. Positions decide units from the
+  page's bytes, task leads project the page, units match its hash, and titles
+  come from the page cache, which rereads the file. Readers that borrow a
+  selection's connection, such as `units_of`, are not fenced; in the maps
+  packet they choose lenses or decide which pages a reader may not see, and
+  serve no text. Only the request-held view is fenced, and a
+  selection's own view keeps its behaviour, unreadable generation included.
+
+  The view binds only on a catalogue in WAL mode. There a held reader blocks
+  no writer: saves and publications proceed, but the WAL cannot checkpoint
+  past the snapshot while the view is held. `_connect_setup` keeps building
+  when a journal-hostile filesystem refuses WAL, and in rollback-journal mode
+  an open read transaction holds a SHARED lock, so every catalogue commit
+  would wait behind the view. A capture in that mode binds no view, and the
+  request reads as it did before the view existed. The view stays open until
+  compilation ends, which the request budget stops cooperatively, and no
+  view binds past that budget's deadline (50 seconds for an MCP call). The
+  activation log recorded whole activation requests of 14.0 and 35.8
+  seconds; these are request times, not compile times, and the compilation
+  is one part of each. While a view is
+  held, `rebuild_atomic` cannot fold the live WAL, so its publish declines
+  with `wal_busy`, and the repair worker keeps the declined pass for a later
+  flight, as it does for any other reader.
 
   Selection exit sends activation's lag repair through its existing deferred
   repair queue. Repair dispatch waits until the activation request ends, so
@@ -1203,7 +1268,12 @@ it, and the timing table keeps one row per stage:
 - **[Risk] A request session pins an old catalogue generation.** → Selection
   retains one catalogue transaction bound to the admitted checkpoints and
   closes it before model loading, encoding and reranking
-  (`keep-recall-available-during-pending-recovery`). An ordinary data
+  (`keep-recall-available-during-pending-recovery`). The maps packet's
+  request read view is the one exception: it stays open across the packet's
+  compilation, query encodes included, until compilation ends, which its
+  request budget stops cooperatively. It closes before final evidence checks
+  and binds only on a catalogue in WAL mode.
+  An ordinary data
   publication during the request leaves the selected rows, membership and
   statistics unchanged, and the response discloses the lag known at
   admission. An access-policy

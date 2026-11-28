@@ -15,6 +15,9 @@ from typing import Any, TypeVar
 
 T = TypeVar("T")
 
+# How long `run` waits for a command when its caller names no other limit.
+DEFAULT_TIMEOUT_SECONDS = 900
+
 
 class CommandFailed(RuntimeError):
     def __init__(self, command: Sequence[str], returncode: int, stdout: str, stderr: str) -> None:
@@ -34,7 +37,7 @@ def run(
     check: bool = True,
     cwd: Path | None = None,
     env: Mapping[str, str] | None = None,
-    timeout: float | None = 900,
+    timeout: float | None = DEFAULT_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         list(command),

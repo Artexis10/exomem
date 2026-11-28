@@ -86,7 +86,7 @@ Apple Silicon MPS/MLX.
 The image sets its defaults under `EVERMATTER_` names, such as `EVERMATTER_LOG_DIR`.
 To override one with `-e` or in `.env`, use the same `EVERMATTER_` name: an
 `EXOMEM_` override gives the setting two names, so the server warns at every start
-and the credential commands, such as `exomem auth revoke`, refuse to run.
+and the credential commands, such as `evermatter auth revoke`, refuse to run.
 
 ## Remote compose deployment
 
@@ -155,7 +155,7 @@ documented in [deployment.md](deployment.md).
 5. Verify:
 
    ```bash
-   docker compose exec exomem exomem doctor --profile remote
+   docker compose exec exomem evermatter doctor --profile remote
    ```
 
 `docker compose ps` reports `exomem` healthy once

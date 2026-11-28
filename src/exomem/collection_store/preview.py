@@ -412,6 +412,11 @@ def note_checked_hash(path, digest):
 class _DeadlinePassed(Exception):
     """The request's store read reached its completion deadline before it decided every page."""
 
+    def __init__(self, answers):
+        super().__init__()
+        #: The pages decided before the deadline, answered as their own calls would be.
+        self.answers = answers
+
 
 class _Decide:
     """The work of one store request: each page asked, answered as its own call would be."""
@@ -432,7 +437,7 @@ class _Decide:
             for path, (args, kwargs) in self.calls.items():
                 request_budget.checkpoint()
                 if self.deadline is not None and time.monotonic() >= self.deadline:
-                    raise _DeadlinePassed()
+                    raise _DeadlinePassed(answers)
                 try:
                     kind, payload = "value", self.read(self.vault_root, *args, **kwargs)
                 except (CollectionStoreError, OpError) as error:
@@ -464,8 +469,13 @@ def _request(server, decisions, work):
     try:
         try:
             return server.read_beside(work, initial=None, progress=False)
-        except _DeadlinePassed:
-            raise server.missed_read() from None
+        except _DeadlinePassed as stop:
+            # The pages decided before the deadline keep their answers. Every other page is withheld as one missed
+            # read, and the command asks this store no more.
+            missed = server.missed_read()
+            if decisions is not None:
+                decisions.refusals.setdefault(server, missed)
+            return {**dict.fromkeys(work.calls, ("refused", missed, None)), **stop.answers}
     except (CollectionStoreError, OpError) as error:
         if decisions is not None:
             decisions.refusals.setdefault(server, error)
@@ -475,6 +485,9 @@ def _request(server, decisions, work):
 def _replay(answer):
     """What that page's own call would have returned or raised."""
     kind, payload, _checked = answer
+    if kind == "refused":
+        # A refusal can stand for many pages: clear its traceback so it does not grow per page.
+        raise payload.with_traceback(None)
     if kind != "value":
         raise payload
     return payload
@@ -494,11 +507,13 @@ def _decide_through_store(server, read, batch, vault_root, path, args, kwargs):
     from .runtime import projection_route
 
     decisions = published_admission.request_decisions()
-    if decisions is not None and server in decisions.refusals:
-        # One refusal object raised for every page: clear its traceback so it does not grow per page.
-        raise decisions.refusals[server].with_traceback(None)
+    refused = None if decisions is None else decisions.refusals.get(server)
 
     def alone():
+        # Read now: a batch this call just made may have been refused at its deadline.
+        if decisions is not None and (current := decisions.refusals.get(server)) is not None:
+            # One refusal object raised for every page: clear its traceback so it does not grow per page.
+            raise current.with_traceback(None)
         return _replay(_request(server, decisions, _Decide(read, vault_root, {path: (args, kwargs)}))[path])
 
     if (decisions is None or batch is None or len(args) != 1 or path not in decisions.paths
@@ -512,6 +527,9 @@ def _decide_through_store(server, read, batch, vault_root, path, args, kwargs):
     effects = {keyword: shared.pop(keyword) for keyword in batch.effects if keyword in shared}
     # The ambient principal is an input of the answer wherever a call leaves its own out.
     answers = decisions.answers((read, vault_root, effective_principal(), shared))
+    if path not in answers and refused is not None:
+        # A page decided before the store was refused keeps its answer; any other asks this store no more.
+        raise refused.with_traceback(None)
     if path not in answers:
         calls = {path: ((path,), {**shared, **effects})}
         for other in decisions.pending():
@@ -738,13 +756,16 @@ def dispatch(
         if server is not None and server.root == Path(vault_root).resolve():
             return source_dependencies.dispatch_request(server, profile, action, values)
         return False, None
+    # nosemgrep: ep-word-membership -- These are the facade actions bound to the two row writer methods.
+    if action in {"append", "add", "update", "triage"}:
+        save = _prepare_row_save(vault_root, binding, profile, action, values)
+        if save is None:
+            return False, None
+        _writer, method, collection, args = save
+        return True, _mutate(vault_root, method, collection, **args)
     writer = binding[1]
     prove = _prover(vault_root, writer, binding)
-    if binding[2]:
-        from .capability import require_records_summary_route
-
-        require_records_summary_route(vault_root, writer, action, values, prove=prove)
-    args = {name: value for name, value in values.items() if value is not None}
+    args = _dispatch_arguments(vault_root, binding, action, values, prove)
 
     if action == "describe" and profile == "records":
         from ..query_engine import route
@@ -879,17 +900,8 @@ def dispatch(
     collection = args.pop("collection")
     if profile == "planning" and "plan_id" in args:
         args["item_key"] = args.pop("plan_id")
-    if action in {"append", "add"}:
-        return True, _mutate(vault_root, writer.append_record, collection, **args)
     if action == "bulk_upsert" and profile == "records":
         return True, _mutate(vault_root, writer.bulk_upsert_records, collection, **args)
-    if action == "triage":
-        args["changes"] = args.pop("transition")
-        args["operation"] = "triage"
-    if action in {"update", "triage"}:
-        args.setdefault("changes", {})
-        args["refresh_presentation"] = args.get("refresh_presentation") is True
-        return True, _mutate(vault_root, writer.update_record, collection, **args)
     if action == "revise":
         if binding[2] and isinstance(args.get("manifest_text"), str):
             from .admission import require_summary_manifest
@@ -919,3 +931,57 @@ def dispatch(
     raise collections.CollectionError(
         "COLLECTION_STORE_PREVIEW_UNSUPPORTED", "this operation belongs to a later store slice"
     )
+
+
+def _dispatch_arguments(vault_root, binding, action, values, prove, *, released_manifest=None):
+    if binding[2]:
+        from .capability import require_records_summary_route
+
+        require_records_summary_route(vault_root, binding[1], action, values, prove=prove,
+                                      released_manifest=released_manifest)
+    return {name: value for name, value in values.items() if value is not None}
+
+
+def _prepare_row_save(vault_root, binding, profile, action, values, *, released_manifest=None):
+    """Check the route and select its writer call without invoking it."""
+    writer = binding[1]
+    prove = _prover(vault_root, writer, binding)
+    args = _dispatch_arguments(vault_root, binding, action, values, prove, released_manifest=released_manifest)
+    selector = args.get("collection", args.get("manifest_path"))
+    if prove().marker is not None and (selector is None or selected_writer(vault_root, selector, prove=prove) is None):
+        return None
+    writer._require_operation_context()
+    writer._facade_profile = profile
+    collection = args.pop("collection")
+    if profile == "planning" and "plan_id" in args:
+        args["item_key"] = args.pop("plan_id")
+    if action == "append" or action == "add":
+        return writer, writer.append_record, collection, args
+    if action == "triage":
+        args["changes"] = args.pop("transition")
+        args["operation"] = "triage"
+    args.setdefault("changes", {})
+    args["refresh_presentation"] = args.get("refresh_presentation") is True
+    return writer, writer.update_record, collection, args
+
+
+def row_save_refusal(vault_root, profile, action, values, *, released_manifest) -> collections.CollectionError | None:
+    """Read the first refusal of a row save after resolving its manifest in the same snapshot."""
+    from inspect import signature
+
+    from . import record_inputs
+
+    binding = _BOUND.get()
+    if binding is None or not _bound_to(binding, vault_root):
+        return None
+    save = _prepare_row_save(vault_root, binding, profile, action, values, released_manifest=released_manifest)
+    if save is None:
+        return None
+    writer, method, collection, args = save
+    try:
+        collection, arguments = record_inputs.bind_arguments(signature(method), collection, **args)
+        with writer.read_snapshot(mutation=True):
+            candidate, replay = record_inputs.from_snapshot(writer, method.__name__, collection, arguments)
+        return None if replay is not None else candidate.error
+    except collections.CollectionError as error:
+        return error

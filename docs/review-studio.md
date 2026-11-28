@@ -13,11 +13,11 @@ CDN, Node runtime, frontend daemon, or separate database.
 Start the HTTP service as usual, then print the Studio URL:
 
 ```sh
-exomem --transport http
-exomem studio
+evermatter --transport http
+evermatter studio
 ```
 
-The default is `http://127.0.0.1:8765/studio/`. `exomem studio --open` opts into
+The default is `http://127.0.0.1:8765/studio/`. `evermatter studio --open` opts into
 opening the system browser; the plain command only prints the URL and is safe on
 headless hosts. `EVERMATTER_BASE_URL` or `--url https://kb.example.test` selects a
 remote origin.

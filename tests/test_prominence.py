@@ -512,7 +512,7 @@ EXPECTED_HOOK_CADENCE = {
     "reads": "operator environment, then this client machine's exomem configuration file",
     "saved_preference_reaches_hooks": False,
     "change_with": (
-        "exomem prominence <level> on the client machine "
+        "evermatter prominence <level> on the client machine "
         "(changes hook cadence only; a saved preference still decides what is served)"
     ),
 }

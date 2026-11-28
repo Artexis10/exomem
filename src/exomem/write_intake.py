@@ -36,7 +36,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -146,25 +146,29 @@ def _report_json(value: Any) -> str:
 
 
 @contextmanager
-def _store(vault_root: Path, *, mode: StoreMode) -> Iterator[sqlite3.Connection]:
+def _store(
+    vault_root: Path, *, mode: StoreMode, deadline: float | None = None
+) -> Iterator[sqlite3.Connection]:
     """Open the intake store under the private-state ceremony.
 
     ``create`` makes the store and may change the vault's private identities, so it advances
     the identity generation; only the first acceptance on a vault needs it. ``write`` opens
     the existing store read-write and ``read`` opens it read-only; neither changes an identity,
-    and both raise ``FileNotFoundError`` when no store exists yet.
+    and both raise ``FileNotFoundError`` when no store exists yet. A ``deadline`` (a
+    ``time.monotonic()`` value) bounds the waits for the identity coordination and for SQLite's
+    locks: a wait that would pass it raises instead.
     """
     root = Path(vault_root).resolve()
     path = store_path(root)
     create = mode == "create"
     with reserved_paths._subsystem_authority_scope(OWNER):  # noqa: SLF001
         with reserved_paths._identity_coordination_scope(  # noqa: SLF001
-            root, descriptor_ids=(STORE_ID,), identity_may_change=create
+            root, descriptor_ids=(STORE_ID,), identity_may_change=create, deadline=deadline
         ):
             with reserved_paths._sqlite_owner_target_scope(  # noqa: SLF001
                 root, path, STORE_ID, create=create
             ) as retained:
-                conn = _open(root, path, retained, mode)
+                conn = _open(root, path, retained, mode, deadline=deadline)
     try:
         yield conn
     finally:
@@ -183,22 +187,25 @@ def _write(vault_root: Path, *, create: bool = False) -> Iterator[sqlite3.Connec
             raise
 
 
-def _open(root: Path, path: Path, retained: Path, mode: StoreMode) -> sqlite3.Connection:
+def _open(
+    root: Path, path: Path, retained: Path, mode: StoreMode, *, deadline: float | None = None
+) -> sqlite3.Connection:
+    wait = 5.0 if deadline is None else min(5.0, max(0.0, deadline - time.monotonic()))
     if mode == "create":
         retained.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(retained, timeout=5.0, check_same_thread=False)
+        conn = sqlite3.connect(retained, timeout=wait, check_same_thread=False)
     else:
         if not retained.exists():
             raise FileNotFoundError(retained)
         # `mode=rw` opens the existing file and never creates one.
         # A replay's connection is used by the commit gate on the store thread, under the replay's lock.
         conn = sqlite3.connect(
-            f"{retained.as_uri()}?mode={'rw' if mode == 'write' else 'ro'}", uri=True, timeout=5.0,
+            f"{retained.as_uri()}?mode={'rw' if mode == 'write' else 'ro'}", uri=True, timeout=wait,
             check_same_thread=False,
         )
     try:
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute(f"PRAGMA busy_timeout={int(wait * 1000)}")
         if mode != "read":
             # A queued receipt promises custody: it must survive a power loss, not only a kill.
             conn.execute("PRAGMA synchronous=FULL")
@@ -212,7 +219,8 @@ def _open(root: Path, path: Path, retained: Path, mode: StoreMode) -> sqlite3.Co
                 "state TEXT NOT NULL, owner TEXT, attempts INTEGER NOT NULL DEFAULT 0, "
                 "accepted_at REAL NOT NULL, updated_at REAL NOT NULL, next_attempt_at REAL NOT NULL, "
                 "error_code TEXT, error TEXT, outcome TEXT, finished_at REAL, "
-                "generation INTEGER NOT NULL DEFAULT 0, commit_reached INTEGER NOT NULL DEFAULT 0, named_at REAL)"
+                "generation INTEGER NOT NULL DEFAULT 0, commit_reached INTEGER NOT NULL DEFAULT 0, named_at REAL, "
+                f"{_DECLARATION_COLUMN})"
             )
             conn.execute("CREATE INDEX IF NOT EXISTS intake_state ON intake(state, seq)")
             # One open save per original identity: a resend while it is open gets its receipt.
@@ -220,12 +228,59 @@ def _open(root: Path, path: Path, retained: Path, mode: StoreMode) -> sqlite3.Co
                 "CREATE UNIQUE INDEX IF NOT EXISTS intake_open_origin ON intake(origin) "
                 "WHERE origin IS NOT NULL AND state IN ('queued', 'applying')"
             )
+            _add_declaration_marker(conn)
             conn.commit()
         reserved_paths._publish_sqlite_owner_family(root, path, STORE_ID, conn)  # noqa: SLF001
     except BaseException:
         conn.close()
         raise
     return conn
+
+
+def may_change_declaration(command: Any, arguments: Any) -> bool:
+    """Whether a queued save of `command` with these JSON `arguments` may change a declaration before a later save
+    replays. It is decided once, when the save is accepted, and kept in `declaration_change`, because a replay
+    drops the arguments.
+
+    A command that declares `sets_any_frontmatter_field` may, whichever page it names: only its own resolution,
+    when it applies, decides which page that is. A command of `operation_entries.manifest_text_commands` may when
+    it carries a `MANIFEST_TEXT_FIELD` other than null; MCP stores a field the caller left unset as null. Arguments
+    that are not an object may too.
+    """
+    from . import operation_entries
+
+    if command.sets_any_frontmatter_field:
+        return True
+    if command.name not in operation_entries.manifest_text_commands():
+        return False
+    return not isinstance(arguments, Mapping) or arguments.get(operation_entries.MANIFEST_TEXT_FIELD) is not None
+
+
+#: The column that keeps `may_change_declaration` for each save, one definition for a new store and an upgraded
+#: one. A writer that does not know the column, such as an earlier release after a rollback, leaves it NULL, and
+#: NULL counts as may change: only a 0 that an acceptance wrote says that a save cannot.
+_DECLARATION_COLUMN = "declaration_change INTEGER"
+def _add_declaration_marker(conn: sqlite3.Connection) -> None:
+    """Start the declaration marker with a single seek, in the caller's write transaction."""
+    present = conn.execute(
+        "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='intake_declaration_state'"
+    ).fetchone()
+    if present is not None:
+        return
+    if "declaration_change" not in {row[1] for row in conn.execute("PRAGMA table_info(intake)")}:
+        conn.execute(f"ALTER TABLE intake ADD COLUMN {_DECLARATION_COLUMN}")
+    conn.execute("CREATE TABLE intake_declaration_state ("
+                 "id INTEGER PRIMARY KEY CHECK(id=1), last_seq INTEGER NOT NULL)")
+    # A legacy save may change a declaration. The primary-key seek covers all legacy saves at once.
+    conn.execute("INSERT INTO intake_declaration_state VALUES (1, COALESCE((SELECT MAX(seq) FROM intake), 0))")
+    # Older writers run this trigger too. Their omitted column is NULL and must count as a possible change.
+    conn.execute("""
+        CREATE TRIGGER intake_declaration_on_insert AFTER INSERT ON intake
+        WHEN NEW.declaration_change IS NOT 0
+        BEGIN
+            UPDATE intake_declaration_state SET last_seq = MAX(last_seq, NEW.seq) WHERE id = 1;
+        END
+    """)
 
 
 # --------------------------------------------------------------------------- identity and eligibility
@@ -1107,6 +1162,12 @@ class Admission:
     #: The refusal that the arguments alone are certain to get. A save that would queue raises it
     #: instead, because a queued receipt for it would only fail later, at the replay.
     refusal: Exception | None = None
+    #: The same, for a refusal that needs a read of the vault's declarations. Only a save that is
+    #: about to queue runs it (`certain_refusal`), so a save that never meets contention reads nothing.
+    declared_refusal: Callable[[], Exception | None] | None = None
+    #: The call's arguments, whose own references the terminal filter leaves as sent.
+    arguments: Mapping[str, Any] = field(default_factory=dict)
+    _released: bool = field(default=False, init=False, repr=False)
 
     def run(self, call: Callable[[], Any]) -> Any:
         """Run the save, or queue it when the boundary stays busy.
@@ -1145,13 +1206,55 @@ class Admission:
             if in_flight:
                 self.drainer.end_accept(self.origin)
 
+    def certain_refusal(self) -> Exception | None:
+        """The refusal this save is certain to get, read once and only for a save about to queue.
+
+        It is raised in place of the call, outside `invoke_command`'s terminal filter, so it leaves through
+        that filter here, as the same refusal from the call does. An argument refusal quotes only the
+        caller's own arguments, so a filter fault still raises it, as before the declared check existed. A
+        declared refusal quotes the vault's own declaration, so one that the filter cannot release is
+        dropped: the save goes on as if none were known, and its own refusal comes from the call or the
+        replay.
+        """
+        if self.refusal is not None:
+            if not self._released:
+                self._released = True
+                self._filter(self.refusal)
+            return self.refusal
+        if self.declared_refusal is not None:
+            read, self.declared_refusal = self.declared_refusal, None
+            try:
+                declared = read()
+            except Exception:  # noqa: BLE001 - a declaration that cannot be read leaves the save queueable
+                log.debug("write intake could not read the declarations of a %s save", self.command.name,
+                          exc_info=True)
+                declared = None
+            if declared is not None and self._filter(declared):
+                self._released = True
+                self.refusal = declared
+        return self.refusal
+
+    def _filter(self, refusal: Exception) -> bool:
+        """Pass `refusal` through the terminal egress filter in place; False when the filter faults."""
+        from .governance import egress
+
+        try:
+            egress.postfilter_error(
+                self.command.name, refusal, self.drainer.vault_root, request_kwargs=self.arguments
+            )
+        except Exception:  # noqa: BLE001 - the caller decides what an unfiltered refusal does
+            log.warning("write intake could not filter the refusal of a %s save", self.command.name,
+                        exc_info=True)
+            return False
+        return True
+
     def _run_in_flight(self, call: Callable[[], Any], started: float, deadline: float) -> Any:
         try:
             backlog = self.drainer.has_backlog()
         except Exception:  # noqa: BLE001 - an intake fault must not stop an ordinary save
             log.warning("write intake could not read its queue", exc_info=True)
             backlog = False
-        if backlog and self.refusal is not None:
+        if backlog and self.certain_refusal() is not None:
             # Refused whether it runs after the queue or never: waiting would only delay the answer.
             raise self.refusal
         if backlog:
@@ -1169,7 +1272,7 @@ class Admission:
         except OpError as error:
             if error.code not in ACCEPTED_REFUSALS or error.details.get("committed") is not False:
                 raise
-            if self.refusal is not None:
+            if self.certain_refusal() is not None:
                 raise self.refusal from error
             try:
                 # The refusal's cause when it names one (a spent call budget, a moved auxiliary), so
@@ -1238,13 +1341,16 @@ class Admission:
             ).fetchone()
             if row is not None:
                 return _receipt(conn, row), None
+            # Only the create path runs the schema, so an existing store from before the marker gains it here.
+            _add_declaration_marker(conn)
             conn.execute(
                 "INSERT INTO intake (id, origin, origin_ttl, command, arguments, principal, surface, state, "
-                "accepted_at, updated_at, next_attempt_at, error_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "accepted_at, updated_at, next_attempt_at, error_code, declaration_change) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     intake_id, self.origin, self.origin_ttl, self.command.name, self.encoded,
                     _json(self.principal), _json(self.surface) if self.surface else None,
-                    QUEUED, now, now, now, reason,
+                    QUEUED, now, now, now, reason, int(may_change_declaration(self.command, self.arguments)),
                 ),
             )
             row = conn.execute("SELECT * FROM intake WHERE id = ?", (intake_id,)).fetchone()
@@ -1347,7 +1453,12 @@ def admission(command: Any, injected: tuple[Any, ...], kwargs: Mapping[str, Any]
     if drainer is None:
         return None
     from . import writer_lease
-    from .commands import busy_intake_applies, invocation_is_read_only, refusal_before_queueing
+    from .commands import (
+        busy_intake_applies,
+        declared_refusal_before_queueing,
+        invocation_is_read_only,
+        refusal_before_queueing,
+    )
     from .governance import principal as principal_module
     from .governance.egress import SelectorCoverageError
 
@@ -1395,6 +1506,8 @@ def admission(command: Any, injected: tuple[Any, ...], kwargs: Mapping[str, Any]
         origin=origin[0],
         origin_ttl=origin[1],
         refusal=refusal_before_queueing(command, jsonable),
+        declared_refusal=lambda: declared_refusal_before_queueing(command, jsonable, drainer.vault_root),
+        arguments=jsonable,
     )
 
 
@@ -1489,6 +1602,65 @@ def _summary_line(state_counts: Mapping[str, int]) -> str:
     queued = state_counts.get(QUEUED, 0) + state_counts.get(APPLYING, 0)
     failed = state_counts.get(FAILED, 0)
     return f"{queued} queued save(s) waiting, {failed} failed save(s) to review."
+
+
+def declaration_mark(vault_root: Path, *, seconds: float) -> int | None:
+    """The lowest `seq` that a save open now, or accepted from now on, holds; None where that is unknown.
+
+    A check that reads a declaration takes this mark before that read and, only once the read refuses, asks
+    `declaration_changed_since`. A save that has ended never reopens, AUTOINCREMENT never reuses a `seq`, and an
+    ended save stays a row until retention or dismissal removes it. So a change that commits between the two
+    reads comes from a save that was open at the mark or was accepted after it, each at or above the mark.
+
+    The mark is the first open save's `seq`, else one more than the last assigned `seq`. SQLite keeps that
+    number even when the save is deleted. The lowest `seq` of each open state is a seek on `intake_state`."""
+    row = _declaration_query(
+        vault_root, seconds,
+        "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'intake'), 0), "
+        "(SELECT MIN(seq) FROM intake WHERE state = ?), (SELECT MIN(seq) FROM intake WHERE state = ?)",
+        _OPEN_STATES, empty=(0, None, None),
+    )
+    if row is None:
+        return None
+    last, *first_open = row
+    return min((int(seq) for seq in first_open if seq is not None), default=int(last) + 1)
+
+
+def declaration_changed_since(vault_root: Path, marker: int, *, seconds: float) -> bool | None:
+    """Whether a save at or after `marker`, in whatever state it is now, may have changed a declaration; None
+    where that is unknown. Read the last possible change from one row. A deleted save can still count until
+    the first open save moves past it. A store that has not added the marker answers unknown."""
+    row = _declaration_query(
+        vault_root, seconds,
+        "SELECT last_seq >= ? FROM intake_declaration_state WHERE id = 1",
+        (marker,), empty=(0,),
+    )
+    return None if row is None else bool(row[0])
+
+
+def _declaration_query(
+    vault_root: Path, seconds: float, sql: str, parameters: Sequence[Any], *, empty: tuple[Any, ...]
+) -> tuple[Any, ...] | None:
+    """The one row that `sql` answers within `seconds`, `empty` where no save was ever queued, None where it is
+    unknown. The wait to open the store counts: the statement gets only the time that the open left, none at all
+    once it is spent, and an answer that arrives later is unknown too."""
+    if seconds <= 0:
+        return None
+    deadline = time.monotonic() + seconds
+    try:
+        with _store(vault_root, mode="read", deadline=deadline) as conn:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            conn.execute(f"PRAGMA busy_timeout={math.ceil(remaining * 1000)}")
+            conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 100)
+            row = tuple(conn.execute(sql, parameters).fetchone())
+    except FileNotFoundError:
+        row = empty
+    except Exception:  # noqa: BLE001 - a queue that cannot be read is an unknown, never an empty one
+        log.debug("write intake could not read its queued saves", exc_info=True)
+        return None
+    return row if time.monotonic() < deadline else None
 
 
 def read(vault_root: Path, ref: str | None = None, limit: int | None = None) -> dict[str, Any]:
@@ -1595,17 +1767,17 @@ def dismiss(vault_root: Path, intake_id: str) -> dict[str, Any]:
             row = conn.execute("SELECT state FROM intake WHERE id = ?", (intake_id,)).fetchone()
             if row is None:
                 raise OpError(
-                    "QUEUED_WRITE_NOT_FOUND", f"no queued save {intake_id}", "List saves with `exomem intake list`."
+                    "QUEUED_WRITE_NOT_FOUND", f"no queued save {intake_id}", "List saves with `evermatter intake list`."
                 )
             if row["state"] != FAILED:
                 raise OpError(
                     "QUEUED_WRITE_NOT_FAILED",
                     f"save {intake_id} is {row['state']}; only a failed save can be dismissed",
-                    "Wait for it to be applied, or list saves with `exomem intake list`.",
+                    "Wait for it to be applied, or list saves with `evermatter intake list`.",
                 )
             conn.execute("DELETE FROM intake WHERE id = ?", (intake_id,))
     except FileNotFoundError:
         raise OpError(
-            "QUEUED_WRITE_NOT_FOUND", f"no queued save {intake_id}", "List saves with `exomem intake list`."
+            "QUEUED_WRITE_NOT_FOUND", f"no queued save {intake_id}", "List saves with `evermatter intake list`."
         ) from None
     return {"dismissed": ref_for(intake_id)}

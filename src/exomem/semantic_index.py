@@ -56,6 +56,7 @@ class SemanticParentIndexState:
     definitions_unavailable: bool = False
     # None means unknown coverage for states built by older callers.
     prose_carriers: Mapping[str, Any] | None = field(default=None, repr=False)
+    audit_occurrence_keys: frozenset[str] | None = field(default=None, repr=False)
 
     @property
     def occurrences(self) -> tuple[semantic_units.StructuralOccurrence, ...]:
@@ -454,10 +455,15 @@ def current_parent_index_state(
     return build_parent_index_state(root, path, source=source, owner_type_basis=owner_type_basis)
 
 
-def from_semantic_page_state(state: Any) -> SemanticParentIndexState:
-    """Adapt an already-evaluated contract page without reparsing its Markdown."""
+def from_semantic_page_state(
+    state: Any, *, restore_candidates: bool = True
+) -> SemanticParentIndexState:
+    """Reuse an evaluated contract page and its exact source snapshot."""
     path = str(state.path)
     source_hash = str(state.source_hash)
+    candidates = state.candidates
+    if restore_candidates and candidates is None:
+        candidates = semantic_units.scan_semantic_units(state.body, path=path)
     parent_ref = (
         memory_refs.memory_ref(str(state.identity)) if state.identity_kind == "exomem_id" else None
     )
@@ -477,8 +483,9 @@ def from_semantic_page_state(state: Any) -> SemanticParentIndexState:
         ),
         parser_version=PARSER_VERSION,
         document=state.neutral_document or state.document,
-        body=state.body, frontmatter=state.frontmatter, candidates=state.candidates,
+        body=state.body, frontmatter=state.frontmatter, candidates=candidates,
         prose_carriers=getattr(state, "prose_carriers", None),
+        audit_occurrence_keys=state.audit_occurrence_keys,
     )
 
 
@@ -506,6 +513,27 @@ def structural_metadata(state: SemanticParentIndexState) -> dict[str, Any]:
         "structural_complete": True,
         **({"prose_carriers": state.prose_carriers} if state.prose_carriers is not None else {}),
     }
+
+
+def _interpret_summary(
+    path: str, metadata: Mapping[str, Any], frontmatter: Mapping[str, Any],
+    language: semantic_language_registry.LanguageRegistryView,
+    relations: relation_registry.RelationRegistry, *, complete: bool = True,
+) -> semantic_units.SelectedStructure:
+    return semantic_units.interpret_structural_summary(
+        metadata["structure"], path=path, parent_ref=metadata.get("parent_ref"),
+        language_registry=semantic_language_registry.for_attached_projects(language, page_projects(frontmatter)),
+        relation_registry=relations,
+        page_type=str(frontmatter.get("type") or "") or None, definitions_available=complete,
+    )
+
+
+def interpret_neutral_summary(path: str, metadata: Mapping[str, Any]) -> semantic_units.SelectedStructure:
+    """Interpret verified parser facts under the core registries used to build graph rows."""
+    return _interpret_summary(
+        path, metadata, yaml.safe_load(metadata["frontmatter_yaml"]) or {},
+        semantic_language_registry.core_registry(), relation_registry.core_registry(),
+    )
 
 
 #: Registry subjects one page interpretation admits together. The parser reads
@@ -661,19 +689,13 @@ class Interpretations:
             definitions.snapshots["categories"].typed if definitions is not None
             else semantic_language_registry.core_registry()
         )
-        structure = semantic_units.interpret_structural_summary(
-            metadata["structure"],
-            language_registry=semantic_language_registry.for_attached_projects(
-                language, page_projects(frontmatter),
-            ),
-            relation_registry=(
+        structure = _interpret_summary(
+            path, metadata, frontmatter, language,
+            (
                 definitions.snapshots["relations"].typed if definitions is not None
                 else relation_registry.core_registry()
             ),
-            page_type=str(frontmatter.get("type") or "") or None,
-            parent_ref=metadata.get("parent_ref"),
-            path=path,
-            definitions_available=definitions is not None,
+            complete=definitions is not None,
         )
         selected = SelectedParent(path, metadata, frontmatter, structure, definitions)
         self._parents[key] = selected
@@ -920,12 +942,11 @@ def _graph_unit_rows(path: Path) -> dict[str, _SidecarParentRows]:
 
 def _occurrence_keys(state: SemanticParentIndexState) -> frozenset[str]:
     """Every structural occurrence a neutral sidecar stores for this parse."""
+    if state.audit_occurrence_keys is not None:
+        return state.audit_occurrence_keys
     if state.candidates is None:
         return frozenset()
-    return frozenset(
-        semantic_units.occurrence_key(unit.form, unit.span, unit.source_hash)
-        for unit in semantic_units.candidate_units(state.candidates)
-    )
+    return semantic_units.candidate_occurrence_keys(state.candidates)
 
 
 def _trash_original_paths(vault_root: Path) -> frozenset[str]:
@@ -953,6 +974,8 @@ def audit_semantic_unit_sidecars(
     include_graph: bool,
 ) -> tuple[SemanticUnitSidecarDrift, ...]:
     """Compare current parsed units with every enabled derived sidecar."""
+    if not (include_lexical or include_vectors or include_graph):
+        return ()
     from . import epistemic_graph, index_paths, lexstore
 
     expected = dict(expected_states)

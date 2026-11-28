@@ -99,6 +99,7 @@ from .log_events import log_event
 from .published_admission import Admission, admission_of, deciding
 
 if TYPE_CHECKING:
+    from . import unit_rows as unit_rows_module
     from .semantic_index import SemanticParentIndexState
 
 log = logging.getLogger(__name__)
@@ -111,6 +112,9 @@ class _CatalogReadView:
     connection: sqlite3.Connection | None
     checkpoints: Mapping[str, object]
     semantic_identity: str
+    #: The Source retirement generation read before the snapshot pinned, for a request-held view only
+    #: (`retain_request_view`). None for a selection's own view, which closes before provider work.
+    retired_through: int | None = None
     page_hashes: dict[str, str | None] = field(default_factory=dict)
     incomplete: bool = False
     owner_thread: int = field(default_factory=threading.get_ident)
@@ -172,6 +176,15 @@ class _CatalogReadView:
                 conn.rollback()
             finally:
                 conn.close()
+
+    def retired(self) -> bool:
+        """Whether a Source erasure started after this request-held view read the generation; its snapshot may hold
+        the erased rows."""
+        from . import source_custody
+
+        return self.retired_through is not None and source_custody.retired_since(
+            self.store.vault_root, self.retired_through
+        )
 
 
 _ADMITTED_CATALOG: ContextVar[
@@ -411,11 +424,116 @@ def _admitted_catalog_view(vault_root: Path) -> _CatalogReadView | None:
     return view
 
 
+@dataclass
+class _RequestCatalog:
+    """One request's slot for the catalogue read view its exact reads share (`request_catalog_view`)."""
+
+    root: Path
+    owner_thread: int = field(default_factory=threading.get_ident)
+    #: The monotonic deadline of the budget the slot opened under; no view binds past it.
+    deadline: float | None = None
+    view: _CatalogReadView | None = None
+    lagging: tuple[str, ...] = ()
+    #: The checkpoint state a bind found no view for, so a second bind at that state does not capture again.
+    declined: object | None = None
+
+    def expired(self) -> bool:
+        return self.deadline is not None and time.monotonic() >= self.deadline
+
+
+_REQUEST_CATALOG: ContextVar[_RequestCatalog | None] = ContextVar("request_catalog_view", default=None)
+
+
+@contextlib.contextmanager
+def request_catalog_view(vault_root: Path, *, lag_dispatch: Callable[[Path], None]):
+    """Let one request's exact catalogue reads share one read view, then close it.
+
+    The slot opens empty; `retain_request_view` binds a view at the request's checkpoint. A read at that
+    checkpoint then reads the view's snapshot, so a publication by another write during the request cannot
+    turn the read stale. The view is never the request's ambient admission (`_ADMITTED_CATALOG`): only a read
+    that names the view's checkpoint borrows it, and a lexical selection scope inside the request. The view
+    holds a WAL reader until the request ends, which the request budget stops cooperatively, and no view binds
+    past that budget's deadline. On exit the view closes first, then a lag the view showed when it bound is
+    dispatched, so the repair never meets this reader.
+    """
+    budget = request_budget.current()
+    slot = _RequestCatalog(Path(vault_root).resolve(), deadline=None if budget is None else budget.deadline)
+    token = _REQUEST_CATALOG.set(slot)
+    try:
+        yield
+    finally:
+        _REQUEST_CATALOG.reset(token)
+        view, slot.view = slot.view, None
+        try:
+            if view is not None:
+                view.close()
+        finally:
+            if slot.lagging:
+                lag_dispatch(slot.root)
+
+
+def retain_request_view(vault_root: Path, checkpoint: object) -> object | None:
+    """Bind this request's catalogue read view at `checkpoint`; the kb checkpoint the bound view holds, or None.
+
+    A view binds only when its kb catalogue state equals `checkpoint`'s. No delta is applied to make them match:
+    a view at another state is not a read at this checkpoint. None without a request slot, off the slot's
+    thread (SQLite handles cannot follow a context to another thread) or past the slot's deadline. A request
+    whose view did not bind reads as it did before, and a second bind at a state that found no view returns
+    None without a second capture. A bound view stays bound, so a second call returns its checkpoint.
+    """
+    from . import freshness as freshness_module
+
+    root = Path(vault_root).resolve()
+    slot = _REQUEST_CATALOG.get()
+    if slot is None or slot.root != root or slot.owner_thread != threading.get_ident() or slot.expired():
+        return None
+    if slot.view is not None:
+        return slot.view.checkpoints.get("kb")
+    state = checkpoint_state(checkpoint)
+    if state is None or state == slot.declined:
+        return None
+    view = get_store(root)._capture_read_view(fenced=True)
+    if view is None or checkpoint_state(view.checkpoints.get("kb")) != state:
+        if view is not None:
+            view.close()
+        slot.declined = state
+        return None
+    slot.view = view  # The slot closes it from here, also when the lag check below raises.
+    slot.lagging = tuple(
+        scope for scope, held in view.checkpoints.items()
+        if freshness_module.live_recall_checkpoint(root, scope) != held
+    )
+    return view.checkpoints.get("kb")
+
+
+def _request_catalog_view(vault_root: Path) -> _CatalogReadView | None:
+    """The read view this request bound for `vault_root`, on the thread that bound it, or None."""
+    slot = _REQUEST_CATALOG.get()
+    if slot is None or slot.root != Path(vault_root).resolve():
+        return None
+    view = slot.view
+    if view is None or view.owner_thread != threading.get_ident() or view.connection is None:
+        return None
+    return view
+
+
+def request_view_checkpoint(vault_root: Path) -> object | None:
+    """The kb checkpoint of the read view this request bound (`retain_request_view`), or None."""
+    view = _request_catalog_view(vault_root)
+    return None if view is None else view.checkpoints.get("kb")
+
+
 @contextlib.contextmanager
 def catalog_selection_scope(
-    vault_root: Path, *, lag_dispatch: Callable[[Path], None] | None = None
+    vault_root: Path, *, lag_dispatch: Callable[[Path], None] | None = None,
+    borrow_request_view: bool = False,
 ):
-    """Admit and retain SQL selection, closing before provider work begins."""
+    """Admit and retain SQL selection, closing before provider work begins.
+
+    With `borrow_request_view`, inside a request that holds a read view (`request_catalog_view`), the selection
+    reads that view and the request closes it. The request accounted for that view's lag when it bound, so the
+    selection reports none: a publication after the bind is the view's age, not catalogue lag.
+    """
     from . import freshness as freshness_module
 
     root = Path(vault_root).resolve()
@@ -423,21 +541,24 @@ def catalog_selection_scope(
     if current is None or current[0] != root:
         raise RuntimeError("catalogue selection requires its request scope")
     store = get_store(root)
-    view = store._capture_read_view()
+    held = _request_catalog_view(root) if borrow_request_view else None
+    view = held if held is not None else store._capture_read_view()
     if view is None:
         yield None
         return
     token = _ADMITTED_CATALOG.set((root, view.checkpoints, view))
     lagging: tuple[str, ...] = ()
     try:
-        lagging = tuple(
-            scope for scope, checkpoint in view.checkpoints.items()
-            if freshness_module.live_recall_checkpoint(root, scope) != checkpoint
-        )
+        if view is not held:
+            lagging = tuple(
+                scope for scope, checkpoint in view.checkpoints.items()
+                if freshness_module.live_recall_checkpoint(root, scope) != checkpoint
+            )
         yield RecallProjectionAdmission(dict(view.checkpoints), lagging)
     finally:
         try:
-            view.close()
+            if view is not held:
+                view.close()
         finally:
             _ADMITTED_CATALOG.reset(token)
         if lagging:
@@ -802,7 +923,7 @@ def _ranking_metadata(
     return RankingPage(frontmatter=frontmatter, **payload)
 
 
-def _unit_eligibility_columns(unit: object) -> tuple[str | None, ...]:
+def unit_eligibility_columns(unit: object) -> tuple[str | None, ...]:
     """`(verdict, check_by_day, check_by_json, tags_canonical_json)` for one unit.
 
     Read off `structured_filters.unit_view`, the same adapter the evaluator
@@ -2484,7 +2605,17 @@ def runtime_retrieval_catalog_current(
     require_live_projection: bool = True,
     schedule_repair: bool = True,
 ) -> bool:
-    """Whether :func:`runtime_retrieval_catalog_proof` can bind both scopes."""
+    """Whether retrieval can bind both scopes to the vault's serving catalogue."""
+    from . import find_corpus
+
+    if find_corpus.store_serves(vault_root):
+        from .vault_store import read
+
+        # Store readers pin these rows to the same snapshot as the pages. They
+        # report derived lag separately, without waiting on the file catalogue.
+        with read.snapshot(vault_root):
+            return True
+
     return (
         runtime_retrieval_catalog_proof(
             vault_root,
@@ -2925,7 +3056,14 @@ def _admit_if_current(vault_root: Path) -> bool:
     from . import freshness as freshness_module
 
     if _is_configured_runtime_vault(vault_root):
-        return _mark_runtime_retrieval_ready_if_current(vault_root)
+        from . import readiness
+
+        proof: dict[str, object] = {}
+        if _mark_runtime_retrieval_ready_if_current(vault_root, proof_out=proof):
+            return True
+        # A completed proof can lose publication to another admission. A
+        # revocation clears the readiness event, so it still needs repair.
+        return bool(proof) and readiness.is_ready("retrieval_catalog")
     existing = runtime_retrieval_catalog_proof(
         vault_root,
         require_live_projection=freshness_module.event_indexes_enabled(),
@@ -6458,6 +6596,8 @@ class PageRows:
     body_lower: str
     structure_json: str | None
     units: tuple[SemanticUnitRow, ...]
+    #: The unit rows that `units` project from. The graph's candidate nodes project from them too.
+    unit_rows: tuple[unit_rows_module.UnitRow, ...] = ()
 
 
 def page_rows(
@@ -6482,7 +6622,8 @@ def page_rows(
     destination file itself.
     """
     from . import bm25 as bm25_module
-    from . import recall_policy, semantic_language_registry, semantic_units
+    from . import recall_policy
+    from . import unit_rows as unit_rows_module
     from .semantic_index import structural_metadata
 
     if not recall_policy.admits_markdown_content(vault_root, rel, raw):
@@ -6533,60 +6674,20 @@ def page_rows(
     }
     structure_json = None
     units: list[SemanticUnitRow] = []
+    built: tuple[unit_rows_module.UnitRow, ...] = ()
     if page is not None and state is not None and state.candidates is not None:
         structure_json = json.dumps(structural_metadata(state), sort_keys=True)
-        authored_keys = {
-            occurrence.key: tuple(
-                key for key in semantic_units.GOVERNED_UNIT_METADATA_KEYS if key in occurrence.metadata
+        built = unit_rows_module.build(rel, state)
+        units = [
+            SemanticUnitRow(
+                unit_rows_module.lexical_columns(row, columns),
+                " ".join(bm25_module.tokenize(row.content)),
+                row.row_keys,
             )
-            for occurrence in semantic_units.structural_occurrences(state.candidates)
-        }
-        for source_order, unit in enumerate(semantic_units.candidate_units(state.candidates)):
-            verdict, check_by_day, check_by_json, tags_canonical_json = (
-                _unit_eligibility_columns(unit)
-            )
-            units.append(
-                SemanticUnitRow(
-                    {
-                        "record_type": "structural_occurrence",
-                        "unit_ref": semantic_units.occurrence_key(
-                            unit.form, unit.span, unit.source_hash
-                        ),
-                        "parent_path": state.path,
-                        "parent_ref": state.parent_ref,
-                        "parent_generation": state.parent_generation,
-                        "parent_source_hash": state.parent_source_hash,
-                        "parser_version": state.parser_version,
-                        "form": unit.form,
-                        "category_raw": unit.category_raw,
-                        "category_key": unit.category_key,
-                        "category": semantic_language_registry.normalize_label(unit.category_raw),
-                        "kind": unit.kind_key,
-                        "content": unit.content,
-                        "tags_json": json.dumps(
-                            list(unit.tags), ensure_ascii=False, separators=(",", ":")
-                        ),
-                        "context": unit.context,
-                        "unit_source_hash": unit.source_hash,
-                        "anchor": unit.anchor,
-                        "line": unit.line,
-                        "end_line": unit.end_line,
-                        "fingerprint": None,
-                        "source_order": source_order,
-                        "updated": updated,
-                        "in_kb": int(in_kb),
-                        "in_vault": int(in_vault),
-                        "verdict": verdict,
-                        "check_by_day": check_by_day,
-                        "check_by_json": check_by_json,
-                        "tags_canonical_json": tags_canonical_json,
-                    },
-                    " ".join(bm25_module.tokenize(unit.content)),
-                    authored_keys[semantic_units.occurrence_key(unit.form, unit.span, unit.source_hash)],
-                )
-            )
+            for row in built
+        ]
     return PageRows(columns, stemmed, " ".join(bm25_module.tokenize(title or "")),
-                    title_lower, body_lower, structure_json, tuple(units))
+                    title_lower, body_lower, structure_json, tuple(units), built)
 
 
 def _membership_of_parts(rel_parts: tuple[str, ...]) -> tuple[bool, bool]:
@@ -6885,13 +6986,28 @@ class LexicalStore:
 
     # -------------------------------------------------------------- plumbing
 
-    def _capture_read_view(self) -> _CatalogReadView | None:
-        """Capture both published scopes from one already-pinned transaction."""
+    def _capture_read_view(self, *, fenced: bool = False) -> _CatalogReadView | None:
+        """Capture both published scopes from one already-pinned transaction.
+
+        `fenced` is for the request-held view (`retain_request_view`), which a Source erasure retires
+        (`_CatalogReadView.retired`) and which is captured only on a WAL connection. A selection's own view closes
+        before provider work and is neither fenced nor limited to WAL.
+        """
         from . import freshness as freshness_module
+        from . import source_custody
         from .vocabulary.registry import RegistryError
 
         if backend() == "python" or self._failed or not self.path.exists():
             return None
+        retired_through: int | None = None
+        if fenced:
+            # Read before the transaction pins its snapshot. An eraser advances the generation again after it
+            # drops the rows, so a value read after the pin could pair that advance with rows from before the drop.
+            retired_through = source_custody.retirement_generation(self.vault_root)
+            if retired_through is None:
+                # An unreadable generation cannot rule out a Source erasure, as in `rebuild_atomic`. The cost when
+                # it fires wrongly: the request reads as it did before this view existed.
+                return None
         conn: sqlite3.Connection | None = None
         try:
             conn = self._connect()
@@ -6903,6 +7019,13 @@ class LexicalStore:
                     or self._meta_catalog_identity(conn) != identity
                 ):
                     return None
+                if fenced:
+                    # `_connect_setup` soft-fails WAL on a journal-hostile filesystem. In rollback-journal mode
+                    # a held read transaction keeps a SHARED lock, so every catalogue commit would wait behind
+                    # the request's whole compilation. The read above fixed the mode for this transaction.
+                    mode = conn.execute("PRAGMA journal_mode").fetchone()
+                    if not mode or str(mode[0]).lower() != "wal":
+                        return None
                 checkpoints: dict[str, object] = {}
                 for scope in freshness_module.SCOPES:
                     checkpoint = self._meta_checkpoint(conn, scope)
@@ -6927,7 +7050,9 @@ class LexicalStore:
                     )
                 ):
                     return None
-            view = _CatalogReadView(self, conn, MappingProxyType(checkpoints), identity)
+            view = _CatalogReadView(
+                self, conn, MappingProxyType(checkpoints), identity, retired_through=retired_through
+            )
             conn = None  # The selection scope now owns rollback and close.
             return view
         except RegistryError:
@@ -6942,12 +7067,17 @@ class LexicalStore:
     def _catalogue_view_status(
         self, view: _CatalogReadView, scope: str, checkpoint: object | None = None
     ) -> CatalogReadiness:
-        """Validate interpretation while ordinary publication may advance."""
+        """Validate interpretation while ordinary publication may advance.
+
+        A Source erasure that started after a request-held view read the generation retires it
+        (`_CatalogReadView.retired`): its snapshot may still hold the erased rows.
+        """
         conn = view.connection
         target = view.checkpoints.get(scope)
         valid = (
             view.store is self and conn is not None and conn.in_transaction
             and target is not None
+            and not view.retired()
             and (checkpoint is None or checkpoint_state(checkpoint) == checkpoint_state(target))
             and _checkpoint_policy_current(self.vault_root, target)
             and self._schema_is_current(conn)
@@ -12077,7 +12207,9 @@ class LexicalStore:
         if view is not None and view.store is self:
             ready = self._catalogue_view_status(view, scope)
             if not ready.complete:
-                _schedule_repair(self.vault_root)
+                if not view.retired():
+                    _schedule_repair(self.vault_root)
+                # A retired view schedules nothing: the eraser drops the rows from the catalogue itself.
                 return None
             # Legacy content lanes borrow A too; reconciliation would replace its proof.
             return query_fn(view.connection)
@@ -14347,19 +14479,31 @@ class LexicalStore:
             if served is not None:
                 return served
         view = _admitted_catalog_view(self.vault_root)
+        if view is None and recall_checkpoint is not None:
+            held = _request_catalog_view(self.vault_root)
+            target = None if held is None else held.checkpoints.get(scope)
+            if target is not None and checkpoint_state(recall_checkpoint) == checkpoint_state(target):
+                # The request's own snapshot at exactly this checkpoint, which a later publication cannot move.
+                view = held
         if view is not None:
             try:
                 with call_spans.span("lexical.readiness"):
                     readiness = self._catalogue_view_status(view, scope, recall_checkpoint)
                 if not readiness.complete:
-                    # Only metadata disagrees (view, checkpoint, policy, schema or
-                    # identity); the worker's catch-up must prove the catalogue
-                    # exactly current, or the full pass runs.
-                    _schedule_runtime_catalog_repair(
-                        self.vault_root, lag_only=True, cause=RepairCause.CATALOGUE_LAG
-                    )
+                    if not view.retired():
+                        # Only metadata disagrees (view, checkpoint, policy, schema or
+                        # identity); the worker's catch-up must prove the catalogue
+                        # exactly current, or the full pass runs.
+                        _schedule_runtime_catalog_repair(
+                            self.vault_root, lag_only=True, cause=RepairCause.CATALOGUE_LAG
+                        )
+                    # A retired view schedules nothing: the eraser drops the rows from the catalogue itself.
                     return CatalogQueryResult(None, readiness)
-                return self._query_within_budget(view.connection, query_fn, readiness)
+                result = self._query_within_budget(view.connection, query_fn, readiness)
+                if result.readiness.complete and view.retired():
+                    # A Source erased while the query ran may be in the rows it read from the older snapshot.
+                    return CatalogQueryResult(None, CatalogReadiness("stale", False, readiness.backend))
+                return result
             except RegistryError:
                 return CatalogQueryResult(
                     None, CatalogReadiness("definitions_unavailable", False, backend())
