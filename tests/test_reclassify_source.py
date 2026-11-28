@@ -106,6 +106,8 @@ def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
             assert not readiness.is_warming()
             assert freshness.generation(vault, "vault") is not None
             await asyncio.to_thread(_until, lambda: not freshness.external_pending(vault))
+            # Prepare the lexical catalogue for the moved tree before testing inbound recovery.
+            assert await asyncio.to_thread(lexstore.ensure_fresh, vault)
             # Withdraw the cache after the move, as an idle quiet-mode service may.
             vault_module.evict_inbound_index(vault)
             monkeypatch.setattr(vault_module, "_build_inbound_index", paused_build)
@@ -128,9 +130,6 @@ def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
             finally:
                 release.set()
             assert await asyncio.to_thread(find.await_recall_resolver_warm)
-            await asyncio.to_thread(_until, lambda: lexstore.search_current_published_substrings(
-                vault, [captured.path.removeprefix(f"{KB}/").lower()]
-            ).readiness.complete)
             async with asyncio.timeout(5):
                 while True:
                     warm = await call("manage_memory_file", **preview)
