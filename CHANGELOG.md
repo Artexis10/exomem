@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.211.0](https://github.com/substrate-systems/evermatter/compare/v0.210.2...v0.211.0) (2026-11-28)
+
+
+### Features
+
+* **import:** keep captions from Google Photos Takeout ([#3402](https://github.com/substrate-systems/evermatter/issues/3402)) ([75f5b59](https://github.com/substrate-systems/evermatter/commit/75f5b59d66ef3b8f579a0b5521c1e0dec63deb23))
+
+
+### Bug Fixes
+
+* **mcp:** refuse undeclared values before queueing ([#3405](https://github.com/substrate-systems/evermatter/issues/3405)) ([2d414d0](https://github.com/substrate-systems/evermatter/commit/2d414d021e9808090ea06bab516b80ffb863ad0c))
+
 ## [0.210.2](https://github.com/substrate-systems/evermatter/compare/v0.210.1...v0.210.2) (2026-11-28)
 
 
