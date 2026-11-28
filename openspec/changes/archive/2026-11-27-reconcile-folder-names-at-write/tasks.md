@@ -17,4 +17,4 @@
 
 - [x] 3.1 A test per spec scenario, in file mode and store mode where the path differs; each fails without its code change.
 - [x] 3.2 Scoped suites for vault respelling, preserve, notes, create, move, path_variants, audit, project keys and store writes; strict OpenSpec gate.
-- [ ] 3.3 One blind review; merge; archive the change with `openspec archive`.
+- [x] 3.3 One blind review; merge; archive the change with `openspec archive`.

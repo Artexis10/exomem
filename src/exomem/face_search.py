@@ -52,7 +52,7 @@ def faces_off() -> OpError:
         "FACES_OFF",
         "Face search is off for this account, so no search by person ran.",
         "Ask the owner whether to turn faces on: faces.set with state on shows what is stored, "
-        "and the owner turns faces on with `exomem faces on`. Or search without people.",
+        "and the owner turns faces on with `evermatter faces on`. Or search without people.",
     )
 
 
@@ -75,7 +75,7 @@ class Restriction:
 def faces_unreadable(error: sqlite3.DatabaseError) -> OpError:
     """A face store this release cannot read: damaged, or written by a newer release."""
     newer = isinstance(error, face_store.NewerStore)
-    cause = "a newer release of Exomem wrote it" if newer else "it is damaged"
+    cause = "a newer release of Evermatter wrote it" if newer else "it is damaged"
     return OpError(
         "FACES_UNREADABLE",
         f"The face data cannot be read: {cause}, so nothing ran.",

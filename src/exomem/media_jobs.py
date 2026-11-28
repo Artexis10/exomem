@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import cloud_cell, held_fs, media_brakes, media_engines, reserved_paths
+from . import cloud_cell, held_fs, media_brakes, media_engines, reserved_paths, speech_tracks
 from .asr_facts import AsrFacts
 from .asr_runtime import COMPUTE_RUNTIME_MARKERS, is_compute_runtime_failure
 from .capture_metadata import CaptureFacts
@@ -117,6 +117,14 @@ OVER_BUDGET = "over_budget"
 #: The original exceeds the whole hydration capacity of the store policy; only a larger
 #: capacity and a retry clear it (`media_store.HYDRATION_TOO_LARGE_CODE`).
 HYDRATION_TOO_LARGE = "hydration_too_large"
+#: The job crashed the media process the stop limit of times under one release
+#: (`MediaJobStore.record_crash_stop`). `blocked_context` names how the process died and the
+#: release it ran (`crash_verdict`). A retry, or the first start of another release, returns
+#: the job (`MediaJobStore.recover_crash_blocks`); a reprocess row returns on a new request.
+CHILD_CRASHED = "child_crashed"
+_CHILD_CRASHED_RETURN = "a new Evermatter release retries the file by itself; to try it sooner, "
+CHILD_CRASHED_ACTION = _CHILD_CRASHED_RETURN + "retry it"
+CHILD_CRASHED_REPROCESS_ACTION = _CHILD_CRASHED_RETURN + "reprocess the file again"
 #: Reasons a tenant sees only as waiting: nothing for a person to repair or retry.
 _WAITING_REASONS = frozenset({MEMORY_BLOCKED, ENGINE_DISABLED})
 #: Reasons whose rows return by themselves, as a SQL list of these constants.
@@ -161,6 +169,25 @@ _UNCOUNTED_STOP = "state = 'pending', blocked_reason = NULL, last_error = NULL, 
 
 def _canonical_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def crash_verdict(
+    *, signal_name: str | None, exit_status: int | None, release: str
+) -> tuple[str, str]:
+    """The `last_error` and `blocked_context` of a CHILD_CRASHED verdict.
+
+    The context names the signal that ended the media process, as `cuda_containment.signal_name`
+    names it ("SIGSEGV", or "signal 40" for a signal with no name), or its exit status when no
+    signal did, and the release it ran. The error names no count: a file that a release returned
+    blocks after one more death.
+    """
+    how = {"signal": signal_name} if signal_name is not None else {"exit_status": exit_status}
+    last = signal_name if signal_name is not None else f"exit status {exit_status}"
+    error = (
+        "MediaProcessCrashed: the media process kept dying while it ran this file, "
+        f"the last time with {last} (release {release})"
+    )
+    return error, _canonical_json({**how, "release": release})
 
 
 def _is_sha256(value: object) -> bool:
@@ -517,10 +544,19 @@ class MediaJob:
     language: str | None = None
     language_mode: str | None = None
     diarize: bool | None = None
+    # The tracks a request declared (`speech_tracks.declaration`); the worker reads them and the sidecar records them.
+    tracks: tuple[speech_tracks.Track, ...] | None = None
     preview_sha256: str | None = None
     preview_receipt_id: str | None = None
     # The failure to retain if a receipt-only claim proves there is no matching record.
     preview_finish_error: str | None = None
+    # Why the row's declaration of tracks cannot be read; the worker fails this job with it, and the queue goes on.
+    tracks_unreadable: str | None = None
+
+
+def _tracks_text(tracks: tuple[speech_tracks.Track, ...] | None) -> str | None:
+    """A declaration of tracks as a job row keeps it: the same data as the sidecar's (`speech_tracks.as_data`)."""
+    return None if tracks is None else json.dumps(speech_tracks.as_data(tracks), ensure_ascii=False)
 
 
 @dataclass(frozen=True)
@@ -1119,7 +1155,8 @@ class MediaJobStore:
 
         `memory_stops` counts consecutive memory stops and `memory_soft_stops` those
         of them that were pressure stops, not the child's own hard-limit failure.
-        `timeout_stops` counts the watchdog's stops apart from both. `blocked_reason`
+        `timeout_stops` counts the watchdog's stops apart from both, and `crash_stops` the
+        crashes of the media process under the release in `crash_release`. `blocked_reason`
         and `blocked_context` say why a row is blocked and what that verdict depended on.
         """
         columns = {
@@ -1134,6 +1171,10 @@ class MediaJobStore:
             )
         if "timeout_stops" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN timeout_stops INTEGER NOT NULL DEFAULT 0")
+        if "crash_stops" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN crash_stops INTEGER NOT NULL DEFAULT 0")
+        if "crash_release" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN crash_release TEXT")
         if "blocked_context" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN blocked_context TEXT")
         if "blocked_reason" not in columns:
@@ -1161,6 +1202,8 @@ class MediaJobStore:
             conn.execute("ALTER TABLE jobs ADD COLUMN language_mode TEXT")
         if "diarize" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN diarize INTEGER")
+        if "tracks" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN tracks TEXT")
 
     @staticmethod
     def _migrate_result_schema(conn: sqlite3.Connection) -> None:
@@ -1541,9 +1584,9 @@ class MediaJobStore:
                     """
                     INSERT INTO jobs (
                         job_key, binary_rel, sidecar_rel, media_type, do_ocr, state, attempts,
-                        ocr_generation, reprocess, language, language_mode, diarize,
+                        ocr_generation, reprocess, language, language_mode, diarize, tracks,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, 1, 'pending', 0, 1, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, 1, 'pending', 0, 1, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         key,
@@ -1554,6 +1597,7 @@ class MediaJobStore:
                         language,
                         language_mode,
                         job.diarize,
+                        _tracks_text(job.tracks),
                         now,
                         now,
                     ),
@@ -1563,13 +1607,14 @@ class MediaJobStore:
                 conn.execute(
                     """
                     UPDATE jobs SET do_ocr = 1, reprocess = ?, language = ?, language_mode = ?,
-                        diarize = COALESCE(?, diarize),
+                        diarize = COALESCE(?, diarize), tracks = COALESCE(?, tracks),
                         state = 'pending', ocr_generation = ocr_generation + 1, last_error = NULL,
                         blocked_reason = NULL, blocked_context = NULL, memory_stops = 0,
-                        memory_soft_stops = 0, timeout_stops = 0, updated_at = ?
+                        memory_soft_stops = 0, timeout_stops = 0, crash_stops = 0, crash_release = NULL,
+                        updated_at = ?
                     WHERE id = ?
                     """,
-                    (int(reprocess), language, language_mode, job.diarize, now, row_id),
+                    (int(reprocess), language, language_mode, job.diarize, _tracks_text(job.tracks), now, row_id),
                 )
             conn.commit()
             return row_id
@@ -1674,7 +1719,7 @@ class MediaJobStore:
                 conn.execute(
                     """
                     UPDATE jobs SET do_ocr = ?, do_clip = ?, do_reembed = ?,
-                        reprocess = 0, language = NULL, language_mode = NULL, diarize = NULL,
+                        reprocess = 0, language = NULL, language_mode = NULL, diarize = NULL, tracks = NULL,
                         state = 'pending', pinned = 0, returns = 0, retry_at = NULL,
                         updated_at = ?, last_error = NULL
                     WHERE id = ? AND state = 'running' AND claim_revision = ?
@@ -1973,6 +2018,71 @@ class MediaJobStore:
             ),
             progress,
         )
+
+    def record_crash_stop(
+        self,
+        job: MediaJob,
+        *,
+        release: str,
+        stop_limit: int,
+        error: str,
+        context: str,
+        progress: int | None = None,
+    ) -> str | None:
+        """Return a job whose media process crashed under it to pending, refunding its attempt.
+
+        A crash counts apart from memory and watchdog stops, over the job's life under one
+        `release`: a crash under another release than the recorded one starts the count again.
+        When the count reaches `stop_limit` the job is blocked as CHILD_CRASHED with the
+        `crash_verdict` pair `error` and `context`, so a file that kills the process costs
+        at most `stop_limit` processes and the jobs queued behind it run. A crash of a speech
+        job whose `progress` moved past its last stop's does not count. Returns PENDING,
+        CHILD_CRASHED, or None when the claim is no longer this job's.
+        """
+        count = "(CASE WHEN crash_release IS ? THEN crash_stops + 1 ELSE 1 END)"
+        blocks = f"{count} >= ?"
+        reached = (release, stop_limit)
+        return self._record_stop(
+            job,
+            f"""
+            crash_stops = {count}, crash_release = ?,
+            state = CASE WHEN {blocks} THEN 'blocked' ELSE 'pending' END,
+            blocked_reason = CASE WHEN {blocks} THEN ? ELSE NULL END,
+            last_error = CASE WHEN {blocks} THEN ? ELSE NULL END,
+            blocked_context = CASE WHEN {blocks} THEN ? ELSE NULL END
+            """,
+            (
+                release, release,
+                *reached,
+                *reached, CHILD_CRASHED,
+                *reached, error,
+                *reached, context,
+            ),
+            progress,
+        )
+
+    def recover_crash_blocks(self, release: str, *, stop_limit: int) -> int:
+        """Return to pending the CHILD_CRASHED jobs that another release blocked.
+
+        A release can carry the fix for what killed the media process, so its first start
+        tries each such file once more: the job returns with `stop_limit - 1` crashes counted
+        under `release`, so one more crash under it blocks the job again. Only the crash count
+        changes; the memory, watchdog and return counts stay. A job this release blocked stays
+        blocked until a retry: `crash_release` names the release that blocked it.
+        """
+        conn = self._connect()
+        try:
+            with conn:
+                return conn.execute(
+                    "UPDATE jobs SET state = 'pending', last_error = NULL, crash_stops = ?, "
+                    "crash_release = ?, blocked_reason = NULL, blocked_context = NULL, updated_at = ? "
+                    "WHERE state = 'blocked' AND blocked_reason = ? AND crash_release IS NOT ? "
+                    "AND NOT EXISTS (SELECT 1 FROM media_job_results "
+                    "WHERE media_job_results.job_id = jobs.id)",
+                    (max(0, stop_limit - 1), release, time.time(), CHILD_CRASHED, release),
+                ).rowcount
+        finally:
+            conn.close()
 
     def _record_stop(
         self,
@@ -2356,11 +2466,13 @@ class MediaJobStore:
                             language = CASE WHEN ? THEN language ELSE NULL END,
                             language_mode = CASE WHEN ? THEN language_mode ELSE NULL END,
                             diarize = CASE WHEN ? THEN diarize ELSE NULL END,
+                            tracks = CASE WHEN ? THEN tracks ELSE NULL END,
                             updated_at = ? WHERE id = ? AND state IN (""" + state_placeholders + """)
                             AND claim_revision = ?
                         """,
                         (
                             remaining_ocr,
+                            keep_request,
                             keep_request,
                             keep_request,
                             keep_request,
@@ -2487,7 +2599,7 @@ class MediaJobStore:
         with contextlib.closing(self._connect(readonly=True)) as conn:
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
             # These are the only request fields in the ledger schema. An older ledger may omit them.
-            flags = {"reprocess": "reprocess = 1", "diarize": "diarize IS NOT NULL",
+            flags = {"reprocess": "reprocess = 1", "diarize": "diarize IS NOT NULL", "tracks": "tracks IS NOT NULL",
                      "language": "language IS NOT NULL", "language_mode": "language_mode IS NOT NULL"}
             request = " OR ".join(test for field, test in flags.items() if field in columns)
             if not request:
@@ -2811,7 +2923,8 @@ class MediaJobStore:
                 for job_id, state, error in admitted:
                     changed += conn.execute(
                         "UPDATE jobs SET state = 'pending', last_error = NULL, updated_at = ?, "
-                        "memory_stops = 0, memory_soft_stops = 0, timeout_stops = 0, "
+                        "memory_stops = 0, memory_soft_stops = 0, timeout_stops = 0, crash_stops = 0, "
+                        "crash_release = NULL, "
                         "returns = 0, retry_at = NULL, blocked_reason = NULL, "
                         "blocked_context = NULL WHERE id = ? AND state = ? AND last_error IS ? "
                         "AND NOT EXISTS (SELECT 1 FROM media_job_results "
@@ -3078,6 +3191,13 @@ class MediaJobStore:
 
     def _row_to_job(self, row: Any) -> MediaJob:
         diarize = row["diarize"] if "diarize" in row.keys() else None
+        stored = row["tracks"] if "tracks" in row.keys() else None
+        tracks, unreadable = None, None
+        # The door read the declaration before it queued it, so only a corrupt row fails here; that fails its own job.
+        try:
+            tracks = None if stored is None else speech_tracks.declaration(json.loads(stored))
+        except (ValueError, TypeError) as error:  # TrackDeclarationError and JSONDecodeError are ValueErrors
+            unreadable = f"the job's declaration of tracks cannot be read ({error})"
         return MediaJob(
             id=int(row["id"]),
             binary_path=self.vault_root / str(row["binary_rel"]),
@@ -3099,6 +3219,8 @@ class MediaJobStore:
             language=row["language"] if "language" in row.keys() else None,
             language_mode=row["language_mode"] if "language_mode" in row.keys() else None,
             diarize=None if diarize is None else bool(diarize),
+            tracks=tracks,
+            tracks_unreadable=unreadable,
             preview_sha256=row["preview_sha256"] if "preview_sha256" in row.keys() else None,
             preview_receipt_id=row["preview_receipt_id"] if "preview_receipt_id" in row.keys() else None,
             preview_finish_error=row["preview_finish_error"] if "preview_finish_error" in row.keys() else None,
@@ -3674,6 +3796,8 @@ def _status_job(row: Any) -> dict[str, Any]:
         actions[BLOCKED] = OVER_BUDGET_ACTION
     elif reason == HYDRATION_TOO_LARGE:
         actions[BLOCKED] = _hydration_too_large_action()
+    elif reason == CHILD_CRASHED:
+        actions[BLOCKED] = CHILD_CRASHED_ACTION
     elif reason == ENGINE_UNAVAILABLE:
         actions[BLOCKED] = media_engines.unavailable_next_action(row["blocked_context"])
     # A stopped reprocess leaves the completed transcript as it was, and a retry would
@@ -3687,7 +3811,11 @@ def _status_job(row: Any) -> dict[str, Any]:
     reprocess_failed = reprocess_stopped and state == FAILED
     # The start that requeues a paused reprocess keeps its request, so the restart is the whole remedy.
     if reprocess_stopped and state == BLOCKED and restart_action is None:
-        actions[BLOCKED] = actions[BLOCKED].removesuffix(", then retry") + ", then reprocess the file again"
+        actions[BLOCKED] = (
+            CHILD_CRASHED_REPROCESS_ACTION
+            if reason == CHILD_CRASHED
+            else actions[BLOCKED].removesuffix(", then retry") + ", then reprocess the file again"
+        )
     multilingual_unsupported = state == FAILED and (error or "").startswith("MultilingualUnsupported:")
     unsupported_language = multilingual_unsupported or (
         state == FAILED and (error or "").startswith("UnsupportedLanguage:")

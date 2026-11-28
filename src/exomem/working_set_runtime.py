@@ -1355,17 +1355,38 @@ def pin_lexical_checkpoint(
     (`defer_index_refreshes`), because a catalogue that converged mid-request
     would leave later lanes reading a checkpoint that is no longer current.
     The release decision on each hit stays per request, on the live file.
+
+    Inside `request_catalogue_view` the decided checkpoint also binds the
+    request's read view, and a view the request already holds is the
+    catalogue state the decision compares against.
     """
     request = snapshot.recall_checkpoint("kb")
     from . import lexstore
 
     # A store-mode vault's rows are current at the request's snapshot: no published lag to bridge.
-    if visible is None or lexstore.store_rows_serve(vault_root):
+    if lexstore.store_rows_serve(vault_root):
+        return request
+    decided = _decide_lexical_checkpoint(vault_root, snapshot, visible, request)
+    if _retains_lexical_catalogue(vault_root):
+        lexstore.retain_request_view(vault_root, decided)
+    return decided
+
+
+def _decide_lexical_checkpoint(
+    vault_root: Path, snapshot, visible: Callable[[str], bool] | None,
+    request: freshness.RecallFreshnessCheckpoint,
+) -> freshness.RecallFreshnessCheckpoint:
+    """`pin_lexical_checkpoint`'s decision for a vault whose catalogue is file-built."""
+    from . import lexstore
+
+    if visible is None:
         return request
     from .governance import egress
 
     try:
-        published = lexstore.get_store(vault_root).published_recall_checkpoint("kb")
+        published = lexstore.request_view_checkpoint(vault_root)
+        if published is None:
+            published = lexstore.get_store(vault_root).published_recall_checkpoint("kb")
         # The catalogue's own comparison of what a checkpoint serves: corpus and admission policy.
         if published is None or (
             lexstore.checkpoint_state(published) == lexstore.checkpoint_state(request)
@@ -1382,6 +1403,37 @@ def pin_lexical_checkpoint(
     return published
 
 
+def _retains_lexical_catalogue(vault_root: Path) -> bool:
+    """Whether this request's lexical reads retain the file-built catalogue's SQL snapshot.
+
+    A managed reader with event indexes on and the SQL backend does. The `python` backend reads no catalogue,
+    and a store-mode vault's snapshot is the request's selection already.
+    """
+    from . import lexstore
+
+    return (
+        _managed() and freshness.event_indexes_enabled() and lexstore.backend() != "python"
+        and not lexstore.store_rows_serve(vault_root)
+    )
+
+
+@contextmanager
+def request_catalogue_view(vault_root: Path, snapshot) -> Iterator[None]:
+    """Let the request's exact catalogue reads read one snapshot at its lexical checkpoint.
+
+    Another write can publish to the catalogue while the request runs. A read at the request's checkpoint
+    would then find the catalogue past it and answer stale, so a lane would lose what it holds. The view binds
+    only at the request's checkpoint (`lexstore.retain_request_view`); `pin_lexical_checkpoint` binds it at the
+    pinned one when this first bind found another state. A lag the view showed is repaired after it closes.
+    """
+    from . import lexstore
+
+    with lexstore.request_catalog_view(vault_root, lag_dispatch=_defer_lexical_repair):
+        if snapshot is not None and _retains_lexical_catalogue(vault_root):
+            lexstore.retain_request_view(vault_root, snapshot.lexical_checkpoint("kb"))
+        yield
+
+
 @contextmanager
 def lexical_selection_scope(
     vault_root: Path, recall_checkpoint: freshness.RecallFreshnessCheckpoint | None,
@@ -1390,18 +1442,13 @@ def lexical_selection_scope(
     """Retain lexical reads, bridging only changes withheld from the current caller."""
     from . import lexstore
 
-    if (
-        recall_checkpoint is None or not _managed() or not freshness.event_indexes_enabled()
-        or lexstore.backend() == "python"
-        # The store's snapshot is the request's selection: no file-built catalogue to retain.
-        or lexstore.store_rows_serve(vault_root)
-    ):
+    if recall_checkpoint is None or not _retains_lexical_catalogue(vault_root):
         yield recall_checkpoint
         return
     with (
         lexstore.admitted_catalog_scope(vault_root),
         lexstore.catalog_selection_scope(
-            vault_root, lag_dispatch=_defer_lexical_repair,
+            vault_root, lag_dispatch=_defer_lexical_repair, borrow_request_view=True,
         ) as selection,
     ):
         captured = None if selection is None else selection.checkpoints.get("kb")

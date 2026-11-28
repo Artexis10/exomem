@@ -172,7 +172,7 @@ def install_skill(
     if not (_SKILL_SRC / "SKILL.md").exists():
         raise FileNotFoundError(
             f"bundled skill missing at {_SKILL_SRC} (SKILL.md not found) — "
-            "is the exomem install intact?"
+            "is the Evermatter install intact?"
         )
 
     target = (
@@ -185,7 +185,7 @@ def install_skill(
         if not (src / "SKILL.md").is_file():
             raise FileNotFoundError(
                 f"bundled skill missing at {src} (SKILL.md not found) — "
-                "is the exomem install intact?"
+                "is the Evermatter install intact?"
             )
         workflow_skills.validate_contract_projection(
             item["name"], src, core=item["kind"] == "core"

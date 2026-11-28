@@ -207,6 +207,7 @@ def test_preserve_artifacts_rest_schema_and_malformed_file_error(vault, monkeypa
         "mime_type",
         "file_name",
         "diarize",
+        "tracks",
     ]
     assert schema["items"]["required"] == ["download_url", "file_id"]
     assert "additionalProperties" not in schema["items"]
@@ -1215,7 +1216,7 @@ def test_process_media_has_one_generated_registry_rest_and_openapi_contract(
     assert set(schema["properties"]) == {
         "path", "paths", "operation", "language", "multilingual", "store", "response_detail",
         "diarize", "binary_sha256", "binary_size", "segments", "turns", "engine", "asr", "names",
-        "replace_labelled", "renames",
+        "replace_labelled", "renames", "tracks",
     }
     assert schema["properties"]["diarize"]["type"] == "boolean"
     assert schema["properties"]["response_detail"]["enum"] == [

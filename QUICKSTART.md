@@ -1,6 +1,6 @@
 # Evermatter (formerly Exomem) — local setup (Claude Code, no cloud)
 
-`exomem setup --vault "/path/to/your/Obsidian"` does steps 1–6 below for you in
+`evermatter setup --vault "/path/to/your/Obsidian"` does steps 1–6 below for you in
 one command — see [Set it up in 5 minutes](README.md#set-it-up-in-5-minutes) in
 the main README. This document is the full-control manual path: each step run
 by hand, plus GPU/media extras, for anyone who wants to see or customize what's
@@ -30,7 +30,7 @@ If you're comfortable in Claude Code, this is ~20–30 minutes.
 >
 > Claude Code alone? `/plugin marketplace add substrate-systems/evermatter` then
 > `/plugin install evermatter@exomem` installs the skills and hooks. Finish the MCP
-> route with `exomem setup --stdio`, or point setup at your existing service.
+> route with `evermatter setup --stdio`, or point setup at your existing service.
 >
 > The manual walkthrough below exists so you can see what those do, and for when
 > you want to run the steps yourself.
@@ -94,7 +94,7 @@ save one harmless test conclusion so I can see where it lands.
 
 The expected first-run verification is concrete:
 
-1. `exomem doctor` passes for the selected vault.
+1. `evermatter doctor` passes for the selected vault.
 2. The connected assistant can call `read_instructions()`, unless it has
    already loaded the Evermatter skill.
 3. A known question about your vault triggers `search_memory` before the answer.
@@ -109,14 +109,14 @@ After setup, you can use simple action aliases instead of learning every
 canonical operation first:
 
 ```bash
-exomem ask "what do I know about this project?"
-exomem ask "what supports this decision?" --deep --graph-enrich --json
-exomem create_note "# Setup succeeded\n\n## Claim\n\nEvermatter setup completed today." --title "Setup succeeded today" --json
-exomem capture "raw source text" --title "Source title" --source-type other --json
-exomem capture "receipt text" --as evidence --scope warranty --category receipts --filename receipt.txt --json
-exomem review --json
-exomem connect --path "Notes/Insights/example" --json
-exomem maintain --json
+evermatter ask "what do I know about this project?"
+evermatter ask "what supports this decision?" --deep --graph-enrich --json
+evermatter create_note "# Setup succeeded\n\n## Claim\n\nEvermatter setup completed today." --title "Setup succeeded today" --json
+evermatter capture "raw source text" --title "Source title" --source-type other --json
+evermatter capture "receipt text" --as evidence --scope warranty --category receipts --filename receipt.txt --json
+evermatter review --json
+evermatter connect --path "Notes/Insights/example" --json
+evermatter maintain --json
 ```
 
 These aliases are thin routes over product commands: `ask` -> `search_memory`,
@@ -174,22 +174,22 @@ Concrete adoption commands after setup:
 
 ```bash
 # readable read-only report: no files created, moved, edited, or deleted
-exomem adopt
+evermatter adopt
 
 # same report as a machine-readable envelope
-exomem adopt --json
+evermatter adopt --json
 
 # save the report under Knowledge Base/_Adoption/
-exomem adopt --mode save-manifest --json
+evermatter adopt --mode save-manifest --json
 
 # copy only files you explicitly name into governed Sources/Imported/
-exomem adopt --mode copy-as-sources \
+evermatter adopt --mode copy-as-sources \
   --selected-paths "Warranty Case/laptop-receipt.md" \
   --json
 
 # copy selected legacy text if needed, then return a compile plan;
 # no compiled note is created until you review and call note()
-exomem adopt --mode compile-selected \
+evermatter adopt --mode compile-selected \
   --selected-paths "Warranty Case/laptop-receipt.md" \
   --json
 ```
@@ -238,7 +238,7 @@ Before touching your own vault, you can verify the repo against the public sampl
 vault:
 
 ```bash
-uv run exomem demo --json
+uv run evermatter demo --json
 ```
 
 That read-only smoke runs the path a new install depends on: `doctor`, keyword
@@ -304,7 +304,7 @@ their own. Confirm the accelerated stack is live:
 
 ```bash
 uv run python scripts/verify-mlx.py     # expect: GATE: PASS
-uv run exomem doctor --profile media    # torch.device: mps, asr.backend: mlx-whisper
+uv run evermatter doctor --profile media    # torch.device: mps, asr.backend: mlx-whisper
 ```
 
 Optional knobs: `EVERMATTER_MPS_FP16=0` keeps embeddings in fp32; `EVERMATTER_TORCH_DEVICE=cpu`
@@ -343,7 +343,7 @@ uv run python -m exomem reconcile --vault "/path/to/your/Obsidian"
 Use `performance` only when you explicitly want GPU-capable bulk/model work. It
 preloads the models at startup and keeps them resident — idle reclamation still
 evicts caches, but not the preloaded models, because reloading one costs whichever
-request arrives next about half a minute. `exomem doctor --profile hybrid` reports
+request arrives next about half a minute. `evermatter doctor --profile hybrid` reports
 that state under `models.residency`: whether a model is loaded, whether its weights
 are in the local HuggingFace cache, and whether the next load resolves from that
 cache instead of revalidating it over the network.
@@ -618,7 +618,7 @@ in the client's environment **or** persisted in the managed install's
 with `EVERMATTER_SERVICE_ENV`). A key read from that file is only ever sent to a
 loopback host: point `EVERMATTER_HOST` elsewhere and the REST rung is skipped for it.
 Then, only if you also set `EVERMATTER_RETRIEVE_INJECT_CLI=1`, an
-`exomem search_memory --json` subprocess call (~5s timeout, slower — cold Python
+`evermatter search_memory --json` subprocess call (~5s timeout, slower — cold Python
 start). The two rungs share one 8s budget under the hook's 10s timeout, measured
 on elapsed time: a REST call that dribbles bytes past the budget is abandoned and
 the CLI rung gets what is left. If
@@ -659,7 +659,7 @@ kb"* or *"check the kb."*)
 
 Try it in Claude Code: *"capture this source and compile an insight from it,"*
 or *"ask Evermatter what I know about X,"* or *"review the KB."* Then run
-**`exomem maintain --reconcile`** once to sync index counts after manual edits.
+**`evermatter maintain --reconcile`** once to sync index counts after manual edits.
 
 ## Optional: mobile / claude.ai-web access
 
@@ -703,7 +703,7 @@ produces on a hooked one.
 **[docs/prominence.md](docs/prominence.md) is the full reference** — four levels
 (`off` / `light` / `balanced` / `maximal`), what each one changes, and a copy-paste
 block per level for both claude.ai and ChatGPT. Set it on a local install with
-`exomem prominence <level>`; on web, paste the block. Tune *down* if it is too
+`evermatter prominence <level>`; on web, paste the block. Tune *down* if it is too
 chatty — you should never have to tune up to get it working.
 
 This vault is served by Evermatter, an MCP server (formerly kb-mcp). Once added as a

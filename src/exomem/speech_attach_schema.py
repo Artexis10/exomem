@@ -3,6 +3,7 @@
 A personal install's agent transcribes or diarises a recording on its machine and attaches the
 result with `media.attach-speech` (`speech_attach`). This module holds only the schema the door
 publishes and the bounds it states, so that `commands` imports it without loading the attach.
+It also holds the schema of a track declaration, which `media.process` and `media.reprocess` take.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from pydantic import ConfigDict, Field, StringConstraints
 from typing_extensions import NotRequired, TypedDict
 
 from .speaker_names import MAX_NAME_CHARS
+from .speech_tracks import MAX_TRACKS
 
 #: The two `process_media` operations that carry a speech result; the door, the commands and the reply view share them.
 ATTACH_OPERATION = "attach-speech"
@@ -90,6 +92,15 @@ class AttachedAsr(TypedDict, total=False):
     speech_seconds: _Seconds
 
 
+class DeclaredTrack(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="forbid")
+
+    name: Annotated[_Label, Field(description="The name each line from this microphone carries.")]
+    stream: NotRequired[Annotated[int, Field(strict=True, ge=0, description="Audio stream, from 0.")]]
+    channel: NotRequired[Annotated[int, Field(strict=True, ge=0, description="Channel of that stream, from 0; omit for all.")]]
+    single_voice: NotRequired[Annotated[bool, Field(strict=True, description="True when one person uses it.")]]
+
+
 Segments = Annotated[
     list[AttachedSegment],
     Field(min_length=1, max_length=MAX_ITEMS, description="Transcribed speech, in any order; the cell sorts by start."),
@@ -101,6 +112,10 @@ Turns = Annotated[
 Names = Annotated[
     list[AttachedName],
     Field(max_length=MAX_NAMES, description="Names for labels of `turns`; each label and each name appears once."),
+]
+Tracks = Annotated[
+    list[DeclaredTrack],
+    Field(max_length=MAX_TRACKS, description="Audio streams or channels that are separate microphones; [] on reprocess clears them."),
 ]
 Renames = Annotated[
     dict[_Label, Annotated[str, StringConstraints(min_length=1, max_length=MAX_NAME_CHARS)]],

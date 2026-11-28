@@ -24,7 +24,7 @@ def open_image(path: Path | BinaryIO, *, suffix: str | None = None, max_pixels: 
     try:
         from PIL import Image
     except ImportError as error:
-        raise ImportError("Image decoding requires Pillow; install exomem[image-codecs]") from error
+        raise ImportError("Image decoding requires Pillow; install evermatter[image-codecs]") from error
     from .media_types import RAW_EXTS
 
     extension = (suffix if suffix is not None else Path(path).suffix).lower()
@@ -38,7 +38,7 @@ def open_image(path: Path | BinaryIO, *, suffix: str | None = None, max_pixels: 
         try:
             from pi_heif import register_heif_opener
         except ImportError as error:
-            raise ImportError("HEIC decoding requires pi-heif; install exomem[image-codecs]") from error
+            raise ImportError("HEIC decoding requires pi-heif; install evermatter[image-codecs]") from error
         register_heif_opener(decode_threads=1)
     # Pillow chooses a decoder by sniffing content, and some (EPS) run external programs. Only
     # the decoders of the registry's image extensions may run, whatever the file claims to be.
@@ -73,7 +73,7 @@ def _open_raw(path: Path | BinaryIO, max_pixels: int | None):
                 "Camera raw decoding needs rawpy, which publishes no build for Intel macOS; "
                 "download the original with transfer_artifact operation=download"
             ) from error
-        raise ImportError("Camera raw decoding requires rawpy; install exomem[image-codecs]") from error
+        raise ImportError("Camera raw decoding requires rawpy; install evermatter[image-codecs]") from error
     limit = max_pixels if max_pixels is not None else (
         2 * Image.MAX_IMAGE_PIXELS if Image.MAX_IMAGE_PIXELS else None
     )

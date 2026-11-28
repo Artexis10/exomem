@@ -539,6 +539,23 @@ def test_the_release_a_dispatch_names_is_served_even_when_a_backlog_fills_the_ru
     assert tags[0] == "v1.0.0" and len(tags) == 40
 
 
+def test_only_serves_the_named_release_and_reads_no_release_list(asset, monkeypatch, capsys):
+    """A run on a release tag must not sweep the window: that run's older code would stamp the other releases' permanent files."""
+    named = {"tag_name": "v1.0.0", "draft": False, "published_at": "2026-03-01T09:00:00+00:00", "assets": [{"name": "sample.whl"}]}
+    requested = []
+
+    def run(*command):
+        requested.append(command[-1])
+        return json.dumps(named)
+
+    monkeypatch.setattr(asset, "_run", run)
+
+    assert asset.main(["missing", "--only", "v1.0.0"]) == 0
+
+    assert capsys.readouterr().out.split() == ["v1.0.0"]
+    assert [url for url in requested if "/releases?" in url] == []  # no page of the list was read
+
+
 def test_the_tag_a_dispatch_names_joins_the_sweep_even_when_older_than_the_window(asset):
     older = release("v1.2.0", "2026-03-01")
     pages = [[release("v1.8.0", "2026-11-20"), release("v1.4.0", "2026-09-30")]]

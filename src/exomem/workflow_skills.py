@@ -143,7 +143,7 @@ def load_index() -> dict[str, Any]:
     if not WORKFLOW_SKILLS_INDEX.is_file():
         raise FileNotFoundError(
             f"workflow skill index missing at {WORKFLOW_SKILLS_INDEX} "
-            "(is the exomem install intact?)"
+            "(is the Evermatter install intact?)"
         )
     data = yaml.safe_load(WORKFLOW_SKILLS_INDEX.read_text(encoding="utf-8")) or {}
     skills = data.get("skills")

@@ -53,7 +53,7 @@ An older runtime that lacks this compatibility capability must refuse the armed 
 5. Start the runtime through its service manager, expecting startup to validate the configuration and portable requirement.
 
 ```sh
-exomem maintain --migrate-state --offline --arm-connector-boundary --vault "$EVERMATTER_VAULT_PATH"
+evermatter maintain --migrate-state --offline --arm-connector-boundary --vault "$EVERMATTER_VAULT_PATH"
 ```
 
 Maintenance also prepares the existing immutable semantic activation manifest.

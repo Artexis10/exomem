@@ -163,7 +163,7 @@ async def test_continue_empty_state_names_hook_install(make_app):
         recovery = app.screen.query_one("#continue-recovery")
         assert recovery.has_class("visible")
         options = recovery.query_one("#recovery-options")
-        assert "exomem install-hook" in str(options.get_option_at_index(0).prompt)
+        assert "evermatter install-hook" in str(options.get_option_at_index(0).prompt)
 
 
 async def test_continue_renders_and_copies_a_packet(make_app):

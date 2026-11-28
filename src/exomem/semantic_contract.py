@@ -299,7 +299,10 @@ class SemanticPageState:
     # relation row. Retained so fact derivation never re-reads the file.
     body_wikilinks: tuple[tuple[str, int], ...] = ()
     body: str = field(default="", repr=False)
-    candidates: semantic_units.SemanticUnitCandidates | None = field(default=None, repr=False)
+    # Candidates are derived from the body and path. Corpus states can discard
+    # them without changing equality at the write boundary.
+    candidates: semantic_units.SemanticUnitCandidates | None = field(default=None, repr=False, compare=False)
+    audit_occurrence_keys: frozenset[str] | None = field(default=None, repr=False, compare=False)
     definitions: instances.PageDefinitions | None = field(default=None, repr=False)
     # An explicit operation witness retains staged definitions in an unarmed corpus.
     definitions_explicit: bool = False
@@ -1642,11 +1645,14 @@ def _parse_page_state(
     review_fingerprint: str | None | object = _REVIEW_FINGERPRINT_UNSET,
     complete_authored_effects: bool = False,
     owner_type_basis: note_types.Basis | None = None,
+    retain_candidates: bool = True,
 ) -> SemanticPageState:
     """Build detached semantic state from one already-read Markdown string.
 
     ``owner_type_basis`` is the owner-local note-type basis that the caller shares across the pages
     it parses, so that each page does not load the registry again.
+    A resident corpus keeps the authored body once. Registry reinterpretation
+    can scan those same bytes if it needs the candidates again.
     """
     request_budget.checkpoint()
     root = Path(vault_root)
@@ -1773,7 +1779,10 @@ def _parse_page_state(
         structurally_placed_connectable=connectable_placed,
         body_wikilinks=tuple(body_links),
         body=body,
-        candidates=candidates,
+        candidates=candidates if retain_candidates else None,
+        audit_occurrence_keys=(
+            None if retain_candidates else semantic_units.candidate_occurrence_keys(candidates)
+        ),
         neutral_document=document,
         prose_carriers=prose_carriers,
     )
@@ -3541,6 +3550,7 @@ def _reconcile_markdown_delta(
             source,
             relation_registry=relation_definitions,
             language_registry=language,
+            retain_candidates=False,
         )
         if included:
             states[rel_path] = state
@@ -4872,6 +4882,7 @@ def _build_corpus_context_uncached(
                 source,
                 relation_registry=relation_definitions,
                 language_registry=language,
+                retain_candidates=False,
             )
 
     identity_census, _ = _build_identity_census(root, consume=consume)

@@ -253,7 +253,7 @@ def prepare_upload(
             # A Cloud cell takes an import as an encrypted archive from `exomem cloud import`; this unpacker is not on that path.
             raise ValueError(
                 "UPLOAD_LANE_UNAVAILABLE: lane import is for a personal server. "
-                "A folder reaches Evermatter Cloud with `exomem cloud import <folder>` on the person's computer")
+                "A folder reaches Evermatter Cloud with `evermatter cloud import <folder>` on the person's computer")
         if who.client_binding is None or who.origin_session is None:
             if cloud:
                 raise ValueError("UPLOAD_HANDOFF_UNAVAILABLE: this Evermatter Cloud request has no verified gateway origin")
@@ -305,7 +305,7 @@ def prepare_upload(
             token = (RESUMABLE_PREFIX if resumable else TOKEN_PREFIX) + secret
         # Name the next step before writing a ticket.
         if resumable:
-            steps = [{"step": "send", "text": "Use exomem attach with this handoff file and the Source original. "
+            steps = [{"step": "send", "text": "Use evermatter attach with this handoff file and the Source original. "
                       "The client resumes the upload and returns the verified Source receipt."}]
         elif saved_to is not None:
             # A Cloud cell's byte route sits behind the gateway, which serves no page, so only a personal server offers one.

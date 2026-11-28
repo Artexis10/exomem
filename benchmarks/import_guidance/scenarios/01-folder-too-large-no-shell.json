@@ -18,7 +18,7 @@
         "routes": [
           {
             "route": "cli",
-            "detail": "with a shell: exomem cloud import <folder>"
+            "detail": "with a shell: evermatter cloud import <folder>"
           },
           {
             "route": "browser",
@@ -45,7 +45,7 @@
     {
       "id": "gives_cli_command",
       "expect": true,
-      "text": "The agent gives the person the literal command `exomem cloud import ~/Archive` (or the same command with the folder path) to run themselves."
+      "text": "The agent gives the person the literal command `evermatter cloud import ~/Archive` (or the same command with the folder path, or the older name `exomem` in place of `evermatter`) to run themselves."
     },
     {
       "id": "keeps_source",

@@ -149,7 +149,7 @@ _SETTLED_JOIN_TIMEOUT_SECONDS = 0.0
 #: matched neither, so a user following the remediation got a usage error from
 #: the server argument parser — the same defect as the doctor strings in #479.
 _RECONCILE_CALL = (
-    'maintain_memory(mode="reconcile") — `exomem maintain --reconcile` from a shell'
+    'maintain_memory(mode="reconcile") — `evermatter maintain --reconcile` from a shell'
 )
 _RECONCILE_HINT = f"run {_RECONCILE_CALL} to recover the derived graph."
 _RECONCILE_REMEDIATION = f"Run {_RECONCILE_CALL} to recover the derived graph."

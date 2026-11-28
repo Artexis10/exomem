@@ -11,6 +11,7 @@ import base64
 import gzip
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -20,9 +21,10 @@ from types import SimpleNamespace
 import pytest
 from cellctl.imports import JOB_FAILED_LOG_PHRASE
 
-from cloud_rehearsal import large_import, platform
+from cloud_rehearsal import infra, large_import, large_import_fixture, platform, scenarios, shell
+from cloud_rehearsal.infra import K3s
 from cloud_rehearsal.mcp_client import ToolResult
-from cloud_rehearsal.report import StepFailure
+from cloud_rehearsal.report import Report, StepFailure
 from cloud_rehearsal.shell import CommandFailed
 
 CLEAN = {"manifest_proof": [], "sources": [], "consumed": []}
@@ -444,7 +446,7 @@ def test_a_page_without_a_finish_count_leaves_its_unconsumed_files_unknown_not_z
 
 
 def test_a_deadline_that_stops_filing_still_reports_the_calls_made():
-    """Catches the report that lost every page because the deadline check came before the pages were recorded."""
+    """Keep observed page rates and the expired projection when the deadline stops filing."""
     agent = Scripted({"file": [_working("r1", filed=40, token="a"), _working("r1", filed=90, token="b")]})
     folder = _folder(name="media")
     plan = _plan()
@@ -453,6 +455,7 @@ def test_a_deadline_that_stops_filing_still_reports_the_calls_made():
     def require_time(what, *, seconds=0):
         checks.append(what)
         if len(checks) == 3:
+            plan.deadline = time.monotonic()
             raise large_import.OutOfTime(f"the scenario's deadline came before {what}")
 
     plan.require_time = require_time
@@ -462,9 +465,32 @@ def test_a_deadline_that_stops_filing_still_reports_the_calls_made():
 
     (page,) = folder.report["pages"]
     assert [step["files"] for step in page["file_steps"]] == [40, 50]
-    assert folder.report["file_projection"]["files_filed"] == 90  # kept current before the deadline check, as the pages are
+    assert page["files_per_second"] == 90.0
+    assert folder.report["file_projection"]["files_filed"] == 90
+    assert folder.report["file_projection"]["deadline_seconds_left"] == 0
     assert folder.report["file_seconds_by_page"] == [
         {"page": 1, "calls": 2, "file_seconds": 1.0, "longest_call_seconds": 0.5}]
+
+
+def test_a_deadline_during_the_final_status_read_keeps_the_filing_result(monkeypatch):
+    """A status timeout must not leave the time before that status read in the report."""
+    agent = Scripted({"file": [_done("r1", filed=90)]})
+    folder = _folder(name="media")
+    plan = _plan()
+
+    async def read_run(agent, run_id):
+        plan.deadline = time.monotonic()
+        raise large_import.OutOfTime("the scenario's deadline came during status")
+
+    monkeypatch.setattr(large_import, "read_run", read_run)
+
+    with pytest.raises(large_import.OutOfTime, match="during status"):
+        asyncio.run(large_import.file_pages(agent, plan, folder))
+
+    (page,) = folder.report["pages"]
+    assert page["files_per_second"] == 180.0
+    assert folder.report["file_projection"]["files_filed"] == 90
+    assert folder.report["file_projection"]["deadline_seconds_left"] == 0
 
 
 def test_a_deadline_that_stops_paging_still_reports_the_refusals_counted_so_far(monkeypatch):
@@ -547,12 +573,17 @@ def test_a_reply_without_counts_leaves_its_files_and_the_rate_unknown_not_zero()
 # --- the agent's calls across a restarting cell ---------------------------------------------
 
 
+HANGS = object()  # a call that the cell never answers
+
+
 class Session:
     def __init__(self, script):
         self.script = script
 
     async def call(self, name, arguments):
         step = self.script.pop(0)
+        if step is HANGS:
+            await asyncio.Event().wait()
         if isinstance(step, Exception):
             raise step
         return step
@@ -809,3 +840,218 @@ def test_the_app_log_is_kept_before_the_discard_replaces_the_pod(monkeypatch):
     asyncio.run(large_import.discard(Cell(), Refusing(), _plan(), _folder()))
 
     assert events.index("app log kept for notes") < events.index("transfer_memory")
+
+
+# --- a hung call ends at the deadline and leaves its evidence --------------------------------
+
+
+def _plan_with(seconds):
+    plan = _plan()
+    plan.deadline = time.monotonic() + seconds
+    return plan
+
+
+def test_a_call_the_cell_never_answers_is_ended_at_the_deadline_and_named():
+    """Catches the hang that the between-calls deadline check could not see: one call that never returned held the run
+    until the step's own timeout killed it, and the report and the cell's evidence went with it."""
+    agent = large_import.Agent(Client([HANGS]), _plan_with(0.2))
+    agent.where = "media folder, file call 7, 3 pages so far"
+    started = time.monotonic()
+
+    with pytest.raises(large_import.OutOfTime) as ended:
+        asyncio.run(asyncio.wait_for(agent.import_op("file", path="p"), timeout=5))
+
+    assert time.monotonic() - started < 3
+    message = str(ended.value)
+    assert "manage_memory.file" in message and "media folder, file call 7, 3 pages so far" in message
+    assert re.search(r"after \d+\.\d s", message)
+
+
+def test_a_call_that_the_boundary_keeps_refusing_names_the_cause_when_the_deadline_ends_it():
+    """Catches a retry chain that is its own hang: each refusal is retried after its pause, so no single request is slow."""
+    agent = large_import.Agent(Client([_busy("holder_overdue") for _ in range(5)]), _plan_with(0.3))
+
+    with pytest.raises(large_import.OutOfTime) as ended:
+        asyncio.run(asyncio.wait_for(agent.call("manage_memory", {}, kind="file"), timeout=5))
+
+    assert "holder_overdue" in str(ended.value) and len(agent.refusals) >= 1
+
+
+def test_a_call_made_after_the_deadline_is_not_sent():
+    agent = large_import.Agent(Client([_reply({"ok": True})]), _plan_with(-1))
+
+    with pytest.raises(large_import.OutOfTime, match="search_memory"):
+        asyncio.run(agent.call("search_memory", {"query": "q"}))
+
+
+def _the_container(tmp_path, seconds=3):
+    """Stands for the K3s container: it runs what `docker exec <container>` was given, with a `kubectl` that takes
+    `seconds`. The host's own `timeout` is the container's, and the docker client's death is not modelled: only the
+    command's own limit can end the call."""
+    kubectl = tmp_path / "kubectl"
+    kubectl.write_text(f"#!/bin/sh\nsleep {seconds}\n")
+    kubectl.chmod(0o755)
+
+    def run(command, **kwargs):
+        inner = command[command.index("c") + 1:]
+        return shell.run([str(kubectl) if word == "kubectl" else word for word in inner],
+                         check=kwargs.get("check", True), timeout=None)
+
+    return run
+
+
+@pytest.mark.parametrize("check", [True, False])
+def test_a_kubectl_call_that_outlives_the_scenarios_time_is_ended_in_the_container_and_named(monkeypatch, tmp_path, check):
+    """Catches a kubectl that the docker client's death left running: `timeout` inside the container ends it, and its
+    exit status reads as the call's limit, with the call named."""
+    plan = _plan_with(0.3)
+    plan.begin_stage()
+    monkeypatch.setattr(infra, "run", _the_container(tmp_path))
+    ctx = SimpleNamespace(large_import=plan, stack=SimpleNamespace(k3s=K3s(container="c", ip="10.0.0.1")))
+    started = time.monotonic()
+
+    with pytest.raises(large_import.OutOfTime, match="kubectl exec"):
+        scenarios.Context.kubectl(ctx, "exec", "--namespace", "cell-a", "pod", "--", "python3", check=check)
+
+    assert time.monotonic() - started < 2.5
+
+
+def test_the_log_snapshots_of_a_large_import_end_a_read_that_the_cluster_does_not_answer(monkeypatch, tmp_path):
+    """Catches `snapshot_logs` reading with the 900-second default once the stage had ended: six reads of a cluster
+    that stopped answering held the report for up to 90 minutes."""
+    plan = _plan_with(-1)
+    plan.read_seconds = 0.3
+    monkeypatch.setattr(infra, "run", _the_container(tmp_path))
+    ctx = SimpleNamespace(large_import=plan, stack=SimpleNamespace(k3s=K3s(container="c", ip="10.0.0.1")),
+                          tenants=[], log_snapshots=[])
+    started = time.monotonic()
+
+    with pytest.raises(StepFailure, match="kubectl logs"):
+        scenarios.snapshot_logs(ctx)
+
+    assert time.monotonic() - started < 2.5
+
+
+BOUNDARY = {"state": "held", "operation": "lexical_repair", "holder_kind": "background", "age_seconds": 1500.0}
+
+
+def _stage_ctx(monkeypatch, tmp_path, plan, run_folder):
+    """A context that `run_large_import` can run on: the cell's reads are stubs and `run_folder` stands for both folders.
+    Returns it with the list of what the run kept."""
+    plan.sizing = large_import_fixture.Sizing(
+        notes_bytes=1, media_bytes=1, volume_gib=17, files_notes=1, files_media=1, scaled=False,
+        proves_one_copy_only=True, note="", fullest_volume_bytes=1, staged_copies_peak_bytes=1)
+    kept = []
+
+    async def fetchrow(*_args):
+        return {"observed_state": "importing"}
+
+    ctx = SimpleNamespace(
+        report=SimpleNamespace(stages={"large_import": {}}, environment={}), a=SimpleNamespace(cell_id="c", session=None),
+        stack=SimpleNamespace(workdir=tmp_path), resolver=None, browser=None, substrate=SimpleNamespace(redirect_uri=""),
+        large_import=plan, fetchrow=fetchrow)
+
+    async def volume(_ctx):
+        return {"pvc_request": "17Gi", "pvc_request_bytes": 17 * large_import_fixture.GIB, "cell_row_storage_gib": 17}
+
+    async def first_session(*_args, **_kwargs):
+        return []
+
+    async def app_logs(_ctx, label):
+        kept.append(f"app log {label}")
+        return {}
+
+    def probe(_ctx, script, *_args, **_kwargs):
+        return {"boundary": BOUNDARY, "journal_tail": []} if script == large_import.HANG_SCRIPT else [plan.ceiling, plan.reserve]
+
+    monkeypatch.setattr(large_import, "TenantClient", lambda *_args: Client([HANGS]))
+    monkeypatch.setattr(large_import, "first_session", first_session)
+    monkeypatch.setattr(large_import, "exec_json", probe)
+    monkeypatch.setattr(large_import, "read_cell", lambda _ctx: {"ready": {"status": "starting", "repair": {"phase": "rebuilding"}}})
+    monkeypatch.setattr(large_import, "run_folder", run_folder)
+    monkeypatch.setattr(large_import, "volume_state", volume)
+    monkeypatch.setattr(large_import, "measurements", lambda *_args: {})
+    monkeypatch.setattr(large_import, "save_import_failure_evidence", lambda _ctx: kept.append("failure evidence") or {})
+    monkeypatch.setattr(large_import, "save_cell_logs", lambda _ctx: kept.append("pod log"))
+    monkeypatch.setattr(large_import, "keep_cell_app_logs", app_logs)
+    return ctx, kept
+
+
+def test_a_hung_call_ends_the_stage_with_the_call_named_and_the_cells_state_collected(monkeypatch, tmp_path):
+    """The workflow's one proof: a call that never returns still yields a finding that names it, the evidence of what the
+    cell was held by, and the logs the run keeps, because the stage ends instead of waiting for the step's timeout."""
+
+    async def hangs(_ctx, agent, _plan, _out, sampler, _name, _space):
+        sampler.label = "notes.paging"
+        agent.where = "notes folder, file call 5, 2 pages so far"
+        await agent.import_op("file", path="p")
+
+    plan = _plan_with(0.3)
+    ctx, kept = _stage_ctx(monkeypatch, tmp_path, plan, hangs)
+
+    asyncio.run(asyncio.wait_for(large_import.run_large_import(ctx, plan), timeout=20))
+
+    stage = ctx.report.stages["large_import"]
+    (finding,) = stage["findings"]
+    assert finding["deadline"] is True and finding["phase"] == "notes.paging"
+    assert "manage_memory.file" in finding["message"] and "notes folder, file call 5, 2 pages so far" in finding["message"]
+    assert finding["latest_import"] == {"observed_state": "importing"}
+    assert stage["hang_evidence"]["boundary"] == {"boundary": BOUNDARY, "journal_tail": []}
+    assert stage["hang_evidence"]["last_sample"]["ready"]["repair"] == {"phase": "rebuilding"}
+    assert {"failure evidence", "pod log", "app log end"} <= set(kept)
+    assert stage["verdict"] == "fail"
+
+
+@pytest.mark.parametrize("how", ["passes", "hangs"])
+def test_the_stages_call_limits_end_with_the_stage(monkeypatch, tmp_path, how):
+    """Catches the wrap-up limits outliving the stage: a kubectl read after it (the post checks) kept the 60-second limit
+    or the one-second floor, so a healthy cluster failed the run with exit status 2."""
+
+    async def folder(_ctx, agent, _plan, _out, sampler, _name, _space):
+        sampler.label = "notes.paging"
+        if how == "hangs":
+            await agent.import_op("file", path="p")
+        return {"manifest_proof": [], "sources": [], "consumed": []}
+
+    plan = _plan_with(0.3 if how == "hangs" else 60)
+    ctx, _kept = _stage_ctx(monkeypatch, tmp_path, plan, folder)
+    limits = []
+    ctx.stack.k3s = SimpleNamespace(kubectl=lambda *_args, **kwargs: limits.append(kwargs.get("timeout")))
+
+    asyncio.run(asyncio.wait_for(large_import.run_large_import(ctx, plan), timeout=20))
+    scenarios.Context.kubectl(ctx, "get", "pods")
+
+    assert limits == [None]
+
+
+def test_the_report_and_the_kept_diagnostics_leave_before_the_post_checks_read_the_cluster(monkeypatch, tmp_path):
+    """Catches post checks that stalled on a cluster which stopped answering ahead of the report's first write: the
+    step's own timeout then killed the run, and the report and the cell's logs went with it."""
+    from cloud_rehearsal import __main__ as entry
+
+    report = Report(run_id="r")
+    report.stages["large_import"] = {"verdict": "fail"}
+    report_path = tmp_path / "out" / "report.json"
+    work = tmp_path / "work"
+    (work / "diagnostics").mkdir(parents=True)
+    (work / "diagnostics" / "cell-pod.log").write_text("the cell's log")
+    artifacts = tmp_path / "artifacts"
+    monkeypatch.setenv("REHEARSAL_DIAGNOSTICS_DIR", str(artifacts))
+    on_disk = {}
+
+    async def steps(_ctx, only=None):
+        return None
+
+    def stalls(_ctx):
+        on_disk["report"] = json.loads(report_path.read_text())["stages"] if report_path.exists() else None
+        on_disk["log"] = (artifacts / "cell-pod.log").exists()
+        raise TimeoutError("the cluster did not answer")
+
+    monkeypatch.setattr(entry, "run_steps", steps)
+    monkeypatch.setattr(entry, "close_clients", steps)
+    monkeypatch.setattr(entry, "post_checks", stalls)
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(entry._steps_then_checks(SimpleNamespace(), report, report_path, work, None))
+
+    assert on_disk == {"report": {"large_import": {"verdict": "fail"}}, "log": True}

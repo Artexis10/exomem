@@ -356,7 +356,7 @@ def warming(*, unavailable: bool = False) -> dict[str, Any]:
         "reason": "review_projection_unavailable" if unavailable else "review_projection_rebuild_required",
         "recovery": {
             "operator_required": True,
-            "command": "exomem maintain --reconcile",
+            "command": "evermatter maintain --reconcile",
             "remote": 'check_memory operation.kind="reconcile" dry_run=true, then repair_memory with the plan_id and a why',
         },
         "items": [],

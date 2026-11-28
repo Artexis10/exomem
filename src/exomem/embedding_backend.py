@@ -1068,7 +1068,7 @@ def _quantize(served: ServedArtifact, source: str, out: str) -> None:
         detail = (result.stderr or "").strip().splitlines()[-1:] or [f"exit {result.returncode}"]
         raise ModelFilesUnavailable(
             f"building the int8 model failed ({detail[0]}); it needs onnxruntime and onnx, "
-            "which exomem[embeddings] installs"
+            "which evermatter[embeddings] installs"
         )
 
 

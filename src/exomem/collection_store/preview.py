@@ -412,6 +412,11 @@ def note_checked_hash(path, digest):
 class _DeadlinePassed(Exception):
     """The request's store read reached its completion deadline before it decided every page."""
 
+    def __init__(self, answers):
+        super().__init__()
+        #: The pages decided before the deadline, answered as their own calls would be.
+        self.answers = answers
+
 
 class _Decide:
     """The work of one store request: each page asked, answered as its own call would be."""
@@ -432,7 +437,7 @@ class _Decide:
             for path, (args, kwargs) in self.calls.items():
                 request_budget.checkpoint()
                 if self.deadline is not None and time.monotonic() >= self.deadline:
-                    raise _DeadlinePassed()
+                    raise _DeadlinePassed(answers)
                 try:
                     kind, payload = "value", self.read(self.vault_root, *args, **kwargs)
                 except (CollectionStoreError, OpError) as error:
@@ -464,8 +469,13 @@ def _request(server, decisions, work):
     try:
         try:
             return server.read_beside(work, initial=None, progress=False)
-        except _DeadlinePassed:
-            raise server.missed_read() from None
+        except _DeadlinePassed as stop:
+            # The pages decided before the deadline keep their answers. Every other page is withheld as one missed
+            # read, and the command asks this store no more.
+            missed = server.missed_read()
+            if decisions is not None:
+                decisions.refusals.setdefault(server, missed)
+            return {**dict.fromkeys(work.calls, ("refused", missed, None)), **stop.answers}
     except (CollectionStoreError, OpError) as error:
         if decisions is not None:
             decisions.refusals.setdefault(server, error)
@@ -475,6 +485,9 @@ def _request(server, decisions, work):
 def _replay(answer):
     """What that page's own call would have returned or raised."""
     kind, payload, _checked = answer
+    if kind == "refused":
+        # A refusal can stand for many pages: clear its traceback so it does not grow per page.
+        raise payload.with_traceback(None)
     if kind != "value":
         raise payload
     return payload
@@ -494,11 +507,13 @@ def _decide_through_store(server, read, batch, vault_root, path, args, kwargs):
     from .runtime import projection_route
 
     decisions = published_admission.request_decisions()
-    if decisions is not None and server in decisions.refusals:
-        # One refusal object raised for every page: clear its traceback so it does not grow per page.
-        raise decisions.refusals[server].with_traceback(None)
+    refused = None if decisions is None else decisions.refusals.get(server)
 
     def alone():
+        # Read now: a batch this call just made may have been refused at its deadline.
+        if decisions is not None and (current := decisions.refusals.get(server)) is not None:
+            # One refusal object raised for every page: clear its traceback so it does not grow per page.
+            raise current.with_traceback(None)
         return _replay(_request(server, decisions, _Decide(read, vault_root, {path: (args, kwargs)}))[path])
 
     if (decisions is None or batch is None or len(args) != 1 or path not in decisions.paths
@@ -512,6 +527,9 @@ def _decide_through_store(server, read, batch, vault_root, path, args, kwargs):
     effects = {keyword: shared.pop(keyword) for keyword in batch.effects if keyword in shared}
     # The ambient principal is an input of the answer wherever a call leaves its own out.
     answers = decisions.answers((read, vault_root, effective_principal(), shared))
+    if path not in answers and refused is not None:
+        # A page decided before the store was refused keeps its answer; any other asks this store no more.
+        raise refused.with_traceback(None)
     if path not in answers:
         calls = {path: ((path,), {**shared, **effects})}
         for other in decisions.pending():

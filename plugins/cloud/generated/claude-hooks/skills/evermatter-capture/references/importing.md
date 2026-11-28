@@ -20,7 +20,7 @@ instructions for the current platform when either is missing.
 
 An unversioned `uvx` command can reuse a cached CLI, and a connector refresh does not update it.
 After a CLI fix ships, retry the returned command with its prefix pinned to the fixed release. This
-package's release is `uvx evermatter@0.208.0`. Keep the endpoints, the other arguments and
+package's release is `uvx evermatter@0.209.0`. Keep the endpoints, the other arguments and
 the existing checkpoint. [uv's tool-version guidance](https://docs.astral.sh/uv/concepts/tools/#tool-versions)
 explains pinned versions.
 
@@ -35,10 +35,10 @@ progress first and agree with the person whether to resume or cancel it.
    client:
    - Personal server, client with a shell or a networked sandbox: send the folder as one archive.
      `read_instructions(topic="upload_files")` gives the three steps.
-   - Personal server, shell on its machine: run `exomem import <folder>` (CLI only). It copies the
+   - Personal server, shell on its machine: run `evermatter import <folder>` (CLI only). It copies the
      folder into a stage and prints its path.
    - Personal server, client with neither a shell nor a sandbox: give the person
-     `exomem import <folder>`.
+     `evermatter import <folder>`.
    - Evermatter Cloud with a shell: start the returned CLI command in the background, never in the
      foreground. It can run for hours. A folder larger than the cell's room goes as several windows,
      each an ordinary import with its own ID. The folder is encrypted before it leaves the machine.

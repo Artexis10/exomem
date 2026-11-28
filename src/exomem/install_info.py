@@ -251,7 +251,7 @@ def print_version(*, as_json: bool) -> int:
     if as_json:
         print(json.dumps(identity, ensure_ascii=False))
     else:
-        print(f"exomem {identity['version']}")
+        print(f"evermatter {identity['version']}")
     return 0
 
 

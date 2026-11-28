@@ -38,12 +38,14 @@ from .preserve import (
     DESTINATION_ACCEPTED_FORM,
     DuplicateArtifact,
     PreserveError,
+    declared_speech_tracks,
     destination_segment_refusal,
     diarize_pin,
     disclose_retained_speaker_choice,
     preserve_stream,
     validate_raw_capture,
 )
+from .speech_tracks import Track, TrackDeclarationError, declaration
 from .vault import (
     FrontmatterError,
     PathGuard,
@@ -179,6 +181,8 @@ class StagedArtifact:
     #: stores nothing can put it back.
     held: object | None = None
     diarize: bool | None = None
+    #: The declaration of tracks the file handle gave, read before anything is written (`speech_tracks.declaration`).
+    tracks: tuple[Track, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -507,6 +511,7 @@ def stage_artifact(
     diarize = file.get("diarize")
     if diarize is not None and not isinstance(diarize, bool):
         raise SafeFetchError("INVALID_FILE", "diarize must be true or false")
+    tracks = _declared_tracks(file.get("tracks"))
     if is_held_reference(file.get("download_url")):
         artifact = _redeem_held(file, budget, vault_root=vault_root, lane=lane)
     elif cloud_mode_enabled():
@@ -517,7 +522,24 @@ def stage_artifact(
         )
     else:
         artifact = stage_direct_artifact(file, budget, batch_deadline=batch_deadline)
-    return artifact if diarize is None else replace(artifact, diarize=diarize)
+    if diarize is not None:
+        artifact = replace(artifact, diarize=diarize)
+    return artifact if tracks is None else replace(artifact, tracks=tracks)
+
+
+def _declared_tracks(value: object) -> tuple[Track, ...] | None:
+    """A file handle's declaration of tracks, read; a refusal names what to change."""
+    if value is None:
+        return None
+    try:
+        tracks = declaration(value)
+    except TrackDeclarationError as error:
+        raise SafeFetchError("INVALID_FILE", str(error)) from error
+    if not tracks:
+        raise SafeFetchError(
+            "INVALID_FILE", "declare at least one track, or omit tracks; to clear a declaration, reprocess with tracks: []"
+        )
+    return tracks
 
 
 def stage_direct_artifact(
@@ -1296,7 +1318,7 @@ def _already_stored_outcome(
         # A stored row names its page as `page`; the earlier copy's page answers the same question.
         "page": duplicate.sidecar_path,
     }
-    disclose_retained_speaker_choice(out, artifact.diarize)
+    disclose_retained_speaker_choice(out, artifact.diarize, artifact.tracks)
     return source_result_attribution.bind(out, (duplicate.ref,)) if lane == "source" else out
 
 
@@ -1349,7 +1371,8 @@ def _assert_replay_identity(
 
 
 def _replayed_outcome(
-    receipt: Mapping[str, object], *, diarize: bool | None, source_refs: tuple[str, ...] | None = None,
+    receipt: Mapping[str, object], *, diarize: bool | None, tracks: object = None,
+    source_refs: tuple[str, ...] | None = None,
 ) -> dict[str, object]:
     out = {
         "file_id": receipt["selected_file_id"],
@@ -1365,7 +1388,7 @@ def _replayed_outcome(
         "warnings": [],
         "adoption": dict(receipt),
     }
-    disclose_retained_speaker_choice(out, diarize)
+    disclose_retained_speaker_choice(out, diarize, tracks)
     return source_result_attribution.bind(out, source_refs) if source_refs is not None else out
 
 
@@ -1489,7 +1512,7 @@ def _capture_source_adoption(
                 outcomes[selected_index] = _failed(artifact.file_id, error)
                 return _finish_adoption(outcomes)
             outcomes[selected_index] = _replayed_outcome(
-                receipt.receipt, diarize=artifact.diarize, source_refs=(receipt.source_ref,)
+                receipt.receipt, diarize=artifact.diarize, tracks=artifact.tracks, source_refs=(receipt.source_ref,)
             )
             return _finish_adoption(outcomes)
 
@@ -1526,6 +1549,7 @@ def _capture_source_adoption(
                                 filename=artifact.filename,
                                 content_type=artifact.content_type,
                                 diarize=artifact.diarize,
+                                tracks=artifact.tracks,
                             ),
                             adoption_seed=envelope.seed(
                                 lane="source", destination=destination
@@ -1535,7 +1559,7 @@ def _capture_source_adoption(
                         payload = _with_unavailable_warning(result.as_dict(), available, "this file")
             if raced is not None:
                 outcomes[selected_index] = _replayed_outcome(
-                    raced.receipt, diarize=artifact.diarize, source_refs=(raced.source_ref,)
+                    raced.receipt, diarize=artifact.diarize, tracks=artifact.tracks, source_refs=(raced.source_ref,)
                 )
             elif duplicate is not None:
                 # Nothing is written: the earlier copy answers, and the call settles without a commit.
@@ -1643,7 +1667,7 @@ def _preserve_evidence_adoption(
             except SafeFetchError as error:
                 outcomes[selected_index] = _failed(artifact.file_id, error)
                 return _finish_adoption(outcomes)
-            outcomes[selected_index] = _replayed_outcome(receipt.receipt, diarize=artifact.diarize)
+            outcomes[selected_index] = _replayed_outcome(receipt.receipt, diarize=artifact.diarize, tracks=artifact.tracks)
             return _finish_adoption(outcomes)
 
         manager = active_manager()
@@ -1688,11 +1712,12 @@ def _preserve_evidence_adoption(
                                 raw_protection=raw_protection,
                                 media_pending=True,
                                 diarize=artifact.diarize,
+                                tracks=artifact.tracks,
                                 sensitivity=sensitivity,
                             )
                         payload = _with_unavailable_warning(result.as_dict(), held.available, "this file")
             if raced is not None:
-                outcomes[selected_index] = _replayed_outcome(raced.receipt, diarize=artifact.diarize)
+                outcomes[selected_index] = _replayed_outcome(raced.receipt, diarize=artifact.diarize, tracks=artifact.tracks)
                 return _finish_adoption(outcomes)
 
             if _wrote(duplicate):
@@ -1898,7 +1923,7 @@ def _commit_staged_sources(
                             vault_root, artifact.sha256, raw_protection=bool(source_fields.get("raw_protection")),
                         )
                     if duplicate is None:
-                        diarize = artifact.diarize
+                        diarize, tracks = artifact.diarize, artifact.tracks
                         if (
                             correction_speech_original is not None
                             and media_jobs.job_store_path(vault_root).is_file()
@@ -1908,6 +1933,8 @@ def _commit_staged_sources(
                             pending = store.get_by_binary(correction_speech_original, readonly=True)
                             if pending is not None and pending.do_ocr and pending.diarize is not None:
                                 diarize = pending.diarize
+                            if pending is not None and pending.do_ocr and pending.tracks is not None:
+                                tracks = pending.tracks
                         result = add_module.add(
                             vault_root,
                             source_schema,
@@ -1918,6 +1945,7 @@ def _commit_staged_sources(
                                 filename=artifact.filename,
                                 content_type=artifact.content_type,
                                 diarize=diarize,
+                                tracks=tracks,
                             ),
                             identity_check=identity.frontmatter() if identity is not None else None,
                             import_capture=import_capture,
@@ -2094,6 +2122,7 @@ def capture_source_correction(
         "stored-original", staged_path, size, digest.hexdigest(),
         str(metadata["original_content_type"]) if metadata.get("original_content_type") else None, str(filename),
         diarize=diarize_pin(plan.old_source),
+        tracks=declared_speech_tracks(plan.old_source),
     )
     original_path = vault_root.resolve() / stored
     speech_original = (
@@ -2225,8 +2254,8 @@ def preserve_artifacts(
             if archive is not None:
                 from .held_uploads import is_held_reference
 
-                if file.get("diarize") is not None:
-                    raise SafeFetchError("INVALID_FILE", "archive=members takes no speaker-label choice")
+                if file.get("diarize") is not None or file.get("tracks") is not None:
+                    raise SafeFetchError("INVALID_FILE", "archive=members takes no speaker-label choice or tracks")
                 if not is_held_reference(file["download_url"]):
                     # The manifest records what verified the zip's SHA-256 (`upload` or `session`);
                     # a fetched attachment had neither, so only a held upload can be kept as members.
@@ -2303,6 +2332,7 @@ def preserve_artifacts(
                                 raw_protection=raw_protection,
                                 media_pending=True,
                                 diarize=artifact.diarize,
+                                tracks=artifact.tracks,
                                 description=description,
                                 sensitivity=declared_sensitivity,
                                 **(
@@ -2322,7 +2352,7 @@ def preserve_artifacts(
                         "file_id": artifact.file_id,
                         **held.duplicate.receipt(size=artifact.size, content_type=artifact.content_type),
                     }
-                    disclose_retained_speaker_choice(outcomes[index], artifact.diarize)
+                    disclose_retained_speaker_choice(outcomes[index], artifact.diarize, artifact.tracks)
                     if index in transcribed:
                         outcomes[index]["transcription"] = {
                             "state": "not_recorded",

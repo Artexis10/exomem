@@ -132,7 +132,7 @@ Resource regressions have explicit adversarial fixtures:
 Review decisions remain in the existing canonical review-state owner. Its
 whole-file write and point-read cost is an existing limitation; paged vocabulary
 review uses a fenced derived SQLite projection. Missing or corrupt derived state
-reports warming/unavailable with the owner's recovery: `exomem maintain --reconcile`
+reports warming/unavailable with the owner's recovery: `evermatter maintain --reconcile`
 on the host, or a remote reconcile job (preview with `check_memory`, start with
 `repair_memory` and the preview's `plan_id`). A new cell with no canonical review ledger
 returns a current empty bounded pass without creating a projection.

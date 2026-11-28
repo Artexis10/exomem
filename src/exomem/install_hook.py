@@ -1442,7 +1442,7 @@ def check_hooks(
 
 def render_check_human(report: dict) -> str:
     lines = [
-        "exomem hook check",
+        "evermatter hook check",
         f"overall: {'PASS' if report.get('success') else 'FAIL'}",
     ]
     for client in report.get("clients", []):
@@ -1979,7 +1979,7 @@ def install_hook(
         if not (_HOOK_DIR_SRC / name).exists():
             raise FileNotFoundError(
                 f"bundled hook file missing at {_HOOK_DIR_SRC / name} — "
-                "is the exomem install intact?"
+                "is the Evermatter install intact?"
             )
     hook_dir = (
         Path(hook_dir).expanduser()
@@ -2768,11 +2768,11 @@ def render_uninstall_human(report: dict) -> str:
     count = report["removed_entries"]
     if report["config_changed"]:
         noun = "entry" if count == 1 else "entries"
-        lines.append(f"Removed {count} exomem hook {noun} from {report['settings']}.")
+        lines.append(f"Removed {count} evermatter hook {noun} from {report['settings']}.")
     elif report["settings_error"]:
         lines.append(f"Could not update {report['settings']}: {report['settings_error']}")
     else:
-        lines.append(f"No exomem hook entries were wired in {report['settings']}.")
+        lines.append(f"No evermatter hook entries were wired in {report['settings']}.")
     for row in report["alternates"]:
         if row["error"]:
             lines.append(f"  ! yadm alternate {row['path']}: {row['error']}")

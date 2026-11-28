@@ -257,8 +257,8 @@ def _allowance(root: Path, config: dict, *, may_count: bool) -> dict:
     counts afresh and records the result when nothing is recorded, or the record is older than the demand lease.
     A census that could not count, or none at all, is unknown, never 0.
     """
-    allowance = config.get("allowance_bytes")
-    if type(allowance) is not int or allowance < 0:
+    allowance = media_allowance.configured(config.get("allowance_bytes"))
+    if allowance is None:
         return {"unknown": "the media store policy sets no allowance"}
     try:
         counted = media_store.recorded_census(root)

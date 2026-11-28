@@ -43,6 +43,10 @@ class AsrFacts:
     duration_seconds: float | None = None
     #: The revision of the decoding policy the engine ran with.
     policy: str | None = None
+    #: The revision of the track policy (dominance margin and published track fields) that a multitrack recording ran under.
+    tracks_policy: str | None = None
+    #: The declared tracks that the file does not have, each with the reason; the recording was read without them.
+    tracks_skipped: str | None = None
 
     @property
     def reported(self) -> bool:
@@ -60,7 +64,7 @@ class AsrFacts:
         """Rebuild facts from a job result; a value of the wrong type is a corrupt result."""
         if not isinstance(value, dict) or set(value) - set(cls.__dataclass_fields__):
             raise ValueError("ASR facts must be a mapping of the known fields")
-        texts = ("language", "language_source", "language_requested", "language_mode", "decoding", "policy")
+        texts = ("language", "language_source", "language_requested", "language_mode", "decoding", "policy", "tracks_policy", "tracks_skipped")
         numbers = ("language_probability", "speech_seconds", "duration_seconds")
         for key in texts:
             if value.get(key) is not None and not isinstance(value[key], str):
