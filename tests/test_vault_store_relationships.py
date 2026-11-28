@@ -764,6 +764,7 @@ def test_relationships_can_read_endpoints_on_a_read_only_reference(served, write
     claim = semantic_index.selected_parent_index_state(served, source_path).document.units[0]
     result = commands.op_observe_memory(
         served, path=source_path, operation="assess", unit=observe_memory.unit_id(claim),
+        kind="claim",
         relations=[
             {"kind": "supports", "target": "[[Reference/Manual]]"},
             {"kind": "supports", "target": "[[Reference/Manual#^lamp]]"},
