@@ -3592,11 +3592,12 @@ class EpistemicGraphIndex:
             (_DRAIN_COVERAGE_KEY,),
         ))
 
-    def _startup_state(self) -> _GraphStartupState | None:
+    def _startup_state(self, *, deadline: float | None = None) -> _GraphStartupState | None:
         """Sample bounded graph, canonical and observation state under the held boundary."""
         from .writer_lease import read_commit_generation
 
-        deadline = time.monotonic() + 0.05
+        if deadline is None:
+            deadline = time.monotonic() + 0.05
         floor = graph_sync.floor_state(self.vault_root, deadline=deadline)
         checkpoint = graph_sync.checkpoint_state(self.vault_root, deadline=deadline)
         if floor[0] == "unreadable" or checkpoint[0] == "unreadable":
@@ -3640,6 +3641,34 @@ class EpistemicGraphIndex:
         return _GraphStartupState(
             floor, checkpoint, generation, policy, observation, identity, values,
             freshness.recall_generation(self.vault_root, "vault"), epoch, coherent,
+        )
+
+    def _standalone_snapshot_state(self, *, deadline: float) -> _GraphStartupState | None:
+        """Sample the published generation without walking the corpus or waiting for a writer."""
+        try:
+            with self._canonical_mutation_coordinator().try_hold(
+                operation="epistemic_graph_standalone_snapshot", holder_kind="graph",
+            ) as held:
+                if (
+                    not held or time.monotonic() >= deadline
+                    or freshness.external_pending(self.vault_root)
+                ):
+                    return None
+                state = self._startup_state(deadline=deadline)
+                if state is not None and state.coherent and time.monotonic() < deadline:
+                    return state
+        except (OSError, OpError, reserved_paths.SqliteIdentityBusyError, sqlite3.Error):
+            pass  # Contention or unavailable metadata leaves coverage unknown.
+        return None
+
+    def _standalone_snapshot_is_current(
+        self, conn: sqlite3.Connection, state: _GraphStartupState, *, deadline: float,
+    ) -> bool:
+        # The lookup used this transaction. Only that same published state can seal its answer.
+        return (
+            time.monotonic() < deadline
+            and self._read_startup_metadata(conn) == state.values
+            and self._standalone_snapshot_state(deadline=deadline) == state
         )
 
     def promotion_proof_stamp(
@@ -16641,14 +16670,15 @@ class GraphView:
         self._require_current_parser()
         if self.source_limit is not None:
             return self._bounded_summaries(paths)
-        return {
-            str(path): _json(metadata).get(STRUCTURAL_METADATA) or {}
-            for path, metadata in self.conn.execute(
-                "SELECT path, metadata FROM graph_nodes "
-                "WHERE node_key IN (SELECT 'file:' || value FROM json_each(?))",
-                (json.dumps(paths),),
-            )
-        }
+        summaries: dict[str, Mapping[str, Any]] = {}
+        for path, metadata in self.conn.execute(
+            "SELECT path, metadata FROM graph_nodes "
+            "WHERE node_key IN (SELECT 'file:' || value FROM json_each(?))",
+            (json.dumps(paths),),
+        ):
+            self._check()
+            summaries[str(path)] = _json(metadata).get(STRUCTURAL_METADATA) or {}
+        return summaries
 
     def _check(self) -> None:
         if self.check is not None:
@@ -16934,6 +16964,138 @@ class GraphView:
     def edge_row(self, row: tuple[Any, ...]) -> dict[str, Any] | None:
         """Serve one row selected as `EDGE_COLUMNS`."""
         return self.edge(_edge_row_to_dict(row))
+
+    def replaced_units(
+        self, predecessors: Mapping[str, tuple[str, str]], *, edge_limit: int, source_limit: int,
+    ) -> frozenset[str] | None:
+        """Find exact predecessor keys through incoming unit relations in an unrestricted view."""
+        # The graph snapshot must cover the predecessor bytes admitted earlier.
+        pages = json.dumps(dict(predecessors.values()))
+        different = self.conn.execute(
+            "SELECT 1 FROM json_each(?) AS predecessor "
+            "LEFT JOIN graph_nodes AS page ON page.node_key = 'file:' || predecessor.key "
+            "WHERE page.source_hash IS NOT predecessor.value LIMIT 1",
+            (pages,),
+        ).fetchone()
+        if different is not None:
+            return None
+        replacing, relation_parameters = _family_relation_predicate(
+            relation_registry.core_registry(), (), self.interpretations, ("replaces",),
+        )
+        self._check()
+        # The neutral row can land elsewhere. The selected parser owns the exact end.
+        rows = self.conn.execute(
+            f"SELECT predecessor.key, {EDGE_COLUMNS} FROM json_each(?) AS predecessor "
+            "CROSS JOIN graph_edges AS e ON e.dst_page_key = 'file:' || predecessor.key "
+            "WHERE e.origin = 'semantic_relation' AND e.source_path <> predecessor.key "
+            f"AND {replacing} "
+            "AND json_extract(e.metadata, '$.target_fragment') IS NOT NULL "
+            "LIMIT ?",
+            (pages, *relation_parameters, edge_limit + 1),
+        ).fetchall()
+        sources = {str(row[11]) for row in rows}
+        if len(rows) > edge_limit or len(sources) > source_limit:
+            return None
+        if not rows:
+            return frozenset()
+        paths = sources | {str(row[0]) for row in rows}
+        # The source-count cap cannot bound the combined parser summaries.
+        sizes = self.conn.execute(
+            "SELECT length(CAST(metadata AS BLOB)) FROM graph_nodes "
+            "WHERE node_key IN (SELECT 'file:' || value FROM json_each(?))",
+            (json.dumps(sorted(paths)),),
+        )
+        summary_bytes = 0
+        for size, in sizes:
+            self._check()
+            summary_bytes += size or 0
+            if summary_bytes > runtime_resources.SEMANTIC_SMALL_RESERVE_BYTES:
+                return None
+        self.prefetch(paths)
+        by_source: dict[str, list[dict[str, Any]]] = {}
+        for path, *row in rows:
+            self._node_paths[row[2]] = path
+            edge = self.edge_row(row)
+            if (
+                edge is not None
+                and edge["dst_key"] in predecessors
+                and (edge.get("metadata") or {}).get("unit_ref")
+                and relation_registry.traversable_resolution_status(edge.get("registry_status"))
+                and self.has(edge, "replaces")
+            ):
+                by_source.setdefault(edge["source_path"], []).append(edge)
+        if self.unavailable:
+            return None
+        return self._validate_replacement_sources(by_source)
+
+    def _validate_replacement_sources(
+        self, by_source: Mapping[str, Sequence[dict[str, Any]]],
+    ) -> frozenset[str] | None:
+        """Check normal unit diagnostics that the structural graph does not retain."""
+        from . import activation
+        from .vault_store import read as store_read
+
+        if not by_source:
+            return frozenset()
+        authors: dict[str, tuple[str, Sequence[dict[str, Any]]]] = {}
+        type_basis = note_types.Basis(self.vault_root)
+        status_basis = lifecycle_statuses.Basis(self.vault_root)
+        for path, edges in by_source.items():
+            parent = self.parent(path)
+            if parent is None:
+                return None
+            page = ParsedPage(
+                path=self.vault_root / path, rel_path=path, frontmatter=dict(parent.frontmatter),
+                body="", title="", mtime=0.0,
+            )
+            if not activation.structurally_eligible(
+                self.vault_root, page, selects=note_types.governed_endpoint, type_basis=type_basis,
+            ):
+                continue
+            status = status_basis.classify(
+                page.frontmatter.get("status"), path=path, frontmatter=page.frontmatter,
+            )
+            if status.lifecycle_class is None:
+                return None
+            # A later replacement or archival does not undo a historical author's decision.
+            if status.live or status.historical:
+                source_hash = parent.metadata.get("parent_source_hash")
+                if not source_hash:
+                    return None
+                authors[path] = (source_hash, edges)
+        if not authors:
+            return frozenset()
+        snapshot = store_read.snapshot_for_connection(self.conn)
+        batch = snapshot.prefetch(authors) if snapshot is not None else nullcontext()
+        replaced: set[str] = set()
+        with batch:
+            if snapshot is not None:
+                total_bytes = sum(meta.size for meta in snapshot.page_metas(authors).values())
+                if total_bytes > runtime_resources.SEMANTIC_SMALL_RESERVE_BYTES:
+                    return None
+            for path, (source_hash, edges) in authors.items():
+                try:
+                    with runtime_resources.semantic_preparation(
+                        self.vault_root, self.vault_root / path,
+                        limit_bytes=runtime_resources.SEMANTIC_SMALL_RESERVE_BYTES,
+                        check=self._check, expected_hash=source_hash,
+                    ) as prepared:
+                        state = semantic_index.selected_parent_index_state(
+                            self.vault_root, path, source=prepared.source,
+                        )
+                        wanted = {edge["src_key"] for edge in edges}
+                        validity = {}
+                        for unit in state.document.units:
+                            self._check()
+                            key = _unit_candidate_key(path, unit)
+                            if key in wanted:
+                                validity[key] = not state.document.has_errors_in(unit)
+                except (OSError, ValueError, runtime_resources.PreparationBudgetExceeded):
+                    return None
+                if state.definitions_unavailable or validity.keys() != wanted:
+                    return None
+                replaced.update(edge["dst_key"] for edge in edges if validity[edge["src_key"]])
+        return frozenset(replaced)
 
     def node_row(self, row: tuple[Any, ...]) -> dict[str, Any] | None:
         """Serve one row selected as `NODE_SELECT`."""

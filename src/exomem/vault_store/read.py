@@ -1157,9 +1157,9 @@ def owned_page(vault_root: Path, rel: str, *, max_bytes: int | None = None) -> S
         return None
     with snapshot(root) as view:
         if max_bytes is not None:
-            row = view.connection.execute(f"SELECT size FROM {_META_FROM} WHERE path = ?", (rel,)).fetchone()
-            if row is not None and row[0] > max_bytes:
-                raise vault._refuse_unbounded_leaf(rel, vault._over_limit_reason(row[0], max_bytes))
+            meta = view.page_meta(rel)
+            if meta is not None and meta.size > max_bytes:
+                raise vault._refuse_unbounded_leaf(rel, vault._over_limit_reason(meta.size, max_bytes))
         page = view.page(rel)
     if page is None:
         raise FileNotFoundError(rel)

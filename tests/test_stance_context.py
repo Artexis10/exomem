@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
@@ -39,9 +42,9 @@ def stance_vault(tmp_path):
 
 
 def _stance(root, *, today=date(2026, 11, 2), limit=800, who=None):
+    _reset_caches()
     lexstore.ensure_fresh(root)
     _built(root)
-    _reset_caches()
     with principal.request_scope(who or principal.owner_principal(surface="library")), principal.invocation_scope():
         caller = context_views.CallerView.current(root)
         block = stance.compile_block(root, caller, limit, today=today)
@@ -238,6 +241,271 @@ def test_same_page_and_page_supersession_stop_global_lines(stance_vault):
     assert block["omitted"] == block["expired"] == 0
     _page(stance_vault, "global", "stance: true\nsuperseded_by: [successor]\n", body="- [rule] Old operating rule. ^old\n")
     assert _stance(stance_vault)["items"] == []
+
+
+@pytest.mark.parametrize("identified", [False, True], ids=["path-backed", "uuid-backed"])
+def test_cross_page_supersession_retires_only_the_linked_global_claim(stance_vault, identified, monkeypatch):
+    from exomem import commands, working_set_runtime
+    from exomem.writer_lease import invoke_command
+
+    predecessor_identity = "exomem_id: 21111111-1111-4111-8111-111111111111\n" if identified else ""
+    successor_identity = "exomem_id: 22222222-2222-4222-8222-222222222222\n" if identified else ""
+    predecessor = _page(
+        stance_vault, "global", f"stance: true\n{predecessor_identity}",
+        body=(
+            "## Claim\n- id: interval\n- as_of: 2026-01-01\n\n"
+            "The east beacon flashes every eight seconds.\n\n"
+            "## Claim\n- id: reserve\n- as_of: 2026-01-01\n\n"
+            "The west beacon flashes every eight seconds.\n"
+        ),
+    )
+    inspection_heading = "## Claim\n- id: measured\n- as_of: 2026-02-01\n"
+    observation = "\nThe east beacon flashes every five seconds.\n"
+    _page(stance_vault, "inspection", successor_identity, body=inspection_heading + observation)
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    lexstore.ensure_fresh(stance_vault)
+    _built(stance_vault).close()
+    working_set_runtime.reset_caches_for_tests()
+    recall = next(command for command in commands.PRODUCT_COMMANDS if command.name == "activate_context")
+    turn = "How often do the beacons flash?"
+    before = invoke_command(recall, stance_vault, turn=turn)
+    assert [item["text"] for item in before["stance"]["items"]] == [
+        "The east beacon flashes every eight seconds.",
+        "The west beacon flashes every eight seconds.",
+    ]
+
+    successor = _page(stance_vault, "inspection", successor_identity, body=(
+        inspection_heading + "- relations: supersedes: [[Notes/Insights/global#interval]]\n" + observation
+    ))
+    lexstore.ensure_fresh(stance_vault)
+    _built(stance_vault).close()
+    after = invoke_command(recall, stance_vault, turn=turn, continuity=before["continuity"])
+    block = after["stance"]
+    original = commands.op_read_memory(stance_vault, path=str(predecessor), units=True)
+    assert any(unit["text"] == "The east beacon flashes every eight seconds." for unit in original["units"])
+    assert block["state"] == "ready" and block["generation"] != before["stance"]["generation"]
+    assert [item["text"] for item in block["items"]] == [
+        "The west beacon flashes every eight seconds.",
+    ]
+    assert block["omitted"] == block["expired"] == 0
+
+    _withhold(stance_vault, str(successor), ceiling=0)
+    with principal.request_scope(_external()):
+        shared = _stance(stance_vault, who=_external())
+    assert shared["items"] == before["stance"]["items"]
+
+
+def test_unavailable_replacement_lookup_does_not_reuse_held_stance(stance_vault, monkeypatch):
+    from exomem import commands
+    from exomem.writer_lease import invoke_command
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    recall = next(command for command in commands.PRODUCT_COMMANDS if command.name == "activate_context")
+    before = invoke_command(recall, stance_vault, turn="Keep a source")
+    assert before["stance"]["state"] == "ready"
+    monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_INDEX", "1")
+    after = invoke_command(recall, stance_vault, turn="Keep a source", continuity=before["continuity"])
+    assert after["stance"]["state"] == "unavailable"
+    assert after["stance"]["items"] == [] and after["stance"]["generation"] is None
+
+
+def test_cross_page_replacement_lands_on_a_vault_defined_heading(stance_vault):
+    _write(stance_vault, "Knowledge Base/_Schema/semantic-language-registry.yaml", (
+        "schema_version: 1\nkinds:\n  claim:\n    labels:\n      en: Claim\n      fi: Väite\n"
+    ))
+    _page(stance_vault, "global", "stance: true\n", body=(
+        "## Väite\n- id: old\n\nOld operating rule.\n"
+    ))
+    assert [item["text"] for item in _stance(stance_vault)["items"]] == ["Old operating rule."]
+    _page(stance_vault, "inspection", "", body=(
+        "## Claim\n- id: new\n- relations: supersedes: [[Notes/Insights/global#old]]\n\n"
+        "New operating rule.\n"
+    ))
+    assert _stance(stance_vault)["state"] == "empty"
+
+
+def test_invalid_cross_page_successor_cannot_retire_a_global_claim(stance_vault):
+    _page(stance_vault, "global", "stance: true\n", body="## Claim\n- id: old\n\nOld operating rule.\n")
+    before = _stance(stance_vault)
+    _page(stance_vault, "inspection", "", body=(
+        "## Claim\n- id: new\n- until: someday\n- relations: supersedes: [[Notes/Insights/global#old]]\n\n"
+        "New operating rule.\n"
+    ))
+    assert _stance(stance_vault) == before
+
+
+def test_raw_capture_cannot_retire_a_global_claim(stance_vault):
+    _page(stance_vault, "global", "stance: true\n", body="## Claim\n- id: old\n\nOld operating rule.\n")
+    before = _stance(stance_vault)
+    _write(stance_vault, "Knowledge Base/Sources/raw.md", (
+        "---\ntype: source\n---\n\n## Claim\n- id: new\n"
+        "- relations: supersedes: [[Notes/Insights/global#old]]\n\nNew operating rule.\n"
+    ))
+    assert _stance(stance_vault) == before
+
+
+def test_a_replaced_successor_still_retires_its_predecessor(stance_vault):
+    _page(stance_vault, "global", "stance: true\n", body="## Claim\n- id: old\n\nOld operating rule.\n")
+    assert [item["text"] for item in _stance(stance_vault)["items"]] == ["Old operating rule."]
+    _write(stance_vault, "Knowledge Base/Notes/Insights/inspection.md", (
+        "---\ntype: insight\nstatus: superseded\n---\n\n## Claim\n- id: intermediate\n"
+        "- relations: supersedes: [[Notes/Insights/global#old]]\n\nIntermediate rule.\n"
+    ))
+    _page(stance_vault, "reinspection", "", body=(
+        "## Claim\n- id: latest\n- relations: supersedes: [[Notes/Insights/inspection#intermediate]]\n\n"
+        "Latest rule.\n"
+    ))
+    assert _stance(stance_vault)["state"] == "empty"
+
+
+def test_draft_successor_cannot_retire_a_global_claim(stance_vault):
+    _page(stance_vault, "global", "stance: true\n", body="## Claim\n- id: old\n\nOld operating rule.\n")
+    before = _stance(stance_vault)
+    _write(stance_vault, "Knowledge Base/Notes/Insights/inspection.md", (
+        "---\ntype: insight\nstatus: draft\n---\n\n## Claim\n- id: proposed\n"
+        "- relations: supersedes: [[Notes/Insights/global#old]]\n\nProposed operating rule.\n"
+    ))
+    assert _stance(stance_vault) == before
+
+
+def test_replacement_lookup_refuses_a_graph_newer_than_the_admitted_page(stance_vault, monkeypatch):
+    from exomem import commands, unit_corrections, working_set_runtime
+    from exomem.writer_lease import invoke_command
+
+    earlier = "## Claim\n- id: old\n\nOld operating rule.\n"
+    predecessor = _page(stance_vault, "global", "stance: true\n", body=earlier)
+    _page(stance_vault, "inspection", "", body=(
+        "## Claim\n- id: new\n- relations: supersedes: [[Notes/Insights/global#old]]\n\n"
+        "New operating rule.\n"
+    ))
+    assert _stance(stance_vault)["state"] == "empty"
+    working_set_runtime.reset_caches_for_tests()
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    recall = next(command for command in commands.PRODUCT_COMMANDS if command.name == "activate_context")
+    assert invoke_command(recall, stance_vault, turn="Which operating rule is current?")["stance"]["state"] == "empty"
+    lookup = unit_corrections.replaced_units
+    published = False
+
+    def write_revision(root):
+        # Moving the heading changes its graph occurrence without changing its authored identity.
+        _page(root, "global", "stance: true\n", body="Inspection record.\n\n" + earlier)
+        lexstore.ensure_fresh(root)
+        _built(root).close()
+
+    def publish_revision(root, predecessors):
+        nonlocal published
+        if not published and any(path == predecessor for path, _ in predecessors.values()):
+            with ThreadPoolExecutor(max_workers=1) as writer:
+                writer.submit(write_revision, root).result(timeout=30)
+            published = True
+        return lookup(root, predecessors)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(unit_corrections, "replaced_units", publish_revision)
+        mixed = invoke_command(recall, stance_vault, turn="Which operating rule is current?")["stance"]
+    assert published
+    assert mixed["state"] == "unavailable" and mixed["items"] == []
+    assert _stance(stance_vault)["state"] == "empty"
+
+
+def test_supporting_links_do_not_spend_replacement_coverage(stance_vault):
+    _write(stance_vault, "Knowledge Base/_Schema/relation-registry.yaml", (
+        "schema_version: 1\nextensions:\n"
+        "  x.retires: {parent: supersedes, description: Retires an earlier view}\n"
+    ))
+    _page(stance_vault, "global", "stance: true\n", body=(
+        "## Claim\n- id: old\n\nOld operating rule.\n\n"
+        "## Claim\n- id: relay\n\nUnrelated operating rule.\n"
+    ))
+    for report in range(3):
+        _page(stance_vault, f"inspection-{report}", "", body="\n".join(
+            f"## Claim\n- id: check-{index}\n- relations: supports: [[Notes/Insights/global#old]]\n\n"
+            f"Inspection {report} confirms reading {index}.\n"
+            for index in range(22)
+        ))
+    before = _stance(stance_vault)
+    assert before["state"] == "ready"
+    assert [item["text"] for item in before["items"]] == ["Old operating rule.", "Unrelated operating rule."]
+
+    _page(stance_vault, "reinspection", "", body=(
+        "## Claim\n- id: new\n- relations: x.retires: [[Notes/Insights/global#old]]\n\n"
+        "New operating rule.\n"
+    ))
+    after = _stance(stance_vault)
+    assert after["state"] == "ready"
+    assert [item["text"] for item in after["items"]] == ["Unrelated operating rule."]
+
+
+def test_fresh_cli_uses_existing_graph_for_current_stance(stance_vault):
+    _page(stance_vault, "global", "stance: true\n", body=(
+        "## Claim\n- id: old\n\nOld operating rule.\n\n"
+        "## Claim\n- id: relay\n\nUnrelated operating rule.\n"
+    ))
+    assert _stance(stance_vault)["state"] == "ready"
+    env = {
+        **os.environ, "EXOMEM_VAULT_PATH": str(stance_vault),
+        "EXOMEM_ACTIVATION_PACKET": "maps", "EXOMEM_LOG_DIR": str(stance_vault / "logs"),
+    }
+
+    def recall():
+        result = subprocess.run(
+            [sys.executable, "-m", "exomem", "recall_context", "--json", "--", "Which operating rule is current?"],
+            env=env, capture_output=True, text=True, check=True, timeout=30,
+        )
+        return json.loads(result.stdout)["data"]["stance"]
+
+    assert [item["text"] for item in recall()["items"]] == ["Old operating rule.", "Unrelated operating rule."]
+    _page(stance_vault, "inspection", "", body=(
+        "## Claim\n- id: new\n- relations: supersedes: [[Notes/Insights/global#old]]\n\n"
+        "New operating rule.\n"
+    ))
+    assert [item["text"] for item in _stance(stance_vault)["items"]] == ["Unrelated operating rule."]
+    assert [item["text"] for item in recall()["items"]] == ["Unrelated operating rule."]
+
+    # The standalone proof may walk the vault once. Confirmation must work when
+    # that walk is no longer available and must still detect a withdrawn graph.
+    script = """
+import runpy
+import sys
+from contextlib import ExitStack
+from unittest.mock import patch
+from exomem import epistemic_graph, find, unit_corrections, vault
+
+withdraw = sys.argv.pop(1) == "withdraw"
+lookup = epistemic_graph.GraphView.replaced_units
+discover = unit_corrections.discover
+
+def reject_census(*args, **kwargs):
+    raise AssertionError("snapshot confirmation repeated the vault census")
+
+def check_confirmation(*args, **kwargs):
+    with ExitStack() as guards:
+        def after_lookup(view, *args, **kwargs):
+            result = lookup(view, *args, **kwargs)
+            if withdraw:
+                epistemic_graph.EpistemicGraphIndex(view.vault_root).withdraw_availability()
+            guards.enter_context(patch.object(find, "_corpus_walk", reject_census))
+            guards.enter_context(patch.object(vault, "walk_vault_md", reject_census))
+            return result
+
+        guards.enter_context(patch.object(epistemic_graph.GraphView, "replaced_units", after_lookup))
+        return discover(*args, **kwargs)
+
+unit_corrections.discover = check_confirmation
+runpy.run_module("exomem", run_name="__main__")
+"""
+    for operation in ("confirm", "withdraw"):
+        result = subprocess.run(
+            [sys.executable, "-c", script, operation, "recall_context", "--json", "--",
+             "Which operating rule is current?"],
+            env=env, capture_output=True, text=True, check=True, timeout=30,
+        )
+        block = json.loads(result.stdout)["data"]["stance"]
+        if operation == "withdraw":
+            assert block["state"] == "unavailable" and block["items"] == []
+        else:
+            assert block["state"] == "ready"
+            assert [item["text"] for item in block["items"]] == ["Unrelated operating rule."]
 
 
 def test_hook_uses_supplied_or_generated_moves_and_stance_generation():
@@ -523,9 +791,9 @@ def test_identified_stance_page_is_served_on_a_store_enrolled_vault(stance_vault
     state_migration.record_collection_store_compatibility(stance_vault, authority_check=lambda: True)
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     working_set_runtime.reset_caches_for_tests()
+    _reset_caches()
     lexstore.ensure_fresh(stance_vault)
     _built(stance_vault)
-    _reset_caches()
     command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "activate_context")
     packet = invoke_command(command, stance_vault, turn="Keep a source", max_chars=2000)
     assert packet["stance"]["state"] == "ready"

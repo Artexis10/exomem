@@ -848,6 +848,44 @@ def test_a_reader_with_no_drainer_answers_at_once_and_says_what_lags(served, wri
     assert behind is not None and behind["lag"]["derived_pending"] == 1
 
 
+def test_personal_recall_waits_for_cross_page_replacement_rows(served, writer, monkeypatch):  # noqa: F811
+    from test_context_catalogue import _built
+
+    from exomem import commands
+    from exomem.collection_store.preview import unbound
+    from exomem.governance.principal import library_scope
+
+    save(served, "Knowledge Base/Notes/Observations/Beacon.md", (
+        "---\ntype: insight\nstatus: active\nstance: true\n---\n\n"
+        "## Claim\n- category: rule\n- id: earlier\n\nThe beacon flashes every eight seconds.\n"
+    ))
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    recall = next(command for command in commands.PRODUCT_COMMANDS if command.name == "activate_context")
+    with unbound(), library_scope():
+        lexstore.ensure_fresh(served)
+        _built(served).close()
+        before = writer_lease.invoke_command(recall, served, turn="Which interval is current?")
+        assert before["stance"]["state"] == "ready"
+        assert [item["text"] for item in before["stance"]["items"]] == ["The beacon flashes every eight seconds."]
+
+    successor = "Knowledge Base/Notes/Observations/Inspection.md"
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: None)
+        save(served, successor, (
+            "---\ntype: insight\nstatus: active\n---\n\n## Claim\n- category: rule\n- id: later\n"
+            "- relations: supersedes: [[Notes/Observations/Beacon#earlier]]\n\n"
+            "The beacon flashes every five seconds.\n"
+        ))
+    assert store_rows(served, "SELECT path FROM store_derivation_queue WHERE path = ?", successor) == [(successor,)]
+    with unbound(), library_scope():
+        pending = writer_lease.invoke_command(recall, served, turn="Which interval is current?")
+        derivation.drain(served, writer)
+        complete = writer_lease.invoke_command(recall, served, turn="Which interval is current?")
+
+    assert pending["stance"]["state"] == "unavailable"
+    assert complete["stance"]["state"] == "empty"
+
+
 def test_a_reader_does_not_wait_for_a_write_that_committed_after_it_began(
     served, writer, monkeypatch  # noqa: F811
 ):

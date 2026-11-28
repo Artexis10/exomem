@@ -13,6 +13,7 @@ from . import (
     find,
     freshness,
     memory_refs,
+    readiness,
     relation_registry,
     request_budget,
 )
@@ -20,6 +21,10 @@ from .governance import egress
 from .published_admission import admission_of
 
 MAX_COUNTERPARTS = 4
+#: Bound extra graph work before the context packet allocates lines.
+REPLACEMENT_EDGE_LIMIT = 64
+REPLACEMENT_SOURCE_LIMIT = 32
+REPLACEMENT_SECONDS = 0.1
 
 
 def reader_view(root: Path, purpose: str | None = None) -> Callable[[str], bool] | None:
@@ -51,16 +56,18 @@ def discover(
     root: Path,
     unit_refs: Sequence[str],
     *,
-    accept: Callable[[dict[str, Any]], bool],
+    accept: Callable[[dict[str, Any]], bool] | None = None,
     keep: Callable[[str], bool] | None = None,
     deadline: float | None = None,
     outgoing_sources: Mapping[str, Sequence[tuple[str, Sequence[Mapping[str, Any]]]]] | None = None,
     accept_outgoing: Callable[[dict[str, Any]], bool] | None = None,
+    replacement_nodes: Mapping[str, tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Discover references once; the caller admits exact units before the cap.
 
-    No cold graph proof or resolver build belongs to optional enrichment. If
-    publication moves during hydration, discard every tentative reference.
+    Managed enrichment uses the live graph. A one-shot command can prove an
+    inherited graph before its bounded lookup. If publication moves during
+    hydration, discard every tentative reference.
     """
     def result(status: str, units=(), outgoing=()) -> dict[str, Any]:
         return {"status": status, "units": list(units),
@@ -70,7 +77,7 @@ def discover(
         ref for ref in unit_refs
         if "#" in ref and memory_refs.parse_memory_ref(ref.partition("#")[0]) is not None
     ))
-    if not references:
+    if not references and not replacement_nodes:
         return result("available")
     budget = request_budget.current()
     if deadline is None:
@@ -89,6 +96,7 @@ def discover(
         publication = None
         authority = None
         stored = None
+        standalone_state = None
         current_reader = keep.fresh(withheld=frozenset()) if isinstance(keep, egress.ReaderView) else None
         if current_reader is not None and (admission := admission_of(current_reader)) is not None:
             authority = admission.identity()
@@ -109,12 +117,26 @@ def discover(
             checkpoint = (
                 stored if stored is not None else freshness.live_recall_checkpoint(root, "vault")
             )
-            if checkpoint is None:
-                return result("unavailable")
-            resolver = find.recall_resolver_snapshot_at_checkpoint(root, checkpoint)
-            if resolver is None:
-                return result("unavailable")
-            conn = index._open_read_snapshot(live_only=True)
+            if replacement_nodes is None:
+                if checkpoint is None:
+                    return result("unavailable")
+                resolver = find.recall_resolver_snapshot_at_checkpoint(root, checkpoint)
+                if resolver is None:
+                    return result("unavailable")
+                conn = index._open_read_snapshot(live_only=True)
+            else:
+                # The unrestricted lookup starts with exact graph keys and never resolves a page name.
+                resolver = None
+                if checkpoint is not None:
+                    conn = index._open_read_snapshot(live_only=True, check=check_deadline)
+                if conn is None and stored is None and budget is None and not readiness.runtime_managed():
+                    # A one-shot reader uses the ordinary proof of an inherited graph generation.
+                    standalone_state = index._standalone_snapshot_state(deadline=deadline)
+                    if standalone_state is None:
+                        return result("unavailable")
+                    conn = index._open_read_snapshot(prove=epistemic_graph.SINGLE_FLIGHT)
+                    if conn is not None:
+                        deadline = time.monotonic() + REPLACEMENT_SECONDS
             if conn is None:
                 return result("unavailable")
             instance = conn.execute("SELECT value FROM main.graph_meta WHERE key = 'instance'").fetchone()
@@ -124,7 +146,45 @@ def discover(
         check_deadline()
         view = epistemic_graph.GraphView(
             root, conn, keep=current_reader if publication is not None else keep, resolver=resolver,
+            check=check_deadline if replacement_nodes is not None else None,
         )
+
+        def still_current() -> bool:
+            check_deadline()
+            if standalone_state is not None:
+                current = index._standalone_snapshot_is_current(
+                    view.conn, standalone_state, deadline=deadline,
+                )
+            elif publication is not None:
+                final_reader = keep.fresh(withheld=frozenset())
+                final_admission = admission_of(final_reader)
+                current = (
+                    final_reader is not None and final_admission is not None
+                    and final_admission.identity() == authority
+                    and index._published_read_is_current(publication, final_reader, deadline=deadline, conn=conn)
+                )
+            else:
+                current = stored is not None or (
+                    not freshness.external_pending(root)
+                    and freshness.recall_checkpoint_is_current(root, "vault", checkpoint)
+                    and index._snapshot_instance_is_current(snapshot_instance, deadline=deadline)
+                )
+            check_deadline()
+            return current
+
+        if replacement_nodes is not None:
+            # The canonical store can acknowledge text before it publishes that text's graph rows.
+            if stored is not None and conn.execute("SELECT 1 FROM store_derivation_queue LIMIT 1").fetchone():
+                return result("unavailable")
+            replaced = view.replaced_units(
+                replacement_nodes, edge_limit=REPLACEMENT_EDGE_LIMIT, source_limit=REPLACEMENT_SOURCE_LIMIT,
+            )
+            if not still_current():
+                return result("unavailable")
+            if replaced is None:
+                return result("partial")
+            return {**result("available"), "replaced": replaced}
+
         seeds: dict[str, str] = {}
         outgoing_seeds: dict[str, tuple[str, str, frozenset[str]]] = {}
         partial = False
@@ -236,7 +296,7 @@ def discover(
                 corrects=target, relation=edge["relation_type"],
                 family=(edge.get("metadata") or {}).get("relation_family"),
             )
-            if not accept(candidate):
+            if accept is None or not accept(candidate):
                 return False
             check_deadline()
             if per_seed.get(target, 0) >= MAX_COUNTERPARTS:
@@ -249,26 +309,8 @@ def discover(
         _edges, overflow = view.neighbor_edges(
             set(seeds), limit=MAX_COUNTERPARTS * len(references), accept=inspect,
         )
-        check_deadline()
-        if publication is not None:
-            final_reader = keep.fresh(withheld=frozenset())
-            final_admission = admission_of(final_reader)
-            proof_current = (
-                final_reader is not None and final_admission is not None
-                and final_admission.identity() == authority
-                and index._published_read_is_current(publication, final_reader, deadline=deadline, conn=conn)
-            )
-            check_deadline()
-            if not proof_current:
-                return result("unavailable")
-        elif stored is None and (
-            freshness.external_pending(root)
-            or not freshness.recall_checkpoint_is_current(root, "vault", checkpoint)
-            or not index._snapshot_instance_is_current(snapshot_instance, deadline=deadline)
-        ):
-            check_deadline()
+        if not still_current():
             return result("unavailable")
-        check_deadline()
         return result("partial" if partial or overflow or view.unavailable else "available",
                       admitted.values(), outgoing.values())
     except TimeoutError:
@@ -283,3 +325,12 @@ def discover(
                 # Publication may already have cycled this tracked reader.
                 pass
             conn.close()
+
+
+def replaced_units(root: Path, predecessors: Mapping[str, tuple[str, str]]) -> frozenset[str] | None:
+    """The exact replaced keys, or None when the current graph cannot prove coverage."""
+    if not predecessors:
+        return frozenset()
+    return discover(
+        root, (), replacement_nodes=predecessors, deadline=time.monotonic() + REPLACEMENT_SECONDS,
+    ).get("replaced")
