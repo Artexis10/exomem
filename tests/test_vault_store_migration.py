@@ -878,7 +878,7 @@ def test_a_migration_dry_run_reports_queued_graph_work_and_leaves_it_queued(vaul
     assert report["status"] == "dry-run"
     assert report["queued_graph_work"]["receipts"] == queued
     assert report["queued_graph_work"]["oldest_age_seconds"] >= 0
-    assert "catches the graph index up" in report["queued_graph_work"]["apply"]
+    assert "drains this queue" in report["queued_graph_work"]["apply"]
     assert deferred_index.graph_queue_age(vault)[0] == queued
 
 
