@@ -117,8 +117,7 @@
     - an original whose plaintext exceeds the whole capacity blocks its job with `MEDIA_HYDRATION_TOO_LARGE`;
     - both download routes refuse such an original with that code, not with `ORIGINAL_UNAVAILABLE`;
     - eviction reads a bounded candidate set.
-  - [x] 5.4.4 Make the import Job record each member's identity in the member manifest, after it sets the modification time. The identity is inode, size, `mtime_ns` and `ctime_ns`, without the device number. Verify: a Job test shows each entry's identity equals the stat of its staged file. The rehearsal shows the identity unchanged when the runtime pod mounts the volume.
-    - Passed on 2026-11-28. A v0.209.0 adopt Job staged two synthetic files in disposable K3s. A separate pod mounted the same local claim with the hosted ownership settings. After `cell-init`, both files matched every identity field recorded by the Job. The probe used the published lean image with the hosted account entry.
+  - [ ] 5.4.4 Make the import Job record each member's identity in the member manifest, after it sets the modification time. The identity is inode, size, `mtime_ns` and `ctime_ns`, without the device number. Verify: a Job test shows each entry's identity equals the stat of its staged file. The rehearsal shows the identity unchanged when the runtime pod mounts the volume.
   - [x] 5.4.5 Add the rename primitive to the Source writer and file artifact members by rename. Verify these with tests:
     - a matched member files with no byte read, and its offload job exists when the call returns;
     - a mismatched member re-hashes once and files, or goes to the residual as changed;

@@ -981,7 +981,7 @@ def start_call_cpu(before: Mapping[str, Any] | None, after: Mapping[str, Any] | 
 
 
 def record_paging(folder: Folder, pages: Mapping[str, dict[str, Any]], plan: LargeImportPlan) -> None:
-    """Report completed file calls and the time left when paging ends."""
+    """Report completed file calls and the time left when filing and status reads end."""
     calls = list(pages.values())
     for page in calls:
         page["files_per_second"] = files_per_second(page["file_steps"])
@@ -1031,30 +1031,32 @@ async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder,
             if not reply.get("continuation"):
                 raise StepFailure(f"page {page['page']}: a working reply carried no continuation; keys {sorted(reply)}")
             fields = {"path": stage_path, "collection": collection, "continuation": reply["continuation"]}
+        failed = (reply.get("progress") or {}).get("failed")
+        if failed:
+            problems["filing"].append(f"{failed} files failed to file")
+        consumed = 0
+        for page in pages.values():
+            agent.where = f"{folder.name} folder, status read of page {page['page']}"
+            stored = await read_run(agent, page["run_id"])
+            rows = stored.get("inventory") or []
+            recorded = stored.get("finish") or {}
+            page.update({"rows": len(rows), "row_bytes": sum(int(row.get("bytes") or 0) for row in rows),
+                         "hidden_files_skipped": stored.get("hidden_files_skipped"), "consumed": recorded.get("consumed"),
+                         "filed_not_consumed": unconsumed_files(page["file_steps"], recorded.get("consumed"))})
+            if stored.get("stage") != {"stage": folder.import_id, "proof": folder.proof}:
+                problems["manifest_proof"].append(
+                    f"page {page['page']} recorded the stage as {stored.get('stage')}, not its manifest proof")
+            consumed += int(recorded.get("consumed") or 0)
+            # Only finish removes empty folders. The compact done reply re-reads the residual from the stage.
+            held = {key: value for key, value in (recorded.get("residual") or {}).items() if key != "removed_empty_folders"}
+            if reply["filing"] == "done" and page["run_id"] == reply["run_id"] and recorded \
+                    and (held or None) != (reply.get("filed") or {}).get("residual"):
+                problems["compact_reply"].append(
+                    f"the compact done reply carried residual {reply['filed'].get('residual')!r}, "
+                    f"the run holds {recorded.get('residual')!r}")
     finally:
         record_paging(folder, pages, plan)
-    failed = (reply.get("progress") or {}).get("failed")
-    if failed:
-        problems["filing"].append(f"{failed} files failed to file")
-    consumed = 0
     for page in pages.values():
-        agent.where = f"{folder.name} folder, status read of page {page['page']}"
-        stored = await read_run(agent, page["run_id"])
-        rows = stored.get("inventory") or []
-        recorded = stored.get("finish") or {}
-        page.update({"rows": len(rows), "row_bytes": sum(int(row.get("bytes") or 0) for row in rows),
-                     "hidden_files_skipped": stored.get("hidden_files_skipped"), "consumed": recorded.get("consumed"),
-                     "filed_not_consumed": unconsumed_files(page["file_steps"], recorded.get("consumed"))})
-        if stored.get("stage") != {"stage": folder.import_id, "proof": folder.proof}:
-            problems["manifest_proof"].append(f"page {page['page']} recorded the stage as {stored.get('stage')}, not its manifest proof")
-        consumed += int(recorded.get("consumed") or 0)
-        # A done reply re-reads the newest page's residual from the stage; a newest page that closed has none to compare.
-        # Only `finish` removes empty folders, so only its residual counts them: that count is left out of the comparison.
-        held = {key: value for key, value in (recorded.get("residual") or {}).items() if key != "removed_empty_folders"}
-        if reply["filing"] == "done" and page["run_id"] == reply["run_id"] and recorded \
-                and (held or None) != (reply.get("filed") or {}).get("residual"):
-            problems["compact_reply"].append(
-                f"the compact done reply carried residual {reply['filed'].get('residual')!r}, the run holds {recorded.get('residual')!r}")
         print(f"[rehearsal] large-import {folder.name} page {page['page']}: {page['rows']} rows, "
               f"{len(page['file_steps'])} file calls in {page['file_seconds']}s ({page['files_per_second']} files per call second), "
               f"consumed {page['consumed']}, filed but not consumed {page['filed_not_consumed']}", flush=True)

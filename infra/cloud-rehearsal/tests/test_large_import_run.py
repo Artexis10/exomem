@@ -472,6 +472,27 @@ def test_a_deadline_that_stops_filing_still_reports_the_calls_made():
         {"page": 1, "calls": 2, "file_seconds": 1.0, "longest_call_seconds": 0.5}]
 
 
+def test_a_deadline_during_the_final_status_read_keeps_the_filing_result(monkeypatch):
+    """A status timeout must not leave the time before that status read in the report."""
+    agent = Scripted({"file": [_done("r1", filed=90)]})
+    folder = _folder(name="media")
+    plan = _plan()
+
+    async def read_run(agent, run_id):
+        plan.deadline = time.monotonic()
+        raise large_import.OutOfTime("the scenario's deadline came during status")
+
+    monkeypatch.setattr(large_import, "read_run", read_run)
+
+    with pytest.raises(large_import.OutOfTime, match="during status"):
+        asyncio.run(large_import.file_pages(agent, plan, folder))
+
+    (page,) = folder.report["pages"]
+    assert page["files_per_second"] == 180.0
+    assert folder.report["file_projection"]["files_filed"] == 90
+    assert folder.report["file_projection"]["deadline_seconds_left"] == 0
+
+
 def test_a_deadline_that_stops_paging_still_reports_the_refusals_counted_so_far(monkeypatch):
     """Catches the journal refusal count that was written only when paging ended normally, so the run most in need lost it."""
     readings = iter([{"rows": 5, "busy_by_command": {}, "inode": 7},
