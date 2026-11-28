@@ -8353,25 +8353,27 @@ def _op_activate_context_body(
         try:
             # This leaf guards the map it compiled, so a direct library call is an invocation of its own.
             with principal_module.invocation_scope():
-                packet = context_views_module.activation_packet(
-                    vault_root, budget, purpose=purpose, timings=timings,
-                    generation={
-                        **generation_stub,
-                        "freshness_key": working_set_runtime_module._key_text(freshness_key),
-                        "index_generation": evidence_token[1] if evidence_token else 0,
-                    },
-                    turn_leads=slice_leads if working_set_runtime_module.activation_turn_slice() else None,
-                    known_generation=(held_map or {}).get("map_generation"),
-                    native_skills=native_skills, known_skills=(held_map or {}).get("skills_generation"),
-                    known_stance=(held_map or {}).get("stance_generation"),
-                    known_profiles=(held_map or {}).get("profile_generations"),
-                    turn=turn, snapshot=snapshot,
-                    task_context=task_context,
-                    positions=recorded_positions,
-                    reached=lambda: reach.paths,
-                    packet_limit=working_set_module.clamp_budget(max_chars),
-                    spent_after=reserved_chars,
-                )
+                # The map's exact catalogue reads share one snapshot; the guard below reads live state after it closes.
+                with working_set_runtime_module.request_catalogue_view(vault_root, snapshot):
+                    packet = context_views_module.activation_packet(
+                        vault_root, budget, purpose=purpose, timings=timings,
+                        generation={
+                            **generation_stub,
+                            "freshness_key": working_set_runtime_module._key_text(freshness_key),
+                            "index_generation": evidence_token[1] if evidence_token else 0,
+                        },
+                        turn_leads=slice_leads if working_set_runtime_module.activation_turn_slice() else None,
+                        known_generation=(held_map or {}).get("map_generation"),
+                        native_skills=native_skills, known_skills=(held_map or {}).get("skills_generation"),
+                        known_stance=(held_map or {}).get("stance_generation"),
+                        known_profiles=(held_map or {}).get("profile_generations"),
+                        turn=turn, snapshot=snapshot,
+                        task_context=task_context,
+                        positions=recorded_positions,
+                        reached=lambda: reach.paths,
+                        packet_limit=working_set_module.clamp_budget(max_chars),
+                        spent_after=reserved_chars,
+                    )
                 # Optional slice work must not stop the built map reaching its final authorization check.
                 with find_types.timing_span(timings, "working_set.guard"):
                     guarded = egress_module.guard_working_set(
