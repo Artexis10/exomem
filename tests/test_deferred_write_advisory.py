@@ -8,6 +8,7 @@ terminal handoff is faked, and it is faked through Lane 1's own committed
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import importlib
 import importlib.util
@@ -1031,7 +1032,13 @@ def test_ready_advisory_review_ref_keeps_existing_triage_semantics(
     assert _run(vault)[0].outcome == "published"
 
     [advisory] = _resolve(vault, ref)["advisories"]
-    from exomem import epistemic_graph, file_watcher, lexstore
+    from exomem import epistemic_graph, file_watcher, lexstore, name_drift
+
+    # The attention view stamps name drift with the current minute.
+    scanned_at = dt.datetime.now(dt.UTC)
+    clock = SimpleNamespace(**vars(dt))
+    clock.datetime = SimpleNamespace(now=lambda _zone: scanned_at)
+    monkeypatch.setattr(name_drift, "dt", clock)
 
     # Read current annotations before dismissal, rather than racing their background repair.
     file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
