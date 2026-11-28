@@ -9377,9 +9377,9 @@ def _collection_store_thread(func):
                     command.name, injected[0], kwargs, write=not (read_only or import_status)
                 )
                 server = routing.server
-                records_query = command.name == "record_memory" and kwargs.get("action") == "query"
-                if server is not None and read_only and (import_status or records_query):
-                    # These reads can answer from the last commit while a batch occupies the store thread.
+                if server is not None and import_status and read_only:
+                    # Status answers while a batch keeps the store thread busy: it reads the store's
+                    # last commit on this thread, under the proof that routed it.
                     return server.read_beside(lambda: func(command, *injected, **kwargs), initial=routing.proof,
                                               collection=kwargs.get("collection"))
                 if server is not None:
