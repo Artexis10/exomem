@@ -1777,6 +1777,25 @@ def test_a_busy_save_does_not_repeat_a_timed_out_legacy_scope_backfill(vault, ma
     assert len(attempts) == 1
 
 
+def test_a_save_recovers_scope_after_the_first_acceptance_rolls_back(vault, managers, drainer, monkeypatch):
+    _, holder = managers
+    command, arguments = _command("remember"), _remember_kwargs(vault, 978)
+
+    def interrupted(_conn):
+        raise TimeoutError("scope setup interrupted during first acceptance")
+
+    with _Hold(holder, vault):
+        with monkeypatch.context() as first:
+            first.setattr(write_intake.write_intake_access, "ensure_index", interrupted)
+            with pytest.raises(OpError) as refused:
+                _send(command, vault, arguments)
+            assert refused.value.code == "MUTATION_BUSY"
+        accepted = _send(command, vault, arguments)["queued_write"]
+        assert accepted["position"] == 1
+    _wait_for_state(vault, accepted["ref"], "applied")
+    assert len(_pages_titled(vault, "Queued save 978")) == 1
+
+
 def test_another_login_does_not_consume_a_failure_notice(
     vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

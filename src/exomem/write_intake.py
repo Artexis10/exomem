@@ -741,6 +741,10 @@ class Drainer:
         with self._condition:
             return self._backlog_unsettled()
 
+    def mark_scope_index_needed(self) -> None:
+        with self._condition:
+            self._scope_index_needed = True
+
     def prepare_retained_origins(self, deadline: float, *, work_deadline: float) -> None:
         """Qualify a legacy store on its first save, before choosing a new execution."""
         if not (self._retry_indexes_needed or self._scope_index_needed):
@@ -1512,9 +1516,12 @@ class Admission:
             # Only the create path runs the schema, so an existing store from before the marker gains it here.
             _add_declaration_marker(conn)
             _add_retry_indexes(conn)
-            # A legacy backfill belongs to the budgeted preparation path, never to a busy save.
-            if create and conn.execute("SELECT 1 FROM intake LIMIT 1").fetchone() is None:
-                write_intake_access.ensure_index(conn)
+            if not write_intake_access.indexed(conn):
+                if conn.execute("SELECT 1 FROM intake LIMIT 1").fetchone() is None:
+                    write_intake_access.ensure_index(conn)
+                else:
+                    # A legacy backfill belongs to the budgeted preparation path.
+                    self.drainer.mark_scope_index_needed()
             conn.execute(
                 "INSERT INTO intake (id, origin, origin_ttl, command, arguments, principal, surface, state, "
                 "accepted_at, updated_at, next_attempt_at, error_code, declaration_change) "
