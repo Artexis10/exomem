@@ -17,11 +17,13 @@ from . import (
     capabilities,
     edit,
     find,
+    markdown_regions,
     note_types,
     origin_bindings,
     page_ids,
     provenance,
     relation_registry,
+    semantic_blocks,
     semantic_contract,
     semantic_index,
     semantic_kinds,
@@ -41,7 +43,6 @@ from .mutation_timings import MutationTimings, write_timings_enabled
 
 ObserveOperation = Literal["add", "update", "remove", "validate", "supersede", "assess"]
 _OPERATIONS: tuple[str, ...] = get_args(ObserveOperation)
-_COMPACT_KIND = "observation"
 _HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$")
 _FENCE_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 _UPDATED_RE = re.compile(r"^updated:.*$", re.MULTILINE)
@@ -349,6 +350,7 @@ def observe_memory(
     lift_resolver: Any = None
     dated_default_kind: str | None = None
     dated_fields: tuple[str, ...] = ()
+    placement_outcome: str | None = None
     link_warnings: list[str] = []
     if proposal_mode == "remove":
         assert current_unit is not None
@@ -400,22 +402,7 @@ def observe_memory(
             elif resolved.kind is not None:
                 selected_kind = resolved.kind
             else:
-                admitted = set(
-                    _admitted_kind_keys(
-                        language, projects=page_projects, page_type=page_type
-                    )
-                )
-                replacements = sorted(language.kinds_with("replacement") & admitted)
-                if len(replacements) != 1:
-                    raise ObserveMemoryError(
-                        "REPLACEMENT_KIND_REQUIRED",
-                        f"{len(replacements)} admitted kinds carry the "
-                        "replacement trait; the successor's kind must be named",
-                        "Pass `kind` with one of the replacement kinds: "
-                        + (", ".join(replacements) if replacements else "none admitted")
-                        + ".",
-                    )
-                selected_kind = replacements[0]
+                selected_kind = semantic_kinds.replacement_kind()
             if selected_kind in semantic_kinds.compact_kinds():
                 raise ObserveMemoryError(
                     "UNSUPPORTED_SEMANTIC_KIND",
@@ -509,6 +496,7 @@ def observe_memory(
                     as_of=normalized_as_of,
                     until=normalized_until,
                     preserved=preserved_metadata,
+                    heading_level=resolved.unit.level or 2,
                 )
                 after_body = _replace_unit(
                     body,
@@ -627,7 +615,7 @@ def observe_memory(
         normalized_relations = unit_edges.add_unit_edges((), _canonical_relations(relations or []))
         explicit_rich_kind = dated_default_kind is not None or bool(
             kind is not None
-            and semantic_language_registry.normalize_label(kind) != _COMPACT_KIND
+            and semantic_language_registry.normalize_label(kind) not in semantic_kinds.compact_kinds()
         )
         if normalized_relations and not explicit_rich_kind:
             # A rich unit that keeps its kind on update carries its own relations, so only a unit
@@ -670,7 +658,7 @@ def observe_memory(
             as_of=normalized_as_of,
             until=normalized_until,
         )
-        if selected_kind == _COMPACT_KIND and (governed_passed or preserved_metadata):
+        if selected_kind in semantic_kinds.compact_kinds() and (governed_passed or preserved_metadata):
             if base_unit is None or base_unit.form != "rich":
                 # A compact unit, new or existing, carries no rows, so the only exits that apply
                 # are a rich kind, or leaving the other fields out so a date takes the default kind.
@@ -729,23 +717,39 @@ def observe_memory(
                 existing_anchors,
             )
         )
-        rendered = _render_unit(
-            kind=selected_kind,
-            category=normalized_category,
-            content=normalized_content,
-            tags=normalized_tags,
-            context=normalized_context,
-            relations=normalized_relations,
-            anchor=target_anchor,
-            verdict=normalized_verdict,
-            check_by=normalized_check_by,
-            as_of=normalized_as_of,
-            until=normalized_until,
-            preserved=preserved_metadata,
-        )
-        if proposal_mode == "update":
-            assert current_unit is not None
-            if current_unit.form == "compact" and selected_kind != _COMPACT_KIND:
+
+        def render(heading_level: int) -> str:
+            return _render_unit(
+                kind=selected_kind, category=normalized_category, content=normalized_content,
+                tags=normalized_tags, context=normalized_context, relations=normalized_relations,
+                anchor=target_anchor, verdict=normalized_verdict, check_by=normalized_check_by,
+                as_of=normalized_as_of, until=normalized_until, preserved=preserved_metadata,
+                heading_level=heading_level,
+            )
+
+        compact = selected_kind in semantic_kinds.compact_kinds()
+        if dated_default_kind is not None:
+            insertion_body = body if current_unit is None else _remove_unit(
+                body, current_unit.span.start_offset, current_unit.span.end_offset,
+            )
+            after_body = _place_dated_block(insertion_body, render(3))
+            if after_body is None:
+                after_body = _append_rich(insertion_body, render(2))
+                placement_outcome = _end_placement_notice(previewing)
+        elif current_unit is not None and proposal_mode == "update":
+            start, end = current_unit.span.start_offset, current_unit.span.end_offset
+            depth = current_unit.level or 2
+            section = _observation_section_containing(body, start) if depth > 2 else None
+            if section is not None and compact:
+                after_body = _add_compact(_remove_unit(body, start, end), render(2), section_start=section.start)
+            elif section is not None:
+                rendered = render(depth)
+                if _fits_nested_block(rendered, depth):
+                    after_body = _replace_unit(body, start, end, rendered)
+                else:
+                    after_body = _append_rich(_remove_unit(body, start, end), render(2))
+                    placement_outcome = _end_placement_notice(previewing)
+            elif current_unit.form == "compact" and not compact:
                 # A promoted compact line cannot become a rich block in place:
                 # the compact lines after it would fall inside the new block.
                 # The line leaves and the block lands at the body end instead.
@@ -755,20 +759,18 @@ def observe_memory(
                         current_unit.span.start_offset,
                         current_unit.span.end_offset,
                     ),
-                    rendered,
+                    render(2),
                 )
             else:
                 after_body = _replace_unit(
                     body,
                     current_unit.span.start_offset,
                     current_unit.span.end_offset,
-                    rendered,
+                    render(2),
                 )
         else:
             after_body = (
-                _add_compact(body, rendered)
-                if selected_kind == _COMPACT_KIND
-                else _append_rich(body, rendered)
+                _add_compact(body, render(2)) if compact else _append_rich(body, render(2))
             )
 
     # What the governed parser must read back for the rendered unit; a remove renders none.
@@ -934,6 +936,7 @@ def observe_memory(
                 lifted_outcome=lifted_outcome,
                 dated_default_kind=dated_default_kind,
                 dated_default_outcome=dated_default_outcome,
+                placement_outcome=placement_outcome,
                 warnings=link_warnings,
             )
 
@@ -996,6 +999,7 @@ def observe_memory(
             lifted_outcome=lifted_outcome,
             dated_default_kind=dated_default_kind,
             dated_default_outcome=dated_default_outcome,
+            placement_outcome=placement_outcome,
             timings=(
                 timings.as_dict() if timings is not None and write_timings_enabled() else None
             ),
@@ -1152,7 +1156,7 @@ def _resolved_claim(
     edits: tuple[tuple[int, int, str], ...] = ()
     if not anchor:
         anchor = _generated_anchor(
-            kind or _COMPACT_KIND,
+            kind or semantic_kinds.compact_kind(),
             category,
             unit.content,
             tuple(unit.tags),
@@ -1271,7 +1275,7 @@ def claim_conversion(
     """
     item = target.item
     category = str(target.category)
-    anchor = _generated_anchor(_COMPACT_KIND, category, item.text, (), None, (), existing_anchors)
+    anchor = _generated_anchor(semantic_kinds.compact_kind(), category, item.text, (), None, (), existing_anchors)
     existing_anchors.add(anchor)
     return anchor, (item.start, item.end, f"{item.indent}- [{category}] {item.text} ^{anchor}")
 
@@ -1350,8 +1354,8 @@ def _select_kind(
     raw = kind
     if raw is None and current_unit is not None and current_unit.form == "rich":
         raw = current_unit.kind
-    if raw is None or semantic_language_registry.normalize_label(raw) == _COMPACT_KIND:
-        return _COMPACT_KIND
+    if raw is None or semantic_language_registry.normalize_label(raw) in semantic_kinds.compact_kinds():
+        return semantic_kinds.compact_kind()
     registry = semantic_language_registry.for_attached_projects(
         language, projects
     )
@@ -1533,7 +1537,7 @@ def _compact_names_passed(arguments: Mapping[str, Any]) -> tuple[str, ...] | Non
     if kind is None:
         compact_kind = mode in {"add", "validate"}
     else:
-        compact_kind = semantic_language_registry.normalize_label(kind) == _COMPACT_KIND
+        compact_kind = semantic_language_registry.normalize_label(kind) in semantic_kinds.compact_kinds()
     if not compact_kind:
         return None
     # A blank value is no value, as `_resolve_governed_value` reads it on an add.
@@ -1989,7 +1993,7 @@ def _generated_anchor(
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    prefix = "obs" if kind == _COMPACT_KIND else "unit"
+    prefix = "obs" if kind in semantic_kinds.compact_kinds() else "unit"
     base = f"{prefix}-{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:12]}"
     candidate = base
     occurrence = 2
@@ -2013,11 +2017,12 @@ def _render_unit(
     as_of: str | None = None,
     until: str | None = None,
     preserved: tuple[tuple[str, str], ...] = (),
+    heading_level: int = 2,
 ) -> str:
     clean_content = content.strip()
     if not clean_content:
         raise ObserveMemoryError("INVALID_OBSERVE_INPUT", "content must not be empty")
-    if kind == _COMPACT_KIND:
+    if kind in semantic_kinds.compact_kinds():
         if "\n" in clean_content or "\r" in clean_content:
             raise ObserveMemoryError(
                 "INVALID_COMPACT_CONTENT",
@@ -2048,7 +2053,7 @@ def _render_unit(
         metadata.append(f"- until: {until}")
     # Rows this command does not own, re-emitted in their authored order.
     metadata.extend(_metadata_row(key, value) for key, value in preserved)
-    return f"## {heading}\n" + "\n".join(metadata) + f"\n\n{clean_content}"
+    return f"{'#' * heading_level} {heading}\n" + "\n".join(metadata) + f"\n\n{clean_content}"
 
 
 def _metadata_row(key: str, value: str) -> str:
@@ -2073,21 +2078,63 @@ def _remove_unit(body: str, start: int, end: int) -> str:
     return body[:start] + body[end:]
 
 
-def _add_compact(body: str, rendered: str) -> str:
-    section_ends = _observation_section_ends(body)
-    if len(section_ends) > 1:
+def _add_compact(body: str, rendered: str, *, section_start: int | None = None) -> str:
+    sections = _observation_sections(body)
+    if section_start is not None:
+        sections = [section for section in sections if section.start == section_start]
+    if len(sections) > 1:
         raise ObserveMemoryError(
             "AMBIGUOUS_OBSERVATIONS_SECTION",
             "parent contains multiple canonical ## Observations sections",
         )
-    if not section_ends:
-        separator = _append_separator(body)
-        return f"{body}{separator}## Observations\n\n{rendered}\n"
-    point = section_ends[0]
+    if not sections:
+        return _append_rich(body, f"## Observations\n\n{rendered}")
+    return _insert_observation(body, sections[0].compact_at, rendered)
+
+
+def _insert_observation(body: str, point: int, rendered: str) -> str:
     before, after = body[:point], body[point:]
     separator = "" if before.endswith("\n\n") else "\n" if before.endswith("\n") else "\n\n"
     tail = "\n" if not after else "\n\n"
     return before + separator + rendered + tail + after
+
+
+def _end_placement_notice(preview: bool) -> str:
+    return ("The observation will go at the end of the note." if preview
+            else "The observation is at the end of the note.")
+
+
+def _fits_nested_block(rendered: str, depth: int) -> bool:
+    """Both readers must keep the block whole and see the section that follows it."""
+    followed = f"{rendered}\n\n# Following section\n"
+    headings = markdown_regions.block_headings(followed)
+    semantic = semantic_blocks.scan_semantic_blocks(followed)
+    boundary = len(rendered) + 2
+    return (
+        len(headings) >= 2 and headings[-1][:2] == (boundary, 1)
+        and all(level > depth for _, level, _ in headings[1:-1])
+        and len(semantic) >= 2 and semantic[0].end_line + 1 == semantic[-1].line
+    )
+
+
+def _place_dated_block(body: str, rendered: str) -> str | None:
+    if not _fits_nested_block(rendered, 3):
+        return None
+    sections = _observation_sections(body)
+    outline = markdown_regions.block_headings(body)
+    visible = [offset for offset, level, title in outline
+               if level == 2 and semantic_language_registry.normalize_label(title) == "observations"]
+    if not sections and not visible:
+        return _append_rich(body, f"## Observations\n\n{rendered}")
+    if len(sections) != 1 or visible != [sections[0].start]:
+        return None
+    section = sections[0]
+    visible_end = next((offset for offset, level, _ in outline if offset > section.start and level <= 2), len(body))
+    return _insert_observation(body, section.end, rendered) if section.end == visible_end else None
+
+
+def _observation_section_containing(body: str, point: int) -> _ObservationSection | None:
+    return next((section for section in _observation_sections(body) if section.start < point < section.end), None)
 
 
 def _append_rich(body: str, rendered: str) -> str:
@@ -2101,9 +2148,17 @@ def _append_separator(body: str) -> str:
     return "\n" if body.endswith("\n") else "\n\n"
 
 
-def _observation_section_ends(body: str) -> list[int]:
+@dataclass(frozen=True, slots=True)
+class _ObservationSection:
+    start: int
+    compact_at: int
+    end: int
+
+
+def _observation_sections(body: str) -> list[_ObservationSection]:
+    """The start, compact line insertion point and end of each canonical section."""
     lines = body.splitlines(keepends=True)
-    offsets: list[int] = []
+    sections = []
     offset = 0
     headings: list[tuple[int, int, str]] = []
     fence_char: str | None = None
@@ -2132,16 +2187,20 @@ def _observation_section_ends(body: str) -> list[int]:
         if heading is not None:
             headings.append((offset, len(heading.group(1)), heading.group(2).strip()))
         offset += len(line)
-    for index, (_start, level, title) in enumerate(headings):
+    for index, (start, level, title) in enumerate(headings):
         if level != 2 or semantic_language_registry.normalize_label(title) != "observations":
             continue
         end = len(body)
-        for candidate_start, candidate_level, _ in headings[index + 1 :]:
+        first_child = None
+        for candidate_index in range(index + 1, len(headings)):
+            candidate_start, candidate_level, _ = headings[candidate_index]
             if candidate_level <= level:
                 end = candidate_start
                 break
-        offsets.append(end)
-    return offsets
+            if first_child is None:
+                first_child = candidate_start
+        sections.append(_ObservationSection(start, end if first_child is None else first_child, end))
+    return sections
 
 
 def _rebuild_source(
@@ -2212,7 +2271,7 @@ def _assert_round_trip(
         and unit.anchor == anchor
         and relation_values == relations
     )
-    if kind == _COMPACT_KIND:
+    if kind in semantic_kinds.compact_kinds():
         matches = common_matches and unit.tags == tags and unit.context == context
     else:
         # Preserved rows are part of the expectation, so a reconstruction that
@@ -2308,6 +2367,7 @@ def _result(
     lifted_outcome: str | None = None,
     dated_default_kind: str | None = None,
     dated_default_outcome: str | None = None,
+    placement_outcome: str | None = None,
     timings: dict[str, Any] | None = None,
     warnings: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -2330,6 +2390,10 @@ def _result(
     elif dated_default_kind is not None and dated_default_outcome is not None:
         value["kind_defaulted"] = dated_default_kind
         value["outcome"] = dated_default_outcome
+    if placement_outcome is not None:
+        value["observation_at_end"] = True
+        outcome = value.get("outcome")
+        value["outcome"] = f"{outcome} {placement_outcome}" if outcome else placement_outcome
     if timings is not None:
         value["timings"] = timings
     if warnings:

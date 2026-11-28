@@ -90,6 +90,108 @@ def _page_hash(page: Path) -> str:
     return vault.content_hash(page.read_bytes().decode("utf-8"))
 
 
+def test_dated_and_compact_observations_share_a_section_before_references(tmp_path: Path) -> None:
+    page = _write_page(tmp_path, source=_page_source(
+        "# Observe\n\n## Observations\n\n- [rule] Earlier fact ^earlier\n\n## References\n\nRead the log."
+    ))
+    commands.op_observe_memory(
+        tmp_path, path=PAGE, category="rule", content="The service settled.\n\n```md\n### Example\n```",
+        as_of="2026-11-25",
+    )
+    commands.op_observe_memory(tmp_path, path=PAGE, category="rule", content="Later fact")
+    dated = next(unit for unit in semantic_index.current_parent_index_state(tmp_path, PAGE).document.units if unit.as_of)
+
+    commands.op_observe_memory(
+        tmp_path, path=PAGE, operation="assess", unit_ref=dated.unit_ref,
+        expected_fingerprint=dated.fingerprint, expected_hash=_page_hash(page),
+        relations=[{"kind": "supports", "target": "#earlier"}],
+    )
+
+    source = page.read_text(encoding="utf-8")
+    assert source.index("Earlier fact") < source.index("Later fact") < source.index("\n### Record\n")
+    assert source.endswith("## References\n\nRead the log.\n")
+    units = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units
+    assert [unit.form for unit in units] == ["compact", "compact", "rich"]
+    assert (units[-1].anchor, units[-1].level, units[-1].as_of) == (dated.anchor, 3, "2026-11-25")
+    assert any(edge.kind == "supports" for edge in units[-1].relations)
+
+
+@pytest.mark.parametrize("following", [
+    "An introduction.\n\n  ## References\n\nRead the log.",
+    "References\n----------\n\nRead the log.",
+    "## Observations\n\n- [rule] Second copy ^second",
+])
+def test_an_ambiguous_observation_boundary_uses_the_end_of_the_note(tmp_path: Path, following: str) -> None:
+    page = _write_page(tmp_path, source=_page_source(
+        f"# Observe\n\n## Observations\n\n- [rule] Earlier fact ^earlier\n\n{following}"
+    ))
+    before = page.read_text(encoding="utf-8").split("# Observe", 1)[1]
+
+    result = commands.op_observe_memory(
+        tmp_path, path=PAGE, category="rule", content="Dated fact", as_of="2026-11-25",
+    )
+
+    after = page.read_text(encoding="utf-8").split("# Observe", 1)[1]
+    assert after.startswith(before + "\n## Record\n")
+    assert result["outcome"] == "Saved with its date. The observation is at the end of the note."
+
+
+def test_edit_moves_a_nested_record_to_keep_its_markdown_and_anchor(tmp_path: Path) -> None:
+    page = _write_page(tmp_path, source=_page_source(
+        "# Observe\n\n## Observations\n\n### Record\n- id: dated\n- category: rule\n"
+        "- as_of: 2026-11-25\n\nFirst account.\n\n## References\n\nRead the log."
+    ))
+    unit, = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units
+    content = "Updated account.\n\n### Supporting detail\n\nThe log agrees."
+
+    result = commands.op_observe_memory(
+        tmp_path, path=PAGE, operation="update", category="rule", content=content, unit_ref=unit.unit_ref,
+        expected_fingerprint=unit.fingerprint, expected_hash=_page_hash(page),
+    )
+
+    updated, = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units
+    assert (updated.anchor, updated.level, updated.content) == ("dated", 2, content)
+    assert "Read the log.\n\n## Record\n" in page.read_text(encoding="utf-8")
+    assert result["outcome"] == "The observation is at the end of the note."
+
+
+def test_converting_a_dated_record_to_compact_keeps_it_above_child_headings(tmp_path: Path) -> None:
+    page = _write_page(tmp_path, source=_page_source(
+        "# Observe\n\n## Observations\n\n- [rule] Earlier fact ^earlier\n\n"
+        "### Record\n- id: dated\n- category: rule\n- as_of: 2026-11-25\n\nAccount.\n\n"
+        "### Background\n\nFrom the log.\n\n## References\n\nRead the log."
+    ))
+    units = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units
+    dated = next(unit for unit in units if unit.anchor == "dated")
+
+    commands.op_observe_memory(
+        tmp_path, path=PAGE, operation="update", kind="observation", category="rule", content="Account.", as_of="",
+        unit_ref=dated.unit_ref, expected_fingerprint=dated.fingerprint, expected_hash=_page_hash(page),
+    )
+
+    assert "- [rule] Account. ^dated\n\n### Background\n" in page.read_text(encoding="utf-8")
+    units = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units
+    assert [(unit.form, unit.anchor) for unit in units] == [("compact", "earlier"), ("compact", "dated")]
+
+
+def test_a_preview_from_before_dated_placement_cannot_write_the_new_structure(tmp_path: Path, monkeypatch) -> None:
+    page = _write_page(tmp_path)
+    before = page.read_bytes()
+    proposal = {"path": PAGE, "category": "rule", "content": "Dated fact", "as_of": "2026-11-25"}
+    with monkeypatch.context() as old_placement:
+        old_placement.setattr(observe_memory, "_place_dated_block", lambda *_: None)
+        preview = commands.op_observe_memory(tmp_path, **proposal, operation="validate")
+
+    with pytest.raises(ValueError, match="LIFECYCLE_TRANSITION_MISMATCH"):
+        commands.op_observe_memory(tmp_path, **proposal, transition_token=preview["semantic"]["transition_token"])
+    assert page.read_bytes() == before
+
+    fresh = commands.op_observe_memory(tmp_path, **proposal, operation="validate")
+    committed = commands.op_observe_memory(tmp_path, **proposal, transition_token=fresh["semantic"]["transition_token"])
+    assert committed["after_hash"] == fresh["after_hash"] == _page_hash(page)
+    assert "\n## Observations\n\n### Record\n" in page.read_text(encoding="utf-8")
+
+
 def _origin_block(root: Path, scope: dict) -> str:
     source = f"---\ntype: source\nexomem_id: {uuid.uuid4()}\n---\n\nRetained rule evidence.\n"
     _write_page(root, rel="Knowledge Base/Sources/observe-original.md", source=source)
