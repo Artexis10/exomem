@@ -3104,6 +3104,11 @@ def _caught_up_without_rebuild(vault_root: Path, store) -> bool:
             return True
         if lagging_again is None:
             return False  # the refusal that keeps the full pass is already logged
+        # A competing proof can advance the admission generation without
+        # changing any catalogue row. Prove the current state once more before
+        # treating a lost admission race as a reason to rebuild.
+        if _admit_if_current(vault_root):
+            return True
         return _log_catch_up_decline(store, CatchUpDecline.NOT_CURRENT)
     except Exception as error:  # noqa: BLE001 - a failed catch-up must still rebuild
         if _is_repair_contention(error):

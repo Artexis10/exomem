@@ -455,9 +455,12 @@ def current_parent_index_state(
 
 
 def from_semantic_page_state(state: Any) -> SemanticParentIndexState:
-    """Adapt an already-evaluated contract page without reparsing its Markdown."""
+    """Reuse an evaluated contract page and its exact source snapshot."""
     path = str(state.path)
     source_hash = str(state.source_hash)
+    candidates = state.candidates
+    if candidates is None:
+        candidates = semantic_units.scan_semantic_units(state.body, path=path)
     parent_ref = (
         memory_refs.memory_ref(str(state.identity)) if state.identity_kind == "exomem_id" else None
     )
@@ -477,7 +480,7 @@ def from_semantic_page_state(state: Any) -> SemanticParentIndexState:
         ),
         parser_version=PARSER_VERSION,
         document=state.neutral_document or state.document,
-        body=state.body, frontmatter=state.frontmatter, candidates=state.candidates,
+        body=state.body, frontmatter=state.frontmatter, candidates=candidates,
         prose_carriers=getattr(state, "prose_carriers", None),
     )
 

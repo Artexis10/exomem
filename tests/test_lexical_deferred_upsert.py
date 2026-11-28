@@ -368,6 +368,56 @@ def test_a_page_saved_between_a_catch_up_and_its_admission_proof_costs_no_whole_
     assert lexstore.search_bm25(tmp_path, "firstsave", k=3, scope="kb")
 
 
+def test_a_current_catalogue_is_not_rebuilt_when_another_proof_publishes_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue
+) -> None:
+    from exomem import readiness
+
+    store, changed, _removed = live_catalogue
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path))
+    changed.write_text("# After\n\nfirstsave\n", encoding="utf-8")
+    freshness.on_files_changed(tmp_path, changed=[changed])
+    prove = lexstore.runtime_retrieval_catalog_proof
+    repair_proved = threading.Event()
+    other_proof_finished = threading.Event()
+    admitted = []
+    rebuilt = []
+
+    def prove_with_competing_admission(root, **kwargs):
+        proof = prove(root, **kwargs)
+        if not repair_proved.is_set():
+            repair_proved.set()
+            assert other_proof_finished.wait(10)
+        return proof
+
+    def admit_current_catalogue():
+        try:
+            assert repair_proved.wait(10)
+            admitted.append(lexstore._mark_runtime_retrieval_ready_if_current(tmp_path))
+        finally:
+            other_proof_finished.set()
+
+    def rebuild():
+        rebuilt.append(True)
+        return False
+
+    monkeypatch.setattr(lexstore, "runtime_retrieval_catalog_proof", prove_with_competing_admission)
+    monkeypatch.setattr(store, "rebuild_atomic", rebuild)
+    readiness.reset()
+    readiness.manage_runtime()
+    other_proof = threading.Thread(target=admit_current_catalogue)
+    other_proof.start()
+    try:
+        lexstore.request_lag_repair(tmp_path)
+        assert _wait_for_flight_end(tmp_path)
+        assert admitted == [True]
+        assert rebuilt == []
+        assert lexstore.search_bm25(tmp_path, "firstsave", k=3, scope="kb")
+    finally:
+        other_proof.join(10)
+        readiness.reset()
+
+
 def test_a_caught_up_catalogue_that_still_fails_its_proof_without_lag_is_rebuilt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue
 ) -> None:
@@ -382,26 +432,21 @@ def test_a_caught_up_catalogue_that_still_fails_its_proof_without_lag_is_rebuilt
     freshness.on_files_changed(tmp_path, changed=[changed])
     real_admit = lexstore._admit_if_current
     real_rebuild = store.rebuild_atomic
-    refusals = []
     rebuilds = []
 
-    def refuse_once(root):
-        if not refusals:
-            refusals.append(True)
-            return False
-        return real_admit(root)
+    def refuse_until_rebuilt(root):
+        return bool(rebuilds) and real_admit(root)
 
     def rebuild():
         rebuilds.append(True)
         return real_rebuild()
 
-    monkeypatch.setattr(lexstore, "_admit_if_current", refuse_once)
+    monkeypatch.setattr(lexstore, "_admit_if_current", refuse_until_rebuilt)
     monkeypatch.setattr(store, "rebuild_atomic", rebuild)
 
     lexstore.request_lag_repair(tmp_path)
     assert _wait_for_flight_end(tmp_path)
 
-    assert refusals == [True]
     assert rebuilds == [True], "a proof that no lag explains was answered with another catch-up"
     assert lexstore.search_bm25(tmp_path, "firstsave", k=3, scope="kb")
 
