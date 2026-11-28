@@ -1588,6 +1588,33 @@ def test_a_save_during_a_long_startup_wait_finds_the_write_intake_running(
         readiness.reset()
 
 
+def test_stdio_shutdown_preserves_the_http_drainer(tmp_path, monkeypatch):
+    """Exiting a stdio session must leave the HTTP service able to accept and replay writes."""
+    from exomem import write_intake
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "lease"))
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    http = server_runtime.LocalRuntimeActivation(vault, deferred=True)
+    http.serves_upload_sessions = True
+    stdio = server_runtime.LocalRuntimeActivation(vault, deferred=True)
+    try:
+        http._start_write_intake(vault)
+        stdio._start_write_intake(vault)
+        assert write_intake.drainer_for(vault) is http.write_intake
+        assert stdio.write_intake is None
+
+        stdio._stop_background_workers()
+        assert write_intake.drainer_for(vault) is http.write_intake
+
+        http._stop_background_workers()
+        assert write_intake.drainer_for(vault) is None
+    finally:
+        write_intake.stop(vault)
+
+
 @pytest.mark.parametrize(("serves_upload_sessions", "runs"), [(True, True), (False, False)])
 def test_the_import_filer_runs_in_the_http_serving_runtime_only_and_stops_with_it(
     tmp_path, monkeypatch: pytest.MonkeyPatch, serves_upload_sessions: bool, runs: bool
@@ -1851,7 +1878,7 @@ def test_shutdown_reports_a_write_intake_replay_that_outlived_its_stop(tmp_path,
     monkeypatch.setattr(write_intake.Drainer, "_drain_one", replay_that_outlives_the_stop)
     real_stop = write_intake.stop
     # A short join keeps the test fast; the stop's real join is longer but just as finite.
-    monkeypatch.setattr(write_intake, "stop", lambda root, timeout=10.0: real_stop(root, timeout=0.1))
+    monkeypatch.setattr(write_intake, "stop", lambda root, *, worker: real_stop(root, worker=worker, timeout=0.1))
     activation = server_runtime.LocalRuntimeActivation(tmp_path, fallback_seconds=60)
     activation.serves_upload_sessions = True
 

@@ -1891,6 +1891,98 @@ def bulk_upsert_records(
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _FileUpdateTarget:
+    snapshot: record_formats.AdapterSnapshot
+    record: record_formats.Record
+    source_path: Path
+    source_bytes: bytes
+    source_text: str
+    source_guard: vault.PathGuard
+    source_hash: str
+    values: dict[str, Any]
+
+
+def _file_update_target(
+    root, manifest, item_key, changes, delete_fields, expected_container_hash, expected_item_version,
+    *, validate_snapshot=None,
+) -> _FileUpdateTarget:
+    """Read and check the file-backed row and its guards before judging any new value."""
+    adapter = record_formats.load_adapter(root, manifest)
+    if not adapter.mutable:
+        adapter.refuse_mutation("update")
+    _require_activity_log(root)
+    is_log = manifest.storage.strategy == "markdown-log"
+    if is_log:
+        source_bytes, source_guard = _read_record_bytes(root, manifest.storage.source)
+        source_text = source_bytes.decode("utf-8")
+        snapshot = adapter.read_bytes(source_bytes, manifest_version=manifest.manifest_version)  # type: ignore[attr-defined]
+        _expect_hash(expected_container_hash, hashlib.sha256(source_bytes).hexdigest(), "container")
+    else:
+        snapshot = adapter.read()
+    matches = [record for record in snapshot.records if record.identity.key == item_key]
+    if not matches:
+        raise collections.CollectionError("RECORD_NOT_FOUND", "record key does not exist")
+    if len(matches) != 1 or matches[0].ambiguous:
+        raise collections.CollectionError("AMBIGUOUS_RECORD", "record key is ambiguous")
+    record = matches[0]
+    final_values = dict(record.values)
+    for name in delete_fields:
+        final_values.pop(name, None)
+    final_values.update(changes)
+    if validate_snapshot is not None:
+        validate_snapshot(manifest, snapshot, item_key, dict(final_values))
+    if not is_log:
+        source_bytes, source_guard = _read_record_bytes(root, record.source.path)
+        source_text = source_bytes.decode("utf-8")
+    current_hash = hashlib.sha256(source_bytes).hexdigest()
+    current_item_hash = (hashlib.sha256(source_bytes[record.span.start : record.span.end]).hexdigest()
+                         if is_log else current_hash)
+    if record.source.hash != current_item_hash:
+        raise collections.CollectionError("STALE_RECORD", "record changed while resolving update")
+    if not is_log:
+        _expect_hash(expected_container_hash, snapshot.snapshot, "container")
+    _expect_hash(expected_item_version, record.source.hash, "item")
+    return _FileUpdateTarget(snapshot, record, root / record.source.path, source_bytes,
+                             source_text, source_guard, current_hash, final_values)
+
+
+def file_save_value_refusal(root, manifest, action, arguments):
+    """Check a plain file-backed Records write as far as its row-value validation."""
+    _validate_why(arguments.get("why"))
+    _validate_hold(True if arguments.get("hold") is None else arguments["hold"])
+    manifest, _, _ = _load_guarded_manifest(root, manifest)
+    body = arguments.get("body")
+    if body is not None:
+        _validate_body(body)
+    if action == "append":
+        if manifest.storage.strategy == "dataset" or (body and manifest.storage.strategy == "markdown-log"):
+            return None
+        values = arguments["item"]
+        _refuse_excluded_authored_names(values)
+        values = _registered_classes(root, manifest, values)
+        if key := arguments.get("item_key"):
+            _validate_item_key(key, manifest=manifest, candidate=values)
+        written = None
+    else:
+        changes = arguments["changes"]
+        key = _validate_update_item_key(root, manifest, arguments.get("item_key"), changes)
+        _refuse_excluded_authored_names(changes)
+        if (arguments.get("refresh_presentation") is True
+                and manifest.record_presentation is None and manifest.item_presentation is None):
+            return None
+        record_governance.require_mutation_visibility(root, manifest)
+        written = _registered_classes(root, manifest, changes)
+        target = _file_update_target(root, manifest, key, written, (),
+                                     arguments.get("expected_container_hash"), arguments.get("expected_item_version"))
+        values = target.values
+    try:
+        _validate_values(manifest, values, written=written)
+    except collections.CollectionError as error:
+        return error
+    return None
+
+
 def update_record(
     vault_root: Path,
     collection: str | Path | collections.CollectionManifest,
@@ -1960,59 +2052,15 @@ def update_record(
             )
         record_governance.require_mutation_visibility(root, manifest)
         changes = _registered_classes(root, manifest, changes)
-        adapter = record_formats.load_adapter(root, manifest)
-        if not adapter.mutable:
-            adapter.refuse_mutation("update")
-        _require_activity_log(root)
-        directory_guards: tuple[vault.DirectoryCensusGuard, ...] = ()
-        if manifest.storage.strategy == "markdown-log":
-            source_bytes, source_guard = _read_record_bytes(root, manifest.storage.source)
-            source_text = source_bytes.decode("utf-8")
-            snapshot = adapter.read_bytes(source_bytes, manifest_version=manifest.manifest_version)  # type: ignore[attr-defined]
-            _expect_hash(
-                expected_container_hash,
-                hashlib.sha256(source_bytes).hexdigest(),
-                "container",
-            )
-        else:
-            snapshot = adapter.read()
-            directory_guards = snapshot.directory_guards
-            source_text = ""
-            source_bytes = b""
-            source_guard = None
-        matches = [record for record in snapshot.records if record.identity.key == item_key]
-        if not matches:
-            raise collections.CollectionError("RECORD_NOT_FOUND", "record key does not exist")
-        if len(matches) != 1 or matches[0].ambiguous:
-            raise collections.CollectionError("AMBIGUOUS_RECORD", "record key is ambiguous")
-        record = matches[0]
-        final_values = dict(record.values)
-        for name in delete_fields:
-            final_values.pop(name, None)
-        final_values.update(changes)
-        if validate_snapshot is not None:
-            validate_snapshot(manifest, snapshot, item_key, final_values)
-        source_path = root / record.source.path
-        if manifest.storage.strategy != "markdown-log":
-            source_bytes, source_guard = _read_record_bytes(root, record.source.path)
-            source_text = source_bytes.decode("utf-8")
-        current_hash = hashlib.sha256(source_bytes).hexdigest()
-        current_item_hash = (
-            hashlib.sha256(source_bytes[record.span.start : record.span.end]).hexdigest()
-            if manifest.storage.strategy == "markdown-log"
-            else current_hash
+        target = _file_update_target(
+            root, manifest, item_key, changes, delete_fields, expected_container_hash, expected_item_version,
+            validate_snapshot=validate_snapshot,
         )
-        if record.source.hash != current_item_hash:
-            raise collections.CollectionError(
-                "STALE_RECORD", "record changed while resolving update"
-            )
-        if manifest.storage.strategy != "markdown-log":
-            _expect_hash(expected_container_hash, snapshot.snapshot, "container")
-        _expect_hash(expected_item_version, record.source.hash, "item")
-        merged = dict(record.values)
-        for name in delete_fields:
-            merged.pop(name, None)
-        merged.update(changes)
+        snapshot, record = target.snapshot, target.record
+        directory_guards = snapshot.directory_guards
+        source_path, source_bytes, source_text = target.source_path, target.source_bytes, target.source_text
+        source_guard, current_hash = target.source_guard, target.source_hash
+        merged = target.values
         try:
             values = _validate_values(manifest, merged, written=changes)
         except collections.CollectionError as error:

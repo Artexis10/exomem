@@ -49,6 +49,7 @@ from . import (
     file_watcher,
     foreground_priority,
     freshness,
+    held_fs,
     originals,
     page_lineage,
     path_mentions,
@@ -64,7 +65,15 @@ from . import (
 )
 from . import move_file as move_file_module
 from .cli_ops import OpError
-from .governance import authorization_session_authority, bridges, egress, lifecycle, policy, store
+from .governance import (
+    authorization_session_authority,
+    bridges,
+    egress,
+    lifecycle,
+    membership,
+    policy,
+    store,
+)
 from .governance.authorization_session_lifecycle import AuthorizationSessionUnavailable
 from .governance.principal import RequestPrincipal, effective_principal
 from .kbdir import managed_form, managed_join, managed_split
@@ -1030,6 +1039,10 @@ class _HeldSink(dict):
     compiled = None
     identity = None
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.parents = membership.ParentSubjects()
+
 
 #: A private preview job's held-evidence sink, set only inside its own thread. Every other
 #: preview sees ``None`` and pays no capture cost.
@@ -1071,26 +1084,26 @@ def _load_held_context(sink: _HeldSink, vault_root: Path, who: RequestPrincipal)
 
 
 def _stat_witness(info: os.stat_result) -> tuple[int, int, int, int, int]:
-    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    return held_fs.stat_witness(info)
 
 
 def _record_held_row(
     vault_root: Path,
     sink: _HeldSink,
-    who: RequestPrincipal,
     rel: str,
     text: str,
     guard: PathGuard,
     witness: tuple[int, int, int, int, int],
 ) -> None:
-    """Record one simple governed row's release evidence while its bytes are still in hand.
+    """Record one governed row's release evidence while its bytes are still in hand.
 
-    A row is simple when its permit depends on no other file: no container-parent binding and no
-    bridge contribution. Anything unclear leaves no record and takes the full release path. Only
-    scalars are stored — the page text dies with this frame.
+    A row whose permit depends on another file keeps its own scopes here and names that file:
+    the page an extracted part or a scene frame inherits from, or a container member's parent.
+    Release proves the dependency again from the dependency itself. Bridge rows and anything
+    unclear leave no record and take the full release path. Only scalars are stored: the page
+    text dies with this frame.
     """
-    from . import document_containers
-    from .governance import connector_boundary
+    from . import document_containers, find_corpus
 
     if not rel.lower().endswith(".md") or sink.compiled is None:
         return
@@ -1101,21 +1114,33 @@ def _record_held_row(
     digest = hashlib.sha256(raw).hexdigest()
     if digest != guard.expected_content_hash:
         return
-    if document_containers.parent_binding_for_path(vault_root, rel, content=raw) is not None:
-        return
+    # A bridge's release depends on its own text and on resolving its ref across the vault.
     if bridges.maybe_bridge(raw) or any(
             rel == grant.path or any(rel == dependency.path for dependency in grant.bridge_of)
             for grant in sink.compiled.release_grants):
         return
-    scopes = connector_boundary._membership_sets(
-        vault_root, rel, sink.compiled, content=raw, who=who,
+    binding = document_containers.parent_binding_for_path(vault_root, rel, content=raw)
+    page = find_corpus.parse_page(vault_root / rel, 0, vault_root, content=raw)
+    if page is None:
+        return
+    basis = membership.held_scope_basis(
+        page, sink.compiled, content_hash=digest, parents=sink.parents,
     )
+    if basis is None:
+        return
+    own, inherits = basis
+    # A part or frame whose parent sits in a container takes its binding from that parent:
+    # it takes the full path.
+    contained = inherits is not None and inherits["kind"] == membership.CONTAINER_INHERITANCE
+    if binding is not None and not contained:
+        return
     sink[rel] = {
         "path": rel,
         "sha256": digest,
         "size": len(raw),
         "witness": list(witness),
-        "scopes": [sorted(scope) for scope in scopes],
+        "scopes": [sorted(own)],
+        "inherits": inherits,
         "identity": sink.identity,
     }
 
@@ -1143,7 +1168,7 @@ def _witnessed_read(
             who = effective_principal()
             _load_held_context(sink, root, who)
             if sink.context_usable:
-                _record_held_row(root, sink, who, rel, text, guard, _stat_witness(before))
+                _record_held_row(root, sink, rel, text, guard, _stat_witness(before))
         except Exception:  # noqa: BLE001 - one unprovable row must not lose the others
             pass
     return text, guard
@@ -1389,7 +1414,10 @@ def _write_correction(
             raise ReclassifyError(refusal["code"], refusal["reason"])
 
     def current_reference_generation() -> tuple:
-        generation = freshness.preview_reference_generation(vault_root)
+        # An approval is refused for a change, not for a moment of lock contention: wait briefly.
+        generation = freshness.preview_reference_generation(
+            vault_root, wait=_APPROVAL_SAMPLE_WAIT_SECONDS,
+        )
         if generation is None or generation[1] is None or generation[3] is not None:
             raise _stale_paged_approval()
         try:
@@ -1477,6 +1505,10 @@ def _write_correction(
         result.new_path, result.wikilinks_updated, result.path_mentions_updated,
         tuple(result.warnings), tuple(result.pointer_repointed),
     )
+
+
+#: How long an approved correction waits for a busy freshness registry before it gives up.
+_APPROVAL_SAMPLE_WAIT_SECONDS = 2.0
 
 
 def _stale_paged_approval() -> ReclassifyError:

@@ -18,7 +18,6 @@ _REFUSAL_MESSAGE_MAX_BYTES = 512
 
 # A busy save may spend this much SQL proving its first refusal. Full collection authorisation
 # can grow with held candidates. If it needs more work, leave the refusal to the normal writer.
-_REFUSAL_STORE_SQL_STEPS = 16_000
 
 # The operation entries are the one table of what each action accepts and requires.
 ACTIONS = operation_entries.PLANS.actions()
@@ -383,8 +382,7 @@ def value_refusal(
         same = first is not None and (first.code, first.reason) == (refusal.code, refusal.reason)
         return refusal if same else None
 
-    refusal = collection_refs.decide_on_declaration(
-        root, collection, budget, profile="planning", decide=decide, store_sql_steps=_REFUSAL_STORE_SQL_STEPS)
+    refusal = collection_refs.decide_on_declaration(root, collection, budget, profile="planning", decide=decide)
     if refusal is None:
         return None
     code = _public_error_code(refusal)

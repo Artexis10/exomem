@@ -94,8 +94,8 @@ Stdio is intentionally explicit because each client session owns its process
 and can load its own embedding runtime.
 
 The plugin was called `exomem` before the rename, and the marketplace keeps that name.
-Claude Code moves an installed `exomem` plugin to `evermatter` on its own and tells you once.
-For a plugin from Git, run `/plugin install evermatter@exomem` once to finish the move.
+Claude Code moves the plugin settings from `exomem` to `evermatter`.
+If Claude Code reports that `evermatter` is not cached, run `/plugin install evermatter@exomem`.
 Then run `/reload-plugins` or restart Claude Code before you rerun setup.
 
 The plugin's server key changed from `exomem` to `evermatter` too. Claude Code stores a

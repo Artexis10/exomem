@@ -13,8 +13,8 @@ Task 1.1 measures the wall-time split per phase on one thread before 2.2 chooses
 ## Goals / Non-Goals
 
 **Goals:**
-- A governed preview over 10,000 referrers in one flat folder completes, with a concurrent Records read staying responsive. Measure it before and after on the same instrument.
-- No referrer, simple or dependent, is reread in full at the terminal gate when its proof is current.
+- On Linux, a governed preview completes for 10,000 referrers in the two-folder fixture. Each folder has 10,001 entries. A concurrent Records read stays responsive. Measure the build and paging before and after on the same instrument.
+- On Linux, release container members, extraction parts, and scene frames without rereading the referrer when their held evidence and dependencies are current.
 
 **Non-Goals:**
 - Changing what a governed caller may see, or any release rule.
@@ -22,10 +22,14 @@ Task 1.1 measures the wall-time split per phase on one thread before 2.2 chooses
 
 ## Decisions
 
-- **Name resolution.** Memoize one folder listing for one build or request scope, keyed by the folder's held identity and change stamp. Never cache across scopes. A changed folder lists again.
-- **Build budget and progress.** Decide between a separate bounded job budget and checkpointed progress from a measurement on the fixture. The job must stay cancellable and must not starve writers.
-- **Snapshot check.** Bind the final check to the generations that can change the report. Prove that unrelated index or governance movement cannot discard a correct report, and that a relevant change still refuses it.
-- **Dependent release.** Hold each dependency's own witness and identity, and require all of them to be current.
+- **Name resolution.** Reuse current listings within one governed build, keyed by each folder's held identity and change stamp. Bound the cache by its total name count. When a listing cannot fit, use the full lookup.
+- **Build budget.** The job shares a ten-minute budget across the build, staging and admission of the atomic report commit. Reserve the final second for recording interruption. The job leaves writers free while it builds. Time and cancellation checks admit the commit. Before admission, an interruption rolls back every report row. After admission, the job preserves SQLite's acknowledged result. If the job store is busy when recording interruption, the next claim recovers the orphan.
+- **Snapshot check.** Keep the exact generation and authority checks during the build and when releasing a retained report.
+- **Dependent release.** A held row keeps its own scopes and names what it inherits. The build checks this split against full membership. Parts and frames use the same physical parent path as ordinary membership. A report request reuses selector inputs only while the settled parent file version still matches. Parts and frames with a store-owned parent or a parent with its own inheritance use full verification. For a container member, release revalidates the parent binary and checks the witness on the member's payload. Bridge rows also keep full verification because release depends on resolving the bridge reference across the vault.
+
+In the initial laptop runs, the frozen tree stopped at 50 s on each capped attempt and completed in 118 s without that cap. The scoped listing brought the build down to 28–29 s. Index and governance generations stayed stable during those runs.
+
+Defer narrower invalidation until a measurement shows rebuilds caused by unrelated writes and a proof covers every report dependency. The candidate read set missed changes to container companion provenance and path-prefix siblings that can alter a rewrite.
 
 ## Risks / Trade-offs
 
