@@ -326,10 +326,11 @@ These do not gate the owner's switch:
   - Keep public retrieval off until 5.4 shows an outcome gain with a positive lower 95% confidence bound and 7.3 finds no reproducible store-mode regression on planted-error, canonicity, or graph cases that file mode passes.
   - Release stored relationship writes and reads together with their projection and recovery path, after the installed rollback and re-migration drill. Amend the semantic-write contract in that batch so store-mode supersession writes one stored edge and existing authored supersessions stay readable.
   - Pre-switch run (2026-11-22): the planted-error cases (16 development, 32 held out) ran from a source checkout of main of that date, in file mode and store mode, graph on and off, by replaying recorded tool calls. In every pair, no case where file mode could retrieve the planted correction lost it in store mode. Turn-slice differences are not attributed to store mode: the file-mode arms were enrolled with the collection store, and an enrolled file-mode vault returned an empty turn slice where an unenrolled one did not (#3061).
-- [ ] 7.4 Owner decision on switch timing; then migrate the owner's vault, then Cloud cells.
-  - The owner vault migrated to store mode on 28 November 2026. Cloud migration remains open.
+- [x] 7.4 Decide the owner's switch timing and migrate the owner's vault.
+  - The owner vault migrated to store mode on 28 November 2026. The settled read and search checks reproduced the file-mode results.
   - Done (gate lift, #3000): the release enables explicit migration and serving. A generated vault migrated, served a write, and rolled back on an installed wheel.
   - Note: the CLI fence refuses the `PAGES` entries on store mode itself (`VAULT_STORE_CLI_REFUSED`), not through `availability.require_servable`, so opening the rollout gate does not open it. An entry opens only when its own code serves a store-mode vault and its declaration in `cli_fence.ACCESS` changes.
+- [ ] 7.5 Migrate Cloud cells after the owner's vault.
 
 ## 8. Retire file-mode sync machinery
 

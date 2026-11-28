@@ -395,13 +395,7 @@ def observe_memory(
                 vault_root, current.document, rel_registry, editable.rel_path, resolved.unit
             )
             if superseding is not None:
-                raise ObserveMemoryError(
-                    stored_relationships.ALREADY_SUPERSEDED,
-                    f"the claim is already superseded by unit "
-                    f"{unit_id(superseding)}",
-                    "Supersede the successor instead, or read the page's units "
-                    "for the current ids.",
-                )
+                raise _already_superseded(superseding)
             if kind is not None:
                 selected_kind = _select_kind(
                     language,
@@ -1059,6 +1053,10 @@ def observe_memory(
         except semantic_writes.SemanticWriteError as error:
             raise ObserveMemoryError(error.code, error.reason) from error
         except OpError as error:
+            if error.code == stored_relationships.ALREADY_SUPERSEDED:
+                successor = _unit_by_anchor(current.document, error.details.get("successor_anchor"))
+                if successor is not None:
+                    raise _already_superseded(successor) from error
             raise ObserveMemoryError(error.code, error.message, error.remediation) from error
         link_warnings.extend(committed.review_field_warnings())
 
@@ -1102,6 +1100,14 @@ def observe_memory(
 def unit_id(unit: Any) -> str:
     """The short id that names one unit and its current version."""
     return page_ids.part_id(str(unit.unit_ref), str(unit.fingerprint))
+
+
+def _already_superseded(successor: semantic_units.SemanticUnit) -> ObserveMemoryError:
+    return ObserveMemoryError(
+        stored_relationships.ALREADY_SUPERSEDED,
+        f"the claim is already superseded by unit {unit_id(successor)}",
+        "Supersede the successor instead, or read the page's units for the current ids.",
+    )
 
 
 def page_units(vault_root: Path, page: dict[str, Any]) -> Any:

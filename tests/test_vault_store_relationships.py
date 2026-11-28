@@ -12,13 +12,15 @@ from test_vault_store_readers import EXTERNAL, restrict_external
 from test_vault_store_write_path import served  # noqa: F401
 
 from exomem import (
-    commands, held_operation, observe_memory, reserved_paths, semantic_index, semantic_writes, unit_edges,
+    commands, find, held_operation, observe_memory, reserved_paths, semantic_index, semantic_writes,
+    unit_corrections, unit_edges,
     vault_portability,
 )
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 from exomem.governance.principal import ClientBinding, OriginSessionBinding, library_scope, request_scope
 from exomem.vault_store import held, importer, projector, relationship_files, relationships, write
+from exomem.vault_store import read as store_read
 
 
 def test_relationship_only_commit_queues_both_pages_without_changing_their_bytes(
@@ -251,7 +253,10 @@ def test_supersession_is_stored_once_and_updates_current_history(served, writer)
     original = (
         b"---\ntitle: Tide\ntype: insight\nstatus: active\n"
         b"exomem_id: 03b68654-8da6-433f-82fa-b8239668e43a\n---\n\n# Tide\n\n"
-        b"## Claim\n- category: rule\n- id: tide\n\nThe ferry arrives at nine.\n"
+        b"## Claim\n- category: rule\n- id: tide\n\nThe ferry arrives at nine.\n\n"
+        b"## Claim\n- category: rule\n- id: dock-old\n\nThe ferry uses the west dock.\n\n"
+        b"## Claim\n- category: rule\n- id: dock-current\n- relations: supersedes: [[#^dock-old]]\n\n"
+        b"The ferry uses the east dock.\n"
     )
     write.commit(writer, write.StoreChange(
         write.Origin.GOVERNED, "Record the timetable.", puts=(write.PagePut(page, original),),
@@ -264,20 +269,27 @@ def test_supersession_is_stored_once_and_updates_current_history(served, writer)
         )
         read = commands.op_read_memory(served, path=page, include_history=True)
         units = observe_memory.page_units(served, read)
+        with store_read.request_snapshot(served):
+            find.recall_resolver_snapshot(served)
+            corrections = unit_corrections.discover(served, [prior.unit_ref], accept=lambda _row: True)
     assert result["mutated"]
     assert original.split(b"# Tide")[1] in stored_body(served, page)
-    assert b"supersedes::" not in stored_body(served, page)
+    assert stored_body(served, page).count(b"- relations: supersedes:") == 1
     [(relationship_id,)] = rows(served, "SELECT id FROM store_relationships WHERE retired_revision IS NULL")
     assert rows(served, "SELECT relationship_id,action,reason FROM store_relationship_history") == [
         (relationship_id, "add", "The ferry timetable changed."),
     ]
-    previous, successor = units
+    previous, dock_old, dock_current, successor = units
     assert previous["superseded_by"] == [successor["id"]]
     assert successor["supersedes"] == [previous["id"]]
+    assert dock_old["superseded_by"] == [dock_current["id"]]
+    assert dock_current["supersedes"] == [dock_old["id"]]
+    assert corrections["status"] == "available"
+    assert [item["unit_ref"] for item in corrections["units"]] == [result["unit_ref"]]
     revision = read["revision_history"]["revisions"][0]
     assert revision["reason"] == "The ferry timetable changed."
     assert {item["unit_ref"] for item in revision["affected_units"]} == {
-        unit.unit_ref for unit in semantic_index.selected_parent_index_state(served, page).document.units
+        prior.unit_ref, result["unit_ref"],
     }
     with pytest.raises(ValueError, match="ALREADY_SUPERSEDED"):
         commands.op_observe_memory(
@@ -319,8 +331,11 @@ def test_supersede_refuses_a_relationship_that_lands_after_preflight(
         return prepared
 
     monkeypatch.setattr(semantic_writes, "preflight_existing", let_assessment_land)
-    with pytest.raises(ValueError, match="SUPERSEDE_TARGET_ALREADY_SUPERSEDED"):
+    candidate = semantic_index.selected_parent_index_state(served, page).document.resolve_fragment("candidate").unit
+    expected = observe_memory.unit_id(candidate)
+    with pytest.raises(ValueError, match="SUPERSEDE_TARGET_ALREADY_SUPERSEDED") as error:
         commands.op_observe_memory(served, **correction, transition_token=checked["semantic"]["transition_token"])
+    assert expected in str(error.value)
     assert landed and stored_body(served, page) == original
     assert rows(served, "SELECT relation_type FROM store_relationships ORDER BY relation_type") == [
         ("supersedes",), ("supports",),

@@ -217,7 +217,8 @@ def last_retirement(tx: Connection, source_id: str, keys: tuple[RelationshipKey,
 
 def _require_new_successor(tx: Connection, check: SupersessionCheck) -> None:
     already = tx.execute(
-        "SELECT 1 FROM store_unit_ids AS prior CROSS JOIN store_relationships AS r ON r.target_unit_id=prior.id"
+        "SELECT successor.anchor FROM store_unit_ids AS prior"
+        " CROSS JOIN store_relationships AS r ON r.target_unit_id=prior.id"
         " JOIN store_unit_ids AS successor ON successor.id=r.source_unit_id"
         " WHERE prior.parent_path=?1 AND prior.parent_ref=?2 AND prior.anchor=?3"
         " AND successor.parent_path=?1 AND successor.parent_ref=?2 AND successor.id<>prior.id"
@@ -227,7 +228,10 @@ def _require_new_successor(tx: Connection, check: SupersessionCheck) -> None:
          json.dumps(check.relation_types)),
     ).fetchone()
     if already is not None:
-        raise OpError(ALREADY_SUPERSEDED, "the claim already has a successor", "Read the page's current units.")
+        raise OpError(
+            ALREADY_SUPERSEDED, "the claim already has a successor", "Read the page's current units.",
+            details={"successor_anchor": already[0]},
+        )
 
 
 def same_page_pairs(

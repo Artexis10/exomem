@@ -1109,6 +1109,7 @@ def direct_text_references_verdict(
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
     resolved_here: Callable[[str], tuple[str, ...]] | None = None,
+    local_page: str | None = None,
 ) -> str:
     """Prove every wikilink in returned direct-read text remains releasable.
 
@@ -1123,14 +1124,21 @@ def direct_text_references_verdict(
     `resolved_here` answers, for a name as the text wrote it that the index does not
     resolve, the paths the caller proved it names (a page the index no longer lists).
     Such a path is still decided like any other, so it must name a page that exists.
+    `local_page` binds fragment-only links in an admitted page image to their parent.
     """
     root = Path(vault_root)
     policy = policy_module.load(root)
     who = principal if principal is not None else effective_principal()
+    targets = []
     for reference in _WIKILINK_ANYWHERE.findall(text):
         target, _ = _unwrap_reference(reference, is_wikilink_target=True)
+        if not target and local_page is not None:
+            page, fragment = vault.split_wikilink_target(reference)
+            if not page and len(fragment) > 1:
+                target = local_page
         if not content_permits(root, target, who):
             return TEXT_REFUSED
+        targets.append(target)
     if _file_policy_empty(root, policy):
         return TEXT_RELEASED
     if policy.blocked or not who.resolved:
@@ -1139,11 +1147,7 @@ def direct_text_references_verdict(
 
     paths: set[str] = set()
     names: set[str] = set()
-    for raw in _WIKILINK_ANYWHERE.findall(text):
-        # `raw` is already bracket-stripped by the regex capture, so the
-        # alias/heading split needs `is_wikilink_target=True` -- see
-        # `_unwrap_reference`'s docstring.
-        target, _explicit = _unwrap_reference(raw, is_wikilink_target=True)
+    for target in targets:
         if not target:
             return TEXT_REFUSED
         if target.endswith(".md"):

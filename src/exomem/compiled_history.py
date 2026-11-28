@@ -25,7 +25,7 @@ import json
 import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import (
     context_refs,
@@ -46,6 +46,9 @@ from .governance.principal import OWNER_AUDIENCE, effective_principal
 from .kbdir import managed_join
 from .vault_store import mode as store_mode
 from .vault_store import read as store_read
+
+if TYPE_CHECKING:
+    from . import semantic_contract
 
 ENTRY_VERSION = 1
 #: The `operation` an episode revision's entry carries; the semantic writer names its own.
@@ -132,7 +135,9 @@ def validate_new_entry(
 
 
 def plan_entry(
-    root: Path, *, preflight: Any, token: dict, reason: str | None
+    root: Path, *, preflight: Any, token: dict, reason: str | None,
+    stored_before: Sequence[semantic_contract.RelationFact] = (),
+    stored_after: Sequence[semantic_contract.RelationFact] = (),
 ) -> vault.PlannedWrite | None:
     """Keep one changed interpretation before the lifecycle auxiliary hash seals it."""
     if (
@@ -176,9 +181,7 @@ def plan_entry(
     # bytes stand unchanged: the transition changed its derived superseded
     # state, which is exactly what the entry must answer for later.
     supersession_touched = _supersession_touched_refs(
-        preflight.before, preflight.after, preflight.path,
-        preflight.before_corpus.stored_relation_facts,
-        preflight.after_corpus.stored_relation_facts,
+        preflight.before, preflight.after, preflight.path, stored_before, stored_after,
     )
     affected = [
         {
@@ -471,10 +474,10 @@ def _admitted_entry(
         shown = json.dumps(entry, ensure_ascii=False)
         # A revision names its siblings, which the same fold moved to trash, so the index no longer lists them.
         # Under the head's own admission a sibling that this history keeps counts as resolved.
-        if not retained_inputs.exact_text_visible(root, shown) and not (
+        if not retained_inputs.exact_text_visible(root, shown, local_page=path) and not (
             entry.get("operation") == FOLD_OPERATION
             and siblings is not None
-            and retained_inputs.exact_text_visible(root, shown, resolved_here=siblings())
+            and retained_inputs.exact_text_visible(root, shown, resolved_here=siblings(), local_page=path)
         ):
             return None
     except (KeyError, TypeError, ValueError, provenance.OriginError):

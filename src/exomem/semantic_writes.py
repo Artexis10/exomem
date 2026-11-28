@@ -2576,6 +2576,8 @@ def _commit_existing_locked(
     history_write = compiled_history.plan_entry(
         root, preflight=preflight, token=_decode_existing_transition_token(preflight.transition_token),
         reason=history_reason,
+        stored_before=preflight.before_corpus.stored_relation_facts,
+        stored_after=preflight.after_corpus.stored_relation_facts,
     )
     if history_write is not None:
         auxiliaries = (*auxiliaries, history_write)
