@@ -284,8 +284,8 @@ Exomem SHALL NOT let a CUDA library fault end the process that serves requests. 
 - **AND** status and doctor show the number of deaths in a row and the job at the head of the queue
 - **AND** doctor shows this beside, not behind, an old failed or blocked job
 
-### Requirement: A job crash counts against each job that the media process ran
-A job crash SHALL be a death of the media process while it still holds its runtime record, by a signal other than SIGTERM, SIGINT and SIGHUP, or by an exit status other than 0 and 75 to 81. A death that the supervisor caused by its own stop SHALL NOT be a job crash, nor a death already counted as a memory stop. Each job that the process ran SHALL count one job crash and SHALL keep its attempt. A preview job SHALL count none and SHALL keep its own attempt ceiling.
+### Requirement: A job crash counts against the jobs it interrupts
+While the process holds its runtime record, death by a signal other than SIGTERM, SIGINT or SIGHUP, or exit outside 0 and 75 to 81, SHALL count as a crash. A supervisor stop or recorded memory stop SHALL NOT count. For each non-preview job it still holds, the supervisor SHALL refund the attempt and count one crash. A speech job that advanced since its last stop SHALL count no crash. A preview job SHALL count no crash and keep its attempt ceiling.
 
 #### Scenario: A native fault or a native exit
 - **WHEN** the media process dies by SIGSEGV, or exits with status 3, while it runs a job
