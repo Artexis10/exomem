@@ -5980,6 +5980,7 @@ def test_a_dependent_held_row_releases_unread_until_a_dependency_changes(
         parent = vault / stored.sidecar_path
         preserve.update_sidecar_extraction(vault, parent, text="Clause. " * 9000, engine="upload")
         rel = sorted(extraction_parts.folder_for(parent).glob("*.md"))[-1].relative_to(vault).as_posix()
+        _retag(parent, "general-parent")
     else:
         from test_scene_frames import _FakeImg, _scene, _video
 
@@ -6003,9 +6004,16 @@ def test_a_dependent_held_row_releases_unread_until_a_dependency_changes(
 
         if change == "container payload replaced":
             (vault / child).write_bytes(b"other document!")
+        elif change == "part source retagged":
+            # A sync can change the Source bytes while keeping its size and mtime.
+            previous = parent.stat()
+            text = parent.read_text(encoding="utf-8")
+            parent.write_text(text.replace("general-parent", "private-parent"), encoding="utf-8")
+            os.utime(parent, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+            updated = parent.stat()
+            assert (updated.st_size, updated.st_mtime_ns) == (previous.st_size, previous.st_mtime_ns)
         else:
             _retag(parent, "private-parent")
-        _reset_caches()
         retained, withheld = _release(vault, rel, held)
     assert withheld["entries"] == []
     with pytest.raises(OpError, match="RECLASSIFICATION_PREVIEW_STALE"):

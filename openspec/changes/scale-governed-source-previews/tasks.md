@@ -19,5 +19,5 @@
 ## 4. Delivery
 
 - [ ] 4.1 Rerun the governed and ungoverned fixtures on the same instrument, then get an independent review and required CI, and confirm on the installed release.
-  - Governed repeat on the laptop with Python 3.11 and 10,000 referrers. Frozen tree `f8b1288ce`: build 170.1 s with a raised budget, paging stopped on repeated WARMING responses. Corrected tree: build 35.0 s, all 79 pages, median 227 ms, max 1.84 s. Records reads during the build had a median of 139 ms and a max of 1.60 s. No referrers were missing.
-  - Ungoverned corrected tree on the same instrument: build 87.4 s, all 79 pages, median 51 ms, max 68 ms. Records reads during the build had a median of 28 ms and a max of 654 ms. No referrers were missing.
+  - Governed runs on Linux with Python 3.11 and 10,000 referrers. Frozen tree `f8b1288ce` built in 170.1 s with a raised budget. Paging stopped on repeated WARMING responses. The bounded-cache candidate built in 31.5 s and served all 79 pages, median 82 ms, max 145 ms. All 29 concurrent Records reads returned a row, median 97 ms, max 462 ms.
+  - Ungoverned runs on the same fixture. Main `ccb788663` built in 31.8 s after 280.9 s of setup. The candidate built in 9.6 s after 39.7 s of setup. Both served all 79 pages. The candidate's pages took a median of 40 ms and a max of 89 ms. All ten concurrent Records reads returned a row.

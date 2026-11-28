@@ -753,7 +753,12 @@ def live_inherited_scopes(
     """
     kind = inherited.get("kind")
     if kind in {PART_EDGE, FRAME_EDGE}:
-        return evaluate(_read_parent_path(root, inherited["parent"]), policy), None
+        parent = _read_parent_path(root, inherited["parent"])
+        # The parent bytes can change without changing its size or mtime.
+        content_hash = parent.snapshot_hash
+        if content_hash is None:
+            raise MembershipUnresolved("parent content snapshot is unavailable")
+        return evaluate_snapshot(parent, policy, content_hash=content_hash), None
     if kind == CONTAINER_INHERITANCE:
         try:
             payload = root / inherited["claim"]["artifact_path"]

@@ -13,8 +13,8 @@ Task 1.1 measures the wall-time split per phase on one thread before 2.2 chooses
 ## Goals / Non-Goals
 
 **Goals:**
-- A governed preview over 10,000 referrers in one flat folder completes, with a concurrent Records read staying responsive. Measure it before and after on the same instrument.
-- Release container members, extraction parts, and scene frames without rereading the referrer when their held evidence and dependencies are current.
+- On Linux, a governed preview over 10,000 referrers in one flat folder completes, with a concurrent Records read staying responsive. Measure it before and after on the same instrument.
+- On Linux, release container members, extraction parts, and scene frames without rereading the referrer when their held evidence and dependencies are current.
 
 **Non-Goals:**
 - Changing what a governed caller may see, or any release rule.
@@ -22,7 +22,7 @@ Task 1.1 measures the wall-time split per phase on one thread before 2.2 chooses
 
 ## Decisions
 
-- **Name resolution.** Memoize one folder listing for one build or request scope, keyed by the folder's held identity and change stamp. Never cache across scopes. A changed folder lists again.
+- **Name resolution.** Reuse current listings within one governed build, keyed by each folder's held identity and change stamp. Bound the cache by its total name count. When a listing cannot fit, use the full lookup.
 - **Build budget.** Give the build a ten-minute budget. The job stays cancellable and allows writers to proceed while it runs.
 - **Snapshot check.** Keep the exact generation and authority checks during the build and when releasing a retained report.
 - **Dependent release.** A held row keeps its own scopes and names what it inherits. The build checks this split against full membership. Release reads the parent page again and, for a container member, revalidates the parent binary and checks the witness on the member's payload. Parts and frames with a container binding keep full verification. Bridge rows also keep full verification because release depends on resolving the bridge reference across the vault.

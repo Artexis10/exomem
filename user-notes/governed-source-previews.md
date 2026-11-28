@@ -1,4 +1,4 @@
 ---
-title: Large source previews finish
+title: Large source previews finish on Linux
 ---
-Your assistant can now preview a source change in a large vault with access rules without getting stuck restarting the preview.
+On Linux, your assistant can preview a source change in a large vault with access rules without getting stuck restarting the preview.

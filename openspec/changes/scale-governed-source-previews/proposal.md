@@ -6,9 +6,9 @@ Release has a second gap. A referrer with a container parent can still require a
 
 ## What Changes
 
-- Resolve a referrer's physical name without enumerating its folder once per referrer. Reuse one bounded listing of the folder while its identity is unchanged.
+- On Linux, resolve referrer names from one folder listing while the directory version stays current.
 - Give the background build its own bounded budget and keep the exact snapshot check.
-- Release container members, extraction parts, and scene frames from held evidence for their own bytes and current proof of their dependencies.
+- On Linux, release container members, extraction parts, and scene frames from held evidence and current proof of their dependencies.
 - Return a typed public error for an interrupted or cancelled preview job, instead of its raw state.
 
 ## Capabilities
@@ -19,7 +19,7 @@ None.
 
 ### Modified Capabilities
 
-- `command-surface`: a governed reclassification preview meets the load target, and a dependent referrer is released without rereading its bytes.
+- `command-surface`: on Linux, a governed reclassification preview meets the load target and releases dependent referrers without rereading their bytes.
 
 ## Impact
 

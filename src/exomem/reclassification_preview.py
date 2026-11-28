@@ -23,7 +23,7 @@ from . import (
     reserved_paths,
 )
 from .cli_ops import OpError
-from .governance import connector_boundary, lifecycle
+from .governance import connector_boundary, lifecycle, policy
 from .governance.principal import (
     RequestPrincipal,
     effective_principal,
@@ -190,7 +190,7 @@ def _build(
         with (
             request_scope(who), invocation_scope(), request_budget.checking(check),
             capabilities.active_surface(surface) if surface is not None else nullcontext(),
-            reclassify_source.held_evidence_sink() as held, reserved_paths.folder_listing_scope(),
+            reclassify_source.held_evidence_sink() as held,
         ):
             if (auth_sessions.origin_revalidates_in_background(who)
                     and auth_sessions.origin_login_state_sync(who) is not auth_sessions.OriginLogin.VALID):
@@ -199,7 +199,11 @@ def _build(
                 raise _not_found()
             if _snapshot_key(root) != snapshot_key:
                 raise reclassify_source.preview_warming()
-            result = invoke_command(command, root, operation="propose-reclassification", **args)
+            folder_scope = (
+                reserved_paths.folder_listing_scope() if not policy.load(root).empty else nullcontext()
+            )
+            with folder_scope:
+                result = invoke_command(command, root, operation="propose-reclassification", **args)
             if (not original or _digest({key: result.get(key) for key in original["keys"]}) != original["digest"]
                     or stop.is_set() or _authority_binding(root, who) != authority):
                 raise _not_found()

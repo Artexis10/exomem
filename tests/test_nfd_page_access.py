@@ -493,3 +493,44 @@ def test_a_scoped_folder_listing_still_refuses_a_new_alias_spelling(vault: Path,
         with pytest.raises(reserved_paths.ReservedPathLeafError) as refused:
             reserved_paths.resolve_physical_relative(vault, rel)
     assert refused.value.code == "AMBIGUOUS_PATH"
+
+
+@pytest.mark.parametrize("limit", [1, 2], ids=["oversized folder", "eviction"])
+def test_scoped_folder_listings_keep_a_total_name_budget(vault: Path, monkeypatch, limit: int) -> None:
+    import sys
+
+    from exomem import held_fs, reserved_paths
+
+    if sys.platform != "linux":
+        pytest.skip("only Linux reuses held directory listings")
+    first = vault / "Knowledge Base/Notes/First"
+    second = vault / "Knowledge Base/Notes/Second"
+    _write_page(first, _DECOMPOSED_NAME)
+    _write_page(first, "neighbour.md")
+    _write_page(second, "neighbour.md")
+    _write_page(second, "other.md")
+    with held_fs.acquire(vault).require() as filesystem:
+        backend = type(filesystem)
+    listings: list[object] = []
+    iter_names = backend.iter_names
+
+    def counted(self, parent):
+        listings.append(parent.identity)
+        return iter_names(self, parent)
+
+    monkeypatch.setattr(backend, "iter_names", counted)
+    monkeypatch.setattr(reserved_paths, "_SETTLED_FOLDER_NS", 0)
+    monkeypatch.setattr(reserved_paths, "_FOLDER_NAME_LIMIT", limit)
+    with reserved_paths.folder_listing_scope():
+        first_rel = first.relative_to(vault).as_posix()
+        target = f"{first_rel}/{_COMPOSED_NAME}"
+        expected = f"{first_rel}/{_DECOMPOSED_NAME}"
+        assert reserved_paths.resolve_physical_relative(vault, target) == expected
+        assert reserved_paths.resolve_physical_relative(vault, target) == expected
+        neighbour = f"{first_rel}/neighbour.md"
+        assert reserved_paths.resolve_physical_relative(vault, neighbour) == neighbour
+        assert len(listings) == 1
+        other = (second / "neighbour.md").relative_to(vault).as_posix()
+        assert reserved_paths.resolve_physical_relative(vault, other) == other
+        assert reserved_paths.resolve_physical_relative(vault, target) == expected
+    assert len(listings) == 3

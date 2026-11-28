@@ -627,7 +627,8 @@ def test_a_long_preview_allows_a_writer_and_checks_the_snapshot(
                 assert status.get("error_code") == "RECLASSIFICATION_PREVIEW_WARMING", status
                 assert {"result", "preview_digest", "entries"}.isdisjoint(status), status
             else:
-                assert status.get("state") == "completed" and status["result"]["preview_digest"], status
+                assert status.get("state") == "completed", status
+                assert status["result"]["preview_digest"], status
 
     asyncio.run(exercise())
 
