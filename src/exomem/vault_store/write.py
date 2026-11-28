@@ -855,10 +855,9 @@ def derived_room(
 ) -> Iterator[tuple[dict[str, derive._LexicalPage], derive.ReserveGraph | None, Callable[[], None]]]:
     """Protect the derived rows that an original causes on the vault device, for one drain batch.
 
-    The rows of an original's page, of the path that a move of it vacated, and of the pages that link
-    to it draw on the room that this reserves; a batch with no original reserves nothing. It yields
-    the original's prepared lexical rows, the graph reservation callback and the settle step.
-    A continuation reserves room for its graph rows and the receipt it still holds.
+    An original's page, the path its move vacated, and its linking pages draw on this reservation.
+    A continuation reserves room for its graph rows and its receipt. The context yields prepared
+    lexical rows, the graph reservation callback, and the settle step.
     """
     from .. import media_capacity
 

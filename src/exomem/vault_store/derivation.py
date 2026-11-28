@@ -763,6 +763,7 @@ def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: 
             refreshed = [intent.path for intent in batch if intent.operation == REFRESH]
             before = read.vault_triple(tx, row[1])
             metered = {intent.path for intent in batch if intent.metered}
+            relationship_moves = tuple(intent.path for intent in batch if intent.relationship_move)
             prepared, reserve_graph, settle = allocations.enter_context(write.derived_room(
                 writer, tx, [rel for rel in written if rel in metered],
                 tuple(rel for rel in removed if rel in metered),
@@ -770,7 +771,7 @@ def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: 
             delta = derive.derive_paths(
                 tx, root, written=written, removed=removed, refreshed=refreshed,
                 before=before, prepared_lexical=prepared, reserve_graph=reserve_graph,
-                metered=frozenset(metered),
+                metered=frozenset(metered), relationship_moves=frozenset(relationship_moves),
                 dependency_revisions={intent.path: intent.revision for intent in batch},
                 dependency_limit=BATCH_PAGES,
             )
@@ -781,9 +782,8 @@ def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: 
                 "DELETE FROM store_derivation_queue WHERE path = ?", [(path,) for path in completed]
             )
             revision = row[1] + 1
-            moved = tuple(intent.path for intent in batch if intent.relationship_move)
-            if moved:
-                relationships.reproject_moved(tx, moved, revision=revision, at=write.timestamp())
+            if relationship_moves:
+                relationships.reproject_moved(tx, relationship_moves, revision=revision, at=write.timestamp())
             tx.execute("UPDATE store_mode SET revision = ? WHERE id = 1", (revision,))
             after = read.vault_triple(tx, revision)
     except Exception as error:  # noqa: BLE001 - a failed intent is recorded and retried, never lost

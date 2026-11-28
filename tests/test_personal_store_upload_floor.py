@@ -474,14 +474,16 @@ def test_stored_links_to_an_original_resume_with_room_for_each_batch(
                         for number in range(len(targets))),
         ),
     ))
-    graph_count = "SELECT COUNT(*) FROM graph_edges WHERE edge_key LIKE 'stored:survey-%'"
-    assert writer.connection.execute(graph_count).fetchone() == (len(targets),)
+    graph_count = (
+        "SELECT COUNT(*) FROM graph_edges WHERE edge_key LIKE 'stored:survey-%' AND dst_page_key=?"
+    )
+    assert writer.connection.execute(graph_count, (f"file:{original}",)).fetchone() == (len(targets),)
     monkeypatch.setattr(derivation, "BATCH_PAGES", 2)
+    moved = original.replace("Survey.md", "Moved Survey.md")
     with monkeypatch.context() as pause:
         pause.setattr(derivation, "drain", lambda *_args, **_kwargs: None)
         write.commit(writer, write.StoreChange(
-            write.Origin.GOVERNED, "Remove the anchor from the survey.",
-            puts=(write.PagePut(original, raw.replace(b" ^reading", b""), media_allocation=True),),
+            write.Origin.GOVERNED, "Move the retained survey.", moves=(write.PageMove(original, moved),),
         ))
     resume = derivation._derive_dependency_pass
 
@@ -492,12 +494,12 @@ def test_stored_links_to_an_original_resume_with_room_for_each_batch(
     with monkeypatch.context() as pause:
         pause.setattr(derivation, "_derive_dependency_pass", tighten_floor)
         derivation.drain(served, writer)
-    assert queued(writer, original) == [(derivation.NO_ROOM,)]
-    assert writer.connection.execute(graph_count).fetchone() == (3,)
+    assert queued(writer, moved) == [(derivation.NO_ROOM,)]
+    assert writer.connection.execute(graph_count, (f"file:{moved}",)).fetchone() == (2,)
     free[0] = ample
     derive_again(served, writer)
-    assert queued(writer, original) == []
-    assert writer.connection.execute(graph_count).fetchone() == (0,)
+    assert queued(writer, moved) == []
+    assert writer.connection.execute(graph_count, (f"file:{moved}",)).fetchone() == (len(targets),)
 
 
 def test_an_original_draws_no_room_for_the_other_pages_its_commit_writes(

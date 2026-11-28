@@ -493,6 +493,71 @@ def test_a_migration_strips_projected_relationship_text_before_indexing(vault):
         ).fetchone()).encode()
 
 
+def test_fresh_migration_refuses_a_marker_free_projection_with_a_portable_relationship(vault, capsys):
+    from test_vault_store_readers import EXTERNAL, restrict_external
+
+    from exomem import commands
+    from exomem.governance.principal import request_scope
+
+    source = b"# Alpha\n\n- [rule] Check the tide. ^tide\n"
+    target = b"# Beta\n\n- [rule] Light the lamp. ^lamp\n"
+    locator = f"{BETA}#lamp"
+    damaged = source + (
+        "\n### Stored relationships\n- Outgoing supports for tide: 1\n"
+        f"- tide · supports to {locator}\n"
+    ).encode()
+    path = vault / ALPHA
+    path.write_bytes(damaged)
+    (vault / BETA).write_bytes(target)
+    page_target = "Knowledge Base/Notes/Desk.md"
+    desk = vault / page_target
+    desk_body = b"# Desk\n\nA page-only target.\n"
+    desk.write_bytes(desk_body)
+    alpha = relationships.UnitIdentity("tide-id", ALPHA, "tide")
+    beta = relationships.UnitIdentity("lamp-id", BETA, "lamp")
+    edge = relationships.Relationship("edge-id", alpha.id, "supports", beta.id)
+    page_edge = relationships.Relationship("page-edge", alpha.id, "supports", target_page_path=page_target)
+    artifact = vault / relationship_files.path_for(ALPHA)
+    portable = b"".join(relationship_files.lines(
+        ALPHA, 1, (alpha,), (
+            relationships.BoundRelationship(edge, alpha, beta),
+            relationships.BoundRelationship(page_edge, alpha, None),
+        ),
+    ))
+    artifact.write_bytes(portable)
+    build_indexes(vault)
+
+    assert migrate_apply(vault) == 1
+    refusal = capsys.readouterr().err
+    assert "RELATIONS_BLOCK_DAMAGED" in refusal
+    assert ALPHA in refusal and "Remove" in refusal
+    assert not mode.store_mode_active(vault)
+    assert path.read_bytes() == damaged
+    assert artifact.read_bytes() == portable
+
+    authored = source + b"\n- Notes \xc2\xb7 refer to section two\n"
+    path.write_bytes(authored)
+    bare_incoming = desk_body + f"\n{ALPHA}#tide\n".encode()
+    desk.write_bytes(bare_incoming)
+    build_indexes(vault)
+    assert migrate_apply(vault) == 1
+    assert page_target in capsys.readouterr().err
+    assert not mode.store_mode_active(vault)
+    assert desk.read_bytes() == bare_incoming
+    assert not (vault / relationship_files.path_for(page_target)).exists()
+
+    desk.write_bytes(desk_body)
+    build_indexes(vault)
+    assert migrate_apply(vault) == 0, capsys.readouterr().err
+    restrict_external(vault, 'paths: ["Notes/Beta.md"]')
+    with request_scope(EXTERNAL):
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            commands.op_read_memory(vault, path=BETA)
+        released = commands.op_read_memory(vault, path=ALPHA)
+    assert released["body"].encode() == authored
+    assert locator not in released["body"]
+
+
 def test_a_rollback_and_remigration_preserve_relationship_ids_and_an_unresolved_target(
     vault, tmp_path, capsys, monkeypatch, coordinator_url,  # noqa: F811
 ):

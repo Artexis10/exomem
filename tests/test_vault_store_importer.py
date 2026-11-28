@@ -142,6 +142,33 @@ def test_an_outside_body_edit_with_an_intact_relations_block_is_imported(
     assert not rows(stored, "SELECT path FROM store_held")
 
 
+def test_an_ordinary_editor_list_uses_no_projection_witness(stored, importing):
+    path = stored / ALPHA
+    edited_page = path.read_bytes() + b"\n- Notes \xc2\xb7 refer to section two\n"
+    path.write_bytes(edited_page)
+
+    assert importing.import_paths([ALPHA]).imported == [ALPHA]
+    assert rows(stored, "SELECT body FROM store_pages WHERE path = ?", ALPHA) == [(edited_page,)]
+    assert not rows(stored, "SELECT path FROM store_held")
+
+
+def test_an_intact_relations_block_allows_an_authored_wikilink_to_its_target(
+    stored, projecting, importing, related_pages,
+):
+    source, _target = related_pages
+    path = stored / ALPHA
+    projected = path.read_bytes()
+    assert relationship_files.strip_block(projected) == source
+    edited_page = source + f"\nSee [[{BETA}#lamp]].\n".encode()
+    path.write_bytes(edited_page + projected[len(source):])
+
+    assert importing.import_paths([ALPHA]).imported == [ALPHA]
+    assert rows(stored, "SELECT body FROM store_pages WHERE path = ?", ALPHA) == [(edited_page,)]
+    assert projecting.run_pass().projected == 1
+    assert relationship_files.strip_block(path.read_bytes()) == edited_page
+    assert not rows(stored, "SELECT path FROM store_held")
+
+
 @pytest.mark.parametrize(
     ("edit_body", "sweep"),
     [(False, False), (False, True), (True, False)],
@@ -192,7 +219,9 @@ def test_managed_block_recovery_preserves_a_later_outside_edit(
     assert rows(stored, "SELECT kind, body FROM store_held WHERE path = ?", ALPHA) == [("edit", later)]
 
 
-@pytest.mark.parametrize("survives", ["all rows", "locator row", "bare locator", "one marker"])
+@pytest.mark.parametrize(
+    "survives", ["all rows", "locator row", "bare locator", "one marker", "copy outside intact block"],
+)
 def test_damaged_projection_cannot_put_a_withheld_target_in_the_authored_page(
     stored, writer, projecting, importing, related_pages, survives,
 ):
@@ -210,6 +239,8 @@ def test_damaged_projection_cannot_put_a_withheld_target_in_the_authored_page(
         surviving = sample
     elif survives == "bare locator":
         surviving = locator + b"\n"
+    elif survives == "copy outside intact block":
+        surviving = sample + b"".join(projection)
     else:
         surviving = b"".join(projection[:-1])
     authored = source + b"\nAn outside edit.\n"
@@ -303,7 +334,7 @@ def test_restricted_hold_listing_keeps_metadata_for_a_proven_block_with_an_autho
     restrict_external(stored, 'paths: ["Notes/Beta.md"]')
     path = stored / ALPHA
     projection = path.read_bytes()[len(source):]
-    authored = source + b"\nAn outside edit.\n"
+    authored = source + f"\nSee [[{BETA}#lamp]].\n".encode()
     commit(writer, relationship_change=relationships.Change(
         actor="owner",
         retired=(relationships.Retirement("link-id"),),

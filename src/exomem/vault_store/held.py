@@ -206,8 +206,6 @@ def _listed_item(
     try:
         if projected is None:
             body = relationship_files.strip_block(disk.body)
-            if not unrestricted and relationship_files.has_locator_rows(body):
-                return None
         elif (before := projected[0]) is not None:
             body = relationship_files.body_from_witness(disk.body, before, projected[1])
         else:

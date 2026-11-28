@@ -366,15 +366,24 @@ def orphaned_pages(tx: Connection) -> Iterator[tuple[str, str | None]]:
 
 
 def relanding_sources(
-    tx: Connection, path: str, *, after: str, limit: int,
+    tx: Connection, path: str, *, after: str, limit: int, page_targets: bool = False,
 ) -> Iterator[tuple[str]]:
-    """Seek the sources whose stored unit targets can land on this page."""
-    yield from tx.execute(
-        "SELECT DISTINCT s.parent_path FROM store_unit_ids t"
+    """Seek the sources whose stored targets can land again on this page."""
+    linked_units = (
+        "SELECT r.source_unit_id FROM store_unit_ids t"
         " CROSS JOIN store_relationships r ON r.target_unit_id=t.id"
-        " JOIN store_unit_ids s ON s.id=r.source_unit_id"
-        " WHERE t.parent_path=? AND r.retired_revision IS NULL AND s.parent_path>?"
-        " ORDER BY s.parent_path LIMIT ?",
+        " WHERE t.parent_path=?1 AND r.retired_revision IS NULL"
+    )
+    linked_pages = (
+        " UNION ALL SELECT source_unit_id FROM store_relationships"
+        " WHERE target_page_path=?1 AND retired_revision IS NULL"
+        if page_targets else ""
+    )
+    yield from tx.execute(
+        "WITH links(source) AS (" + linked_units + linked_pages + ")"
+        " SELECT DISTINCT s.parent_path FROM links"
+        " JOIN store_unit_ids s ON s.id=links.source"
+        " WHERE s.parent_path>?2 ORDER BY s.parent_path LIMIT ?3",
         (path, after, limit),
     )
 
@@ -532,7 +541,7 @@ def move_page(tx: Connection, old: str, new: str, *, parent_ref: str | None) -> 
 
 
 def reproject_moved(tx: Connection, paths: tuple[str, ...], *, revision: int, at: str) -> None:
-    """A move's derivation intent refreshes the source pages that name its far ends."""
+    """Refresh the portable files of sources that name a moved endpoint."""
     sources = (
         "WITH moved AS (SELECT value AS path FROM json_each(?1)), active AS ("
         " SELECT r.source_unit_id FROM moved CROSS JOIN store_unit_ids t ON t.parent_path=moved.path"
@@ -547,8 +556,4 @@ def reproject_moved(tx: Connection, paths: tuple[str, ...], *, revision: int, at
     tx.execute(
         sources + "INSERT INTO store_projection_queue(path,revision,operation,queued_at)"
         " SELECT path,?2,'write',?3 FROM affected WHERE 1 ON CONFLICT(path) DO NOTHING", params,
-    )
-    tx.execute(
-        sources + "INSERT INTO store_derivation_queue(path,revision,operation,queued_at)"
-        " SELECT path,?2,'derive',?3 FROM affected WHERE 1 ON CONFLICT(path) DO NOTHING", params,
     )

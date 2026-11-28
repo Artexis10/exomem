@@ -2932,13 +2932,13 @@ def write_page_graph_rows(
     if unit_links:
         link_rows.write(conn)
     for batch in relationship_batches:
-        records = PageGraphRecords(
+        stored_edges = PageGraphRecords(
             "graph_edges", edge_columns,
             tuple(_edge_values(edge)[: len(edge_columns)] for edge in batch), replace=True,
         )
         if before_write is not None:
-            before_write(rel, (records,), False)
-        records.write(conn)
+            before_write(rel, (stored_edges,), False)
+        stored_edges.write(conn)
     _bump_generation(conn)
 
 

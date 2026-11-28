@@ -536,7 +536,8 @@ def test_moving_a_target_refreshes_other_pages_relations_files(served, writer): 
             actor="owner",
             identities=(relationships.UnitIdentity("tide-id", ALPHA, "tide"),
                         relationships.UnitIdentity("lamp-id", BETA, "lamp")),
-            added=(relationships.Relationship("link-id", "tide-id", "supports", "lamp-id"),),
+            added=(relationships.Relationship("link-id", "tide-id", "supports", "lamp-id"),
+                   relationships.Relationship("page-target", "tide-id", "supports", target_page_path=BETA)),
         ),
     ))
     projection = projector.Projector(served, run=lambda work: work(writer))
@@ -566,6 +567,9 @@ def test_moving_a_target_refreshes_other_pages_relations_files(served, writer): 
     assert relations.target_units[0].parent_path == moved
     assert relations.target_units[0].id == "lamp-id" and relations.relationships[0].id == "link-id"
     assert not beta.exists() and (served / relationship_files.path_for(moved)).exists()
+    assert rows(served, "SELECT dst_page_key FROM graph_edges WHERE edge_key='stored:page-target'") == [
+        (f"file:{moved}",),
+    ]
 
 
 def test_a_rename_into_a_vacant_path_preserves_both_old_and_current_targets(served, writer):  # noqa: F811

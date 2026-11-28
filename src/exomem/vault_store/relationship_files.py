@@ -8,11 +8,11 @@ import json
 import tempfile
 import uuid
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Container, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from io import BytesIO
-from itertools import groupby
+from itertools import chain, groupby
 from operator import itemgetter
 from pathlib import Path
 from sqlite3 import Connection, IntegrityError
@@ -115,32 +115,25 @@ def editor_body(
 ) -> tuple[bytes, bool]:
     """Remove a marked block and refuse surviving projection text with no reliable boundary."""
     body, block, rendered_body = _split_block(source, keep_mine=keep_mine)
-    locator_rows = Counter(_locator_rows(body))
     prior = tx.execute(
         "SELECT p.body, m.sha256, m.canonical_sha256, p.sha256 "
-        "FROM (SELECT ? AS path) AS item "
-        "LEFT JOIN store_pages AS p ON p.path = item.path "
-        "LEFT JOIN store_manifest AS m ON m.path = item.path "
-        "WHERE m.canonical_sha256 IS NOT NULL OR (? AND p.path IS NOT NULL)",
-        (page, bool(locator_rows)),
+        "FROM store_manifest AS m LEFT JOIN store_pages AS p ON p.path = m.path "
+        "WHERE m.path = ? AND m.canonical_sha256 IS NOT NULL",
+        (page,),
     ).fetchone()
-    before = b"" if prior is None or prior[0] is None else prior[0]
-    had_block = prior is not None and prior[2] is not None
-    if body == before:
-        return body, had_block
-    if locator_rows - Counter(_locator_rows(before)):
-        raise _damaged_markers()
-    if not had_block:
+    if prior is None:
         return body, False
-    assert prior is not None
-    if prior[2] == prior[3]:
-        if block and hashlib.sha256(before + block).hexdigest() == prior[1]:
+    before, projected_sha256, canonical_sha256, page_sha256 = prior
+    if body == (before or b""):
+        return body, True
+    if before is not None and canonical_sha256 == page_sha256:
+        if block and hashlib.sha256(before + block).hexdigest() == projected_sha256:
             _check_projection_fragments(before, body, rendered_body.splitlines())
             return body, True
         rendered = tuple(projection_lines(tx, page))
         projected = splice_block(before, rendered)
-        if projected != before and hashlib.sha256(projected).hexdigest() == prior[1]:
-            _check_projection_fragments(before, body, (row.encode() for row in rendered))
+        if projected != before and hashlib.sha256(projected).hexdigest() == projected_sha256:
+            _check_projection_fragments(before, body, (row.encode() for row in rendered), bare_locators=True)
             return body, True
     raise OpError(
         "RELATIONS_BLOCK_STALE", "the last managed relations block cannot be verified",
@@ -169,17 +162,6 @@ def _locator(line: bytes) -> bytes | None:
     return None
 
 
-def _locator_rows(body: bytes) -> Iterator[bytes]:
-    if _LOCATOR_SEPARATOR.encode() in body:
-        for line in _body_rows(body):
-            if _locator(line):
-                yield line
-
-
-def has_locator_rows(body: bytes) -> bool:
-    return next(_locator_rows(body), None) is not None
-
-
 def body_from_witness(source: bytes, before: bytes, projected_sha256: str) -> bytes:
     """Release the authored bytes of a held file after authenticating its marked block."""
     body, block, rendered = _split_block(source, keep_mine=False)
@@ -187,27 +169,36 @@ def body_from_witness(source: bytes, before: bytes, projected_sha256: str) -> by
         return body
     if not block or hashlib.sha256(before + block).hexdigest() != projected_sha256:
         raise _damaged_markers()
-    if Counter(_locator_rows(body)) - Counter(_locator_rows(before)):
-        raise _damaged_markers()
     _check_projection_fragments(before, body, rendered.splitlines())
     return body
 
 
-def _check_projection_fragments(before: bytes, body: bytes, rendered: Iterable[bytes]) -> None:
-    """Compare with the previous authored bytes after proving the rendered projection."""
-    rendered_rows = set(rendered)
-    old_rows = Counter(row for row in _body_rows(before) if row in rendered_rows)
-    new_rows = Counter(row for row in _body_rows(body) if row in rendered_rows)
-    if any(new_rows[row] > old_rows[row] for row in rendered_rows):
+def _check_projection_fragments(
+    before: bytes | None, body: bytes, rendered: Iterable[bytes], *, bare_locators: bool = False,
+) -> None:
+    """Compare complete rows with the previous authored body after proving the projection."""
+    fragments = _projection_fragments(rendered, bare_locators=bare_locators)
+    if before is None:
+        # A portable artifact proves the rows, but carries no prior authored body.
+        presented = set(_body_rows(body))
+        if any(fragment in presented for fragment in fragments):
+            raise _damaged_markers()
+        return
+    rows = set(fragments)
+    old_rows = Counter(row for row in _body_rows(before) if row in rows)
+    new_rows = Counter(row for row in _body_rows(body) if row in rows)
+    if new_rows - old_rows:
         raise _damaged_markers()
-    for row in rendered_rows:
-        locator = _locator(row)
-        if locator is not None:
-            path, _, anchor = locator.partition(b"#")
-            if (anchor and body.count(locator) > before.count(locator)) or (
-                b"/" in path and body.count(path) > before.count(path)
-            ):
-                raise _damaged_markers()
+
+
+def _projection_fragments(rendered: Iterable[bytes], *, bare_locators: bool) -> Iterator[bytes]:
+    for row in rendered:
+        yield row
+        if bare_locators and (locator := _locator(row)):
+            yield locator
+            path, separator, _ = locator.rpartition(b"#")
+            if separator and path.lower().endswith(b".md"):
+                yield path
 
 
 def _body_rows(body: bytes) -> Iterator[bytes]:
@@ -234,8 +225,6 @@ class PreparedFile:
 @contextmanager
 def prepare_file(tx: Connection, page: str, revision: int) -> Iterator[PreparedFile | None]:
     """Spool the paged SQLite result for a held, repeatable filesystem publication."""
-    from itertools import chain
-
     units = store.units_on(tx, page)
     first = next(units, None)
     if first is None:
@@ -280,14 +269,77 @@ def projection_lines(tx: Connection, page: str) -> Iterator[str]:
         return
     yield "### Stored relationships"
     for anchor, kind, incoming, count in groups[:40]:
-        direction = "Incoming" if incoming else "Outgoing"
-        yield f"- {direction} {_label(kind)} for {_label(anchor or 'page')}: {count}"
+        yield _group_line(anchor, kind, incoming, count)
     if len(groups) > 40:
         yield "- The relations file carries more relationship groups."
     for anchor, kind, incoming, target, fragment in store.projection_samples(tx, page, parent_ref, 12):
-        far = f"{target}#{fragment}" if fragment is not None else target
-        direction = _LOCATOR_DIRECTIONS[incoming]
-        yield f"- {_label(anchor or 'page')}{_LOCATOR_SEPARATOR}{_label(kind)} {direction} {_label(far)}"
+        yield _sample_line(anchor, kind, incoming, target, fragment)
+
+
+def _group_line(anchor: str | None, kind: str, incoming: int, count: int) -> str:
+    direction = "Incoming" if incoming else "Outgoing"
+    return f"- {direction} {_label(kind)} for {_label(anchor or 'page')}: {count}"
+
+
+def _sample_line(
+    anchor: str | None, kind: str, incoming: int, target: str, fragment: str | None,
+) -> str:
+    far = f"{target}#{fragment}" if fragment is not None else target
+    direction = _LOCATOR_DIRECTIONS[incoming]
+    return f"- {_label(anchor or 'page')}{_LOCATOR_SEPARATOR}{_label(kind)} {direction} {_label(far)}"
+
+
+def validate_restored_projection(
+    tx: Connection, paths: list[str], marked_pages: Container[str],
+) -> None:
+    """Refuse identifiable projection residue on a batch of portable relationship endpoints."""
+    rows = tx.execute(
+        "WITH pages(path) AS (SELECT value FROM json_each(?)), "
+        "incoming(path, anchor, id) AS ("
+        " SELECT pages.path, u.anchor, r.id FROM pages"
+        " CROSS JOIN store_unit_ids u ON u.parent_path=pages.path"
+        " CROSS JOIN store_relationships r ON r.target_unit_id=u.id WHERE r.retired_revision IS NULL"
+        " UNION ALL SELECT pages.path, NULL, r.id FROM pages"
+        " CROSS JOIN store_relationships r ON r.target_page_path=pages.path WHERE r.retired_revision IS NULL"
+        "), incidence(path, anchor, id, incoming) AS ("
+        " SELECT pages.path, u.anchor, r.id, 0 FROM pages"
+        " CROSS JOIN store_unit_ids u ON u.parent_path=pages.path"
+        " CROSS JOIN store_relationships r ON r.source_unit_id=u.id WHERE r.retired_revision IS NULL"
+        " UNION ALL SELECT path, anchor, id, 1 FROM incoming"
+        "), numbered AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY path) AS position FROM incidence)"
+        " SELECT n.path, CASE WHEN n.position=1 THEN p.body END, n.anchor, r.relation_type, n.incoming,"
+        " CASE n.incoming WHEN 1 THEN s.parent_path ELSE COALESCE(t.parent_path,r.target_page_path) END,"
+        " CASE n.incoming WHEN 1 THEN s.anchor ELSE t.anchor END"
+        " FROM numbered n JOIN store_pages p ON p.path=n.path"
+        " JOIN store_relationships r ON r.id=n.id JOIN store_unit_ids s ON s.id=r.source_unit_id"
+        " LEFT JOIN store_unit_ids t ON t.id=r.target_unit_id ORDER BY n.path,n.position",
+        (json.dumps(paths),),
+    )
+    for path, related in groupby(rows, key=itemgetter(0)):
+        first = next(related)
+        # The first row includes the page body. Stream each remaining edge exactly once.
+        samples = chain((first[2:],), (row[2:] for row in related))  # noqa: B031
+        try:
+            _check_projection_fragments(
+                None, first[1], _possible_projection_lines(samples), bare_locators=path not in marked_pages,
+            )
+        except OpError as error:
+            raise OpError(
+                error.code, f"{path}: generated relationship text remains outside its managed block",
+                "Remove the generated relationship rows from the page, then run migration again.",
+            ) from error
+
+
+def _possible_projection_lines(
+    samples: Iterable[tuple[str | None, str, int, str, str | None]],
+) -> Iterator[bytes]:
+    """Portable edges lack their original creation order, so every exact sample is possible."""
+    counts: Counter[tuple[str | None, str, int]] = Counter()
+    for anchor, kind, incoming, target, fragment in samples:
+        counts[(anchor, kind, incoming)] += 1
+        yield _sample_line(anchor, kind, incoming, target, fragment).encode()
+    for (anchor, kind, incoming), count in counts.items():
+        yield _group_line(anchor, kind, incoming, count).encode()
 
 
 def _label(value: str) -> str:

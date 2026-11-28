@@ -191,6 +191,7 @@ def derive_paths(
     prepared_lexical: Mapping[str, _LexicalPage] | None = None,
     reserve_graph: ReserveGraph | None = None,
     metered: frozenset[str] = frozenset(),
+    relationship_moves: frozenset[str] = frozenset(),
     dependency_revisions: Mapping[str, int] | None = None,
     dependency_limit: int = 32,
 ) -> ResolverDelta:
@@ -220,6 +221,7 @@ def derive_paths(
         prepared_lexical=prepared_lexical,
         reserve_graph=reserve_graph,
         metered=metered,
+        relationship_moves=relationship_moves,
         dependency_revisions=dependency_revisions,
         dependency_limit=dependency_limit,
     ).run()
@@ -264,6 +266,7 @@ class _Derivation:
         prepared_lexical: Mapping[str, _LexicalPage] | None = None,
         reserve_graph: ReserveGraph | None = None,
         metered: frozenset[str] = frozenset(),
+        relationship_moves: frozenset[str] = frozenset(),
         dependency_revisions: Mapping[str, int] | None = None,
         dependency_limit: int = 32,
         include_relationships: bool = True,
@@ -273,6 +276,7 @@ class _Derivation:
         self.prepared_lexical = dict(prepared_lexical or {})
         self.reserve_graph = reserve_graph
         self.metered = metered if reserve_graph is not None else frozenset()
+        self.relationship_moves = relationship_moves
         self.written, self.removed, self.refreshed = written, removed, refreshed
         self.dependency_revisions = dependency_revisions or {}
         self.dependency_limit = dependency_limit
@@ -656,7 +660,7 @@ class _Derivation:
         Also returns the ones among them that re-resolve because of a metered path.
         """
         # A prior path that gains or loses a claimant moves the links that name it.
-        moved: set[str] = set(self.removed) | self.prior_changed
+        moved = set(self.removed) | self.prior_changed | self.relationship_moves
         edited: set[str] = set()
         for rel in (*self.written, *self.refreshed):
             if rel not in self.existing and rel not in before:
