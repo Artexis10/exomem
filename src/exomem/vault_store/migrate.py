@@ -37,7 +37,7 @@ from .. import (
 from ..cli_ops import OpError
 from ..collection_store import admission, authority, capability, connection
 from ..governance import page_admission
-from . import availability, fragment_pass, graph_state, marker, mode, ownership, rederive, verify
+from . import availability, dependency_pass, graph_state, marker, mode, ownership, rederive, verify
 from .write import Origin, frontmatter_json
 
 #: A migration's private directory beside the live store; a run that died leaves one, and the next migrate or rollback removes it.
@@ -131,7 +131,7 @@ def create_owner_schema(
     refs_done = schema_objects(conn)
     vault.create_inbound_schema(conn)
     page_admission.create_schema(conn)
-    fragment_pass.create_schema(conn)
+    dependency_pass.create_schema(conn)
     after = schema_objects(conn)
     return (
         {n: t for n, t in middle.items() if n not in before},

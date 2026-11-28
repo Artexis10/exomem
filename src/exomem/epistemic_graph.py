@@ -2513,7 +2513,9 @@ def fragment_dependency_paths(
         if not target or not fragment:
             continue
         try:
-            canonical, warning = vault_module.normalize_wikilink(target, root, resolver=resolver, strict=False)
+            canonical, warning = vault_module.normalize_wikilink(
+                target, root, resolver=resolver, strict=False,
+            )
         except ValueError:
             continue
         if canonical and not warning:
@@ -2594,11 +2596,6 @@ def dependency_keys_for_page(path: str, title: str | None) -> set[str]:
     if title:
         keys.add(vault_module.title_key(title))
     return keys
-
-
-def fragment_dependency_keys(path: str, resolver: vault_module.WikilinkResolver) -> tuple[str, ...]:
-    """Indexed names for a target whose title and path did not change."""
-    return tuple(sorted(_dependency_changed_keys({path}, resolver)))
 
 
 #: One digest per resident publication, including builds with no checkpoint. Keep only
@@ -2705,7 +2702,6 @@ def _unit_link_rows(
     state: semantic_index.SemanticParentIndexState,
     rel: str,
     resolver: vault_module.WikilinkResolver,
-    target_exists: Callable[[str], bool],
     landing: Callable[[str, str], tuple[str, str, dict[str, str]]],
 ) -> tuple[UnitLink, ...]:
     from heapq import heappop, heappush
@@ -2726,26 +2722,27 @@ def _unit_link_rows(
         _, fragment = _split_target_fragment(raw)
         if not semantic_units.is_unit_anchor_shaped(fragment):
             continue
-        landed = _relation_target(
-            root, raw, resolver, None, source_path=rel, target_exists=target_exists, landing=landing,
+        landed = _link_target(
+            root, raw, resolver, None, source_path=rel, landing=landing,
         )
         if landed is None:
             continue
-        destination, page_key, _, details = landed
+        _, destination, page_key, details = landed
         outcome = details["fragment_resolution"]
-        # A matching heading on the neutral target can be a unit anchor on a visible namesake.
+        # A heading on the neutral target can be a unit anchor on a visible namesake.
         embed = start > 0 and body[start - 1] == "!"
         position = start - int(embed)
         while candidate is not None and candidate.span.start_offset <= position:
             span = candidate.span
-            heappush(spans, (-span.start_offset, span.end_offset,
-                             _candidate_key(rel, candidate.key, candidate.form)))
+            key = _candidate_key(rel, candidate.key, candidate.form)
+            heappush(spans, (-span.start_offset, span.end_offset, key))
             candidate = next(candidates, None)
         while spans and spans[0][1] <= position:
             heappop(spans)
+        resolved_page = page_key.removeprefix("file:")
         rows.append(UnitLink(
             occurrence, line, embed, raw, spans[0][2] if spans else _file_key(rel),
-            page_key.removeprefix("file:") if details["target_resolution"] != "unresolved" else None,
+            resolved_page if details["target_resolution"] != "unresolved" else None,
             fragment, destination if outcome == "unit" else None, outcome,
         ))
     return tuple(rows)
@@ -2847,7 +2844,10 @@ def page_graph_rows(
         dependencies=(tuple(_dependency_records(state.body, state.candidates))
                       if prepared_dependencies is None else prepared_dependencies),
         source_hash=file_node.source_hash,
-        unit_links=_unit_link_rows(vault_root, state, rel, resolver, target_exists, landing) if unit_links else (),
+        unit_links=(
+            _unit_link_rows(vault_root, state, rel, resolver, landing)
+            if unit_links else ()
+        ),
     )
 
 
@@ -2899,8 +2899,11 @@ def write_page_graph_rows(
         "graph_unit_links",
         ("source_path", "occurrence", "line", "embed", "raw_target", "src_key",
          "target_path", "fragment", "dst_key", "resolution"),
-        tuple((rel, link.occurrence, link.line, link.embed, link.raw_target, link.src_key,
-               link.target_path, link.fragment, link.dst_key, link.resolution) for link in rows.unit_links),
+        tuple(
+            (rel, link.occurrence, link.line, link.embed, link.raw_target, link.src_key,
+             link.target_path, link.fragment, link.dst_key, link.resolution)
+            for link in rows.unit_links
+        ),
     )
     if before_write is not None:
         nodes = PageGraphRecords(
@@ -10348,11 +10351,17 @@ class EpistemicGraphIndex:
 
                 conn.set_progress_handler(lambda: int(expired()), 1000)
                 try:
-                    if rederive.owner_schema_behind(conn, required_version=rederive.UNIT_LINKS_OWNER_VERSION):
+                    if rederive.owner_schema_behind(
+                        conn, required_version=rederive.UNIT_LINKS_OWNER_VERSION,
+                    ):
                         return UnitLinkPage()
                     store_read.require_current_parser(conn)
-                    view = GraphView(self.vault_root, conn, keep=keep, resolver=resolver, check=check)
-                    return view.unit_links(_page_rel(path), incoming=incoming, limit=limit, after=after)
+                    view = GraphView(
+                        self.vault_root, conn, keep=keep, resolver=resolver, check=check,
+                    )
+                    return view.unit_links(
+                        _page_rel(path), incoming=incoming, limit=limit, after=after,
+                    )
                 except GraphSnapshotUnavailable:
                     return UnitLinkPage()
                 except OpError as error:
@@ -10360,7 +10369,8 @@ class EpistemicGraphIndex:
                         return UnitLinkPage()
                     raise
                 except sqlite3.OperationalError as error:
-                    if getattr(error, "sqlite_errorcode", None) == sqlite3.SQLITE_INTERRUPT and expired():
+                    error_code = getattr(error, "sqlite_errorcode", None)
+                    if error_code == sqlite3.SQLITE_INTERRUPT and expired():
                         return UnitLinkPage()
                     raise
 
@@ -15022,7 +15032,9 @@ def _unit_node(
         path=page.rel_path,
         anchor=_unit_anchor(unit),
         title=unit.title,
-        text=_unit_text(page, unit.form, unit.content if unit.form == "compact" else unit.body, unit.title),
+        text=_unit_text(
+            page, unit.form, unit.content if unit.form == "compact" else unit.body, unit.title,
+        ),
         source_hash=state.parent_source_hash,
         line_start=unit.line,
         line_end=unit.end_line,
@@ -15196,6 +15208,27 @@ def _relation_target(
     resolve through the ordinary audience-aware vault resolver. `landing` and
     `target_exists` answer for the target page; without them the vault's files do.
     """
+    result = _link_target(
+        vault_root, raw_target, resolver, visible,
+        source_path=source_path, check=check, landing=landing,
+    )
+    if result is None:
+        return None
+    canonical, dst, page, details = result
+    return dst, page, _target_kind(vault_root, canonical, target_exists), details
+
+
+def _link_target(
+    vault_root: Path,
+    raw_target: str,
+    resolver: vault_module.WikilinkResolver,
+    visible: Callable[[str], bool] | None,
+    *,
+    source_path: str,
+    check: Callable[[], None] | None = None,
+    landing: Callable[[str, str], tuple[str, str, dict[str, str]]] | None = None,
+) -> tuple[str, str, str, dict[str, Any]] | None:
+    """Resolve an authored address and land its fragment without classifying the target file."""
     if check is not None:
         check()
     target, fragment = _split_target_fragment(raw_target)
@@ -15228,9 +15261,10 @@ def _relation_target(
         else:
             fragment_metadata = _unlanded_fragment(fragment)
     else:
-        return _land_relation_target(vault_root, canonical, fragment, landing=landing,
-                                     target_exists=target_exists, resolved=not warning)
-    return dst_key, dst_page_key, _target_kind(vault_root, canonical, target_exists), {
+        return canonical, *_land_link_target(
+            vault_root, canonical, fragment, landing=landing, resolved=not warning,
+        )
+    return canonical, dst_key, dst_page_key, {
         "target_resolution": "unresolved", **fragment_metadata,
     }
 
@@ -15241,9 +15275,20 @@ def _land_relation_target(
     target_exists: Callable[[str], bool] | None = None, resolved: bool = True,
 ) -> tuple[str, str, str, dict[str, Any]]:
     """Land an already-normalized address for both the producer and stored typed target proofs."""
+    dst, page, details = _land_link_target(
+        vault_root, canonical, fragment, landing=landing, resolved=resolved,
+    )
+    return dst, page, _target_kind(vault_root, canonical, target_exists), details
+
+
+def _land_link_target(
+    vault_root: Path, canonical: str, fragment: str, *,
+    landing: Callable[[str, str], tuple[str, str, dict[str, str]]] | None,
+    resolved: bool,
+) -> tuple[str, str, dict[str, str]]:
     dst, page, metadata = (_relation_destination(vault_root, canonical, fragment)
                            if landing is None else landing(canonical, fragment))
-    return dst, page, _target_kind(vault_root, canonical, target_exists), {
+    return dst, page, {
         "target_resolution": "resolved" if resolved else "unresolved", **metadata,
     }
 
@@ -15524,7 +15569,9 @@ def landing_from_bytes(
     )
 
 
-def graph_dependencies(state: semantic_index.SemanticParentIndexState) -> tuple[tuple[str, str, bool], ...]:
+def graph_dependencies(
+    state: semantic_index.SemanticParentIndexState,
+) -> tuple[tuple[str, str, bool], ...]:
     return tuple(_dependency_records(state.body, state.candidates))
 
 
@@ -17041,15 +17088,24 @@ class GraphView:
             if any(self.allowed(source) for source in pending_paths):
                 return UnitLinkPage()
         if incoming:
-            keys = sorted(dependency_keys_for_page(path, shared.title_key_for_path(path)))
+            names = {path, *(prior for (prior,) in self.conn.execute(
+                "SELECT prior_path FROM prior_paths WHERE path = ?", (path,),
+            ))}
+            keys = sorted(_dependency_changed_keys(names, shared))
+            # Use the name and destination indexes even when statistics are skewed by hubs.
             candidates = self.conn.execute(
                 "WITH candidates AS ("
-                " SELECT source_path, occurrence FROM graph_unit_links WHERE target_path = ?"
+                " SELECT source_path, occurrence FROM graph_unit_links"
+                " INDEXED BY idx_graph_unit_links_target WHERE target_path = ?"
                 " UNION"
                 " SELECT l.source_path, l.occurrence FROM graph_dependencies AS d"
-                " JOIN graph_unit_links AS l ON l.source_path = d.source_path AND l.raw_target = d.raw_target"
+                " INDEXED BY idx_graph_fragment_dependencies"
+                " CROSS JOIN graph_unit_links AS l INDEXED BY idx_graph_unit_links_authored"
+                " ON l.source_path = d.source_path AND l.raw_target = d.raw_target"
                 " WHERE d.lookup_key IN (SELECT value FROM json_each(?))"
-                ") SELECT l.* FROM candidates AS c JOIN graph_unit_links AS l USING(source_path, occurrence)"
+                " AND instr(d.raw_target, '#') > 0"
+                ") SELECT l.* FROM candidates AS c"
+                " CROSS JOIN graph_unit_links AS l USING(source_path, occurrence)"
                 " ORDER BY l.source_path, l.occurrence",
                 (path, json.dumps(keys)),
             )
@@ -17065,8 +17121,13 @@ class GraphView:
             self._check()
             sources = {row[0] for row in batch}
             self.parents.admit(sources)
-            visible_rows = [(source, UnitLink(*record)) for source, *record in batch if self.allowed(source)]
-            addresses = [(source, link, _page_target(link.raw_target) or source) for source, link in visible_rows]
+            visible_rows = [
+                (source, UnitLink(*record)) for source, *record in batch if self.allowed(source)
+            ]
+            addresses = [
+                (source, link, _page_target(link.raw_target) or source)
+                for source, link in visible_rows
+            ]
             names = {address for _, _, address in addresses}.difference(destinations)
             self.parents.admit({
                 candidate for address in names
@@ -17076,7 +17137,8 @@ class GraphView:
                 destinations[address] = None
                 try:
                     canonical, warning = vault_module.normalize_wikilink(
-                        address, self.vault_root, resolver=shared, strict=False, visible=self.allowed,
+                        address, self.vault_root, resolver=shared,
+                        strict=False, visible=self.allowed,
                     )
                 except ValueError:
                     continue
@@ -17105,7 +17167,10 @@ class GraphView:
                     continue
                 total += 1
                 if (after is None or (source, link.occurrence) > after) and len(window) <= limit:
-                    window.append((source, replace(link, target_path=target, dst_key=destination, resolution="unit")))
+                    window.append((source, replace(
+                        link, target_path=target, dst_key=destination,
+                        resolution="unit", embed=bool(link.embed),
+                    )))
         more = len(window) > limit
         links = tuple(window[:limit])
         next_after = (links[-1][0], links[-1][1].occurrence) if more else None

@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, TypeVar
 from .. import find, foreground_priority, media_capacity, writer_lease
 from ..cli_ops import OpError
 from ..collection_store import connection
-from . import derive, fragment_pass, mode, read, rederive, resident_catalogue
+from . import dependency_pass, derive, mode, read, rederive, resident_catalogue
 
 if TYPE_CHECKING:
     from ..collection_store.writer import CollectionWriter
@@ -591,7 +591,7 @@ class Drained:
     failed: int = 0
     stopped: bool = False
     cut: bool = False
-    fragment_batches: int = 0
+    dependency_batches: int = 0
 
 
 def drain(
@@ -611,25 +611,25 @@ def drain(
     """
     root = Path(root)
     result = Drained()
-    next_fragment_cost = 0.0
+    next_dependency_cost = 0.0
     yielded = False
     with _UNADVANCED_LOCK:
         _OWED.pop(root, None)
     with scope(root):
         _advance(root, writer)
         while not result.stopped and (deadline is None or time.monotonic() < deadline):
-            if deadline is not None and time.monotonic() + next_fragment_cost >= deadline:
+            if deadline is not None and time.monotonic() + next_dependency_cost >= deadline:
                 yielded = True
                 break
             try:
                 batch = _next_batch(writer, from_revision)
                 if not batch:
                     break
-                began, fragment_batches = time.monotonic(), result.fragment_batches
+                began, dependency_batches = time.monotonic(), result.dependency_batches
                 completed = _derive(root, writer, batch, result)
-                if result.fragment_batches != fragment_batches:
+                if result.dependency_batches != dependency_batches:
                     # Leave enough of this slice for one more transaction before starting it.
-                    next_fragment_cost = max(next_fragment_cost, time.monotonic() - began)
+                    next_dependency_cost = max(next_dependency_cost, time.monotonic() - began)
                 if completed or len(batch) == 1:
                     continue
                 for position, intent in enumerate(batch):
@@ -695,7 +695,7 @@ def _next_batch(writer: CollectionWriter, from_revision: int = 0) -> list[_Inten
     ).fetchone()
     if first is None:
         return []
-    if first[3] > 0 or fragment_pass.for_intents(writer.connection, [(first[0], first[1])]):
+    if first[3] > 0 or dependency_pass.for_intents(writer.connection, [(first[0], first[1])]):
         return [_Intent(*first)]
     rows = writer.connection.execute(
         f"SELECT {_INTENT_COLUMNS} FROM store_derivation_queue WHERE {_DUE} "
@@ -714,7 +714,7 @@ def _next_batch(writer: CollectionWriter, from_revision: int = 0) -> list[_Inten
                 (_stamp(_now()), last),
             ).fetchall()
             intents = [_Intent(*row) for row in rows]
-    cursors = fragment_pass.for_intents(writer.connection, [(it.path, it.revision) for it in intents])
+    cursors = dependency_pass.for_intents(writer.connection, [(it.path, it.revision) for it in intents])
     if cursors:
         first_cursor = min(cursor.revision for cursor in cursors.values())
         ready = [intent for intent in intents if intent.revision < first_cursor]
@@ -731,9 +731,9 @@ def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: 
 
     if len(batch) == 1:
         [intent] = batch
-        cursor = fragment_pass.for_intents(writer.connection, [(intent.path, intent.revision)]).get(intent.path)
+        cursor = dependency_pass.for_intents(writer.connection, [(intent.path, intent.revision)]).get(intent.path)
         if cursor is not None:
-            return _derive_fragment_pass(root, writer, intent, cursor, result)
+            return _derive_dependency_pass(root, writer, intent, cursor, result)
     started = False
     try:
         # Close the transaction before releasing capacity, including on rollback, as a commit does. A
@@ -761,12 +761,12 @@ def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: 
                 tx, root, written=written, removed=removed, refreshed=refreshed,
                 before=before, prepared_lexical=prepared, reserve_graph=reserve_graph,
                 metered=frozenset(metered),
-                fragment_revisions={intent.path: intent.revision for intent in batch},
-                fragment_limit=BATCH_PAGES,
+                dependency_revisions={intent.path: intent.revision for intent in batch},
+                dependency_limit=BATCH_PAGES,
             )
             settle()
-            completed = [intent.path for intent in batch if intent.path not in delta.pending_fragments]
-            fragment_pass.discard(tx, completed)
+            completed = [intent.path for intent in batch if intent.path not in delta.pending_dependencies]
+            dependency_pass.discard(tx, completed)
             tx.executemany(
                 "DELETE FROM store_derivation_queue WHERE path = ?", [(path,) for path in completed]
             )
@@ -787,9 +787,9 @@ def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: 
     return True
 
 
-def _derive_fragment_pass(
+def _derive_dependency_pass(
     root: Path, writer: CollectionWriter, intent: _Intent,
-    cursor: fragment_pass.FragmentPass, result: Drained,
+    cursor: dependency_pass.DependencyPass, result: Drained,
 ) -> bool:
     """Commit a cursor and its graph rows together. The page's receipt covers both phases."""
     started = False
@@ -801,9 +801,9 @@ def _derive_fragment_pass(
                 result.stopped = True
                 return True
             before = read.vault_triple(tx, mode_row[1])
-            completed = derive.resume_fragments(tx, root, before, cursor, limit=BATCH_PAGES)
+            completed = derive.resume_dependencies(tx, root, before, cursor, limit=BATCH_PAGES)
             if completed:
-                fragment_pass.discard(tx, [intent.path])
+                dependency_pass.discard(tx, [intent.path])
                 tx.execute("DELETE FROM store_derivation_queue WHERE path = ?", (intent.path,))
             elif intent.failed_code is not None:
                 tx.execute(
@@ -821,7 +821,7 @@ def _derive_fragment_pass(
     result.batches += 1
     resident_catalogue.advance(root, before, after)
     find.on_store_commit(root, before, after, (), (), ())
-    result.fragment_batches += 1
+    result.dependency_batches += 1
     _signal()
     return True
 

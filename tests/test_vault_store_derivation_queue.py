@@ -174,8 +174,9 @@ class Killed(BaseException):
     """The process stopping mid-transaction: no handler of ordinary errors catches it."""
 
 
+@pytest.mark.parametrize("rename_title", [False, True])
 def test_a_hub_edit_resumes_both_fragment_projections_after_an_interrupted_batch(
-    served, writer, monkeypatch, tmp_path,  # noqa: F811
+    served, writer, monkeypatch, tmp_path, rename_title,  # noqa: F811
 ):
     hub = "Knowledge Base/Notes/Signal Hub.md"
     hub_text = "---\ntitle: Signal Hub\ntype: note\n---\n# Signal Hub\n\n- [rule] A signal. ^old\n"
@@ -196,14 +197,17 @@ def test_a_hub_edit_resumes_both_fragment_projections_after_an_interrupted_batch
     assert store_rows(served, landed, hub) == [(10,)]
     assert store_rows(served, typed, f"file:{hub}") == [(5,)]
 
+    edited_text = hub_text.replace("^old", "^new")
+    if rename_title:
+        edited_text = edited_text.replace("title: Signal Hub", "title: Renamed Hub")
     with monkeypatch.context() as patch:
         patch.setattr(derivation, "drain", lambda *_args, **_kwargs: None)
         with writer_lease.get_manager().mutation_guard(served):
             vault_module.batch_atomic_write(
-                [planned(served, hub, hub_text.replace("^old", "^new"), create_only=False)],
+                [planned(served, hub, edited_text, create_only=False)],
                 vault_root=served, post_commit_fanout=False,
             )
-    real = derive.resume_fragments
+    real = derive.resume_dependencies
 
     def interrupted(*args, **kwargs):
         real(*args, **kwargs)
@@ -211,17 +215,26 @@ def test_a_hub_edit_resumes_both_fragment_projections_after_an_interrupted_batch
 
     monkeypatch.setattr(derivation, "BATCH_PAGES", 2)
     with monkeypatch.context() as patch:
-        patch.setattr(derive, "resume_fragments", interrupted)
+        patch.setattr(derive, "resume_dependencies", interrupted)
         with pytest.raises(Killed):
             derivation.drain(served, writer)
 
     assert store_rows(served, "SELECT path FROM store_derivation_queue") == [(hub,)]
-    assert store_rows(served, "SELECT path FROM graph_fragment_pass") == [(hub,)]
+    assert store_rows(served, "SELECT path FROM graph_dependency_pass") == [(hub,)]
     assert store_rows(served, landed, hub) == [(6,)]
     assert store_rows(served, typed, f"file:{hub}") == [(3,)]
+    if rename_title:
+        # The new receipt still owns links to the title dropped by the interrupted receipt.
+        with monkeypatch.context() as patch:
+            patch.setattr(derivation, "drain", lambda *_args, **_kwargs: None)
+            with writer_lease.get_manager().mutation_guard(served):
+                vault_module.batch_atomic_write(
+                    [planned(served, hub, edited_text.replace("^new", "^newer"), create_only=False)],
+                    vault_root=served, post_commit_fanout=False,
+                )
     derivation.started(served, writer)
     derivation.drain(served, writer)
-    assert store_rows(served, "SELECT path FROM graph_fragment_pass") == []
+    assert store_rows(served, "SELECT path FROM graph_dependency_pass") == []
     assert store_rows(served, "SELECT path FROM store_derivation_queue") == []
     assert store_rows(served, landed, hub) == [(0,)]
     assert store_rows(served, typed, f"file:{hub}") == [(0,)]

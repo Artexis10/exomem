@@ -913,19 +913,9 @@ def served_store(tmp_path, monkeypatch):
                 "VALUES (1, 'store', 5, 'now', 'test')"
             )
             migrate.create_owner_schema(tx)
-            for key in (rederive.OVERLAY_REVISION, rederive.REGISTRY_REVISION):
-                tx.execute("INSERT INTO store_meta(key, value) VALUES (?, '5')", (key,))
-            # As this build's migration records it: the store holds this build's owner objects.
-            tx.execute(
-                "INSERT INTO store_meta(key, value) VALUES (?, ?)",
-                (rederive.OWNER_SCHEMA, str(rederive.OWNER_SCHEMA_VERSION)),
-            )
-            tx.execute(
-                "INSERT INTO store_meta(key, value) VALUES (?, ?)",
-                (rederive.PARSER_VERSION, str(semantic_index.PARSER_VERSION)),
-            )
             lexstore.create_catalogue_schema(tx)
             lexstore.stamp_catalogue_schema(tx)
+            rederive.record_derived_from_files(tx, 5)
     monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
     # The state manifest of a real migration is another suite's subject; this one needs the answer.
     monkeypatch.setattr(mode, "store_mode_for_reads", lambda _root: True)

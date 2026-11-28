@@ -206,6 +206,37 @@ def test_fragment_landing_follows_committed_bytes_while_the_projection_lags(stor
     assert (stored / BETA).exists()
 
 
+def test_link_pages_find_a_moved_claim_after_filtering_the_live_namesake(stored, service):
+    source = f"{NOTES}/Dispatch.md"
+    visible = f"{NOTES}/Moved Claim.md"
+    hidden = f"{NOTES}/Current/Beacon.md"
+    prior = f"{NOTES}/Prior/Beacon.md"
+    moved_text = (
+        "---\ntitle: Moved Claim\nexomem_id: 11111111-1111-4111-8111-111111111111\n"
+        f"moved_from:\n- path: {prior}\n---\n# Moved Claim\n\n- [rule] East signal. ^signal\n"
+    )
+    commit(stored, puts=(
+        write.PagePut(source, b"# Dispatch\n\n[[Beacon#^signal]] ![[Notes/Prior/Beacon#^signal]]\n"),
+        write.PagePut(visible, moved_text.encode()),
+        write.PagePut(hidden, b"# Beacon\n\n- [rule] West signal. ^signal\n"),
+    ))
+    derived(stored)
+    graph = epistemic_graph.EpistemicGraphIndex(stored)
+
+    def allowed(path):
+        return path != hidden
+
+    page = graph.unit_links(visible, incoming=True, keep=allowed)
+    assert page.total == 2
+    assert [path for path, _ in page.links] == [source, source]
+    commit(stored, puts=(write.PagePut(visible, moved_text.replace("^signal", "^new").encode()),))
+    derived(stored)
+    assert store_rows(
+        stored, "SELECT resolution FROM graph_unit_links WHERE target_path = ?", visible,
+    ) == [("missing",)]
+    assert graph.unit_links(visible, incoming=True, keep=allowed).total == 0
+
+
 def test_a_served_assessment_commits_page_bytes_before_the_verdict_projection(stored, service, monkeypatch):
     path = f"{NOTES}/Insights/Signal Assessment.md"
     commit(stored, puts=(write.PagePut(
