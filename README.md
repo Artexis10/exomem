@@ -629,12 +629,14 @@ Remote-only variables and full deployment notes are in
 
 ## Project status
 
-exomem is packaged on PyPI, uses Release Please for versioning, and follows the
-lightweight SemVer policy in [docs/release.md](docs/release.md). The public CLI
-entry point is `exomem`; `kb` is the short daily-driver alias for knowledge-base
-operations.
+Evermatter is packaged on PyPI and follows the version policy in
+[docs/release.md](docs/release.md). Run `evermatter` to use the CLI. Existing
+scripts can still use `exomem` or `kb`.
 
 ## License
+
+[Release v0.202.0](docs/licensing/licence-change.md) renamed Exomem to Evermatter
+and changed the licence for the server, CLI and container images to FSL-1.1-ALv2.
 
 The server, CLI and everything not listed below, except third-party files that carry their own
 licence, are source-available under the
