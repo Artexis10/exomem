@@ -374,6 +374,17 @@ From stage 2, a page's projection MAY add one managed relations block, the one e
 - **WHEN** a person edits a line inside a page's relations block outside Exomem
 - **THEN** the edit becomes a held correction and the stored page bytes are unchanged
 
+#### Scenario: Fresh migration preserves a verified authored locator
+- **WHEN** a rolled-back page has an authored line that matches a generated relationship locator
+- **THEN** migration preserves the line when the page bytes match the digest in the page's relations file
+- **AND** the same proof applies to a page with incoming relationships only
+
+#### Scenario: Fresh migration preserves a page with an ambiguous locator
+- **WHEN** a line outside the managed block matches a projected relationship line or locator
+- **AND** the page bytes do not match a canonical digest from its relations file
+- **THEN** migration refuses activation and leaves the original files intact
+- **AND** the refusal explains how to retain authored text and remove generated residue
+
 #### Scenario: Stored relationships survive a rollback and a re-migration
 - **WHEN** a store-mode vault with stored relationships reverts to file mode and is migrated back
 - **THEN** the reverted pages carry no relations block and the relationship history is exported

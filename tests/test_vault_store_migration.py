@@ -523,6 +523,7 @@ def test_fresh_migration_refuses_a_marker_free_projection_with_a_portable_relati
             relationships.BoundRelationship(edge, alpha, beta),
             relationships.BoundRelationship(page_edge, alpha, None),
         ),
+        canonical_sha256=hashlib.sha256(source).hexdigest(),
     ))
     artifact.write_bytes(portable)
     build_indexes(vault)
@@ -530,7 +531,7 @@ def test_fresh_migration_refuses_a_marker_free_projection_with_a_portable_relati
     assert migrate_apply(vault) == 1
     refusal = capsys.readouterr().err
     assert "RELATIONS_BLOCK_DAMAGED" in refusal
-    assert ALPHA in refusal and "Remove" in refusal
+    assert ALPHA in refusal and "restore the exact page" in refusal
     assert not mode.store_mode_active(vault)
     assert path.read_bytes() == damaged
     assert artifact.read_bytes() == portable
@@ -541,7 +542,8 @@ def test_fresh_migration_refuses_a_marker_free_projection_with_a_portable_relati
     desk.write_bytes(bare_incoming)
     build_indexes(vault)
     assert migrate_apply(vault) == 1
-    assert page_target in capsys.readouterr().err
+    refusal = capsys.readouterr().err
+    assert page_target in refusal and "Use inline code" in refusal
     assert not mode.store_mode_active(vault)
     assert desk.read_bytes() == bare_incoming
     assert not (vault / relationship_files.path_for(page_target)).exists()
@@ -561,10 +563,10 @@ def test_fresh_migration_refuses_a_marker_free_projection_with_a_portable_relati
 def test_a_rollback_and_remigration_preserve_relationship_ids_and_an_unresolved_target(
     vault, tmp_path, capsys, monkeypatch, coordinator_url,  # noqa: F811
 ):
-    source = (vault / ALPHA).read_bytes() + b"\n- [rule] Check the tide. ^tide\n"
+    source = (vault / ALPHA).read_bytes() + f"\n- [rule] Check the tide. ^tide\n\n{BETA}#lamp\n".encode()
     target = (vault / BETA).read_bytes() + b"\n- [rule] Light the lamp. ^lamp\n"
     page_target = "Knowledge Base/Notes/Desk.md"
-    page_body = b"# Desk\n\nThe daily log goes here.\n"
+    page_body = f"# Desk\n\nThe daily log goes here.\n\n{ALPHA}#tide\n".encode()
     reference = "Reference/Manual.md"
     reference_body = b"# Manual\n\n- [rule] Verify the reading. ^reading\n"
     (vault / ALPHA).write_bytes(source)
@@ -597,6 +599,7 @@ def test_a_rollback_and_remigration_preserve_relationship_ids_and_an_unresolved_
     assert rollback_apply(vault, export) == 0, capsys.readouterr().err
     assert (vault / ALPHA).read_bytes() == source
     assert (vault / BETA).read_bytes() == target
+    assert (vault / page_target).read_bytes() == page_body
     assert (vault / reference).read_bytes() == reference_body
     assert not (vault / relationship_files.path_for(reference)).exists()
     assert json.loads((export / "reference-unit-ids.jsonl").read_text()) == {
@@ -606,7 +609,15 @@ def test_a_rollback_and_remigration_preserve_relationship_ids_and_an_unresolved_
     with (vault / artifact).open("rb") as encoded:
         recovered = relationship_files.parse(encoded)
     assert {edge.id for edge in recovered.relationships} == {"link-id", "page-link", "reference-link"}
+    assert recovered.canonical_sha256 == hashlib.sha256(source).hexdigest()
     assert (export / "relationships" / artifact).read_bytes() == (vault / artifact).read_bytes()
+    page_artifact = relationship_files.path_for(page_target)
+    with (vault / page_artifact).open("rb") as encoded:
+        received_page = relationship_files.parse(encoded)
+    assert received_page.source == page_target
+    assert received_page.canonical_sha256 == hashlib.sha256(page_body).hexdigest()
+    assert received_page.units == () and received_page.relationships == ()
+    assert (export / "relationships" / page_artifact).read_bytes() == (vault / page_artifact).read_bytes()
     history = [json.loads(line) for line in (export / "relationship-history.jsonl").read_bytes().splitlines()]
     assert [(row["relationship_id"], row["action"]) for row in history] == [
         ("link-id", "add"), ("page-link", "add"), ("reference-link", "add"),
@@ -634,6 +645,21 @@ def test_a_rollback_and_remigration_preserve_relationship_ids_and_an_unresolved_
     assert not mode.store_mode_active(fresh)
     assert restored_relations.read_bytes() == unregistered
     restored_relations.write_bytes(valid)
+    edited = page_body + b"\nCheck the notebook tomorrow.\n"
+    edited_page = fresh / page_target
+    edited_page.write_bytes(edited)
+    build_indexes(fresh)
+    assert migrate_apply(fresh) == 1
+    refusal = capsys.readouterr().err
+    assert "RELATIONS_BLOCK_DAMAGED" in refusal and page_target in refusal
+    assert "restore the exact page" in refusal and "reapply the edit" in refusal
+    assert "If no verified copy exists, use inline code" in refusal
+    assert not mode.store_mode_active(fresh)
+    assert edited_page.read_bytes() == edited
+    assert (fresh / ALPHA).read_bytes() == source
+    assert restored_relations.read_bytes() == valid
+    edited_page.write_bytes(page_body)
+    build_indexes(fresh)
     orphan_path = "Knowledge Base/Notes/Absent Source.md"
     orphan = relationships.UnitIdentity("orphan-id", orphan_path, "lost")
     orphan_edge = relationships.Relationship("lost-link", orphan.id, "unknown-private-type", "lamp-id")

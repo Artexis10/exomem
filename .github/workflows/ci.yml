@@ -27,8 +27,8 @@ env:
   EXOMEM_TEST_OLDER_READER_SHA256: "a3d18d3abbfcf93b4831950c033197b5ca3f6aecdd89756e6359ca5b51cba626"
   # The newest release one store schema back; move it to the next one with each schema bump.
   # Each pinned release comes with its published wheel's SHA-256 (scripts/ci_install_release.py).
-  EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.210.0"
-  EXOMEM_TEST_PREVIOUS_SCHEMA_SHA256: "afbc449da3ad86fa4e3531e36cba7cca34c5cf7a29eb468f020243ba7dd1be02"
+  EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.210.1"
+  EXOMEM_TEST_PREVIOUS_SCHEMA_SHA256: "fe327e6ad7cfb720ddb673c0fc77d6c4826cab2a3ab1b28c3cb31c86b0b7bd02"
   # The earlier release that full runs qualify as the rollback application on a migrated store,
   # with its published wheel's SHA-256: any published release that reads the current store schema. A store schema bump empties both, because no earlier
   # release reads the new schema; the next release that ships that schema sets them again.

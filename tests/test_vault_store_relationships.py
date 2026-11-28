@@ -1,5 +1,6 @@
 """The store commits relationship history and projection work with its page changes."""
 
+import hashlib
 import json
 import sqlite3
 from dataclasses import replace
@@ -273,6 +274,8 @@ def test_relation_file_carries_locators_and_keeps_managed_block_out_of_page_byte
     )
     decoded = relationship_files.parse(encoded)
     assert decoded == relationship_files.PortableRelations(ALPHA, 12, (source,), (link,), (target,))
+    with pytest.raises(OpError, match="invalid canonical page digest"):
+        relationship_files.parse(relationship_files.lines(ALPHA, 12, (), (), canonical_sha256="z" * 64))
     path = relationship_files.path_for(ALPHA)
     assert reserved_paths.classify_logical(path).blocked
     assert vault_portability.classify_artifact(path).artifact_class is vault_portability.ArtifactClass.CANONICAL
@@ -570,6 +573,57 @@ def test_moving_a_target_refreshes_other_pages_relations_files(served, writer): 
     assert rows(served, "SELECT dst_page_key FROM graph_edges WHERE edge_key='stored:page-target'") == [
         (f"file:{moved}",),
     ]
+
+
+def test_moving_a_page_only_target_before_projection_keeps_its_witness_until_retirement(
+    served, writer,  # noqa: F811
+):
+    target = stored_body(served, BETA)
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "Connect the pages.",
+        puts=(write.PagePut(ALPHA, b"# Alpha\n\n- [rule] Check the tide. ^tide\n"),),
+        relationship_change=relationships.Change(
+            actor="owner",
+            identities=(relationships.UnitIdentity("tide-id", ALPHA, "tide"),),
+            added=(relationships.Relationship("page-edge", "tide-id", "supports", target_page_path=BETA),),
+        ),
+    ))
+    assert not (served / relationship_files.path_for(BETA)).exists()
+    moved = "Knowledge Base/Notes/Lantern.md"
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "Move the target page.", moves=(write.PageMove(BETA, moved),),
+    ))
+    projection = projector.Projector(served, run=lambda work: work(writer))
+    assert not projection.run_pass().deferred
+    moved_page = served / moved
+    artifact = served / relationship_files.path_for(moved)
+    assert b"Incoming supports for page: 1" in moved_page.read_bytes()
+    assert relationship_files.strip_block(moved_page.read_bytes()) == target
+    with artifact.open("rb") as encoded:
+        witness = relationship_files.parse(encoded)
+    assert witness.canonical_sha256 == hashlib.sha256(target).hexdigest()
+    assert witness.units == () and witness.relationships == ()
+
+    edited = target + b"\nCheck the notebook tomorrow.\n"
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "Edit the target page.", puts=(write.PagePut(moved, edited),),
+    ))
+    assert not projection.run_pass().deferred
+    with artifact.open("rb") as encoded:
+        assert relationship_files.parse(encoded).canonical_sha256 == hashlib.sha256(edited).hexdigest()
+
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "Retire the relationship.",
+        relationship_change=relationships.Change(actor="owner", retired=(relationships.Retirement("page-edge"),)),
+    ))
+    assert not projection.run_pass().deferred
+    assert not projection.run_pass().deferred
+    assert moved_page.read_bytes() == edited
+    assert not artifact.exists()
+    with (served / relationship_files.path_for(ALPHA)).open("rb") as encoded:
+        inactive = relationship_files.parse(encoded)
+    assert inactive.canonical_sha256 is None
+    assert [unit.id for unit in inactive.units] == ["tide-id"]
 
 
 def test_a_rename_into_a_vacant_path_preserves_both_old_and_current_targets(served, writer):  # noqa: F811

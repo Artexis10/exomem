@@ -518,32 +518,36 @@ class Projector:
             raise Deferred("a write intent names a path with no stored page")
         disk = observe(filesystem, intent.path)
         with ExitStack() as staged:
-            body, artifact = self._prepare_relationship_projection(page, intent, staged)
+            body, artifact, obsolete = self._prepare_relationship_projection(page, intent, staged)
             projected = hashlib.sha256(body).hexdigest() if body is not None else None
             verdict = _judge_write(facts, None if disk is None else disk.sha256, projected=projected)
-            self._apply_write(filesystem, facts, disk, verdict, report, body, artifact)
+            self._apply_write(filesystem, facts, disk, verdict, report, body, artifact, obsolete)
 
     def _prepare_relationship_projection(
         self, page: read.PageMeta, intent: Intent, staged: ExitStack,
-    ) -> tuple[bytes | None, relationship_files.PreparedFile | None]:
+    ) -> tuple[bytes | None, relationship_files.PreparedFile | None, str | None]:
         if not ownership.is_markdown(page.path):
-            return None, None
+            return None, None, None
+        related_path = relationship_files.path_for(page.path)
         with read.snapshot(self._root) as view:
             cursor = view.connection.execute(
-                "SELECT revision FROM store_projection_queue WHERE path = ?", (page.path,),
+                "SELECT revision, EXISTS (SELECT 1 FROM store_manifest WHERE path = ?) "
+                "FROM store_projection_queue WHERE path = ?", (related_path, page.path),
             ).fetchone()
             if cursor is None or cursor[0] != intent.revision or view.page_meta(page.path) != page:
                 raise Deferred("the page projection changed while it was prepared")
             lines = tuple(relationship_files.projection_lines(view.connection, page.path))
             artifact = staged.enter_context(relationship_files.prepare_file(
                 view.connection, page.path, intent.revision,
+                canonical_sha256=page.sha256 if lines else None,
             ))
             if not lines:
-                return None, artifact
+                obsolete = related_path if artifact is None and cursor[1] else None
+                return None, artifact, obsolete
             stored = view.page(page.path)
             if stored is None or hashlib.sha256(stored.body).hexdigest() != page.sha256:
                 raise Deferred("the stored page does not match its recorded hash")
-            return relationship_files.splice_block(stored.body, lines), artifact
+            return relationship_files.splice_block(stored.body, lines), artifact, None
 
     def _apply_write(
         self,
@@ -554,6 +558,7 @@ class Projector:
         report: PassReport,
         body: bytes | None = None,
         artifact: relationship_files.PreparedFile | None = None,
+        obsolete: str | None = None,
     ) -> None:
         page, manifest, intent = facts.page, facts.manifest, facts.intent
         assert page is not None
@@ -577,7 +582,7 @@ class Projector:
             # folders the first attempt made, so every folder up to the root is flushed first.
             _flush_through_root(filesystem, _split(facts.path)[0])
             related = self._project_relation_file(filesystem, intent, artifact, report)
-            self._record_projected(page, disk, intent.revision, related)
+            self._record_projected(page, disk, intent.revision, related, obsolete)
             report.projected += 1
         else:
             body = body if body is not None else self._stored_body(page)
@@ -590,7 +595,7 @@ class Projector:
                 )
             )
             related = self._project_relation_file(filesystem, intent, artifact, report)
-            self._record_projected(page, installed, intent.revision, related)
+            self._record_projected(page, installed, intent.revision, related, obsolete)
             report.projected += 1
 
     def _project_relation_file(
@@ -705,11 +710,13 @@ class Projector:
                 if self._remove(filesystem, related, related_disk, report, store_revision=None):
                     self._record_removed(old_relation, intent.revision)
         with read.snapshot(self._root) as view:
-            related_units = view.connection.execute(
-                "SELECT 1 FROM store_unit_ids WHERE parent_path=? LIMIT 1", (page.path,),
+            related_page = view.connection.execute(
+                "SELECT 1 FROM store_unit_ids WHERE parent_path=?1"
+                " UNION ALL SELECT 1 FROM store_relationships "
+                "WHERE target_page_path=?1 AND retired_revision IS NULL LIMIT 1", (page.path,),
             ).fetchone()
         if (
-            related_units is None
+            related_page is None
             and old_disk is not None
             and old.manifest is not None
             and old.manifest.sha256 == page.sha256 == old_disk.sha256
@@ -879,7 +886,7 @@ class Projector:
 
     def _record_projected(
         self, page: read.PageMeta, disk: OnDisk, revision: int,
-        related: tuple[str, OnDisk] | None,
+        related: tuple[str, OnDisk] | None, obsolete: str | None,
     ) -> None:
         """The file holds ``page``'s bytes: record it, and drop the intent unless a newer waits."""
 
@@ -896,6 +903,12 @@ class Projector:
                 if related is not None:
                     rel, projected = related
                     write.record_manifest(tx, rel, projected.sha256, projected.size, projected.mtime_ns, revision)
+                elif obsolete is not None:
+                    tx.execute(
+                        "INSERT OR IGNORE INTO store_projection_queue(path, revision, operation, queued_at) "
+                        "SELECT path, ?, 'delete', ? FROM store_manifest WHERE path = ? AND revision <= ?",
+                        (revision, write.timestamp(), obsolete, revision),
+                    )
                 tx.execute(
                     "DELETE FROM store_projection_queue WHERE path = ? AND revision <= ?",
                     (page.path, revision),

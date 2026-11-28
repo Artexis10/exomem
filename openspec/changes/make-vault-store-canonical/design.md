@@ -237,6 +237,10 @@ The internal reader uses the destination index and indexed authored names for in
 7. **Scale.** Relationship rows are indexed by source unit and type and by target and type. A relationship read seeks the cursor in the source index and admits endpoints in bounded batches. The same snapshot counts visible rows on both sides of the cursor. If the count exceeds the store’s read budget, or an admitted endpoint’s interpretation is stale, the read reports unavailable without a total. Adds probe the requested keys. Preflight reads its incident relationships in bounded batches. If it cannot finish its exact proof within the read budget, the write makes no changes and asks for a retry. The block uses one grouped count query and one bounded top-N query.
 8. **Visibility of the projection.** The block and the relations file exist only in the owner's projected files. Every tool read of a page returns the stored bytes, which never hold the block, and every relationship read applies two-ended visibility.
 
+A relations file for a store-owned page with a managed block records the SHA-256 of that page's canonical bytes. An incoming-only page with a managed block keeps a header-only relations file. When a valid block is present, fresh migration removes it before checking the digest. A matching digest preserves the authored bytes.
+
+When the digest is absent or stale, an exact match to a projected line can be ambiguous. Migration refuses and preserves the files. When a verified copy exists, save the edit separately, restore that copy, and migrate. Then reapply the edit. When a verified copy is unavailable, mark the intended literal text with inline code before retrying. Remove surviving generated rows before migration.
+
 Recall can therefore return units with their page context, and graph edges can point at the exact unit a claim lives in. Task 5.2 can release its internal schema and derivation first. Public claim-link retrieval waits for task 5.4 and the stage-2 outcome evaluation (task 7.3).
 
 *Option chosen for stage 2:* page bytes stay the source of unit text, and relationships become stored rows.

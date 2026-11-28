@@ -218,6 +218,7 @@ def _derive_without_projected_blocks(
 
 
 def _load_files(vault_root: Path, conn: sqlite3.Connection, staged: Staged, revision: int) -> None:
+    page_witnesses: dict[str, str] = {}
     conn.execute("BEGIN IMMEDIATE")
     try:
         for owned, fact, body in snapshot(vault_root, staged.skipped.append):
@@ -228,6 +229,8 @@ def _load_files(vault_root: Path, conn: sqlite3.Connection, staged: Staged, revi
                     raise OpError("INVALID_RELATIONS_FILE", "a relations file names a different source")
                 relationship_files.restore(conn, decoded, revision=revision)
                 staged.relation_files[owned.rel] = (fact, decoded.revision)
+                if decoded.canonical_sha256 is not None:
+                    page_witnesses[decoded.source] = decoded.canonical_sha256
                 continue
             if body is not None:
                 canonical = relationship_files.strip_block(body) if ownership.is_markdown(owned.rel) else body
@@ -258,11 +261,14 @@ def _load_files(vault_root: Path, conn: sqlite3.Connection, staged: Staged, revi
         if staged.relation_files:
             paths = conn.execute(
                 _RELATIONSHIP_ENDPOINTS
-                + "SELECT e.path FROM endpoints e JOIN store_pages p ON p.path=e.path ORDER BY e.path"
+                + "SELECT e.path, p.sha256 FROM endpoints e JOIN store_pages p ON p.path=e.path ORDER BY e.path"
             )
             while batch := paths.fetchmany(read.KEYS_PER_QUERY):
                 relationship_files.validate_restored_projection(
-                    conn, [path for (path,) in batch if ownership.is_markdown(path)], staged.projected_pages,
+                    conn,
+                    [path for path, digest in batch
+                     if ownership.is_markdown(path) and page_witnesses.get(path) != digest],
+                    staged.projected_pages, page_witnesses,
                 )
         conn.execute("COMMIT")
     except BaseException:

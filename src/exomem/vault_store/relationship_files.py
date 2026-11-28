@@ -214,6 +214,7 @@ class PortableRelations:
     units: tuple[UnitIdentity, ...]
     relationships: tuple[Relationship, ...]
     target_units: tuple[UnitIdentity, ...] = ()
+    canonical_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,16 +224,21 @@ class PreparedFile:
 
 
 @contextmanager
-def prepare_file(tx: Connection, page: str, revision: int) -> Iterator[PreparedFile | None]:
+def prepare_file(
+    tx: Connection, page: str, revision: int, *, canonical_sha256: str | None = None,
+) -> Iterator[PreparedFile | None]:
     """Spool the paged SQLite result for a held, repeatable filesystem publication."""
     units = store.units_on(tx, page)
     first = next(units, None)
-    if first is None:
+    if first is None and canonical_sha256 is None:
         yield None
         return
     with tempfile.SpooledTemporaryFile(max_size=256 * 1024, mode="w+b") as stream:
         digest = hashlib.sha256()
-        for line in lines(page, revision, chain((first,), units), store.outgoing_on(tx, page)):
+        identities = () if first is None else chain((first,), units)
+        for line in lines(
+            page, revision, identities, store.outgoing_on(tx, page), canonical_sha256=canonical_sha256,
+        ):
             digest.update(line)
             stream.write(line)
         yield PreparedFile(Chunks(lambda: _parts(stream)), digest.hexdigest())
@@ -246,9 +252,13 @@ def _parts(stream: tempfile.SpooledTemporaryFile[bytes]) -> Iterator[bytes]:
 
 def lines(
     source: str, revision: int, units: Iterable[UnitIdentity], relationships: Iterable[BoundRelationship],
+    *, canonical_sha256: str | None = None,
 ) -> Iterator[bytes]:
     """Stream one versioned relations file with all the source's durable identities."""
-    yield _line({"format": FORMAT, "version": VERSION, "source": source, "revision": revision})
+    header = {"format": FORMAT, "version": VERSION, "source": source, "revision": revision}
+    if canonical_sha256 is not None:
+        header["canonical_sha256"] = canonical_sha256
+    yield _line(header)
     for unit in units:
         yield _line({"unit": asdict(unit)})
     for bound in relationships:
@@ -256,6 +266,31 @@ def lines(
             "relationship": asdict(bound.relationship),
             "target_unit": asdict(bound.target) if bound.target is not None else None,
         })
+
+
+def export_pages(tx: Connection) -> Iterator[tuple[str, str | None]]:
+    """Read portable artifact paths and active canonical witnesses in one set query."""
+    rows = tx.execute(
+        "WITH bound(path, ref, page_end) AS ("
+        " SELECT u.parent_path, u.parent_ref, 0 FROM store_unit_ids u WHERE"
+        " EXISTS (SELECT 1 FROM store_relationships r WHERE r.source_unit_id=u.id AND r.retired_revision IS NULL)"
+        " OR EXISTS (SELECT 1 FROM store_relationships r WHERE r.target_unit_id=u.id AND r.retired_revision IS NULL)"
+        " UNION SELECT target_page_path, target_page_ref, 1 FROM store_relationships"
+        " WHERE target_page_path IS NOT NULL AND retired_revision IS NULL"
+        "), portable(path) AS (SELECT parent_path FROM store_unit_ids UNION SELECT path FROM bound)"
+        " SELECT e.path, p.sha256, p.frontmatter_json, b.path, b.ref, b.page_end"
+        " FROM portable e LEFT JOIN store_pages p ON p.path=e.path"
+        " LEFT JOIN bound b ON b.path=e.path ORDER BY e.path"
+    )
+    for path, group in groupby(rows, key=itemgetter(0)):
+        witness = None
+        for _, digest, fields, bound_path, ref, page_end in group:
+            if digest is not None and bound_path is not None and (
+                (page_end and ref is None) or store.page_reference(fields) == ref
+            ):
+                witness = digest
+                break
+        yield path, witness
 
 
 def projection_lines(tx: Connection, page: str) -> Iterator[str]:
@@ -290,7 +325,7 @@ def _sample_line(
 
 
 def validate_restored_projection(
-    tx: Connection, paths: list[str], marked_pages: Container[str],
+    tx: Connection, paths: list[str], marked_pages: Container[str], witnessed_pages: Container[str] = (),
 ) -> None:
     """Refuse identifiable projection residue on a batch of portable relationship endpoints."""
     rows = tx.execute(
@@ -324,9 +359,19 @@ def validate_restored_projection(
                 None, first[1], _possible_projection_lines(samples), bare_locators=path not in marked_pages,
             )
         except OpError as error:
+            remedy = (
+                "Set aside the edit, restore the exact page from the rollback copy, "
+                "then migrate and reapply the edit. If no verified copy exists, use inline code for "
+                "an intended literal line or remove only generated text, then retry."
+                if path in witnessed_pages else
+                "Use inline code for an intended literal line or remove only generated text, "
+                "then run migration again."
+            )
             raise OpError(
-                error.code, f"{path}: generated relationship text remains outside its managed block",
-                "Remove the generated relationship rows from the page, then run migration again.",
+                error.code,
+                f"{json.dumps(path)} has a line that matches a managed relationship projection "
+                "without a matching authored page digest",
+                remedy,
             ) from error
 
 
@@ -380,11 +425,17 @@ def parse(encoded: Iterable[bytes]) -> PortableRelations:
     """Validate the exact supported format before a caller installs any row."""
     records = iter(encoded)
     header = _object(next(records, b""))
-    if (set(header) != {"format", "version", "source", "revision"}
+    if (set(header) - {"canonical_sha256"} != {"format", "version", "source", "revision"}
             or header["format"] != FORMAT or type(header["version"]) is not int
             or header["version"] != VERSION or not _path(header["source"])
             or type(header["revision"]) is not int or not 0 <= header["revision"] < 2**63):
         raise _invalid("the relations file header or version is invalid")
+    digest = header.get("canonical_sha256")
+    if "canonical_sha256" in header and (
+        not isinstance(digest, str) or len(digest) != 64
+        or any(char not in "0123456789abcdef" for char in digest)
+    ):
+        raise _invalid("the relations file has an invalid canonical page digest")
     source, revision = header["source"], header["revision"]
     units: dict[str, UnitIdentity] = {}
     targets: dict[str, UnitIdentity] = {}
@@ -413,7 +464,7 @@ def parse(encoded: Iterable[bytes]) -> PortableRelations:
     if any(link.source_unit_id not in units for link in links.values()):
         raise _invalid("a relationship's source unit is missing from the relations file")
     return PortableRelations(
-        source, revision, tuple(units.values()), tuple(links.values()), tuple(targets.values()),
+        source, revision, tuple(units.values()), tuple(links.values()), tuple(targets.values()), digest,
     )
 
 

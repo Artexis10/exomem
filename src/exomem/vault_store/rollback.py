@@ -414,7 +414,8 @@ def _export(
         projection.write_file(destination / "held", rel, body, durable=True)
     for rel, body in beside.items():
         projection.write_file(destination / "on-disk", rel, body, durable=True)
-    relation_files = _export_relationships(root, conn, destination, revision)
+    with read.snapshot(root, join_request=False) as view:
+        relation_files = _export_relationships(root, view.connection, destination, revision)
     summary = {
         "exported_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "reason": why,
@@ -485,7 +486,7 @@ def _export_relationships(root: Path, conn: sqlite3.Connection, destination: Pat
         conn.row_factory = factory
     count = 0
     reference_paths = []
-    for (source,) in conn.execute("SELECT DISTINCT parent_path FROM store_unit_ids ORDER BY parent_path"):
+    for source, witness in relationship_files.export_pages(conn):
         rel = relationship_files.path_for(source)
         if ownership.relation_source(rel) != source:
             if next(relationships.outgoing_on(conn, source), None) is not None:
@@ -496,14 +497,12 @@ def _export_relationships(root: Path, conn: sqlite3.Connection, destination: Pat
             # export keeps the remaining reference identities without writing beside them.
             reference_paths.append(source)
             continue
-        for target in (destination / "relationships", root):
-            projection.write_file(
-                target, rel, relationship_files.lines(
-                    source, revision, relationships.units_on(conn, source),
-                    relationships.outgoing_on(conn, source),
-                ), durable=True,
-            )
-        count += 1
+        with relationship_files.prepare_file(conn, source, revision, canonical_sha256=witness) as artifact:
+            if artifact is None:
+                continue
+            for target in (destination / "relationships", root):
+                projection.write_file(target, rel, artifact.data.open(), durable=True)
+            count += 1
     if reference_paths:
         rows = conn.execute(
             "SELECT id,parent_path,anchor,parent_ref FROM store_unit_ids "
