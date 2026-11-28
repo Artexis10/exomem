@@ -35,7 +35,7 @@ In store mode, offload, the offload scan, the refusal status, upload admission a
 
 ### Requirement: A total that is not current makes offload wait
 
-In store mode, when the binding projection is not current, offload SHALL return the job to the queue without spending an attempt, and status SHALL report the owner total as being counted. A failed rebuild SHALL record up to five notes and their reasons where the media worker reads them. Until the store changes after that failure, the total SHALL be unknown and SHALL name those notes. A malformed stored reference, or one without a binding, SHALL make the total unknown.
+In store mode, when the binding projection is not current, offload SHALL return the job without spending an attempt, and status SHALL report the total as being counted. A note that the projection cannot count, such as one with a malformed or unbound stored reference, SHALL make the total unknown and be named, while the projection stays published. A failed rebuild SHALL record up to five notes where the media worker reads them. An unrelated save SHALL NOT clear a named note or start a rebuild.
 
 #### Scenario: A projection that is not current makes offload wait without spending an attempt
 
@@ -48,9 +48,15 @@ In store mode, when the binding projection is not current, offload SHALL return 
 - **WHEN** a companion's stored reference is malformed, or names a stored version but binds no original
 - **THEN** offload in the media worker process refuses with `MEDIA_ALLOWANCE_UNKNOWN` and names that companion
 
+#### Scenario: An unrelated save does not clear a named note
+
+- **WHEN** a companion that does not parse makes the total unknown, and the owner then saves a note that holds no stored reference
+- **THEN** the total stays unknown and names that companion, and no rebuild starts
+- **AND** after the owner fixes the companion, the follow makes the total known without a rebuild
+
 ### Requirement: The binding projection follows every change to the references in store mode
 
-In store mode, every vault with a valid media allowance SHALL keep the binding projection, and each change to a page that the store owns SHALL reach it through the store's audit trail. A change that the trail cannot express SHALL make it not current. Pages that the census walks but the store does not own SHALL be read at each rebuild and checked again at each store sweep. A rebuild SHALL read the pages outside the mutation boundary.
+In store mode, every vault with a valid media allowance SHALL keep the binding projection. It SHALL follow the store's audit trail for every page the store owns, and be current at the trail's head whatever the store revision. A change that the trail cannot express SHALL make it not current. Pages that the census walks but the store does not own SHALL be checked at each store sweep, and a save during that walk SHALL NOT withdraw it. A rebuild SHALL read the pages outside the mutation boundary.
 
 #### Scenario: An edit made while the service was stopped is counted
 
@@ -61,10 +67,21 @@ In store mode, every vault with a valid media allowance SHALL keep the binding p
 #### Scenario: A rebuild completes while saves continue
 
 - **WHEN** in store mode saves land while a rebuild reads the pages
-- **THEN** the rebuild publishes at the frontier of the snapshot that it read, and the audit replay brings the projection to the store's head
+- **THEN** the rebuild publishes at the audit position of the snapshot that it read, and the audit replay brings the projection to the store's head
 - **AND** offload's next check finds the projection current
 
 #### Scenario: A page that the store does not own is counted
 
 - **WHEN** a sync conflict copy of a companion names a stored version that no other page names
 - **THEN** after the next store sweep the projection decides on that page as the owner census does
+
+#### Scenario: A save's derivation leaves the projection current
+
+- **WHEN** in store mode the owner saves a note and the derivation drain then raises the store revision
+- **THEN** the projection is current once it has followed the save's audit row
+- **AND** offload's next check publishes without `MEDIA_STORE_BUSY`, and eviction finds the projection current without a rebuild
+
+#### Scenario: A save during the sweep's walk keeps the projection
+
+- **WHEN** saves land on pages that the store owns while the store sweep reads the pages that it does not own
+- **THEN** the check completes and the projection stays published
