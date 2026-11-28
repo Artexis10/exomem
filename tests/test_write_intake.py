@@ -387,7 +387,7 @@ def test_the_next_save_after_a_queued_save_failed_says_so_once(vault: Path, mana
 
     noticed = _send(remember, vault, _remember_kwargs(vault, 41), scope="principal:session-b")
     assert noticed["user_summary"].startswith("Saved")
-    assert "1 queued save sent earlier failed and was not saved" in noticed["user_summary"]
+    assert "1 earlier queued save failed" in noticed["user_summary"]
     assert "queued-write" in noticed["user_summary"]
     assert noticed["queued_writes_failed"] == 1
     later = _send(remember, vault, _remember_kwargs(vault, 42), scope="principal:session-b")
@@ -1758,11 +1758,12 @@ def test_a_commit_marker_that_cannot_be_written_commits_nothing_and_the_save_lan
     assert len(_pages_titled(vault, "Queued save 13")) == 1
 
 
-def test_a_replay_whose_outcome_is_unknown_fails_visibly_and_the_queue_moves_on(
+def test_an_unknown_outcome_keeps_its_receipt_after_restart_and_the_queue_moves_on(
     vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _writer, holder = managers
     remember = _command("remember")
+    arguments = _remember_kwargs(vault, 14)
     real_invoke = writer_lease.invoke_command
 
     def unknown_for_the_first(command, *injected, **kwargs):
@@ -1774,7 +1775,7 @@ def test_a_replay_whose_outcome_is_unknown_fails_visibly_and_the_queue_moves_on(
 
     receipts = _hold_and_queue(
         holder, vault,
-        lambda: _send(remember, vault, _remember_kwargs(vault, 14)),
+        lambda: _send(remember, vault, arguments),
         lambda: _send(remember, vault, _remember_kwargs(vault, 15), scope="principal:session-b"),
         monkeypatch=monkeypatch,
         then=lambda: monkeypatch.setattr(writer_lease, "invoke_command", unknown_for_the_first),
@@ -1786,6 +1787,70 @@ def test_a_replay_whose_outcome_is_unknown_fails_visibly_and_the_queue_moves_on(
     assert "may have landed" in read["user_summary"]
     _wait_for_state(vault, receipts[1]["queued_write"]["ref"], "applied")
     assert len(_pages_titled(vault, "Queued save 15")) == 1
+
+    monkeypatch.setattr(writer_lease, "invoke_command", real_invoke)
+    write_intake.stop(vault)
+    with write_intake._write(vault) as database:
+        database.execute("DROP INDEX intake_retry_deadline")
+        database.execute("DROP INDEX intake_retry_origin")
+    write_intake.start(vault)
+    with write_intake._store(vault, mode="read") as database:
+        assert not write_intake._has_retry_index(database)
+    resend = _send(remember, vault, arguments)
+    assert resend["queued_write"]["ref"] == receipts[0]["queued_write"]["ref"]
+    assert resend["queued_write"]["state"] == "failed"
+    assert resend["committed"] is None
+    assert not _pages_titled(vault, "Queued save 14")
+    with write_intake._store(vault, mode="read") as database:
+        assert write_intake._has_retry_index(database)
+
+    def missing_store(*_args, **_kwargs):
+        raise FileNotFoundError("intake store temporarily unavailable")
+
+    with monkeypatch.context() as unavailable:
+        unavailable.setattr(write_intake, "_store", missing_store)
+        resend = _send(remember, vault, arguments)
+        assert resend["queued_write"]["ref"] == receipts[0]["queued_write"]["ref"]
+        assert resend["committed"] is None
+        assert not _pages_titled(vault, "Queued save 14")
+
+    noticed = _send(remember, vault, _remember_kwargs(vault, 16))
+    assert noticed["queued_writes_failed"] == 1
+    assert "queued-write" in noticed["user_summary"]
+    assert "was not saved" not in noticed["user_summary"]
+
+
+def test_a_dismissed_legacy_duplicate_leaves_the_older_receipt_addressable(vault, managers, drainer, monkeypatch):
+    """Legacy repeats could produce several terminal rows for one origin."""
+    _writer, holder = managers
+    monkeypatch.setattr(write_intake, "_claim_head", lambda _root: 0.05)
+    remember = _command("remember")
+    arguments = _remember_kwargs(vault, 17)
+    (receipt,) = _hold_and_queue(holder, vault, lambda: _send(remember, vault, arguments))
+    first_ref = receipt["queued_write"]["ref"]
+    first_id = first_ref.removeprefix(write_intake.REF_PREFIX)
+    later_id = "a" * 32
+    now = time.time()
+    with write_intake._write(vault) as database:
+        database.execute("UPDATE intake SET state = 'failed', finished_at = ? WHERE id = ?", (now, first_id))
+        database.execute(
+            "INSERT INTO intake (id, origin, origin_ttl, command, arguments, principal, surface, state, "
+            "accepted_at, updated_at, next_attempt_at, finished_at) "
+            "SELECT ?, origin, origin_ttl, command, arguments, principal, surface, state, ?, ?, ?, ? "
+            "FROM intake WHERE id = ?",
+            (later_id, now, now, now, now, first_id),
+        )
+
+    write_intake.stop(vault)
+    write_intake.start(vault)
+    later_ref = write_intake.ref_for(later_id)
+    assert _send(remember, vault, arguments)["queued_write"]["ref"] == later_ref
+    write_intake.dismiss(vault, later_ref)
+    assert _send(remember, vault, arguments)["queued_write"]["ref"] == first_ref
+    write_intake.stop(vault)
+    write_intake.start(vault)
+    assert _send(remember, vault, arguments)["queued_write"]["ref"] == first_ref
+    assert not _pages_titled(vault, "Queued save 17")
 
 
 def test_a_replay_that_faults_before_the_dispatcher_fails_and_the_save_behind_it_lands(
