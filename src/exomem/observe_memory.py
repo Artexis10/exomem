@@ -616,9 +616,10 @@ def observe_memory(
             selected_kind = dated_default_kind
         # add and update both render the unit's whole edge set, which the seam owns.
         normalized_relations = unit_edges.add_unit_edges((), _canonical_relations(relations or []))
+        compact_kinds = semantic_kinds.compact_kinds()
         explicit_rich_kind = dated_default_kind is not None or bool(
             kind is not None
-            and semantic_language_registry.normalize_label(kind) not in semantic_kinds.compact_kinds()
+            and semantic_language_registry.normalize_label(kind) not in compact_kinds
         )
         if normalized_relations and not explicit_rich_kind:
             # A rich unit that keeps its kind on update carries its own relations, so only a unit
@@ -661,7 +662,7 @@ def observe_memory(
             as_of=normalized_as_of,
             until=normalized_until,
         )
-        if selected_kind in semantic_kinds.compact_kinds() and (governed_passed or preserved_metadata):
+        if selected_kind in compact_kinds and (governed_passed or preserved_metadata):
             if base_unit is None or base_unit.form != "rich":
                 # A compact unit, new or existing, carries no rows, so the only exits that apply
                 # are a rich kind, or leaving the other fields out so a date takes the default kind.
@@ -735,20 +736,29 @@ def observe_memory(
             insertion_body = body if current_unit is None else _remove_unit(
                 body, current_unit.span.start_offset, current_unit.span.end_offset,
             )
-            # A vault may use this heading for an authored rich unit. Rich units own their descendants.
-            observation_heading = semantic_language_registry.for_attached_projects(language, page_projects).resolve_heading(
-                "Observations", page_type=page_type,
+            # A vault may use this heading for a rich unit that owns its descendants.
+            page_language = semantic_language_registry.for_attached_projects(
+                language, page_projects,
             )
-            after_body = None if observation_heading.resolved is not None else _place_dated_block(insertion_body, render(3))
-            if after_body is None:
+            observation_heading = page_language.resolve_heading("Observations", page_type=page_type)
+            nested_body = (
+                _place_dated_block(insertion_body, render(3))
+                if observation_heading.resolved is None
+                else None
+            )
+            if nested_body is None:
                 after_body = _append_visible_record(insertion_body, render(2))
                 placement_outcome = _end_placement_notice(previewing)
+            else:
+                after_body = nested_body
         elif current_unit is not None and proposal_mode == "update":
             start, end = current_unit.span.start_offset, current_unit.span.end_offset
             depth = current_unit.level or 2
             section = _observation_section_containing(body, start) if depth > 2 else None
             if section is not None and compact:
-                after_body = _add_compact(_remove_unit(body, start, end), render(2), section_start=section.start)
+                after_body = _add_compact(
+                    _remove_unit(body, start, end), render(2), section_start=section.start,
+                )
             elif section is not None:
                 rendered = render(depth)
                 if _fits_nested_block(rendered, depth):
@@ -1282,7 +1292,9 @@ def claim_conversion(
     """
     item = target.item
     category = str(target.category)
-    anchor = _generated_anchor(semantic_kinds.compact_kind(), category, item.text, (), None, (), existing_anchors)
+    anchor = _generated_anchor(
+        semantic_kinds.compact_kind(), category, item.text, (), None, (), existing_anchors,
+    )
     existing_anchors.add(anchor)
     return anchor, (item.start, item.end, f"{item.indent}- [{category}] {item.text} ^{anchor}")
 
@@ -1361,7 +1373,10 @@ def _select_kind(
     raw = kind
     if raw is None and current_unit is not None and current_unit.form == "rich":
         raw = current_unit.kind
-    if raw is None or semantic_language_registry.normalize_label(raw) in semantic_kinds.compact_kinds():
+    if (
+        raw is None
+        or semantic_language_registry.normalize_label(raw) in semantic_kinds.compact_kinds()
+    ):
         return semantic_kinds.compact_kind()
     registry = semantic_language_registry.for_attached_projects(
         language, projects
@@ -1544,7 +1559,8 @@ def _compact_names_passed(arguments: Mapping[str, Any]) -> tuple[str, ...] | Non
     if kind is None:
         compact_kind = mode in {"add", "validate"}
     else:
-        compact_kind = semantic_language_registry.normalize_label(kind) in semantic_kinds.compact_kinds()
+        key = semantic_language_registry.normalize_label(kind)
+        compact_kind = key in semantic_kinds.compact_kinds()
     if not compact_kind:
         return None
     # A blank value is no value, as `_resolve_governed_value` reads it on an add.
@@ -2129,8 +2145,10 @@ def _place_dated_block(body: str, rendered: str) -> str | None:
         return None
     sections = _observation_sections(body)
     outline = markdown_regions.block_headings(body)
-    visible = [offset for offset, level, title in outline
-               if level == 2 and semantic_language_registry.normalize_label(title) == "observations"]
+    visible = [
+        offset for offset, level, title in outline
+        if level == 2 and semantic_language_registry.normalize_label(title) == "observations"
+    ]
     if not sections and not visible:
         candidate = _append_rich(body, f"## Observations\n\n{rendered}")
         point = len(body)
@@ -2138,7 +2156,10 @@ def _place_dated_block(body: str, rendered: str) -> str | None:
         return None
     else:
         section = sections[0]
-        visible_end = next((offset for offset, level, _ in outline if offset > section.start and level <= 2), len(body))
+        visible_end = next(
+            (offset for offset, level, _ in outline if offset > section.start and level <= 2),
+            len(body),
+        )
         if section.end != visible_end:
             return None
         point = section.end
@@ -2159,7 +2180,10 @@ def _append_visible_record(body: str, rendered: str) -> str:
 
 
 def _observation_section_containing(body: str, point: int) -> _ObservationSection | None:
-    return next((section for section in _observation_sections(body) if section.start < point < section.end), None)
+    return next(
+        (section for section in _observation_sections(body) if section.start < point < section.end),
+        None,
+    )
 
 
 def _guard_nested_observation_span(body: str, unit: semantic_units.SemanticUnit) -> None:
@@ -2174,7 +2198,7 @@ def _guard_nested_observation_span(body: str, unit: semantic_units.SemanticUnit)
         raise ObserveMemoryError(
             "AMBIGUOUS_SEMANTIC_UNIT_CONTENT",
             "the record crosses a Markdown section boundary",
-            "Use a page edit to separate the heading from the record, then read the unit and retry.",
+            "Separate the heading from the record with a page edit, then read the unit and retry.",
         )
 
 
@@ -2248,7 +2272,8 @@ def _observation_sections(body: str) -> list[_ObservationSection]:
                 break
             if first_child is None:
                 first_child = candidate_start
-        sections.append(_ObservationSection(start, end if first_child is None else first_child, end))
+        compact_at = end if first_child is None else first_child
+        sections.append(_ObservationSection(start, compact_at, end))
     return sections
 
 
