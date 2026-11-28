@@ -792,7 +792,7 @@ def test_canonical_selectors_and_exclusions_share_the_file_kernel(store, tmp_pat
     store.create_collection(manifest_path(), text, why="create")
     item = {"title": "One", "tags": ["Secret"], "classes": ["Private"]}
     store.append_record(CID, item=item, item_key=KEY, why="capture")
-    selectors = {"paths": [f"Records/**/{KEY}.md"], "refs": [f"exomem://record/{CID}/{KEY}"],
+    selectors = {"paths": [f"RECORDS/**/{KEY}.MD"], "refs": [f"exomem://record/{CID}/{KEY}"],
                  "projects": ["beta"], "tags": ["secret"], "types": ["record"], "classes": ["private"]}
     write_scope(store.root, paths="Unrelated/**")
     scope = store.root / "Knowledge Base/_Governance/scopes/patterns.yaml"

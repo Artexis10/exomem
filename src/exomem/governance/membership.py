@@ -106,8 +106,14 @@ def _relative_to_kb(rel_path: str) -> str:
 
 
 def _matches_paths(patterns: tuple[str, ...], rel_path: str) -> bool:
-    kb_rel = _kb_relative(rel_path)
-    return any(fnmatch.fnmatchcase(rel_path, p) or fnmatch.fnmatchcase(kb_rel, p) for p in patterns)
+    if not patterns:
+        return False
+    full = rel_path.casefold()
+    kb_rel = _kb_relative(rel_path).casefold()
+    return any(
+        fnmatch.fnmatchcase(full, pattern) or fnmatch.fnmatchcase(kb_rel, pattern)
+        for pattern in map(str.casefold, patterns)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,7 +181,8 @@ def path_selector_below(patterns: tuple[str, ...], folder: str) -> bool | None:
     A path below `folder`, which ends with ``/``, starts with it and ends with a file name, so that no
     normalization strips its end.
     """
-    found = {_glob_below(pattern, form) for pattern in patterns for form in (folder, below_form(folder))}
+    forms = folder.casefold(), below_form(folder).casefold()
+    found = {_glob_below(pattern, form) for pattern in map(str.casefold, patterns) for form in forms}
     return True if True in found else None if None in found else False
 
 

@@ -41,7 +41,7 @@ def test_path_glob_selector_resolves_membership(vault: Path) -> None:
     _write_scope(
         vault,
         "acmeco",
-        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\npaths: [\"Knowledge Base/Projects/AcmeCo/**\"]\n",
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\npaths: [\"knowledge base/PROJECTS/acmeco/**\"]\n",
     )
     pol = policy.load(vault)
     _write_page(vault, "Knowledge Base/Projects/AcmeCo/client-notes.md", "type: source")
@@ -51,6 +51,14 @@ def test_path_glob_selector_resolves_membership(vault: Path) -> None:
     _write_page(vault, "Knowledge Base/Notes/other.md", "type: source")
     parsed_outside = _parse(vault, "Knowledge Base/Notes/other.md")
     assert membership.evaluate(parsed_outside, pol) == frozenset()
+
+
+def test_folder_scope_keeps_a_casefolded_path_exception() -> None:
+    folder = "Knowledge Base/Projects/AcmeCo/"
+    patterns = ("projects/ACMECO/Public.md",)
+    assert membership.path_selector_below(patterns, folder) is None
+    assert membership.path_selector_matches(patterns, folder + "public.md")
+    assert not membership.path_selector_matches(patterns, folder + "private.md")
 
 
 def test_project_selector_resolves_membership(vault: Path) -> None:
