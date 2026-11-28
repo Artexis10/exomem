@@ -346,8 +346,16 @@ def expansion_rows_size(vault_root: Path, import_id: str) -> int:
         return 0
 
 
-def read_expansion_rows(vault_root: Path, import_id: str, *, offset: int = 0) -> Iterator[tuple[int, dict]]:
-    """The complete rows of the stage's expansion from byte `offset`, each with the offset that follows it.
+def _expansion_row(line: bytes) -> dict | None:
+    try:
+        row = json.loads(line)
+    except ValueError:
+        return None
+    return row if isinstance(row, dict) else None
+
+
+def read_expansion_rows(vault_root: Path, import_id: str, *, offset: int = 0, starts: bool = False) -> Iterator[tuple[int, dict]]:
+    """Read complete expansion rows with their end offsets, or their start offsets when `starts` is set.
 
     A last line that lacks its newline is a row that a crash cut in two, and is not read. A line that is not a JSON
     object is left out: a file that no row vouches for is never consumed, so a damaged row only keeps its staged copy.
@@ -362,15 +370,26 @@ def read_expansion_rows(vault_root: Path, import_id: str, *, offset: int = 0) ->
         for line in stream:
             if not line.endswith(b"\n"):
                 return
+            start = position
             position += len(line)
-            try:
-                row = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(row, dict):
-                yield position, row
+            if (row := _expansion_row(line)) is not None:
+                yield start if starts else position, row
     finally:
         stream.close()
+
+
+def read_expansion_rows_at(vault_root: Path, import_id: str, starts: Iterable[int]) -> Iterator[tuple[int, dict]]:
+    """Read the selected complete rows through one stream, using the indexed byte offsets."""
+    positions = sorted(starts)
+    if not positions:
+        return
+    with open(expansion_dir(vault_root, import_id) / EXPANSION_ROWS, "rb") as stream:
+        for position in positions:
+            stream.seek(position)
+            line = stream.readline()
+            if not line.endswith(b"\n") or (row := _expansion_row(line)) is None:
+                raise OSError("a selected sidecar row is no longer readable")
+            yield position, row
 
 
 def append_expansion_rows(vault_root: Path, import_id: str, rows: list[dict]) -> int:

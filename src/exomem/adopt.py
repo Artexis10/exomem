@@ -510,11 +510,18 @@ def render_artifact_source(
 ) -> str:
     """The Source page of an artifact original, in capture's own page format."""
     from . import add as add_module
-    from . import memory_refs
-    from .preserve import _sanitize_filename
+    from . import export_photos, memory_refs
+    from .preserve import DESCRIPTION_HEADING, _sanitize_filename
 
     kind, domain_lines = _kind_lines(planned)
     name = _sanitize_filename(Path(planned["original_path"]).name)
+    content = add_module._describe_artifact(name, planned["original_sha256"], planned["original_bytes"])
+    sidecar = planned.get("sidecar") or {}
+    if lines := export_photos.provenance_lines(sidecar.get("timestamps") or {}):
+        content += "\n" + "\n".join(lines)
+    if sidecar.get("caption"):
+        # The owner's caption from a Takeout sidecar, in the section an upload's description has, so one caption has one home.
+        content = f"{content}\n\n{DESCRIPTION_HEADING}\n\n{sidecar['caption']}"
     return add_module._render_source(
         title=planned["title"],
         source_type=kind,
@@ -525,9 +532,7 @@ def render_artifact_source(
             f"Copied from `{_clean_inline(planned['original_path'])}` by Evermatter adoption. "
             "The original remains unchanged."
         ),
-        content=add_module._describe_artifact(
-            name, planned["original_sha256"], planned["original_bytes"]
-        ),
+        content=content,
         exomem_id=source_id or memory_refs.new_id(),
         domain=(planned.get("classification") or {}).get("domain"),
         artifact_name=name,

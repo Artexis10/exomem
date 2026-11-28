@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
 
-from . import adoption_plan, held_fs, import_stage
+from . import adoption_plan, export_sidecars, held_fs, import_stage
 
 # The outcome statuses of an item that is in the Knowledge Base; a run, its residual report and a discard all read them here.
 FILED_STATUSES = ("applied", "already-applied")  # nosemgrep: ep-word-set -- the statuses that `apply` writes: a closed protocol of the run object.
@@ -35,6 +35,7 @@ STAYS: Mapping[str, tuple[bool, str]] = MappingProxyType({  # nosemgrep: ep-word
     "text": (True, "{n} text"),
     "kept": (True, "{n} artifact"),
     "kept_speech": (True, "{n} transcript kept with its recording"),
+    **export_sidecars.STAYS,  # a Takeout sidecar stays under what became of its photo, as its caller passes in `known`
 })
 
 
@@ -215,17 +216,22 @@ def _page_classifier(page: dict, filed_statuses: tuple[str, ...]):
 
 
 def stage_reasons(
-    import_id: str, files: list[tuple[str, int]], pages: tuple[dict, ...], filed_statuses: tuple[str, ...]
+    import_id: str, files: list[tuple[str, int]], pages: tuple[dict, ...], filed_statuses: tuple[str, ...],
+    known: Mapping[str, str] | None = None,
 ) -> list[tuple[str, int, str]]:
     """Each of `files` (path relative to the stage, bytes) as (path, bytes, why it stays); `pages` are the scans, nearest first.
 
     A file that no page scanned (hidden, added after the scan, on a page not yet scanned) is `OUTSIDE_RUN`.
-    A caller passes the staged files, and may add manifest members that are no longer there.
+    A caller passes the staged files, and may add manifest members that are no longer there. `known` gives the reason
+    that the caller settled for a path, which no scan decides: a Takeout sidecar is never selected, so no page says why it stays.
     """
     classifiers = [_page_classifier(page, filed_statuses) for page in pages]
     prefix = f"{import_stage.STAGE_DIR}/{import_id}/"
+    known = known or {}
 
     def why(path: str) -> str:
+        if path in known:
+            return known[path]
         for classify in classifiers:
             reason = classify(prefix + path)
             if reason is not None:
@@ -235,7 +241,9 @@ def stage_reasons(
     return [(path, size, why(path)) for path, size in files]
 
 
-def residual(root: Path, run: dict, filed_statuses: tuple[str, ...], earlier_pages: tuple[dict, ...] = ()) -> dict | None:
+def residual(
+    root: Path, run: dict, filed_statuses: tuple[str, ...], earlier_pages: tuple[dict, ...] = (), known: Mapping[str, str] | None = None,
+) -> dict | None:
     """What is still in the run's stage, by why it stays, with counts and bytes; None for a run with no stage.
 
     `filed_statuses` are the outcome statuses of an item that is in the Knowledge Base. `earlier_pages` are
@@ -253,7 +261,8 @@ def residual(root: Path, run: dict, filed_statuses: tuple[str, ...], earlier_pag
     the files of those reasons, and `summary` says in one sentence what needs review. The Cloud route discards a
     stage with `transfer_memory`; a local import has no Evermatter command, so its stage goes by hand. Both name the
     whole stage folder, which holds the residual and nothing else. A page that later pages follow names no discard
-    route, because the folder still holds their files: `more_pages` says so.
+    route, because the folder still holds their files: `more_pages` says so. `known` gives a path the reason that its caller
+    settled (a Takeout sidecar, under what became of its photo), in place of the scan's.
     """
     recorded_stage = run.get("stage")
     if not isinstance(recorded_stage, dict):
@@ -261,7 +270,7 @@ def residual(root: Path, run: dict, filed_statuses: tuple[str, ...], earlier_pag
     folder = f"{import_stage.STAGE_DIR}/{recorded_stage['stage']}"
     by_reason: dict[str, dict[str, int]] = {}
     staged = import_stage.staged_files(root, recorded_stage["stage"])
-    for _path, size, reason in stage_reasons(recorded_stage["stage"], staged, (run, *earlier_pages), filed_statuses):
+    for _path, size, reason in stage_reasons(recorded_stage["stage"], staged, (run, *earlier_pages), filed_statuses, known):
         entry = by_reason.setdefault(reason, {"files": 0, "bytes": 0})
         entry["files"] += 1
         entry["bytes"] += size

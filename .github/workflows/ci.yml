@@ -665,6 +665,7 @@ jobs:
           tests/test_media_preview_recovery.py tests/test_capture_metadata.py
           tests/test_capture_backfill.py tests/test_capture_backfill_store.py tests/test_capture_recovery.py
           tests/test_speech_attach_door.py tests/test_speech_track_containers.py tests/test_speech_track_door.py
+          tests/test_takeout_sidecars.py
           -m frame_codecs -o timeout=120
           --junitxml=test-results/e2e-logs/cloud-frame-junit.xml
       # The harness prints the tail inline; this keeps the whole log for the
