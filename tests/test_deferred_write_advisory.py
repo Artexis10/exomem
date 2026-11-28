@@ -22,6 +22,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from derived_receipt_fakes import DerivedReceiptProtocolFake
+from test_name_drift import without_scan_time
 
 from exomem import commands, corpus_aware, derived_receipts, embeddings, review_state
 from exomem import find as find_module
@@ -291,7 +292,7 @@ def _carrier_bytes(vault: Path) -> str:
         "dispositions": commands.op_review_memory(vault, mode="dispositions"),
         "due_state": due_state_module.recompute(vault),
     }
-    return json.dumps(payload, sort_keys=True, default=str)
+    return json.dumps(without_scan_time(payload), sort_keys=True, default=str)
 
 
 # ---------------------------------------------------------------------------
@@ -1048,8 +1049,8 @@ def test_ready_advisory_review_ref_keeps_existing_triage_semantics(
 
     assert decision["state"] == "dismissed"
     assert decision["ref"] == advisory["ref"]
-    # The dispositions view's effect block counts the owner's dismissal by
-    # contract; every other carrier byte stays as it was.
+    # The dispositions view counts the owner's dismissal. All other carrier
+    # values agree once the scan times are normalised.
     after = json.loads(_carrier_bytes(vault))
     counted = after["dispositions"]["effect"]["families"]["near-duplicate"]
     held = before["dispositions"]["effect"]["families"]["near-duplicate"]
