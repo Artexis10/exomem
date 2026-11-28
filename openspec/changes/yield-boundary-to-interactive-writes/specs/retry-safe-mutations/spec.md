@@ -3,16 +3,16 @@
 ### Requirement: Prompt MCP retries replay successful mutations
 The system SHALL detect a successful mutation repeated through MCP by the same authenticated principal with the same command and canonical arguments within a bounded retry window. It SHALL resolve the completed write without executing the mutation leaf again. Replay SHALL resolve the persisted terminal even when the original call's derived-state acknowledgement failed after the commit.
 
-The compact and full projections of a replayed terminal SHALL carry `replayed: true`. A cached terminal replay SHALL retain its stored `mutated`, `request_id` and `receipt_id`. A replay terminal built from a verified receipt SHALL report `status="replayed"` and `mutated=false` and retain original identities when available. An original terminal SHALL omit the replay marker. Legacy detail for a versioned terminal SHALL return the compatibility leaf without adding the terminal's replay marker. Pre-versioned results remain replayable under the mutation-terminal contract.
+The compact and full projections of a replayed terminal SHALL carry `replayed: true`. When a replay returns the stored terminal, it SHALL retain the stored `mutated`, `request_id` and `receipt_id`. A replay terminal built from a verified receipt SHALL report `status="replayed"` and `mutated=false` and retain original identities when available. An original terminal SHALL omit the replay marker. Legacy detail for a versioned terminal SHALL return the compatibility leaf without adding the terminal's replay marker. Pre-versioned results remain replayable under the mutation-terminal contract.
 
 #### Scenario: Lost save acknowledgement is retried
-- **WHEN** an authenticated MCP client repeats an identical successful additive save within the retry window
-- **THEN** the system returns the first save result and creates only one vault artifact
-- **AND** the reply carries `replayed: true` and the receipt of the first save
+- **WHEN** an authenticated MCP client repeats an identical successful additive save within the retry window using compact or full detail
+- **THEN** the system resolves the completed save and creates only one vault artifact
+- **AND** the projection carries `replayed: true` and full detail provides the original receipt identity when available
 
 #### Scenario: Lost delete acknowledgement is retried
 - **WHEN** an authenticated MCP client repeats an identical successful delete within the retry window
-- **THEN** the system returns the first delete result instead of executing a second delete that reports `NOT_FOUND`
+- **THEN** the system resolves the completed delete without executing the mutation leaf again
 
 #### Scenario: Artifact batch acknowledgement failed after commit
 - **WHEN** an artifact preservation commits, its derived-state acknowledgement fails, and the client repeats the identical call within the retry window
@@ -20,9 +20,9 @@ The compact and full projections of a replayed terminal SHALL carry `replayed: t
 - **AND** no file is fetched or written again
 
 #### Scenario: A verified receipt supplies a replay terminal
-- **WHEN** the system resolves a retry from a verified receipt and the client requests compact or full detail
-- **THEN** the terminal reports `status="replayed"`, `mutated=false` and `replayed: true`
-- **AND** the terminal retains the original identities available for the commit
+- **WHEN** the system builds a replay terminal from a verified receipt
+- **THEN** the terminal records `status="replayed"`, `mutated=false`, `replayed: true` and the original identities available for the commit
+- **AND** compact and full show the marker and full detail shows the operational fields in `diagnostics.operational`
 
 #### Scenario: A client requests legacy detail for a replayed terminal
 - **WHEN** the client retries a completed versioned mutation with `response_detail="legacy"`

@@ -29,7 +29,7 @@ A retry after a lost reply replays the original commit, but the reply is the sam
 - A waiter counts for yielding only when it is interactive. A machine hold, a maintenance job and a borrower of a lent boundary do not count. The keyed writes queued behind the head of the capture line do count. A waiter in another process counts.
 - After a hold that ended for a waiter, a maintenance job, the reconcile phases and the drain turns wait while a writer still waits, within the existing foreground-priority floors, before they take the boundary again. The wait holds no lock and never runs on the collection store thread.
 - The reconcile phases for unit sidecars and embeddings run in short holds that each end after one second or when an interactive writer waits. Every hold names its phase.
-- The compact and full projections mark a replay. A cached terminal keeps its original mutation and receipt fields. A replay resolved from a verified receipt reports that this call made no new write. The implicit-retry digest treats one text in two Unicode compositions as one request. The retry-safe-mutations spec states the 600 s window that the code uses.
+- The compact and full projections mark a replay. A replay that returns the stored terminal keeps its original mutation and receipt fields. A replay resolved from a verified receipt reports that this call made no new write. The implicit-retry digest treats one text in two Unicode compositions as one request. The retry-safe-mutations spec states the 600 s window that the code uses.
 
 No wait is lengthened, no governed write is queued, the boundary is not lent to canonical writers, and no outbox is added.
 

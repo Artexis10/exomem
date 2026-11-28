@@ -21,7 +21,7 @@
 
 ## 2. Replay marker
 
-- [x] 2.1 Mark replays in compact and full. Keep the original fields when replaying a cached terminal. Report no new write when a verified receipt supplies a replay terminal. Preserve the legacy projection.
+- [x] 2.1 Mark replays in compact and full. Keep the original fields when returning the stored terminal. Report no new write when a verified receipt supplies a replay terminal. Preserve the legacy projection.
 - [x] 2.2 Hash the implicit-retry digest over NFC strings.
 - [x] 2.3 Correct the retry window in the retry-safe-mutations spec from 60 s to 600 s.
 
