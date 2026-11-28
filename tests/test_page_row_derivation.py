@@ -123,6 +123,9 @@ def test_rows_derive_from_the_given_bytes_not_from_the_page_on_disk(tmp_path: Pa
             "depends_on": (f"file:{BETA}", "file", None),
             "supports": (unit_in_the_store, "file", "unit"),
         }
+        assert rows.execute(
+            "SELECT source_path, raw_target, target_path, dst_key FROM graph_unit_links"
+        ).fetchall() == [(rel, "Beta#^obs", BETA, unit_in_the_store)]
 
 
 def test_dependent_paths_name_the_pages_whose_links_a_title_re_resolves(tmp_path: Path) -> None:
