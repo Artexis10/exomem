@@ -3592,11 +3592,12 @@ class EpistemicGraphIndex:
             (_DRAIN_COVERAGE_KEY,),
         ))
 
-    def _startup_state(self) -> _GraphStartupState | None:
+    def _startup_state(self, *, deadline: float | None = None) -> _GraphStartupState | None:
         """Sample bounded graph, canonical and observation state under the held boundary."""
         from .writer_lease import read_commit_generation
 
-        deadline = time.monotonic() + 0.05
+        if deadline is None:
+            deadline = time.monotonic() + 0.05
         floor = graph_sync.floor_state(self.vault_root, deadline=deadline)
         checkpoint = graph_sync.checkpoint_state(self.vault_root, deadline=deadline)
         if floor[0] == "unreadable" or checkpoint[0] == "unreadable":
@@ -3640,6 +3641,31 @@ class EpistemicGraphIndex:
         return _GraphStartupState(
             floor, checkpoint, generation, policy, observation, identity, values,
             freshness.recall_generation(self.vault_root, "vault"), epoch, coherent,
+        )
+
+    def _standalone_snapshot_state(self, *, deadline: float) -> _GraphStartupState | None:
+        """Sample the published generation without walking the corpus or waiting for a writer."""
+        try:
+            with self._canonical_mutation_coordinator().try_hold(
+                operation="epistemic_graph_standalone_snapshot", holder_kind="graph",
+            ) as held:
+                if not held or time.monotonic() >= deadline or freshness.external_pending(self.vault_root):
+                    return None
+                state = self._startup_state(deadline=deadline)
+                if state is not None and state.coherent and time.monotonic() < deadline:
+                    return state
+        except (OSError, OpError, reserved_paths.SqliteIdentityBusyError, sqlite3.Error):
+            pass  # Contention or unavailable metadata leaves coverage unknown.
+        return None
+
+    def _standalone_snapshot_is_current(
+        self, conn: sqlite3.Connection, state: _GraphStartupState, *, deadline: float,
+    ) -> bool:
+        # The lookup used this transaction. Only that same published state can seal its answer.
+        return (
+            time.monotonic() < deadline
+            and self._read_startup_metadata(conn) == state.values
+            and self._standalone_snapshot_state(deadline=deadline) == state
         )
 
     def promotion_proof_stamp(

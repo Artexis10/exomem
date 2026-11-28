@@ -462,6 +462,51 @@ def test_fresh_cli_uses_existing_graph_for_current_stance(stance_vault):
     assert [item["text"] for item in _stance(stance_vault)["items"]] == ["Unrelated operating rule."]
     assert [item["text"] for item in recall()["items"]] == ["Unrelated operating rule."]
 
+    # The standalone proof may walk the vault once. Confirmation must work when
+    # that walk is no longer available and must still detect a withdrawn graph.
+    script = """
+import runpy
+import sys
+from contextlib import ExitStack
+from unittest.mock import patch
+from exomem import epistemic_graph, find, unit_corrections, vault
+
+withdraw = sys.argv.pop(1) == "withdraw"
+lookup = epistemic_graph.GraphView.replaced_units
+discover = unit_corrections.discover
+
+def reject_census(*args, **kwargs):
+    raise AssertionError("snapshot confirmation repeated the vault census")
+
+def check_confirmation(*args, **kwargs):
+    with ExitStack() as guards:
+        def after_lookup(view, *args, **kwargs):
+            result = lookup(view, *args, **kwargs)
+            if withdraw:
+                epistemic_graph.EpistemicGraphIndex(view.vault_root).withdraw_availability()
+            guards.enter_context(patch.object(find, "_corpus_walk", reject_census))
+            guards.enter_context(patch.object(vault, "walk_vault_md", reject_census))
+            return result
+
+        guards.enter_context(patch.object(epistemic_graph.GraphView, "replaced_units", after_lookup))
+        return discover(*args, **kwargs)
+
+unit_corrections.discover = check_confirmation
+runpy.run_module("exomem", run_name="__main__")
+"""
+    for operation in ("confirm", "withdraw"):
+        result = subprocess.run(
+            [sys.executable, "-c", script, operation, "recall_context", "--json", "--",
+             "Which operating rule is current?"],
+            env=env, capture_output=True, text=True, check=True, timeout=30,
+        )
+        block = json.loads(result.stdout)["data"]["stance"]
+        if operation == "withdraw":
+            assert block["state"] == "unavailable" and block["items"] == []
+        else:
+            assert block["state"] == "ready"
+            assert [item["text"] for item in block["items"]] == ["Unrelated operating rule."]
+
 
 def test_hook_uses_supplied_or_generated_moves_and_stance_generation():
     from exomem._hooks import exomem_retrieve_nudge as hook

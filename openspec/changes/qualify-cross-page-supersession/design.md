@@ -8,7 +8,7 @@ Reuse the graph's typed unit relations and the correction reader's snapshot chec
 
 Batch lookups on the graph's existing destination-page index. Compare the admitted predecessor page hashes with the graph snapshot before using it to prove coverage. The selected parser lands each fragment on an exact occurrence, including units with vault-defined headings. Apply the replacement only when a valid unit on a live or historical governed authoring page names it. Use the page's lifecycle registry. Keep a replacement after its author is replaced or archived. Share one lookup across all selected domain profiles. Filter candidates by replacing behaviour before applying the edge cap. Limit a lookup to 64 candidate edges and 32 distinct source pages under the caller's deadline and a 100 ms allowance. Cap the combined summary bytes before decoding. A store snapshot with pending derivation or a lookup with incomplete coverage reports unavailable.
 
-Managed recall uses the live graph snapshot. An unbudgeted standalone command can use the existing one-shot graph proof, then run the bounded lookup and confirm the graph generation. The cold proof checks the inherited snapshot against the vault.
+Managed recall uses the live graph snapshot. An unbudgeted standalone command can use the existing one-shot proof to check an inherited snapshot against the vault. The bounded lookup confirms the same published generation using graph metadata.
 
 Shared recall requires a separate qualification step before it can use cross-page edges for currency. A readable source page can hold a unit whose own text is withheld. The page admission cache cannot prove which exact units count for a shared reader.
 

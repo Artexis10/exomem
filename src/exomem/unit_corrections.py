@@ -5,7 +5,6 @@ from __future__ import annotations
 import sqlite3
 import time
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -66,8 +65,9 @@ def discover(
 ) -> dict[str, Any]:
     """Discover references once; the caller admits exact units before the cap.
 
-    No cold graph proof or resolver build belongs to optional enrichment. If
-    publication moves during hydration, discard every tentative reference.
+    Managed enrichment uses the live graph. A one-shot command can prove an
+    inherited graph before its bounded lookup. If publication moves during
+    hydration, discard every tentative reference.
     """
     def result(status: str, units=(), outgoing=()) -> dict[str, Any]:
         return {"status": status, "units": list(units),
@@ -96,7 +96,7 @@ def discover(
         publication = None
         authority = None
         stored = None
-        standalone_token = None
+        standalone_state = None
         current_reader = keep.fresh(withheld=frozenset()) if isinstance(keep, egress.ReaderView) else None
         if current_reader is not None and (admission := admission_of(current_reader)) is not None:
             authority = admission.identity()
@@ -131,11 +131,11 @@ def discover(
                     conn = index._open_read_snapshot(live_only=True, check=check_deadline)
                 if conn is None and stored is None and budget is None and not readiness.runtime_managed():
                     # A one-shot reader uses the ordinary proof of an inherited graph generation.
+                    standalone_state = index._standalone_snapshot_state(deadline=deadline)
+                    if standalone_state is None:
+                        return result("unavailable")
                     conn = index._open_read_snapshot(prove=epistemic_graph.SINGLE_FLIGHT)
                     if conn is not None:
-                        standalone_token = epistemic_graph.snapshot_cache_token(conn)
-                        if standalone_token is None:
-                            return result("unavailable")
                         deadline = time.monotonic() + REPLACEMENT_SECONDS
             if conn is None:
                 return result("unavailable")
@@ -151,13 +151,9 @@ def discover(
 
         def still_current() -> bool:
             check_deadline()
-            if standalone_token is not None:
-                latest = index._open_read_snapshot(prove=False)
-                if latest is None:
-                    return False
-                with closing(latest):
-                    return epistemic_graph.snapshot_cache_token(latest) == standalone_token
-            if publication is not None:
+            if standalone_state is not None:
+                current = index._standalone_snapshot_is_current(conn, standalone_state, deadline=deadline)
+            elif publication is not None:
                 final_reader = keep.fresh(withheld=frozenset())
                 final_admission = admission_of(final_reader)
                 current = (
