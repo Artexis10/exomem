@@ -188,6 +188,30 @@ def test_unrelated_owner_mode_does_not_block_private_claim_or_replay(tmp_path: P
         assert stat.S_IMODE(path.stat().st_mode) & 0o077 == 0
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX unlink of a locked file")
+def test_a_store_start_removes_dead_owner_files_and_keeps_live_and_fresh_ones(tmp_path: Path) -> None:
+    """Every exited process left its owner file behind, so the directory grew without bound."""
+    from exomem.mutation_lock import _try_os_lock
+
+    owners = tmp_path / "state" / "idempotency-owners"
+    owners.mkdir(parents=True, mode=0o700)
+    hour_ago = time.time() - 3600
+    for name in ("dead-1.lock", "dead-2.lock", "live.lock", "fresh.lock"):
+        (owners / name).write_bytes(b"")
+        if name != "fresh.lock":
+            os.utime(owners / name, (hour_ago, hour_ago))
+    with (owners / "live.lock").open("r+b") as live:
+        assert _try_os_lock(live)
+        store = IdempotencyStore(tmp_path / "state" / "idempotency.sqlite")
+        remaining = {path.name for path in owners.iterdir()}
+        assert {"live.lock", "fresh.lock"} <= remaining
+        assert not {"dead-1.lock", "dead-2.lock"} & remaining
+        assert writer_lease_module._probe_owner_liveness(store.state_dir, "live")
+        # The store's own owner file is held for its lifetime, so its own sweep keeps it.
+        assert store.owner_id is not None
+        assert writer_lease_module._owner_lock_path(store.state_dir, store.owner_id).exists()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX mode contract")
 def test_insecure_idempotency_database_is_rejected_before_unpickle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
