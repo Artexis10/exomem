@@ -3915,8 +3915,8 @@ def test_a_pdf_child_aborted_under_its_data_limit_ends_the_job_over_budget(
 
 @pytest.mark.parametrize(
     ("returncode", "death"),
-    [(-11, "signal SIGSEGV"), (3, "exit status 3"), (-15, None)],
-    ids=["native-fault", "native-exit", "asked-to-stop"],
+    [(-11, "with SIGSEGV"), (-40, "with signal 40"), (3, "with exit status 3"), (-15, None)],
+    ids=["native-fault", "unnamed-signal", "native-exit", "asked-to-stop"],
 )
 def test_a_file_that_keeps_killing_the_media_process_is_blocked_and_the_queue_moves_on(
     vault, monkeypatch: pytest.MonkeyPatch, returncode: int, death: str | None

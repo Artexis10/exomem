@@ -33,6 +33,11 @@ Job crashes SHALL add up over the job's life under one release, not only in a ro
 - **AND** status tells the owner that a new release retries the file by itself, or that a retry tries it sooner
 - **AND** the next media process runs the other queued jobs
 
+#### Scenario: A crash-blocked reprocess names a new request
+- **WHEN** a reprocess of a completed transcript is blocked as `child_crashed`
+- **THEN** status tells the owner that a new release retries the file by itself, or that a new reprocess request tries it sooner
+- **AND** status does not offer a retry, which leaves a reprocess alone
+
 #### Scenario: A retry returns a crash-blocked job
 - **WHEN** an owner retries a job that is blocked as `child_crashed`
 - **THEN** the job returns to the queue with no job crashes counted

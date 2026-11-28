@@ -120,11 +120,11 @@ HYDRATION_TOO_LARGE = "hydration_too_large"
 #: The job crashed the media process the stop limit of times under one release
 #: (`MediaJobStore.record_crash_stop`). `blocked_context` names how the process died and the
 #: release it ran (`crash_verdict`). A retry, or the first start of another release, returns
-#: the job (`MediaJobStore.recover_crash_blocks`).
+#: the job (`MediaJobStore.recover_crash_blocks`); a reprocess row returns on a new request.
 CHILD_CRASHED = "child_crashed"
-CHILD_CRASHED_ACTION = (
-    "a new Evermatter release retries the file by itself; to try it sooner, retry it"
-)
+_CHILD_CRASHED_RETURN = "a new Evermatter release retries the file by itself; to try it sooner, "
+CHILD_CRASHED_ACTION = _CHILD_CRASHED_RETURN + "retry it"
+CHILD_CRASHED_REPROCESS_ACTION = _CHILD_CRASHED_RETURN + "reprocess the file again"
 #: Reasons a tenant sees only as waiting: nothing for a person to repair or retry.
 _WAITING_REASONS = frozenset({MEMORY_BLOCKED, ENGINE_DISABLED})
 #: Reasons whose rows return by themselves, as a SQL list of these constants.
@@ -176,27 +176,18 @@ def crash_verdict(
 ) -> tuple[str, str]:
     """The `last_error` and `blocked_context` of a CHILD_CRASHED verdict.
 
-    The context names the signal that ended the media process, or its exit status
-    when no signal did, and the release it ran; `verdict_release` reads the release back.
-    The error names no count: a file that a release returned blocks after one more death.
+    The context names the signal that ended the media process, as `cuda_containment.signal_name`
+    names it ("SIGSEGV", or "signal 40" for a signal with no name), or its exit status when no
+    signal did, and the release it ran. The error names no count: a file that a release returned
+    blocks after one more death.
     """
     how = {"signal": signal_name} if signal_name is not None else {"exit_status": exit_status}
-    last = f"signal {signal_name}" if signal_name is not None else f"exit status {exit_status}"
+    last = signal_name if signal_name is not None else f"exit status {exit_status}"
     error = (
         "MediaProcessCrashed: the media process kept dying while it ran this file, "
-        f"the last time by {last} (release {release})"
+        f"the last time with {last} (release {release})"
     )
     return error, _canonical_json({**how, "release": release})
-
-
-def verdict_release(context: object) -> str | None:
-    """The release a `crash_verdict` context names, or None when the context names none."""
-    try:
-        parsed = json.loads(str(context))
-    except ValueError:
-        return None
-    release = parsed.get("release") if isinstance(parsed, dict) else None
-    return release if isinstance(release, str) else None
 
 
 def _is_sha256(value: object) -> bool:
@@ -2077,33 +2068,19 @@ class MediaJobStore:
         tries each such file once more: the job returns with `stop_limit - 1` crashes counted
         under `release`, so one more crash under it blocks the job again. Only the crash count
         changes; the memory, watchdog and return counts stay. A job this release blocked stays
-        blocked until a retry. Writes nothing when no row is due.
+        blocked until a retry: `crash_release` names the release that blocked it.
         """
         conn = self._connect()
         try:
-            rows = conn.execute(
-                "SELECT id, blocked_context FROM jobs WHERE state = 'blocked' AND blocked_reason = ? "
-                "AND NOT EXISTS (SELECT 1 FROM media_job_results "
-                "WHERE media_job_results.job_id = jobs.id) ORDER BY id",
-                (CHILD_CRASHED,),
-            ).fetchall()
-            due = [
-                (int(row["id"]), row["blocked_context"])
-                for row in rows
-                if verdict_release(row["blocked_context"]) != release
-            ]
-            changed = 0
-            if due:
-                with conn:
-                    for job_id, context in due:
-                        changed += conn.execute(
-                            "UPDATE jobs SET state = 'pending', last_error = NULL, crash_stops = ?, "
-                            "crash_release = ?, blocked_reason = NULL, blocked_context = NULL, updated_at = ? "
-                            "WHERE id = ? AND state = 'blocked' AND blocked_reason = ? "
-                            "AND blocked_context IS ?",
-                            (max(0, stop_limit - 1), release, time.time(), job_id, CHILD_CRASHED, context),
-                        ).rowcount
-            return changed
+            with conn:
+                return conn.execute(
+                    "UPDATE jobs SET state = 'pending', last_error = NULL, crash_stops = ?, "
+                    "crash_release = ?, blocked_reason = NULL, blocked_context = NULL, updated_at = ? "
+                    "WHERE state = 'blocked' AND blocked_reason = ? AND crash_release IS NOT ? "
+                    "AND NOT EXISTS (SELECT 1 FROM media_job_results "
+                    "WHERE media_job_results.job_id = jobs.id)",
+                    (max(0, stop_limit - 1), release, time.time(), CHILD_CRASHED, release),
+                ).rowcount
         finally:
             conn.close()
 
@@ -3834,7 +3811,11 @@ def _status_job(row: Any) -> dict[str, Any]:
     reprocess_failed = reprocess_stopped and state == FAILED
     # The start that requeues a paused reprocess keeps its request, so the restart is the whole remedy.
     if reprocess_stopped and state == BLOCKED and restart_action is None:
-        actions[BLOCKED] = actions[BLOCKED].removesuffix(", then retry") + ", then reprocess the file again"
+        actions[BLOCKED] = (
+            CHILD_CRASHED_REPROCESS_ACTION
+            if reason == CHILD_CRASHED
+            else actions[BLOCKED].removesuffix(", then retry") + ", then reprocess the file again"
+        )
     multilingual_unsupported = state == FAILED and (error or "").startswith("MultilingualUnsupported:")
     unsupported_language = multilingual_unsupported or (
         state == FAILED and (error or "").startswith("UnsupportedLanguage:")
