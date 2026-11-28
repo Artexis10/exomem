@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 from .. import epistemic_graph, lexstore, vault
 from ..cli_ops import OpError
 from ..collection_store import connection
-from . import derivation, derive, mode, ownership, read, rederive
+from . import derivation, derive, mode, ownership, read, rederive, relationships
 from .read import AFTER, NOT_ACTIVE
 
 if TYPE_CHECKING:
@@ -255,6 +255,7 @@ class StoreChange:
     #: (``folder_intent``), and the projector removes the folder once nothing queued below it is
     #: left to move and it is empty.
     vacated_folders: tuple[str, ...] = ()
+    relationship_change: relationships.Change | None = None
 
     @property
     def paths(self) -> tuple[str, ...]:
@@ -278,7 +279,7 @@ class StoreChange:
         )
 
     def __post_init__(self) -> None:
-        if not self.paths and not self.refresh:
+        if not self.paths and not self.refresh and self.relationship_change is None:
             raise ValueError("a store change names no file")
         named = (*self.paths, *self.refresh)
         if len(set(named)) != len(named):
@@ -980,6 +981,18 @@ def commit(
             _delete_binary(tx, binary, audit)
         for move in change.binary_moves:
             _move_binary(tx, move, revision, audit)
+        relationship_paths: list[str] = []
+        if change.relationship_change is not None:
+            affected = relationships.apply(
+                tx, change.relationship_change, revision=revision, reason=change.reason, at=now,
+            )
+            relationship_paths = [path for (path,) in tx.execute(
+                "SELECT path FROM store_pages WHERE path IN (SELECT value FROM json_each(?)) "
+                "ORDER BY path", (json.dumps(sorted(affected)),),
+            )]
+            new_intents = tuple(path for path in relationship_paths if path not in audit.intents)
+            _degrade_moves(tx, new_intents)
+            audit.intents.update((path, ("write", None)) for path in new_intents)
         if overlay:
             # The overlay job settles the rows that the registries under ``_Schema`` derive.
             rederive.record_overlay_change(tx, revision)
@@ -991,7 +1004,8 @@ def commit(
             *(path for move in change.moves if move.src in retained_moves for path in (move.src, move.dst)),
         ))
         derivation.enqueue(
-            tx, list(dict.fromkeys(change.page_paths)), list(change.refresh), revision, now, metered
+            tx, list(dict.fromkeys((*change.page_paths, *relationship_paths))),
+            list(change.refresh), revision, now, metered,
         )
         for held in change.resolves_held:
             _drop_held(tx, held)
@@ -1000,7 +1014,7 @@ def commit(
         tx.execute("UPDATE store_mode SET revision = ? WHERE id = 1", (revision,))
         after = read.vault_triple(tx, revision)
     # A refreshed file is a page of the corpus too (the importer's non-owned Markdown).
-    derivation.committed(writer, before, after, (*change.paths, *change.refresh))
+    derivation.committed(writer, before, after, (*change.paths, *change.refresh, *relationship_paths))
     return CommitResult(revision, tuple(audit.written), tuple(audit.deleted))
 
 
@@ -1359,6 +1373,7 @@ def _move_page(
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
         (move.dst, *content, revision),
     )
+    relationships.move_page(tx, move.src, move.dst)
     if move.on_disk:
         tx.execute(
             "UPDATE store_manifest SET path = ?, revision = ? WHERE path = ?",
