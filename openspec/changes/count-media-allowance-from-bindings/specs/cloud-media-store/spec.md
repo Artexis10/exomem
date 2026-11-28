@@ -2,7 +2,7 @@
 
 ### Requirement: Offload reads the owner total from the binding projection in store mode
 
-In store mode, offload, the offload scan, the refusal status, upload admission and import window status SHALL read the owner total from the binding projection, which SHALL count what the owner census counts. While offload holds the mutation boundary, it SHALL walk no notes for the allowance and SHALL replay at most one batch of 256 audit rows or fewer. It SHALL use a total under a hold only while the projection is current, and SHALL read it again if it moved.
+In store mode, offload, the offload scan, the refusal status, upload admission and import window status SHALL read the owner total from the binding projection, which SHALL count what the owner census counts. While offload holds the mutation boundary, it SHALL walk no notes for the allowance and SHALL replay at most one batch of 256 audit rows or fewer. It SHALL use a total under a hold only while the projection is current, and SHALL read it again if it moved. File mode keeps the batch census.
 
 #### Scenario: A save lands during admission at any vault size
 
@@ -14,6 +14,13 @@ In store mode, offload, the offload scan, the refusal status, upload admission a
 
 - **WHEN** the worker offloads 500 filed originals in a row in store mode
 - **THEN** each member's admission and publication check read the owner total from the projection, which includes the versions that earlier members published
+- **AND** other writes run between two members
+
+#### Scenario: A batch of offloads takes one census in file mode
+
+- **WHEN** the worker offloads a batch of 500 filed originals in file mode
+- **THEN** it reads the owner's references once for the batch
+- **AND** each member's admission and publication check use that census with the versions that the batch has already published
 - **AND** other writes run between two members
 
 #### Scenario: The projection counts what the census counts

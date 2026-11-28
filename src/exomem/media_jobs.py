@@ -1133,6 +1133,11 @@ class MediaJobStore:
             conn.execute("ALTER TABLE jobs ADD COLUMN do_offload INTEGER NOT NULL DEFAULT 0")
         if "offload_generation" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN offload_generation INTEGER NOT NULL DEFAULT 0")
+        # When offload first waited for the owner total to be counted, and how often since, so a restart keeps it.
+        if "offload_wait_since" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN offload_wait_since REAL")
+        if "offload_waits" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN offload_waits INTEGER NOT NULL DEFAULT 0")
 
     @staticmethod
     def _migrate_claim_revision(conn: sqlite3.Connection) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -151,7 +152,7 @@ def _document(vault: Path, path: str) -> tuple[dict[str, object], str, held_fs.F
             preparation.reserve_source(size)
             raw = source.stream.read(size + 1)
             if len(raw) != size:
-                raise ValueError("Trash metadata changed during read")
+                raise PlacementChanged(path, "Trash metadata changed during read")
             text = raw.decode("utf-8")
             preparation.reserve_parser(text, json_bytes=len(raw))
             parsed = parse_exact_json_object(text)
@@ -392,8 +393,54 @@ def original_path(
     raise ValueError("Trash item is outside its declared placement")
 
 
+class PlacementChanged(ValueError):
+    """A Trash placement that changed while a census read it, or that disagrees with the store's record of it.
+
+    A race, not a fault of the page that names it: a later read can pass. It stays a `ValueError`, so a caller
+    that already takes any `ValueError` as an unknown census still does.
+    """
+
+    def __init__(self, path: str, reason: str = "Trash placement changed during the census") -> None:
+        super().__init__(reason)
+        self.path = path
+
+
+def binary_exists(vault: Path, rel: str, *, inspect: Callable[[Path, str], object] | None = None) -> bool:
+    """Whether a file is at ``rel``. Under a pinned store snapshot, the store's record answers for a binary it owns.
+
+    The record is what that snapshot's commit holds; the disk can lag it while the projector still owes a move.
+    Raises `reserved_paths.ReservedPathLeafError` for a path that cannot be inspected.
+    """
+    view = _pinned(vault)
+    if view is not None and _store_binary(rel):
+        return view.binary(rel) is not None
+    try:
+        (inspect or reserved_paths.inspect_generic_path)(vault, rel)
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code != "MISSING":
+            raise
+        return False
+    return True
+
+
+def _pinned(vault: Path):
+    from .vault_store import read as store_read
+
+    return store_read.pinned_view(vault)
+
+
+def _store_binary(rel: str) -> bool:
+    from .vault_store import ownership
+
+    return ownership.classify(rel) is ownership.Ownership.BINARY
+
+
 class PlacementCensus:
-    """Reuse bounded placement parsing and recheck every acquired metadata version."""
+    """Reuse bounded placement parsing and recheck every acquired metadata version.
+
+    Under a pinned store snapshot (`vault_store.read.pinned`), a placement's bytes still come from the disk, and
+    they must match the hash that the snapshot records for that file: a disagreement is `PlacementChanged`.
+    """
 
     def __init__(self, vault: Path) -> None:
         self.vault = vault
@@ -403,8 +450,13 @@ class PlacementCensus:
     def _placement(self, root: str) -> dict[str, object] | None:
         if root not in self.placements:
             path = root + METADATA_SUFFIX
+            view = _pinned(self.vault)
+            recorded = view.binary(path) if view is not None and _store_binary(path) else None
             try:
-                parsed, _text, version = _document(self.vault, path)
+                parsed, text, version = _document(self.vault, path)
+                if view is not None and _store_binary(path) and (
+                        recorded is None or hashlib.sha256(text.encode("utf-8")).hexdigest() != recorded.sha256):
+                    raise PlacementChanged(path, "a Trash placement on disk differs from the store's record of it")
                 placement = {"original_path": parsed.get("original_path")}
                 original_path(placement, trash_root=root, current_path=root)
                 if "original_retirement" in parsed:
@@ -415,6 +467,8 @@ class PlacementCensus:
             except reserved_paths.ReservedPathLeafError as error:
                 if error.code != "MISSING":
                     raise
+                if recorded is not None:
+                    raise PlacementChanged(path, "the store records a Trash placement that the disk lacks") from error
                 self.placements[root] = None
         return self.placements[root]
 
@@ -434,12 +488,7 @@ class PlacementCensus:
         if (proof is None or companion != proof.companion
                 or not _matches_retirement_fields(fields, metadata, digest, proof)):
             return False
-        try:
-            reserved_paths.inspect_generic_path(self.vault, proof.source.path)
-        except reserved_paths.ReservedPathLeafError as error:
-            if error.code != "MISSING":
-                raise
-        else:
+        if binary_exists(self.vault, proof.source.path):
             return False
         return _confirmed_by_trash(self.vault, proof)
 
@@ -481,10 +530,15 @@ class PlacementCensus:
 
     def require_current(self) -> None:
         for path, version in self.versions.items():
-            with reserved_paths.open_generic_binary(self.vault, path) as source:
-                if source.version != version:
-                    raise ValueError("Trash placement changed during the census")
-                source.require_current()
+            try:
+                with reserved_paths.open_generic_binary(self.vault, path) as source:
+                    if source.version != version:
+                        raise PlacementChanged(path)
+                    source.require_current()
+            except reserved_paths.ReservedPathLeafError as error:
+                if error.code not in reserved_paths.CHANGE_CODES:
+                    raise
+                raise PlacementChanged(path) from error
 
 
 def retired_companion(vault: Path, companion: str, fields: dict[str, object], digest: str,

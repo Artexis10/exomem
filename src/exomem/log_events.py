@@ -54,6 +54,7 @@ EVENT_CATALOG: dict[str, EventSpec] = {
     "http_request": EventSpec(content_fields=frozenset({"client_ip", "host", "path"})),
     "mutation_lock_acquired": EventSpec(),
     "mutation_lock_released": EventSpec(),
+    "media_offload_wait": EventSpec(),
     "mutation_lock_long_hold": EventSpec(),
     "mutation_lock_hold_summary": EventSpec(),
     "mutation_lock_refused": EventSpec(),

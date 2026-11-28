@@ -91,6 +91,10 @@ def main(argv: list[str] | None = None) -> int:
     from .logging_config import configure_logging, resolve_log_dir
 
     configure_logging(resolve_log_dir(), process="media")
+    from . import media_bindings
+
+    # Only the serving process rebuilds the binding projection; this one reads it and its failure record.
+    media_bindings.refuse_rebuilds()
 
     args = arguments(argv)
 

@@ -31,6 +31,7 @@ from exomem import (
     delete_file,
     extract,
     file_watcher,
+    media_bindings,
     media_jobs,
     media_processing,
     media_store,
@@ -452,6 +453,8 @@ def test_a_new_original_that_a_store_mode_vault_offloads_can_then_be_evicted_and
     settling = importer.Importer(stored, run=store_thread.run)
     (stored / PICTURE).write_bytes(PICTURE_BYTES)
     settling.import_paths([PICTURE])
+    # The watcher's reconcile thread makes the allowance's projection current; this test runs no watcher.
+    assert media_bindings.recover(stored)
 
     reference = _offload(stored, stored / PICTURE)
 
@@ -489,6 +492,8 @@ def test_trash_retirement_tracks_the_authoritative_companion_before_markdown_pro
     settling = importer.Importer(stored, run=store_thread.run)
     (stored / PICTURE).write_bytes(PICTURE_BYTES)
     settling.import_paths([PICTURE])
+    # The watcher's reconcile thread makes the allowance's projection current; this test runs no watcher.
+    assert media_bindings.recover(stored)
     assert _offload(stored, stored / PICTURE) is not None
     results = []
     store_thread.run(lambda _writer: results.append(delete_file.delete_file(stored, path=PICTURE, confirm=True)))

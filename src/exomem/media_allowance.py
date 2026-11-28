@@ -108,6 +108,11 @@ class ReferenceUsage:
         entries = (matches,) if isinstance(matches, tuple) else matches.items()
         return [(Path(path), self.versions[key][1]) for key, path in islice(entries, limit)]
 
+    def version(self, reference: originals.StoredObject) -> tuple[str, int, originals.StoredObject] | None:
+        """The digest, size and reference that the census counts for this version, or None when it counts none."""
+        found = None if self.versions is None else self.versions.get(_key(reference))
+        return None if found is None else (found[0].sha256, found[0].size, found[1])
+
     def skip_reuse(self, binary: originals.BinaryBinding, reference: originals.StoredObject) -> None:
         """Keep a failed version in the allowance while this census stops offering it for reuse."""
         group = (binary.sha256, binary.size, reference.key_version)
@@ -117,6 +122,53 @@ class ReferenceUsage:
                 del self._reuse[group]
         elif matches is not None:
             matches.pop(_key(reference), None)
+
+
+@dataclass(slots=True)
+class ProjectedUsage:
+    """The owner total that the binding projection gives in store mode (count-media-allowance-from-bindings D1).
+
+    It answers what `ReferenceUsage` answers for an admission: the bytes in use, the figure of a version, and the
+    reuse slice of an original's bytes. `figures` maps (object, version) in `store` to the digest, size and reference
+    that the projection counts, or None when it counts none. `candidates` holds reuse slices by (digest, size, key
+    version); `find` reads a slice that is not held. `counting` marks a total that the projection is still counting.
+    """
+
+    used: int | None
+    observed_at: str
+    store: str
+    figures: dict[tuple[str, str], tuple[str, int, originals.StoredObject] | None] = field(default_factory=dict)
+    candidates: dict[tuple[str, int, str], list[tuple[Path, originals.StoredObject]]] = field(default_factory=dict)
+    find: Callable[[str, int, str], list[tuple[Path, originals.StoredObject]]] | None = None
+    blockers: tuple[Blocker, ...] = ()
+    counting: bool = False
+
+    @property
+    def used_bytes(self) -> int | None:
+        return self.used
+
+    def version(self, reference: originals.StoredObject) -> tuple[str, int, originals.StoredObject] | None:
+        if reference.store != self.store:
+            return None  # the projection holds references in the selected store only, as the census counts
+        return self.figures.get((reference.object, reference.version))
+
+    def reuse_candidates(self, binary: originals.BinaryBinding, key_version: str, *, limit: int
+                         ) -> list[tuple[Path, originals.StoredObject]]:
+        if self.used is None:
+            return []
+        group = (binary.sha256, binary.size, key_version)
+        if group not in self.candidates:
+            self.candidates[group] = [] if self.find is None else self.find(*group)
+        found = self.candidates[group][:limit]
+        for _path, reference in found:
+            # A counted total has no conflict, so every row of a version found by these bytes holds these bytes.
+            self.figures.setdefault((reference.object, reference.version), (binary.sha256, binary.size, reference))
+        return found
+
+    def skip_reuse(self, binary: originals.BinaryBinding, reference: originals.StoredObject) -> None:
+        group = (binary.sha256, binary.size, reference.key_version)
+        if group in self.candidates:
+            self.candidates[group] = [item for item in self.candidates[group] if item[1] != reference]
 
 
 def _key(reference: originals.StoredObject) -> tuple[str, str, str]:
@@ -134,14 +186,16 @@ def _consistent(
 
 
 def projected_bytes(
-    usage: ReferenceUsage, binary: originals.BinaryBinding, reference: originals.StoredObject | None,
+    usage: ReferenceUsage | ProjectedUsage, binary: originals.BinaryBinding, reference: originals.StoredObject | None,
 ) -> int | None:
     """Count a proposed version once; None names a new version not uploaded yet."""
     used = usage.used_bytes
-    if used is None or usage.versions is None:
+    if used is None:
         return None
-    if reference is not None and (existing := usage.versions.get(_key(reference))) is not None:
-        _consistent(existing, (binary, reference))
+    if reference is not None and (existing := usage.version(reference)) is not None:
+        sha256, size, counted = existing
+        if sha256 != binary.sha256 or size != binary.size or counted != reference:
+            raise ValueError("one stored version has conflicting bindings")
         return used
     return used + binary.size
 
@@ -182,7 +236,7 @@ def decide(
 
 
 def admission(
-    usage: ReferenceUsage, binary: originals.BinaryBinding,
+    usage: ReferenceUsage | ProjectedUsage, binary: originals.BinaryBinding,
     reference: originals.StoredObject | None, allowance_bytes: int | None,
 ) -> AllowanceDecision:
     """Admit one proposed plaintext version against the current reference union."""
@@ -191,6 +245,35 @@ def admission(
     except ValueError:
         projected = None
     return decide(usage.used_bytes, projected, allowance_bytes, usage.observed_at)
+
+
+class ReferenceUnknown(ValueError):
+    """A page whose stored reference the census cannot count: malformed, or naming a version it binds no original to."""
+
+
+def page_reference(
+    path: str, fields: dict[str, object], store: str, placements: trash_metadata.PlacementCensus,
+) -> tuple[originals.BinaryBinding, originals.StoredObject] | None:
+    """The census's rule for one page's parsed header: the version it counts in `store`, or None when it counts none.
+
+    The owner census and the binding projection (`media_bindings`) both take it, so each counts what the other does.
+    Raises `ReferenceUnknown` for a reference that cannot be counted, `originals.DisplacedReference` for a page
+    away from its original, which the media ledger must confirm, and any other `ValueError` that resolving the
+    page's placement raises.
+    """
+    if "stored_object" not in fields:
+        return None
+    reference = originals.stored_reference(fields["stored_object"])
+    if reference is None:
+        raise ReferenceUnknown("stored reference is malformed")
+    if reference.store != store:
+        return None
+    # A live page's `DisplacedReference` comes here, and so does a Trash page that sat away from its
+    # companion path before its deletion: the caller confirms both from the ledger.
+    binary = placements.resolve(path, fields)
+    if binary is None:
+        raise ReferenceUnknown("stored reference has no valid binary binding")
+    return binary, reference
 
 
 def bound_references(
@@ -234,18 +317,7 @@ def bound_references(
                 if entry.markdown is None:
                     raise ValueError("companion header was not read")
                 fields = parse_frontmatter(entry.markdown.decode("utf-8"), custody=True)[0]
-                bound = None
-                if "stored_object" in fields:
-                    reference = originals.stored_reference(fields["stored_object"])
-                    if reference is None:
-                        raise ValueError("stored reference is malformed")
-                    if reference.store == store.store:
-                        # A live page's `DisplacedReference` comes here, and so does a Trash page that sat
-                        # away from its companion path before its deletion: the ledger confirms both below.
-                        binary = placements.resolve(path, fields)
-                        if binary is None:
-                            raise ValueError("stored reference has no valid binary binding")
-                        bound = binary, reference
+                bound = page_reference(path, fields, store.store, placements)
             except originals.DisplacedReference as error:
                 displaced.append((path, error))
                 continue

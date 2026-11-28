@@ -757,6 +757,8 @@ class _RequestScope:
 _REQUEST: ContextVar[_RequestScope | None] = ContextVar(
     "vault_store_request_snapshot", default=None
 )
+#: The scope that ``pinned`` set: a derivation that answers for store-owned binaries from that snapshot's records.
+_PINNED: ContextVar[_RequestScope | None] = ContextVar("vault_store_pinned_snapshot", default=None)
 # This stack identifies borrowed read connections without treating writer-side derivation as a read.
 _SNAPSHOTS: ContextVar[tuple[StoreSnapshot, ...]] = ContextVar("vault_store_snapshots", default=())
 
@@ -794,6 +796,31 @@ def request_snapshot(vault_root: Path, *, catch_up: bool = False) -> Iterator[No
                     yield
                     return
         yield
+
+
+@contextmanager
+def pinned(vault_root: Path, view: StoreSnapshot) -> Iterator[None]:
+    """Make every ``snapshot`` call on this thread for this vault join ``view``, which the caller holds open.
+
+    A background reader that derives facts from one snapshot (``media_bindings``) reads each page that the
+    store owns through the byte chokepoints, which open their own snapshot otherwise and could read a later
+    commit than the one it follows.
+    """
+    scope = _RequestScope(Path(vault_root), threading.get_ident(), view)
+    token, marked = _REQUEST.set(scope), _PINNED.set(scope)
+    try:
+        yield
+    finally:
+        _PINNED.reset(marked)
+        _REQUEST.reset(token)
+
+
+def pinned_view(vault_root: Path) -> StoreSnapshot | None:
+    """The snapshot that ``pinned`` binds on this thread for this vault, or None; a request's own scope is not one."""
+    scope = _PINNED.get()
+    if scope is None or scope.thread != threading.get_ident() or scope.root != Path(vault_root):
+        return None
+    return scope.view
 
 
 def _caught_up(root: Path, scope: ExitStack, catch_up: bool) -> tuple[StoreSnapshot, bool]:

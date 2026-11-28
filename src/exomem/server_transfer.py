@@ -72,16 +72,60 @@ log = logging.getLogger(__name__)
 _header_count = upload_sessions.header_count
 
 
+@dataclass(frozen=True, slots=True)
+class _AllowanceAnswer:
+    """What the media allowance answers an upload before its bytes are kept: a refusal (413) or busy (503)."""
+
+    status: int
+    body: dict
+    headers: dict[str, str]
+    retry_after: int | None = None
+
+    def response(self) -> JSONResponse:
+        return JSONResponse(self.body, status_code=self.status, headers=self.headers)
+
+
+class _AllowanceStop(Exception):  # deliberately no ValueError, which claim_upload callers answer as an unusable ticket
+    """A ticket's before-body allowance answer, raised through `claim_upload` so the ticket stays usable."""
+
+    def __init__(self, answer: _AllowanceAnswer) -> None:
+        super().__init__(answer.body["code"])
+        self.answer = answer
+
+
+class _AllowanceSessionError(upload_sessions.SessionError):
+    """A resumable session's allowance answer, with the headers that a busy answer carries."""
+
+    def __init__(self, answer: _AllowanceAnswer) -> None:
+        super().__init__(answer.body["code"], answer.body["reason"], answer.status)
+        self.headers = answer.headers
+
+
+async def _ticket_admission(vault_root: Path, request: Request, lane: str) -> None:
+    """A ticket's before-body allowance check, which `claim_upload` runs before it spends the ticket (D5).
+
+    Content-Length less the framing allowance is the least the file can hold. With no name yet, only a Source
+    upload can be refused here; any other request reads its form and asks again after the claim.
+    """
+    declared = _header_count(request.headers.get("content-length", ""))
+    if declared is not None and declared > _FORM_OVERHEAD_BYTES:
+        answer = await _allowance_refused(
+            vault_root, declared - _FORM_OVERHEAD_BYTES, None, lane, most_bytes=declared)
+        if answer is not None:
+            raise _AllowanceStop(answer)
+
+
 async def _allowance_refused(
     vault_root: Path, file_bytes: int | None, filename: str | None, lane: str, *, most_bytes: int | None = None,
-) -> dict[str, str] | None:
-    """The refusal body for an upload that the media allowance cannot hold, read before its bytes are kept (D10).
+) -> _AllowanceAnswer | None:
+    """The answer for an upload that the media allowance cannot hold now, read before its bytes are kept (D10).
 
     In the Evidence lane the file's name decides whether it charges the allowance. A multipart body names its
     file only in the body, so the multipart lanes ask once the form is read, before they hold or file a byte. The
     ticket lane also asks before the body, from Content-Length, with no name: that can refuse only a Source upload.
     A resumable session names its file at creation, before any byte. A request without a size carries nothing to
-    admit here; offload's own admission then keeps its original local.
+    admit here; offload's own admission then keeps its original local. In store mode an allowance that is still
+    counting a large backlog answers busy (503 with `Retry-After`) and admits nothing.
     """
     from . import media_allowance, media_store
 
@@ -89,7 +133,15 @@ async def _allowance_refused(
         return None
     reason = await run_in_threadpool(
         media_store.upload_refusal, vault_root, file_bytes, filename, lane, most_bytes=most_bytes)
-    return None if reason is None else {"code": media_allowance.MEDIA_ALLOWANCE_EXCEEDED, "reason": reason}
+    if reason is None:
+        return None
+    if isinstance(reason, media_store.UploadBusy):
+        return _AllowanceAnswer(503, {
+            "code": media_store.STORE_BUSY_CODE,
+            "reason": f"the media allowance is still counting recent changes; retry after {reason.retry_after} seconds",
+            "diagnostics": {"audit_rows": reason.rows},
+        }, {"Retry-After": str(reason.retry_after)}, reason.retry_after)
+    return _AllowanceAnswer(413, {"code": media_allowance.MEDIA_ALLOWANCE_EXCEEDED, "reason": reason}, {})
 
 
 def _flag(value: str) -> bool | None:
@@ -885,9 +937,23 @@ class _OriginalDownloadResponse(Response):
                 status_code=404, headers=_RECOVERY_HEADERS)(scope, receive, send)
 
 
+class _SpentBusy(Exception):
+    def __init__(self, answer: _AllowanceAnswer) -> None:
+        super().__init__(answer.body["code"])
+        self.answer = answer
+
+
 async def _receive_ticket_upload(vault_root: Path, request: Request, ticket: dict) -> JSONResponse:
     """Receive one claimed ticket's file into a held upload; the ticket fixes lane and limit."""
-    status, body = await _hold_ticket_upload(vault_root, request, ticket)
+    try:
+        status, body = await _hold_ticket_upload(vault_root, request, ticket)
+    except _SpentBusy as busy:
+        # A busy answer after the claim leads with the new-link retry, in place of the spent ticket's remedy (D5).
+        answer = busy.answer
+        lead = (f"This upload link is used now; request a new link from upload_files after "
+                f"{answer.retry_after} seconds.")
+        return JSONResponse({**answer.body, "reason": f"{lead} The media allowance is still counting recent changes."},
+                            status_code=answer.status, headers=answer.headers)
     if status != 201:
         # The claim spent the ticket, so a refusal must say that a retry needs a new upload.
         body = {**body, "reason": f"{body['reason']}. {upload_handoff.SPENT_REMEDY}"}
@@ -917,13 +983,7 @@ async def _hold_ticket_upload(vault_root: Path, request: Request, ticket: dict) 
     declared = _header_count(request.headers.get("content-length", ""))
     if declared is not None and declared > maximum + _FORM_OVERHEAD_BYTES:
         return 413, {"code": "TOO_LARGE", "reason": "upload exceeds the handoff limit"}
-    # Content-Length less the framing allowance is the least the file can hold. With no name yet, only a
-    # Source upload can be refused here; any other request reads its form and asks again below.
-    if declared is not None and declared > _FORM_OVERHEAD_BYTES:
-        refused = await _allowance_refused(
-            vault_root, declared - _FORM_OVERHEAD_BYTES, None, ticket["lane"], most_bytes=declared)
-        if refused is not None:
-            return 413, refused
+    # The allowance's before-body check ran in `claim_upload`, before the ticket was spent (`_ticket_admission`).
     try:
         async with multipart_upload.form(
             bounded, vault_root, max_files=1, max_fields=3, max_part_size=_FORM_OVERHEAD_BYTES,
@@ -942,8 +1002,10 @@ async def _hold_ticket_upload(vault_root: Path, request: Request, ticket: dict) 
                 # The cause alone: the refusal's remedy is the spent ticket's, which the caller adds.
                 return 401, {"code": "UPLOAD_HANDOFF_UNAVAILABLE", "reason": upload_handoff.UNAVAILABLE_REASON}
             filename = str(form.get("filename") or upload.filename or "")
-            if (refused := await _allowance_refused(vault_root, upload.size, filename, ticket["lane"])) is not None:
-                return 413, refused
+            if (answer := await _allowance_refused(vault_root, upload.size, filename, ticket["lane"])) is not None:
+                if answer.retry_after is not None:
+                    raise _SpentBusy(answer)
+                return answer.status, answer.body
             with principal_module.request_scope(ticket["principal"]):
                 held = await run_in_threadpool(
                     held_uploads.hold, vault_root, upload.file,
@@ -1104,7 +1166,10 @@ def register_cloud_upload_route(mcp_app: FastMCP, *, vault_root: Path, cell_bear
             return JSONResponse({"code": "CLOUD_CELL_READ_ONLY", "reason": "this Evermatter Cloud cell is serving read-only"}, status_code=503)
         with cloud_origin.bound(request_origin):
             try:
-                claimed = await upload_handoff.claim_upload(vault_root, ticket)
+                claimed = await upload_handoff.claim_upload(
+                    vault_root, ticket, admit_ticket=functools.partial(_ticket_admission, vault_root, request))
+            except _AllowanceStop as stop:  # answered before the claim, so the ticket stays usable
+                return stop.answer.response()
             except ValueError:
                 return _handoff_unavailable()
             return await _receive_ticket_upload(vault_root, request, claimed)
@@ -1284,7 +1349,10 @@ def register_transfer_routes(
         presented = header[len("Bearer "):].strip() if header.startswith("Bearer ") else ""
         if presented.startswith(upload_handoff.TOKEN_PREFIX):
             try:
-                ticket = await upload_handoff.claim_upload(vault_root, presented)
+                ticket = await upload_handoff.claim_upload(
+                    vault_root, presented, admit_ticket=functools.partial(_ticket_admission, vault_root, request))
+            except _AllowanceStop as stop:  # answered before the claim, so the ticket stays usable
+                return stop.answer.response()
             except ValueError:
                 return _handoff_unavailable()
             return await _receive_ticket_upload(vault_root, request, ticket)
@@ -1365,8 +1433,8 @@ def register_transfer_routes(
                 status_code=400,
             )
         lane = str(form.get("lane") or "evidence").strip() if hold else _upload_lane(request)
-        if (refused := await _allowance_refused(vault_root, getattr(upload, "size", None), filename, lane)) is not None:
-            return JSONResponse(refused, status_code=413)
+        if (answer := await _allowance_refused(vault_root, getattr(upload, "size", None), filename, lane)) is not None:
+            return answer.response()
         if hold:
             # `preserve-attachment-originals`: hold the bytes for a file-handle
             # command instead of preserving them. Only a verified local grant
@@ -1686,8 +1754,8 @@ def register_transfer_routes(
                     )
             if diarize is not None:
                 target["diarize"] = diarize
-            if (refused := await _allowance_refused(vault_root, declared, target["filename"], lane)) is not None:
-                raise upload_sessions.SessionError(refused["code"], refused["reason"], 413)
+            if (answer := await _allowance_refused(vault_root, declared, target["filename"], lane)) is not None:
+                raise _AllowanceSessionError(answer)
 
         async def admit_source(who: principal_module.RequestPrincipal) -> None:
             if declared > session_max_bytes:
@@ -1731,7 +1799,8 @@ def register_transfer_routes(
         except add.AddError as exc:
             return _tus_refusal(exc.code, exc.reason, 400)
         except upload_sessions.SessionError as exc:
-            return _tus_refusal(exc.code, exc.reason, exc.status, handoff_spent=ticket is not None)
+            return _tus_refusal(exc.code, exc.reason, exc.status, handoff_spent=ticket is not None,
+                                **getattr(exc, "headers", {}))
         except OSError:
             if ticket is None:
                 raise

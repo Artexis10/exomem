@@ -1273,12 +1273,19 @@ def _enqueue_offload(
 
 def enqueue_offloads(vault: Path) -> int:
     from . import foreground_priority, media_bindings, original_pool
+    from .vault_store import mode
     from .writer_lease import get_manager
 
     if originals.binding_for(vault) is None:
         return 0
-    if original_pool.enabled(vault):
+    if mode.store_mode_for_reads(vault):
+        # The store sweep rebuilds the projection, so the start scan waits for no rebuild (D4).
+        with suppress(*media_bindings.RACES):
+            media_bindings.follow_until(vault)
+    elif original_pool.enabled(vault):
         media_bindings.recover(vault)  # The census takes its own guard, so it runs before the scan's.
+    config = originals.configuration(vault) or {}
+    projected = media_bindings.counts_allowance(vault, config)
     with get_manager().consistency_guard(vault, operation="media_offload_scan", holder_kind="background"):
         placeholders = ",".join("?" for _code in media_allowance.ALLOWANCE_REFUSAL_CODES)
         rows, _coverage = _status_candidates(vault, "media_offload_refusals",
@@ -1286,7 +1293,10 @@ def enqueue_offloads(vault: Path) -> int:
             media_allowance.ALLOWANCE_REFUSAL_CODES)
         # With no allowance each refusal stays unknown whatever the census counts (`_refusal_code`).
         allowance = media_allowance.configured((originals.configuration(vault) or {}).get("allowance_bytes"))
-        usage = media_allowance.reference_usage(vault) if rows and allowance is not None else None
+        usage = (media_allowance.reference_usage(vault)
+                 if rows and allowance is not None and not projected else None)
+    if rows and projected:
+        usage = _projected_census(vault, config)  # in store mode the projection's total, read outside the hold
     # The walk reads every companion page, so it holds no boundary: one hold around it kept every save
     # waiting for minutes on a large vault. Each enqueue re-reads its original under a brief hold, and a
     # census older than the walk only decides what is queued: offload admission takes its own census.
@@ -1508,6 +1518,8 @@ class RecordedCensus:
     used_bytes: int | None
     observed_at: str
     blockers: tuple[media_allowance.Blocker, ...] = ()
+    #: The binding projection is still counting the total (store mode, count-media-allowance-from-bindings D5).
+    counting: bool = False
 
     def older_than(self, seconds: float) -> bool:
         """Whether the census is older than `seconds`; a time that cannot be read counts as older."""
@@ -1521,17 +1533,33 @@ class RecordedCensus:
 def take_census(vault: Path) -> RecordedCensus:
     """Count the owner references now and record the result, as an offload batch does; for a status with a demand (D12)."""
     vault = Path(vault).resolve()
+    if (projected := _store_census(vault)) is not None:
+        return projected
     usage = media_allowance.reference_usage(vault)
     with suppress(*_LEDGER_UNREADABLE):  # The reading is still returned; only the record is lost.
         _record_census(MediaJobStore(vault), usage)
     return RecordedCensus(usage.used_bytes, usage.observed_at, usage.blockers)
 
 
+def _store_census(vault: Path) -> RecordedCensus | None:
+    """In store mode the census is the binding projection's total, read now and recorded nowhere (D1); else None."""
+    from . import media_bindings
+
+    config = originals.configuration(vault) or {}
+    if not media_bindings.counts_allowance(vault, config):
+        return None
+    usage = _projected_census(vault, config)
+    return RecordedCensus(usage.used_bytes, usage.observed_at, usage.blockers, usage.counting)
+
+
 def recorded_census(vault: Path) -> RecordedCensus | None:
     """The latest census that offload recorded, or None when it recorded none.
 
     Raises `MediaStoreError` when the ledger cannot be read. A ledger from before the record has no table: none.
+    In store mode it is the binding projection's total, which is always current.
     """
+    if (projected := _store_census(Path(vault).resolve())) is not None:
+        return projected
     ledger = MediaJobStore(Path(vault).resolve(), create=False)
     if not ledger.path.exists():
         return None
@@ -1601,6 +1629,144 @@ def _reuse_walk_inputs(
     return usage, candidates, damaged
 
 
+class ProjectionWait(MediaStoreError):
+    """Offload waits until the binding projection counts the owner total (count-media-allowance-from-bindings D5).
+
+    Its code is `STORE_BUSY_CODE`, so the worker returns the job without spending an attempt.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(STORE_BUSY_CODE, reason)
+
+
+def _stored(text: str) -> StoredObject | None:
+    try:
+        return originals.stored_reference(json.loads(text))
+    except (TypeError, ValueError, RecursionError):
+        return None
+
+
+def _projected_usage(head, store: str, key: tuple[str, str] | None = None, *,
+                     find: Callable[[str, int, str], list[tuple[Path, StoredObject]]] | None = None,
+                     ) -> media_allowance.ProjectedUsage:
+    """The `ProjectedUsage` of a total at the store's head (`media_bindings.head_total`)."""
+    from . import media_bindings
+
+    observed = datetime.now(UTC).isoformat()
+    if head.state != media_bindings.COUNTED:
+        blockers = tuple(media_allowance.Blocker(path, reason[:media_allowance.REASON_MAX_CHARS] or "unreadable")
+                         for path, reason in head.blockers)
+        return media_allowance.ProjectedUsage(
+            None, observed, store, blockers=blockers,
+            counting=head.state in (media_bindings.WAIT, media_bindings.BUSY))
+    figure = head.figure
+    figures: dict[tuple[str, str], tuple[str, int, StoredObject] | None] = {}
+    if key is not None:
+        counted = None if figure is None else _stored(figure.reference)
+        figures[key] = None if figure is None or counted is None else (figure.sha256, figure.size, counted)
+    return media_allowance.ProjectedUsage(head.used_bytes, observed, store, figures, find=find)
+
+
+def _projected_census(vault: Path, config: dict[str, object]) -> media_allowance.ProjectedUsage:
+    """The owner total at the store's head for a reader that reports it or decides what is queued (D1).
+
+    It follows nothing, holds no boundary and writes nothing. A projection that needs a rebuild or a follow past
+    the upload bound is still counting; a race or a read failure is unknown and names no note.
+    """
+    from . import media_bindings
+
+    store = str(config.get("store"))
+
+    def find(digest: str, size: int, key_version: str) -> list[tuple[Path, StoredObject]]:
+        try:
+            found = media_bindings.reuse_versions(vault, digest, size, key_version)
+        except media_bindings.RACES:
+            return []
+        return [(Path(rel), reference) for rel, text in found if (reference := _stored(text)) is not None]
+
+    try:
+        head = media_bindings.head_total(vault)
+    except media_bindings.RACES:
+        return media_allowance.ProjectedUsage(None, datetime.now(UTC).isoformat(), store)
+    return _projected_usage(head, store, find=find)
+
+
+def _store_usage(
+    vault: Path, config: dict[str, object], binary: originals.BinaryBinding, *, reference: StoredObject | None = None,
+    reuse: bool = False, follow: bool = True, previous=None,
+):
+    """Offload's owner total in store mode, at the store's head, with the figure of ``reference`` (D2, D5).
+
+    With ``follow`` it first follows the trail until the projection lags by 256 rows or fewer, for at most 8 rounds;
+    a hold passes False. It applies at most that suffix in memory, so it walks no note and writes nothing.
+    With ``previous`` read at the same checkpoint, the aggregate is not read again. A total that is not current
+    raises `ProjectionWait`; a failed rebuild, an unknown row or a conflict gives an unknown total with its notes.
+    Returns the usage and the published total that it corrected.
+    """
+    from . import media_bindings
+
+    if follow:
+        _follow_before_hold(vault)
+    store = str(config["store"])
+    key = (reference.object, reference.version) if reference is not None and reference.store == store else None
+    group = (binary.sha256, binary.size, str(config["key_version"]))
+    try:
+        head = media_bindings.head_total(vault, version=key, reuse=group if reuse else None,
+                                         limit=media_bindings.REPLAY_ROWS, previous=previous)
+    except media_bindings.RACES as error:
+        raise ProjectionWait("the owner total changed while it was read") from error
+    if head.state in (media_bindings.WAIT, media_bindings.BUSY):
+        raise ProjectionWait(head.reason or "the owner total is being counted")
+    usage = _projected_usage(head, store, key)
+    if reuse and head.state == media_bindings.COUNTED:
+        usage.candidates[group] = [(Path(rel), found) for rel, text in head.reuse if (found := _stored(text)) is not None]
+    return usage, head.total
+
+
+def _follow_before_hold(vault: Path) -> None:
+    """Follow until the projection lags the audit head by 256 rows or fewer, for at most 8 rounds (D2)."""
+    from . import media_bindings
+
+    try:
+        followed = media_bindings.follow_until(vault, lag=media_bindings.REPLAY_ROWS,
+                                               rounds=media_bindings.FOLLOW_ROUNDS)
+    except media_bindings.RACES as error:
+        raise ProjectionWait("the store's audit trail could not be read") from error
+    if followed.lag is not None and followed.lag > media_bindings.REPLAY_ROWS:
+        raise ProjectionWait("the projection lags the store by more than one replay")
+
+
+def _offload_waited(vault: Path, job: MediaJob | None, reason: str | None, outcome: str) -> None:
+    """Log `media_offload_wait` and keep the job's first wait on its row, so that a restart keeps it (task 2.7).
+
+    A return ("returned") records the wait. Publication or refusal logs the whole wait and clears it, and does
+    nothing for a job that never waited. A ledger that cannot be read or written costs this log, never the offload.
+    """
+    from .log_events import log_event
+
+    if job is None or job.id is None:
+        return
+    now = time.time()
+    try:
+        with closing(MediaJobStore(vault)._connect()) as conn, conn:
+            row = conn.execute("SELECT offload_wait_since, offload_waits FROM jobs WHERE id = ?", (job.id,)).fetchone()
+            if row is None:
+                return
+            since, waits = row[0], int(row[1] or 0)
+            if outcome == "returned":
+                since, waits = (now if since is None else since), waits + 1
+                conn.execute("UPDATE jobs SET offload_wait_since = ?, offload_waits = ? WHERE id = ?",
+                             (since, waits, job.id))
+            elif since is None:
+                return
+            else:
+                conn.execute("UPDATE jobs SET offload_wait_since = NULL, offload_waits = 0 WHERE id = ?", (job.id,))
+    except _LEDGER_UNREADABLE:
+        return
+    log_event(log, logging.INFO, "media_offload_wait", fields={
+        "seconds": round(now - float(since), 3), "returns": waits, "reason": reason, "outcome": outcome})
+
+
 def _offload_admission(
     vault: Path, snapshot: OriginalSnapshot, *, reference: StoredObject | None = None,
     select_reuse: bool = True, usage: media_allowance.ReferenceUsage | None = None,
@@ -1610,9 +1776,12 @@ def _offload_admission(
     The reuse is the first live filing of a version of equal bytes that no finding recorded as damaged
     (`_reuse_candidates`). Offload confirms its candidates against the store itself (`_offload_member`).
     """
+    from . import media_bindings
     from .writer_lease import get_manager
 
     binary = _binding_of(vault, snapshot)
+    if usage is None and media_bindings.counts_allowance(vault, configured := originals.configuration(vault) or {}):
+        usage = _projected_census(vault, configured)  # store mode reads the projection outside the hold (D1)
     with get_manager().consistency_guard(vault, operation="media_offload_admission", holder_kind="background"):
         config = originals.configuration(vault) or {}
         if usage is None and media_allowance.configured(config.get("allowance_bytes")) is None:
@@ -1629,14 +1798,59 @@ def _offload_admission(
                 try:
                     reuse, reference = _live_filing(vault, binary, path, candidate_reference), candidate_reference
                 except _FILING_UNREADABLE:
+                    if isinstance(usage, media_allowance.ProjectedUsage):
+                        continue  # the projection's total does not rest on one filing: try the next (D1)
                     usage = media_allowance.ReferenceUsage(None, usage.observed_at)
                 break
         return media_allowance.admission(usage, binary, reference, config.get("allowance_bytes")), reuse
 
 
+@dataclass(frozen=True, slots=True)
+class UploadBusy:
+    """Upload admission found the projection too far behind the store to count now (D5): retry after a while.
+
+    `retry_after` is in whole seconds; `rows` is the audit suffix that the projection has not followed yet.
+    """
+
+    retry_after: int
+    rows: int
+
+
+#: The expected time to follow one round of audit rows, which sets an upload's retry hint (design, Cost).
+_ROUND_SECONDS = 0.5
+
+
+def _upload_busy(vault: Path, rows: int) -> UploadBusy:
+    """Wake the watcher's follow, and hint a retry once it should have followed ``rows`` audit rows (D5)."""
+    from . import file_watcher, media_bindings
+
+    interval = file_watcher.wake_binding_follow(vault)
+    if interval is None:
+        return UploadBusy(math.ceil(file_watcher.RECONCILE_INTERVAL_SECONDS), rows)
+    expected = rows / media_bindings.REPLAY_ROWS * _ROUND_SECONDS
+    return UploadBusy(math.ceil(max(1.0, min(interval, expected))), rows)
+
+
+def _store_upload_decision(vault: Path, declared_bytes: int, allowance_bytes: object
+                           ) -> media_allowance.AllowanceDecision | UploadBusy:
+    """Decide an upload on the owner total at the store's head, taking no boundary and writing nothing (D5)."""
+    from . import media_bindings
+
+    try:
+        head = media_bindings.head_total(vault)
+    except media_bindings.RACES as error:  # a race or a read failure admits the upload as unknown
+        log.warning("the upload allowance check admits an upload as unknown: %s", type(error).__name__)
+        return media_allowance.unset_decision()
+    if head.state == media_bindings.BUSY:
+        return _upload_busy(vault, head.rows)
+    used = head.used_bytes if head.state == media_bindings.COUNTED else None
+    return media_allowance.decide(used, None if used is None else used + declared_bytes, allowance_bytes,
+                                  datetime.now(UTC).isoformat())
+
+
 def upload_refusal(
     vault: Path, declared_bytes: int, filename: str | None, lane: str, *, most_bytes: int | None = None,
-) -> str | None:
+) -> str | UploadBusy | None:
     """Why `MEDIA_ALLOWANCE_EXCEEDED` refuses an upload of `declared_bytes`, or None when it is admitted (D10, task 4.5).
 
     Only an upload that offload would store charges the allowance. Preserve keeps an Evidence note or dataset
@@ -1650,8 +1864,11 @@ def upload_refusal(
     that cannot be read admits the upload: its original stays local with retryable offload demand, and offload
     rechecks the allowance before publication. The declared size counts as a new version, because nothing
     shows a duplicate of a stored version before the bytes arrive.
+
+    In store mode the binding projection's total at the store's head decides, with no census and no boundary.
+    A projection too far behind to count now answers `UploadBusy`, which admits nothing (D5).
     """
-    from . import held_uploads, source_inspection
+    from . import held_uploads, media_bindings, source_inspection
 
     vault = Path(vault).resolve()
     try:
@@ -1668,14 +1885,19 @@ def upload_refusal(
         # A larger size never classifies back to offloadable, so the largest possible size decides for the range.
         if stays or (bounds is not None and bounds.classify(largest) != media_capacity.OFFLOADABLE):
             return None
-        # The record, not a census read now, keeps a whole-vault walk under the consistency guard off each
-        # upload: the per-item census cost that task 5.4.9 removed from offload.
-        recorded = recorded_census(vault)
-        if recorded is None:
-            return None
-        decision = _upload_decision(recorded, declared_bytes, config.get("allowance_bytes"))
-        if decision.code == media_allowance.MEDIA_ALLOWANCE_EXCEEDED:
-            decision = _upload_decision(take_census(vault), declared_bytes, config.get("allowance_bytes"))
+        if media_bindings.counts_allowance(vault, config):
+            decision = _store_upload_decision(vault, declared_bytes, config.get("allowance_bytes"))
+            if isinstance(decision, UploadBusy):
+                return decision
+        else:
+            # The record, not a census read now, keeps a whole-vault walk under the consistency guard off each
+            # upload: the per-item census cost that task 5.4.9 removed from offload.
+            recorded = recorded_census(vault)
+            if recorded is None:
+                return None
+            decision = _upload_decision(recorded, declared_bytes, config.get("allowance_bytes"))
+            if decision.code == media_allowance.MEDIA_ALLOWANCE_EXCEEDED:
+                decision = _upload_decision(take_census(vault), declared_bytes, config.get("allowance_bytes"))
     except (OSError, ValueError, TypeError, MediaStoreError, held_fs.HeldFsError) as error:  # An unreadable policy, volume, ledger or pool marker.
         log.warning("the upload allowance check admits an upload as unknown: %s", type(error).__name__)
         return None
@@ -2179,14 +2401,20 @@ def offload_refusals(vault: Path, *, path: str | None = None) -> tuple[list[dict
     rows, coverage = _status_candidates(vault, "media_offload_refusals", query + " ORDER BY binary_rel LIMIT ?", parameters)
     if path is not None:
         coverage = {**coverage, "coverage": "exact-path"}
+    from . import media_bindings
+
     config = originals.configuration(vault) or {}
     result = []
+    allowance_rows = any(row["code"] in media_allowance.ALLOWANCE_REFUSAL_CODES for row in rows)
+    projected = media_bindings.counts_allowance(vault, config)
+    # In store mode the projection's total, read before the status's hold (D1).
+    usage: media_allowance.ReferenceUsage | media_allowance.ProjectedUsage | None = (
+        _projected_census(vault, config) if projected and allowance_rows else None)
     with get_manager().consistency_guard(vault, operation="media_refusal_status", holder_kind="background"):
         # With no allowance a refusal is unknown for that reason alone, so no census names notes behind it.
         counted = media_allowance.configured(config.get("allowance_bytes")) is not None
-        usage = (media_allowance.reference_usage(vault)
-                 if counted and any(row["code"] in media_allowance.ALLOWANCE_REFUSAL_CODES for row in rows)
-                 else None)
+        if counted and allowance_rows and not projected:
+            usage = media_allowance.reference_usage(vault)
         for row in rows:
             try:
                 snapshot = original_state(vault, row["binary_rel"])
@@ -2200,6 +2428,8 @@ def offload_refusals(vault: Path, *, path: str | None = None) -> tuple[list[dict
                      "code": code, "ciphertext_size": row["ciphertext_size"]}
             if code in media_allowance.ALLOWANCE_REFUSAL_CODES and usage is not None:
                 entry.update(media_allowance.blocked_fields(usage.blockers))
+                if isinstance(usage, media_allowance.ProjectedUsage) and usage.counting:
+                    entry["counting"] = True  # the projection is still counting the owner total (D5)
             result.append(entry)
     return result, coverage
 
@@ -2288,23 +2518,46 @@ def offload(vault: Path, path: Path, *, batch: OffloadBatch | None = None,
         batch = OffloadBatch(vault, record_status=False)
     batch.begin()
     try:
-        return _offload_member(Path(vault).resolve(), path, batch, direct=direct, job=job)
+        published = _offload_member(Path(vault).resolve(), path, batch, direct=direct, job=job)
+    except ProjectionWait as wait:
+        batch.failed()
+        _offload_waited(vault, job, wait.reason, "returned")
+        raise
+    except MediaStoreError as error:
+        batch.failed()
+        if error.code in media_allowance.ALLOWANCE_REFUSAL_CODES:
+            _offload_waited(vault, job, None, "refused")
+        raise
     except BaseException:
         batch.failed()
         raise
+    _offload_waited(vault, job, None, "published" if published is not None else "refused")
+    return published
 
 
 def _offload_member(vault: Path, path: Path, batch: OffloadBatch, *,
                     direct: bool, job: MediaJob | None = None) -> StoredObject | None:
-    from . import media_replicas
+    from . import media_bindings, media_replicas
 
     config = _settings(vault)
     if config.get("enabled") is not True:
         raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "offload is disabled")
     backend = _configured_store(vault, config)
     ledger = MediaJobStore(vault)
-    def census() -> media_allowance.ReferenceUsage:
-        return batch.usage(ledger)
+    # In store mode the owner total comes from the binding projection, read outside every hold, and the batch's
+    # census, its charge and its marker stay unused (count-media-allowance-from-bindings D1, D2).
+    projected = media_bindings.counts_allowance(vault, config)
+    admitted: list[media_bindings.OwnerTotal | None] = [None]
+
+    def census(reference: StoredObject | None = None, *, follow: bool = True, reuse: bool = False
+               ) -> media_allowance.ReferenceUsage | media_allowance.ProjectedUsage:
+        if media_bindings.counts_allowance(vault, config) != projected:
+            raise ProjectionWait("the vault's storage mode changed during offload")
+        if not projected:
+            return batch.usage(ledger)
+        usage, admitted[0] = _store_usage(vault, config, _binding_of(vault, snapshot), reference=reference,
+                                          reuse=reuse, follow=follow, previous=admitted[0])
+        return usage
     with _pin(vault, path) as (_ledger, token), _offload_input(vault, path, ledger) as snapshot:
         if snapshot.binary_sha256 is None or snapshot.binary_size is None:
             raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original has no exact sidecar binding")
@@ -2357,13 +2610,20 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch, *,
             decision, _none = _offload_admission(vault, snapshot, select_reuse=False)
             _require_allowance(ledger, snapshot, decision.code)
         # One bounded slice from the current census. A fresh copy still needs room under the allowance.
-        usage, candidates, damaged = _reuse_walk_inputs(vault, snapshot, census, str(config["key_version"]))
-        reuse = None
         binary = _binding_of(vault, snapshot)
+        if projected:
+            usage = census(reuse=True)
+            candidates, damaged = _reuse_candidates(vault, binary, usage, str(config["key_version"]))
+        else:
+            usage, candidates, damaged = _reuse_walk_inputs(vault, snapshot, census, str(config["key_version"]))
+        reuse = None
         for candidate_path, candidate in candidates:
             try:
                 live = _live_filing(vault, binary, candidate_path, candidate)
             except _FILING_UNREADABLE:
+                if projected:
+                    usage.skip_reuse(binary, candidate)  # the projection's total does not rest on one filing (D1)
+                    continue
                 usage = media_allowance.ReferenceUsage(None, usage.observed_at)  # the census no longer vouches for its filings
                 break
             failure = _head_failure(backend, candidate)
@@ -2377,6 +2637,8 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch, *,
             if failure not in (_ABSENT, _CONDEMNED) or (failure == _ABSENT and live.state not in _BYTES_HERE):
                 _quarantine_found(vault, [ledger._relative(live.path)], candidate, failure)
             damaged.append(candidate)
+        if projected and reuse is not None:
+            usage = census(reuse.reference, follow=False)  # the figure of the reused version at the store's head
         decision, _none = _offload_admission(vault, snapshot, reference=reuse.reference if reuse is not None else None,
                                              select_reuse=False, usage=usage)
         _require_allowance(ledger, snapshot, decision.code)
@@ -2387,6 +2649,8 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch, *,
             if _digest(source.stream) != ObjectHead(snapshot.binary_size, snapshot.binary_sha256):
                 raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original differs from its binding")
             source.stream.seek(0)
+            if projected:
+                _follow_before_hold(vault)
             with _guard(vault, "media_store_protect"):
                 source.require_current()
                 if original_state(vault, path) != snapshot:
@@ -2396,7 +2660,7 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch, *,
                     reuse = None
                 decision, _candidate = _offload_admission(
                     vault, snapshot, reference=reuse.reference if reuse is not None else None, select_reuse=False,
-                    usage=census(),
+                    usage=census(reuse.reference if reuse is not None else None, follow=False),
                 )
                 _require_allowance(ledger, snapshot, decision.code)
                 name = reuse.reference.object if reuse is not None else _upload_name(ledger, snapshot)
@@ -2419,17 +2683,18 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch, *,
                 source.require_current()
                 if original_state(vault, path) != snapshot:
                     raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the binding changed")
-                if direct:
+                if direct and not projected:
                     # A file restored outside the runtime can add a pointer without a ledger marker.
                     batch.end()
-                publishing_usage = census()
+                publishing_usage = census(reference, follow=False)
                 decision, _candidate = _offload_admission(
                     vault, snapshot, reference=reference, select_reuse=False, usage=publishing_usage,
                 )
                 _require_allowance(ledger, snapshot, decision.code)
                 _require_current_local_policy(vault, config, backend)
-                # Charged before the write: a failed write leaves the batch over-counting, never under.
-                batch.charge(ledger, snapshot, reference, publishing_usage)
+                if not projected:
+                    # Charged before the write: a failed write leaves the batch over-counting, never under.
+                    batch.charge(ledger, snapshot, reference, publishing_usage)
                 _recheck_publication(vault, witness)
                 _seal(ledger, snapshot, reference.object)
                 _publish_reference(vault, snapshot, reference)
@@ -2439,6 +2704,8 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch, *,
                     media_replicas.note_repair(vault, ledger._relative(path), damaged)
                 _finish_reference(ledger, original_state(vault, path), source)
 
+            if projected:
+                _follow_before_hold(vault)
             _publishing(vault, "media_store_publish", publish, publishing=(reference,) if reuse is not None else ())
         return reference
 
@@ -4600,7 +4867,9 @@ class DrainRecord:
     attempted_at: str
     attempt_failed: bool  # The latest attempt could not count, so the figures above are from an earlier census.
     waiting: str | None
-    blocked_by: tuple[str, ...]  # The originals whose companion stopped the latest attempt, vault-relative.
+    # The originals whose companion stopped the latest attempt, or the companion pages that the binding
+    # projection could not read, vault-relative.
+    blocked_by: tuple[str, ...]
     unit: str = DRAIN_UNIT
 
 
@@ -4741,8 +5010,8 @@ def _require_released(vault: Path, relative: str) -> None:
 class _CompanionBlocks(ValueError):
     """Bound originals without local bytes or proven release; paths stay off worker log messages."""
 
-    def __init__(self, blocked: list[str]) -> None:
-        super().__init__("an original has no local bytes or proven release")
+    def __init__(self, blocked: list[str], reason: str = "an original has no local bytes or proven release") -> None:
+        super().__init__(reason)
         self.blocked = blocked
 
 
@@ -4784,6 +5053,9 @@ def drain_census(vault: Path, *, inventory_only: bool = False) -> tuple[int, int
             with _guard(vault, "media_drain_census_start"):
                 before = media_bindings.checkpoint(conn)
                 if not media_bindings.current(vault, conn):
+                    if flagged := media_bindings.flagged_pages(conn, limit=media_allowance.BLOCKERS_SHOWN):
+                        raise _CompanionBlocks([path for path, _reason in flagged],
+                                               "a companion note cannot be read for the binding inventory")
                     raise ValueError("the canonical binding inventory is incomplete")
                 policy = media_bindings.policy_key(vault)
                 config = originals.configuration(vault)

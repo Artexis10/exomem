@@ -205,6 +205,18 @@ _WATCHERS_LOCK = threading.Lock()
 _WATCHERS: dict[str, weakref.WeakSet[FileWatcher]] = {}
 
 
+def wake_binding_follow(vault_root: Path) -> float | None:
+    """Wake the store sweep's follow of the media binding projection for `vault_root` (count-media-allowance D5).
+
+    Returns the reconcile interval of a watcher that will follow, or None when no watcher runs a store sweep.
+    """
+    root = _canon_root(vault_root)
+    with _WATCHERS_LOCK:
+        watchers = list(_WATCHERS.get(root, ()))
+    intervals = [interval for watcher in watchers if (interval := watcher.wake_follow()) is not None]
+    return min(intervals) if intervals else None
+
+
 def observing_inbound_recovery_stop(vault_root: Path) -> threading.Event | None:
     """The stop signal for a seeded file watcher with live event delivery."""
     from .vault_store.mode import store_mode_for_reads
@@ -1369,6 +1381,8 @@ class FileWatcher:
         self._pending_moves: dict[str, str] = {}
         self._last_change = 0.0
         self._wake = threading.Event()
+        # An upload that its admission answered busy asks the reconcile thread for a follow-only pass (D5).
+        self._follow_wake = threading.Event()
         self._stop = foreground_priority.StopEvent()
         self._thread: threading.Thread | None = None
         self._observer = None
@@ -2045,7 +2059,9 @@ class FileWatcher:
         """Store mode's reconcile pass: hash every owned file against the store, then the census.
 
         The first pass also settles what changed while the service was down (git, a restore). True
-        means that the sweep ran to its end; a failed sweep is retried at the next interval.
+        means that the sweep ran to its end; a failed sweep is retried at the next interval. After a
+        later pass's import, the media binding projection follows the trail and checks the pages that
+        the store does not own; the first pass leaves that to `_run_reconcile`, after the seed.
         """
         importer = self._importer
         assert importer is not None
@@ -2055,7 +2071,45 @@ class FileWatcher:
             log.exception("file watcher: the store sweep failed")
             return False
         self._publish_census_if_needed()
+        if self._seed_published.is_set():
+            self._recover_bindings()
         return True
+
+    def _recover_bindings(self) -> None:
+        """Follow, check or rebuild the media binding projection after a store sweep (count-media-allowance D4)."""
+        from . import media_bindings
+
+        try:
+            media_bindings.recover(self._vault_root, sweep=True)
+        except Exception:  # noqa: BLE001 - the projection lags, and the next sweep tries again
+            log.exception("file watcher: the media binding projection could not be brought current")
+
+    def _wait_interval(self) -> bool:
+        """Wait one reconcile interval, running a follow-only pass at each wake; False once the watcher stops.
+
+        A wake moves no sweep, and wakes that arrive while a pass is due or running join that pass.
+        """
+        from . import media_bindings
+
+        deadline = time.monotonic() + self._reconcile_interval_seconds()
+        while not self._stop.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return True
+            if self._follow_wake.wait(remaining) and not self._stop.is_set():
+                self._follow_wake.clear()
+                try:
+                    media_bindings.follow_until(self._vault_root)
+                except Exception:  # noqa: BLE001 - the upload's retry decides on what the follow reached
+                    log.exception("file watcher: the media binding follow failed")
+        return False
+
+    def wake_follow(self) -> float | None:
+        """Ask for a follow-only pass; the reconcile interval, or None when this watcher runs no store sweep."""
+        if self._importer is None or not self._seed_published.is_set() or self._stop.is_set():
+            return None
+        self._follow_wake.set()
+        return self._reconcile_interval_seconds()
 
     def arm_optional_recovery(self) -> None:
         """Permit optional metadata work only after runtime workers have started."""
@@ -2831,7 +2885,9 @@ class FileWatcher:
             self._seed_published.set()
             if not self._dispatch_waits_for_seed:
                 self._seed_complete.set()
-        while not self._stop.wait(self._reconcile_interval_seconds()):
+        if self._importer is not None and succeeded and not self._stop.is_set():
+            self._recover_bindings()  # after the seed is published, so a rebuild never delays activation
+        while self._wait_interval():
             self._reconcile_once(seed=False)
             try:
                 from . import brief_watermarks, served_context
@@ -3095,6 +3151,7 @@ class FileWatcher:
             observer, self._observer = self._observer, None
         self._observer_armed.set()
         self._wake.set()
+        self._follow_wake.set()
         self._seed_published.set()
         self._seed_complete.set()
         # No owner keeps the published census current once the watcher stops.

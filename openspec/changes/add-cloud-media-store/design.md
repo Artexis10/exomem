@@ -392,6 +392,7 @@ Each cell has a media allowance, separate from its volume size. It is a configur
 
 - **Metering.** The cell meters original plaintext bytes from the versions its live and trash sidecars reference, each version counted once. Trash counts until it is emptied. A version kept only for retained backups does not count against the owner. cellctl separately meters physical ciphertext bytes per prefix from the bucket listing, for the operator (the physical meter below).
 - **Admission.** An upload or import whose declared media bytes exceed the remaining allowance is refused before any byte arrives, with a code that names the limit.
+  - *Amendment, 2026-11-28.* In store mode, `count-media-allowance-from-bindings` reads the owner total from the binding projection outside the mutation boundary, for offload, upload admission and status. Its code pull request replaces the per-batch census there. File mode keeps the census below.
 - **Overflow.** An original that the allowance cannot cover stays local and is reported in status.
 - **Two meters.** Status and the Home display report two figures, each named for what it counts:
   - *Vault storage:* notes, sidecars, extracted text, indexes and datasets on the volume, against the volume size. It excludes cached copies of stored originals, which would otherwise be counted twice.

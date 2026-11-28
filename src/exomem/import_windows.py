@@ -253,7 +253,8 @@ def _allowance(root: Path, config: dict, *, may_count: bool) -> dict:
     """The allowance and the owner census that it was measured by, with the census's time.
 
     A census walks every note under the mutation boundary, which blocks filing for as long as the vault is large,
-    so a plain status reads the latest census that offload recorded. A call that carries a demand (`may_count`)
+    so a plain status reads the latest census that offload recorded. In store mode both reads are the binding
+    projection's total, which walks no note. A call that carries a demand (`may_count`)
     counts afresh and records the result when nothing is recorded, or the record is older than the demand lease.
     A census that could not count, or none at all, is unknown, never 0.
     """
@@ -268,6 +269,9 @@ def _allowance(root: Path, config: dict, *, may_count: bool) -> dict:
         return {"allowance_bytes": allowance, "unknown": str(error)}
     if counted is None:
         return {"allowance_bytes": allowance, "unknown": "no owner census is recorded yet; the next offload records one"}
+    if counted.counting:  # in store mode the binding projection has not yet counted the total at the store's head
+        return {"allowance_bytes": allowance, "observed_at": counted.observed_at,
+                "unknown": "the stored versions are being counted"}
     if counted.used_bytes is None:
         return {"allowance_bytes": allowance, "observed_at": counted.observed_at,
                 "unknown": "the stored versions could not be counted",

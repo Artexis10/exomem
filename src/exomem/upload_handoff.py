@@ -392,8 +392,14 @@ def page_endpoint(upload_url: str) -> str:
 async def claim_upload(
     vault_root: Path, token: str, *, resumable: bool = False, size_bytes: int | None = None, sha256: str | None = None,
     admit: Callable[[principal.RequestPrincipal], Awaitable[None]] | None = None,
+    admit_ticket: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict:
-    """Consume the ticket before byte receipt, after delegated admission if supplied."""
+    """Consume the ticket before byte receipt, after delegated admission if supplied.
+
+    `admit_ticket` is a plain ticket's admission, called with the ticket's lane after its checks and before the
+    ticket is spent, so that what it raises leaves the ticket usable. It raises no `ValueError`, which the routes
+    answer as an unusable ticket.
+    """
     secret = parse_ticket(token, resumable=resumable)
     if secret is None:
         raise _unavailable()
@@ -434,6 +440,8 @@ async def claim_upload(
             await admit(who)
     elif not await _active(vault_root, who):
         raise _unavailable()
+    elif admit_ticket is not None:
+        await admit_ticket(record["lane"])
     with FileLock(store / ".lock"):
         try:
             if json.loads(path.read_text(encoding="utf-8")) != record or float(record["expires"]) <= _now():
