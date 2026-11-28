@@ -112,6 +112,12 @@ For restricted callers under a `sensitivity` policy, this is an exception to the
 
 Some facts leave without naming a path, and the postfilter cannot see them by path. Each one gets its own check, and task 4.1 lists them from the code: counts, stored rollups, aggregates, snippets, titles, link names and suggestion lists. Binary downloads decide by their Evidence page's `effective` value.
 
+- For search, recall and link suggestions, check the candidates and their exact representations before ranking. Check the source of each returned snippet, title and reason.
+- Check each review finding's page and related pages before `attention._decided_findings` passes them to ranking. Prove the endpoints and exposed link names on graph and inbound reads. Compare limits, scores and totals in the two vaults.
+- Check Records row subjects before grouping or counting. A stored rollup needs the query runtime's uniform-release proof over the rows it covers. Without that proof, check the result of the existing bounded row path.
+- Exercise the prompt and both resources made by `register_adoption_mcp`. They use their own postfilter call. Check run selection and inventories as well as the returned text, because selection happens before filtering.
+- Exercise the stored-original MCP resource and the download path through `artifact_recovery`. Check the Evidence page's class at the held-byte release check.
+
 The proof is behavioural. A test builds a synthetic vault with classified canaries: a direct page, a cited page, an episode `about` page, a row with a classified source, and a binary with a classified Evidence page. It runs every registered read operation under a restricted caller and fails when any canary's path, title, text or count appears in a result. The test enumerates operations from the command registry and the hand-registered MCP resources and prompts, so a new door joins it without anyone editing the test. A count is checked by comparing results with and without the canaries, not by string match.
 
 ### D7. The `sensitivity` selector restricts only
