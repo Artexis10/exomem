@@ -462,7 +462,7 @@ The owner meter SHALL require complete canonical reference custody, including Tr
 It SHALL exclude registry-owned private state without reusing recall exclusions.
 A malformed potential companion or conflicting binding SHALL NOT prove that no referenced version exists.
 Offload SHALL check the allowance before encryption or provider upload, and SHALL recheck its proposed reference union before publication.
-*Amended 2026-11-28 by `count-media-allowance-from-bindings`:* offload SHALL read the owner total from the binding projection for each member, SHALL keep no census across members, and SHALL read no note for the allowance while it holds the mutation boundary. That change's requirements replace the batch census.
+A batch of offloads SHALL take one owner census, not one per member. It SHALL charge each version that it newly references to that census. The batch SHALL reuse its census across guard releases, and SHALL NOT hold the mutation boundary for the whole batch.
 A quota failure or unknown meter SHALL leave the original local with retryable demand.
 
 #### Scenario: A complete meter meets incomplete custody
@@ -494,6 +494,13 @@ A quota failure or unknown meter SHALL leave the original local with retryable d
 
 - **WHEN** an owner starts an upload whose declared size exceeds the remaining media allowance
 - **THEN** the upload is refused with `MEDIA_ALLOWANCE_EXCEEDED` and the configured allowance before any byte is sent
+
+#### Scenario: A batch of offloads takes one census
+
+- **WHEN** the worker offloads a batch of 500 filed originals
+- **THEN** it reads the owner's references once for the batch
+- **AND** each member's admission and publication check use that census with the versions that the batch has already published
+- **AND** other writes run between two members
 
 #### Scenario: Offload meets a full allowance
 
