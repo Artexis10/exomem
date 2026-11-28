@@ -672,8 +672,10 @@ def test_a_busy_record_edit_keeps_its_guard_order_after_an_earlier_append(
         assert first["state"] == later["state"] == "queued"
     _wait_for_state(vault, first["queued_write"]["ref"], "applied")
     failed = _wait_for_state(vault, later["queued_write"]["ref"], "failed")
+    # The terminal row can be visible before the drainer clears its backlog count.
+    # A call without a retry identity exercises the direct refusal in that window.
     with pytest.raises(OpError) as direct:
-        _send(record, vault, edit)
+        _send(record, vault, edit, scope=None)
     assert direct.value.code == "STALE_RECORD"
     assert (failed["error"]["code"], failed["error"]["message"]) == (direct.value.code, direct.value.message)
 

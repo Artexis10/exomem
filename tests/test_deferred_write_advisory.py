@@ -8,6 +8,7 @@ terminal handoff is faked, and it is faked through Lane 1's own committed
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import importlib
 import importlib.util
@@ -282,14 +283,26 @@ def _review_state_bytes(vault: Path) -> str:
     )
 
 
-def _carrier_bytes(vault: Path) -> str:
+@pytest.fixture
+def carrier_time(monkeypatch: pytest.MonkeyPatch) -> dt.datetime:
+    """Use the same scan and due-state time for both snapshots in a case."""
+    from exomem import name_drift
+
+    snapshot_time = dt.datetime.now(dt.UTC)
+    clock = SimpleNamespace(**vars(dt))
+    clock.datetime = SimpleNamespace(now=lambda _zone: snapshot_time)
+    monkeypatch.setattr(name_drift, "dt", clock)
+    return snapshot_time
+
+
+def _carrier_bytes(vault: Path, *, now: dt.datetime) -> str:
     from exomem import due_state as due_state_module
 
     payload = {
         "attention": commands.op_review_memory(vault, mode="attention", limit=25, state="all"),
         "activation": commands.op_review_memory(vault, mode="activation", limit=25, state="all"),
         "dispositions": commands.op_review_memory(vault, mode="dispositions"),
-        "due_state": due_state_module.recompute(vault),
+        "due_state": due_state_module.recompute(vault, now=now),
     }
     return json.dumps(payload, sort_keys=True, default=str)
 
@@ -988,12 +1001,12 @@ def test_advisory_lookup_reauthorizes_current_target_and_counterparts(
 
 
 def test_advisory_result_never_joins_review_carriers(
-    vault: Path, encoder: _DeterministicEncoder
+    vault: Path, encoder: _DeterministicEncoder, carrier_time: dt.datetime,
 ) -> None:
     target = _seed_page(vault, "lane4-carriers", "Carrier isolation target body.")
     counterpart_rel = _seed_page(vault, "lane4-carriers-counterpart", "Carrier counterpart.")
-    _carrier_bytes(vault)
-    baseline = _carrier_bytes(vault)
+    _carrier_bytes(vault, now=carrier_time)
+    baseline = _carrier_bytes(vault, now=carrier_time)
 
     receipt, fingerprint = _prepare_custody(vault, batch_id="b-carriers", target_rel=target)
     claimed = _claim(vault, owner="carrier-worker", now=20.0)
@@ -1017,11 +1030,11 @@ def test_advisory_result_never_joins_review_carriers(
     ref = derived_receipts.advisory_result_ref(vault, receipt)
     assert _resolve(vault, ref)["status"] == "ready"
 
-    assert _carrier_bytes(vault) == baseline
+    assert _carrier_bytes(vault, now=carrier_time) == baseline
 
 
 def test_ready_advisory_review_ref_keeps_existing_triage_semantics(
-    vault: Path, encoder: _DeterministicEncoder, monkeypatch: pytest.MonkeyPatch
+    vault: Path, encoder: _DeterministicEncoder, monkeypatch: pytest.MonkeyPatch, carrier_time: dt.datetime,
 ) -> None:
     target = _seed_page(vault, "lane4-triage", "Triage semantics target body.")
     counterpart = _candidate(vault, "lane4-triage-counterpart")
@@ -1037,7 +1050,7 @@ def test_ready_advisory_review_ref_keeps_existing_triage_semantics(
     file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
     assert lexstore.ensure_fresh(vault)
     epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
-    before = json.loads(_carrier_bytes(vault))
+    before = json.loads(_carrier_bytes(vault, now=carrier_time))
     decision = corpus_aware.triage_write_advisory(
         vault,
         ref=advisory["ref"],
@@ -1050,7 +1063,7 @@ def test_ready_advisory_review_ref_keeps_existing_triage_semantics(
     assert decision["ref"] == advisory["ref"]
     # The dispositions view's effect block counts the owner's dismissal by
     # contract; every other carrier byte stays as it was.
-    after = json.loads(_carrier_bytes(vault))
+    after = json.loads(_carrier_bytes(vault, now=carrier_time))
     counted = after["dispositions"]["effect"]["families"]["near-duplicate"]
     held = before["dispositions"]["effect"]["families"]["near-duplicate"]
     assert counted["dismissed"] == held["dismissed"] + 1
