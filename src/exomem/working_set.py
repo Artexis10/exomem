@@ -1639,8 +1639,11 @@ def task_candidates(
                     missing.append({"role": "task_context", "reason": "lane_failed"})
                 route = collection_claims.route(working_set_index.terms_of(query), targets or ())
             if route is not None:
-                add(str(route["collection"]), origin)
-                routed.append(str(route["collection"]))
+                path = str(route["collection"])
+                add(path, origin)
+                if path in found:
+                    found[path]["routed"] = True
+                    routed.append(path)
         if restricted:
             selected, _counted, _dropped = lexstore.select_query_units(
                 bm25.token_units(query_text, query=True), statistics.document_frequency,

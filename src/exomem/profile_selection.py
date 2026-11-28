@@ -41,8 +41,8 @@ class LexicalBasis:
 class Selection:
     """The profile pages the turn selected, strongest first, and the evidence that was read to select them.
 
-    `evidence` is `semantic` when the vector reading ran (the lexical reading ran as well), `lexical` when it did
-    not, because no turn vector existed or the recall matrix was not resident, and `none` when neither ran.
+    `evidence` is `semantic` when the vector reading scored any profile, `lexical` when only the keyword reading
+    ran, and `none` when neither ran.
     """
 
     pages: tuple[str, ...]
@@ -75,7 +75,7 @@ def select(
 
 
 def _semantic_scores(root: Path, pages: set[str], turn_vector: Any) -> dict[str, float] | None:
-    """The best chunk score of each page the vector reaches, or None when the reading did not run.
+    """The best chunk score of each page the vector reaches, or None when it scored no profile.
 
     It scores the profile pages' rows of the resident recall matrix against the turn vector the activation pass
     encoded, so its cost follows the profile pages, not the vault. It never encodes and never loads a matrix on
@@ -99,7 +99,9 @@ def _semantic_scores(root: Path, pages: set[str], turn_vector: Any) -> dict[str,
         if not np.all(np.isfinite(query)) or float(np.linalg.norm(query)) == 0.0:
             return None
         scorer = embeddings.resident_page_scorer(root)
-        return None if scorer is None else scorer.best_scores(query, pages)
+        if scorer is None:
+            return None
+        return scorer.best_scores(query, pages) or None
     except Exception:  # noqa: BLE001 - a failed vector reading leaves the lexical one standing, and the evidence says so
         log.debug("profile vector reading unavailable", exc_info=True)
         return None
@@ -114,11 +116,11 @@ def _lexical_scores(
     catch-up and walks nothing). A catalogue that is not ready at that checkpoint, or no checkpoint at all, is a
     reading that did not run, never a walk or a second corpus build.
     """
+    if basis is None:
+        return None
     words = working_set_runtime.content_words(turn)
     if not words:
         return {}
-    if basis is None:
-        return None
     try:
         result = lexstore.search_bm25_result(
             root, words, len(pages), scope="kb", freshness=basis.freshness, recall_checkpoint=basis.checkpoint,

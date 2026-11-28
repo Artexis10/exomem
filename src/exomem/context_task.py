@@ -185,33 +185,41 @@ def _unit_candidates(page: Any, selected: Any) -> tuple[list[Any], dict[str, str
     return candidates, categories
 
 
-def _method_refs(root: Path, page: Any, caller: Any, cache: dict, *, selected=None, admitted=None, check=None) -> tuple[str, ...]:
-    """Current method identities after unit admission, shared by refresh and discovery."""
-    key = page.rel_path, page.snapshot_hash
-    if key in cache:
-        return cache[key]
-    basis = lifecycle_statuses.Basis(root)
-    if not working_set._is_current_page(root, page.rel_path, status_basis=basis, page=page):
-        cache[key] = ()
-        return cache[key]
+def _method_refs(
+    root: Path, page: Any, caller: Any, *, basis, selected=None, admitted=None, check=None,
+) -> tuple[str, ...]:
+    """Method identities from a current page after unit admission."""
     (check or _deadline_check)()
     selected = selected or semantic_index.selected_parent_index_state(root, page.rel_path)
     if selected.parent_source_hash != page.snapshot_hash:
         raise ValueError("method source changed during selection")
     categories = context_roles.projection_categories(context_roles.load_roles(root), "method")
     if not any(unit.category in categories for unit in selected.document.units):
-        cache[key] = ()
-        return cache[key]
+        return ()
     candidates, category_by_ref = _unit_candidates(page, selected)
     if admitted is None:
         verdicts = egress.classify_units(root, [working_set._served_unit(item) for item in candidates], purpose=caller.purpose)
         admitted = tuple(item for item, verdict in zip(candidates, verdicts, strict=True) if verdict == egress.UNIT_KEPT)
     current = working_set_currency.annotate(admitted, status_basis=basis, visible=caller.visible)
-    cache[key] = tuple(
+    return tuple(
         item.ref for item in current
         if category_by_ref[item.ref] in categories and not working_set_currency.state(item, status_basis=basis)[0]
     )
-    return cache[key]
+
+
+def _current_methods(
+    root: Path, page: Any, caller: Any, *, selected=None, admitted=None, check=None,
+) -> tuple[bool, tuple[str, ...] | None]:
+    """Resolve page currency and method identities without rereading the admitted page."""
+    current = False
+    basis = lifecycle_statuses.Basis(root)
+    try:
+        current = working_set._is_current_page(root, page.rel_path, status_basis=basis, page=page)
+        methods = _method_refs(root, page, caller, basis=basis, selected=selected, admitted=admitted,
+                               check=check) if current else ()
+    except Exception:  # noqa: BLE001 - method selection failure leaves the admitted prose readable
+        methods = None
+    return current, methods
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +233,7 @@ class SourceProjection:
     carrier: str | None
     #: The page's stable memory ref, read from the raw frontmatter, for the approval verdict.
     ref: str | None = None
+    current: bool = False
 
 
 class TaskDeadline(TimeoutError):
@@ -308,7 +317,6 @@ def project_source(root: Path, source_ref: str, caller: Any, *, cache=None, expe
             or not caller.sees(source_ref) or not egress.quick_page_visible(root, source_ref, purpose=caller.purpose)):
         return None
     check()
-    method_cache = {}
     if full_source_access(root, caller, provider=provider):
         if expected_hash is not None:
             _raw, guard = vault.read_bounded_guarded_bytes(
@@ -318,15 +326,12 @@ def project_source(root: Path, source_ref: str, caller: Any, *, cache=None, expe
         page = _source(root, source_ref, caller)
         if page is None:
             return None
-        try:
-            methods = _method_refs(root, page, caller, method_cache, check=check)
-        except Exception:  # noqa: BLE001 - failed method currency leaves the source read route usable
-            methods = None
+        current, methods = _current_methods(root, page, caller, check=check)
         public = {"path": source_ref, "frontmatter": dict(page.frontmatter), "body": page.body}
         reference = procedure_approval.page_ref(page.frontmatter)
         result = SourceProjection(
             public, page.snapshot_hash, page.snapshot_hash, _with_skill(methods, public, reference),
-            egress.without_wikilinks(page.title), page.page_type, reference,
+            egress.without_wikilinks(page.title), page.page_type, reference, current=current,
         )
     else:
         with runtime_resources.semantic_preparation(root, path, check=check, expected_hash=expected_hash) as prepared:
@@ -385,16 +390,13 @@ def project_source(root: Path, source_ref: str, caller: Any, *, cache=None, expe
             metadata = released.get("frontmatter")
             title = (vault.resolve_display_title(metadata, released["body"], path) if isinstance(metadata, Mapping) else None)
             carrier = metadata.get("type") if isinstance(metadata, Mapping) else None
-            try:
-                methods = _method_refs(root, page, caller, method_cache, selected=selected, admitted=admitted, check=check)
-            except Exception:  # noqa: BLE001 - failed currency cannot remove admitted source prose
-                methods = None
+            current, methods = _current_methods(root, page, caller, selected=selected, admitted=admitted, check=check)
             prepared.guard.recheck(root)
             check()
             version = hashlib.sha256(json.dumps(released, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
             result = SourceProjection(released, page.snapshot_hash, version, _with_skill(methods, released, reference),
                                       egress.without_wikilinks(title) if title else None, carrier if isinstance(carrier, str) else None,
-                                      reference)
+                                      reference, current=current)
     if cache is not None and provider is None:
         cache[source_ref] = result
     return result
@@ -791,12 +793,16 @@ def compile_context(
         if reach is not None and any(gap.get("reason") == _LANE_FAILED for gap in missing):
             reach.stop(_LANE_FAILED)
         candidates = []
+        routed = set()
+        current = set()
         identities: dict[tuple[str, str], dict[str, Any]] = {}
         methods_by_source: dict[str, list[dict[str, Any]]] = {}
         contract_chars = int(
             activation_conventions.load_conventions(root).conventions.budget("method_contract_max_chars") or 0
         )
         for candidate in discovered:
+            if candidate.pop("routed", False):
+                routed.add(candidate["source_ref"])
             try:
                 with find_types.timing_span(timings, "working_set.task_context_projection"):
                     source = project_source(root, candidate["source_ref"], caller, cache=sources)
@@ -827,12 +833,16 @@ def compile_context(
                 continue
             identities[identity] = item
             candidates.append(item)
+            if source.current:
+                current.add(item["source_ref"])
             if source.methods is None:
                 _add_missing(block, "lane_failed")
             if items := _method_items(
                 source, candidate["source_ref"],
             ):
                 methods_by_source.setdefault(candidate["source_ref"], []).extend(items)
+        if len(candidates) > 1 and full_source_access(root, caller):
+            working_set_runtime.prefer_named_task_notes(root, turn, candidates, routed, current)
         with find_types.timing_span(timings, "working_set.method_fit"):
             selected, block["method_fit"] = _selected_methods(
                 root, caller=caller, catalogue=catalogue, turn=turn, conversation=conversation, sources=sources,

@@ -2622,6 +2622,26 @@ def title_listing(
         return TitleListing((), (), "unavailable")
 
 
+def prefer_named_task_notes(
+    root: Path, turn: str, candidates: list[dict[str, Any]], routed: set[str], current: set[str],
+) -> None:
+    """Use released titles to move current named notes ahead of incidental leads."""
+    from . import note_types
+
+    sentences = _positioned_units(working_set_index.subject_text(turn))
+    basis = note_types.Basis(root)
+
+    def precedence(item: dict[str, Any]) -> int:
+        if item["source_ref"] in routed:
+            return 0
+        if (item["source_ref"] in current and basis.selects(item.get("carrier"), note_types.compiled)
+                and _names_title(sentences, item.get("title", ""))):
+            return 1
+        return 2
+
+    candidates.sort(key=precedence)
+
+
 def _names_title(
     sentences,
     title: str,
