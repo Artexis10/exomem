@@ -54,8 +54,13 @@ A page without the field SHALL read as unclassified.
 
 #### Scenario: A plain edit cannot change the class of a Source
 
-- **WHEN** an edit, a correction or a reclassify of a Source changes its `sensitivity` value
+- **WHEN** an edit or correction tries to change a Source's `sensitivity` value
 - **THEN** the write refuses with `APPEND_ONLY` and the Source is unchanged
+
+#### Scenario: Reclassifying a Source preserves its sensitivity
+
+- **WHEN** an owner reclassifies a Source to another kind
+- **THEN** the Source keeps its `sensitivity` field
 
 ### Requirement: A plain edit takes only registered classes
 
@@ -117,7 +122,7 @@ A store collection MAY declare a `sensitivity` floor. Each stored row SHALL carr
 
 ### Requirement: A row keeps its declared classes
 
-`add_record` SHALL accept an optional list of classes when the row schema declares a `sensitivity` array of strings. A store row SHALL keep the collection's floor when it declares its own classes. A file collection SHALL keep the declared classes on the row.
+`add_record` SHALL accept an optional list of classes when the row schema declares a `sensitivity` array of strings. A store row SHALL store the union of its own classes and the collection's floor in its governance metadata. A file collection SHALL keep its declared classes on the row.
 
 #### Scenario: A file row names a class
 
